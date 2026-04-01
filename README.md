@@ -202,7 +202,6 @@ bsl-analyzer check-config .bsl-analyzer.json
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline sync-pg \
   --source-dir ./my-project \
-  --parent-snapshot-id workspace-code:main@previous \
   --branch main \
   --commit "$CI_COMMIT_SHA"
 
@@ -221,6 +220,9 @@ bsl-analyzer search baseline sync-pg \
 - `Branch`
 - `Commit`
 - количество файлов и чанков
+
+Если `--parent-snapshot-id` не передан, `sync-pg` сам выберет последний опубликованный snapshot
+в том же `corpus/branch`. Для `reference` без branch будет выбран последний snapshot того же corpus.
 
 Для проверки содержимого shared PostgreSQL storage доступны read-only команды:
 

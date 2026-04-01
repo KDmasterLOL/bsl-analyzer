@@ -21,7 +21,6 @@ useful step is a full immutable snapshot publish that CI can run after merge.
 ```bash
 bsl-analyzer-app search baseline sync-pg \
   --source-dir . \
-  --parent-snapshot-id workspace-code:main@previous \
   --branch main \
   --commit "$CI_COMMIT_SHA"
 ```
@@ -36,9 +35,14 @@ Behavior:
    - `snapshot_items`
    - `content_objects`
 
-The published snapshot may also carry optional parent lineage metadata via
-`--parent-snapshot-id`. This does not change runtime resolution yet, but it
-establishes immutable ancestry for future delta publication.
+The published snapshot may also carry parent lineage metadata:
+
+- when `--parent-snapshot-id` is passed, it is used as an explicit override;
+- otherwise the CLI reuses the latest published snapshot from the same
+  `corpus/branch`, or the same `corpus` when branch is not specified.
+
+This does not change runtime resolution yet, but it establishes immutable
+ancestry for future delta publication.
 
 If `--snapshot-id` is omitted, the CLI derives it automatically:
 
@@ -174,7 +178,7 @@ bsl-analyzer-app search baseline sync-pg \
 - selected corpus;
 - published snapshot id;
 - target PostgreSQL schema;
-- optional parent snapshot id;
+- explicit or auto-selected parent snapshot id;
 - branch and commit labels;
 - indexed files, resolved files, and chunk counts.
 

@@ -256,6 +256,8 @@ struct SearchBaselineSyncPgArgs {
     commit: Option<String>,
 
     /// Optional parent snapshot identifier for lineage tracking.
+    /// When omitted, the CLI reuses the latest published snapshot in the same
+    /// corpus and branch, or the same corpus when branch is not specified.
     #[arg(long = "parent-snapshot-id")]
     parent_snapshot_id: Option<String>,
 }
@@ -742,9 +744,13 @@ fn run_search_baseline_sync_pg(
         CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
     };
     let mut snapshot = Snapshot::new(snapshot_id, corpus.clone()).with_fingerprint(fingerprint);
-    if let Some(parent_snapshot_id) =
-        args.parent_snapshot_id.as_deref().map(str::trim).filter(|value| !value.is_empty())
-    {
+    if let Some(parent_snapshot_id) = resolve_parent_snapshot_id(
+        &adapter,
+        &corpus,
+        branch.as_deref(),
+        &snapshot.id.0,
+        args.parent_snapshot_id.as_deref(),
+    )? {
         snapshot = snapshot.with_parent(parent_snapshot_id);
     }
     let publish_metadata =
@@ -884,6 +890,33 @@ fn resolve_snapshot_id(
             "--snapshot-id is required unless --commit is provided",
         )),
     }
+}
+
+fn resolve_parent_snapshot_id(
+    adapter: &bsl_search::ExternalBaselineAdapter,
+    corpus: &bsl_search::CorpusId,
+    branch: Option<&str>,
+    current_snapshot_id: &str,
+    explicit_parent_snapshot_id: Option<&str>,
+) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    if let Some(parent_snapshot_id) =
+        explicit_parent_snapshot_id.map(str::trim).filter(|value| !value.is_empty())
+    {
+        return Ok(Some(parent_snapshot_id.to_owned()));
+    }
+
+    let snapshots = adapter.list_snapshots(Some(corpus.as_str()), branch, None, 2)?;
+    Ok(select_parent_snapshot_id(current_snapshot_id, &snapshots))
+}
+
+fn select_parent_snapshot_id(
+    current_snapshot_id: &str,
+    snapshots: &[bsl_search::BaselineSnapshotRecord],
+) -> Option<String> {
+    snapshots
+        .iter()
+        .find(|snapshot| snapshot.snapshot_id != current_snapshot_id)
+        .map(|snapshot| snapshot.snapshot_id.clone())
 }
 
 fn resolve_pg_connection(
@@ -2382,8 +2415,8 @@ fn setup_logging(
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_first_non_empty, resolve_snapshot_id};
-    use bsl_search::CorpusId;
+    use super::{pick_first_non_empty, resolve_snapshot_id, select_parent_snapshot_id};
+    use bsl_search::{BaselineSnapshotRecord, CorpusId};
 
     #[test]
     fn explicit_snapshot_id_has_priority() {
@@ -2437,5 +2470,49 @@ mod tests {
         let value = pick_first_non_empty([Some(""), Some("  "), None, Some("main")]);
 
         assert_eq!(value.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn select_parent_snapshot_id_picks_latest_different_snapshot() {
+        let snapshots = vec![
+            baseline_snapshot_record("workspace-code:main@new"),
+            baseline_snapshot_record("workspace-code:main@old"),
+        ];
+
+        let parent = select_parent_snapshot_id("workspace-code:main@new", &snapshots);
+
+        assert_eq!(parent.as_deref(), Some("workspace-code:main@old"));
+    }
+
+    #[test]
+    fn select_parent_snapshot_id_uses_latest_when_current_is_not_published_yet() {
+        let snapshots = vec![baseline_snapshot_record("workspace-code:main@old")];
+
+        let parent = select_parent_snapshot_id("workspace-code:main@new", &snapshots);
+
+        assert_eq!(parent.as_deref(), Some("workspace-code:main@old"));
+    }
+
+    #[test]
+    fn select_parent_snapshot_id_returns_none_when_only_self_exists() {
+        let snapshots = vec![baseline_snapshot_record("workspace-code:main@same")];
+
+        let parent = select_parent_snapshot_id("workspace-code:main@same", &snapshots);
+
+        assert_eq!(parent, None);
+    }
+
+    fn baseline_snapshot_record(snapshot_id: &str) -> BaselineSnapshotRecord {
+        BaselineSnapshotRecord {
+            snapshot_id: snapshot_id.to_owned(),
+            corpus: "workspace-code".to_owned(),
+            fingerprint: None,
+            parent_snapshot_id: None,
+            branch: Some("main".to_owned()),
+            commit: None,
+            created_at: "2026-04-02T00:00:00Z".to_owned(),
+            files: 0,
+            documents: 0,
+        }
     }
 }
