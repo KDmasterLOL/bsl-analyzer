@@ -28,6 +28,16 @@ impl WorkspaceOverlayIndex {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceOverlayStats {
+    pub overlay_files: usize,
+    pub deleted_files: usize,
+    pub hidden_paths: usize,
+    pub lexical_chunks: usize,
+    pub semantic_chunks: usize,
+    pub cached_embeddings: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct WorkspaceOverlayCache {
     entries: HashMap<String, OverlayFileEntry>,
@@ -155,6 +165,26 @@ impl WorkspaceOverlayCache {
             hidden_paths: self.hidden_paths.clone(),
             lexical_documents,
             vector_documents,
+        }
+    }
+
+    pub fn stats(&self) -> WorkspaceOverlayStats {
+        let overlay_files = self.entries.len();
+        let hidden_paths = self.hidden_paths.len();
+        let deleted_files =
+            self.hidden_paths.iter().filter(|path| !self.entries.contains_key(*path)).count();
+        let lexical_chunks =
+            self.entries.values().map(|entry| entry.lexical_documents.len()).sum::<usize>();
+        let semantic_chunks =
+            self.entries.values().map(|entry| entry.vector_documents.len()).sum::<usize>();
+
+        WorkspaceOverlayStats {
+            overlay_files,
+            deleted_files,
+            hidden_paths,
+            lexical_chunks,
+            semantic_chunks,
+            cached_embeddings: self.embedding_cache.len(),
         }
     }
 }
@@ -411,7 +441,7 @@ fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{lexical_hits, WorkspaceOverlayCache};
+    use super::{lexical_hits, WorkspaceOverlayCache, WorkspaceOverlayStats};
     use crate::store::Store;
     use std::fs;
     use tempfile::tempdir;
@@ -487,5 +517,42 @@ mod tests {
         cache.refresh(&store, workspace, None, 32).unwrap();
         let third = cache.snapshot();
         assert_eq!(third.lexical_documents[0].symbol_name, "ВерсияДва222222");
+    }
+
+    #[test]
+    fn stats_report_overlay_shape() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file_a = workspace.join("A.bsl");
+        let file_b = workspace.join("B.bsl");
+        fs::write(&file_a, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(&file_b, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("search.db");
+        let mut store = Store::open(&db_path).unwrap();
+        let chunks_a = crate::Chunker::chunk(&fs::read_to_string(&file_a).unwrap());
+        let chunks_b = crate::Chunker::chunk(&fs::read_to_string(&file_b).unwrap());
+        let hash_a = blake3::hash(fs::read(&file_a).unwrap().as_slice());
+        let hash_b = blake3::hash(fs::read(&file_b).unwrap().as_slice());
+        store.reindex_file("A.bsl", hash_a.as_bytes(), &chunks_a, None).unwrap();
+        store.reindex_file("B.bsl", hash_b.as_bytes(), &chunks_b, None).unwrap();
+
+        fs::write(&file_a, "Процедура Измененная()\nКонецПроцедуры").unwrap();
+        fs::remove_file(&file_b).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh(&store, workspace, None, 32).unwrap();
+
+        assert_eq!(
+            cache.stats(),
+            WorkspaceOverlayStats {
+                overlay_files: 1,
+                deleted_files: 1,
+                hidden_paths: 2,
+                lexical_chunks: 1,
+                semantic_chunks: 0,
+                cached_embeddings: 0,
+            }
+        );
     }
 }

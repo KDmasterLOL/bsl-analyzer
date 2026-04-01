@@ -37,3 +37,4 @@ pub use ports::{
 };
 pub use resolver::{InMemoryResolvedViewResolver, ResolvedView};
 pub use store::{ChunkInfo, Store, TextSearchResult};
+pub use workspace_overlay::WorkspaceOverlayStats;

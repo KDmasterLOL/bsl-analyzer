@@ -16,6 +16,7 @@ use crate::index::VectorIndex;
 use crate::store::Store;
 use crate::workspace_overlay::{
     lexical_hits, semantic_hits, WorkspaceOverlayCache, WorkspaceOverlayIndex,
+    WorkspaceOverlayStats,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -589,6 +590,22 @@ impl SearchEngine {
         }
     }
 
+    /// Get current workspace overlay statistics.
+    ///
+    /// Performs a lightweight refresh using file metadata and hashes, but does not
+    /// force semantic embedding generation for status queries.
+    pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
+        let Some(workspace_root) = &self.workspace_root else {
+            return Ok(None);
+        };
+        let mut cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        cache.refresh(&self.store, workspace_root, None, self.batch_size)?;
+        Ok(Some(cache.stats()))
+    }
+
     /// Semantic search, optionally filtered by collection.
     ///
     /// If `collection` is `None`, searches across all collections.
@@ -865,5 +882,26 @@ mod tests {
 
         let hits = engine.text_search("УдаляемаяПроцедура", 10, Some("code")).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn workspace_overlay_stats_report_changed_files() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.overlay_files, 1);
+        assert_eq!(stats.deleted_files, 0);
+        assert_eq!(stats.hidden_paths, 1);
+        assert_eq!(stats.lexical_chunks, 1);
     }
 }

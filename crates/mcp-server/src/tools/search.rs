@@ -160,6 +160,20 @@ pub fn search_status(
         );
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
         let _ = writeln!(out, "  Collections: code, platform");
+
+        if let Some(overlay) = engine
+            .workspace_overlay_stats()
+            .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?
+        {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Workspace overlay: enabled");
+            let _ = writeln!(out, "  Files:    {}", overlay.overlay_files);
+            let _ = writeln!(out, "  Deleted:  {}", overlay.deleted_files);
+            let _ = writeln!(out, "  Hidden:   {}", overlay.hidden_paths);
+            let _ = writeln!(out, "  Chunks:   {}", overlay.lexical_chunks);
+            let _ = writeln!(out, "  Semantic: {}", overlay.semantic_chunks);
+            let _ = writeln!(out, "  Cached embeddings: {}", overlay.cached_embeddings);
+        }
     } else {
         let _ = writeln!(out, "Search index: building (background initialization in progress)");
     }
@@ -229,4 +243,37 @@ fn format_doc_hits(hits: &[bsl_search::SearchHit]) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search_status;
+    use bsl_search::{IndexProgress, SearchEngine};
+    use std::fs;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    #[test]
+    fn search_status_shows_workspace_overlay_section() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let result =
+            search_status(&Arc::new(Mutex::new(Some(engine))), &Arc::new(IndexProgress::default()))
+                .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Workspace overlay: enabled"));
+        assert!(text.contains("Files:    1"));
+        assert!(text.contains("Chunks:   1"));
+    }
 }
