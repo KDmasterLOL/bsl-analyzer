@@ -220,6 +220,35 @@ bsl-analyzer search baseline sync-pg \
 - `Commit`
 - количество файлов и чанков
 
+Для проверки содержимого shared PostgreSQL storage доступны read-only команды:
+
+```bash
+# Показать последние snapshot'ы
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline list-pg --limit 20
+
+# Отфильтровать по corpus/branch
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline list-pg --corpus workspace-code --branch main
+
+# Посмотреть один snapshot подробно
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline show-pg --snapshot-id workspace-code:main@abcdef
+```
+
+`list-pg` показывает:
+
+- `Snapshot`
+- `Corpus`
+- `Created`
+- `Branch`
+- `Commit`
+- `Files`
+- `Chunks`
+- `Fingerprint`
+
+`show-pg` дополнительно показывает breakdown по `collection`.
+
 После установки или запуска MCP проверьте runtime-состояние через инструмент `search` с `action=status`:
 
 - в `workspace` профиле статус покажет `Configured baseline`, `Code lexical source` и `External baseline`;

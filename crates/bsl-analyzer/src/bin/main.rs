@@ -203,7 +203,16 @@ enum SearchCommand {
 #[derive(Subcommand)]
 enum SearchBaselineCommand {
     /// Build a local code snapshot and publish it into PostgreSQL
-    SyncPg(SearchBaselineSyncPgArgs),
+    #[command(name = "sync-pg")]
+    Sync(SearchBaselineSyncPgArgs),
+
+    /// List published snapshots from centralized PostgreSQL storage
+    #[command(name = "list-pg")]
+    List(SearchBaselineListPgArgs),
+
+    /// Show one published snapshot from centralized PostgreSQL storage
+    #[command(name = "show-pg")]
+    Show(SearchBaselineShowPgArgs),
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -245,6 +254,52 @@ struct SearchBaselineSyncPgArgs {
     /// Falls back to CI_COMMIT_SHA or GITHUB_SHA.
     #[arg(long)]
     commit: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineListPgArgs {
+    /// Optional corpus filter
+    #[arg(long, value_enum)]
+    corpus: Option<SearchBaselineCorpusCli>,
+
+    /// Optional branch filter
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Optional commit filter
+    #[arg(long)]
+    commit: Option<String>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Maximum number of snapshots to return
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineShowPgArgs {
+    /// Snapshot identifier to inspect
+    #[arg(long = "snapshot-id")]
+    snapshot_id: String,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -476,7 +531,9 @@ fn run_mcp_command(command: McpCommand) -> Result<(), Box<dyn Error + Send + Syn
 fn run_search_command(command: SearchCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
     match command {
         SearchCommand::Baseline { command } => match command {
-            SearchBaselineCommand::SyncPg(args) => run_search_baseline_sync_pg(args),
+            SearchBaselineCommand::Sync(args) => run_search_baseline_sync_pg(args),
+            SearchBaselineCommand::List(args) => run_search_baseline_list_pg(args),
+            SearchBaselineCommand::Show(args) => run_search_baseline_show_pg(args),
         },
     }
 }
@@ -648,20 +705,8 @@ fn run_search_baseline_sync_pg(
         branch.as_deref(),
         commit.as_deref(),
     )?;
-    let pg_url = pick_first_non_empty([
-        args.pg_url.as_deref(),
-        env::var("BSL_SEARCH_BASELINE_PG_URL").ok().as_deref(),
-    ])
-    .ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--pg-url or BSL_SEARCH_BASELINE_PG_URL is required",
-        )
-    })?;
-    let pg_schema = pick_first_non_empty([
-        args.pg_schema.as_deref(),
-        env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
-    ]);
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
 
     let (indexed_files, documents) = match corpus {
         CorpusId::WorkspaceCode => build_workspace_code_baseline_documents(&source_path)?,
@@ -717,6 +762,86 @@ fn run_search_baseline_sync_pg(
     Ok(())
 }
 
+fn run_search_baseline_list_pg(
+    args: SearchBaselineListPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let corpus = args.corpus.map(search_baseline_corpus_cli_to_domain);
+    let snapshots = adapter.list_snapshots(
+        corpus.as_ref().map(|corpus| corpus.as_str()),
+        args.branch.as_deref(),
+        args.commit.as_deref(),
+        args.limit,
+    )?;
+
+    if snapshots.is_empty() {
+        println!("No snapshots found.");
+        return Ok(());
+    }
+
+    println!("Published search baselines:");
+    for snapshot in snapshots {
+        println!();
+        println!("  Snapshot:  {}", snapshot.snapshot_id);
+        println!("  Corpus:    {}", snapshot.corpus);
+        println!("  Created:   {}", snapshot.created_at);
+        println!("  Branch:    {}", snapshot.branch.as_deref().unwrap_or("-"));
+        println!("  Commit:    {}", snapshot.commit.as_deref().unwrap_or("-"));
+        println!("  Files:     {}", snapshot.files);
+        println!("  Chunks:    {}", snapshot.documents);
+        println!(
+            "  Fingerprint: {}",
+            snapshot.fingerprint.as_deref().map(shorten_fingerprint).unwrap_or("-")
+        );
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_show_pg(
+    args: SearchBaselineShowPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let Some(details) = adapter.snapshot_details(&args.snapshot_id)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("snapshot '{}' was not found", args.snapshot_id),
+        )
+        .into());
+    };
+
+    println!("Search baseline snapshot:");
+    println!("  Snapshot:    {}", details.snapshot.snapshot_id);
+    println!("  Corpus:      {}", details.snapshot.corpus);
+    println!("  Created:     {}", details.snapshot.created_at);
+    println!("  Branch:      {}", details.snapshot.branch.as_deref().unwrap_or("-"));
+    println!("  Commit:      {}", details.snapshot.commit.as_deref().unwrap_or("-"));
+    println!("  Files:       {}", details.snapshot.files);
+    println!("  Chunks:      {}", details.snapshot.documents);
+    println!(
+        "  Fingerprint: {}",
+        details.snapshot.fingerprint.as_deref().map(shorten_fingerprint).unwrap_or("-")
+    );
+
+    if details.collections.is_empty() {
+        println!("  Collections: -");
+    } else {
+        println!("  Collections:");
+        for collection in details.collections {
+            println!(
+                "    {}: files={}, chunks={}",
+                collection.collection, collection.files, collection.documents
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_snapshot_id(
     corpus: &bsl_search::CorpusId,
     snapshot_id: Option<&str>,
@@ -742,6 +867,47 @@ fn resolve_snapshot_id(
             "--snapshot-id is required unless --commit is provided",
         )),
     }
+}
+
+fn resolve_pg_connection(
+    pg_url: Option<&str>,
+    pg_schema: Option<&str>,
+) -> Result<(String, Option<String>), io::Error> {
+    let pg_url =
+        pick_first_non_empty([pg_url, env::var("BSL_SEARCH_BASELINE_PG_URL").ok().as_deref()])
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--pg-url or BSL_SEARCH_BASELINE_PG_URL is required",
+                )
+            })?;
+    let pg_schema = pick_first_non_empty([
+        pg_schema,
+        env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
+    ]);
+    Ok((pg_url, pg_schema))
+}
+
+fn build_postgres_baseline_adapter(
+    pg_url: &str,
+    pg_schema: Option<&str>,
+) -> Result<bsl_search::ExternalBaselineAdapter, Box<dyn Error + Send + Sync>> {
+    let mut config = bsl_search::ExternalBaselineConfig::postgres(pg_url.to_owned());
+    if let Some(schema) = pg_schema {
+        config = config.with_schema(schema.to_owned());
+    }
+    Ok(bsl_search::ExternalBaselineAdapter::new(config)?)
+}
+
+fn search_baseline_corpus_cli_to_domain(corpus: SearchBaselineCorpusCli) -> bsl_search::CorpusId {
+    match corpus {
+        SearchBaselineCorpusCli::WorkspaceCode => bsl_search::CorpusId::WorkspaceCode,
+        SearchBaselineCorpusCli::Reference => bsl_search::CorpusId::Reference,
+    }
+}
+
+fn shorten_fingerprint(fingerprint: &str) -> &str {
+    fingerprint.get(..12).unwrap_or(fingerprint)
 }
 
 fn pick_first_non_empty<'a>(

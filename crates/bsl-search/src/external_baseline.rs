@@ -6,6 +6,31 @@ use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
 
 mod postgres;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineSnapshotRecord {
+    pub snapshot_id: String,
+    pub corpus: String,
+    pub fingerprint: Option<String>,
+    pub branch: Option<String>,
+    pub commit: Option<String>,
+    pub created_at: String,
+    pub files: usize,
+    pub documents: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineCollectionRecord {
+    pub collection: String,
+    pub files: usize,
+    pub documents: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineSnapshotDetails {
+    pub snapshot: BaselineSnapshotRecord,
+    pub collections: Vec<BaselineCollectionRecord>,
+}
+
 /// Infrastructure adapter for centralized baseline storage.
 ///
 /// This adapter is a backend selector. The first supported production backend is
@@ -28,6 +53,27 @@ impl ExternalBaselineAdapter {
     pub fn config(&self) -> &ExternalBaselineConfig {
         match self {
             Self::Postgres(adapter) => adapter.config(),
+        }
+    }
+
+    pub fn list_snapshots(
+        &self,
+        corpus: Option<&str>,
+        branch: Option<&str>,
+        commit: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BaselineSnapshotRecord>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.list_snapshots(corpus, branch, commit, limit),
+        }
+    }
+
+    pub fn snapshot_details(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<BaselineSnapshotDetails>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.snapshot_details(snapshot_id),
         }
     }
 }

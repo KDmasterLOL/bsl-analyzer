@@ -172,6 +172,30 @@ bsl-analyzer-app search baseline sync-pg \
 - branch and commit labels;
 - indexed files, resolved files, and chunk counts.
 
+Operational inspection commands:
+
+```bash
+# List recently published snapshots
+bsl-analyzer-app search baseline list-pg --limit 20
+
+# Filter by corpus / branch / commit
+bsl-analyzer-app search baseline list-pg \
+  --corpus workspace-code \
+  --branch main
+
+# Inspect one specific snapshot
+bsl-analyzer-app search baseline show-pg \
+  --snapshot-id workspace-code:main@abcdef
+```
+
+`list-pg` is intended for operators to verify:
+
+- which snapshots are present in shared storage;
+- which branch/commit labels were recorded;
+- whether the expected file/chunk counts and fingerprints exist.
+
+`show-pg` adds per-collection counters for one snapshot.
+
 MCP `search(action=status)` is the runtime verification step:
 
 - `workspace` should show `Configured baseline`, `Code lexical source`, and `External baseline`;

@@ -1,5 +1,8 @@
 use crate::domain::{BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, Snapshot};
 use crate::error::SearchError;
+use crate::external_baseline::{
+    BaselineCollectionRecord, BaselineSnapshotDetails, BaselineSnapshotRecord,
+};
 use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
 use postgres::{Client, NoTls, Row};
 
@@ -128,6 +131,110 @@ impl PostgresBaselineAdapter {
                 self.table("snapshot_items")
             ),
         ]
+    }
+
+    pub fn list_snapshots(
+        &self,
+        corpus: Option<&str>,
+        branch: Option<&str>,
+        commit: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BaselineSnapshotRecord>, SearchError> {
+        let mut client = self.connect()?;
+        let limit = limit.clamp(1, 200) as i64;
+        let corpus = corpus.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+        let branch = branch.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+        let commit = commit.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+
+        let mut query = format!(
+            "SELECT s.id,
+                    s.corpus,
+                    s.fingerprint,
+                    s.branch,
+                    s.commit_sha,
+                    s.created_at::TEXT AS created_at,
+                    COUNT(si.content_hash) AS documents,
+                    COUNT(DISTINCT si.path) AS files
+             FROM {} s
+             LEFT JOIN {} si ON si.snapshot_id = s.id
+             WHERE 1 = 1",
+            self.table("snapshots"),
+            self.table("snapshot_items")
+        );
+
+        let mut params = Vec::<&(dyn postgres::types::ToSql + Sync)>::new();
+        if let Some(corpus) = corpus.as_ref() {
+            query.push_str(&format!(" AND s.corpus = ${}", params.len() + 1));
+            params.push(corpus);
+        }
+        if let Some(branch) = branch.as_ref() {
+            query.push_str(&format!(" AND s.branch = ${}", params.len() + 1));
+            params.push(branch);
+        }
+        if let Some(commit) = commit.as_ref() {
+            query.push_str(&format!(" AND s.commit_sha = ${}", params.len() + 1));
+            params.push(commit);
+        }
+        query.push_str(
+            " GROUP BY s.id, s.corpus, s.fingerprint, s.branch, s.commit_sha, s.created_at
+              ORDER BY s.created_at DESC",
+        );
+        query.push_str(&format!(" LIMIT ${}", params.len() + 1));
+        params.push(&limit);
+
+        let rows = client.query(&query, &params)?;
+        Ok(rows.into_iter().map(snapshot_record_from_row).collect())
+    }
+
+    pub fn snapshot_details(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<BaselineSnapshotDetails>, SearchError> {
+        let mut client = self.connect()?;
+
+        let summary_query = format!(
+            "SELECT s.id,
+                    s.corpus,
+                    s.fingerprint,
+                    s.branch,
+                    s.commit_sha,
+                    s.created_at::TEXT AS created_at,
+                    COUNT(si.content_hash) AS documents,
+                    COUNT(DISTINCT si.path) AS files
+             FROM {} s
+             LEFT JOIN {} si ON si.snapshot_id = s.id
+             WHERE s.id = $1
+             GROUP BY s.id, s.corpus, s.fingerprint, s.branch, s.commit_sha, s.created_at
+             LIMIT 1",
+            self.table("snapshots"),
+            self.table("snapshot_items")
+        );
+        let Some(snapshot_row) = client.query_opt(&summary_query, &[&snapshot_id])? else {
+            return Ok(None);
+        };
+        let snapshot = snapshot_record_from_row(snapshot_row);
+
+        let collections_query = format!(
+            "SELECT si.collection,
+                    COUNT(si.content_hash) AS documents,
+                    COUNT(DISTINCT si.path) AS files
+             FROM {} si
+             WHERE si.snapshot_id = $1
+             GROUP BY si.collection
+             ORDER BY si.collection",
+            self.table("snapshot_items")
+        );
+        let collections = client
+            .query(&collections_query, &[&snapshot_id])?
+            .into_iter()
+            .map(|row| BaselineCollectionRecord {
+                collection: row.get("collection"),
+                files: row.get::<_, i64>("files") as usize,
+                documents: row.get::<_, i64>("documents") as usize,
+            })
+            .collect();
+
+        Ok(Some(BaselineSnapshotDetails { snapshot, collections }))
     }
 }
 
@@ -288,6 +395,19 @@ fn validate_identifier(identifier: &str) -> Result<(), SearchError> {
         )));
     }
     Ok(())
+}
+
+fn snapshot_record_from_row(row: Row) -> BaselineSnapshotRecord {
+    BaselineSnapshotRecord {
+        snapshot_id: row.get("id"),
+        corpus: row.get("corpus"),
+        fingerprint: row.get("fingerprint"),
+        branch: row.get("branch"),
+        commit: row.get("commit_sha"),
+        created_at: row.get("created_at"),
+        files: row.get::<_, i64>("files") as usize,
+        documents: row.get::<_, i64>("documents") as usize,
+    }
 }
 
 #[cfg(test)]

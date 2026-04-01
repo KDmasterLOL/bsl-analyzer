@@ -39,6 +39,9 @@ pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{IndexProgress, SearchConfig, SearchEngine, SearchHit};
 pub use error::SearchError;
 pub use external_baseline::ExternalBaselineAdapter;
+pub use external_baseline::{
+    BaselineCollectionRecord, BaselineSnapshotDetails, BaselineSnapshotRecord,
+};
 pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
 pub use index::{SearchResult, VectorIndex};
 pub use local_baseline::LocalStoreBaselineAdapter;
