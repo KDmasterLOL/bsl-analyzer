@@ -219,10 +219,15 @@ bsl-analyzer search baseline sync-pg \
 - `Parent`
 - `Branch`
 - `Commit`
+- `Reused files` / `Written files`
+- `Reused chunks` / `Written chunks`
 - количество файлов и чанков
 
 Если `--parent-snapshot-id` не передан, `sync-pg` сам выберет последний опубликованный snapshot
 в том же `corpus/branch`. Для `reference` без branch будет выбран последний snapshot того же corpus.
+
+При наличии parent snapshot publish теперь не переписывает все mappings заново из CLI:
+неизменённые файлы копируются внутри PostgreSQL из parent snapshot, а заново записываются только изменённые.
 
 Для проверки содержимого shared PostgreSQL storage доступны read-only команды:
 

@@ -30,8 +30,10 @@ Behavior:
 1. Build a temporary local FTS index from the configuration sources.
 2. Export indexed `workspace-code` documents from that index.
 3. Ensure PostgreSQL schema/tables/indexes exist.
-4. Publish one immutable snapshot into:
+4. Compare logical files with the selected parent snapshot when one exists.
+5. Publish one immutable snapshot into:
    - `snapshots`
+   - `snapshot_files`
    - `snapshot_items`
    - `content_objects`
 
@@ -43,6 +45,12 @@ The published snapshot may also carry parent lineage metadata:
 
 This does not change runtime resolution yet, but it establishes immutable
 ancestry for future delta publication.
+
+When a parent snapshot is available, publish reuses it in the write path:
+
+- unchanged logical files are detected by per-file fingerprint;
+- unchanged file mappings are copied inside PostgreSQL from the parent snapshot;
+- only changed files insert fresh `snapshot_items` rows from the current CLI run.
 
 If `--snapshot-id` is omitted, the CLI derives it automatically:
 
@@ -180,6 +188,8 @@ bsl-analyzer-app search baseline sync-pg \
 - target PostgreSQL schema;
 - explicit or auto-selected parent snapshot id;
 - branch and commit labels;
+- reused/written file counters;
+- reused/written chunk counters;
 - indexed files, resolved files, and chunk counts.
 
 Operational inspection commands:

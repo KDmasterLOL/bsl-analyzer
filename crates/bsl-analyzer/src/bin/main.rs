@@ -756,7 +756,7 @@ fn run_search_baseline_sync_pg(
     let publish_metadata =
         SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
     adapter.ensure_storage()?;
-    adapter.publish_snapshot(&snapshot, &publish_metadata, &documents)?;
+    let publish_stats = adapter.publish_snapshot(&snapshot, &publish_metadata, &documents)?;
 
     let published_files = documents
         .iter()
@@ -777,7 +777,11 @@ fn run_search_baseline_sync_pg(
     println!("  Branch:        {}", branch_label);
     println!("  Commit:        {}", commit_label);
     println!("  Indexed files: {}", indexed_files);
+    println!("  Reused files:  {}", publish_stats.reused_files);
+    println!("  Written files: {}", publish_stats.written_files);
     println!("  Files:         {}", published_files);
+    println!("  Reused chunks: {}", publish_stats.reused_documents);
+    println!("  Written chunks: {}", publish_stats.written_documents);
     println!("  Chunks:        {}", documents.len());
 
     Ok(())

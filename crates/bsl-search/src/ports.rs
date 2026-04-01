@@ -1,5 +1,6 @@
 use crate::domain::{
     BaselineRef, IndexedDocument, SearchOverlay, Snapshot, SnapshotPublishMetadata,
+    SnapshotPublishStats,
 };
 use crate::error::SearchError;
 use crate::resolver::ResolvedView;
@@ -27,7 +28,7 @@ pub trait SnapshotPublisher {
         snapshot: &Snapshot,
         metadata: &SnapshotPublishMetadata,
         documents: &[IndexedDocument],
-    ) -> Result<(), SearchError>;
+    ) -> Result<SnapshotPublishStats, SearchError>;
 }
 
 /// Builds a local overlay relative to the selected baseline.

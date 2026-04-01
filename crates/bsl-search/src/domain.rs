@@ -130,6 +130,15 @@ pub struct SnapshotPublishMetadata {
     pub commit: Option<String>,
 }
 
+/// Operational counters produced by one snapshot publication.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SnapshotPublishStats {
+    pub reused_files: usize,
+    pub written_files: usize,
+    pub reused_documents: usize,
+    pub written_documents: usize,
+}
+
 /// File-like identifier inside a corpus collection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocumentPath {

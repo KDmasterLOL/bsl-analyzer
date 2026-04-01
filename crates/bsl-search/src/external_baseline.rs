@@ -1,6 +1,6 @@
 use crate::domain::{
     BaselineRef, ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, Snapshot,
-    SnapshotPublishMetadata,
+    SnapshotPublishMetadata, SnapshotPublishStats,
 };
 use crate::error::SearchError;
 use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
@@ -111,7 +111,7 @@ impl SnapshotPublisher for ExternalBaselineAdapter {
         snapshot: &Snapshot,
         metadata: &SnapshotPublishMetadata,
         documents: &[IndexedDocument],
-    ) -> Result<(), SearchError> {
+    ) -> Result<SnapshotPublishStats, SearchError> {
         match self {
             Self::Postgres(adapter) => adapter.publish_snapshot(snapshot, metadata, documents),
         }
