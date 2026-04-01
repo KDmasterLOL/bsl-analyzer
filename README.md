@@ -56,64 +56,84 @@ bsl-analyzer analyze -s ./my-project --format=jsonl > report.jsonl
 
 ### MCP-сервер
 
-BSL Analyzer включает встроенный [MCP-сервер](https://modelcontextprotocol.io/) (Model Context Protocol), позволяющий AI-агентам работать с конфигурацией 1С: просматривать метаданные, искать по коду и документации, валидировать запросы, выполнять код и отлаживать.
+BSL Analyzer включает встроенный [MCP-сервер](https://modelcontextprotocol.io/) (Model Context Protocol). Теперь он разделён на два явных профиля:
+
+- `reference` — глобальная справка платформы и ИТС, устанавливается один раз в `user scope`
+- `workspace` — работа с конкретным проектом и конкретной базой, устанавливается отдельно в каждый проект
 
 > **Внимание:** MCP-сервер с подключением к 1С предоставляет полный доступ к базе данных, включая выполнение произвольного кода и запросов. Используйте только в контуре разработки или тестирования. Подключение к продуктивной базе крайне не рекомендуется.
 
 ```bash
-bsl-analyzer mcp --source-dir ./my-project
+bsl-analyzer mcp serve --profile reference
+```
+
+```bash
+bsl-analyzer mcp serve --profile workspace --source-dir ./my-project
 ```
 
 Автоустановка MCP-конфига в AI-инструменты:
 
 ```bash
-# Установить project-scoped MCP в Codex / Gemini / Claude / Cursor
-bsl-analyzer mcp install --target all --scope project --source-dir ./my-project
-
-# Установить только в Claude Code локально для текущего проекта
-bsl-analyzer mcp install --target claude --scope local --source-dir ./my-project
-
-# Посмотреть, что будет записано, без изменений на диске
-bsl-analyzer mcp install --target codex --scope project --source-dir ./my-project --dry-run
-
-# Обновить существующую запись MCP с тем же именем
-bsl-analyzer mcp install --target cursor --scope project --source-dir ./my-project --force
-
-# Передать переменные окружения для its_help и семантического поиска
+# Установить глобальный MCP справки в Codex / Gemini / Claude / Cursor
 bsl-analyzer mcp install \
-  --target claude \
-  --scope project \
-  --source-dir ./my-project \
+  --target all \
+  --preset reference \
+  --scope user \
   --env NAPARNIK_TOKEN=your_token \
   --env EMBEDDING_URL=http://localhost:8000/v1/embeddings
+
+# Установить project-scoped MCP workspace для конкретного проекта
+bsl-analyzer mcp install \
+  --target all \
+  --preset workspace \
+  --scope project \
+  --source-dir ./my-project
+
+# Посмотреть, что будет записано, без изменений на диске
+bsl-analyzer mcp install --target codex --preset reference --scope user --dry-run
+
+# Обновить существующую запись MCP с тем же именем
+bsl-analyzer mcp install \
+  --target cursor \
+  --preset workspace \
+  --scope project \
+  --source-dir ./my-project \
+  --force
 ```
 
-Поддерживаемые targets и scopes:
+Профили MCP:
 
-| Target | Scopes | Способ установки |
-|--------|--------|------------------|
-| `codex` | `user`, `project` | `user` через `codex mcp add`, `project` через merge в `.codex/config.toml` |
-| `gemini` | `user`, `project` | через `gemini mcp add` |
-| `claude` | `user`, `project`, `local` | через `claude mcp add` |
-| `cursor` | `user`, `project` | через merge в `~/.cursor/mcp.json` или `.cursor/mcp.json` |
+| Preset | Scope | Инструменты |
+|--------|-------|-------------|
+| `reference` | `user` | `search(find_docs/search_docs/status)`, `syntax_help`, `its_help` |
+| `workspace` | `project` | `metadata`, `search(find_code/search_code/status)`, `query`, `execute`, `debug` |
+
+Поддерживаемые targets:
+
+| Target | Способ установки |
+|--------|------------------|
+| `codex` | `user` через `codex mcp add`, `project` через merge в `.codex/config.toml` |
+| `gemini` | через `gemini mcp add` |
+| `claude` | через `claude mcp add` |
+| `cursor` | через merge в `~/.cursor/mcp.json` или `.cursor/mcp.json` |
 
 > **Примечание:** если передать `--onec-password`, пароль будет сохранён в конфиге целевого инструмента как аргумент запуска MCP. `--dry-run` показывает итоговый CLI-вызов или файл конфигурации до записи.
 
 Типовые ошибки установки:
 
-- `server 'bsl-analyzer' already exists ...`
+- `server '...' already exists ...`
   Перезапустите команду с `--force`, если хотите обновить существующую запись.
 - `failed to run 'codex': binary not found in PATH`
   Установите соответствующий CLI (`codex`, `gemini` или `claude`) и проверьте, что он доступен в `PATH`.
 - `failed to parse ... config file`
   Целевой конфиг уже существует, но содержит некорректный JSON/TOML. Исправьте файл и повторите установку.
-- `target '...' does not support '...' scope`
-  Выбран неподдерживаемый `--scope` для текущего `--target`. Используйте матрицу scopes из таблицы выше.
+- `preset 'workspace' does not support 'user' scope`
+  Используйте `workspace + project` или `reference + user`.
 
 С подключением к 1С (для выполнения запросов и кода):
 
 ```bash
-bsl-analyzer mcp \
+bsl-analyzer mcp serve --profile workspace \
   --source-dir ./my-project \
   --onec-url http://localhost/base/hs/bsl-analyzer \
   --onec-user admin \
@@ -154,7 +174,7 @@ curl http://localhost/base/hs/bsl-analyzer/version
 # {"version":"1.0.0"}
 ```
 
-> **Примечание:** инструменты `metadata`, `search` и `syntax_help` работают локально и не требуют расширения.
+> **Примечание:** инструменты `reference`-профиля и локальные инструменты `workspace` (`metadata`, `search` по коду) работают без расширения. Для `query`, `execute` и `debug` требуется подключение к 1С.
 
 #### Справка ИТС (its_help)
 
@@ -167,14 +187,18 @@ curl http://localhost/base/hs/bsl-analyzer/version
 
 #### Настройка в Claude Desktop / Claude Code
 
-Добавьте в конфигурацию MCP (`claude_desktop_config.json` или `.mcp.json`):
+Добавьте в конфигурацию MCP (`claude_desktop_config.json` или `.mcp.json`) оба сервера:
 
 ```json
 {
   "mcpServers": {
-    "bsl-analyzer": {
+    "bsl-analyzer-reference": {
       "command": "bsl-analyzer",
-      "args": ["mcp", "--source-dir", "/path/to/project"]
+      "args": ["mcp", "serve", "--profile", "reference"]
+    },
+    "bsl-analyzer-workspace": {
+      "command": "bsl-analyzer",
+      "args": ["mcp", "serve", "--profile", "workspace", "--source-dir", "/path/to/project"]
     }
   }
 }
@@ -185,10 +209,12 @@ curl http://localhost/base/hs/bsl-analyzer/version
 ```json
 {
   "mcpServers": {
-    "bsl-analyzer": {
+    "bsl-analyzer-workspace": {
       "command": "bsl-analyzer",
       "args": [
         "mcp",
+        "serve",
+        "--profile", "workspace",
         "--source-dir", "/path/to/project",
         "--onec-url", "http://localhost/base/hs/bsl-analyzer",
         "--onec-user", "admin",
@@ -204,20 +230,26 @@ curl http://localhost/base/hs/bsl-analyzer/version
 ```json
 {
   "mcpServers": {
-    "bsl-analyzer": {
+    "bsl-analyzer-reference": {
       "command": "bsl-analyzer",
-      "args": [
-        "mcp",
-        "--source-dir", "/path/to/project",
-        "--onec-url", "http://localhost/base/hs/bsl-analyzer",
-        "--onec-user", "admin",
-        "--onec-password", "secret"
-      ],
+      "args": ["mcp", "serve", "--profile", "reference"],
       "env": {
         "NAPARNIK_TOKEN": "ваш_токен_с_code.1c.ai",
         "EMBEDDING_URL": "http://localhost:8000/v1/embeddings",
         "OPENROUTER_API_KEY": "ваш_ключ_openrouter"
       }
+    },
+    "bsl-analyzer-workspace": {
+      "command": "bsl-analyzer",
+      "args": [
+        "mcp",
+        "serve",
+        "--profile", "workspace",
+        "--source-dir", "/path/to/project",
+        "--onec-url", "http://localhost/base/hs/bsl-analyzer",
+        "--onec-user", "admin",
+        "--onec-password", "secret"
+      ]
     }
   }
 }
@@ -230,9 +262,9 @@ curl http://localhost/base/hs/bsl-analyzer/version
 ```json
 {
   "servers": {
-    "bsl-analyzer": {
+    "bsl-analyzer-workspace": {
       "command": "bsl-analyzer",
-      "args": ["mcp", "--source-dir", "${workspaceFolder}"]
+      "args": ["mcp", "serve", "--profile", "workspace", "--source-dir", "${workspaceFolder}"]
     }
   }
 }
@@ -243,7 +275,7 @@ curl http://localhost/base/hs/bsl-analyzer/version
 Для работы семантического поиска (`search_code`, `search_docs`) необходим эмбеддинг-сервер, совместимый с OpenAI API:
 
 ```bash
-EMBEDDING_URL=http://localhost:8000/v1/embeddings bsl-analyzer mcp --source-dir ./my-project
+EMBEDDING_URL=http://localhost:8000/v1/embeddings bsl-analyzer mcp serve --profile reference
 ```
 
 ### Фиксация версии (CI/CD)

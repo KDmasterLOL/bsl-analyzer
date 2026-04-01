@@ -2228,6 +2228,7 @@ dependencies = [
  "bsl-metadata",
  "bsl-platform",
  "bsl-search",
+ "dirs",
  "expect-test",
  "naparnik",
  "onec-client",

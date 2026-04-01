@@ -5,12 +5,16 @@ use crate::mcp_install::model::{
 pub fn build_server_spec(request: &InstallRequest) -> ServerSpec {
     match request.preset {
         InstallPreset::Workspace => build_workspace_spec(request),
+        InstallPreset::Reference => build_reference_spec(request),
     }
 }
 
 fn build_workspace_spec(request: &InstallRequest) -> ServerSpec {
     let mut args = vec![
         "mcp".to_owned(),
+        "serve".to_owned(),
+        "--profile".to_owned(),
+        "workspace".to_owned(),
         "--source-dir".to_owned(),
         normalize_source_dir_for_scope(request.scope, &request.project_dir, &request.source_dir),
     ];
@@ -34,6 +38,20 @@ fn build_workspace_spec(request: &InstallRequest) -> ServerSpec {
         name: request.name.clone(),
         command: "bsl-analyzer".to_owned(),
         args,
+        env: request.env.clone(),
+    }
+}
+
+fn build_reference_spec(request: &InstallRequest) -> ServerSpec {
+    ServerSpec {
+        name: request.name.clone(),
+        command: "bsl-analyzer".to_owned(),
+        args: vec![
+            "mcp".to_owned(),
+            "serve".to_owned(),
+            "--profile".to_owned(),
+            "reference".to_owned(),
+        ],
         env: request.env.clone(),
     }
 }
@@ -75,6 +93,9 @@ mod tests {
             spec.args,
             vec![
                 "mcp",
+                "serve",
+                "--profile",
+                "workspace",
                 "--source-dir",
                 "src",
                 "--onec-url",
@@ -85,6 +106,19 @@ mod tests {
                 "secret",
             ]
         );
+        assert_eq!(spec.env.get("NAPARNIK_TOKEN"), Some(&"test".to_owned()));
+    }
+
+    #[test]
+    fn reference_preset_builds_global_reference_command() {
+        let mut req = request();
+        req.preset = InstallPreset::Reference;
+
+        let spec = build_server_spec(&req);
+
+        assert_eq!(spec.name, "bsl-analyzer");
+        assert_eq!(spec.command, "bsl-analyzer");
+        assert_eq!(spec.args, vec!["mcp", "serve", "--profile", "reference"]);
         assert_eq!(spec.env.get("NAPARNIK_TOKEN"), Some(&"test".to_owned()));
     }
 }

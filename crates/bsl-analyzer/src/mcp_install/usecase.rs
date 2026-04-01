@@ -14,6 +14,7 @@ pub fn build_install_plan(mut request: InstallRequest) -> Result<InstallPlan, In
     request.source_dir =
         request.source_dir.canonicalize().unwrap_or_else(|_| request.source_dir.clone());
 
+    validate_preset_scope(&request)?;
     let targets = resolve_targets(request.target, request.scope)?;
     let spec = preset::build_server_spec(&request);
 
@@ -30,6 +31,19 @@ pub fn build_install_plan(mut request: InstallRequest) -> Result<InstallPlan, In
         .collect();
 
     Ok(InstallPlan { actions })
+}
+
+fn validate_preset_scope(request: &InstallRequest) -> Result<(), InstallError> {
+    let supported = match request.preset {
+        crate::mcp_install::model::InstallPreset::Workspace => InstallScope::Project,
+        crate::mcp_install::model::InstallPreset::Reference => InstallScope::User,
+    };
+
+    if request.scope == supported {
+        Ok(())
+    } else {
+        Err(InstallError::UnsupportedPresetScope { preset: request.preset, scope: request.scope })
+    }
 }
 
 fn resolve_targets(
@@ -93,10 +107,10 @@ mod tests {
     fn all_requires_shared_scope() {
         let mut req = request();
         req.target = InstallTargetSelector::All;
-        req.scope = InstallScope::Local;
+        req.scope = InstallScope::User;
 
-        let err = build_install_plan(req).expect_err("local scope must be rejected for all");
-        assert!(err.to_string().contains("target 'all' does not support 'local' scope"));
+        let err = build_install_plan(req).expect_err("workspace preset only supports project");
+        assert!(err.to_string().contains("preset 'workspace' does not support 'user' scope"));
     }
 
     #[test]
@@ -119,5 +133,14 @@ mod tests {
         );
 
         assert_eq!(normalized, "/tmp/workspace/src");
+    }
+
+    #[test]
+    fn reference_preset_requires_user_scope() {
+        let mut req = request();
+        req.preset = crate::mcp_install::model::InstallPreset::Reference;
+
+        let err = build_install_plan(req).expect_err("reference preset only supports user scope");
+        assert!(err.to_string().contains("preset 'reference' does not support 'project' scope"));
     }
 }

@@ -155,7 +155,10 @@ enum Commands {
     Lsp,
 
     /// Start MCP server or install MCP config into AI tools
-    Mcp(McpCommand),
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
 
     /// Export built-in 1C extension (BSL_Analyzer) to a directory
     Extension {
@@ -173,18 +176,8 @@ enum Commands {
     },
 }
 
-#[derive(Args)]
-#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
-struct McpCommand {
-    #[command(subcommand)]
-    command: Option<McpSubcommand>,
-
-    #[command(flatten)]
-    serve: McpServeArgs,
-}
-
 #[derive(Subcommand)]
-enum McpSubcommand {
+enum McpCommand {
     /// Start MCP server (Model Context Protocol for AI agents)
     Serve(McpServeArgs),
 
@@ -194,9 +187,13 @@ enum McpSubcommand {
 
 #[derive(Args, Clone)]
 struct McpServeArgs {
+    /// Runtime profile
+    #[arg(long, value_enum)]
+    profile: McpProfileCli,
+
     /// Source directory containing 1C configuration (with Configuration.xml)
-    #[arg(short = 's', long = "source-dir", default_value = ".")]
-    source_dir: PathBuf,
+    #[arg(short = 's', long = "source-dir", required_if_eq("profile", "workspace"))]
+    source_dir: Option<PathBuf>,
 
     /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
     #[arg(long)]
@@ -227,12 +224,12 @@ struct McpInstallArgs {
     preset: InstallPresetCli,
 
     /// MCP server name inside target config
-    #[arg(long, default_value = "bsl-analyzer")]
-    name: String,
+    #[arg(long)]
+    name: Option<String>,
 
     /// Source directory containing 1C configuration (with Configuration.xml)
-    #[arg(short = 's', long = "source-dir", default_value = ".")]
-    source_dir: PathBuf,
+    #[arg(short = 's', long = "source-dir")]
+    source_dir: Option<PathBuf>,
 
     /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
     #[arg(long)]
@@ -280,6 +277,13 @@ enum InstallScopeCli {
 enum InstallPresetCli {
     #[default]
     Workspace,
+    Reference,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum McpProfileCli {
+    Workspace,
+    Reference,
 }
 
 #[derive(Subcommand)]
@@ -390,7 +394,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Format { file, write, spaces, indent_size }) => {
             run_format(file, write, spaces, indent_size)
         }
-        Some(Commands::Mcp(command)) => run_mcp_command(command),
+        Some(Commands::Mcp { command }) => run_mcp_command(command),
         Some(Commands::Extension { command }) => run_extension_command(command),
         Some(Commands::Dap) => run_dap_server(),
         Some(Commands::Rules { command }) => run_rules_command(command),
@@ -399,26 +403,46 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn run_mcp_command(command: McpCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
-    match command.command {
-        Some(McpSubcommand::Serve(args)) => run_mcp_serve(args),
-        Some(McpSubcommand::Install(args)) => run_mcp_install(args),
-        None => run_mcp_serve(command.serve),
+    match command {
+        McpCommand::Serve(args) => run_mcp_serve(args),
+        McpCommand::Install(args) => run_mcp_install(args),
     }
 }
 
 fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     let password = decode_password(&args.onec_password);
-    run_mcp_server(args.source_dir, args.onec_url, &args.onec_user, &password)
+    let profile = match args.profile {
+        McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
+        McpProfileCli::Reference => mcp_server::McpProfile::Reference,
+    };
+
+    if matches!(profile, mcp_server::McpProfile::Reference)
+        && (args.onec_url.is_some() || !args.onec_user.is_empty() || !args.onec_password.is_empty())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reference profile does not accept --onec-url/--onec-user/--onec-password",
+        )
+        .into());
+    }
+
+    run_mcp_server(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
 }
 
 fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_analyzer::mcp_install::{
-        self, InstallPreset, InstallRequest, InstallScope, InstallTarget, InstallTargetSelector,
+        self, default_server_name, InstallPreset, InstallRequest, InstallScope, InstallTarget,
+        InstallTargetSelector,
     };
 
     let project_dir = env::current_dir()?;
     let env = args.env.into_iter().collect::<BTreeMap<_, _>>();
     let password = decode_password(&args.onec_password);
+    let preset = match args.preset {
+        InstallPresetCli::Workspace => InstallPreset::Workspace,
+        InstallPresetCli::Reference => InstallPreset::Reference,
+    };
+    let source_dir = args.source_dir.unwrap_or_else(|| project_dir.clone());
 
     let request = InstallRequest {
         target: match args.target {
@@ -433,12 +457,10 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
             InstallScopeCli::Project => InstallScope::Project,
             InstallScopeCli::Local => InstallScope::Local,
         },
-        preset: match args.preset {
-            InstallPresetCli::Workspace => InstallPreset::Workspace,
-        },
-        name: args.name,
+        preset,
+        name: args.name.unwrap_or_else(|| default_server_name(preset).to_owned()),
         project_dir,
-        source_dir: args.source_dir,
+        source_dir,
         onec_url: args.onec_url,
         onec_user: args.onec_user,
         onec_password: password,
@@ -831,22 +853,34 @@ fn escape_html(s: &str) -> String {
 }
 
 fn run_mcp_server(
-    source_dir: PathBuf,
+    profile: mcp_server::McpProfile,
+    source_dir: Option<PathBuf>,
     onec_url: Option<String>,
     onec_user: &str,
     onec_password: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing::info!(?source_dir, ?onec_url, "Starting MCP server (stdio)");
+    tracing::info!(?profile, ?source_dir, ?onec_url, "Starting MCP server (stdio)");
 
-    let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
-    let mut state = mcp_server::SharedState::standalone(source_dir);
+    let state = match profile {
+        mcp_server::McpProfile::Workspace => {
+            let source_dir = source_dir.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "workspace profile requires --source-dir",
+                )
+            })?;
+            let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
+            let mut state = mcp_server::SharedState::workspace(source_dir);
+            if let Some(ref url) = onec_url {
+                tracing::info!(%url, "Configuring 1C HTTP client");
+                state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
+            }
+            state
+        }
+        mcp_server::McpProfile::Reference => mcp_server::SharedState::reference(),
+    };
 
-    if let Some(ref url) = onec_url {
-        tracing::info!(%url, "Configuring 1C HTTP client");
-        state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
-    }
-
-    let server = mcp_server::McpServer::new(state);
+    let server = mcp_server::McpServer::new(profile, state);
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(mcp_server::serve_stdio(server))?;

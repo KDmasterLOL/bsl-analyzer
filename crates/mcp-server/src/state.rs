@@ -4,8 +4,11 @@ use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{Document, IndexProgress, SearchEngine};
 use onec_client::Client as OnecClient;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 use tokio::sync::RwLock;
 
 /// State shared between all MCP tool handlers.
@@ -29,11 +32,11 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    /// Create state for standalone MCP mode (loads configuration from directory).
+    /// Create state for workspace MCP mode (loads configuration from directory).
     ///
     /// Returns immediately. Metadata loading is synchronous (~1-2s).
     /// Search engine initialization (FTS indexing) runs in a background thread.
-    pub fn standalone(source_dir: PathBuf) -> Self {
+    pub fn workspace(source_dir: PathBuf) -> Self {
         // Use Project to discover configuration path (configurationRoot,
         // recursive Configuration.xml search, common patterns).
         let project = project_model::Project::new(&source_dir);
@@ -58,7 +61,7 @@ impl SharedState {
                 .name("bsl-search-init".to_owned())
                 .spawn(move || {
                     tracing::info!("search engine initialization started in background");
-                    let engine = Self::init_search_engine(&root, &progress_arc);
+                    let engine = Self::init_workspace_search_engine(&root, &progress_arc);
                     if let Ok(mut guard) = engine_arc.lock() {
                         *guard = engine;
                     }
@@ -89,6 +92,40 @@ impl SharedState {
             configuration: Arc::new(RwLock::new(configuration)),
             extensions: Arc::new(RwLock::new(extensions)),
             workspace_root: Some(source_dir),
+            onec_client: None,
+            debug_session: Arc::new(Mutex::new(None)),
+            search_engine,
+            index_progress,
+        }
+    }
+
+    /// Create state for global reference MCP mode.
+    ///
+    /// Loads no project metadata and builds a user-level docs-only search index in the background.
+    pub fn reference() -> Self {
+        let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let index_progress = IndexProgress::new();
+
+        {
+            let engine_arc = Arc::clone(&search_engine);
+            let progress_arc = Arc::clone(&index_progress);
+            std::thread::Builder::new()
+                .name("bsl-search-reference-init".to_owned())
+                .spawn(move || {
+                    tracing::info!("reference search engine initialization started in background");
+                    let engine = Self::init_reference_search_engine(&progress_arc);
+                    if let Ok(mut guard) = engine_arc.lock() {
+                        *guard = engine;
+                    }
+                    tracing::info!("reference search engine initialization complete");
+                })
+                .ok();
+        }
+
+        Self {
+            configuration: Arc::new(RwLock::new(None)),
+            extensions: Arc::new(RwLock::new(Vec::new())),
+            workspace_root: None,
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
@@ -256,7 +293,7 @@ impl SharedState {
     /// If a DB exists, opens it. Otherwise builds index from source files.
     /// If EMBEDDING_URL is set, enables semantic search too.
     /// If DB has FTS data but no embeddings, rebuilds for semantic upgrade.
-    fn init_search_engine(
+    fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
         progress: &Arc<IndexProgress>,
     ) -> Option<SearchEngine> {
@@ -325,9 +362,17 @@ impl SharedState {
             }
         }
 
-        // Index platform reference documentation.
-        Self::index_platform_docs(&mut engine, progress);
+        Some(engine)
+    }
 
+    fn init_reference_search_engine(progress: &Arc<IndexProgress>) -> Option<SearchEngine> {
+        let db_path = Self::reference_search_db_path()?;
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+
+        let mut engine = Self::open_search_engine(&db_path)?;
+        Self::index_platform_docs(&mut engine, progress);
         Some(engine)
     }
 
@@ -454,10 +499,26 @@ impl SharedState {
     /// Initialize search engine for LSP+MCP mode (called when workspace root is set).
     pub fn init_search(&self) {
         if let Some(ref root) = self.workspace_root {
-            let engine = Self::init_search_engine(root, &self.index_progress);
+            let engine = Self::init_workspace_search_engine(root, &self.index_progress);
             if let Ok(mut guard) = self.search_engine.lock() {
                 *guard = engine;
             }
         }
+    }
+
+    fn reference_search_db_path() -> Option<PathBuf> {
+        if let Some(base) = dirs::cache_dir() {
+            return Some(base.join("bsl-analyzer").join("reference-search.db"));
+        }
+
+        if let Some(home) = env::var_os("HOME") {
+            return Some(PathBuf::from(home).join(".cache/bsl-analyzer/reference-search.db"));
+        }
+
+        if let Some(profile) = env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(profile).join(".bsl-analyzer/reference-search.db"));
+        }
+
+        None
     }
 }

@@ -57,14 +57,23 @@ impl fmt::Display for InstallScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPreset {
     Workspace,
+    Reference,
 }
 
 impl fmt::Display for InstallPreset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Workspace => "workspace",
+            Self::Reference => "reference",
         };
         f.write_str(value)
+    }
+}
+
+pub fn default_server_name(preset: InstallPreset) -> &'static str {
+    match preset {
+        InstallPreset::Workspace => "bsl-analyzer-workspace",
+        InstallPreset::Reference => "bsl-analyzer-reference",
     }
 }
 

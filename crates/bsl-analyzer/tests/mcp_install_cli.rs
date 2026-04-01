@@ -68,7 +68,7 @@ impl TestHarness {
 }
 
 #[test]
-fn codex_user_force_uses_cli_and_passes_env() {
+fn codex_user_reference_force_uses_cli_and_passes_env() {
     let harness = TestHarness::new();
     harness.install_stub("codex", &codex_stub());
 
@@ -82,11 +82,11 @@ fn codex_user_force_uses_cli_and_passes_env() {
             "codex",
             "--scope",
             "user",
+            "--preset",
+            "reference",
             "--force",
             "--env",
             "NAPARNIK_TOKEN=test",
-            "--source-dir",
-            harness.source_dir().to_str().expect("utf-8 path"),
         ])
         .output()
         .expect("run binary");
@@ -98,13 +98,27 @@ fn codex_user_force_uses_cli_and_passes_env() {
     let invocations = harness.invocations();
     assert_eq!(invocations.len(), 2);
     assert_eq!(invocations[0].program, "codex");
-    assert_eq!(invocations[0].args, vec!["mcp", "get", "bsl-analyzer", "--json"]);
-    assert_eq!(invocations[1].args[0..4], ["mcp", "add", "bsl-analyzer", "--env"]);
+    assert_eq!(invocations[0].args, vec!["mcp", "get", "bsl-analyzer-reference", "--json"]);
+    assert_eq!(invocations[1].args[0..4], ["mcp", "add", "bsl-analyzer-reference", "--env"]);
     assert!(invocations[1].args.contains(&"NAPARNIK_TOKEN=test".to_owned()));
     assert!(invocations[1].args.contains(&"--".to_owned()));
     assert!(invocations[1].args.contains(&"bsl-analyzer".to_owned()));
-    assert!(invocations[1].args.contains(&"--source-dir".to_owned()));
-    assert!(invocations[1].args.contains(&harness.source_dir().display().to_string()));
+    assert_eq!(
+        invocations[1].args,
+        vec![
+            "mcp",
+            "add",
+            "bsl-analyzer-reference",
+            "--env",
+            "NAPARNIK_TOKEN=test",
+            "--",
+            "bsl-analyzer",
+            "mcp",
+            "serve",
+            "--profile",
+            "reference",
+        ]
+    );
     assert_eq!(invocations[1].cwd, harness.project_dir.display().to_string());
 }
 
@@ -133,8 +147,10 @@ fn codex_project_writes_toml_without_invoking_cli() {
 
     let config_path = harness.project_dir.join(".codex/config.toml");
     let config = fs::read_to_string(&config_path).expect("project config");
-    assert!(config.contains("[mcp_servers.bsl-analyzer]"));
-    assert!(config.contains("args = [\"mcp\", \"--source-dir\", \"src\"]"));
+    assert!(config.contains("[mcp_servers.bsl-analyzer-workspace]"));
+    assert!(config.contains(
+        "args = [\"mcp\", \"serve\", \"--profile\", \"workspace\", \"--source-dir\", \"src\"]"
+    ));
 }
 
 #[test]
@@ -145,7 +161,7 @@ fn gemini_project_force_updates_via_add() {
     fs::create_dir_all(&settings_dir).expect("settings dir");
     fs::write(
         settings_dir.join("settings.json"),
-        r#"{"mcpServers":{"bsl-analyzer":{"command":"old","args":["serve"]}}}"#,
+        r#"{"mcpServers":{"bsl-analyzer-workspace":{"command":"old","args":["serve"]}}}"#,
     )
     .expect("settings");
 
@@ -177,7 +193,7 @@ fn gemini_project_force_updates_via_add() {
     assert_eq!(invocations[0].args[0..4], ["mcp", "add", "-s", "project"]);
     assert!(invocations[0].args.contains(&"-e".to_owned()));
     assert!(invocations[0].args.contains(&"NAPARNIK_TOKEN=test".to_owned()));
-    assert!(invocations[0].args.contains(&"bsl-analyzer".to_owned()));
+    assert!(invocations[0].args.contains(&"bsl-analyzer-workspace".to_owned()));
     assert_eq!(invocations[0].cwd, harness.project_dir.display().to_string());
 }
 
@@ -211,9 +227,15 @@ fn claude_project_force_runs_get_remove_add() {
 
     let invocations = harness.invocations();
     assert_eq!(invocations.len(), 3);
-    assert_eq!(invocations[0].args, vec!["mcp", "get", "bsl-analyzer"]);
-    assert_eq!(invocations[1].args, vec!["mcp", "remove", "-s", "project", "bsl-analyzer"]);
-    assert_eq!(invocations[2].args[0..5], ["mcp", "add", "-s", "project", "bsl-analyzer"]);
+    assert_eq!(invocations[0].args, vec!["mcp", "get", "bsl-analyzer-workspace"]);
+    assert_eq!(
+        invocations[1].args,
+        vec!["mcp", "remove", "-s", "project", "bsl-analyzer-workspace"]
+    );
+    assert_eq!(
+        invocations[2].args[0..5],
+        ["mcp", "add", "-s", "project", "bsl-analyzer-workspace"]
+    );
     assert!(invocations[2].args.contains(&"-e".to_owned()));
     assert!(invocations[2].args.contains(&"NAPARNIK_TOKEN=test".to_owned()));
 }
