@@ -395,6 +395,23 @@ impl Store {
         Ok(result)
     }
 
+    /// Get all indexed file paths with their hashes for a single collection.
+    pub fn all_files_in_collection(
+        &self,
+        collection: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
+        let mut stmt = self.conn.prepare("SELECT path, hash FROM files WHERE collection = ?1")?;
+        let rows = stmt.query_map(params![collection], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Total number of chunks in the store.
     pub fn chunk_count(&self) -> Result<usize, SearchError> {
         let count: i64 =

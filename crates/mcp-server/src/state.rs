@@ -327,6 +327,7 @@ impl SharedState {
         {
             let project = project_model::Project::new(workspace_root);
             let source_path = project.source_path();
+            engine.set_workspace_root(source_path.to_path_buf());
 
             if engine.has_semantic() {
                 // Always call index_directory — it skips files by hash.

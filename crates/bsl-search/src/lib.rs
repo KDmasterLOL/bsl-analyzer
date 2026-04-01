@@ -10,17 +10,30 @@
 mod chunker;
 mod context;
 mod document;
+mod domain;
 mod embedder;
 mod engine;
 mod error;
 mod index;
+mod ports;
+mod resolver;
 mod store;
+mod workspace_overlay;
 
 pub use chunker::{Chunk, ChunkKind, Chunker};
 pub use context::{enrich_chunk_text, file_path_to_module_path};
 pub use document::Document;
+pub use domain::{
+    BaselineRef, CorpusId, DocumentPath, FileOverlay, IndexedDocument, OverlayChange,
+    SearchOverlay, Snapshot, SnapshotId,
+};
 pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{IndexProgress, SearchConfig, SearchEngine, SearchHit};
 pub use error::SearchError;
 pub use index::{SearchResult, VectorIndex};
+pub use ports::{
+    LexicalSearchIndex, OverlayBuilder, ResolvedViewService, SnapshotCatalog, SnapshotContentStore,
+    VectorSearchIndex,
+};
+pub use resolver::{InMemoryResolvedViewResolver, ResolvedView};
 pub use store::{ChunkInfo, Store, TextSearchResult};

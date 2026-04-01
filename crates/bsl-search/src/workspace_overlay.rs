@@ -1,0 +1,491 @@
+use crate::chunker::Chunker;
+use crate::context::{enrich_chunk_text, file_path_to_module_path};
+use crate::domain::{BaselineRef, CorpusId, DocumentPath, IndexedDocument, SearchOverlay};
+use crate::embedder::Embedder;
+use crate::error::SearchError;
+use crate::store::Store;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+#[derive(Debug, Clone)]
+pub struct OverlayVectorDocument {
+    pub document: IndexedDocument,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceOverlayIndex {
+    pub overlay: SearchOverlay,
+    pub hidden_paths: HashSet<String>,
+    pub lexical_documents: Vec<IndexedDocument>,
+    pub vector_documents: Vec<OverlayVectorDocument>,
+}
+
+impl WorkspaceOverlayIndex {
+    pub fn is_empty(&self) -> bool {
+        self.overlay.changes.is_empty()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct WorkspaceOverlayCache {
+    entries: HashMap<String, OverlayFileEntry>,
+    hidden_paths: HashSet<String>,
+    embedding_cache: HashMap<String, Vec<f32>>,
+}
+
+impl WorkspaceOverlayCache {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.hidden_paths.clear();
+    }
+
+    pub fn refresh(
+        &mut self,
+        store: &Store,
+        workspace_root: &Path,
+        embedder: Option<&Embedder>,
+        batch_size: usize,
+    ) -> Result<(), SearchError> {
+        let baseline_files: HashMap<String, Vec<u8>> =
+            store.all_files_in_collection("code")?.into_iter().collect();
+        let workspace_files = scan_workspace_files(workspace_root);
+        let mut seen_paths = HashSet::new();
+        let mut hidden_paths = HashSet::new();
+
+        for file in workspace_files {
+            seen_paths.insert(file.rel_path.clone());
+            let baseline_hash = baseline_files.get(&file.rel_path);
+
+            let mut should_remove_cached_entry = false;
+            if let Some(entry) = self.entries.get_mut(&file.rel_path) {
+                if entry.fingerprint == file.fingerprint {
+                    if baseline_hash.is_some_and(|stored_hash| stored_hash == &entry.file_hash) {
+                        should_remove_cached_entry = true;
+                    } else {
+                        if baseline_hash.is_some() {
+                            hidden_paths.insert(file.rel_path.clone());
+                        }
+                        if let Some(embedder) = embedder {
+                            if entry.vector_documents.is_empty() {
+                                entry.vector_documents = build_overlay_vectors(
+                                    embedder,
+                                    batch_size,
+                                    &entry.lexical_documents,
+                                    &entry.embedding_inputs,
+                                    &mut self.embedding_cache,
+                                )?;
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+            if should_remove_cached_entry {
+                self.entries.remove(&file.rel_path);
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&file.abs_path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let file_hash = blake3::hash(content.as_bytes()).as_bytes().to_vec();
+            if baseline_hash.is_some_and(|stored_hash| stored_hash == &file_hash) {
+                self.entries.remove(&file.rel_path);
+                continue;
+            }
+
+            let entry = build_overlay_entry(
+                &file.rel_path,
+                &content,
+                file.fingerprint,
+                file_hash,
+                embedder,
+                batch_size,
+                &mut self.embedding_cache,
+            )?;
+            if baseline_hash.is_some() {
+                hidden_paths.insert(file.rel_path.clone());
+            }
+            self.entries.insert(file.rel_path, entry);
+        }
+
+        self.entries.retain(|path, _| seen_paths.contains(path));
+
+        for rel_path in baseline_files.keys() {
+            if !seen_paths.contains(rel_path) {
+                hidden_paths.insert(rel_path.clone());
+            }
+        }
+
+        self.hidden_paths = hidden_paths;
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> WorkspaceOverlayIndex {
+        let baseline =
+            BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline");
+        let mut overlay = SearchOverlay::new(baseline);
+        let mut lexical_documents = Vec::new();
+        let mut vector_documents = Vec::new();
+
+        let mut entry_paths: Vec<&String> = self.entries.keys().collect();
+        entry_paths.sort();
+        for rel_path in entry_paths {
+            let entry = self.entries.get(rel_path).expect("path collected from map keys");
+            overlay.replace_file(
+                DocumentPath::new("code", rel_path.clone()),
+                entry.lexical_documents.clone(),
+            );
+            lexical_documents.extend(entry.lexical_documents.clone());
+            vector_documents.extend(entry.vector_documents.clone());
+        }
+
+        let mut deleted_paths: Vec<&String> =
+            self.hidden_paths.iter().filter(|path| !self.entries.contains_key(*path)).collect();
+        deleted_paths.sort();
+        for rel_path in deleted_paths {
+            overlay.delete_file(DocumentPath::new("code", rel_path.clone()));
+        }
+
+        WorkspaceOverlayIndex {
+            overlay,
+            hidden_paths: self.hidden_paths.clone(),
+            lexical_documents,
+            vector_documents,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone)]
+struct OverlayFileEntry {
+    fingerprint: FileFingerprint,
+    file_hash: Vec<u8>,
+    lexical_documents: Vec<IndexedDocument>,
+    vector_documents: Vec<OverlayVectorDocument>,
+    embedding_inputs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceFileState {
+    rel_path: String,
+    abs_path: PathBuf,
+    fingerprint: FileFingerprint,
+}
+
+fn scan_workspace_files(workspace_root: &Path) -> Vec<WorkspaceFileState> {
+    walkdir::WalkDir::new(workspace_root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            let rel_path = entry
+                .path()
+                .strip_prefix(workspace_root)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .to_string();
+            Some(WorkspaceFileState {
+                rel_path,
+                abs_path: entry.into_path(),
+                fingerprint: FileFingerprint {
+                    len: metadata.len(),
+                    modified: metadata.modified().ok(),
+                },
+            })
+        })
+        .collect()
+}
+
+fn build_overlay_entry(
+    rel_path: &str,
+    content: &str,
+    fingerprint: FileFingerprint,
+    file_hash: Vec<u8>,
+    embedder: Option<&Embedder>,
+    batch_size: usize,
+    embedding_cache: &mut HashMap<String, Vec<f32>>,
+) -> Result<OverlayFileEntry, SearchError> {
+    let (lexical_documents, embedding_inputs) = build_overlay_documents(rel_path, content);
+    let vector_documents = if let Some(embedder) = embedder {
+        build_overlay_vectors(
+            embedder,
+            batch_size,
+            &lexical_documents,
+            &embedding_inputs,
+            embedding_cache,
+        )?
+    } else {
+        Vec::new()
+    };
+
+    Ok(OverlayFileEntry {
+        fingerprint,
+        file_hash,
+        lexical_documents,
+        vector_documents,
+        embedding_inputs,
+    })
+}
+
+fn build_overlay_documents(rel_path: &str, content: &str) -> (Vec<IndexedDocument>, Vec<String>) {
+    let chunks = Chunker::chunk(content);
+    let module_path = file_path_to_module_path(rel_path);
+    let mut lexical_documents = Vec::with_capacity(chunks.len());
+    let mut embedding_inputs = Vec::with_capacity(chunks.len());
+
+    for chunk in chunks {
+        let kind = match chunk.kind {
+            crate::chunker::ChunkKind::ModuleHeader => "header",
+            crate::chunker::ChunkKind::Procedure => "procedure",
+            crate::chunker::ChunkKind::Function => "function",
+        };
+        let content_hash = blake3::hash(chunk.text.as_bytes()).to_hex().to_string();
+        let document = IndexedDocument {
+            collection: "code".to_owned(),
+            path: rel_path.to_owned(),
+            symbol_name: chunk.name.clone(),
+            kind: kind.to_owned(),
+            line_start: chunk.line_start,
+            line_end: chunk.line_end,
+            text: chunk.text.clone(),
+            content_hash,
+        };
+        embedding_inputs.push(enrich_chunk_text(&chunk, &module_path));
+        lexical_documents.push(document);
+    }
+
+    (lexical_documents, embedding_inputs)
+}
+
+fn build_overlay_vectors(
+    embedder: &Embedder,
+    batch_size: usize,
+    documents: &[IndexedDocument],
+    embedding_inputs: &[String],
+    embedding_cache: &mut HashMap<String, Vec<f32>>,
+) -> Result<Vec<OverlayVectorDocument>, SearchError> {
+    if documents.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut vectors: Vec<Option<Vec<f32>>> = vec![None; documents.len()];
+    let mut missing_indexes = Vec::new();
+    let mut missing_inputs = Vec::new();
+
+    for (idx, document) in documents.iter().enumerate() {
+        if let Some(embedding) = embedding_cache.get(&document.content_hash) {
+            vectors[idx] = Some(embedding.clone());
+        } else {
+            missing_indexes.push(idx);
+            missing_inputs.push(embedding_inputs[idx].as_str());
+        }
+    }
+
+    for (batch_indexes, batch_inputs) in
+        missing_indexes.chunks(batch_size.max(1)).zip(missing_inputs.chunks(batch_size.max(1)))
+    {
+        let embeddings = embedder.embed_batch(batch_inputs)?;
+        for (idx, embedding) in batch_indexes.iter().copied().zip(embeddings) {
+            embedding_cache.insert(documents[idx].content_hash.clone(), embedding.clone());
+            vectors[idx] = Some(embedding);
+        }
+    }
+
+    Ok(documents
+        .iter()
+        .cloned()
+        .zip(vectors)
+        .map(|(document, embedding)| OverlayVectorDocument {
+            document,
+            embedding: embedding.unwrap_or_default(),
+        })
+        .collect())
+}
+
+pub fn lexical_hits(
+    overlay: &WorkspaceOverlayIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<crate::engine::SearchHit> {
+    let mut hits: Vec<crate::engine::SearchHit> = overlay
+        .lexical_documents
+        .iter()
+        .filter_map(|document| lexical_score(document, query).map(|score| (document, score)))
+        .map(|(document, score)| crate::engine::SearchHit {
+            collection: document.collection.clone(),
+            file_path: document.path.clone(),
+            symbol_name: document.symbol_name.clone(),
+            kind: document.kind.clone(),
+            text: document.text.clone(),
+            line_start: document.line_start,
+            line_end: document.line_end,
+            score,
+        })
+        .collect();
+
+    hits.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
+    hits.truncate(limit);
+    hits
+}
+
+pub fn semantic_hits(
+    overlay: &WorkspaceOverlayIndex,
+    query_embedding: &[f32],
+    limit: usize,
+) -> Vec<crate::engine::SearchHit> {
+    let mut hits: Vec<crate::engine::SearchHit> = overlay
+        .vector_documents
+        .iter()
+        .map(|document| crate::engine::SearchHit {
+            collection: document.document.collection.clone(),
+            file_path: document.document.path.clone(),
+            symbol_name: document.document.symbol_name.clone(),
+            kind: document.document.kind.clone(),
+            text: document.document.text.clone(),
+            line_start: document.document.line_start,
+            line_end: document.document.line_end,
+            score: cosine_similarity(query_embedding, &document.embedding),
+        })
+        .collect();
+
+    hits.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
+    hits.truncate(limit);
+    hits
+}
+
+fn lexical_score(document: &IndexedDocument, query: &str) -> Option<f32> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+
+    let symbol = document.symbol_name.to_lowercase();
+    let text = document.text.to_lowercase();
+
+    if symbol == needle {
+        return Some(1.0);
+    }
+    if symbol.contains(&needle) {
+        return Some(0.95);
+    }
+    if text.contains(&needle) {
+        let occurrences = text.matches(&needle).count().min(10) as f32;
+        return Some((0.70 + occurrences * 0.02).min(0.90));
+    }
+
+    None
+}
+
+fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
+    if lhs.len() != rhs.len() || lhs.is_empty() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0f32;
+    let mut lhs_norm = 0.0f32;
+    let mut rhs_norm = 0.0f32;
+
+    for (&left, &right) in lhs.iter().zip(rhs.iter()) {
+        dot += left * right;
+        lhs_norm += left * left;
+        rhs_norm += right * right;
+    }
+
+    let denom = lhs_norm.sqrt() * rhs_norm.sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        dot / denom
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lexical_hits, WorkspaceOverlayCache};
+    use crate::store::Store;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn overlay_detects_changed_and_deleted_files() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file_a = workspace.join("A.bsl");
+        let file_b = workspace.join("B.bsl");
+        fs::write(&file_a, "Процедура Старая()\nКонецПроцедуры").unwrap();
+        fs::write(&file_b, "Процедура Удаляемая()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("search.db");
+        let mut store = Store::open(&db_path).unwrap();
+        let chunks_a = crate::Chunker::chunk(&fs::read_to_string(&file_a).unwrap());
+        let chunks_b = crate::Chunker::chunk(&fs::read_to_string(&file_b).unwrap());
+        let hash_a = blake3::hash(fs::read(&file_a).unwrap().as_slice());
+        let hash_b = blake3::hash(fs::read(&file_b).unwrap().as_slice());
+        store.reindex_file("A.bsl", hash_a.as_bytes(), &chunks_a, None).unwrap();
+        store.reindex_file("B.bsl", hash_b.as_bytes(), &chunks_b, None).unwrap();
+
+        fs::write(&file_a, "Процедура НовоеИмя()\nКонецПроцедуры").unwrap();
+        fs::remove_file(&file_b).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh(&store, workspace, None, 32).unwrap();
+        let overlay = cache.snapshot();
+
+        assert!(overlay.hidden_paths.contains("A.bsl"));
+        assert!(overlay.hidden_paths.contains("B.bsl"));
+        assert_eq!(overlay.lexical_documents.len(), 1);
+        assert_eq!(overlay.lexical_documents[0].symbol_name, "НовоеИмя");
+    }
+
+    #[test]
+    fn lexical_hits_rank_overlay_matches() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура НоваяПроцедура123()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh(&store, workspace, None, 32).unwrap();
+        let overlay = cache.snapshot();
+
+        let hits = lexical_hits(&overlay, "НоваяПроцедура123", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_name, "НоваяПроцедура123");
+    }
+
+    #[test]
+    fn refresh_updates_only_changed_overlay_state() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура ВерсияОдин111()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh(&store, workspace, None, 32).unwrap();
+        let first = cache.snapshot();
+        assert_eq!(first.lexical_documents[0].symbol_name, "ВерсияОдин111");
+
+        cache.refresh(&store, workspace, None, 32).unwrap();
+        let second = cache.snapshot();
+        assert_eq!(second.lexical_documents[0].symbol_name, "ВерсияОдин111");
+
+        fs::write(&file, "Процедура ВерсияДва222222()\nКонецПроцедуры").unwrap();
+        cache.refresh(&store, workspace, None, 32).unwrap();
+        let third = cache.snapshot();
+        assert_eq!(third.lexical_documents[0].symbol_name, "ВерсияДва222222");
+    }
+}

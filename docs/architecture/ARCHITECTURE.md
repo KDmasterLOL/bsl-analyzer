@@ -60,6 +60,7 @@ BSL Analyzer использует инкрементальную архитек�
 | **SDBL** | sdbl-hir | Query language HIR + type inference |
 | **Dataflow** | cfg, cfg-types, dataflow | CFG, reaching definitions, liveness |
 | **Metadata** | bsl-metadata, bsl-platform | 1C configuration, platform types |
+| **Search** | bsl-search, mcp-server | FTS, semantic search, MCP search tools |
 | **Infra** | base-db, vfs, vfs-notify, project-model | Salsa, VFS, file watching |
 | **Utils** | line-index, intern, stdx, paths, profile | Helpers |
 
@@ -184,6 +185,22 @@ File Change → VFS → Salsa Invalidation → Recompute affected queries only
                             ├─ .bsl changed → parse, HIR (metadata NOT invalidated)
                             └─ Configuration.xml → load_configuration + dependents
 ```
+
+## Search Architecture
+
+Поиск для MCP и справки платформы развивается как отдельная подсистема поверх
+`bsl-search` и `mcp-server`.
+
+Текущий runtime использует локальный SQLite store и in-memory HNSW. Следующий
+этап архитектуры описан в отдельном ADR:
+
+- [Search Baseline + Overlay](./SEARCH_BASELINE_OVERLAY.md)
+
+Цель этой модели:
+
+- хранить общую справку и baseline-индексы централизованно;
+- накладывать локальные изменения рабочей копии как overlay;
+- не переиндексировать полностью почти одинаковые ветки.
 
 ## Производительность
 
