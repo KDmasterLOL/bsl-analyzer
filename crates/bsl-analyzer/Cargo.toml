@@ -48,6 +48,7 @@ parking_lot.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+toml_edit = "0.22"
 
 # Logging
 tracing.workspace = true
@@ -57,6 +58,7 @@ rustc-hash.workspace = true
 
 # Error handling
 anyhow.workspace = true
+thiserror.workspace = true
 
 # Utilities
 walkdir.workspace = true
@@ -72,3 +74,4 @@ walkdir = "2.4"
 
 [dev-dependencies]
 expect-test.workspace = true
+tempfile.workspace = true

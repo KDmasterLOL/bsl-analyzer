@@ -11,6 +11,7 @@ pub mod diff_filter;
 pub mod global_state;
 pub mod handlers;
 pub mod lsp;
+pub mod mcp_install;
 pub mod mem_docs;
 pub mod reporters;
 pub mod server;

@@ -6,9 +6,9 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{env, error::Error, fs, io, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, env, error::Error, fs, io, path::PathBuf, sync::Arc};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use ide_db::metadata;
 
 /// Output format for analysis results.
@@ -154,25 +154,8 @@ enum Commands {
     /// Start LSP server (default)
     Lsp,
 
-    /// Start MCP server (Model Context Protocol for AI agents)
-    Mcp {
-        /// Source directory containing 1C configuration (with Configuration.xml)
-        #[arg(short = 's', long = "source-dir", default_value = ".")]
-        source_dir: PathBuf,
-
-        /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
-        #[arg(long)]
-        onec_url: Option<String>,
-
-        /// 1C username for HTTP service authentication
-        #[arg(long, default_value = "")]
-        onec_user: String,
-
-        /// 1C password for HTTP service authentication.
-        /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
-        #[arg(long, default_value = "")]
-        onec_password: String,
-    },
+    /// Start MCP server or install MCP config into AI tools
+    Mcp(McpCommand),
 
     /// Export built-in 1C extension (BSL_Analyzer) to a directory
     Extension {
@@ -188,6 +171,115 @@ enum Commands {
         #[command(subcommand)]
         command: RulesCommands,
     },
+}
+
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+struct McpCommand {
+    #[command(subcommand)]
+    command: Option<McpSubcommand>,
+
+    #[command(flatten)]
+    serve: McpServeArgs,
+}
+
+#[derive(Subcommand)]
+enum McpSubcommand {
+    /// Start MCP server (Model Context Protocol for AI agents)
+    Serve(McpServeArgs),
+
+    /// Install MCP config into supported AI tools
+    Install(McpInstallArgs),
+}
+
+#[derive(Args, Clone)]
+struct McpServeArgs {
+    /// Source directory containing 1C configuration (with Configuration.xml)
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
+    /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
+    #[arg(long)]
+    onec_url: Option<String>,
+
+    /// 1C username for HTTP service authentication
+    #[arg(long, default_value = "")]
+    onec_user: String,
+
+    /// 1C password for HTTP service authentication.
+    /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
+    #[arg(long, default_value = "")]
+    onec_password: String,
+}
+
+#[derive(Args)]
+struct McpInstallArgs {
+    /// Target application: codex, gemini, claude, cursor or all
+    #[arg(long, value_enum)]
+    target: InstallTargetCli,
+
+    /// Configuration scope
+    #[arg(long, value_enum, default_value_t = InstallScopeCli::Project)]
+    scope: InstallScopeCli,
+
+    /// Installation preset
+    #[arg(long, value_enum, default_value_t = InstallPresetCli::Workspace)]
+    preset: InstallPresetCli,
+
+    /// MCP server name inside target config
+    #[arg(long, default_value = "bsl-analyzer")]
+    name: String,
+
+    /// Source directory containing 1C configuration (with Configuration.xml)
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
+    /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
+    #[arg(long)]
+    onec_url: Option<String>,
+
+    /// 1C username for HTTP service authentication
+    #[arg(long, default_value = "")]
+    onec_user: String,
+
+    /// 1C password for HTTP service authentication.
+    /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
+    #[arg(long, default_value = "")]
+    onec_password: String,
+
+    /// Extra environment variable for the spawned MCP server (repeatable KEY=value)
+    #[arg(long = "env", value_parser = parse_env_pair)]
+    env: Vec<(String, String)>,
+
+    /// Replace an existing MCP entry with the same name
+    #[arg(long)]
+    force: bool,
+
+    /// Print the generated command or config instead of writing it
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InstallTargetCli {
+    Codex,
+    Gemini,
+    Claude,
+    Cursor,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InstallScopeCli {
+    User,
+    Project,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum InstallPresetCli {
+    #[default]
+    Workspace,
 }
 
 #[derive(Subcommand)]
@@ -298,14 +390,92 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Format { file, write, spaces, indent_size }) => {
             run_format(file, write, spaces, indent_size)
         }
-        Some(Commands::Mcp { source_dir, onec_url, onec_user, onec_password }) => {
-            let password = decode_password(&onec_password);
-            run_mcp_server(source_dir, onec_url, &onec_user, &password)
-        }
+        Some(Commands::Mcp(command)) => run_mcp_command(command),
         Some(Commands::Extension { command }) => run_extension_command(command),
         Some(Commands::Dap) => run_dap_server(),
         Some(Commands::Rules { command }) => run_rules_command(command),
         Some(Commands::Lsp) | None => run_lsp_server(),
+    }
+}
+
+fn run_mcp_command(command: McpCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match command.command {
+        Some(McpSubcommand::Serve(args)) => run_mcp_serve(args),
+        Some(McpSubcommand::Install(args)) => run_mcp_install(args),
+        None => run_mcp_serve(command.serve),
+    }
+}
+
+fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let password = decode_password(&args.onec_password);
+    run_mcp_server(args.source_dir, args.onec_url, &args.onec_user, &password)
+}
+
+fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use bsl_analyzer::mcp_install::{
+        self, InstallPreset, InstallRequest, InstallScope, InstallTarget, InstallTargetSelector,
+    };
+
+    let project_dir = env::current_dir()?;
+    let env = args.env.into_iter().collect::<BTreeMap<_, _>>();
+    let password = decode_password(&args.onec_password);
+
+    let request = InstallRequest {
+        target: match args.target {
+            InstallTargetCli::Codex => InstallTargetSelector::One(InstallTarget::Codex),
+            InstallTargetCli::Gemini => InstallTargetSelector::One(InstallTarget::Gemini),
+            InstallTargetCli::Claude => InstallTargetSelector::One(InstallTarget::Claude),
+            InstallTargetCli::Cursor => InstallTargetSelector::One(InstallTarget::Cursor),
+            InstallTargetCli::All => InstallTargetSelector::All,
+        },
+        scope: match args.scope {
+            InstallScopeCli::User => InstallScope::User,
+            InstallScopeCli::Project => InstallScope::Project,
+            InstallScopeCli::Local => InstallScope::Local,
+        },
+        preset: match args.preset {
+            InstallPresetCli::Workspace => InstallPreset::Workspace,
+        },
+        name: args.name,
+        project_dir,
+        source_dir: args.source_dir,
+        onec_url: args.onec_url,
+        onec_user: args.onec_user,
+        onec_password: password,
+        env,
+        force: args.force,
+        dry_run: args.dry_run,
+    };
+
+    let result = match mcp_install::install(request) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("{}", format_install_error(&err));
+            std::process::exit(2);
+        }
+    };
+
+    for entry in result.entries {
+        println!(
+            "[{}:{}] {} -> {}",
+            entry.target,
+            entry.scope,
+            status_label(entry.status),
+            entry.location
+        );
+        if !entry.detail.is_empty() {
+            println!("{}", entry.detail);
+        }
+    }
+
+    Ok(())
+}
+
+fn format_install_error(err: &bsl_analyzer::mcp_install::InstallError) -> String {
+    if let Some(hint) = err.hint() {
+        format!("{err}\nHint: {hint}")
+    } else {
+        err.to_string()
     }
 }
 
@@ -387,6 +557,24 @@ fn run_extension_command(command: ExtensionCommands) -> Result<(), Box<dyn Error
     }
 
     Ok(())
+}
+
+fn parse_env_pair(input: &str) -> Result<(String, String), String> {
+    let Some((key, value)) = input.split_once('=') else {
+        return Err("expected KEY=value".to_owned());
+    };
+    if key.is_empty() {
+        return Err("environment variable name must not be empty".to_owned());
+    }
+    Ok((key.to_owned(), value.to_owned()))
+}
+
+fn status_label(status: bsl_analyzer::mcp_install::InstallStatus) -> &'static str {
+    match status {
+        bsl_analyzer::mcp_install::InstallStatus::Installed => "installed",
+        bsl_analyzer::mcp_install::InstallStatus::Updated => "updated",
+        bsl_analyzer::mcp_install::InstallStatus::DryRun => "dry-run",
+    }
 }
 
 /// Decode password: if prefixed with "base64:", decode from base64.

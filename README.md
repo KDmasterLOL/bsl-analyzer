@@ -64,6 +64,52 @@ BSL Analyzer включает встроенный [MCP-сервер](https://mo
 bsl-analyzer mcp --source-dir ./my-project
 ```
 
+Автоустановка MCP-конфига в AI-инструменты:
+
+```bash
+# Установить project-scoped MCP в Codex / Gemini / Claude / Cursor
+bsl-analyzer mcp install --target all --scope project --source-dir ./my-project
+
+# Установить только в Claude Code локально для текущего проекта
+bsl-analyzer mcp install --target claude --scope local --source-dir ./my-project
+
+# Посмотреть, что будет записано, без изменений на диске
+bsl-analyzer mcp install --target codex --scope project --source-dir ./my-project --dry-run
+
+# Обновить существующую запись MCP с тем же именем
+bsl-analyzer mcp install --target cursor --scope project --source-dir ./my-project --force
+
+# Передать переменные окружения для its_help и семантического поиска
+bsl-analyzer mcp install \
+  --target claude \
+  --scope project \
+  --source-dir ./my-project \
+  --env NAPARNIK_TOKEN=your_token \
+  --env EMBEDDING_URL=http://localhost:8000/v1/embeddings
+```
+
+Поддерживаемые targets и scopes:
+
+| Target | Scopes | Способ установки |
+|--------|--------|------------------|
+| `codex` | `user`, `project` | `user` через `codex mcp add`, `project` через merge в `.codex/config.toml` |
+| `gemini` | `user`, `project` | через `gemini mcp add` |
+| `claude` | `user`, `project`, `local` | через `claude mcp add` |
+| `cursor` | `user`, `project` | через merge в `~/.cursor/mcp.json` или `.cursor/mcp.json` |
+
+> **Примечание:** если передать `--onec-password`, пароль будет сохранён в конфиге целевого инструмента как аргумент запуска MCP. `--dry-run` показывает итоговый CLI-вызов или файл конфигурации до записи.
+
+Типовые ошибки установки:
+
+- `server 'bsl-analyzer' already exists ...`
+  Перезапустите команду с `--force`, если хотите обновить существующую запись.
+- `failed to run 'codex': binary not found in PATH`
+  Установите соответствующий CLI (`codex`, `gemini` или `claude`) и проверьте, что он доступен в `PATH`.
+- `failed to parse ... config file`
+  Целевой конфиг уже существует, но содержит некорректный JSON/TOML. Исправьте файл и повторите установку.
+- `target '...' does not support '...' scope`
+  Выбран неподдерживаемый `--scope` для текущего `--target`. Используйте матрицу scopes из таблицы выше.
+
 С подключением к 1С (для выполнения запросов и кода):
 
 ```bash
