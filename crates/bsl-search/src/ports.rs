@@ -1,6 +1,6 @@
 use crate::domain::{
-    BaselineRef, IndexedDocument, LexicalHit, SearchOverlay, Snapshot, SnapshotPublishMetadata,
-    SnapshotPublishStats,
+    BaselineRef, IndexedDocument, LexicalHit, SearchOverlay, SemanticHit, Snapshot,
+    SnapshotPublishMetadata, SnapshotPublishStats,
 };
 use crate::error::SearchError;
 use crate::external_baseline::BaselineEmbeddingStats;
@@ -56,6 +56,18 @@ pub trait BaselineLexicalSearch {
         collection: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LexicalHit>, SearchError>;
+}
+
+/// Provides direct semantic hits from a published baseline snapshot via pgvector.
+pub trait BaselineSemanticSearch {
+    fn semantic_search_baseline(
+        &self,
+        snapshot_id: &str,
+        query_embedding: &[f32],
+        model_id: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SemanticHit>, SearchError>;
 }
 
 /// Publishes immutable baseline snapshots into a backing store.

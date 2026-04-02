@@ -1,10 +1,11 @@
 use crate::domain::{
     BaselineRef, ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, LexicalHit,
-    Snapshot, SnapshotPublishMetadata, SnapshotPublishStats,
+    SemanticHit, Snapshot, SnapshotPublishMetadata, SnapshotPublishStats,
 };
 use crate::error::SearchError;
 use crate::ports::{
-    BaselineLexicalSearch, EmbeddingStore, SnapshotCatalog, SnapshotContentStore, SnapshotPublisher,
+    BaselineLexicalSearch, BaselineSemanticSearch, EmbeddingStore, SnapshotCatalog,
+    SnapshotContentStore, SnapshotPublisher,
 };
 use std::collections::HashMap;
 
@@ -215,6 +216,38 @@ impl ExternalBaselineAdapter {
             }
         }
     }
+
+    pub fn populate_serving_semantic(
+        &self,
+        snapshot_id: &str,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<usize, SearchError> {
+        match self {
+            Self::Postgres(adapter) => {
+                adapter.populate_serving_semantic(snapshot_id, model_id, dimension)
+            }
+        }
+    }
+
+    pub fn semantic_search_baseline(
+        &self,
+        snapshot_id: &str,
+        query_embedding: &[f32],
+        model_id: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SemanticHit>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.semantic_search_baseline(
+                snapshot_id,
+                query_embedding,
+                model_id,
+                collection,
+                limit,
+            ),
+        }
+    }
 }
 
 impl EmbeddingStore for ExternalBaselineAdapter {
@@ -287,6 +320,26 @@ impl BaselineLexicalSearch for ExternalBaselineAdapter {
             self,
             snapshot_id,
             query,
+            collection,
+            limit,
+        )
+    }
+}
+
+impl BaselineSemanticSearch for ExternalBaselineAdapter {
+    fn semantic_search_baseline(
+        &self,
+        snapshot_id: &str,
+        query_embedding: &[f32],
+        model_id: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SemanticHit>, SearchError> {
+        ExternalBaselineAdapter::semantic_search_baseline(
+            self,
+            snapshot_id,
+            query_embedding,
+            model_id,
             collection,
             limit,
         )

@@ -1,6 +1,6 @@
 use crate::domain::{
-    BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, LexicalHit, Snapshot,
-    SnapshotPublishMetadata, SnapshotPublishStats,
+    BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, LexicalHit, SemanticHit,
+    Snapshot, SnapshotPublishMetadata, SnapshotPublishStats,
 };
 use crate::error::SearchError;
 use crate::external_baseline::{
@@ -9,7 +9,8 @@ use crate::external_baseline::{
     BaselineFileObjectReference, BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
 };
 use crate::ports::{
-    BaselineLexicalSearch, SnapshotCatalog, SnapshotContentStore, SnapshotPublisher,
+    BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotContentStore,
+    SnapshotPublisher,
 };
 use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
@@ -76,6 +77,19 @@ type PgPooledConnection = r2d2_postgres::r2d2::PooledConnection<PostgresConnecti
 ///   `text TEXT NOT NULL`
 ///   `tsv TSVECTOR NOT NULL`
 ///   PK: (snapshot_id, collection, path, ordinal)
+/// - `<schema>.serving_semantic`
+///   `snapshot_id TEXT NOT NULL`
+///   `collection TEXT NOT NULL`
+///   `path TEXT NOT NULL`
+///   `ordinal INTEGER NOT NULL`
+///   `symbol_name TEXT NOT NULL`
+///   `kind TEXT NOT NULL`
+///   `line_start INTEGER NOT NULL`
+///   `line_end INTEGER NOT NULL`
+///   `model_id TEXT NOT NULL`
+///   `dimension INTEGER NOT NULL`
+///   `embedding vector NOT NULL`
+///   PK: (snapshot_id, model_id, collection, path, ordinal)
 #[derive(Debug, Clone)]
 pub struct PostgresBaselineAdapter {
     config: ExternalBaselineConfig,
@@ -290,6 +304,35 @@ impl PostgresBaselineAdapter {
                  ON {} (snapshot_id)",
                 self.schema,
                 self.table("serving_lexical")
+            ),
+            // pgvector extension — best-effort, may require superuser.
+            // If already installed, IF NOT EXISTS succeeds silently.
+            // If not installed and no privileges, the error is caught below
+            // and serving_semantic queries will return empty results.
+            "DO $$ BEGIN CREATE EXTENSION IF NOT EXISTS vector; EXCEPTION WHEN insufficient_privilege THEN NULL; END $$".to_owned(),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
+                    collection TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    symbol_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    line_start INTEGER NOT NULL,
+                    line_end INTEGER NOT NULL,
+                    model_id TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    embedding vector NOT NULL,
+                    PRIMARY KEY (snapshot_id, model_id, collection, path, ordinal)
+                )",
+                self.table("serving_semantic"),
+                self.table("snapshots"),
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_serving_semantic_snapshot_model
+                 ON {} (snapshot_id, model_id)",
+                self.schema,
+                self.table("serving_semantic")
             ),
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_file_objects_fingerprint
@@ -753,6 +796,135 @@ impl PostgresBaselineAdapter {
 
         Ok(report)
     }
+
+    /// Populates the `serving_semantic` table for a published snapshot.
+    ///
+    /// Computes embedding keys for all visible documents, loads matching
+    /// embeddings from `semantic_embeddings`, and inserts them into the
+    /// serving table. Call after both snapshot and embeddings are published.
+    pub fn populate_serving_semantic(
+        &self,
+        snapshot_id: &str,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<usize, SearchError> {
+        self.ensure_storage()?;
+        let mut client = self.connect()?;
+
+        let visible_files = materialize_visible_snapshot_files(&mut *client, self, snapshot_id)?;
+        if visible_files.is_empty() {
+            return Ok(0);
+        }
+
+        // Build a map from file_object_id to (collection, path) from the fully
+        // materialized visible set — this includes inherited files, not just the
+        // current snapshot's delta in snapshot_files.
+        let file_object_ids =
+            visible_files.iter().map(|f| f.file_object_id.clone()).collect::<Vec<_>>();
+        let file_meta: HashMap<String, (&str, &str)> = visible_files
+            .iter()
+            .map(|f| (f.file_object_id.clone(), (f.collection.as_str(), f.path.as_str())))
+            .collect();
+
+        let items_query = format!(
+            "SELECT foi.file_object_id, foi.ordinal, foi.symbol_name, foi.kind,
+                    foi.line_start, foi.line_end, co.text
+             FROM {} foi
+             JOIN {} co ON co.content_hash = foi.content_hash
+             WHERE foi.file_object_id = ANY($1)
+             ORDER BY foi.file_object_id, foi.ordinal",
+            self.table("file_object_items"),
+            self.table("content_objects"),
+        );
+        let item_rows = client.query(&items_query, &[&file_object_ids])?;
+
+        let mut embedding_keys = Vec::with_capacity(item_rows.len());
+        struct DocInfo {
+            collection: String,
+            path: String,
+            ordinal: i32,
+            symbol_name: String,
+            kind: String,
+            line_start: i32,
+            line_end: i32,
+            embedding_key: String,
+        }
+        let mut doc_infos = Vec::with_capacity(item_rows.len());
+        for row in &item_rows {
+            let fo_id: String = row.get("file_object_id");
+            let Some(&(collection, path)) = file_meta.get(&fo_id) else {
+                continue;
+            };
+            let key = semantic_key_for_document(
+                path,
+                row.get("kind"),
+                row.get("symbol_name"),
+                row.get("text"),
+            );
+            embedding_keys.push(key.clone());
+            doc_infos.push(DocInfo {
+                collection: collection.to_owned(),
+                path: path.to_owned(),
+                ordinal: row.get("ordinal"),
+                symbol_name: row.get("symbol_name"),
+                kind: row.get("kind"),
+                line_start: row.get("line_start"),
+                line_end: row.get("line_end"),
+                embedding_key: key,
+            });
+        }
+
+        let embeddings = self.load_embeddings(&embedding_keys, model_id, dimension)?;
+        if embeddings.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = client.transaction()?;
+        let delete = format!(
+            "DELETE FROM {} WHERE snapshot_id = $1 AND model_id = $2",
+            self.table("serving_semantic")
+        );
+        tx.execute(&delete, &[&snapshot_id, &model_id])?;
+
+        let insert = format!(
+            "INSERT INTO {} (
+                snapshot_id, collection, path, ordinal, symbol_name, kind,
+                line_start, line_end, model_id, dimension, embedding
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::vector)",
+            self.table("serving_semantic")
+        );
+
+        let dim = dimension as i32;
+        let mut inserted = 0usize;
+        for doc in &doc_infos {
+            if let Some(embedding) = embeddings.get(&doc.embedding_key) {
+                let vector_text = format!(
+                    "[{}]",
+                    embedding.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+                );
+                tx.execute(
+                    &insert,
+                    &[
+                        &snapshot_id,
+                        &doc.collection,
+                        &doc.path,
+                        &doc.ordinal,
+                        &doc.symbol_name,
+                        &doc.kind,
+                        &doc.line_start,
+                        &doc.line_end,
+                        &model_id,
+                        &dim,
+                        &vector_text,
+                    ],
+                )?;
+                inserted += 1;
+            }
+        }
+
+        tx.commit()?;
+        Ok(inserted)
+    }
 }
 
 impl SnapshotCatalog for PostgresBaselineAdapter {
@@ -937,6 +1109,68 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
                 line_end: row.get::<_, i32>("line_end") as u32,
                 text: row.get("text"),
                 rank: row.get::<_, f32>("rank"),
+            })
+            .collect())
+    }
+}
+
+impl BaselineSemanticSearch for PostgresBaselineAdapter {
+    fn semantic_search_baseline(
+        &self,
+        snapshot_id: &str,
+        query_embedding: &[f32],
+        model_id: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SemanticHit>, SearchError> {
+        if query_embedding.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let collection =
+            collection.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+        let limit = limit.clamp(1, 200) as i64;
+        let snapshot_id = snapshot_id.to_owned();
+        let model_id = model_id.to_owned();
+        let vector_text = format!(
+            "[{}]",
+            query_embedding.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+        );
+
+        let mut sql = format!(
+            "SELECT collection,
+                    path,
+                    symbol_name,
+                    kind,
+                    line_start,
+                    line_end,
+                    1.0 - (embedding <=> $1::vector) AS score
+             FROM {}
+             WHERE snapshot_id = $2 AND model_id = $3",
+            self.table("serving_semantic")
+        );
+
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            vec![&vector_text, &snapshot_id, &model_id];
+        if let Some(collection) = collection.as_ref() {
+            sql.push_str(&format!(" AND collection = ${}", params.len() + 1));
+            params.push(collection);
+        }
+        sql.push_str(&format!(" ORDER BY embedding <=> $1::vector LIMIT ${}", params.len() + 1));
+        params.push(&limit);
+
+        let mut client = self.connect()?;
+        Ok(client
+            .query(&sql, &params)?
+            .into_iter()
+            .map(|row| SemanticHit {
+                collection: row.get("collection"),
+                path: row.get("path"),
+                symbol_name: row.get("symbol_name"),
+                kind: row.get("kind"),
+                line_start: row.get::<_, i32>("line_start") as u32,
+                line_end: row.get::<_, i32>("line_end") as u32,
+                score: row.get::<_, f64>("score") as f32,
             })
             .collect())
     }
@@ -1469,6 +1703,11 @@ fn semantic_key_for_semantic_row(row: Row) -> String {
     blake3::hash(payload.as_bytes()).to_hex().to_string()
 }
 
+fn semantic_key_for_document(path: &str, kind: &str, symbol_name: &str, text: &str) -> String {
+    let payload = format!("Path: {path}\nKind: {kind}\nSymbol: {symbol_name}\n{text}");
+    blake3::hash(payload.as_bytes()).to_hex().to_string()
+}
+
 fn query_string_column(
     client: &mut impl GenericClient,
     query: &str,
@@ -1484,7 +1723,9 @@ mod tests {
         PostgresBaselineAdapter,
     };
     use crate::domain::{CorpusId, ExternalBaselineConfig};
-    use crate::ports::{BaselineLexicalSearch, SnapshotCatalog, SnapshotPublisher};
+    use crate::ports::{
+        BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotPublisher,
+    };
     use crate::{BaselineRef, IndexedDocument};
 
     #[test]
@@ -1553,6 +1794,31 @@ mod tests {
 
         let result = adapter.lexical_search_baseline("snapshot-1", "   ", None, 10).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn semantic_search_returns_empty_for_empty_embedding() {
+        let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
+            "postgres://127.0.0.1:1",
+        ))
+        .unwrap();
+
+        let result =
+            adapter.semantic_search_baseline("snapshot-1", &[], "model-1", None, 10).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn connection_errors_surface_from_semantic_search() {
+        let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
+            "postgres://127.0.0.1:1",
+        ))
+        .unwrap();
+
+        let error = adapter
+            .semantic_search_baseline("snapshot-1", &[0.1, 0.2, 0.3], "model-1", None, 10)
+            .unwrap_err();
+        assert!(error.to_string().contains("connection"));
     }
 
     #[test]

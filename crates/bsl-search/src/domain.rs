@@ -185,6 +185,18 @@ pub struct LexicalHit {
     pub rank: f32,
 }
 
+/// Semantic hit returned directly from a baseline serving table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticHit {
+    pub collection: String,
+    pub path: String,
+    pub symbol_name: String,
+    pub kind: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub score: f32,
+}
+
 /// Overlay for one logical file/document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileOverlay {
