@@ -290,7 +290,11 @@ pub fn find_docs(
                         )]));
                     }
                     Ok(_) => {
-                        // Empty result — serving table may be absent for this snapshot.
+                        // Query succeeded — authoritative empty. Don't fall back
+                        // to load-all or local SQLite which may hold stale data.
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            "No results found.",
+                        )]));
                     }
                     Err(error) => {
                         warn!(
