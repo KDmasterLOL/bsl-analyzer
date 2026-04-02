@@ -15,6 +15,7 @@ use crate::error::SearchError;
 use crate::index::VectorIndex;
 use crate::local_baseline::LocalStoreBaselineAdapter;
 use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+use crate::publish::EmbeddingExecutionPolicy;
 use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
 use crate::store::Store;
 use crate::workspace_overlay::{
@@ -30,9 +31,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
-
-/// Default number of concurrent embedding connections.
-const DEFAULT_CONCURRENCY: usize = 10;
 
 /// Progress tracker for indexing operations.
 ///
@@ -86,23 +84,12 @@ impl IndexProgress {
 }
 
 /// Configuration for the search engine.
+#[derive(Default)]
 pub struct SearchConfig {
     /// Embedding API configuration.
     pub embedder: EmbedderConfig,
-    /// Maximum batch size for embedding generation.
-    pub batch_size: usize,
-    /// Number of concurrent embedding connections (default 10).
-    pub concurrency: usize,
-}
-
-impl Default for SearchConfig {
-    fn default() -> Self {
-        Self {
-            embedder: EmbedderConfig::default(),
-            batch_size: 32,
-            concurrency: DEFAULT_CONCURRENCY,
-        }
-    }
+    /// Execution policy for embedding generation.
+    pub execution: EmbeddingExecutionPolicy,
 }
 
 /// A search result with chunk metadata and similarity score.
@@ -144,9 +131,10 @@ impl SearchEngine {
     /// - `db_path`: path to the SQLite database file
     /// - `config`: search configuration (embedder + batch size + concurrency)
     pub fn new(db_path: &Path, config: SearchConfig) -> Result<Self, SearchError> {
+        let SearchConfig { embedder: embedder_config, execution } = config;
         let store = Store::open(db_path)?;
-        let dim = config.embedder.dim.unwrap_or(1024);
-        let embedder = Embedder::new(config.embedder);
+        let dim = embedder_config.dim.unwrap_or(1024);
+        let embedder = Embedder::new(embedder_config);
 
         // Load existing embeddings from store into HNSW index.
         let data = store.load_all_embeddings(dim)?;
@@ -160,8 +148,8 @@ impl SearchEngine {
             embedder: Some(embedder),
             index,
             dim,
-            batch_size: config.batch_size,
-            concurrency: config.concurrency,
+            batch_size: execution.batch_size(),
+            concurrency: execution.concurrency(),
             workspace_root: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
@@ -184,8 +172,8 @@ impl SearchEngine {
             embedder: None,
             index,
             dim,
-            batch_size: 32,
-            concurrency: DEFAULT_CONCURRENCY,
+            batch_size: EmbeddingExecutionPolicy::default().batch_size(),
+            concurrency: EmbeddingExecutionPolicy::default().concurrency(),
             workspace_root: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,

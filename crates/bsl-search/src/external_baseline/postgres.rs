@@ -9,8 +9,11 @@ use crate::external_baseline::{
     BaselineFileObjectReference, BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
 };
 use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
-use postgres::{Client, GenericClient, NoTls, Row, Transaction};
+use postgres::{GenericClient, NoTls, Row, Transaction};
+use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+type PgPooledConnection = r2d2_postgres::r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
 
 /// PostgreSQL adapter for centralized baseline storage.
 ///
@@ -53,25 +56,42 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 ///   `model_id TEXT NOT NULL`
 ///   `dimension INTEGER NOT NULL`
 ///   `embedding BYTEA NOT NULL`
+/// - `<schema>.snapshot_heads`
+///   `corpus TEXT NOT NULL`
+///   `branch TEXT NOT NULL`
+///   `snapshot_id TEXT NOT NULL`
+///   `updated_at TIMESTAMPTZ NOT NULL`
+///   PK: (corpus, branch)
 #[derive(Debug, Clone)]
 pub struct PostgresBaselineAdapter {
     config: ExternalBaselineConfig,
     schema: String,
+    pool: Pool<PostgresConnectionManager<NoTls>>,
 }
 
 impl PostgresBaselineAdapter {
     pub fn new(config: ExternalBaselineConfig) -> Result<Self, SearchError> {
         let schema = config.schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
         validate_identifier(&schema)?;
-        Ok(Self { config, schema })
+        let pg_config = config.connection.parse().map_err(|err: postgres::Error| {
+            SearchError::ExternalBaseline(format!("invalid connection string: {err}"))
+        })?;
+        let manager = PostgresConnectionManager::new(pg_config, NoTls);
+        let pool = Pool::builder()
+            .max_size(4)
+            .connection_timeout(std::time::Duration::from_secs(5))
+            .build_unchecked(manager);
+        Ok(Self { config, schema, pool })
     }
 
     pub fn config(&self) -> &ExternalBaselineConfig {
         &self.config
     }
 
-    fn connect(&self) -> Result<Client, SearchError> {
-        Client::connect(&self.config.connection, NoTls).map_err(SearchError::from)
+    fn connect(&self) -> Result<PgPooledConnection, SearchError> {
+        self.pool.get().map_err(|err| {
+            SearchError::ExternalBaseline(format!("failed to get pooled connection: {err}"))
+        })
     }
 
     fn table(&self, table: &str) -> String {
@@ -188,6 +208,17 @@ impl PostgresBaselineAdapter {
                 self.table("snapshots"),
             ),
             format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    corpus TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (corpus, branch)
+                )",
+                self.table("snapshot_heads"),
+                self.table("snapshots"),
+            ),
+            format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_snapshots_corpus_created_at
                  ON {} (corpus, created_at DESC)",
                 self.schema,
@@ -285,7 +316,7 @@ impl PostgresBaselineAdapter {
         let mut snapshots = Vec::with_capacity(rows.len());
         for row in rows {
             let mut snapshot = snapshot_record_from_metadata_row(row);
-            let summary = effective_snapshot_summary(&mut client, self, &snapshot.snapshot_id)?;
+            let summary = effective_snapshot_summary(&mut *client, self, &snapshot.snapshot_id)?;
             snapshot.files = summary.total_files;
             snapshot.documents = summary.total_documents;
             snapshots.push(snapshot);
@@ -316,7 +347,7 @@ impl PostgresBaselineAdapter {
             return Ok(None);
         };
         let mut snapshot = snapshot_record_from_metadata_row(snapshot_row);
-        let summary = effective_snapshot_summary(&mut client, self, snapshot_id)?;
+        let summary = effective_snapshot_summary(&mut *client, self, snapshot_id)?;
         snapshot.files = summary.total_files;
         snapshot.documents = summary.total_documents;
         let collections = summary.collections;
@@ -521,7 +552,7 @@ impl PostgresBaselineAdapter {
         dimension: Option<usize>,
     ) -> Result<Vec<BaselineEmbeddingCoverageRecord>, SearchError> {
         let mut client = self.connect()?;
-        let active_keys = collect_active_embedding_keys(&mut client, self)?;
+        let active_keys = collect_active_embedding_keys(&mut *client, self)?;
         let active_payloads = active_keys.len();
         let models = self.list_embedding_models(model_id, dimension)?;
         if models.is_empty() {
@@ -578,10 +609,10 @@ impl PostgresBaselineAdapter {
 
     pub fn garbage_collect(&self, execute: bool) -> Result<BaselineGcReport, SearchError> {
         let mut client = self.connect()?;
-        let active_keys = collect_active_embedding_keys(&mut client, self)?;
+        let active_keys = collect_active_embedding_keys(&mut *client, self)?;
 
         let orphan_file_object_ids = query_string_column(
-            &mut client,
+            &mut *client,
             &format!(
                 "SELECT fo.id
                  FROM {} fo
@@ -700,8 +731,22 @@ impl SnapshotCatalog for PostgresBaselineAdapter {
                 self.latest_snapshot_query("corpus = $1 AND branch = $2 AND commit_sha = $3");
             client.query_opt(&query, &[&corpus, branch, commit])?
         } else if let Some(branch) = &baseline.branch {
-            let query = self.latest_snapshot_query("corpus = $1 AND branch = $2");
-            client.query_opt(&query, &[&corpus, branch])?
+            let head_query = format!(
+                "SELECT s.id, s.corpus, s.fingerprint, s.parent_snapshot_id
+                 FROM {} h
+                 JOIN {} s ON s.id = h.snapshot_id
+                 WHERE h.corpus = $1 AND h.branch = $2
+                 LIMIT 1",
+                self.table("snapshot_heads"),
+                self.table("snapshots"),
+            );
+            let row = client.query_opt(&head_query, &[&corpus, branch])?;
+            if row.is_some() {
+                row
+            } else {
+                let fallback = self.latest_snapshot_query("corpus = $1 AND branch = $2");
+                client.query_opt(&fallback, &[&corpus, branch])?
+            }
         } else if let Some(commit) = &baseline.commit {
             let query = self.latest_snapshot_query("corpus = $1 AND commit_sha = $2");
             client.query_opt(&query, &[&corpus, commit])?
@@ -720,7 +765,7 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
         snapshot: &Snapshot,
     ) -> Result<Vec<IndexedDocument>, SearchError> {
         let mut client = self.connect()?;
-        let visible_files = materialize_visible_snapshot_files(&mut client, self, &snapshot.id.0)?;
+        let visible_files = materialize_visible_snapshot_files(&mut *client, self, &snapshot.id.0)?;
         if visible_files.is_empty() {
             return Ok(Vec::new());
         }
@@ -883,6 +928,7 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
 
             let file_object_id =
                 file_object_id_for(&file_group.collection, &file_group.file_fingerprint);
+            let _ = try_insert_file_object(&mut tx, self, &file_object_id, &file_group)?;
             tx.execute(
                 &insert_snapshot_file,
                 &[
@@ -894,8 +940,6 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
                     &file_object_id,
                 ],
             )?;
-
-            let _ = try_insert_file_object(&mut tx, self, &file_object_id, &file_group)?;
             stats.written_files += 1;
             stats.written_documents += file_group.documents.len();
         }
@@ -903,6 +947,18 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
         for ((collection, path), _) in remaining_parent_files {
             tx.execute(&insert_snapshot_deletion, &[&snapshot.id.0, &collection, &path])?;
             stats.deleted_files += 1;
+        }
+
+        if let Some(branch) = metadata.branch.as_deref() {
+            let upsert_head = format!(
+                "INSERT INTO {} (corpus, branch, snapshot_id, updated_at)
+                 VALUES ($1, $2, $3, NOW())
+                 ON CONFLICT (corpus, branch) DO UPDATE SET
+                    snapshot_id = EXCLUDED.snapshot_id,
+                    updated_at = EXCLUDED.updated_at",
+                self.table("snapshot_heads")
+            );
+            tx.execute(&upsert_head, &[&snapshot.corpus.as_str(), &branch, &snapshot.id.0])?;
         }
 
         tx.commit()?;
@@ -1097,7 +1153,7 @@ fn file_object_record_from_row(row: Row) -> BaselineFileObjectRecord {
 }
 
 fn collect_active_embedding_keys(
-    client: &mut Client,
+    client: &mut impl GenericClient,
     adapter: &PostgresBaselineAdapter,
 ) -> Result<HashSet<String>, SearchError> {
     let shared_query = format!(
@@ -1266,7 +1322,7 @@ fn semantic_key_for_semantic_row(row: Row) -> String {
 }
 
 fn query_string_column(
-    client: &mut Client,
+    client: &mut impl GenericClient,
     query: &str,
     params: &[&(dyn postgres::types::ToSql + Sync)],
 ) -> Result<Vec<String>, SearchError> {
@@ -1312,7 +1368,7 @@ mod tests {
         let baseline = BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "snapshot-1");
 
         let error = adapter.resolve_baseline(&baseline).unwrap_err();
-        assert!(error.to_string().contains("postgres"));
+        assert!(error.to_string().contains("connection"));
     }
 
     #[test]
@@ -1323,7 +1379,7 @@ mod tests {
         .unwrap();
 
         let error = adapter.ensure_storage().unwrap_err();
-        assert!(error.to_string().contains("postgres"));
+        assert!(error.to_string().contains("connection"));
     }
 
     #[test]

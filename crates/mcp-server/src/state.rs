@@ -36,8 +36,29 @@ pub struct SharedState {
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
     search_engine: Arc<Mutex<Option<SearchEngine>>>,
     index_progress: Arc<IndexProgress>,
+    semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
     external_baseline: Option<Arc<ExternalBaselineSource>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SemanticRuntimeStatus {
+    Disabled,
+    WarmingUp,
+    Ready,
+    Failed(String),
+}
+
+struct WorkspaceSearchInit {
+    engine: SearchEngine,
+    semantic_warmup: Option<WorkspaceSemanticWarmup>,
+}
+
+struct WorkspaceSemanticWarmup {
+    db_path: PathBuf,
+    workspace_source_root: PathBuf,
+    external_baseline: Arc<ExternalBaselineSource>,
+    config: bsl_search::SearchConfig,
 }
 
 impl SharedState {
@@ -59,35 +80,20 @@ impl SharedState {
 
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
+        let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let watcher_ready = Arc::new(AtomicBool::new(false));
         let baseline_runtime = BaselineRuntime::workspace(Some(&project.root), &project.config);
 
         // Spawn background thread so standalone() returns immediately.
         // MCP tools check engine readiness and return a friendly message while init is in progress.
-        {
-            let engine_arc = Arc::clone(&search_engine);
-            let progress_arc = Arc::clone(&index_progress);
-            let root = source_dir.clone();
-            let watcher_ready = Arc::clone(&watcher_ready);
-            let external_baseline = baseline_runtime.external_baseline.clone();
-            std::thread::Builder::new()
-                .name("bsl-search-init".to_owned())
-                .spawn(move || {
-                    tracing::info!("search engine initialization started in background");
-                    let mut engine =
-                        Self::init_workspace_search_engine(&root, &progress_arc, external_baseline);
-                    if watcher_ready.load(Ordering::SeqCst) {
-                        if let Some(engine) = engine.as_mut() {
-                            engine.enable_workspace_watcher_mode();
-                        }
-                    }
-                    if let Ok(mut guard) = engine_arc.lock() {
-                        *guard = engine;
-                    }
-                    tracing::info!("search engine initialization complete");
-                })
-                .ok();
-        }
+        Self::spawn_workspace_search_init(
+            Arc::clone(&search_engine),
+            Arc::clone(&index_progress),
+            Arc::clone(&semantic_runtime),
+            source_dir.clone(),
+            Arc::clone(&watcher_ready),
+            baseline_runtime.external_baseline.clone(),
+        );
 
         {
             let engine_arc = Arc::clone(&search_engine);
@@ -127,9 +133,79 @@ impl SharedState {
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
             index_progress,
+            semantic_runtime,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
         }
+    }
+
+    fn spawn_workspace_search_init(
+        search_engine: Arc<Mutex<Option<SearchEngine>>>,
+        index_progress: Arc<IndexProgress>,
+        semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+        workspace_root: PathBuf,
+        watcher_ready: Arc<AtomicBool>,
+        external_baseline: Option<Arc<ExternalBaselineSource>>,
+    ) {
+        std::thread::Builder::new()
+            .name("bsl-search-init".to_owned())
+            .spawn(move || {
+                tracing::info!("search engine initialization started in background");
+                let init = Self::init_workspace_search_engine(
+                    &workspace_root,
+                    &index_progress,
+                    &watcher_ready,
+                    external_baseline,
+                );
+
+                let Some(init) = init else {
+                    Self::set_semantic_runtime_status(
+                        &semantic_runtime,
+                        SemanticRuntimeStatus::Failed(
+                            "workspace search engine initialization failed".to_owned(),
+                        ),
+                    );
+                    tracing::warn!("workspace search engine initialization failed");
+                    return;
+                };
+
+                let semantic_ready = init
+                    .semantic_warmup
+                    .is_none()
+                    .then(|| Self::semantic_runtime_status_from_engine(&init.engine));
+
+                if let Ok(mut guard) = search_engine.lock() {
+                    *guard = Some(init.engine);
+                }
+
+                if let Some(warmup) = init.semantic_warmup {
+                    Self::set_semantic_runtime_status(
+                        &semantic_runtime,
+                        SemanticRuntimeStatus::WarmingUp,
+                    );
+                    let search_engine = Arc::clone(&search_engine);
+                    let index_progress = Arc::clone(&index_progress);
+                    let semantic_runtime = Arc::clone(&semantic_runtime);
+                    let watcher_ready = Arc::clone(&watcher_ready);
+                    std::thread::Builder::new()
+                        .name("bsl-search-semantic-warmup".to_owned())
+                        .spawn(move || {
+                            Self::run_workspace_semantic_warmup(
+                                search_engine,
+                                index_progress,
+                                watcher_ready,
+                                semantic_runtime,
+                                warmup,
+                            );
+                        })
+                        .ok();
+                } else if let Some(status) = semantic_ready {
+                    Self::set_semantic_runtime_status(&semantic_runtime, status);
+                }
+
+                tracing::info!("search engine initialization complete");
+            })
+            .ok();
     }
 
     /// Create state for global reference MCP mode.
@@ -138,12 +214,14 @@ impl SharedState {
     pub fn reference(project_root: Option<PathBuf>) -> Self {
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
+        let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let project_config = project_root.as_deref().and_then(project_model::ProjectConfig::load);
         let baseline_runtime = BaselineRuntime::reference(project_config.as_ref());
 
         {
             let engine_arc = Arc::clone(&search_engine);
             let progress_arc = Arc::clone(&index_progress);
+            let semantic_runtime_arc = Arc::clone(&semantic_runtime);
             let external_baseline = baseline_runtime.external_baseline.clone();
             std::thread::Builder::new()
                 .name("bsl-search-reference-init".to_owned())
@@ -151,9 +229,18 @@ impl SharedState {
                     tracing::info!("reference search engine initialization started in background");
                     let engine =
                         Self::init_reference_search_engine(&progress_arc, external_baseline);
+                    let semantic_status = engine
+                        .as_ref()
+                        .map(Self::semantic_runtime_status_from_engine)
+                        .unwrap_or_else(|| {
+                            SemanticRuntimeStatus::Failed(
+                                "reference search engine initialization failed".to_owned(),
+                            )
+                        });
                     if let Ok(mut guard) = engine_arc.lock() {
                         *guard = engine;
                     }
+                    Self::set_semantic_runtime_status(&semantic_runtime_arc, semantic_status);
                     tracing::info!("reference search engine initialization complete");
                 })
                 .ok();
@@ -167,6 +254,7 @@ impl SharedState {
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
             index_progress,
+            semantic_runtime,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
         }
@@ -184,6 +272,7 @@ impl SharedState {
             debug_session: Arc::new(Mutex::new(None)),
             search_engine: Arc::new(Mutex::new(None)),
             index_progress: IndexProgress::new(),
+            semantic_runtime: Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             external_baseline: None,
             configured_baseline: None,
         }
@@ -269,6 +358,11 @@ impl SharedState {
         &self.index_progress
     }
 
+    /// Access the semantic runtime status.
+    pub(crate) fn semantic_runtime(&self) -> Arc<Mutex<SemanticRuntimeStatus>> {
+        Arc::clone(&self.semantic_runtime)
+    }
+
     /// Access configured external baseline source.
     pub(crate) fn external_baseline(&self) -> Option<Arc<ExternalBaselineSource>> {
         self.external_baseline.clone()
@@ -296,46 +390,95 @@ impl SharedState {
                 dim: Some(dim),
                 api_key: std::env::var("EMBEDDING_API_KEY").ok(),
             },
-            batch_size: 32,
-            concurrency,
+            execution: bsl_search::EmbeddingExecutionPolicy {
+                batch_size: std::env::var("EMBEDDING_BATCH_SIZE")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(32),
+                concurrency,
+                progress_interval: std::env::var("EMBEDDING_PROGRESS_INTERVAL")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20),
+            },
         })
+    }
+
+    fn open_semantic_search_engine(
+        db_path: &Path,
+        config: bsl_search::SearchConfig,
+    ) -> Option<SearchEngine> {
+        let model = config.embedder.model.clone();
+        match SearchEngine::new(db_path, config) {
+            Ok(engine) => {
+                tracing::info!(
+                    files = engine.file_count().unwrap_or(0),
+                    chunks = engine.chunk_count().unwrap_or(0),
+                    vectors = engine.vector_count(),
+                    model,
+                    "search engine loaded (FTS + semantic)"
+                );
+                Some(engine)
+            }
+            Err(e) => {
+                tracing::warn!("failed to init search engine with embedder: {e}");
+                None
+            }
+        }
+    }
+
+    fn open_fts_only_search_engine(db_path: &Path) -> Option<SearchEngine> {
+        match SearchEngine::fts_only(db_path) {
+            Ok(engine) => {
+                tracing::info!(
+                    files = engine.file_count().unwrap_or(0),
+                    chunks = engine.chunk_count().unwrap_or(0),
+                    "search engine loaded (FTS-only)"
+                );
+                Some(engine)
+            }
+            Err(e) => {
+                tracing::warn!("failed to init FTS-only search engine: {e}");
+                None
+            }
+        }
     }
 
     /// Open search engine from DB, creating it if needed.
     fn open_search_engine(db_path: &Path) -> Option<SearchEngine> {
         if let Some(config) = Self::embedding_config() {
-            let model = config.embedder.model.clone();
-            match SearchEngine::new(db_path, config) {
-                Ok(engine) => {
-                    tracing::info!(
-                        files = engine.file_count().unwrap_or(0),
-                        chunks = engine.chunk_count().unwrap_or(0),
-                        vectors = engine.vector_count(),
-                        model,
-                        "search engine loaded (FTS + semantic)"
-                    );
-                    Some(engine)
-                }
-                Err(e) => {
-                    tracing::warn!("failed to init search engine with embedder: {e}");
-                    None
-                }
-            }
+            return Self::open_semantic_search_engine(db_path, config);
+        }
+        Self::open_fts_only_search_engine(db_path)
+    }
+
+    fn configure_workspace_engine(
+        engine: &mut SearchEngine,
+        workspace_source_root: &Path,
+        watcher_ready: &AtomicBool,
+        hash_mode: BaselineHashMode,
+    ) {
+        engine.set_workspace_root(workspace_source_root.to_path_buf());
+        engine.set_workspace_baseline_hash_mode(hash_mode);
+        if watcher_ready.load(Ordering::SeqCst) {
+            engine.enable_workspace_watcher_mode();
+        }
+    }
+
+    fn set_semantic_runtime_status(
+        semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+        status: SemanticRuntimeStatus,
+    ) {
+        if let Ok(mut guard) = semantic_runtime.lock() {
+            *guard = status;
+        }
+    }
+
+    fn semantic_runtime_status_from_engine(engine: &SearchEngine) -> SemanticRuntimeStatus {
+        if engine.has_semantic() {
+            SemanticRuntimeStatus::Ready
         } else {
-            match SearchEngine::fts_only(db_path) {
-                Ok(engine) => {
-                    tracing::info!(
-                        files = engine.file_count().unwrap_or(0),
-                        chunks = engine.chunk_count().unwrap_or(0),
-                        "search engine loaded (FTS-only)"
-                    );
-                    Some(engine)
-                }
-                Err(e) => {
-                    tracing::warn!("failed to init FTS-only search engine: {e}");
-                    None
-                }
-            }
+            SemanticRuntimeStatus::Disabled
         }
     }
 
@@ -347,23 +490,74 @@ impl SharedState {
     fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
         progress: &Arc<IndexProgress>,
+        watcher_ready: &Arc<AtomicBool>,
         external_baseline: Option<Arc<ExternalBaselineSource>>,
-    ) -> Option<SearchEngine> {
+    ) -> Option<WorkspaceSearchInit> {
         let build_dir = workspace_root.join(".build");
         std::fs::create_dir_all(&build_dir).ok();
         let db_path = build_dir.join("bsl-search.db");
 
+        let project = project_model::Project::new(workspace_root);
+        let source_path = project.source_path().to_path_buf();
+        let semantic_config = Self::embedding_config();
+
+        if let Some(external_baseline) = external_baseline
+            .as_ref()
+            .filter(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
+        {
+            let mut engine = Self::open_fts_only_search_engine(&db_path)?;
+            Self::configure_workspace_engine(
+                &mut engine,
+                &source_path,
+                watcher_ready,
+                BaselineHashMode::NormalizedChunks,
+            );
+
+            if let Some(snapshot) =
+                external_baseline.load_workspace_snapshot_documents(None, None).ok().flatten()
+            {
+                match engine.sync_indexed_documents_in_collection(
+                    "code",
+                    &snapshot.documents,
+                    Some(progress),
+                ) {
+                    Ok(indexed_files) => {
+                        if indexed_files > 0 {
+                            tracing::info!(
+                                indexed_files,
+                                "external workspace baseline cached locally for lexical startup"
+                            );
+                        } else {
+                            tracing::info!("external workspace lexical cache is up to date");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("failed to cache external workspace baseline for lexical startup: {error}");
+                        return None;
+                    }
+                }
+            }
+
+            tracing::info!(
+                "external workspace baseline is configured; lexical search is ready and semantic warmup will continue in background"
+            );
+
+            let semantic_warmup = semantic_config.map(|config| WorkspaceSemanticWarmup {
+                db_path,
+                workspace_source_root: source_path,
+                external_baseline: Arc::clone(external_baseline),
+                config,
+            });
+
+            return Some(WorkspaceSearchInit { engine, semantic_warmup });
+        }
+
         let mut engine = Self::open_search_engine(&db_path)?;
 
-        // If DB has code chunks without embeddings and embedder is available,
-        // clear their file hashes so index_directory will re-process them.
         if engine.has_semantic() {
             let code_embeddings = engine.embedding_count_by_collection("code").unwrap_or(0);
             let code_chunks = engine.chunk_count().unwrap_or(0);
             if code_chunks > 0 && code_embeddings < code_chunks {
-                // Some or all code files lack embeddings — clear hashes for unembedded files.
-                // index_directory will skip files whose hash matches (already indexed with
-                // embeddings) and re-process the rest.
                 let cleared = engine.clear_file_hashes_without_embeddings("code").unwrap_or(0);
                 if cleared > 0 {
                     tracing::info!(
@@ -376,88 +570,134 @@ impl SharedState {
             }
         }
 
-        {
-            let project = project_model::Project::new(workspace_root);
-            let source_path = project.source_path();
-            engine.set_workspace_root(source_path.to_path_buf());
-            if external_baseline
-                .as_ref()
-                .is_some_and(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
-            {
-                engine.set_workspace_baseline_hash_mode(BaselineHashMode::NormalizedChunks);
-                if engine.has_semantic() {
-                    let cleared = engine.clear_file_hashes_without_embeddings("code").unwrap_or(0);
-                    if cleared > 0 {
-                        tracing::info!(
-                            cleared,
-                            "cleared hashes for workspace baseline files without embeddings"
-                        );
+        Self::configure_workspace_engine(
+            &mut engine,
+            &source_path,
+            watcher_ready,
+            BaselineHashMode::RawFileBytes,
+        );
+
+        if engine.has_semantic() {
+            match engine.index_directory(&source_path, Some(progress)) {
+                Ok(indexed) => {
+                    if indexed > 0 {
+                        tracing::info!(indexed, "FTS + semantic index updated");
                     }
                 }
-                if let Some(external_baseline) = external_baseline.as_ref() {
-                    let model_id = engine.embedding_model().map(ToOwned::to_owned);
-                    let dimension = engine.embedding_dimension();
-                    match external_baseline
-                        .load_workspace_snapshot_documents(model_id.as_deref(), dimension)
-                    {
-                        Ok(Some(snapshot)) => {
-                            Self::index_external_workspace_docs(&mut engine, progress, snapshot);
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                "external workspace baseline is configured but no snapshot was resolved"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                "failed to load external workspace baseline snapshot for local semantic cache: {error}"
-                            );
-                        }
-                    }
-                }
-                tracing::info!(
-                    "external workspace baseline is configured; lexical search resolves from the shared snapshot and semantic cache is synchronized locally"
-                );
-            } else {
-                engine.set_workspace_baseline_hash_mode(BaselineHashMode::RawFileBytes);
-                if engine.has_semantic() {
-                    // Always call index_directory — it skips files by hash.
-                    // Files without embeddings had their hashes cleared above.
-                    match engine.index_directory(source_path, Some(progress)) {
-                        Ok(indexed) => {
-                            if indexed > 0 {
-                                tracing::info!(indexed, "FTS + semantic index updated");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "failed to build semantic index, falling back to FTS: {e}"
-                            );
-                            if engine.chunk_count().unwrap_or(0) == 0 {
-                                match engine.index_directory_fts(source_path) {
-                                    Ok(indexed) => {
-                                        tracing::info!(indexed, "FTS index built (fallback)")
-                                    }
-                                    Err(e2) => tracing::warn!("failed to build FTS index: {e2}"),
-                                }
-                            }
-                        }
-                    }
-                } else if engine.chunk_count().unwrap_or(0) == 0 {
-                    tracing::info!(?source_path, "building FTS index from source files");
-                    match engine.index_directory_fts(source_path) {
-                        Ok(indexed) => {
-                            tracing::info!(indexed, "FTS index built");
-                        }
-                        Err(e) => {
-                            tracing::warn!("failed to build FTS index: {e}");
+                Err(e) => {
+                    tracing::warn!("failed to build semantic index, falling back to FTS: {e}");
+                    if engine.chunk_count().unwrap_or(0) == 0 {
+                        match engine.index_directory_fts(&source_path) {
+                            Ok(indexed) => tracing::info!(indexed, "FTS index built (fallback)"),
+                            Err(e2) => tracing::warn!("failed to build FTS index: {e2}"),
                         }
                     }
                 }
             }
+        } else if engine.chunk_count().unwrap_or(0) == 0 {
+            tracing::info!(?source_path, "building FTS index from source files");
+            match engine.index_directory_fts(&source_path) {
+                Ok(indexed) => tracing::info!(indexed, "FTS index built"),
+                Err(e) => tracing::warn!("failed to build FTS index: {e}"),
+            }
         }
 
-        Some(engine)
+        Some(WorkspaceSearchInit { engine, semantic_warmup: None })
+    }
+
+    fn run_workspace_semantic_warmup(
+        engine_arc: Arc<Mutex<Option<SearchEngine>>>,
+        progress: Arc<IndexProgress>,
+        watcher_ready: Arc<AtomicBool>,
+        semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+        warmup: WorkspaceSemanticWarmup,
+    ) {
+        tracing::info!("workspace semantic warmup started");
+
+        let mut engine = match Self::open_semantic_search_engine(&warmup.db_path, warmup.config) {
+            Some(engine) => engine,
+            None => {
+                progress.reset();
+                Self::set_semantic_runtime_status(
+                    &semantic_runtime,
+                    SemanticRuntimeStatus::Failed(
+                        "failed to open semantic search engine".to_owned(),
+                    ),
+                );
+                return;
+            }
+        };
+
+        Self::configure_workspace_engine(
+            &mut engine,
+            &warmup.workspace_source_root,
+            &watcher_ready,
+            BaselineHashMode::NormalizedChunks,
+        );
+
+        let cleared = engine.clear_file_hashes_without_embeddings("code").unwrap_or(0);
+        if cleared > 0 {
+            tracing::info!(cleared, "cleared hashes for workspace baseline files without embeddings before semantic warmup");
+        }
+
+        let model_id = engine.embedding_model().map(ToOwned::to_owned);
+        let dimension = engine.embedding_dimension();
+        let snapshot = match warmup
+            .external_baseline
+            .load_workspace_snapshot_documents(model_id.as_deref(), dimension)
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                progress.reset();
+                Self::set_semantic_runtime_status(
+                    &semantic_runtime,
+                    SemanticRuntimeStatus::Failed(
+                        "workspace semantic warmup could not resolve a shared snapshot".to_owned(),
+                    ),
+                );
+                return;
+            }
+            Err(error) => {
+                progress.reset();
+                Self::set_semantic_runtime_status(
+                    &semantic_runtime,
+                    SemanticRuntimeStatus::Failed(format!(
+                        "workspace semantic warmup failed to load shared snapshot: {error}"
+                    )),
+                );
+                return;
+            }
+        };
+
+        match engine.sync_indexed_documents_in_collection_with_embeddings(
+            "code",
+            &snapshot.documents,
+            Some(&snapshot.shared_embeddings),
+            Some(&progress),
+        ) {
+            Ok(indexed_files) => {
+                if indexed_files > 0 {
+                    tracing::info!(indexed_files, "workspace semantic warmup updated local cache");
+                } else {
+                    tracing::info!("workspace semantic warmup found cache up to date");
+                }
+                if let Ok(mut guard) = engine_arc.lock() {
+                    *guard = Some(engine);
+                }
+                Self::set_semantic_runtime_status(&semantic_runtime, SemanticRuntimeStatus::Ready);
+                tracing::info!("workspace semantic warmup complete");
+            }
+            Err(error) => {
+                progress.reset();
+                Self::set_semantic_runtime_status(
+                    &semantic_runtime,
+                    SemanticRuntimeStatus::Failed(format!(
+                        "workspace semantic warmup failed: {error}"
+                    )),
+                );
+                tracing::warn!("workspace semantic warmup failed: {error}");
+            }
+        }
     }
 
     fn init_reference_search_engine(
@@ -546,39 +786,6 @@ impl SharedState {
             }
             Err(error) => {
                 tracing::warn!("failed to cache external reference docs locally: {error}");
-            }
-        }
-    }
-
-    fn index_external_workspace_docs(
-        engine: &mut SearchEngine,
-        progress: &Arc<IndexProgress>,
-        snapshot: BaselineSnapshotDocuments,
-    ) {
-        let version = snapshot.fingerprint.unwrap_or(snapshot.snapshot_id);
-
-        tracing::info!(
-            snapshot = %version,
-            documents = snapshot.documents.len(),
-            shared_embeddings = snapshot.shared_embeddings.len(),
-            "synchronizing external workspace snapshot into local semantic cache"
-        );
-
-        match engine.sync_indexed_documents_in_collection_with_embeddings(
-            "code",
-            &snapshot.documents,
-            Some(&snapshot.shared_embeddings),
-            Some(progress),
-        ) {
-            Ok(indexed_files) => {
-                if indexed_files > 0 {
-                    tracing::info!(indexed_files, "external workspace baseline cached locally");
-                } else {
-                    tracing::info!("external workspace baseline cache is up to date");
-                }
-            }
-            Err(error) => {
-                tracing::warn!("failed to cache external workspace baseline locally: {error}");
             }
         }
     }
@@ -705,15 +912,16 @@ impl SharedState {
 
     /// Initialize search engine for LSP+MCP mode (called when workspace root is set).
     pub fn init_search(&self) {
-        if let Some(ref root) = self.workspace_root {
-            let engine = Self::init_workspace_search_engine(
+        if let Some(root) = self.workspace_root.clone() {
+            let watcher_ready = Arc::new(AtomicBool::new(false));
+            Self::spawn_workspace_search_init(
+                Arc::clone(&self.search_engine),
+                Arc::clone(&self.index_progress),
+                Arc::clone(&self.semantic_runtime),
                 root,
-                &self.index_progress,
+                watcher_ready,
                 self.external_baseline.clone(),
             );
-            if let Ok(mut guard) = self.search_engine.lock() {
-                *guard = engine;
-            }
         }
     }
 

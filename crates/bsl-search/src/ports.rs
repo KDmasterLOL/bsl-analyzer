@@ -3,8 +3,36 @@ use crate::domain::{
     SnapshotPublishStats,
 };
 use crate::error::SearchError;
+use crate::external_baseline::BaselineEmbeddingStats;
 use crate::resolver::ResolvedView;
+use std::collections::HashMap;
 use std::path::Path;
+
+/// Generates embeddings using an external embedding backend.
+pub trait EmbeddingGenerator {
+    fn model_id(&self) -> &str;
+
+    fn dimension(&self) -> usize;
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError>;
+}
+
+/// Stores and loads shared embeddings independent of snapshot publication.
+pub trait EmbeddingStore {
+    fn load_embeddings(
+        &self,
+        embedding_keys: &[String],
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<HashMap<String, Vec<f32>>, SearchError>;
+
+    fn store_embeddings(
+        &self,
+        model_id: &str,
+        dimension: usize,
+        embeddings: &[(String, Vec<f32>)],
+    ) -> Result<BaselineEmbeddingStats, SearchError>;
+}
 
 /// Resolves baseline metadata into a concrete snapshot.
 pub trait SnapshotCatalog {

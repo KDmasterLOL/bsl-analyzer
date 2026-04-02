@@ -59,7 +59,7 @@ fn main() {
     let dim: usize =
         std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
     let batch_size: usize =
-        std::env::var("BATCH_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(32);
+        std::env::var("EMBEDDING_BATCH_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(32);
 
     let api_key = std::env::var("EMBEDDING_API_KEY").ok();
 
@@ -73,8 +73,11 @@ fn main() {
             dim: Some(dim),
             api_key: api_key.clone(),
         },
-        batch_size,
-        concurrency,
+        execution: bsl_search::EmbeddingExecutionPolicy {
+            batch_size,
+            concurrency,
+            progress_interval: 20,
+        },
     };
 
     // Database stored in .build/ (typically gitignored).

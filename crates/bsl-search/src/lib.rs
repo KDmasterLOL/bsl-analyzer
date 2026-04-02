@@ -21,6 +21,7 @@ mod index;
 mod lexical;
 mod local_baseline;
 mod ports;
+mod publish;
 mod resolved_view_search;
 mod resolver;
 mod store;
@@ -50,8 +51,12 @@ pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
 pub use index::{SearchResult, VectorIndex};
 pub use local_baseline::LocalStoreBaselineAdapter;
 pub use ports::{
-    LexicalSearchIndex, OverlayBuilder, ResolvedViewService, SnapshotCatalog, SnapshotContentStore,
-    SnapshotPublisher, VectorSearchIndex,
+    EmbeddingGenerator, EmbeddingStore, LexicalSearchIndex, OverlayBuilder, ResolvedViewService,
+    SnapshotCatalog, SnapshotContentStore, SnapshotPublisher, VectorSearchIndex,
+};
+pub use publish::{
+    BaselinePublishReport, BaselinePublisher, EmbeddingExecutionPolicy,
+    SharedEmbeddingPublishStats, SharedEmbeddingPublisher,
 };
 pub use resolved_view_search::lexical_hits as lexical_hits_for_resolved_view;
 pub use resolver::{InMemoryResolvedViewResolver, ResolvedView};

@@ -1,6 +1,7 @@
 //! Search tools: full-text and semantic search across code and documentation.
 
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineSource, ExternalBaselineState};
+use crate::state::SemanticRuntimeStatus;
 use bsl_search::{lexical_hits_for_resolved_view, IndexProgress, SearchEngine};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -58,11 +59,16 @@ pub fn find_code(
 /// Semantic search across indexed BSL code.
 pub fn search_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
+    let semantic_runtime = semantic_runtime
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
+        .clone();
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
     if guard.is_none() {
@@ -71,6 +77,22 @@ pub fn search_code(
         )]));
     }
     let engine = guard.as_ref().expect("checked above");
+
+    if matches!(semantic_runtime, SemanticRuntimeStatus::WarmingUp) {
+        return Ok(CallToolResult::success(vec![Content::text(
+            "Semantic search is warming up from the shared baseline. Use find_code for lexical search and check search(action=status) for progress.",
+        )]));
+    }
+
+    if let SemanticRuntimeStatus::Failed(error) = semantic_runtime {
+        return Err(McpError::invalid_params(
+            "Semantic search is temporarily unavailable because semantic warmup failed. Use find_code for lexical search and inspect search(action=status).",
+            Some(json!({
+                "reasonCode": "semantic_warmup_failed",
+                "details": error,
+            })),
+        ));
+    }
 
     if !engine.has_semantic() {
         return Err(McpError::invalid_params(
@@ -182,6 +204,7 @@ pub fn search_docs(
 pub fn search_status(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineSource>>,
 ) -> Result<CallToolResult, McpError> {
@@ -211,6 +234,10 @@ pub fn search_status(
         let _ = writeln!(out);
     }
 
+    let semantic_runtime = semantic_runtime
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
+        .clone();
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
 
@@ -223,18 +250,37 @@ pub fn search_status(
         let code_vectors = engine.embedding_count_by_collection("code").unwrap_or(0);
         let platform_vectors = engine.embedding_count_by_collection("platform").unwrap_or(0);
 
-        let _ = writeln!(out, "Search index: ready");
+        let search_state = match &semantic_runtime {
+            SemanticRuntimeStatus::WarmingUp => "ready (lexical only; semantic warmup in progress)",
+            SemanticRuntimeStatus::Failed(_) => "ready (lexical only; semantic warmup failed)",
+            _ => "ready",
+        };
+        let _ = writeln!(out, "Search index: {search_state}");
         let _ = writeln!(out, "  Files:    {files}");
         let _ = writeln!(out, "  Chunks:   {chunks}");
         let _ = writeln!(
             out,
             "  Vectors:  {vectors} (code: {code_vectors}, platform: {platform_vectors})"
         );
-        let _ = writeln!(
-            out,
-            "  Semantic: {}",
-            if semantic { "available" } else { "not configured (set EMBEDDING_URL)" }
-        );
+        let semantic_status = match &semantic_runtime {
+            SemanticRuntimeStatus::Disabled => {
+                if semantic {
+                    "available".to_owned()
+                } else {
+                    "not configured (set EMBEDDING_URL)".to_owned()
+                }
+            }
+            SemanticRuntimeStatus::WarmingUp => "warming up (use find_code until ready)".to_owned(),
+            SemanticRuntimeStatus::Ready => {
+                if semantic {
+                    "available".to_owned()
+                } else {
+                    "warming up".to_owned()
+                }
+            }
+            SemanticRuntimeStatus::Failed(_) => "failed (use find_code; inspect status)".to_owned(),
+        };
+        let _ = writeln!(out, "  Semantic: {semantic_status}");
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
         let _ = writeln!(out, "  Collections: code, platform");
         let workspace_overlay = engine
@@ -249,10 +295,21 @@ pub fn search_status(
                         Err(_) => "local sqlite + local overlay",
                     };
                     let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
-                    let code_semantic_source = if semantic {
-                        "local semantic cache of external baseline + local overlay"
-                    } else {
-                        "not configured (set EMBEDDING_URL)"
+                    let code_semantic_source = match &semantic_runtime {
+                        SemanticRuntimeStatus::WarmingUp => {
+                            "warming up (shared baseline semantic cache + local overlay)"
+                        }
+                        SemanticRuntimeStatus::Failed(_) => {
+                            "warmup failed (lexical search remains available)"
+                        }
+                        SemanticRuntimeStatus::Disabled => "not configured (set EMBEDDING_URL)",
+                        SemanticRuntimeStatus::Ready => {
+                            if semantic {
+                                "local semantic cache of external baseline + local overlay"
+                            } else {
+                                "warming up"
+                            }
+                        }
                     };
                     let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
                 }
@@ -423,9 +480,15 @@ pub fn search_status(
         let total_b = progress.total_batches.load(Ordering::Relaxed);
         let done_b = progress.done_batches.load(Ordering::Relaxed);
         let pct = progress.percent();
+        let heading =
+            if guard.is_some() && matches!(semantic_runtime, SemanticRuntimeStatus::WarmingUp) {
+                "Semantic warmup in progress"
+            } else {
+                "Indexing in progress"
+            };
 
         let _ = writeln!(out);
-        let _ = writeln!(out, "Indexing in progress: {pct}%");
+        let _ = writeln!(out, "{heading}: {pct}%");
         let _ = writeln!(out, "  Batches:  {done_b}/{total_b}");
         let _ = writeln!(out, "  Chunks:   {done}/{total}");
     }
@@ -538,7 +601,8 @@ fn shorten_fingerprint(fingerprint: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_code, search_docs, search_status, ConfiguredBaselineStatus, ExternalBaselineSource,
+        find_code, search_code, search_docs, search_status, ConfiguredBaselineStatus,
+        ExternalBaselineSource, SemanticRuntimeStatus,
     };
     use bsl_search::{
         lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
@@ -546,6 +610,7 @@ mod tests {
     };
     use project_model::{ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState};
     use std::fs;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
@@ -566,6 +631,7 @@ mod tests {
         let result = search_status(
             &Arc::new(Mutex::new(Some(engine))),
             &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             Some(ConfiguredBaselineStatus {
                 backend: "sqlite",
                 selection: "local workspace index".to_owned(),
@@ -601,6 +667,7 @@ mod tests {
         let result = search_status(
             &Arc::new(Mutex::new(None)),
             &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             Some(ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "branch main".to_owned(),
@@ -641,6 +708,7 @@ mod tests {
         let result = search_status(
             &Arc::new(Mutex::new(Some(engine))),
             &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             Some(ConfiguredBaselineStatus {
                 backend: "sqlite",
                 selection: "local reference index".to_owned(),
@@ -713,6 +781,69 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].file_path, "A.bsl");
         assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn search_code_returns_warmup_message_while_semantic_runtime_is_warming_up() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+        let result = search_code(
+            &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::WarmingUp)),
+            None,
+            "обработка проведения документа",
+            10,
+        )
+        .unwrap();
+
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        assert!(text.contains("warming up"));
+        assert!(text.contains("find_code"));
+    }
+
+    #[test]
+    fn search_status_reports_semantic_warmup_for_ready_lexical_engine() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(
+            &file,
+            "Процедура СтараяПроцедура()
+КонецПроцедуры",
+        )
+        .unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let progress = Arc::new(IndexProgress::default());
+        progress.active.store(true, Ordering::Relaxed);
+        progress.total_chunks.store(200, Ordering::Relaxed);
+        progress.done_chunks.store(50, Ordering::Relaxed);
+        progress.total_batches.store(20, Ordering::Relaxed);
+        progress.done_batches.store(5, Ordering::Relaxed);
+
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &progress,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::WarmingUp)),
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch develop".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Search index: ready (lexical only; semantic warmup in progress)"));
+        assert!(text.contains("Semantic: warming up"));
+        assert!(text.contains("Semantic warmup in progress: 25%"));
     }
 
     #[test]

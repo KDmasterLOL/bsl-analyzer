@@ -3,7 +3,7 @@ use crate::domain::{
     SnapshotPublishMetadata, SnapshotPublishStats,
 };
 use crate::error::SearchError;
-use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
+use crate::ports::{EmbeddingStore, SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
 use std::collections::HashMap;
 
 mod postgres;
@@ -198,6 +198,26 @@ impl ExternalBaselineAdapter {
         match self {
             Self::Postgres(adapter) => adapter.garbage_collect(execute),
         }
+    }
+}
+
+impl EmbeddingStore for ExternalBaselineAdapter {
+    fn load_embeddings(
+        &self,
+        embedding_keys: &[String],
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+        ExternalBaselineAdapter::load_embeddings(self, embedding_keys, model_id, dimension)
+    }
+
+    fn store_embeddings(
+        &self,
+        model_id: &str,
+        dimension: usize,
+        embeddings: &[(String, Vec<f32>)],
+    ) -> Result<BaselineEmbeddingStats, SearchError> {
+        ExternalBaselineAdapter::store_embeddings(self, model_id, dimension, embeddings)
     }
 }
 

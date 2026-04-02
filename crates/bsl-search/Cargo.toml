@@ -17,6 +17,7 @@ lexer.workspace = true
 # Storage
 rusqlite = { version = "0.33", features = ["bundled"] }
 postgres = "0.19"
+r2d2_postgres = "0.18"
 
 # Hashing
 blake3 = "1.8"

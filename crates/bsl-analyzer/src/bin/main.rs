@@ -34,12 +34,12 @@ struct Cli {
 
     /// Enable hierarchical profiling (filter syntax: pattern@depth>threshold_ms)
     /// Example: '*>10' profiles all operations taking >10ms
-    #[arg(long, global = true)]
+    #[arg(long = "trace-profile", global = true)]
     profile: Option<String>,
 
     /// Enable JSON profiling output (filter syntax: pattern)
     /// Example: '*' outputs timing for all spans as JSON to stderr
-    #[arg(long, global = true)]
+    #[arg(long = "trace-profile-json", global = true)]
     profile_json: Option<String>,
 
     #[command(subcommand)]
@@ -463,11 +463,11 @@ struct SearchBaselineRetentionPgArgs {
 #[derive(Args, Clone)]
 struct McpServeArgs {
     /// Runtime profile
-    #[arg(long, value_enum)]
-    profile: McpProfileCli,
+    #[arg(long = "profile", value_enum)]
+    runtime_profile: McpProfileCli,
 
     /// Source directory containing 1C configuration (with Configuration.xml)
-    #[arg(short = 's', long = "source-dir", required_if_eq("profile", "workspace"))]
+    #[arg(short = 's', long = "source-dir", required_if_eq("runtime_profile", "workspace"))]
     source_dir: Option<PathBuf>,
 
     /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
@@ -712,7 +712,7 @@ fn run_search_command(command: SearchCommand) -> Result<(), Box<dyn Error + Send
 
 fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     let password = decode_password(&args.onec_password);
-    let profile = match args.profile {
+    let profile = match args.runtime_profile {
         McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
         McpProfileCli::Reference => mcp_server::McpProfile::Reference,
     };
@@ -851,8 +851,9 @@ fn run_search_baseline_sync_pg(
     args: SearchBaselineSyncPgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
-        fingerprint_documents, fingerprint_indexed_documents, CorpusId, ExternalBaselineAdapter,
-        ExternalBaselineConfig, Snapshot, SnapshotPublishMetadata, SnapshotPublisher,
+        fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
+        Embedder, ExternalBaselineAdapter, ExternalBaselineConfig, Snapshot,
+        SnapshotPublishMetadata,
     };
 
     let project = project_model::Project::new(&args.source_dir);
@@ -925,9 +926,14 @@ fn run_search_baseline_sync_pg(
     }
     let publish_metadata =
         SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
-    adapter.ensure_storage()?;
-    let publish_stats = adapter.publish_snapshot(&snapshot, &publish_metadata, &documents)?;
-    let embedding_stats = publish_shared_embeddings_if_configured(&adapter, &documents)?;
+    let embedder = embedding_config_from_env().map(Embedder::new);
+    let publish_report = BaselinePublisher::new(embedding_execution_policy_from_env()).publish(
+        &adapter,
+        &snapshot,
+        &publish_metadata,
+        &documents,
+        embedder.as_ref(),
+    )?;
 
     let published_files = documents
         .iter()
@@ -949,17 +955,17 @@ fn run_search_baseline_sync_pg(
     println!("  Branch:        {}", branch_label);
     println!("  Commit:        {}", commit_label);
     println!("  Indexed files: {}", indexed_files);
-    println!("  Reused files:  {}", publish_stats.reused_files);
-    println!("  Written files: {}", publish_stats.written_files);
-    println!("  Deleted files: {}", publish_stats.deleted_files);
+    println!("  Reused files:  {}", publish_report.snapshot.reused_files);
+    println!("  Written files: {}", publish_report.snapshot.written_files);
+    println!("  Deleted files: {}", publish_report.snapshot.deleted_files);
     println!("  Files:         {}", published_files);
-    println!("  Reused chunks: {}", publish_stats.reused_documents);
-    println!("  Written chunks: {}", publish_stats.written_documents);
+    println!("  Reused chunks: {}", publish_report.snapshot.reused_documents);
+    println!("  Written chunks: {}", publish_report.snapshot.written_documents);
     println!("  Chunks:        {}", documents.len());
-    if let Some((model_id, reused, stored)) = embedding_stats {
-        println!("  Embedding model: {}", model_id);
-        println!("  Reused embeddings: {}", reused);
-        println!("  Stored embeddings: {}", stored);
+    if let Some(embedding_stats) = publish_report.embeddings {
+        println!("  Embedding model: {}", embedding_stats.model_id);
+        println!("  Reused embeddings: {}", embedding_stats.reused);
+        println!("  Stored embeddings: {}", embedding_stats.stored);
     }
 
     Ok(())
@@ -1539,56 +1545,21 @@ fn embedding_config_from_env() -> Option<bsl_search::EmbedderConfig> {
     })
 }
 
-type SharedEmbeddingPublishStats = (String, usize, usize);
-
-fn publish_shared_embeddings_if_configured(
-    adapter: &bsl_search::ExternalBaselineAdapter,
-    documents: &[bsl_search::IndexedDocument],
-) -> Result<Option<SharedEmbeddingPublishStats>, Box<dyn Error + Send + Sync>> {
-    let Some(config) = embedding_config_from_env() else {
-        return Ok(None);
-    };
-    if documents.is_empty() {
-        return Ok(Some((config.model, 0, 0)));
+fn embedding_execution_policy_from_env() -> bsl_search::EmbeddingExecutionPolicy {
+    bsl_search::EmbeddingExecutionPolicy {
+        batch_size: env::var("EMBEDDING_BATCH_SIZE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(32),
+        concurrency: env::var("EMBEDDING_CONCURRENCY")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10),
+        progress_interval: env::var("EMBEDDING_PROGRESS_INTERVAL")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(20),
     }
-
-    let embedder = bsl_search::Embedder::new(config.clone());
-    let dimension = embedder.dim();
-    let model_id = embedder.model().to_owned();
-
-    let unique_documents = documents
-        .iter()
-        .map(|document| {
-            (
-                bsl_search::semantic_key_for_indexed_document(document),
-                bsl_search::semantic_text_for_indexed_document(document),
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let embedding_keys = unique_documents.keys().cloned().collect::<Vec<_>>();
-    let existing = adapter.load_embeddings(&embedding_keys, &model_id, dimension)?;
-    let reused = existing.len();
-
-    let mut missing = unique_documents
-        .into_iter()
-        .filter(|(key, _)| !existing.contains_key(key))
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return Ok(Some((model_id, reused, 0)));
-    }
-
-    let mut generated = Vec::with_capacity(missing.len());
-    for batch in missing.chunks(32) {
-        let texts = batch.iter().map(|(_, text)| text.as_str()).collect::<Vec<_>>();
-        let vectors = embedder.embed_batch(&texts)?;
-        for ((embedding_key, _), embedding) in batch.iter().zip(vectors.into_iter()) {
-            generated.push((embedding_key.clone(), embedding));
-        }
-    }
-    let stats = adapter.store_embeddings(&model_id, dimension, &generated)?;
-    missing.clear();
-
-    Ok(Some((model_id, reused + stats.reused, stats.stored)))
 }
 
 fn search_baseline_corpus_cli_to_domain(corpus: SearchBaselineCorpusCli) -> bsl_search::CorpusId {

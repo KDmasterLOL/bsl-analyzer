@@ -273,12 +273,14 @@ impl McpServer {
             "status" => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
+                let semantic_runtime = self.state.semantic_runtime();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
                     tools::search::search_status(
                         &engine,
                         &progress,
+                        &semantic_runtime,
                         configured_baseline,
                         external_baseline,
                     )
@@ -290,6 +292,7 @@ impl McpServer {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
+                let semantic_runtime = self.state.semantic_runtime();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 let action = p.action.clone();
@@ -303,6 +306,7 @@ impl McpServer {
                     ),
                     "search_code" => tools::search::search_code(
                         &engine,
+                        &semantic_runtime,
                         configured_baseline.as_ref(),
                         &query,
                         limit,
@@ -483,12 +487,14 @@ impl McpServer {
             "status" => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
+                let semantic_runtime = self.state.semantic_runtime();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
                     tools::search::search_status(
                         &engine,
                         &progress,
+                        &semantic_runtime,
                         configured_baseline,
                         external_baseline,
                     )
