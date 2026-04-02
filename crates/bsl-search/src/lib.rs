@@ -35,8 +35,8 @@ pub use document::{
 };
 pub use domain::{
     BaselineRef, BaselineSourceConfig, CorpusId, DocumentPath, ExternalBaselineBackend,
-    ExternalBaselineConfig, FileOverlay, IndexedDocument, OverlayChange, SearchOverlay, Snapshot,
-    SnapshotId, SnapshotPublishMetadata, SnapshotPublishStats,
+    ExternalBaselineConfig, FileOverlay, IndexedDocument, LexicalHit, OverlayChange, SearchOverlay,
+    Snapshot, SnapshotId, SnapshotPublishMetadata, SnapshotPublishStats,
 };
 pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{IndexProgress, SearchConfig, SearchEngine, SearchHit};
@@ -51,8 +51,9 @@ pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
 pub use index::{SearchResult, VectorIndex};
 pub use local_baseline::LocalStoreBaselineAdapter;
 pub use ports::{
-    EmbeddingGenerator, EmbeddingStore, LexicalSearchIndex, OverlayBuilder, ResolvedViewService,
-    SnapshotCatalog, SnapshotContentStore, SnapshotPublisher, VectorSearchIndex,
+    BaselineLexicalSearch, EmbeddingGenerator, EmbeddingStore, LexicalSearchIndex, OverlayBuilder,
+    ResolvedViewService, SnapshotCatalog, SnapshotContentStore, SnapshotPublisher,
+    VectorSearchIndex,
 };
 pub use publish::{
     BaselinePublishReport, BaselinePublisher, EmbeddingExecutionPolicy,

@@ -172,6 +172,19 @@ impl IndexedDocument {
     }
 }
 
+/// Lexical hit returned directly from a baseline serving table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LexicalHit {
+    pub collection: String,
+    pub path: String,
+    pub symbol_name: String,
+    pub kind: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub text: String,
+    pub rank: f32,
+}
+
 /// Overlay for one logical file/document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileOverlay {

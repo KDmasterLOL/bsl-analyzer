@@ -1,5 +1,5 @@
 use crate::domain::{
-    BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, Snapshot,
+    BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, LexicalHit, Snapshot,
     SnapshotPublishMetadata, SnapshotPublishStats,
 };
 use crate::error::SearchError;
@@ -8,7 +8,9 @@ use crate::external_baseline::{
     BaselineEmbeddingStats, BaselineFileObjectDetails, BaselineFileObjectRecord,
     BaselineFileObjectReference, BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
 };
-use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
+use crate::ports::{
+    BaselineLexicalSearch, SnapshotCatalog, SnapshotContentStore, SnapshotPublisher,
+};
 use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -62,6 +64,18 @@ type PgPooledConnection = r2d2_postgres::r2d2::PooledConnection<PostgresConnecti
 ///   `snapshot_id TEXT NOT NULL`
 ///   `updated_at TIMESTAMPTZ NOT NULL`
 ///   PK: (corpus, branch)
+/// - `<schema>.serving_lexical`
+///   `snapshot_id TEXT NOT NULL`
+///   `collection TEXT NOT NULL`
+///   `path TEXT NOT NULL`
+///   `ordinal INTEGER NOT NULL`
+///   `symbol_name TEXT NOT NULL`
+///   `kind TEXT NOT NULL`
+///   `line_start INTEGER NOT NULL`
+///   `line_end INTEGER NOT NULL`
+///   `text TEXT NOT NULL`
+///   `tsv TSVECTOR NOT NULL`
+///   PK: (snapshot_id, collection, path, ordinal)
 #[derive(Debug, Clone)]
 pub struct PostgresBaselineAdapter {
     config: ExternalBaselineConfig,
@@ -209,6 +223,23 @@ impl PostgresBaselineAdapter {
             ),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
+                    snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
+                    collection TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    symbol_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    line_start INTEGER NOT NULL,
+                    line_end INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    tsv TSVECTOR NOT NULL,
+                    PRIMARY KEY (snapshot_id, collection, path, ordinal)
+                )",
+                self.table("serving_lexical"),
+                self.table("snapshots"),
+            ),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
                     corpus TEXT NOT NULL,
                     branch TEXT NOT NULL,
                     snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
@@ -247,6 +278,18 @@ impl PostgresBaselineAdapter {
                  ON {} (snapshot_id, collection, path)",
                 self.schema,
                 self.table("snapshot_deletions")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_serving_lexical_tsv
+                 ON {} USING GIN (tsv)",
+                self.schema,
+                self.table("serving_lexical")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_serving_lexical_snapshot_id
+                 ON {} (snapshot_id)",
+                self.schema,
+                self.table("serving_lexical")
             ),
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_file_objects_fingerprint
@@ -839,6 +882,66 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
     }
 }
 
+impl BaselineLexicalSearch for PostgresBaselineAdapter {
+    fn lexical_search_baseline(
+        &self,
+        snapshot_id: &str,
+        query: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LexicalHit>, SearchError> {
+        let query_text = query.trim();
+        if query_text.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let collection =
+            collection.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+        let limit = limit.clamp(1, 200) as i64;
+        let mut client = self.connect()?;
+        let mut sql = format!(
+            "SELECT collection,
+                    path,
+                    symbol_name,
+                    kind,
+                    line_start,
+                    line_end,
+                    text,
+                    ts_rank(tsv, plainto_tsquery('simple', $2), 32) AS rank
+             FROM {}
+             WHERE snapshot_id = $1
+               AND tsv @@ plainto_tsquery('simple', $2)",
+            self.table("serving_lexical")
+        );
+
+        let snapshot_id = snapshot_id.to_owned();
+        let query_text = query_text.to_owned();
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![&snapshot_id, &query_text];
+        if let Some(collection) = collection.as_ref() {
+            sql.push_str(&format!(" AND collection = ${}", params.len() + 1));
+            params.push(collection);
+        }
+        sql.push_str(" ORDER BY rank DESC, collection, path, ordinal");
+        sql.push_str(&format!(" LIMIT ${}", params.len() + 1));
+        params.push(&limit);
+
+        Ok(client
+            .query(&sql, &params)?
+            .into_iter()
+            .map(|row| LexicalHit {
+                collection: row.get("collection"),
+                path: row.get("path"),
+                symbol_name: row.get("symbol_name"),
+                kind: row.get("kind"),
+                line_start: row.get::<_, i32>("line_start") as u32,
+                line_end: row.get::<_, i32>("line_end") as u32,
+                text: row.get("text"),
+                rank: row.get::<_, f32>("rank"),
+            })
+            .collect())
+    }
+}
+
 impl SnapshotPublisher for PostgresBaselineAdapter {
     fn ensure_storage(&self) -> Result<(), SearchError> {
         let mut client = self.connect()?;
@@ -916,7 +1019,7 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
 
         let mut stats = SnapshotPublishStats::default();
         let mut remaining_parent_files = parent_files;
-        for file_group in file_groups {
+        for file_group in &file_groups {
             let file_key = (file_group.collection.clone(), file_group.path.clone());
             let parent_entry = remaining_parent_files.remove(&file_key);
             if parent_entry
@@ -930,7 +1033,7 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
 
             let file_object_id =
                 file_object_id_for(&file_group.collection, &file_group.file_fingerprint);
-            let _ = try_insert_file_object(&mut tx, self, &file_object_id, &file_group)?;
+            let _ = try_insert_file_object(&mut tx, self, &file_object_id, file_group)?;
             tx.execute(
                 &insert_snapshot_file,
                 &[
@@ -950,6 +1053,8 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
             tx.execute(&insert_snapshot_deletion, &[&snapshot.id.0, &collection, &path])?;
             stats.deleted_files += 1;
         }
+
+        replace_serving_lexical_rows(&mut tx, self, &snapshot.id.0, &file_groups)?;
 
         if let Some(branch) = metadata.branch.as_deref() {
             let upsert_head = format!(
@@ -1120,6 +1225,44 @@ fn try_insert_file_object(
         )?;
     }
     Ok(true)
+}
+
+fn replace_serving_lexical_rows(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+    file_groups: &[PublishedFileGroup],
+) -> Result<(), SearchError> {
+    let delete = format!("DELETE FROM {} WHERE snapshot_id = $1", adapter.table("serving_lexical"));
+    tx.execute(&delete, &[&snapshot_id])?;
+
+    let insert = format!(
+        "INSERT INTO {} (
+            snapshot_id, collection, path, ordinal, symbol_name, kind,
+            line_start, line_end, text, tsv
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_tsvector('simple', $9))",
+        adapter.table("serving_lexical")
+    );
+
+    for file_group in file_groups {
+        for (ordinal, document) in file_group.documents.iter().enumerate() {
+            tx.execute(
+                &insert,
+                &[
+                    &snapshot_id,
+                    &file_group.collection,
+                    &file_group.path,
+                    &(ordinal as i32),
+                    &document.symbol_name,
+                    &document.kind,
+                    &(document.line_start as i32),
+                    &(document.line_end as i32),
+                    &document.text,
+                ],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_identifier(identifier: &str) -> Result<(), SearchError> {
@@ -1341,7 +1484,7 @@ mod tests {
         PostgresBaselineAdapter,
     };
     use crate::domain::{CorpusId, ExternalBaselineConfig};
-    use crate::ports::{SnapshotCatalog, SnapshotPublisher};
+    use crate::ports::{BaselineLexicalSearch, SnapshotCatalog, SnapshotPublisher};
     use crate::{BaselineRef, IndexedDocument};
 
     #[test]
@@ -1385,6 +1528,31 @@ mod tests {
 
         let error = adapter.ensure_storage().unwrap_err();
         assert!(error.to_string().contains("connection"));
+    }
+
+    #[test]
+    fn connection_errors_surface_from_baseline_lexical_search() {
+        let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
+            "postgres://127.0.0.1:1",
+        ))
+        .unwrap();
+
+        let error = adapter.lexical_search_baseline("snapshot-1", "Найти", None, 10).unwrap_err();
+        assert!(error.to_string().contains("connection"));
+    }
+
+    #[test]
+    fn lexical_search_returns_empty_for_blank_query() {
+        let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
+            "postgres://127.0.0.1:1",
+        ))
+        .unwrap();
+
+        let result = adapter.lexical_search_baseline("snapshot-1", "", None, 10).unwrap();
+        assert!(result.is_empty());
+
+        let result = adapter.lexical_search_baseline("snapshot-1", "   ", None, 10).unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]

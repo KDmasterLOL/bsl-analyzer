@@ -1,5 +1,5 @@
 use crate::domain::{
-    BaselineRef, IndexedDocument, SearchOverlay, Snapshot, SnapshotPublishMetadata,
+    BaselineRef, IndexedDocument, LexicalHit, SearchOverlay, Snapshot, SnapshotPublishMetadata,
     SnapshotPublishStats,
 };
 use crate::error::SearchError;
@@ -45,6 +45,17 @@ pub trait SnapshotContentStore {
         &self,
         snapshot: &Snapshot,
     ) -> Result<Vec<IndexedDocument>, SearchError>;
+}
+
+/// Provides direct lexical hits from a published baseline snapshot.
+pub trait BaselineLexicalSearch {
+    fn lexical_search_baseline(
+        &self,
+        snapshot_id: &str,
+        query: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LexicalHit>, SearchError>;
 }
 
 /// Publishes immutable baseline snapshots into a backing store.

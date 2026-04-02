@@ -1,9 +1,11 @@
 use crate::domain::{
-    BaselineRef, ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, Snapshot,
-    SnapshotPublishMetadata, SnapshotPublishStats,
+    BaselineRef, ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, LexicalHit,
+    Snapshot, SnapshotPublishMetadata, SnapshotPublishStats,
 };
 use crate::error::SearchError;
-use crate::ports::{EmbeddingStore, SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
+use crate::ports::{
+    BaselineLexicalSearch, EmbeddingStore, SnapshotCatalog, SnapshotContentStore, SnapshotPublisher,
+};
 use std::collections::HashMap;
 
 mod postgres;
@@ -199,6 +201,20 @@ impl ExternalBaselineAdapter {
             Self::Postgres(adapter) => adapter.garbage_collect(execute),
         }
     }
+
+    pub fn lexical_search_baseline(
+        &self,
+        snapshot_id: &str,
+        query: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LexicalHit>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => {
+                adapter.lexical_search_baseline(snapshot_id, query, collection, limit)
+            }
+        }
+    }
 }
 
 impl EmbeddingStore for ExternalBaselineAdapter {
@@ -256,6 +272,24 @@ impl SnapshotPublisher for ExternalBaselineAdapter {
         match self {
             Self::Postgres(adapter) => adapter.publish_snapshot(snapshot, metadata, documents),
         }
+    }
+}
+
+impl BaselineLexicalSearch for ExternalBaselineAdapter {
+    fn lexical_search_baseline(
+        &self,
+        snapshot_id: &str,
+        query: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LexicalHit>, SearchError> {
+        ExternalBaselineAdapter::lexical_search_baseline(
+            self,
+            snapshot_id,
+            query,
+            collection,
+            limit,
+        )
     }
 }
 
