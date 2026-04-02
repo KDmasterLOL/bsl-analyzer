@@ -309,6 +309,9 @@ pub fn search_status(
         let _ = writeln!(out, "  Backend:  {}", status.backend);
         let _ = writeln!(out, "  Schema:   {}", status.schema);
         let _ = writeln!(out, "  Select:   {}", status.selection);
+        if let Some(resolved) = status.resolved.as_deref() {
+            let _ = writeln!(out, "  Resolved: {}", resolved);
+        }
         match status.state {
             ExternalBaselineState::Ready { snapshot_id, fingerprint, documents, files } => {
                 let _ = writeln!(out, "  Status:   ready");

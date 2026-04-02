@@ -21,7 +21,7 @@ useful step is a full immutable snapshot publish that CI can run after merge.
 ```bash
 bsl-analyzer-app search baseline sync-pg \
   --source-dir . \
-  --branch main \
+  --branch develop \
   --commit "$CI_COMMIT_SHA"
 ```
 
@@ -98,7 +98,17 @@ Example `.bsl-analyzer.json`:
         "schema": "bsl_search"
       },
       "workspaceCode": {
-        "branch": "main"
+        "policy": {
+          "publishBranches": ["vendor", "develop"],
+          "branches": [
+            { "match": "vendor", "selectBranch": "vendor" },
+            { "match": "develop", "selectBranch": "develop", "fallbackBranch": "vendor" },
+            { "match": "feature/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
+            { "match": "fix/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
+            { "match": "bug/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
+            { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
+          ]
+        }
       },
       "reference": {
         "snapshotId": "reference:0.1.104"
@@ -114,6 +124,8 @@ Rules:
 - `search.baseline.backend=postgres` enables centralized baseline mode.
 - environment variables no longer choose the backend for workspace mode;
   they only provide secrets and runtime overrides.
+- when explicit workspace `snapshotId/branch/commit` are absent, `workspaceCode.policy`
+  resolves the published baseline from the current git branch and a configured fallback chain;
 - reference profile may still use env-only PostgreSQL settings when it is started
   without a project root, because user-scope MCP installation has no
   `.bsl-analyzer.json` to read from.
@@ -178,11 +190,18 @@ Example:
 # Validate runtime resolution before publishing
 bsl-analyzer-app check-config .bsl-analyzer.json
 
-# Publish workspace baseline
+# Publish develop baseline
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer-app search baseline sync-pg \
   --source-dir . \
-  --branch main \
+  --branch develop \
+  --commit "$CI_COMMIT_SHA"
+
+# Publish vendor baseline after supplier update
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer-app search baseline sync-pg \
+  --source-dir . \
+  --branch vendor \
   --commit "$CI_COMMIT_SHA"
 
 # Publish shared reference baseline
@@ -212,11 +231,11 @@ bsl-analyzer-app search baseline list-pg --limit 20
 # Filter by corpus / branch / commit
 bsl-analyzer-app search baseline list-pg \
   --corpus workspace-code \
-  --branch main
+  --branch develop
 
 # Inspect one specific snapshot
 bsl-analyzer-app search baseline show-pg \
-  --snapshot-id workspace-code:main@abcdef
+  --snapshot-id workspace-code:develop@abcdef
 
 # Inspect shared file objects
 bsl-analyzer-app search baseline list-file-objects-pg --limit 20
@@ -310,14 +329,14 @@ integration because it already enables:
 
 ## Recommended GitLab job
 
-Example for a pipeline that updates the shared baseline after merge to `main`:
+Example for a pipeline that updates the shared baseline after merge to `develop`:
 
 ```yaml
 publish_search_baseline:
   stage: deploy
   image: rust:1.91
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
   script:
     - cargo build --release --bin bsl-analyzer-app
     - >
@@ -342,11 +361,42 @@ This publishing command belongs to the interface layer. It orchestrates:
 
 It does not embed PostgreSQL logic directly into MCP runtime code.
 
-## Next steps
+## Roadmap
 
-1. Add branch policy helpers such as `main`, `release/*`, feature snapshots.
-2. Introduce delta publishing so snapshots can reuse unchanged file mappings
-   instead of rewriting the full branch state each time.
-3. Add shared embedding storage keyed by `content_hash + model_id`.
-4. Split operator workflows for publishing, inspection, and maintenance into a
-   dedicated baseline operations document.
+### Completed foundation
+
+The current implementation already covers the first baseline-storage milestone:
+
+1. Immutable PostgreSQL snapshot publishing for `workspace-code` and `reference`.
+2. Parent snapshot lineage on publish.
+3. Shared `file_objects` and reuse of unchanged file mappings.
+4. Shared semantic embedding storage and reuse by `model_id + dimension + embedding_key`.
+5. Runtime hybrid model:
+   - shared PostgreSQL baseline for team-visible published state;
+   - local SQLite semantic cache for MCP runtime;
+   - local overlay for uncommitted workspace changes.
+6. Operator commands for inspection and safe garbage collection.
+
+### Next iteration
+
+The next concrete milestone is branch policy support for the team's real workflow:
+
+1. Introduce branch policy configuration for:
+   - `develop` as the main team baseline;
+   - `vendor` as the supplier baseline;
+   - working branches like `feature/*`, `fix/*`, `bug/*` as overlay-only branches
+     that fall back to `develop`.
+2. Teach runtime baseline selection to resolve the effective published baseline
+   from the current branch using that policy.
+3. Teach publish/CI flows which branches are expected to publish centralized
+   snapshots automatically and which branches should stay local-only.
+4. Add focused tests for branch matching, fallback selection, and explicit
+   override precedence.
+
+### Deferred after branch policy
+
+These topics remain useful, but they are not the next implementation step:
+
+1. Delta/slice publication on top of parent-linked snapshots.
+2. Dedicated operations document for publish/inspect/maintenance workflows.
+3. More advanced retention and cleanup policies for shared storage.

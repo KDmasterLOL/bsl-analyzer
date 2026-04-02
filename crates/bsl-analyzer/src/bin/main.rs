@@ -280,6 +280,10 @@ struct SearchBaselineSyncPgArgs {
     /// corpus and branch, or the same corpus when branch is not specified.
     #[arg(long = "parent-snapshot-id")]
     parent_snapshot_id: Option<String>,
+
+    /// Allow publishing a workspace branch that is not listed in branch policy.
+    #[arg(long = "allow-non-policy-branch")]
+    allow_non_policy_branch: bool,
 }
 
 #[derive(Args, Clone)]
@@ -821,11 +825,7 @@ fn run_search_baseline_sync_pg(
 
     let project = project_model::Project::new(&args.source_dir);
     let source_path = project.source_path().to_path_buf();
-    let branch = pick_first_non_empty([
-        args.branch.as_deref(),
-        env::var("CI_COMMIT_BRANCH").ok().as_deref(),
-        env::var("CI_COMMIT_REF_NAME").ok().as_deref(),
-    ]);
+    let branch = resolve_publish_branch(args.branch.as_deref(), &project.root);
     let commit = pick_first_non_empty([
         args.commit.as_deref(),
         env::var("CI_COMMIT_SHA").ok().as_deref(),
@@ -835,6 +835,13 @@ fn run_search_baseline_sync_pg(
         SearchBaselineCorpusCli::WorkspaceCode => CorpusId::WorkspaceCode,
         SearchBaselineCorpusCli::Reference => CorpusId::Reference,
     };
+    if matches!(corpus, CorpusId::WorkspaceCode) {
+        validate_workspace_publish_policy(
+            &project.config.search.baseline.workspace_code.policy,
+            branch.as_deref(),
+            args.allow_non_policy_branch,
+        )?;
+    }
     let snapshot_id = resolve_snapshot_id(
         &corpus,
         args.snapshot_id.as_deref(),
@@ -1320,6 +1327,54 @@ fn pick_first_non_empty<'a>(
         .map(str::trim)
         .find(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn resolve_publish_branch(
+    project_branch: Option<&str>,
+    project_root: &std::path::Path,
+) -> Option<String> {
+    let git_branch = project_model::current_git_branch(project_root);
+    pick_first_non_empty([
+        project_branch,
+        env::var("CI_COMMIT_BRANCH").ok().as_deref(),
+        env::var("CI_COMMIT_REF_NAME").ok().as_deref(),
+        git_branch.as_deref(),
+    ])
+}
+
+fn validate_workspace_publish_policy(
+    policy: &project_model::SearchBaselinePolicyConfig,
+    branch: Option<&str>,
+    allow_non_policy_branch: bool,
+) -> Result<(), io::Error> {
+    if !policy.is_configured() {
+        return Ok(());
+    }
+
+    if policy.publish_branches.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace baseline policy is configured but 'workspaceCode.policy.publishBranches' is empty",
+        ));
+    }
+
+    let Some(branch) = branch.map(str::trim).filter(|branch| !branch.is_empty()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace baseline publish policy requires a branch; pass --branch, set CI_COMMIT_BRANCH, or run inside a git repository",
+        ));
+    };
+
+    if project_model::is_publish_branch_allowed(policy, branch) || allow_non_policy_branch {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "branch '{branch}' is not allowed by workspace baseline publish policy; use --allow-non-policy-branch to override"
+        ),
+    ))
 }
 
 fn build_workspace_code_baseline_documents(
@@ -2723,8 +2778,9 @@ fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send +
     tracing::info!("Checking configuration: {:?}", config);
 
     let content = std::fs::read_to_string(&config)?;
-    let config: project_model::ProjectConfig = serde_json::from_str(&content)?;
-    let diagnostics = mcp_server::resolve_project_baseline_diagnostics(&config);
+    let project_config: project_model::ProjectConfig = serde_json::from_str(&content)?;
+    let diagnostics =
+        mcp_server::resolve_project_baseline_diagnostics(config.parent(), &project_config);
 
     println!("Configuration is valid.");
     println!();
@@ -2766,8 +2822,13 @@ fn setup_logging(
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_first_non_empty, resolve_snapshot_id, select_parent_snapshot_id};
+    use super::{
+        pick_first_non_empty, resolve_publish_branch, resolve_snapshot_id,
+        select_parent_snapshot_id, validate_workspace_publish_policy,
+    };
     use bsl_search::{BaselineSnapshotRecord, CorpusId};
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn explicit_snapshot_id_has_priority() {
@@ -2821,6 +2882,49 @@ mod tests {
         let value = pick_first_non_empty([Some(""), Some("  "), None, Some("main")]);
 
         assert_eq!(value.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn resolve_publish_branch_uses_git_when_cli_and_ci_are_missing() {
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/demo\n").unwrap();
+
+        let branch = resolve_publish_branch(None, dir.path());
+
+        assert_eq!(branch.as_deref(), Some("feature/demo"));
+    }
+
+    #[test]
+    fn workspace_publish_policy_blocks_branch_outside_allowlist() {
+        let policy: project_model::SearchBaselinePolicyConfig =
+            serde_json::from_value(serde_json::json!({
+                "publishBranches": ["vendor", "develop"],
+                "branches": [
+                    { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
+                ]
+            }))
+            .unwrap();
+
+        let error =
+            validate_workspace_publish_policy(&policy, Some("feature/demo"), false).unwrap_err();
+
+        assert!(error.to_string().contains("not allowed by workspace baseline publish policy"));
+    }
+
+    #[test]
+    fn workspace_publish_policy_allows_override_flag() {
+        let policy: project_model::SearchBaselinePolicyConfig =
+            serde_json::from_value(serde_json::json!({
+                "publishBranches": ["vendor", "develop"],
+                "branches": [
+                    { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
+                ]
+            }))
+            .unwrap();
+
+        validate_workspace_publish_policy(&policy, Some("feature/demo"), true).unwrap();
     }
 
     #[test]

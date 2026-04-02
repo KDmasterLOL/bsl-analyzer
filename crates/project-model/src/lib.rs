@@ -401,11 +401,155 @@ pub struct SearchBaselineTargetConfig {
 
     #[serde(default)]
     pub commit: Option<String>,
+
+    #[serde(default)]
+    pub policy: SearchBaselinePolicyConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchBaselinePolicyConfig {
+    #[serde(default)]
+    pub publish_branches: Vec<String>,
+
+    #[serde(default)]
+    pub branches: Vec<SearchBaselineBranchPolicyRuleConfig>,
+}
+
+impl SearchBaselinePolicyConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.publish_branches.is_empty() || !self.branches.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchBaselineBranchPolicyRuleConfig {
+    #[serde(rename = "match")]
+    pub pattern: String,
+
+    pub select_branch: String,
+
+    #[serde(default)]
+    pub fallback_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkspaceBranchPolicy {
+    pub workspace_branch: Option<String>,
+    pub matched_pattern: String,
+    pub select_branch: String,
+    pub fallback_branch: Option<String>,
+}
+
+impl ResolvedWorkspaceBranchPolicy {
+    pub fn candidate_branches(&self) -> Vec<String> {
+        let mut branches = vec![self.select_branch.clone()];
+        if let Some(fallback_branch) = &self.fallback_branch {
+            if branches.iter().all(|branch| branch != fallback_branch) {
+                branches.push(fallback_branch.clone());
+            }
+        }
+        branches
+    }
+
+    pub fn selection_description(&self) -> String {
+        let workspace_branch = self.workspace_branch.as_deref().unwrap_or("<unknown>");
+        let chain = self
+            .candidate_branches()
+            .into_iter()
+            .map(|branch| format!("branch {branch}"))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        format!("workspace branch {workspace_branch} -> {chain}")
+    }
+}
+
+pub fn resolve_workspace_branch_policy(
+    policy: &SearchBaselinePolicyConfig,
+    workspace_branch: Option<&str>,
+) -> Option<ResolvedWorkspaceBranchPolicy> {
+    let workspace_branch =
+        workspace_branch.map(str::trim).filter(|branch| !branch.is_empty()).map(ToOwned::to_owned);
+    let rule = policy
+        .branches
+        .iter()
+        .find(|rule| branch_pattern_matches(&rule.pattern, workspace_branch.as_deref()))?;
+
+    Some(ResolvedWorkspaceBranchPolicy {
+        workspace_branch,
+        matched_pattern: rule.pattern.clone(),
+        select_branch: rule.select_branch.clone(),
+        fallback_branch: rule.fallback_branch.clone(),
+    })
+}
+
+pub fn is_publish_branch_allowed(policy: &SearchBaselinePolicyConfig, branch: &str) -> bool {
+    let branch = branch.trim();
+    !branch.is_empty()
+        && policy
+            .publish_branches
+            .iter()
+            .any(|pattern| branch_pattern_matches(pattern, Some(branch)))
+}
+
+pub fn branch_pattern_matches(pattern: &str, branch: Option<&str>) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+    if pattern == "*" {
+        return true;
+    }
+
+    let Some(branch) = branch.map(str::trim).filter(|branch| !branch.is_empty()) else {
+        return false;
+    };
+
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return branch
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1);
+    }
+
+    branch == pattern
+}
+
+pub fn current_git_branch(start_dir: &Path) -> Option<String> {
+    let git_dir = discover_git_dir(start_dir)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let ref_path = head.trim().strip_prefix("ref: ")?;
+    ref_path.strip_prefix("refs/heads/").map(ToOwned::to_owned)
+}
+
+fn discover_git_dir(start_dir: &Path) -> Option<PathBuf> {
+    for candidate in start_dir.ancestors() {
+        let dot_git = candidate.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+        if dot_git.is_file() {
+            let content = std::fs::read_to_string(&dot_git).ok()?;
+            let path = content.trim().strip_prefix("gitdir: ")?;
+            let git_dir = candidate.join(path);
+            if git_dir.exists() {
+                return Some(git_dir);
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectConfig, SearchBaselineBackend};
+    use super::{
+        branch_pattern_matches, current_git_branch, is_publish_branch_allowed,
+        resolve_workspace_branch_policy, ProjectConfig, SearchBaselineBackend,
+        SearchBaselinePolicyConfig,
+    };
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn project_config_defaults_search_baseline_to_sqlite() {
@@ -453,5 +597,142 @@ mod tests {
             config.search.baseline.reference.snapshot_id.as_deref(),
             Some("reference:0.1.104")
         );
+    }
+
+    #[test]
+    fn project_config_deserializes_workspace_branch_policy() {
+        let config: ProjectConfig = serde_json::from_str(
+            r#"{
+                "search": {
+                    "baseline": {
+                        "workspaceCode": {
+                            "policy": {
+                                "publishBranches": ["vendor", "develop"],
+                                "branches": [
+                                    { "match": "vendor", "selectBranch": "vendor" },
+                                    {
+                                        "match": "feature/*",
+                                        "selectBranch": "develop",
+                                        "fallbackBranch": "vendor"
+                                    },
+                                    {
+                                        "match": "*",
+                                        "selectBranch": "develop",
+                                        "fallbackBranch": "vendor"
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let policy = &config.search.baseline.workspace_code.policy;
+        assert!(policy.is_configured());
+        assert_eq!(policy.publish_branches, vec!["vendor", "develop"]);
+        assert_eq!(policy.branches.len(), 3);
+        assert_eq!(policy.branches[1].pattern, "feature/*");
+        assert_eq!(policy.branches[1].select_branch, "develop");
+        assert_eq!(policy.branches[1].fallback_branch.as_deref(), Some("vendor"));
+    }
+
+    #[test]
+    fn branch_pattern_matches_exact_prefix_and_wildcard() {
+        assert!(branch_pattern_matches("develop", Some("develop")));
+        assert!(branch_pattern_matches("feature/*", Some("feature/test")));
+        assert!(branch_pattern_matches("*", Some("custom/branch")));
+        assert!(!branch_pattern_matches("feature/*", Some("feature")));
+        assert!(!branch_pattern_matches("feature/*", Some("fix/test")));
+    }
+
+    #[test]
+    fn workspace_branch_policy_resolves_branch_chain() {
+        let policy = SearchBaselinePolicyConfig {
+            publish_branches: vec!["vendor".to_owned(), "develop".to_owned()],
+            branches: serde_json::from_value(serde_json::json!([
+                { "match": "vendor", "selectBranch": "vendor" },
+                { "match": "develop", "selectBranch": "develop", "fallbackBranch": "vendor" },
+                { "match": "feature/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
+                { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
+            ]))
+            .unwrap(),
+        };
+
+        let resolved = resolve_workspace_branch_policy(&policy, Some("feature/test")).unwrap();
+        assert_eq!(resolved.workspace_branch.as_deref(), Some("feature/test"));
+        assert_eq!(resolved.matched_pattern, "feature/*");
+        assert_eq!(resolved.candidate_branches(), vec!["develop", "vendor"]);
+        assert_eq!(
+            resolved.selection_description(),
+            "workspace branch feature/test -> branch develop -> branch vendor"
+        );
+    }
+
+    #[test]
+    fn workspace_branch_policy_uses_wildcard_for_unknown_branch() {
+        let policy = SearchBaselinePolicyConfig {
+            publish_branches: vec![],
+            branches: serde_json::from_value(serde_json::json!([
+                { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
+            ]))
+            .unwrap(),
+        };
+
+        let resolved = resolve_workspace_branch_policy(&policy, Some("release/1.0")).unwrap();
+        assert_eq!(resolved.matched_pattern, "*");
+        assert_eq!(resolved.candidate_branches(), vec!["develop", "vendor"]);
+    }
+
+    #[test]
+    fn publish_branch_policy_uses_pattern_matching() {
+        let policy = SearchBaselinePolicyConfig {
+            publish_branches: vec!["vendor".to_owned(), "develop".to_owned()],
+            branches: vec![],
+        };
+
+        assert!(is_publish_branch_allowed(&policy, "vendor"));
+        assert!(is_publish_branch_allowed(&policy, "develop"));
+        assert!(!is_publish_branch_allowed(&policy, "feature/test"));
+    }
+
+    #[test]
+    fn current_git_branch_reads_direct_git_dir() {
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/test\n").unwrap();
+
+        assert_eq!(current_git_branch(dir.path()).as_deref(), Some("feature/test"));
+    }
+
+    #[test]
+    fn current_git_branch_reads_gitdir_file() {
+        let dir = tempdir().unwrap();
+        let actual_git_dir = dir.path().join(".git-data");
+        fs::create_dir_all(&actual_git_dir).unwrap();
+        fs::write(actual_git_dir.join("HEAD"), "ref: refs/heads/develop\n").unwrap();
+        fs::write(dir.path().join(".git"), "gitdir: .git-data\n").unwrap();
+
+        assert_eq!(current_git_branch(dir.path()).as_deref(), Some("develop"));
+    }
+
+    #[test]
+    fn current_git_branch_returns_none_for_detached_head() {
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "0123456789abcdef\n").unwrap();
+
+        assert_eq!(current_git_branch(dir.path()), None);
+    }
+
+    #[test]
+    fn project_config_defaults_workspace_policy_to_empty() {
+        let config: ProjectConfig = serde_json::from_str("{}").unwrap();
+
+        assert!(!config.search.baseline.workspace_code.policy.is_configured());
+        assert!(config.search.baseline.reference.policy.branches.is_empty());
     }
 }

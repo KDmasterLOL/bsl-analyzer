@@ -162,7 +162,17 @@ bsl-analyzer mcp install \
         "schema": "bsl_search"
       },
       "workspaceCode": {
-        "branch": "main"
+        "policy": {
+          "publishBranches": ["vendor", "develop"],
+          "branches": [
+            { "match": "vendor", "selectBranch": "vendor" },
+            { "match": "develop", "selectBranch": "develop", "fallbackBranch": "vendor" },
+            { "match": "feature/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
+            { "match": "fix/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
+            { "match": "bug/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
+            { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
+          ]
+        }
       },
       "reference": {
         "snapshotId": "reference:0.1.104"
@@ -189,6 +199,7 @@ bsl-analyzer check-config .bsl-analyzer.json
 1. `search.baseline.backend` в `.bsl-analyzer.json` выбирает `sqlite` или `postgres`.
 2. Для `postgres` `url/schema` берутся из env, если они заданы, иначе из конфига.
 3. `snapshotId/branch/commit` тоже могут быть переопределены через env.
+4. Если explicit selection не задан, `workspaceCode.policy` выбирает published baseline по текущей git-ветке проекта.
 
 Для workspace-профиля env больше не переключает backend сам по себе: если в конфиге не выбран `postgres`, будет использован локальный SQLite. Для `reference` user-scope без project root по-прежнему допускается env-only режим.
 
@@ -198,11 +209,18 @@ bsl-analyzer check-config .bsl-analyzer.json
 # 1. Проверить, что проектный конфиг разрешается в нужный backend/snapshot
 bsl-analyzer check-config .bsl-analyzer.json
 
-# 2. Опубликовать workspace baseline в PostgreSQL
+# 2. Опубликовать baseline develop в PostgreSQL
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline sync-pg \
   --source-dir ./my-project \
-  --branch main \
+  --branch develop \
+  --commit "$CI_COMMIT_SHA"
+
+# 2a. Обновить baseline vendor, когда приходит новая поставка
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline sync-pg \
+  --source-dir ./my-project \
+  --branch vendor \
   --commit "$CI_COMMIT_SHA"
 
 # 3. Опубликовать shared reference baseline
@@ -244,11 +262,11 @@ bsl-analyzer search baseline list-pg --limit 20
 
 # Отфильтровать по corpus/branch
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
-bsl-analyzer search baseline list-pg --corpus workspace-code --branch main
+bsl-analyzer search baseline list-pg --corpus workspace-code --branch develop
 
 # Посмотреть один snapshot подробно
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
-bsl-analyzer search baseline show-pg --snapshot-id workspace-code:main@abcdef
+bsl-analyzer search baseline show-pg --snapshot-id workspace-code:develop@abcdef
 
 # Показать shared file objects
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
@@ -501,7 +519,27 @@ BSL_ANALYZER_VERSION=0.1.33 bsl-analyzer analyze -s ./src
                 "schema": "bsl_search"
             },
             "workspaceCode": {
-                "branch": "main"
+                "policy": {
+                    "publishBranches": ["vendor", "develop"],
+                    "branches": [
+                        { "match": "vendor", "selectBranch": "vendor" },
+                        {
+                            "match": "develop",
+                            "selectBranch": "develop",
+                            "fallbackBranch": "vendor"
+                        },
+                        {
+                            "match": "feature/*",
+                            "selectBranch": "develop",
+                            "fallbackBranch": "vendor"
+                        },
+                        {
+                            "match": "*",
+                            "selectBranch": "develop",
+                            "fallbackBranch": "vendor"
+                        }
+                    ]
+                }
             },
             "reference": {
                 "snapshotId": "reference:0.1.104"

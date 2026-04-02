@@ -5,12 +5,14 @@ use bsl_search::{
     SnapshotCatalog, SnapshotContentStore,
 };
 use project_model::{
-    ProjectConfig, SearchBaselineBackend, SearchBaselineConfig, SearchBaselineTargetConfig,
+    current_git_branch, resolve_workspace_branch_policy, ProjectConfig, SearchBaselineBackend,
+    SearchBaselineConfig, SearchBaselinePolicyConfig, SearchBaselineTargetConfig,
     SearchPostgresConfig,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
+use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,9 +43,10 @@ pub(crate) struct BaselineRuntime {
 }
 
 impl BaselineRuntime {
-    pub(crate) fn workspace(project_config: &ProjectConfig) -> Self {
+    pub(crate) fn workspace(project_root: Option<&Path>, project_config: &ProjectConfig) -> Self {
         Self::for_corpus(
             CorpusId::WorkspaceCode,
+            project_root,
             Some(&project_config.search.baseline),
             "BSL_SEARCH_BASELINE",
             &["BSL_SEARCH_BASELINE_PG_URL"],
@@ -55,6 +58,7 @@ impl BaselineRuntime {
     pub(crate) fn reference(project_config: Option<&ProjectConfig>) -> Self {
         Self::for_corpus(
             CorpusId::Reference,
+            None,
             project_config.map(|config| &config.search.baseline),
             "BSL_SEARCH_REFERENCE",
             &["BSL_SEARCH_REFERENCE_PG_URL", "BSL_SEARCH_BASELINE_PG_URL"],
@@ -65,6 +69,7 @@ impl BaselineRuntime {
 
     fn for_corpus(
         corpus: CorpusId,
+        project_root: Option<&Path>,
         project_config: Option<&SearchBaselineConfig>,
         selection_prefix: &str,
         connection_keys: &[&str],
@@ -101,8 +106,15 @@ impl BaselineRuntime {
                 CorpusId::Custom(_) => &config.workspace_code,
             })
             .unwrap_or(&default_target);
-        let baseline = baseline_ref_from_config(corpus.clone(), selection_prefix, baseline_target);
-        let selection = baseline_description(&baseline);
+        let explicit_baseline =
+            baseline_ref_from_config(corpus.clone(), selection_prefix, baseline_target);
+        let (baselines, selection) = resolve_baseline_selection(
+            &corpus,
+            project_root,
+            selection_prefix,
+            baseline_target,
+            &explicit_baseline,
+        );
 
         let Some(connection) = resolve_connection(connection_keys, postgres) else {
             return Self {
@@ -123,7 +135,7 @@ impl BaselineRuntime {
             config = config.with_schema(schema);
         }
 
-        match ExternalBaselineSource::new(config, baseline) {
+        match ExternalBaselineSource::new_with_candidates(config, baselines, selection.clone()) {
             Ok(source) => {
                 tracing::info!(corpus = %corpus, "external baseline source configured");
                 Self {
@@ -159,9 +171,10 @@ impl BaselineRuntime {
 }
 
 pub fn resolve_project_baseline_diagnostics(
+    project_root: Option<&Path>,
     project_config: &ProjectConfig,
 ) -> BaselineConfigDiagnostics {
-    let workspace = BaselineRuntime::workspace(project_config);
+    let workspace = BaselineRuntime::workspace(project_root, project_config);
     let reference = BaselineRuntime::reference(Some(project_config));
 
     BaselineConfigDiagnostics { workspace: workspace.summary(), reference: reference.summary() }
@@ -170,16 +183,27 @@ pub fn resolve_project_baseline_diagnostics(
 #[derive(Debug)]
 pub(crate) struct ExternalBaselineSource {
     adapter: ExternalBaselineAdapter,
-    baseline: BaselineRef,
+    baselines: Vec<BaselineRef>,
+    selection: String,
 }
 
 impl ExternalBaselineSource {
+    #[cfg(test)]
     pub(crate) fn new(
         config: ExternalBaselineConfig,
         baseline: BaselineRef,
     ) -> Result<Self, bsl_search::SearchError> {
+        let selection = baseline_description(&baseline);
+        Self::new_with_candidates(config, vec![baseline], selection)
+    }
+
+    pub(crate) fn new_with_candidates(
+        config: ExternalBaselineConfig,
+        baselines: Vec<BaselineRef>,
+        selection: String,
+    ) -> Result<Self, bsl_search::SearchError> {
         let adapter = ExternalBaselineAdapter::new(config)?;
-        Ok(Self { adapter, baseline })
+        Ok(Self { adapter, baselines, selection })
     }
 
     pub(crate) fn probe_status(&self) -> ExternalBaselineStatus {
@@ -188,42 +212,48 @@ impl ExternalBaselineSource {
         };
         let schema =
             self.adapter.config().schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
-        let selection = baseline_description(&self.baseline);
+        let selection = self.selection.clone();
 
-        match self.adapter.resolve_baseline(&self.baseline) {
-            Ok(Some(snapshot)) => match self.adapter.load_snapshot_documents(&snapshot) {
-                Ok(documents) => {
-                    let files: HashSet<&str> =
-                        documents.iter().map(|document| document.path.as_str()).collect();
-                    ExternalBaselineStatus {
+        match self.resolve_snapshot() {
+            Ok(Some((resolved_baseline, snapshot))) => {
+                match self.adapter.load_snapshot_documents(&snapshot) {
+                    Ok(documents) => {
+                        let files: HashSet<&str> =
+                            documents.iter().map(|document| document.path.as_str()).collect();
+                        ExternalBaselineStatus {
+                            backend,
+                            schema,
+                            selection,
+                            resolved: Some(baseline_description(&resolved_baseline)),
+                            state: ExternalBaselineState::Ready {
+                                snapshot_id: snapshot.id.0,
+                                fingerprint: snapshot.fingerprint,
+                                documents: documents.len(),
+                                files: files.len(),
+                            },
+                        }
+                    }
+                    Err(error) => ExternalBaselineStatus {
                         backend,
                         schema,
                         selection,
-                        state: ExternalBaselineState::Ready {
-                            snapshot_id: snapshot.id.0,
-                            fingerprint: snapshot.fingerprint,
-                            documents: documents.len(),
-                            files: files.len(),
-                        },
-                    }
+                        resolved: Some(baseline_description(&resolved_baseline)),
+                        state: ExternalBaselineState::Error(error.to_string()),
+                    },
                 }
-                Err(error) => ExternalBaselineStatus {
-                    backend,
-                    schema,
-                    selection,
-                    state: ExternalBaselineState::Error(error.to_string()),
-                },
-            },
+            }
             Ok(None) => ExternalBaselineStatus {
                 backend,
                 schema,
                 selection,
+                resolved: None,
                 state: ExternalBaselineState::Missing,
             },
             Err(error) => ExternalBaselineStatus {
                 backend,
                 schema,
                 selection,
+                resolved: None,
                 state: ExternalBaselineState::Error(error.to_string()),
             },
         }
@@ -233,8 +263,11 @@ impl ExternalBaselineSource {
         &self,
         engine: &SearchEngine,
     ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
+        let Some((_, snapshot)) = self.resolve_snapshot()? else {
+            return Ok(None);
+        };
         engine.resolve_workspace_code_view_with(
-            self.baseline.clone(),
+            BaselineRef::for_snapshot(snapshot.corpus.clone(), snapshot.id.0.clone()),
             self.adapter.clone(),
             self.adapter.clone(),
         )
@@ -243,7 +276,7 @@ impl ExternalBaselineSource {
     pub(crate) fn resolve_reference_view(
         &self,
     ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
-        let Some(snapshot) = self.adapter.resolve_baseline(&self.baseline)? else {
+        let Some((_, snapshot)) = self.resolve_snapshot()? else {
             return Ok(None);
         };
         let documents = self.adapter.load_snapshot_documents(&snapshot)?;
@@ -256,7 +289,7 @@ impl ExternalBaselineSource {
         model_id: Option<&str>,
         dimension: Option<usize>,
     ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
-        if !matches!(self.baseline.corpus, CorpusId::WorkspaceCode) {
+        if !matches!(self.corpus(), CorpusId::WorkspaceCode) {
             return Ok(None);
         }
         self.load_snapshot_documents(model_id, dimension)
@@ -267,7 +300,7 @@ impl ExternalBaselineSource {
         model_id: Option<&str>,
         dimension: Option<usize>,
     ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
-        if !matches!(self.baseline.corpus, CorpusId::Reference) {
+        if !matches!(self.corpus(), CorpusId::Reference) {
             return Ok(None);
         }
         self.load_snapshot_documents(model_id, dimension)
@@ -278,7 +311,7 @@ impl ExternalBaselineSource {
         model_id: Option<&str>,
         dimension: Option<usize>,
     ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
-        let Some(snapshot) = self.adapter.resolve_baseline(&self.baseline)? else {
+        let Some((_, snapshot)) = self.resolve_snapshot()? else {
             return Ok(None);
         };
         let documents = self.adapter.load_snapshot_documents(&snapshot)?;
@@ -300,14 +333,25 @@ impl ExternalBaselineSource {
     }
 
     pub(crate) fn corpus(&self) -> &CorpusId {
-        &self.baseline.corpus
+        &self.baselines[0].corpus
     }
 
     pub(crate) fn local_reference_fingerprint(&self) -> Option<String> {
-        if !matches!(self.baseline.corpus, CorpusId::Reference) {
+        if !matches!(self.corpus(), CorpusId::Reference) {
             return None;
         }
         Some(fingerprint_documents(&platform_reference_documents()))
+    }
+
+    fn resolve_snapshot(
+        &self,
+    ) -> Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError> {
+        for baseline in &self.baselines {
+            if let Some(snapshot) = self.adapter.resolve_baseline(baseline)? {
+                return Ok(Some((baseline.clone(), snapshot)));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -316,6 +360,7 @@ pub(crate) struct ExternalBaselineStatus {
     pub backend: &'static str,
     pub schema: String,
     pub selection: String,
+    pub resolved: Option<String>,
     pub state: ExternalBaselineState,
 }
 
@@ -378,6 +423,57 @@ fn baseline_ref_from_config(
             .filter(|value| !value.trim().is_empty())
             .or_else(|| target.commit.clone()),
     }
+}
+
+fn resolve_baseline_selection(
+    corpus: &CorpusId,
+    project_root: Option<&Path>,
+    selection_prefix: &str,
+    target: &SearchBaselineTargetConfig,
+    explicit_baseline: &BaselineRef,
+) -> (Vec<BaselineRef>, String) {
+    if baseline_has_explicit_selection(explicit_baseline) {
+        return (vec![explicit_baseline.clone()], baseline_description(explicit_baseline));
+    }
+
+    if matches!(corpus, CorpusId::WorkspaceCode) && target.policy.is_configured() {
+        if let Some(policy_selection) =
+            resolve_workspace_policy_selection(project_root, &target.policy)
+        {
+            let baselines = policy_selection
+                .candidate_branches()
+                .into_iter()
+                .map(|branch| BaselineRef {
+                    corpus: corpus.clone(),
+                    snapshot_id: None,
+                    branch: Some(branch),
+                    commit: None,
+                })
+                .collect::<Vec<_>>();
+            return (baselines, policy_selection.selection_description());
+        }
+    }
+
+    let baseline = baseline_ref_from_config(corpus.clone(), selection_prefix, target);
+    (vec![baseline.clone()], baseline_description(&baseline))
+}
+
+fn baseline_has_explicit_selection(baseline: &BaselineRef) -> bool {
+    baseline.snapshot_id.is_some() || baseline.branch.is_some() || baseline.commit.is_some()
+}
+
+fn resolve_workspace_policy_selection(
+    project_root: Option<&Path>,
+    policy: &SearchBaselinePolicyConfig,
+) -> Option<project_model::ResolvedWorkspaceBranchPolicy> {
+    let workspace_branch = resolve_workspace_branch(project_root);
+    resolve_workspace_branch_policy(policy, workspace_branch.as_deref())
+}
+
+fn resolve_workspace_branch(project_root: Option<&Path>) -> Option<String> {
+    project_root
+        .and_then(current_git_branch)
+        .or_else(|| resolve_env_value(&["CI_COMMIT_BRANCH", "CI_COMMIT_REF_NAME"]))
 }
 
 fn resolve_connection(connection_keys: &[&str], postgres: &SearchPostgresConfig) -> Option<String> {
@@ -481,6 +577,8 @@ mod tests {
         ProjectConfig, SearchBaselineBackend, SearchBaselineConfig, SearchBaselineTargetConfig,
         SearchConfig, SearchPostgresConfig,
     };
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn baseline_description_prefers_snapshot_id() {
@@ -508,7 +606,7 @@ mod tests {
 
     #[test]
     fn workspace_uses_sqlite_when_search_backend_is_default() {
-        let runtime = BaselineRuntime::workspace(&ProjectConfig::default());
+        let runtime = BaselineRuntime::workspace(None, &ProjectConfig::default());
 
         assert_eq!(
             runtime.configured_baseline,
@@ -523,23 +621,26 @@ mod tests {
 
     #[test]
     fn workspace_uses_postgres_config_selection() {
-        let runtime = BaselineRuntime::workspace(&ProjectConfig {
-            search: SearchConfig {
-                baseline: SearchBaselineConfig {
-                    backend: SearchBaselineBackend::Postgres,
-                    postgres: SearchPostgresConfig {
-                        url: Some("postgres://shared-search".to_owned()),
-                        schema: Some("corp_search".to_owned()),
+        let runtime = BaselineRuntime::workspace(
+            None,
+            &ProjectConfig {
+                search: SearchConfig {
+                    baseline: SearchBaselineConfig {
+                        backend: SearchBaselineBackend::Postgres,
+                        postgres: SearchPostgresConfig {
+                            url: Some("postgres://shared-search".to_owned()),
+                            schema: Some("corp_search".to_owned()),
+                        },
+                        workspace_code: SearchBaselineTargetConfig {
+                            branch: Some("main".to_owned()),
+                            ..SearchBaselineTargetConfig::default()
+                        },
+                        ..SearchBaselineConfig::default()
                     },
-                    workspace_code: SearchBaselineTargetConfig {
-                        branch: Some("main".to_owned()),
-                        ..SearchBaselineTargetConfig::default()
-                    },
-                    ..SearchBaselineConfig::default()
                 },
+                ..ProjectConfig::default()
             },
-            ..ProjectConfig::default()
-        });
+        );
 
         assert!(runtime.external_baseline.is_some());
         assert_eq!(runtime.configured_baseline.backend, "postgres");
@@ -549,19 +650,22 @@ mod tests {
 
     #[test]
     fn workspace_reports_missing_postgres_connection() {
-        let runtime = BaselineRuntime::workspace(&ProjectConfig {
-            search: SearchConfig {
-                baseline: SearchBaselineConfig {
-                    backend: SearchBaselineBackend::Postgres,
-                    workspace_code: SearchBaselineTargetConfig {
-                        branch: Some("main".to_owned()),
-                        ..SearchBaselineTargetConfig::default()
+        let runtime = BaselineRuntime::workspace(
+            None,
+            &ProjectConfig {
+                search: SearchConfig {
+                    baseline: SearchBaselineConfig {
+                        backend: SearchBaselineBackend::Postgres,
+                        workspace_code: SearchBaselineTargetConfig {
+                            branch: Some("main".to_owned()),
+                            ..SearchBaselineTargetConfig::default()
+                        },
+                        ..SearchBaselineConfig::default()
                     },
-                    ..SearchBaselineConfig::default()
                 },
+                ..ProjectConfig::default()
             },
-            ..ProjectConfig::default()
-        });
+        );
 
         assert_eq!(runtime.configured_baseline.backend, "postgres");
         assert_eq!(runtime.configured_baseline.selection, "branch main");
@@ -574,27 +678,81 @@ mod tests {
     }
 
     #[test]
-    fn project_baseline_diagnostics_returns_workspace_and_reference_summaries() {
-        let diagnostics = resolve_project_baseline_diagnostics(&ProjectConfig {
-            search: SearchConfig {
-                baseline: SearchBaselineConfig {
-                    backend: SearchBaselineBackend::Postgres,
-                    postgres: SearchPostgresConfig {
-                        url: Some("postgres://shared-search".to_owned()),
-                        schema: Some("corp_search".to_owned()),
-                    },
-                    workspace_code: SearchBaselineTargetConfig {
-                        branch: Some("main".to_owned()),
-                        ..SearchBaselineTargetConfig::default()
-                    },
-                    reference: SearchBaselineTargetConfig {
-                        snapshot_id: Some("reference:0.1.104".to_owned()),
-                        ..SearchBaselineTargetConfig::default()
+    fn workspace_policy_selection_uses_branch_chain() {
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/demo\n").unwrap();
+
+        let runtime = BaselineRuntime::workspace(
+            Some(dir.path()),
+            &ProjectConfig {
+                search: SearchConfig {
+                    baseline: SearchBaselineConfig {
+                        backend: SearchBaselineBackend::Postgres,
+                        postgres: SearchPostgresConfig {
+                            url: Some("postgres://shared-search".to_owned()),
+                            schema: Some("corp_search".to_owned()),
+                        },
+                        workspace_code: serde_json::from_value(serde_json::json!({
+                            "policy": {
+                                "publishBranches": ["vendor", "develop"],
+                                "branches": [
+                                    {
+                                        "match": "feature/*",
+                                        "selectBranch": "develop",
+                                        "fallbackBranch": "vendor"
+                                    },
+                                    {
+                                        "match": "*",
+                                        "selectBranch": "develop",
+                                        "fallbackBranch": "vendor"
+                                    }
+                                ]
+                            }
+                        }))
+                        .unwrap(),
+                        ..SearchBaselineConfig::default()
                     },
                 },
+                ..ProjectConfig::default()
             },
-            ..ProjectConfig::default()
-        });
+        );
+
+        assert!(runtime.external_baseline.is_some());
+        assert_eq!(runtime.configured_baseline.backend, "postgres");
+        assert_eq!(
+            runtime.configured_baseline.selection,
+            "workspace branch feature/demo -> branch develop -> branch vendor"
+        );
+        assert!(runtime.configured_baseline.issue.is_none());
+    }
+
+    #[test]
+    fn project_baseline_diagnostics_returns_workspace_and_reference_summaries() {
+        let diagnostics = resolve_project_baseline_diagnostics(
+            None,
+            &ProjectConfig {
+                search: SearchConfig {
+                    baseline: SearchBaselineConfig {
+                        backend: SearchBaselineBackend::Postgres,
+                        postgres: SearchPostgresConfig {
+                            url: Some("postgres://shared-search".to_owned()),
+                            schema: Some("corp_search".to_owned()),
+                        },
+                        workspace_code: SearchBaselineTargetConfig {
+                            branch: Some("main".to_owned()),
+                            ..SearchBaselineTargetConfig::default()
+                        },
+                        reference: SearchBaselineTargetConfig {
+                            snapshot_id: Some("reference:0.1.104".to_owned()),
+                            ..SearchBaselineTargetConfig::default()
+                        },
+                    },
+                },
+                ..ProjectConfig::default()
+            },
+        );
 
         assert_eq!(
             diagnostics,

@@ -60,7 +60,7 @@ impl SharedState {
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let watcher_ready = Arc::new(AtomicBool::new(false));
-        let baseline_runtime = BaselineRuntime::workspace(&project.config);
+        let baseline_runtime = BaselineRuntime::workspace(Some(&project.root), &project.config);
 
         // Spawn background thread so standalone() returns immediately.
         // MCP tools check engine readiness and return a friendly message while init is in progress.

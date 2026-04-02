@@ -2828,6 +2828,7 @@ dependencies = [
  "expect-test",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
 ]
 
