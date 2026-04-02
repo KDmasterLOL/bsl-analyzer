@@ -50,6 +50,7 @@ parking_lot.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 toml_edit = "0.22"
 
 # Logging

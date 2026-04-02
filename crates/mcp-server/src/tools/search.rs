@@ -4,6 +4,7 @@ use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineSource, External
 use bsl_search::{lexical_hits_for_resolved_view, IndexProgress, SearchEngine};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
+use serde_json::json;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
@@ -13,10 +14,12 @@ use tracing::warn;
 /// Full-text search across indexed BSL code.
 pub fn find_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
+    ensure_workspace_search_allowed(configured_baseline)?;
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
     if guard.is_none() {
@@ -55,9 +58,11 @@ pub fn find_code(
 /// Semantic search across indexed BSL code.
 pub fn search_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
+    ensure_workspace_search_allowed(configured_baseline)?;
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
     if guard.is_none() {
@@ -191,6 +196,18 @@ pub fn search_status(
             "  Status:   {}",
             configured_baseline.issue.as_deref().unwrap_or("ready")
         );
+        if let Some(support) = configured_baseline.support.as_ref() {
+            let _ = writeln!(out, "  Support:  {}", support.state.as_str());
+            let _ = writeln!(out, "  Reason:   {}", support.reason);
+            let _ = writeln!(
+                out,
+                "  Policy:   stale after {}d, expire after {}d",
+                support.stale_after_days, support.expire_after_days
+            );
+            if matches!(support.state, project_model::SearchBaselineSupportState::Expired) {
+                let _ = writeln!(out, "  Action:   update the branch from develop and restart MCP");
+            }
+        }
         let _ = writeln!(out);
     }
 
@@ -416,6 +433,37 @@ pub fn search_status(
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
+fn ensure_workspace_search_allowed(
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+) -> Result<(), McpError> {
+    let Some(configured_baseline) = configured_baseline else {
+        return Ok(());
+    };
+    let Some(support) = configured_baseline.support.as_ref() else {
+        return Ok(());
+    };
+
+    if !configured_baseline.search_is_expired() {
+        return Ok(());
+    }
+
+    Err(McpError::invalid_params(
+        format!(
+            "Shared baseline access is expired for this branch. {}. Update the branch from develop, restart MCP, and retry.",
+            support.reason
+        ),
+        Some(json!({
+            "reasonCode": "expired_branch",
+            "supportState": support.state.as_str(),
+            "workspaceBranch": support.workspace_branch,
+            "selectedBranch": support.selected_branch,
+            "snapshotAgeDays": support.snapshot_age_days,
+            "staleAfterDays": support.stale_after_days,
+            "expireAfterDays": support.expire_after_days
+        })),
+    ))
+}
+
 fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
     let mut out = String::new();
 
@@ -489,11 +537,14 @@ fn shorten_fingerprint(fingerprint: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{search_docs, search_status, ConfiguredBaselineStatus, ExternalBaselineSource};
+    use super::{
+        find_code, search_docs, search_status, ConfiguredBaselineStatus, ExternalBaselineSource,
+    };
     use bsl_search::{
         lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
         IndexedDocument, ResolvedView, SearchEngine,
     };
+    use project_model::{ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState};
     use std::fs;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
@@ -519,6 +570,7 @@ mod tests {
                 backend: "sqlite",
                 selection: "local workspace index".to_owned(),
                 issue: None,
+                support: None,
             }),
             None,
         )
@@ -553,6 +605,7 @@ mod tests {
                 backend: "postgres",
                 selection: "branch main".to_owned(),
                 issue: None,
+                support: None,
             }),
             Some(Arc::new(source)),
         )
@@ -592,6 +645,7 @@ mod tests {
                 backend: "sqlite",
                 selection: "local reference index".to_owned(),
                 issue: None,
+                support: None,
             }),
             None,
         )
@@ -659,5 +713,31 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].file_path, "A.bsl");
         assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn find_code_returns_structured_error_when_workspace_branch_is_expired() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+        let configured = ConfiguredBaselineStatus {
+            backend: "postgres",
+            selection: "workspace branch feature/demo -> branch develop -> branch vendor".to_owned(),
+            issue: None,
+            support: Some(ResolvedWorkspaceBaselineSupport {
+                state: SearchBaselineSupportState::Expired,
+                workspace_branch: Some("feature/demo".to_owned()),
+                selected_branch: Some("develop".to_owned()),
+                snapshot_age_days: 45,
+                stale_after_days: 21,
+                expire_after_days: 30,
+                reason: "workspace branch 'feature/demo' uses shared baseline branch 'develop' published 45 days ago".to_owned(),
+            }),
+        };
+
+        let error = find_code(&engine, Some(&configured), None, "Процедура", 10).unwrap_err();
+
+        assert!(error.message.contains("expired"));
+        assert!(error.message.contains("Update the branch from develop"));
     }
 }

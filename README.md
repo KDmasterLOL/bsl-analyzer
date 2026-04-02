@@ -299,6 +299,10 @@ bsl-analyzer search baseline gc-pg
 # Реальное удаление orphan-объектов
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline gc-pg --execute
+
+# Read-only анализ retention policy для snapshot-ов
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline retention-pg --source-dir ./my-project
 ```
 
 `list-pg` показывает effective состояние snapshot после применения parent lineage:
@@ -322,10 +326,11 @@ bsl-analyzer search baseline gc-pg --execute
 - `list-embeddings-pg` показывает объём stored embeddings по `model + dimension`.
 - `show-embedding-coverage-pg` показывает, сколько active semantic payload'ов уже покрыто shared embeddings.
 - `gc-pg` по умолчанию только считает orphan file objects / items / semantic rows. Реальное удаление выполняется только с `--execute`.
+- `retention-pg` применяет branch policy к опубликованным `workspace-code` snapshot-ам и показывает, что является `active-head`, `safety-head`, `within-window` или `expired-candidate`, не выполняя удаления.
 
 После установки или запуска MCP проверьте runtime-состояние через инструмент `search` с `action=status`:
 
-- в `workspace` профиле статус покажет `Configured baseline`, `Code lexical source`, `Code semantic source` и `External baseline`;
+- в `workspace` профиле статус покажет `Configured baseline`, включая `Support`, `Reason` и `Action`, если shared baseline для ветки стал `stale` или `expired`, а также `Code lexical source`, `Code semantic source` и `External baseline`;
 - в `reference` профиле статус покажет `Configured baseline`, `Docs lexical source`, `Docs semantic source`, `External baseline` и `Freshness`.
 
 Для centralized `reference` semantic search работает так:
@@ -342,6 +347,8 @@ bsl-analyzer search baseline gc-pg --execute
 - локальные изменённые файлы и удаления по-прежнему накладываются overlay-поверх этого cache;
 - cache baseline не переиндексируется заново, если snapshot не изменился;
 - shared embeddings из PostgreSQL используются как первый источник, локальный embedder остаётся fallback.
+
+Если workspace branch policy помечает shared baseline как `expired`, `find_code` и `search_code` возвращают structured error с причиной `expired_branch`, а `search(action=status)` остаётся доступным и явно требует обновить ветку из `develop`.
 
 С подключением к 1С (для выполнения запросов и кода):
 

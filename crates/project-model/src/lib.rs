@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 /// A BSL project.
@@ -414,12 +415,88 @@ pub struct SearchBaselinePolicyConfig {
 
     #[serde(default)]
     pub branches: Vec<SearchBaselineBranchPolicyRuleConfig>,
+
+    #[serde(default)]
+    pub support: SearchBaselineSupportConfig,
+
+    #[serde(default)]
+    pub retention: SearchBaselineRetentionConfig,
 }
 
 impl SearchBaselinePolicyConfig {
     pub fn is_configured(&self) -> bool {
         !self.publish_branches.is_empty() || !self.branches.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchBaselineSupportConfig {
+    #[serde(default = "default_workspace_stale_after_days")]
+    pub stale_after_days: u32,
+
+    #[serde(default = "default_workspace_expire_after_days")]
+    pub expire_after_days: u32,
+}
+
+impl Default for SearchBaselineSupportConfig {
+    fn default() -> Self {
+        Self {
+            stale_after_days: default_workspace_stale_after_days(),
+            expire_after_days: default_workspace_expire_after_days(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchBaselineRetentionConfig {
+    #[serde(default = "default_develop_retention_days")]
+    pub develop_retention_days: u32,
+
+    #[serde(default = "default_vendor_keep_heads")]
+    pub vendor_keep_heads: usize,
+
+    #[serde(default = "default_min_snapshots_per_branch")]
+    pub min_snapshots_per_branch: usize,
+}
+
+impl Default for SearchBaselineRetentionConfig {
+    fn default() -> Self {
+        Self {
+            develop_retention_days: default_develop_retention_days(),
+            vendor_keep_heads: default_vendor_keep_heads(),
+            min_snapshots_per_branch: default_min_snapshots_per_branch(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchBaselineSupportState {
+    Supported,
+    Stale,
+    Expired,
+}
+
+impl SearchBaselineSupportState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Stale => "stale",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkspaceBaselineSupport {
+    pub state: SearchBaselineSupportState,
+    pub workspace_branch: Option<String>,
+    pub selected_branch: Option<String>,
+    pub snapshot_age_days: u32,
+    pub stale_after_days: u32,
+    pub expire_after_days: u32,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -522,6 +599,108 @@ pub fn current_git_branch(start_dir: &Path) -> Option<String> {
     ref_path.strip_prefix("refs/heads/").map(ToOwned::to_owned)
 }
 
+pub fn parse_timestamp_utc(value: &str) -> Option<DateTime<Utc>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    DateTime::parse_from_rfc3339(value)
+        .or_else(|_| DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z"))
+        .or_else(|_| DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%:z"))
+        .map(|value| value.with_timezone(&Utc))
+        .ok()
+}
+
+pub fn evaluate_workspace_baseline_support_now(
+    policy: &SearchBaselinePolicyConfig,
+    workspace_branch: Option<&str>,
+    selected_branch: Option<&str>,
+    snapshot_created_at: Option<DateTime<Utc>>,
+) -> Option<ResolvedWorkspaceBaselineSupport> {
+    evaluate_workspace_baseline_support(
+        policy,
+        workspace_branch,
+        selected_branch,
+        snapshot_created_at,
+        Utc::now(),
+    )
+}
+
+pub fn evaluate_workspace_baseline_support(
+    policy: &SearchBaselinePolicyConfig,
+    workspace_branch: Option<&str>,
+    selected_branch: Option<&str>,
+    snapshot_created_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<ResolvedWorkspaceBaselineSupport> {
+    if !policy.is_configured() {
+        return None;
+    }
+
+    let snapshot_created_at = snapshot_created_at?;
+    let selected_branch =
+        selected_branch.map(str::trim).filter(|branch| !branch.is_empty()).map(ToOwned::to_owned);
+    let workspace_branch =
+        workspace_branch.map(str::trim).filter(|branch| !branch.is_empty()).map(ToOwned::to_owned);
+
+    let stale_after_days = policy.support.stale_after_days.min(policy.support.expire_after_days);
+    let expire_after_days = policy.support.expire_after_days.max(stale_after_days);
+    let age_days = now.signed_duration_since(snapshot_created_at).num_days().max(0) as u32;
+    let state = if age_days >= expire_after_days {
+        SearchBaselineSupportState::Expired
+    } else if age_days >= stale_after_days {
+        SearchBaselineSupportState::Stale
+    } else {
+        SearchBaselineSupportState::Supported
+    };
+
+    let reason = match (workspace_branch.as_deref(), selected_branch.as_deref()) {
+        (Some(workspace_branch), Some(selected_branch)) if workspace_branch != selected_branch => {
+            format!(
+                "workspace branch '{workspace_branch}' uses shared baseline branch '{selected_branch}' published {age_days} days ago"
+            )
+        }
+        (Some(workspace_branch), _) => {
+            format!("workspace branch '{workspace_branch}' uses a shared baseline published {age_days} days ago")
+        }
+        (None, Some(selected_branch)) => {
+            format!("shared baseline branch '{selected_branch}' was published {age_days} days ago")
+        }
+        (None, None) => format!("shared baseline was published {age_days} days ago"),
+    };
+
+    Some(ResolvedWorkspaceBaselineSupport {
+        state,
+        workspace_branch,
+        selected_branch,
+        snapshot_age_days: age_days,
+        stale_after_days,
+        expire_after_days,
+        reason,
+    })
+}
+
+fn default_workspace_stale_after_days() -> u32 {
+    21
+}
+
+fn default_workspace_expire_after_days() -> u32 {
+    30
+}
+
+fn default_develop_retention_days() -> u32 {
+    30
+}
+
+fn default_vendor_keep_heads() -> usize {
+    2
+}
+
+fn default_min_snapshots_per_branch() -> usize {
+    1
+}
+
 fn discover_git_dir(start_dir: &Path) -> Option<PathBuf> {
     for candidate in start_dir.ancestors() {
         let dot_git = candidate.join(".git");
@@ -544,10 +723,12 @@ fn discover_git_dir(start_dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        branch_pattern_matches, current_git_branch, is_publish_branch_allowed,
-        resolve_workspace_branch_policy, ProjectConfig, SearchBaselineBackend,
-        SearchBaselinePolicyConfig,
+        branch_pattern_matches, current_git_branch, evaluate_workspace_baseline_support,
+        is_publish_branch_allowed, parse_timestamp_utc, resolve_workspace_branch_policy,
+        ProjectConfig, SearchBaselineBackend, SearchBaselinePolicyConfig,
+        SearchBaselineSupportState,
     };
+    use chrono::{Duration, TimeZone, Utc};
     use std::fs;
     use tempfile::tempdir;
 
@@ -636,6 +817,68 @@ mod tests {
         assert_eq!(policy.branches[1].pattern, "feature/*");
         assert_eq!(policy.branches[1].select_branch, "develop");
         assert_eq!(policy.branches[1].fallback_branch.as_deref(), Some("vendor"));
+        assert_eq!(policy.support.stale_after_days, 21);
+        assert_eq!(policy.support.expire_after_days, 30);
+        assert_eq!(policy.retention.develop_retention_days, 30);
+        assert_eq!(policy.retention.vendor_keep_heads, 2);
+    }
+
+    #[test]
+    fn parse_timestamp_supports_postgres_text_format() {
+        let parsed = parse_timestamp_utc("2026-04-02 09:01:53.271613+00:00").unwrap();
+
+        assert_eq!(
+            parsed,
+            Utc.with_ymd_and_hms(2026, 4, 2, 9, 1, 53).unwrap() + Duration::microseconds(271613)
+        );
+    }
+
+    #[test]
+    fn workspace_baseline_support_becomes_stale_and_expired_by_age() {
+        let policy: SearchBaselinePolicyConfig = serde_json::from_value(serde_json::json!({
+            "publishBranches": ["vendor", "develop"],
+            "branches": [{ "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }],
+            "support": { "staleAfterDays": 10, "expireAfterDays": 20 }
+        }))
+        .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 4, 2, 12, 0, 0).unwrap();
+
+        let stale = evaluate_workspace_baseline_support(
+            &policy,
+            Some("feature/demo"),
+            Some("develop"),
+            Some(now - Duration::days(12)),
+            now,
+        )
+        .unwrap();
+        assert_eq!(stale.state, SearchBaselineSupportState::Stale);
+        assert!(stale.reason.contains("feature/demo"));
+        assert!(stale.reason.contains("develop"));
+
+        let expired = evaluate_workspace_baseline_support(
+            &policy,
+            Some("feature/demo"),
+            Some("develop"),
+            Some(now - Duration::days(25)),
+            now,
+        )
+        .unwrap();
+        assert_eq!(expired.state, SearchBaselineSupportState::Expired);
+        assert_eq!(expired.snapshot_age_days, 25);
+    }
+
+    #[test]
+    fn workspace_baseline_support_is_none_when_policy_is_not_configured() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 2, 12, 0, 0).unwrap();
+
+        assert!(evaluate_workspace_baseline_support(
+            &SearchBaselinePolicyConfig::default(),
+            Some("feature/demo"),
+            Some("develop"),
+            Some(now - Duration::days(5)),
+            now,
+        )
+        .is_none());
     }
 
     #[test]
@@ -658,6 +901,7 @@ mod tests {
                 { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
             ]))
             .unwrap(),
+            ..SearchBaselinePolicyConfig::default()
         };
 
         let resolved = resolve_workspace_branch_policy(&policy, Some("feature/test")).unwrap();
@@ -678,6 +922,7 @@ mod tests {
                 { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
             ]))
             .unwrap(),
+            ..SearchBaselinePolicyConfig::default()
         };
 
         let resolved = resolve_workspace_branch_policy(&policy, Some("release/1.0")).unwrap();
@@ -690,6 +935,7 @@ mod tests {
         let policy = SearchBaselinePolicyConfig {
             publish_branches: vec!["vendor".to_owned(), "develop".to_owned()],
             branches: vec![],
+            ..SearchBaselinePolicyConfig::default()
         };
 
         assert!(is_publish_branch_allowed(&policy, "vendor"));

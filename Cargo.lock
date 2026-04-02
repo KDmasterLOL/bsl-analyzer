@@ -262,6 +262,7 @@ dependencies = [
  "bsl-metadata",
  "bsl-platform",
  "bsl-search",
+ "chrono",
  "clap",
  "crossbeam-channel",
  "expect-test",
@@ -2333,6 +2334,7 @@ dependencies = [
  "bsl-metadata",
  "bsl-platform",
  "bsl-search",
+ "chrono",
  "dirs",
  "expect-test",
  "naparnik",
@@ -2825,6 +2827,7 @@ version = "0.1.104"
 dependencies = [
  "anyhow",
  "bsl-metadata",
+ "chrono",
  "expect-test",
  "serde",
  "serde_json",

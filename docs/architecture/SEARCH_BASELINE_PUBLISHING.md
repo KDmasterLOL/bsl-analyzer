@@ -268,6 +268,9 @@ bsl-analyzer-app search baseline gc-pg
 
 # Apply garbage collection
 bsl-analyzer-app search baseline gc-pg --execute
+
+# Analyze retention policy without deleting snapshots
+bsl-analyzer-app search baseline retention-pg --source-dir .
 ```
 
 `list-pg` is intended for operators to verify:
@@ -290,11 +293,15 @@ Additional operator commands provide storage-level inspection:
 - `gc-pg` is dry-run by default and reports orphan shared rows before deletion;
 - `gc-pg --execute` deletes orphan `file_objects`, orphan `file_object_items`,
   and orphan rows from `semantic_embeddings`.
+- `retention-pg` applies workspace branch policy to published snapshots and reports
+  `active-head`, `safety-head`, `within-window`, and `expired-candidate` states,
+  plus protections such as minimum preservation and ancestry descendants.
 
 MCP `search(action=status)` is the runtime verification step:
 
-- `workspace` should show `Configured baseline`, `Code lexical source`,
-  `Code semantic source`, and `External baseline`;
+- `workspace` should show `Configured baseline`, including support state and
+  remediation when policy marks the branch as `stale` or `expired`, plus
+  `Code lexical source`, `Code semantic source`, and `External baseline`;
 - `reference` should show `Configured baseline`, `Docs lexical source`, `Docs semantic source`,
   `External baseline`, and `Freshness`.
 
@@ -312,6 +319,11 @@ The runtime model is also hybrid:
 - cache refresh is skipped when the normalized chunk fingerprint of one file is
   unchanged;
 - local workspace changes are still embedded only for the overlay layer.
+
+When workspace branch support is `expired`, MCP search tools no longer serve
+workspace search results. `find_code` and `search_code` return a structured
+error with reason code `expired_branch`, while `search(action=status)` remains
+available to explain the remediation path.
 
 This keeps PostgreSQL as the shared published baseline for team-visible code
 while preserving immediate local relevance for the current checkout.

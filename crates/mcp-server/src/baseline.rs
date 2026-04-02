@@ -5,9 +5,10 @@ use bsl_search::{
     SnapshotCatalog, SnapshotContentStore,
 };
 use project_model::{
-    current_git_branch, resolve_workspace_branch_policy, ProjectConfig, SearchBaselineBackend,
-    SearchBaselineConfig, SearchBaselinePolicyConfig, SearchBaselineTargetConfig,
-    SearchPostgresConfig,
+    current_git_branch, evaluate_workspace_baseline_support_now, parse_timestamp_utc,
+    resolve_workspace_branch_policy, ProjectConfig, ResolvedWorkspaceBaselineSupport,
+    SearchBaselineBackend, SearchBaselineConfig, SearchBaselinePolicyConfig,
+    SearchBaselineSupportState, SearchBaselineTargetConfig, SearchPostgresConfig,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -91,6 +92,7 @@ impl BaselineRuntime {
                     backend: "sqlite",
                     selection: local_baseline_description(&corpus),
                     issue: None,
+                    support: None,
                 },
                 external_baseline: None,
             };
@@ -125,6 +127,7 @@ impl BaselineRuntime {
                         "connection string is not configured; set search.baseline.postgres.url or {}",
                         connection_keys.join(", ")
                     )),
+                    support: None,
                 },
                 external_baseline: None,
             };
@@ -137,12 +140,18 @@ impl BaselineRuntime {
 
         match ExternalBaselineSource::new_with_candidates(config, baselines, selection.clone()) {
             Ok(source) => {
+                let support = if matches!(corpus, CorpusId::WorkspaceCode) {
+                    resolve_workspace_support_status(project_root, &baseline_target.policy, &source)
+                } else {
+                    None
+                };
                 tracing::info!(corpus = %corpus, "external baseline source configured");
                 Self {
                     configured_baseline: ConfiguredBaselineStatus {
                         backend: "postgres",
                         selection,
                         issue: None,
+                        support,
                     },
                     external_baseline: Some(Arc::new(source)),
                 }
@@ -154,6 +163,7 @@ impl BaselineRuntime {
                         backend: "postgres",
                         selection,
                         issue: Some(error.to_string()),
+                        support: None,
                     },
                     external_baseline: None,
                 }
@@ -376,6 +386,15 @@ pub(crate) struct ConfiguredBaselineStatus {
     pub backend: &'static str,
     pub selection: String,
     pub issue: Option<String>,
+    pub support: Option<ResolvedWorkspaceBaselineSupport>,
+}
+
+impl ConfiguredBaselineStatus {
+    pub fn search_is_expired(&self) -> bool {
+        self.support
+            .as_ref()
+            .is_some_and(|support| matches!(support.state, SearchBaselineSupportState::Expired))
+    }
 }
 
 pub(crate) fn baseline_description(baseline: &BaselineRef) -> String {
@@ -474,6 +493,30 @@ fn resolve_workspace_branch(project_root: Option<&Path>) -> Option<String> {
     project_root
         .and_then(current_git_branch)
         .or_else(|| resolve_env_value(&["CI_COMMIT_BRANCH", "CI_COMMIT_REF_NAME"]))
+}
+
+fn resolve_workspace_support_status(
+    project_root: Option<&Path>,
+    policy: &SearchBaselinePolicyConfig,
+    source: &ExternalBaselineSource,
+) -> Option<ResolvedWorkspaceBaselineSupport> {
+    if !policy.is_configured() {
+        return None;
+    }
+
+    let workspace_branch = resolve_workspace_branch(project_root);
+    let (resolved_baseline, snapshot) = source.resolve_snapshot().ok().flatten()?;
+    let details = source.adapter.snapshot_details(&snapshot.id.0).ok().flatten()?;
+    let snapshot_created_at = parse_timestamp_utc(&details.snapshot.created_at);
+    let selected_branch =
+        resolved_baseline.branch.as_deref().or(details.snapshot.branch.as_deref());
+
+    evaluate_workspace_baseline_support_now(
+        policy,
+        workspace_branch.as_deref(),
+        selected_branch,
+        snapshot_created_at,
+    )
 }
 
 fn resolve_connection(connection_keys: &[&str], postgres: &SearchPostgresConfig) -> Option<String> {
@@ -614,6 +657,7 @@ mod tests {
                 backend: "sqlite",
                 selection: "local workspace index".to_owned(),
                 issue: None,
+                support: None,
             }
         );
         assert!(runtime.external_baseline.is_none());
