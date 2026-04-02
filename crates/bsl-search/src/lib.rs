@@ -52,8 +52,7 @@ pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
 pub use index::{SearchResult, VectorIndex};
 pub use local_baseline::LocalStoreBaselineAdapter;
 pub use merge::{
-    build_merge_context, merge_context_for_collection, merge_lexical, merge_semantic,
-    merged_hit_to_search_hit, search_hit_to_lexical, search_hit_to_semantic, HitSource,
+    build_merge_context, merge_context_for_collection, merge_lexical, merge_semantic, HitSource,
     MergeContext, MergedHit,
 };
 pub use ports::{

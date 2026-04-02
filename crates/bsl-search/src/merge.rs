@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use crate::domain::{LexicalHit, OverlayChange, SearchOverlay, SemanticHit};
-use crate::engine::SearchHit;
 
 /// Source of a merged search hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,47 +57,6 @@ pub fn build_merge_context(overlay: &SearchOverlay) -> MergeContext {
 pub fn merge_context_for_collection(paths: &HashSet<String>, collection: &str) -> MergeContext {
     MergeContext {
         hidden_paths: paths.iter().map(|p| (collection.to_owned(), p.clone())).collect(),
-    }
-}
-
-/// Convert a local engine [`SearchHit`] to a [`LexicalHit`] for merge input.
-pub fn search_hit_to_lexical(hit: &SearchHit) -> LexicalHit {
-    LexicalHit {
-        collection: hit.collection.clone(),
-        path: hit.file_path.clone(),
-        symbol_name: hit.symbol_name.clone(),
-        kind: hit.kind.clone(),
-        line_start: hit.line_start,
-        line_end: hit.line_end,
-        text: hit.text.clone(),
-        rank: hit.score,
-    }
-}
-
-/// Convert a local engine [`SearchHit`] to a [`SemanticHit`] for merge input.
-pub fn search_hit_to_semantic(hit: &SearchHit) -> SemanticHit {
-    SemanticHit {
-        collection: hit.collection.clone(),
-        path: hit.file_path.clone(),
-        symbol_name: hit.symbol_name.clone(),
-        kind: hit.kind.clone(),
-        line_start: hit.line_start,
-        line_end: hit.line_end,
-        score: hit.score,
-    }
-}
-
-/// Convert a [`MergedHit`] to a [`SearchHit`] for output formatting.
-pub fn merged_hit_to_search_hit(hit: MergedHit) -> SearchHit {
-    SearchHit {
-        collection: hit.collection,
-        file_path: hit.path,
-        symbol_name: hit.symbol_name,
-        kind: hit.kind,
-        text: hit.text.unwrap_or_default(),
-        line_start: hit.line_start,
-        line_end: hit.line_end,
-        score: hit.score,
     }
 }
 

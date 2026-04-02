@@ -216,8 +216,33 @@ impl ExternalBaselineSource {
         Ok(Self { adapter, baselines, selection })
     }
 
-    pub(crate) fn adapter(&self) -> &ExternalBaselineAdapter {
-        &self.adapter
+    pub(crate) fn lexical_search(
+        &self,
+        snapshot_id: &str,
+        query: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<bsl_search::LexicalHit>, bsl_search::SearchError> {
+        self.adapter.lexical_search_baseline(snapshot_id, query, collection, limit)
+    }
+
+    pub(crate) fn semantic_search(
+        &self,
+        snapshot_id: &str,
+        query_embedding: &[f32],
+        model_id: &str,
+        dimension: usize,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<bsl_search::SemanticHit>, bsl_search::SearchError> {
+        self.adapter.semantic_search_baseline(
+            snapshot_id,
+            query_embedding,
+            model_id,
+            dimension,
+            collection,
+            limit,
+        )
     }
 
     pub(crate) fn probe_status(&self) -> ExternalBaselineStatus {

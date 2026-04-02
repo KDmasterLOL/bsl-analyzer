@@ -112,6 +112,63 @@ pub struct SearchHit {
     pub score: f32,
 }
 
+impl SearchHit {
+    /// Convert from a [`LexicalHit`] (baseline domain type).
+    pub fn from_lexical(hit: &crate::domain::LexicalHit) -> Self {
+        Self {
+            collection: hit.collection.clone(),
+            file_path: hit.path.clone(),
+            symbol_name: hit.symbol_name.clone(),
+            kind: hit.kind.clone(),
+            text: hit.text.clone(),
+            line_start: hit.line_start,
+            line_end: hit.line_end,
+            score: hit.rank,
+        }
+    }
+
+    /// Convert to a [`LexicalHit`] for merge input.
+    pub fn to_lexical(&self) -> crate::domain::LexicalHit {
+        crate::domain::LexicalHit {
+            collection: self.collection.clone(),
+            path: self.file_path.clone(),
+            symbol_name: self.symbol_name.clone(),
+            kind: self.kind.clone(),
+            line_start: self.line_start,
+            line_end: self.line_end,
+            text: self.text.clone(),
+            rank: self.score,
+        }
+    }
+
+    /// Convert to a [`SemanticHit`] for merge input.
+    pub fn to_semantic(&self) -> crate::domain::SemanticHit {
+        crate::domain::SemanticHit {
+            collection: self.collection.clone(),
+            path: self.file_path.clone(),
+            symbol_name: self.symbol_name.clone(),
+            kind: self.kind.clone(),
+            line_start: self.line_start,
+            line_end: self.line_end,
+            score: self.score,
+        }
+    }
+
+    /// Convert from a [`MergedHit`] (merge result).
+    pub fn from_merged(hit: crate::merge::MergedHit) -> Self {
+        Self {
+            collection: hit.collection,
+            file_path: hit.path,
+            symbol_name: hit.symbol_name,
+            kind: hit.kind,
+            text: hit.text.unwrap_or_default(),
+            line_start: hit.line_start,
+            line_end: hit.line_end,
+            score: hit.score,
+        }
+    }
+}
+
 /// The search engine: indexes BSL files and documents, performs search.
 pub struct SearchEngine {
     store: Store,

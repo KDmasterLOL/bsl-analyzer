@@ -4,8 +4,7 @@ use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineSource, External
 use crate::state::SemanticRuntimeStatus;
 use bsl_search::{
     lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical, merge_semantic,
-    merged_hit_to_search_hit, search_hit_to_lexical, search_hit_to_semantic, IndexProgress,
-    LexicalHit, SearchEngine, SearchHit, SemanticHit,
+    IndexProgress, LexicalHit, SearchEngine, SearchHit, SemanticHit,
 };
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -177,18 +176,14 @@ fn try_direct_lexical_code(
             return DirectResult::Unavailable;
         }
     };
-    let baseline_hits = match source.adapter().lexical_search_baseline(
-        snapshot.id.0.as_str(),
-        query,
-        Some("code"),
-        limit * 2,
-    ) {
-        Ok(hits) => hits,
-        Err(e) => {
-            warn!("direct lexical: serving query failed: {e}");
-            return DirectResult::Unavailable;
-        }
-    };
+    let baseline_hits =
+        match source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), limit * 2) {
+            Ok(hits) => hits,
+            Err(e) => {
+                warn!("direct lexical: serving query failed: {e}");
+                return DirectResult::Unavailable;
+            }
+        };
     let (overlay_hits, hidden_paths) = match engine.workspace_overlay_lexical_hits(query, limit) {
         Ok(r) => r,
         Err(e) => {
@@ -197,9 +192,9 @@ fn try_direct_lexical_code(
         }
     };
     let context = merge_context_for_collection(&hidden_paths, "code");
-    let overlay_lexical: Vec<LexicalHit> = overlay_hits.iter().map(search_hit_to_lexical).collect();
+    let overlay_lexical: Vec<LexicalHit> = overlay_hits.iter().map(SearchHit::to_lexical).collect();
     let merged = merge_lexical(&baseline_hits, &overlay_lexical, &context, limit);
-    DirectResult::Found(merged.into_iter().map(merged_hit_to_search_hit).collect())
+    DirectResult::Found(merged.into_iter().map(SearchHit::from_merged).collect())
 }
 
 /// Try direct semantic search against the external baseline serving table,
@@ -231,7 +226,7 @@ fn try_direct_semantic_code(
     let Some(dim) = engine.embedding_dimension() else {
         return DirectResult::Unavailable;
     };
-    let baseline_hits = match source.adapter().semantic_search_baseline(
+    let baseline_hits = match source.semantic_search(
         snapshot.id.0.as_str(),
         &query_embedding,
         model_id,
@@ -254,9 +249,9 @@ fn try_direct_semantic_code(
     };
     let context = merge_context_for_collection(&hidden_paths, "code");
     let overlay_semantic: Vec<SemanticHit> =
-        overlay_hits.iter().map(search_hit_to_semantic).collect();
+        overlay_hits.iter().map(SearchHit::to_semantic).collect();
     let merged = merge_semantic(&baseline_hits, &overlay_semantic, &context, limit);
-    DirectResult::Found(merged.into_iter().map(merged_hit_to_search_hit).collect())
+    DirectResult::Found(merged.into_iter().map(SearchHit::from_merged).collect())
 }
 
 /// Full-text search across platform documentation (types, methods, global functions).
@@ -278,12 +273,8 @@ pub fn find_docs(
         match source.resolve_snapshot() {
             Ok(Some((_, snapshot))) => {
                 // Try direct lexical search via the serving table first.
-                match source.adapter().lexical_search_baseline(
-                    snapshot.id.0.as_str(),
-                    query,
-                    Some("platform"),
-                    limit,
-                ) {
+                match source.lexical_search(snapshot.id.0.as_str(), query, Some("platform"), limit)
+                {
                     Ok(hits) if !hits.is_empty() => {
                         return Ok(CallToolResult::success(vec![Content::text(
                             format_lexical_doc_hits(&hits),
@@ -403,7 +394,7 @@ pub fn search_docs(
                     )
                 })?;
 
-                match source.adapter().semantic_search_baseline(
+                match source.semantic_search(
                     snapshot.id.0.as_str(),
                     &query_embedding,
                     model_id,
