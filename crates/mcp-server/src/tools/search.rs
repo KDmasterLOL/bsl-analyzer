@@ -2,7 +2,9 @@
 
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineSource, ExternalBaselineState};
 use crate::state::SemanticRuntimeStatus;
-use bsl_search::{lexical_hits_for_resolved_view, IndexProgress, SearchEngine};
+use bsl_search::{
+    lexical_hits_for_resolved_view, IndexProgress, LexicalHit, SearchEngine, SemanticHit,
+};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
 use serde_json::json;
@@ -114,6 +116,11 @@ pub fn search_code(
 }
 
 /// Full-text search across platform documentation (types, methods, global functions).
+///
+/// Resolution order when an external baseline is available:
+/// 1. Direct lexical search via the serving table (`serving_lexical`).
+/// 2. Fallback to loading all documents from the snapshot (old snapshots without serving tables).
+/// 3. Fallback to the local SQLite FTS index.
 pub fn find_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     external_baseline: Option<Arc<ExternalBaselineSource>>,
@@ -122,41 +129,76 @@ pub fn find_docs(
 ) -> Result<CallToolResult, McpError> {
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    let hits = if let Some(source) = external_baseline {
-        match source.resolve_reference_view() {
-            Ok(Some(view)) => lexical_hits_for_resolved_view(&view, query, limit, Some("platform")),
-            Ok(None) => {
-                let Some(engine) = guard.as_ref() else {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "Search index is being built, please try again in a moment.",
-                    )]));
-                };
-                engine
-                    .text_search(query, limit, Some("platform"))
-                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+
+    if let Some(source) = external_baseline {
+        match source.resolve_snapshot() {
+            Ok(Some((_, snapshot))) => {
+                // Try direct lexical search via the serving table first.
+                match source.adapter().lexical_search_baseline(
+                    snapshot.id.0.as_str(),
+                    query,
+                    Some("platform"),
+                    limit,
+                ) {
+                    Ok(hits) if !hits.is_empty() => {
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            format_lexical_doc_hits(&hits),
+                        )]));
+                    }
+                    Ok(_) => {
+                        // Empty result — serving table may be absent for this snapshot.
+                    }
+                    Err(error) => {
+                        warn!(
+                            snapshot_id = snapshot.id.0.as_str(),
+                            %error,
+                            "direct lexical search failed for external reference baseline, falling back",
+                        );
+                    }
+                }
+
+                // Fallback: load all documents from the snapshot and search in memory.
+                match source.resolve_reference_view() {
+                    Ok(Some(view)) => {
+                        let hits =
+                            lexical_hits_for_resolved_view(&view, query, limit, Some("platform"));
+                        if !hits.is_empty() {
+                            return Ok(CallToolResult::success(vec![Content::text(
+                                format_doc_hits(&hits),
+                            )]));
+                        }
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            "No results found.",
+                        )]));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(
+                            %error,
+                            "failed to resolve external reference baseline view for lexical search",
+                        );
+                    }
+                }
             }
+            Ok(None) => {}
             Err(error) => {
-                warn!("failed to resolve external reference baseline view for lexical search: {error}");
-                let Some(engine) = guard.as_ref() else {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        "Search index is being built, please try again in a moment.",
-                    )]));
-                };
-                engine
-                    .text_search(query, limit, Some("platform"))
-                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+                warn!(
+                    %error,
+                    "failed to resolve external reference baseline snapshot for lexical search",
+                );
             }
         }
-    } else {
-        let Some(engine) = guard.as_ref() else {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "Search index is being built, please try again in a moment.",
-            )]));
-        };
-        engine
-            .text_search(query, limit, Some("platform"))
-            .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+    }
+
+    // Final fallback: local SQLite FTS.
+    let Some(engine) = guard.as_ref() else {
+        return Ok(CallToolResult::success(vec![Content::text(
+            "Search index is being built, please try again in a moment.",
+        )]));
     };
+    let hits = engine
+        .text_search(query, limit, Some("platform"))
+        .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
 
     if hits.is_empty() {
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
@@ -166,9 +208,13 @@ pub fn find_docs(
 }
 
 /// Semantic search across platform documentation.
+///
+/// Resolution order when an external baseline is available:
+/// 1. Direct semantic search via the serving table (`serving_semantic` + pgvector).
+/// 2. Fallback to the local SQLite semantic index.
 pub fn search_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
-    _external_baseline: Option<Arc<ExternalBaselineSource>>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -189,6 +235,55 @@ pub fn search_docs(
         ));
     }
 
+    // Try direct semantic search against the external baseline serving table.
+    if let Some(source) = external_baseline {
+        match source.resolve_snapshot() {
+            Ok(Some((_, snapshot))) => {
+                let query_embedding = engine
+                    .embed_query(query)
+                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+                let model_id = engine.embedding_model().ok_or_else(|| {
+                    McpError::internal_error(
+                        "search error: semantic model id is unavailable".to_owned(),
+                        None,
+                    )
+                })?;
+
+                match source.adapter().semantic_search_baseline(
+                    snapshot.id.0.as_str(),
+                    &query_embedding,
+                    model_id,
+                    Some("platform"),
+                    limit,
+                ) {
+                    Ok(hits) if !hits.is_empty() => {
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            format_semantic_doc_hits(&hits),
+                        )]));
+                    }
+                    Ok(_) => {
+                        // Empty result — serving table may be absent for this snapshot.
+                    }
+                    Err(error) => {
+                        warn!(
+                            snapshot_id = snapshot.id.0.as_str(),
+                            %error,
+                            "direct semantic search failed for external reference baseline, falling back",
+                        );
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    "failed to resolve external reference baseline snapshot for semantic search",
+                );
+            }
+        }
+    }
+
+    // Fallback: local SQLite semantic index.
     let hits = engine
         .search(query, limit, Some("platform"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
@@ -572,6 +667,58 @@ fn format_doc_hits(hits: &[bsl_search::SearchHit]) -> String {
         if total_lines > 5 {
             let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
         }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn format_lexical_doc_hits(hits: &[LexicalHit]) -> String {
+    let mut out = String::new();
+
+    for (i, hit) in hits.iter().enumerate() {
+        let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+        let _ = writeln!(
+            out,
+            "#{} [{:.3}] {}:{}-{} :: {} ({})",
+            i + 1,
+            hit.rank,
+            hit.path,
+            hit.line_start + 1,
+            hit.line_end,
+            name,
+            hit.kind,
+        );
+
+        for line in hit.text.lines().take(5) {
+            let _ = writeln!(out, "  │ {line}");
+        }
+        let total_lines = hit.text.lines().count();
+        if total_lines > 5 {
+            let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn format_semantic_doc_hits(hits: &[SemanticHit]) -> String {
+    let mut out = String::new();
+
+    for (i, hit) in hits.iter().enumerate() {
+        let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+        let _ = writeln!(
+            out,
+            "#{} [{:.3}] {}:{}-{} :: {} ({})",
+            i + 1,
+            hit.score,
+            hit.path,
+            hit.line_start + 1,
+            hit.line_end,
+            name,
+            hit.kind,
+        );
         out.push('\n');
     }
 

@@ -216,6 +216,10 @@ impl ExternalBaselineSource {
         Ok(Self { adapter, baselines, selection })
     }
 
+    pub(crate) fn adapter(&self) -> &ExternalBaselineAdapter {
+        &self.adapter
+    }
+
     pub(crate) fn probe_status(&self) -> ExternalBaselineStatus {
         let backend = match self.adapter.config().backend {
             ExternalBaselineBackend::Postgres => "postgres",
@@ -353,7 +357,7 @@ impl ExternalBaselineSource {
         Some(fingerprint_documents(&platform_reference_documents()))
     }
 
-    fn resolve_snapshot(
+    pub(crate) fn resolve_snapshot(
         &self,
     ) -> Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError> {
         for baseline in &self.baselines {

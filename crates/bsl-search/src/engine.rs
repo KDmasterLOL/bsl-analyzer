@@ -589,6 +589,19 @@ impl SearchEngine {
         self.embedder.as_ref().map(Embedder::dim)
     }
 
+    /// Generate an embedding vector for a single query string.
+    ///
+    /// Returns an error if the embedder is not configured.
+    pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, SearchError> {
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            SearchError::Index(
+                "semantic search not available: configure EMBEDDING_URL to enable embeddings"
+                    .to_owned(),
+            )
+        })?;
+        embedder.embed(query)
+    }
+
     /// Attach a workspace source root for building a local overlay view.
     pub fn set_workspace_root(&mut self, workspace_root: impl Into<std::path::PathBuf>) {
         self.workspace_root = Some(workspace_root.into());
