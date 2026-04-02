@@ -887,6 +887,7 @@ fn run_search_baseline_sync_pg(
         branch.as_deref(),
         &snapshot.id.0,
         args.parent_snapshot_id.as_deref(),
+        Some(&project.config.search.baseline.workspace_code.policy),
     )? {
         snapshot = snapshot.with_parent(parent_snapshot_id);
     }
@@ -906,6 +907,7 @@ fn run_search_baseline_sync_pg(
 
     println!("Published search baseline to PostgreSQL.");
     println!("  Corpus:        {}", corpus.as_str());
+    println!("  Mode:          {}", if snapshot.parent_id.is_some() { "delta" } else { "root" });
     println!("  Snapshot:      {}", snapshot.id.0);
     println!("  Schema:        {}", schema_label);
     println!(
@@ -917,6 +919,7 @@ fn run_search_baseline_sync_pg(
     println!("  Indexed files: {}", indexed_files);
     println!("  Reused files:  {}", publish_stats.reused_files);
     println!("  Written files: {}", publish_stats.written_files);
+    println!("  Deleted files: {}", publish_stats.deleted_files);
     println!("  Files:         {}", published_files);
     println!("  Reused chunks: {}", publish_stats.reused_documents);
     println!("  Written chunks: {}", publish_stats.written_documents);
@@ -1181,6 +1184,7 @@ fn resolve_parent_snapshot_id(
     branch: Option<&str>,
     current_snapshot_id: &str,
     explicit_parent_snapshot_id: Option<&str>,
+    workspace_policy: Option<&project_model::SearchBaselinePolicyConfig>,
 ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
     if let Some(parent_snapshot_id) =
         explicit_parent_snapshot_id.map(str::trim).filter(|value| !value.is_empty())
@@ -1188,8 +1192,49 @@ fn resolve_parent_snapshot_id(
         return Ok(Some(parent_snapshot_id.to_owned()));
     }
 
+    let mut snapshot_groups = Vec::new();
+    if let Some(branch) = branch.map(str::trim).filter(|value| !value.is_empty()) {
+        let mut branch_candidates = vec![branch.to_owned()];
+        if matches!(corpus, bsl_search::CorpusId::WorkspaceCode)
+            && workspace_policy
+                .is_some_and(project_model::SearchBaselinePolicyConfig::is_configured)
+        {
+            if let Some(policy) = workspace_policy {
+                if let Some(selection) =
+                    project_model::resolve_workspace_branch_policy(policy, Some(branch))
+                {
+                    for candidate in selection.candidate_branches() {
+                        if branch_candidates.iter().all(|existing| existing != &candidate) {
+                            branch_candidates.push(candidate);
+                        }
+                    }
+                }
+            }
+        }
+
+        for branch_candidate in branch_candidates {
+            snapshot_groups.push(adapter.list_snapshots(
+                Some(corpus.as_str()),
+                Some(branch_candidate.as_str()),
+                None,
+                2,
+            )?);
+        }
+
+        return Ok(select_parent_snapshot_id_from_groups(current_snapshot_id, &snapshot_groups));
+    }
+
     let snapshots = adapter.list_snapshots(Some(corpus.as_str()), branch, None, 2)?;
     Ok(select_parent_snapshot_id(current_snapshot_id, &snapshots))
+}
+
+fn select_parent_snapshot_id_from_groups(
+    current_snapshot_id: &str,
+    snapshot_groups: &[Vec<bsl_search::BaselineSnapshotRecord>],
+) -> Option<String> {
+    snapshot_groups
+        .iter()
+        .find_map(|snapshots| select_parent_snapshot_id(current_snapshot_id, snapshots))
 }
 
 fn select_parent_snapshot_id(
@@ -2824,7 +2869,8 @@ fn setup_logging(
 mod tests {
     use super::{
         pick_first_non_empty, resolve_publish_branch, resolve_snapshot_id,
-        select_parent_snapshot_id, validate_workspace_publish_policy,
+        select_parent_snapshot_id, select_parent_snapshot_id_from_groups,
+        validate_workspace_publish_policy,
     };
     use bsl_search::{BaselineSnapshotRecord, CorpusId};
     use std::fs;
@@ -2955,6 +3001,20 @@ mod tests {
         let parent = select_parent_snapshot_id("workspace-code:main@same", &snapshots);
 
         assert_eq!(parent, None);
+    }
+
+    #[test]
+    fn select_parent_snapshot_id_uses_fallback_branch_group() {
+        let feature_group = vec![baseline_snapshot_record("workspace-code:feature@same")];
+        let develop_group = vec![baseline_snapshot_record("workspace-code:develop@old")];
+        let vendor_group = vec![baseline_snapshot_record("workspace-code:vendor@old")];
+
+        let parent = select_parent_snapshot_id_from_groups(
+            "workspace-code:feature@same",
+            &[feature_group, develop_group, vendor_group],
+        );
+
+        assert_eq!(parent.as_deref(), Some("workspace-code:develop@old"));
     }
 
     fn baseline_snapshot_record(snapshot_id: &str) -> BaselineSnapshotRecord {

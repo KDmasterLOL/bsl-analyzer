@@ -9,7 +9,7 @@ use crate::external_baseline::{
     BaselineFileObjectReference, BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
 };
 use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
-use postgres::{Client, NoTls, Row, Transaction};
+use postgres::{Client, GenericClient, NoTls, Row, Transaction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// PostgreSQL adapter for centralized baseline storage.
@@ -170,30 +170,22 @@ impl PostgresBaselineAdapter {
                     path TEXT NOT NULL,
                     file_fingerprint TEXT NOT NULL,
                     document_count INTEGER NOT NULL,
-                    file_object_id TEXT NULL,
+                    file_object_id TEXT NOT NULL REFERENCES {}(id) ON DELETE RESTRICT,
                     PRIMARY KEY (snapshot_id, collection, path)
                 )",
                 self.table("snapshot_files"),
-                self.table("snapshots")
-            ),
-            format!(
-                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS file_object_id TEXT NULL",
-                self.table("snapshot_files")
+                self.table("snapshots"),
+                self.table("file_objects")
             ),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
                     snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
                     collection TEXT NOT NULL,
                     path TEXT NOT NULL,
-                    symbol_name TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    line_start INTEGER NOT NULL,
-                    line_end INTEGER NOT NULL,
-                    content_hash TEXT NOT NULL REFERENCES {}(content_hash) ON DELETE RESTRICT
+                    PRIMARY KEY (snapshot_id, collection, path)
                 )",
-                self.table("snapshot_items"),
+                self.table("snapshot_deletions"),
                 self.table("snapshots"),
-                self.table("content_objects")
             ),
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_snapshots_corpus_created_at
@@ -220,10 +212,10 @@ impl PostgresBaselineAdapter {
                 self.table("snapshot_files")
             ),
             format!(
-                "CREATE INDEX IF NOT EXISTS idx_{}_snapshot_items_snapshot_path
+                "CREATE INDEX IF NOT EXISTS idx_{}_snapshot_deletions_snapshot_path
                  ON {} (snapshot_id, collection, path)",
                 self.schema,
-                self.table("snapshot_items")
+                self.table("snapshot_deletions")
             ),
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_file_objects_fingerprint
@@ -266,23 +258,9 @@ impl PostgresBaselineAdapter {
                     s.parent_snapshot_id,
                     s.branch,
                     s.commit_sha,
-                    s.created_at::TEXT AS created_at,
-                    COALESCE(
-                        (SELECT SUM(sf.document_count) FROM {} sf WHERE sf.snapshot_id = s.id),
-                        (SELECT COUNT(*) FROM {} si WHERE si.snapshot_id = s.id),
-                        0
-                    ) AS documents,
-                    COALESCE(
-                        (SELECT COUNT(*) FROM {} sf WHERE sf.snapshot_id = s.id),
-                        (SELECT COUNT(DISTINCT si.path) FROM {} si WHERE si.snapshot_id = s.id),
-                        0
-                    ) AS files
+                    s.created_at::TEXT AS created_at
              FROM {} s
              WHERE 1 = 1",
-            self.table("snapshot_files"),
-            self.table("snapshot_items"),
-            self.table("snapshot_files"),
-            self.table("snapshot_items"),
             self.table("snapshots"),
         );
 
@@ -304,7 +282,15 @@ impl PostgresBaselineAdapter {
         params.push(&limit);
 
         let rows = client.query(&query, &params)?;
-        Ok(rows.into_iter().map(snapshot_record_from_row).collect())
+        let mut snapshots = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut snapshot = snapshot_record_from_metadata_row(row);
+            let summary = effective_snapshot_summary(&mut client, self, &snapshot.snapshot_id)?;
+            snapshot.files = summary.total_files;
+            snapshot.documents = summary.total_documents;
+            snapshots.push(snapshot);
+        }
+        Ok(snapshots)
     }
 
     pub fn snapshot_details(
@@ -320,31 +306,20 @@ impl PostgresBaselineAdapter {
                     s.parent_snapshot_id,
                     s.branch,
                     s.commit_sha,
-                    s.created_at::TEXT AS created_at,
-                    COALESCE(
-                        (SELECT SUM(sf.document_count) FROM {} sf WHERE sf.snapshot_id = s.id),
-                        (SELECT COUNT(*) FROM {} si WHERE si.snapshot_id = s.id),
-                        0
-                    ) AS documents,
-                    COALESCE(
-                        (SELECT COUNT(*) FROM {} sf WHERE sf.snapshot_id = s.id),
-                        (SELECT COUNT(DISTINCT si.path) FROM {} si WHERE si.snapshot_id = s.id),
-                        0
-                    ) AS files
+                    s.created_at::TEXT AS created_at
              FROM {} s
              WHERE s.id = $1
              LIMIT 1",
-            self.table("snapshot_files"),
-            self.table("snapshot_items"),
-            self.table("snapshot_files"),
-            self.table("snapshot_items"),
             self.table("snapshots"),
         );
         let Some(snapshot_row) = client.query_opt(&summary_query, &[&snapshot_id])? else {
             return Ok(None);
         };
-        let snapshot = snapshot_record_from_row(snapshot_row);
-        let collections = self.snapshot_collection_records(&mut client, snapshot_id)?;
+        let mut snapshot = snapshot_record_from_metadata_row(snapshot_row);
+        let summary = effective_snapshot_summary(&mut client, self, snapshot_id)?;
+        snapshot.files = summary.total_files;
+        snapshot.documents = summary.total_documents;
+        let collections = summary.collections;
 
         Ok(Some(BaselineSnapshotDetails { snapshot, collections }))
     }
@@ -429,54 +404,6 @@ impl PostgresBaselineAdapter {
             file_object: file_object_record_from_row(file_object_row),
             references,
         }))
-    }
-
-    fn snapshot_collection_records(
-        &self,
-        client: &mut Client,
-        snapshot_id: &str,
-    ) -> Result<Vec<BaselineCollectionRecord>, SearchError> {
-        let snapshot_files_query = format!(
-            "SELECT collection,
-                    COUNT(*) AS files,
-                    SUM(document_count) AS documents
-             FROM {}
-             WHERE snapshot_id = $1
-             GROUP BY collection
-             ORDER BY collection",
-            self.table("snapshot_files")
-        );
-        let rows = client.query(&snapshot_files_query, &[&snapshot_id])?;
-        if !rows.is_empty() {
-            return Ok(rows
-                .into_iter()
-                .map(|row| BaselineCollectionRecord {
-                    collection: row.get("collection"),
-                    files: row.get::<_, i64>("files") as usize,
-                    documents: row.get::<_, i64>("documents") as usize,
-                })
-                .collect());
-        }
-
-        let legacy_query = format!(
-            "SELECT collection,
-                    COUNT(DISTINCT path) AS files,
-                    COUNT(*) AS documents
-             FROM {}
-             WHERE snapshot_id = $1
-             GROUP BY collection
-             ORDER BY collection",
-            self.table("snapshot_items")
-        );
-        Ok(client
-            .query(&legacy_query, &[&snapshot_id])?
-            .into_iter()
-            .map(|row| BaselineCollectionRecord {
-                collection: row.get("collection"),
-                files: row.get::<_, i64>("files") as usize,
-                documents: row.get::<_, i64>("documents") as usize,
-            })
-            .collect())
     }
 
     pub fn store_embeddings(
@@ -793,58 +720,58 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
         snapshot: &Snapshot,
     ) -> Result<Vec<IndexedDocument>, SearchError> {
         let mut client = self.connect()?;
-        let shared_query = format!(
-            "SELECT sf.collection,
-                    sf.path,
+        let visible_files = materialize_visible_snapshot_files(&mut client, self, &snapshot.id.0)?;
+        if visible_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let file_object_ids =
+            visible_files.iter().map(|file| file.file_object_id.clone()).collect::<Vec<_>>();
+        let items_query = format!(
+            "SELECT foi.file_object_id,
                     foi.symbol_name,
                     foi.kind,
                     foi.line_start,
                     foi.line_end,
                     co.text,
                     foi.content_hash
-             FROM {} sf
-             JOIN {} foi ON foi.file_object_id = sf.file_object_id
+             FROM {} foi
              JOIN {} co ON co.content_hash = foi.content_hash
-             WHERE sf.snapshot_id = $1 AND sf.file_object_id IS NOT NULL
-             ORDER BY sf.collection, sf.path, foi.ordinal",
-            self.table("snapshot_files"),
+             WHERE foi.file_object_id = ANY($1)
+             ORDER BY foi.file_object_id, foi.ordinal",
             self.table("file_object_items"),
             self.table("content_objects")
         );
-        let shared_rows = client.query(&shared_query, &[&snapshot.id.0])?;
-        let shared_documents: Vec<IndexedDocument> =
-            shared_rows.into_iter().map(indexed_document_from_row).collect();
-        let shared_paths: HashSet<(String, String)> = shared_documents
-            .iter()
-            .map(|document| (document.collection.clone(), document.path.clone()))
-            .collect();
-
-        let legacy_query = format!(
-            "SELECT si.collection,
-                    si.path,
-                    si.symbol_name,
-                    si.kind,
-                    si.line_start,
-                    si.line_end,
-                    co.text,
-                    si.content_hash
-             FROM {} si
-             JOIN {} co ON co.content_hash = si.content_hash
-             WHERE si.snapshot_id = $1
-             ORDER BY si.collection, si.path, si.line_start, si.line_end, si.symbol_name",
-            self.table("snapshot_items"),
-            self.table("content_objects")
-        );
-        let legacy_documents = client
-            .query(&legacy_query, &[&snapshot.id.0])?
-            .into_iter()
-            .map(indexed_document_from_row)
-            .filter(|document| {
-                !shared_paths.contains(&(document.collection.clone(), document.path.clone()))
+        let mut items_by_file_object = HashMap::<String, Vec<FileObjectItem>>::new();
+        for row in client.query(&items_query, &[&file_object_ids])? {
+            let file_object_id: String = row.get("file_object_id");
+            items_by_file_object.entry(file_object_id).or_default().push(FileObjectItem {
+                symbol_name: row.get("symbol_name"),
+                kind: row.get("kind"),
+                line_start: row.get::<_, i32>("line_start") as u32,
+                line_end: row.get::<_, i32>("line_end") as u32,
+                text: row.get("text"),
+                content_hash: row.get("content_hash"),
             });
+        }
 
-        let mut documents = shared_documents;
-        documents.extend(legacy_documents);
+        let mut documents = Vec::new();
+        for file in visible_files {
+            if let Some(items) = items_by_file_object.get(&file.file_object_id) {
+                for item in items {
+                    documents.push(IndexedDocument {
+                        collection: file.collection.clone(),
+                        path: file.path.clone(),
+                        symbol_name: item.symbol_name.clone(),
+                        kind: item.kind.clone(),
+                        line_start: item.line_start,
+                        line_end: item.line_end,
+                        text: item.text.clone(),
+                        content_hash: item.content_hash.clone(),
+                    });
+                }
+            }
+        }
         documents.sort_by(|lhs, rhs| {
             (
                 lhs.collection.as_str(),
@@ -918,9 +845,15 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
         let delete_snapshot_files =
             format!("DELETE FROM {} WHERE snapshot_id = $1", self.table("snapshot_files"));
         tx.execute(&delete_snapshot_files, &[&snapshot.id.0])?;
-        let delete_items =
-            format!("DELETE FROM {} WHERE snapshot_id = $1", self.table("snapshot_items"));
-        tx.execute(&delete_items, &[&snapshot.id.0])?;
+        let delete_snapshot_deletions =
+            format!("DELETE FROM {} WHERE snapshot_id = $1", self.table("snapshot_deletions"));
+        tx.execute(&delete_snapshot_deletions, &[&snapshot.id.0])?;
+
+        let parent_files = if let Some(parent_id) = snapshot.parent_id.as_ref() {
+            materialize_visible_snapshot_file_map(&mut tx, self, &parent_id.0)?
+        } else {
+            BTreeMap::new()
+        };
 
         let insert_snapshot_file = format!(
             "INSERT INTO {} (
@@ -928,9 +861,26 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
              ) VALUES ($1, $2, $3, $4, $5, $6)",
             self.table("snapshot_files")
         );
+        let insert_snapshot_deletion = format!(
+            "INSERT INTO {} (snapshot_id, collection, path)
+             VALUES ($1, $2, $3)",
+            self.table("snapshot_deletions")
+        );
 
         let mut stats = SnapshotPublishStats::default();
+        let mut remaining_parent_files = parent_files;
         for file_group in file_groups {
+            let file_key = (file_group.collection.clone(), file_group.path.clone());
+            let parent_entry = remaining_parent_files.remove(&file_key);
+            if parent_entry
+                .as_ref()
+                .is_some_and(|parent| parent.file_fingerprint == file_group.file_fingerprint)
+            {
+                stats.reused_files += 1;
+                stats.reused_documents += file_group.documents.len();
+                continue;
+            }
+
             let file_object_id =
                 file_object_id_for(&file_group.collection, &file_group.file_fingerprint);
             tx.execute(
@@ -945,14 +895,14 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
                 ],
             )?;
 
-            if !try_insert_file_object(&mut tx, self, &file_object_id, &file_group)? {
-                stats.reused_files += 1;
-                stats.reused_documents += file_group.documents.len();
-                continue;
-            }
-
+            let _ = try_insert_file_object(&mut tx, self, &file_object_id, &file_group)?;
             stats.written_files += 1;
             stats.written_documents += file_group.documents.len();
+        }
+
+        for ((collection, path), _) in remaining_parent_files {
+            tx.execute(&insert_snapshot_deletion, &[&snapshot.id.0, &collection, &path])?;
+            stats.deleted_files += 1;
         }
 
         tx.commit()?;
@@ -966,6 +916,32 @@ struct PublishedFileGroup {
     path: String,
     file_fingerprint: String,
     documents: Vec<IndexedDocument>,
+}
+
+#[derive(Debug, Clone)]
+struct VisibleSnapshotFile {
+    collection: String,
+    path: String,
+    file_fingerprint: String,
+    document_count: usize,
+    file_object_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct FileObjectItem {
+    symbol_name: String,
+    kind: String,
+    line_start: u32,
+    line_end: u32,
+    text: String,
+    content_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct EffectiveSnapshotSummary {
+    total_files: usize,
+    total_documents: usize,
+    collections: Vec<BaselineCollectionRecord>,
 }
 
 fn group_documents_by_file(documents: &[IndexedDocument]) -> Vec<PublishedFileGroup> {
@@ -1085,19 +1061,6 @@ fn try_insert_file_object(
     Ok(true)
 }
 
-fn indexed_document_from_row(row: Row) -> IndexedDocument {
-    IndexedDocument {
-        collection: row.get("collection"),
-        path: row.get("path"),
-        symbol_name: row.get("symbol_name"),
-        kind: row.get("kind"),
-        line_start: row.get::<_, i32>("line_start") as u32,
-        line_end: row.get::<_, i32>("line_end") as u32,
-        text: row.get("text"),
-        content_hash: row.get("content_hash"),
-    }
-}
-
 fn validate_identifier(identifier: &str) -> Result<(), SearchError> {
     if identifier.is_empty()
         || !identifier.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
@@ -1109,7 +1072,7 @@ fn validate_identifier(identifier: &str) -> Result<(), SearchError> {
     Ok(())
 }
 
-fn snapshot_record_from_row(row: Row) -> BaselineSnapshotRecord {
+fn snapshot_record_from_metadata_row(row: Row) -> BaselineSnapshotRecord {
     BaselineSnapshotRecord {
         snapshot_id: row.get("id"),
         corpus: row.get("corpus"),
@@ -1118,8 +1081,8 @@ fn snapshot_record_from_row(row: Row) -> BaselineSnapshotRecord {
         branch: row.get("branch"),
         commit: row.get("commit_sha"),
         created_at: row.get("created_at"),
-        files: row.get::<_, i64>("files") as usize,
-        documents: row.get::<_, i64>("documents") as usize,
+        files: 0,
+        documents: 0,
     }
 }
 
@@ -1150,25 +1113,145 @@ fn collect_active_embedding_keys(
         adapter.table("file_object_items"),
         adapter.table("content_objects")
     );
-    let legacy_query = format!(
-        "SELECT si.path,
-                si.kind,
-                si.symbol_name,
-                co.text
-         FROM {} si
-         JOIN {} co ON co.content_hash = si.content_hash",
-        adapter.table("snapshot_items"),
-        adapter.table("content_objects")
-    );
 
     let mut active_keys = HashSet::new();
     for row in client.query(&shared_query, &[])? {
         active_keys.insert(semantic_key_for_semantic_row(row));
     }
-    for row in client.query(&legacy_query, &[])? {
-        active_keys.insert(semantic_key_for_semantic_row(row));
-    }
     Ok(active_keys)
+}
+
+fn effective_snapshot_summary(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<EffectiveSnapshotSummary, SearchError> {
+    let visible_files = materialize_visible_snapshot_files(client, adapter, snapshot_id)?;
+    let mut documents = 0usize;
+    let mut by_collection = BTreeMap::<String, (usize, usize)>::new();
+    for file in &visible_files {
+        documents += file.document_count;
+        let entry = by_collection.entry(file.collection.clone()).or_default();
+        entry.0 += 1;
+        entry.1 += file.document_count;
+    }
+
+    Ok(EffectiveSnapshotSummary {
+        total_files: visible_files.len(),
+        total_documents: documents,
+        collections: by_collection
+            .into_iter()
+            .map(|(collection, (files, documents))| BaselineCollectionRecord {
+                collection,
+                files,
+                documents,
+            })
+            .collect(),
+    })
+}
+
+fn materialize_visible_snapshot_file_map(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<BTreeMap<(String, String), VisibleSnapshotFile>, SearchError> {
+    let ancestry = snapshot_ancestry_ids(client, adapter, snapshot_id)?;
+    let file_query = format!(
+        "SELECT snapshot_id, collection, path, file_fingerprint, document_count, file_object_id
+         FROM {}
+         WHERE snapshot_id = ANY($1)",
+        adapter.table("snapshot_files")
+    );
+    let deletion_query = format!(
+        "SELECT snapshot_id, collection, path
+         FROM {}
+         WHERE snapshot_id = ANY($1)",
+        adapter.table("snapshot_deletions")
+    );
+
+    let mut files_by_snapshot = HashMap::<String, Vec<VisibleSnapshotFile>>::new();
+    for row in client.query(&file_query, &[&ancestry])? {
+        let snapshot_id: String = row.get("snapshot_id");
+        files_by_snapshot.entry(snapshot_id).or_default().push(VisibleSnapshotFile {
+            collection: row.get("collection"),
+            path: row.get("path"),
+            file_fingerprint: row.get("file_fingerprint"),
+            document_count: row.get::<_, i32>("document_count") as usize,
+            file_object_id: row.get("file_object_id"),
+        });
+    }
+    let mut deletions_by_snapshot = HashMap::<String, Vec<(String, String)>>::new();
+    for row in client.query(&deletion_query, &[&ancestry])? {
+        let snapshot_id: String = row.get("snapshot_id");
+        deletions_by_snapshot
+            .entry(snapshot_id)
+            .or_default()
+            .push((row.get("collection"), row.get("path")));
+    }
+
+    let mut seen_paths = HashSet::<(String, String)>::new();
+    let mut visible_files = BTreeMap::<(String, String), VisibleSnapshotFile>::new();
+    for snapshot_id in ancestry {
+        if let Some(deletions) = deletions_by_snapshot.remove(&snapshot_id) {
+            for key in deletions {
+                seen_paths.insert(key);
+            }
+        }
+        if let Some(files) = files_by_snapshot.remove(&snapshot_id) {
+            for file in files {
+                let key = (file.collection.clone(), file.path.clone());
+                if seen_paths.insert(key.clone()) {
+                    visible_files.insert(key, file);
+                }
+            }
+        }
+    }
+
+    Ok(visible_files)
+}
+
+fn materialize_visible_snapshot_files(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<Vec<VisibleSnapshotFile>, SearchError> {
+    Ok(materialize_visible_snapshot_file_map(client, adapter, snapshot_id)?.into_values().collect())
+}
+
+fn snapshot_ancestry_ids(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<Vec<String>, SearchError> {
+    let query = format!(
+        "SELECT id, parent_snapshot_id
+         FROM {}
+         WHERE id = $1
+         LIMIT 1",
+        adapter.table("snapshots")
+    );
+
+    let mut ancestry = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = Some(snapshot_id.to_owned());
+    while let Some(snapshot_id) = current.take() {
+        if !seen.insert(snapshot_id.clone()) {
+            return Err(SearchError::ExternalBaseline(format!(
+                "snapshot parent chain contains cycle at '{}'",
+                snapshot_id
+            )));
+        }
+        let Some(row) = client.query_opt(&query, &[&snapshot_id])? else {
+            return Err(SearchError::ExternalBaseline(format!(
+                "snapshot '{}' was not found",
+                snapshot_id
+            )));
+        };
+        ancestry.push(row.get::<_, String>("id"));
+        current = row.get("parent_snapshot_id");
+    }
+
+    Ok(ancestry)
 }
 
 fn semantic_key_for_semantic_row(row: Row) -> String {

@@ -135,6 +135,7 @@ pub struct SnapshotPublishMetadata {
 pub struct SnapshotPublishStats {
     pub reused_files: usize,
     pub written_files: usize,
+    pub deleted_files: usize,
     pub reused_documents: usize,
     pub written_documents: usize,
 }

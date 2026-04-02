@@ -60,6 +60,8 @@ Introduce a search architecture based on `baseline + overlay + resolved view`.
   Legacy mapping of a content object into a logical file/document path.
 - `SnapshotFile`
   Snapshot-local mapping from a logical path to a shared `FileObject`.
+- `SnapshotDeletion`
+  Snapshot-local tombstone that hides one logical path inherited from a parent snapshot.
 - `OverlayChange`
   Local replacement or deletion relative to the baseline.
 - `ResolvedView`
@@ -75,27 +77,28 @@ The current iteration already includes:
 - an in-memory resolver that merges baseline documents and overlay changes;
 - local SQLite baseline adapters;
 - PostgreSQL baseline read adapters;
-- CLI publishing of full snapshots into PostgreSQL.
+- PostgreSQL ancestry-aware read reconstruction for delta snapshots;
+- CLI publishing of file-level delta snapshots into PostgreSQL;
 - shared file-object materialization for PostgreSQL publish/read paths;
 - shared embedding storage for PostgreSQL publish/read paths;
 
 The default standalone developer path still uses local SQLite. PostgreSQL is an
 additional backend for shared baseline scenarios.
 
-### Delta-ready lineage
+### Delta lineage
 
-The next iteration should not start with "delta chunks" directly. The first
-safe step is snapshot lineage:
+The current shared-baseline model uses file-level delta lineage:
 
 - each published snapshot may reference one parent snapshot;
 - parent linkage belongs to the baseline publishing model, not to MCP runtime;
-- full snapshot publishing remains valid, but lineage lets operators and future
-  ingestion jobs understand reuse opportunities between revisions;
+- unchanged files are inherited through the parent chain instead of being
+  rewritten into every snapshot;
+- deleted files are represented as snapshot-local tombstones;
 - branch and commit stay operational publish metadata, while parent snapshot is
   immutable baseline metadata.
 
-This keeps the system compatible with today's full materialization while
-preparing clean application boundaries for future delta publication.
+This keeps the read model clean: MCP resolves one visible baseline view, while
+the PostgreSQL adapter owns ancestry traversal and delta materialization.
 
 ## Architectural boundaries
 
@@ -105,6 +108,7 @@ Pure types and invariants:
 
 - snapshot identity;
 - snapshot lineage;
+- snapshot deletions;
 - corpus identity;
 - file-object identity;
 - file-level overlay changes;
@@ -114,7 +118,7 @@ Pure types and invariants:
 
 Use cases:
 
-- publish one immutable snapshot with its branch/commit metadata;
+- publish one immutable delta snapshot with its branch/commit metadata;
 - resolve baseline documents into a visible view;
 - replace one file with overlay content;
 - delete one file from the resolved view;
@@ -125,8 +129,8 @@ Use cases:
 Adapters:
 
 - current SQLite store and local HNSW index;
-- PostgreSQL catalog, shared file storage, shared content storage, and shared embedding storage;
-- future PostgreSQL delta materialization and vector storage;
+- PostgreSQL catalog, shared file storage, delta materialization, shared content storage, and shared embedding storage;
+- future centralized vector storage;
 - future GitLab ingestion worker.
 
 ### Interface
@@ -152,11 +156,11 @@ model simple and correct.
 
 ## Future direction
 
-After the first iteration stabilizes:
+After the current iteration stabilizes:
 
 1. Keep local overlays ephemeral and workspace-specific.
 2. Run GitLab ingestion after merge to update shared baselines incrementally.
-3. Add parent-linked delta publication on top of immutable snapshot lineage.
+3. Strengthen operational workflows for republish, retention, and cleanup.
 4. Reuse shared `Embedding` records across branches and
    snapshots.
 

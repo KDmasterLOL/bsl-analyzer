@@ -11,8 +11,9 @@ Give the corporate search architecture a practical write path:
 - publish it into centralized PostgreSQL storage;
 - make the snapshot selectable later by `snapshot_id`, `branch`, or `commit`.
 
-This is intentionally simpler than the future branch-delta model. The first
-useful step is a full immutable snapshot publish that CI can run after merge.
+The current implementation uses file-level delta snapshots with immutable
+parent lineage. PostgreSQL is treated as a shared published baseline that can
+be rebuilt and republished cleanly when the storage model changes.
 
 ## Current CLI
 
@@ -33,27 +34,38 @@ Behavior:
 4. Resolve one shared file object for each logical file.
 5. Publish one immutable snapshot into:
    - `snapshots`
-   - `snapshot_files`
+   - `snapshot_files` for changed or new files only
+   - `snapshot_deletions` for tombstones relative to the parent snapshot
    - `file_objects`
    - `file_object_items`
-    - `content_objects`
-    - `semantic_embeddings` when embedding configuration is available
+   - `content_objects`
+   - `semantic_embeddings` when embedding configuration is available
 
-The published snapshot may also carry parent lineage metadata:
+The published snapshot always supports immutable parent lineage metadata:
 
 - when `--parent-snapshot-id` is passed, it is used as an explicit override;
-- otherwise the CLI reuses the latest published snapshot from the same
-  `corpus/branch`, or the same `corpus` when branch is not specified.
+- otherwise the CLI prefers the latest published snapshot from the same
+  `corpus/branch`;
+- for `workspace-code`, if the current branch has no published parent yet, the
+  CLI falls back through `workspaceCode.policy` branch candidates such as
+  `feature/* -> develop -> vendor`;
+- for `reference`, the CLI falls back to the latest snapshot from the same
+  corpus when branch is not specified.
 
-This does not change runtime resolution yet, but it establishes immutable
-ancestry for future delta publication.
-
-Publish now reuses a shared file-object store in the write path:
+Publish reuses a shared file-object store in the write path:
 
 - each logical file is fingerprinted independently;
 - snapshots point to shared `file_objects` instead of duplicating chunk mappings;
-- if the same file object already exists, only the `snapshot_files` mapping is written;
-- legacy `snapshot_items` remain readable for snapshots published by older versions.
+- unchanged files relative to the selected parent are not rewritten at all;
+- deleted parent files are written into `snapshot_deletions`;
+- visible snapshot state is reconstructed from the ancestry chain on read.
+
+This is a clean cutover model. Older PostgreSQL full-materialized snapshots are
+not preserved as a compatibility target. The supported migration path is:
+
+1. recreate or clean the shared PostgreSQL schema;
+2. republish `vendor`, `develop`, and `reference` snapshots with the new CLI;
+3. let MCP runtimes resolve only snapshots published in the new delta format.
 
 When `EMBEDDING_URL` is configured for the publishing process:
 
@@ -213,11 +225,12 @@ bsl-analyzer-app search baseline sync-pg \
 `sync-pg` now prints:
 
 - selected corpus;
+- publish mode (`root` or `delta`);
 - published snapshot id;
 - target PostgreSQL schema;
 - explicit or auto-selected parent snapshot id;
 - branch and commit labels;
-- reused/written file counters;
+- reused/written/deleted file counters;
 - reused/written chunk counters;
 - reused/stored embedding counters when semantic publishing is enabled;
 - indexed files, resolved files, and chunk counts.
@@ -262,9 +275,10 @@ bsl-analyzer-app search baseline gc-pg --execute
 - which snapshots are present in shared storage;
 - what their parent lineage is;
 - which branch/commit labels were recorded;
-- whether the expected file/chunk counts and fingerprints exist.
+- whether the effective visible file/chunk counts and fingerprints exist.
 
-`show-pg` adds per-collection counters for one snapshot.
+`show-pg` adds effective per-collection counters for one snapshot after parent
+lineage is applied.
 
 Additional operator commands provide storage-level inspection:
 
@@ -317,15 +331,17 @@ The runtime model is intentionally hybrid:
 This keeps the shared baseline as the canonical published source while avoiding
 re-embedding the same platform help on every startup or in every project.
 
-## Why full snapshot first
+## Why file-level delta now
 
-This is not the final storage strategy. It is the smallest useful write-side
-integration because it already enables:
+This is the current canonical storage strategy because it already enables:
 
 - a central baseline for merged code;
 - MCP runtime selection by branch or commit;
+- parent-aware branch fallback for `vendor -> develop -> feature/*` workflows;
+- deletion tracking without rewriting whole snapshots;
+- file-object and embedding reuse across branches;
 - a stable GitLab job contract;
-- later migration to delta/slice publishing without replacing the read model.
+- future slice-level optimization without replacing the read model.
 
 ## Recommended GitLab job
 
@@ -368,35 +384,32 @@ It does not embed PostgreSQL logic directly into MCP runtime code.
 The current implementation already covers the first baseline-storage milestone:
 
 1. Immutable PostgreSQL snapshot publishing for `workspace-code` and `reference`.
-2. Parent snapshot lineage on publish.
-3. Shared `file_objects` and reuse of unchanged file mappings.
-4. Shared semantic embedding storage and reuse by `model_id + dimension + embedding_key`.
-5. Runtime hybrid model:
+2. Parent snapshot lineage on publish and ancestry-aware read resolution.
+3. Delta snapshot storage with `snapshot_files` + `snapshot_deletions`.
+4. Shared `file_objects` and reuse of unchanged file mappings.
+5. Shared semantic embedding storage and reuse by `model_id + dimension + embedding_key`.
+6. Branch-policy-aware parent auto-selection for corporate flows such as `vendor -> develop -> feature/*`.
+7. Runtime hybrid model:
    - shared PostgreSQL baseline for team-visible published state;
    - local SQLite semantic cache for MCP runtime;
    - local overlay for uncommitted workspace changes.
-6. Operator commands for inspection and safe garbage collection.
+8. Operator commands for inspection and safe garbage collection.
 
 ### Next iteration
 
-The next concrete milestone is branch policy support for the team's real workflow:
+The next concrete milestones move from storage format to operations and scale:
 
-1. Introduce branch policy configuration for:
-   - `develop` as the main team baseline;
-   - `vendor` as the supplier baseline;
-   - working branches like `feature/*`, `fix/*`, `bug/*` as overlay-only branches
-     that fall back to `develop`.
-2. Teach runtime baseline selection to resolve the effective published baseline
-   from the current branch using that policy.
-3. Teach publish/CI flows which branches are expected to publish centralized
-   snapshots automatically and which branches should stay local-only.
-4. Add focused tests for branch matching, fallback selection, and explicit
-   override precedence.
+1. Add a dedicated operations document for clean republish, inspection, and GC.
+2. Add focused integration tests that exercise delta publish/read behavior
+   against real PostgreSQL.
+3. Introduce CI/GitLab automation for shared baseline publish after merge.
+4. Add retention and branch-head maintenance policies on top of immutable
+   snapshots.
 
-### Deferred after branch policy
+### Deferred after operations hardening
 
 These topics remain useful, but they are not the next implementation step:
 
-1. Delta/slice publication on top of parent-linked snapshots.
-2. Dedicated operations document for publish/inspect/maintenance workflows.
+1. Slice-level delta publication inside one file object.
+2. Centralized vector search backend beyond the current shared embedding store.
 3. More advanced retention and cleanup policies for shared storage.

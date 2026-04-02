@@ -232,22 +232,30 @@ bsl-analyzer search baseline sync-pg \
 `sync-pg` печатает итоговые параметры публикации:
 
 - `Corpus`
+- `Mode` (`root` или `delta`)
 - `Snapshot`
 - `Schema`
 - `Parent`
 - `Branch`
 - `Commit`
-- `Reused files` / `Written files`
+- `Reused files` / `Written files` / `Deleted files`
 - `Reused chunks` / `Written chunks`
 - количество файлов и чанков
 
 Если `--parent-snapshot-id` не передан, `sync-pg` сам выберет последний опубликованный snapshot
-в том же `corpus/branch`. Для `reference` без branch будет выбран последний snapshot того же corpus.
+в том же `corpus/branch`. Для `workspace-code`, если в текущей ветке publish ещё не было,
+дальше используется fallback-цепочка из `workspaceCode.policy`, например
+`feature/* -> develop -> vendor`. Для `reference` без branch будет выбран последний snapshot того же corpus.
 
 Publish теперь использует shared file-object storage в PostgreSQL:
 - каждый logical file получает общий `file_object`;
-- если такой объект уже есть, snapshot только ссылается на него;
-- `snapshot_items` остаётся как legacy fallback для старых snapshot'ов.
+- snapshot пишет только новые или изменённые файлы;
+- удалённые относительно parent файлы фиксируются в `snapshot_deletions`;
+- итоговое состояние snapshot восстанавливается чтением всей ancestry-цепочки.
+
+Это clean cutover без обратной совместимости со старым PostgreSQL-форматом full snapshots.
+Поддерживаемый сценарий миграции: очистить или пересоздать shared schema и вручную republish
+`vendor`, `develop` и `reference` уже новым `sync-pg`.
 
 Если при `sync-pg` заданы `EMBEDDING_URL` и `EMBEDDING_MODEL`, команда также публикует
 shared embeddings в PostgreSQL. Тогда на старте MCP local semantic cache сначала забирает
@@ -293,7 +301,7 @@ BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline gc-pg --execute
 ```
 
-`list-pg` показывает:
+`list-pg` показывает effective состояние snapshot после применения parent lineage:
 
 - `Snapshot`
 - `Corpus`
@@ -305,7 +313,7 @@ bsl-analyzer search baseline gc-pg --execute
 - `Chunks`
 - `Fingerprint`
 
-`show-pg` дополнительно показывает breakdown по `collection`.
+`show-pg` дополнительно показывает effective breakdown по `collection`.
 
 Дополнительные операторские команды:
 
