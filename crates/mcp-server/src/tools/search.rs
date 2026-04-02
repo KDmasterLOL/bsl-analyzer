@@ -3,7 +3,9 @@
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineSource, ExternalBaselineState};
 use crate::state::SemanticRuntimeStatus;
 use bsl_search::{
-    lexical_hits_for_resolved_view, IndexProgress, LexicalHit, SearchEngine, SemanticHit,
+    lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical, merge_semantic,
+    merged_hit_to_search_hit, search_hit_to_lexical, search_hit_to_semantic, IndexProgress,
+    LexicalHit, SearchEngine, SearchHit, SemanticHit,
 };
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -15,6 +17,11 @@ use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 /// Full-text search across indexed BSL code.
+///
+/// Resolution order when an external baseline is available:
+/// 1. Direct lexical search via the serving table + local overlay merge.
+/// 2. Fallback to loading all documents from the snapshot (old snapshots without serving tables).
+/// 3. Fallback to the local SQLite FTS index.
 pub fn find_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
@@ -33,16 +40,26 @@ pub fn find_code(
     let engine = guard.as_ref().expect("checked above");
 
     let hits = if let Some(source) = external_baseline {
-        match source.resolve_workspace_view(engine) {
-            Ok(Some(view)) => lexical_hits_for_resolved_view(&view, query, limit, Some("code")),
-            Ok(None) => engine
-                .text_search(query, limit, Some("code"))
-                .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?,
-            Err(error) => {
-                warn!("failed to resolve external baseline view for lexical search: {error}");
-                engine
-                    .text_search(query, limit, Some("code"))
-                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+        match try_direct_lexical_code(engine, &source, query, limit) {
+            DirectResult::Found(hits) => hits,
+            DirectResult::Unavailable => {
+                // Fallback: load-all-then-search.
+                match source.resolve_workspace_view(engine) {
+                    Ok(Some(view)) => {
+                        lexical_hits_for_resolved_view(&view, query, limit, Some("code"))
+                    }
+                    Ok(None) => engine.text_search(query, limit, Some("code")).map_err(|e| {
+                        McpError::internal_error(format!("search error: {e}"), None)
+                    })?,
+                    Err(error) => {
+                        warn!(
+                            "failed to resolve external baseline view for lexical search: {error}"
+                        );
+                        engine.text_search(query, limit, Some("code")).map_err(|e| {
+                            McpError::internal_error(format!("search error: {e}"), None)
+                        })?
+                    }
+                }
             }
         }
     } else {
@@ -59,10 +76,15 @@ pub fn find_code(
 }
 
 /// Semantic search across indexed BSL code.
+///
+/// Resolution order when an external baseline is available:
+/// 1. Direct semantic search via the serving table + local overlay merge.
+/// 2. Fallback to the local SQLite semantic index.
 pub fn search_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -104,6 +126,20 @@ pub fn search_code(
         ));
     }
 
+    // Try direct PG baseline + local overlay merge.
+    if let Some(source) = external_baseline {
+        match try_direct_semantic_code(engine, &source, query, limit) {
+            DirectResult::Found(hits) => {
+                if hits.is_empty() {
+                    return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+                }
+                return Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]));
+            }
+            DirectResult::Unavailable => {}
+        }
+    }
+
+    // Fallback: local SQLite semantic index.
     let hits = engine
         .search(query, limit, Some("code"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
@@ -113,6 +149,112 @@ pub fn search_code(
     }
 
     Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]))
+}
+
+/// Result of a direct baseline search attempt.
+enum DirectResult {
+    /// Baseline query returned results and merge is authoritative (may be empty
+    /// after overlay filtering — that is a valid final answer).
+    Found(Vec<SearchHit>),
+    /// Serving table is unavailable or not populated for this snapshot — caller
+    /// should fall back to load-all or local SQLite.
+    Unavailable,
+}
+
+/// Try direct lexical search against the external baseline serving table,
+/// merging with local overlay.
+fn try_direct_lexical_code(
+    engine: &SearchEngine,
+    source: &ExternalBaselineSource,
+    query: &str,
+    limit: usize,
+) -> DirectResult {
+    let snapshot = match source.resolve_snapshot() {
+        Ok(Some((_, s))) => s,
+        Ok(None) => return DirectResult::Unavailable,
+        Err(e) => {
+            warn!("direct lexical: snapshot resolution failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let baseline_hits = match source.adapter().lexical_search_baseline(
+        snapshot.id.0.as_str(),
+        query,
+        Some("code"),
+        limit * 2,
+    ) {
+        Ok(hits) if hits.is_empty() => return DirectResult::Unavailable,
+        Ok(hits) => hits,
+        Err(e) => {
+            warn!("direct lexical: serving query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let (overlay_hits, hidden_paths) = match engine.workspace_overlay_lexical_hits(query, limit) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("direct lexical: overlay query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let context = merge_context_for_collection(&hidden_paths, "code");
+    let overlay_lexical: Vec<LexicalHit> = overlay_hits.iter().map(search_hit_to_lexical).collect();
+    let merged = merge_lexical(&baseline_hits, &overlay_lexical, &context, limit);
+    DirectResult::Found(merged.into_iter().map(merged_hit_to_search_hit).collect())
+}
+
+/// Try direct semantic search against the external baseline serving table,
+/// merging with local overlay.
+fn try_direct_semantic_code(
+    engine: &SearchEngine,
+    source: &ExternalBaselineSource,
+    query: &str,
+    limit: usize,
+) -> DirectResult {
+    let snapshot = match source.resolve_snapshot() {
+        Ok(Some((_, s))) => s,
+        Ok(None) => return DirectResult::Unavailable,
+        Err(e) => {
+            warn!("direct semantic: snapshot resolution failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let query_embedding = match engine.embed_query(query) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("direct semantic: embed_query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let Some(model_id) = engine.embedding_model() else {
+        return DirectResult::Unavailable;
+    };
+    let baseline_hits = match source.adapter().semantic_search_baseline(
+        snapshot.id.0.as_str(),
+        &query_embedding,
+        model_id,
+        Some("code"),
+        limit * 2,
+    ) {
+        Ok(hits) if hits.is_empty() => return DirectResult::Unavailable,
+        Ok(hits) => hits,
+        Err(e) => {
+            warn!("direct semantic: serving query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let (overlay_hits, hidden_paths) = match engine.workspace_overlay_semantic_hits(query, limit) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("direct semantic: overlay query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let context = merge_context_for_collection(&hidden_paths, "code");
+    let overlay_semantic: Vec<SemanticHit> =
+        overlay_hits.iter().map(search_hit_to_semantic).collect();
+    let merged = merge_semantic(&baseline_hits, &overlay_semantic, &context, limit);
+    DirectResult::Found(merged.into_iter().map(merged_hit_to_search_hit).collect())
 }
 
 /// Full-text search across platform documentation (types, methods, global functions).
@@ -938,6 +1080,7 @@ mod tests {
         let result = search_code(
             &engine,
             &Arc::new(Mutex::new(SemanticRuntimeStatus::WarmingUp)),
+            None,
             None,
             "обработка проведения документа",
             10,

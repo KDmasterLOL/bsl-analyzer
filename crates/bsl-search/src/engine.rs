@@ -26,7 +26,7 @@ use crate::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document,
     BaselineOverlaySearchService, BaselineRef, CorpusId,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -679,6 +679,46 @@ impl SearchEngine {
             self.workspace_baseline_hash_mode,
         )?;
         Ok(Some(cache.stats()))
+    }
+
+    /// Returns overlay-only lexical search hits and the set of paths hidden
+    /// by the overlay, for use with external baseline merge.
+    pub fn workspace_overlay_lexical_hits(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let overlay = self.workspace_overlay_snapshot(None)?;
+        if overlay.is_empty() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let hits = lexical_hits(&overlay, query, limit);
+        Ok((hits, overlay.hidden_paths.clone()))
+    }
+
+    /// Returns overlay-only semantic search hits and the set of paths hidden
+    /// by the overlay, for use with external baseline merge.
+    pub fn workspace_overlay_semantic_hits(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let Some(embedder) = &self.embedder else {
+            return Ok((Vec::new(), HashSet::new()));
+        };
+        let overlay = self.workspace_overlay_snapshot(Some(embedder))?;
+        if overlay.is_empty() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let query_embedding = embedder.embed(query)?;
+        let hits = semantic_hits(&overlay, &query_embedding, limit);
+        Ok((hits, overlay.hidden_paths.clone()))
     }
 
     /// Materialize the current workspace code view from the persisted local

@@ -308,6 +308,7 @@ impl McpServer {
                         &engine,
                         &semantic_runtime,
                         configured_baseline.as_ref(),
+                        external_baseline,
                         &query,
                         limit,
                     ),
