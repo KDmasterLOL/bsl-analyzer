@@ -740,7 +740,9 @@ impl SnapshotCatalog for PostgresBaselineAdapter {
                 self.table("snapshot_heads"),
                 self.table("snapshots"),
             );
-            let row = client.query_opt(&head_query, &[&corpus, branch])?;
+            // Try snapshot_heads first; fall back to timestamp-based if the table
+            // does not exist yet (pre-Phase-1 schema) or the head is not populated.
+            let row = client.query_opt(&head_query, &[&corpus, branch]).ok().flatten();
             if row.is_some() {
                 row
             } else {
@@ -951,12 +953,15 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
 
         if let Some(branch) = metadata.branch.as_deref() {
             let upsert_head = format!(
-                "INSERT INTO {} (corpus, branch, snapshot_id, updated_at)
+                "INSERT INTO {heads} (corpus, branch, snapshot_id, updated_at)
                  VALUES ($1, $2, $3, NOW())
                  ON CONFLICT (corpus, branch) DO UPDATE SET
                     snapshot_id = EXCLUDED.snapshot_id,
-                    updated_at = EXCLUDED.updated_at",
-                self.table("snapshot_heads")
+                    updated_at = NOW()
+                 WHERE (SELECT created_at FROM {snaps} WHERE id = {heads}.snapshot_id)
+                       < (SELECT created_at FROM {snaps} WHERE id = EXCLUDED.snapshot_id)",
+                heads = self.table("snapshot_heads"),
+                snaps = self.table("snapshots"),
             );
             tx.execute(&upsert_head, &[&snapshot.corpus.as_str(), &branch, &snapshot.id.0])?;
         }
