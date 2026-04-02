@@ -213,6 +213,26 @@ enum SearchBaselineCommand {
     /// Show one published snapshot from centralized PostgreSQL storage
     #[command(name = "show-pg")]
     Show(SearchBaselineShowPgArgs),
+
+    /// List shared file objects stored in centralized PostgreSQL storage
+    #[command(name = "list-file-objects-pg")]
+    ListFileObjects(SearchBaselineListFileObjectsPgArgs),
+
+    /// Show one shared file object from centralized PostgreSQL storage
+    #[command(name = "show-file-object-pg")]
+    ShowFileObject(SearchBaselineShowFileObjectPgArgs),
+
+    /// List embedding inventories stored in centralized PostgreSQL storage
+    #[command(name = "list-embeddings-pg")]
+    ListEmbeddings(SearchBaselineListEmbeddingsPgArgs),
+
+    /// Show active embedding coverage for centralized PostgreSQL storage
+    #[command(name = "show-embedding-coverage-pg")]
+    ShowEmbeddingCoverage(SearchBaselineShowEmbeddingCoveragePgArgs),
+
+    /// Garbage-collect unreferenced shared baseline objects in PostgreSQL storage
+    #[command(name = "gc-pg")]
+    GarbageCollect(SearchBaselineGcPgArgs),
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -306,6 +326,103 @@ struct SearchBaselineShowPgArgs {
     /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
     #[arg(long = "pg-schema")]
     pg_schema: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineListFileObjectsPgArgs {
+    /// Optional collection filter
+    #[arg(long)]
+    collection: Option<String>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Maximum number of file objects to return
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineShowFileObjectPgArgs {
+    /// File object identifier to inspect
+    #[arg(long = "file-object-id")]
+    file_object_id: String,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineListEmbeddingsPgArgs {
+    /// Optional embedding model filter
+    #[arg(long = "model")]
+    model_id: Option<String>,
+
+    /// Optional embedding dimension filter
+    #[arg(long)]
+    dimension: Option<usize>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineShowEmbeddingCoveragePgArgs {
+    /// Optional embedding model filter
+    #[arg(long = "model")]
+    model_id: Option<String>,
+
+    /// Optional embedding dimension filter
+    #[arg(long)]
+    dimension: Option<usize>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineGcPgArgs {
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Apply deletions. Without this flag the command reports a dry-run summary.
+    #[arg(long)]
+    execute: bool,
 }
 
 #[derive(Args, Clone)]
@@ -540,6 +657,19 @@ fn run_search_command(command: SearchCommand) -> Result<(), Box<dyn Error + Send
             SearchBaselineCommand::Sync(args) => run_search_baseline_sync_pg(args),
             SearchBaselineCommand::List(args) => run_search_baseline_list_pg(args),
             SearchBaselineCommand::Show(args) => run_search_baseline_show_pg(args),
+            SearchBaselineCommand::ListFileObjects(args) => {
+                run_search_baseline_list_file_objects_pg(args)
+            }
+            SearchBaselineCommand::ShowFileObject(args) => {
+                run_search_baseline_show_file_object_pg(args)
+            }
+            SearchBaselineCommand::ListEmbeddings(args) => {
+                run_search_baseline_list_embeddings_pg(args)
+            }
+            SearchBaselineCommand::ShowEmbeddingCoverage(args) => {
+                run_search_baseline_show_embedding_coverage_pg(args)
+            }
+            SearchBaselineCommand::GarbageCollect(args) => run_search_baseline_gc_pg(args),
         },
     }
 }
@@ -875,6 +1005,142 @@ fn run_search_baseline_show_pg(
     Ok(())
 }
 
+fn run_search_baseline_list_file_objects_pg(
+    args: SearchBaselineListFileObjectsPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let file_objects = adapter.list_file_objects(args.collection.as_deref(), args.limit)?;
+
+    if file_objects.is_empty() {
+        println!("No file objects found.");
+        return Ok(());
+    }
+
+    println!("Shared baseline file objects:");
+    for file_object in file_objects {
+        println!();
+        println!("  File object:  {}", file_object.file_object_id);
+        println!("  Collection:   {}", file_object.collection);
+        println!("  Snapshots:    {}", file_object.snapshots);
+        println!("  Chunks:       {}", file_object.documents);
+        println!("  Fingerprint:  {}", shorten_fingerprint(&file_object.fingerprint));
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_show_file_object_pg(
+    args: SearchBaselineShowFileObjectPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let Some(details) = adapter.file_object_details(&args.file_object_id)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("file object '{}' was not found", args.file_object_id),
+        )
+        .into());
+    };
+
+    println!("Shared baseline file object:");
+    println!("  File object:  {}", details.file_object.file_object_id);
+    println!("  Collection:   {}", details.file_object.collection);
+    println!("  Snapshots:    {}", details.file_object.snapshots);
+    println!("  Chunks:       {}", details.file_object.documents);
+    println!("  Fingerprint:  {}", shorten_fingerprint(&details.file_object.fingerprint));
+    if details.references.is_empty() {
+        println!("  References:   -");
+    } else {
+        println!("  References:");
+        for reference in details.references {
+            println!("    {} -> {}", reference.snapshot_id, reference.path);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_list_embeddings_pg(
+    args: SearchBaselineListEmbeddingsPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let models = adapter.list_embedding_models(args.model_id.as_deref(), args.dimension)?;
+
+    if models.is_empty() {
+        println!("No embeddings found.");
+        return Ok(());
+    }
+
+    println!("Shared embedding inventories:");
+    for model in models {
+        println!();
+        println!("  Model:       {}", model.model_id);
+        println!("  Dimension:   {}", model.dimension);
+        println!("  Embeddings:  {}", model.embeddings);
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_show_embedding_coverage_pg(
+    args: SearchBaselineShowEmbeddingCoveragePgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let coverage = adapter.embedding_coverage(args.model_id.as_deref(), args.dimension)?;
+
+    if coverage.is_empty() {
+        println!("No embedding inventories found.");
+        return Ok(());
+    }
+
+    println!("Shared embedding coverage:");
+    for record in coverage {
+        println!();
+        println!("  Model:            {}", record.model_id);
+        println!("  Dimension:        {}", record.dimension);
+        println!("  Active payloads:  {}", record.active_payloads);
+        println!("  Covered payloads: {}", record.covered_payloads);
+        println!(
+            "  Coverage:         {}",
+            format_ratio(record.covered_payloads, record.active_payloads)
+        );
+        println!("  Embeddings:       {}", record.embeddings);
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_gc_pg(
+    args: SearchBaselineGcPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let report = adapter.garbage_collect(args.execute)?;
+
+    if args.execute {
+        println!("Shared baseline garbage collection finished.");
+        println!("  Deleted file objects:       {}", report.deleted_file_objects);
+        println!("  Deleted file object items:  {}", report.deleted_file_object_items);
+        println!("  Deleted semantic rows:      {}", report.deleted_semantic_embeddings);
+    } else {
+        println!("Shared baseline garbage collection dry-run.");
+        println!("  Use --execute to apply deletions.");
+    }
+    println!("  Orphan file objects:        {}", report.orphan_file_objects);
+    println!("  Orphan file object items:   {}", report.orphan_file_object_items);
+    println!("  Orphan semantic rows:       {}", report.orphan_semantic_embeddings);
+
+    Ok(())
+}
+
 fn resolve_snapshot_id(
     corpus: &bsl_search::CorpusId,
     snapshot_id: Option<&str>,
@@ -1034,6 +1300,15 @@ fn search_baseline_corpus_cli_to_domain(corpus: SearchBaselineCorpusCli) -> bsl_
 
 fn shorten_fingerprint(fingerprint: &str) -> &str {
     fingerprint.get(..12).unwrap_or(fingerprint)
+}
+
+fn format_ratio(numerator: usize, denominator: usize) -> String {
+    if denominator == 0 {
+        return "0/0 (n/a)".to_owned();
+    }
+
+    let percent = (numerator as f64 / denominator as f64) * 100.0;
+    format!("{numerator}/{denominator} ({percent:.1}%)")
 }
 
 fn pick_first_non_empty<'a>(

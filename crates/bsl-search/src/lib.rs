@@ -42,7 +42,9 @@ pub use engine::{IndexProgress, SearchConfig, SearchEngine, SearchHit};
 pub use error::SearchError;
 pub use external_baseline::ExternalBaselineAdapter;
 pub use external_baseline::{
-    BaselineCollectionRecord, BaselineSnapshotDetails, BaselineSnapshotRecord,
+    BaselineCollectionRecord, BaselineEmbeddingCoverageRecord, BaselineEmbeddingModelRecord,
+    BaselineFileObjectDetails, BaselineFileObjectRecord, BaselineFileObjectReference,
+    BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
 };
 pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
 pub use index::{SearchResult, VectorIndex};

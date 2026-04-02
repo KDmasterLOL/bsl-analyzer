@@ -249,6 +249,30 @@ bsl-analyzer search baseline list-pg --corpus workspace-code --branch main
 # Посмотреть один snapshot подробно
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline show-pg --snapshot-id workspace-code:main@abcdef
+
+# Показать shared file objects
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline list-file-objects-pg --limit 20
+
+# Посмотреть один file object и его ссылки из snapshot'ов
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline show-file-object-pg --file-object-id abcdef
+
+# Показать инвентарь shared embeddings
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline list-embeddings-pg
+
+# Показать покрытие active semantic payload'ов embeddings
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline show-embedding-coverage-pg
+
+# Dry-run очистки мусора
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline gc-pg
+
+# Реальное удаление orphan-объектов
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline gc-pg --execute
 ```
 
 `list-pg` показывает:
@@ -264,6 +288,14 @@ bsl-analyzer search baseline show-pg --snapshot-id workspace-code:main@abcdef
 - `Fingerprint`
 
 `show-pg` дополнительно показывает breakdown по `collection`.
+
+Дополнительные операторские команды:
+
+- `list-file-objects-pg` показывает shared file objects, число snapshot-ссылок и fingerprint.
+- `show-file-object-pg` показывает, из каких snapshot/path используется конкретный file object.
+- `list-embeddings-pg` показывает объём stored embeddings по `model + dimension`.
+- `show-embedding-coverage-pg` показывает, сколько active semantic payload'ов уже покрыто shared embeddings.
+- `gc-pg` по умолчанию только считает orphan file objects / items / semantic rows. Реальное удаление выполняется только с `--execute`.
 
 После установки или запуска MCP проверьте runtime-состояние через инструмент `search` с `action=status`:
 

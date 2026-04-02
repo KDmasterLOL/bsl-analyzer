@@ -34,10 +34,57 @@ pub struct BaselineSnapshotDetails {
     pub collections: Vec<BaselineCollectionRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineFileObjectRecord {
+    pub file_object_id: String,
+    pub collection: String,
+    pub fingerprint: String,
+    pub documents: usize,
+    pub snapshots: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineFileObjectReference {
+    pub snapshot_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineFileObjectDetails {
+    pub file_object: BaselineFileObjectRecord,
+    pub references: Vec<BaselineFileObjectReference>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BaselineEmbeddingStats {
     pub stored: usize,
     pub reused: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineEmbeddingModelRecord {
+    pub model_id: String,
+    pub dimension: usize,
+    pub embeddings: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineEmbeddingCoverageRecord {
+    pub model_id: String,
+    pub dimension: usize,
+    pub active_payloads: usize,
+    pub covered_payloads: usize,
+    pub embeddings: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineGcReport {
+    pub orphan_file_objects: usize,
+    pub orphan_file_object_items: usize,
+    pub orphan_semantic_embeddings: usize,
+    pub deleted_file_objects: usize,
+    pub deleted_file_object_items: usize,
+    pub deleted_semantic_embeddings: usize,
 }
 
 /// Infrastructure adapter for centralized baseline storage.
@@ -86,6 +133,25 @@ impl ExternalBaselineAdapter {
         }
     }
 
+    pub fn list_file_objects(
+        &self,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BaselineFileObjectRecord>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.list_file_objects(collection, limit),
+        }
+    }
+
+    pub fn file_object_details(
+        &self,
+        file_object_id: &str,
+    ) -> Result<Option<BaselineFileObjectDetails>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.file_object_details(file_object_id),
+        }
+    }
+
     pub fn store_embeddings(
         &self,
         model_id: &str,
@@ -105,6 +171,32 @@ impl ExternalBaselineAdapter {
     ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
         match self {
             Self::Postgres(adapter) => adapter.load_embeddings(embedding_keys, model_id, dimension),
+        }
+    }
+
+    pub fn list_embedding_models(
+        &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
+    ) -> Result<Vec<BaselineEmbeddingModelRecord>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.list_embedding_models(model_id, dimension),
+        }
+    }
+
+    pub fn embedding_coverage(
+        &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
+    ) -> Result<Vec<BaselineEmbeddingCoverageRecord>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.embedding_coverage(model_id, dimension),
+        }
+    }
+
+    pub fn garbage_collect(&self, execute: bool) -> Result<BaselineGcReport, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.garbage_collect(execute),
         }
     }
 }

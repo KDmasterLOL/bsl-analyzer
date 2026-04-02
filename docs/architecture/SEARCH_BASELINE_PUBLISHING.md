@@ -217,6 +217,25 @@ bsl-analyzer-app search baseline list-pg \
 # Inspect one specific snapshot
 bsl-analyzer-app search baseline show-pg \
   --snapshot-id workspace-code:main@abcdef
+
+# Inspect shared file objects
+bsl-analyzer-app search baseline list-file-objects-pg --limit 20
+
+# Inspect one specific file object
+bsl-analyzer-app search baseline show-file-object-pg \
+  --file-object-id abcdef
+
+# Inspect shared embedding inventories
+bsl-analyzer-app search baseline list-embeddings-pg
+
+# Inspect embedding coverage for active payloads
+bsl-analyzer-app search baseline show-embedding-coverage-pg
+
+# Safe garbage collection preview
+bsl-analyzer-app search baseline gc-pg
+
+# Apply garbage collection
+bsl-analyzer-app search baseline gc-pg --execute
 ```
 
 `list-pg` is intended for operators to verify:
@@ -227,6 +246,17 @@ bsl-analyzer-app search baseline show-pg \
 - whether the expected file/chunk counts and fingerprints exist.
 
 `show-pg` adds per-collection counters for one snapshot.
+
+Additional operator commands provide storage-level inspection:
+
+- `list-file-objects-pg` lists shared file objects with snapshot reference counts;
+- `show-file-object-pg` lists exact `snapshot_id -> path` references for one file object;
+- `list-embeddings-pg` aggregates shared embeddings by `model_id + dimension`;
+- `show-embedding-coverage-pg` reports how many active semantic payloads are covered
+  by stored shared embeddings for each model/dimension pair;
+- `gc-pg` is dry-run by default and reports orphan shared rows before deletion;
+- `gc-pg --execute` deletes orphan `file_objects`, orphan `file_object_items`,
+  and orphan rows from `semantic_embeddings`.
 
 MCP `search(action=status)` is the runtime verification step:
 

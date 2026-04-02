@@ -4,8 +4,9 @@ use crate::domain::{
 };
 use crate::error::SearchError;
 use crate::external_baseline::{
-    BaselineCollectionRecord, BaselineEmbeddingStats, BaselineSnapshotDetails,
-    BaselineSnapshotRecord,
+    BaselineCollectionRecord, BaselineEmbeddingCoverageRecord, BaselineEmbeddingModelRecord,
+    BaselineEmbeddingStats, BaselineFileObjectDetails, BaselineFileObjectRecord,
+    BaselineFileObjectReference, BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
 };
 use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
 use postgres::{Client, NoTls, Row, Transaction};
@@ -348,6 +349,88 @@ impl PostgresBaselineAdapter {
         Ok(Some(BaselineSnapshotDetails { snapshot, collections }))
     }
 
+    pub fn list_file_objects(
+        &self,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BaselineFileObjectRecord>, SearchError> {
+        let mut client = self.connect()?;
+        let limit = limit.clamp(1, 200) as i64;
+        let collection =
+            collection.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+
+        let mut query = format!(
+            "SELECT fo.id,
+                    fo.collection,
+                    fo.file_fingerprint,
+                    fo.document_count,
+                    COUNT(DISTINCT sf.snapshot_id) AS snapshots
+             FROM {} fo
+             LEFT JOIN {} sf ON sf.file_object_id = fo.id
+             WHERE 1 = 1",
+            self.table("file_objects"),
+            self.table("snapshot_files"),
+        );
+        let mut params = Vec::<&(dyn postgres::types::ToSql + Sync)>::new();
+        if let Some(collection) = collection.as_ref() {
+            query.push_str(&format!(" AND fo.collection = ${}", params.len() + 1));
+            params.push(collection);
+        }
+        query.push_str(
+            " GROUP BY fo.id, fo.collection, fo.file_fingerprint, fo.document_count
+              ORDER BY snapshots DESC, fo.collection, fo.id",
+        );
+        query.push_str(&format!(" LIMIT ${}", params.len() + 1));
+        params.push(&limit);
+
+        Ok(client.query(&query, &params)?.into_iter().map(file_object_record_from_row).collect())
+    }
+
+    pub fn file_object_details(
+        &self,
+        file_object_id: &str,
+    ) -> Result<Option<BaselineFileObjectDetails>, SearchError> {
+        let mut client = self.connect()?;
+        let summary_query = format!(
+            "SELECT fo.id,
+                    fo.collection,
+                    fo.file_fingerprint,
+                    fo.document_count,
+                    COUNT(DISTINCT sf.snapshot_id) AS snapshots
+             FROM {} fo
+             LEFT JOIN {} sf ON sf.file_object_id = fo.id
+             WHERE fo.id = $1
+             GROUP BY fo.id, fo.collection, fo.file_fingerprint, fo.document_count
+             LIMIT 1",
+            self.table("file_objects"),
+            self.table("snapshot_files"),
+        );
+        let Some(file_object_row) = client.query_opt(&summary_query, &[&file_object_id])? else {
+            return Ok(None);
+        };
+
+        let references_query = format!(
+            "SELECT snapshot_id, path
+             FROM {}
+             WHERE file_object_id = $1
+             ORDER BY snapshot_id, path",
+            self.table("snapshot_files")
+        );
+        let references = client
+            .query(&references_query, &[&file_object_id])?
+            .into_iter()
+            .map(|row| BaselineFileObjectReference {
+                snapshot_id: row.get("snapshot_id"),
+                path: row.get("path"),
+            })
+            .collect();
+
+        Ok(Some(BaselineFileObjectDetails {
+            file_object: file_object_record_from_row(file_object_row),
+            references,
+        }))
+    }
+
     fn snapshot_collection_records(
         &self,
         client: &mut Client,
@@ -465,6 +548,209 @@ impl PostgresBaselineAdapter {
             result.insert(key, embedding);
         }
         Ok(result)
+    }
+
+    pub fn list_embedding_models(
+        &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
+    ) -> Result<Vec<BaselineEmbeddingModelRecord>, SearchError> {
+        let mut client = self.connect()?;
+        let model_id =
+            model_id.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+        let dimension = dimension.map(|value| value as i32);
+
+        let mut query = format!(
+            "SELECT model_id, dimension, COUNT(*) AS embeddings
+             FROM {}
+             WHERE 1 = 1",
+            self.table("semantic_embeddings")
+        );
+        let mut params = Vec::<&(dyn postgres::types::ToSql + Sync)>::new();
+        if let Some(model_id) = model_id.as_ref() {
+            query.push_str(&format!(" AND model_id = ${}", params.len() + 1));
+            params.push(model_id);
+        }
+        if let Some(dimension) = dimension.as_ref() {
+            query.push_str(&format!(" AND dimension = ${}", params.len() + 1));
+            params.push(dimension);
+        }
+        query.push_str(" GROUP BY model_id, dimension ORDER BY model_id, dimension");
+
+        Ok(client
+            .query(&query, &params)?
+            .into_iter()
+            .map(|row| BaselineEmbeddingModelRecord {
+                model_id: row.get("model_id"),
+                dimension: row.get::<_, i32>("dimension") as usize,
+                embeddings: row.get::<_, i64>("embeddings") as usize,
+            })
+            .collect())
+    }
+
+    pub fn embedding_coverage(
+        &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
+    ) -> Result<Vec<BaselineEmbeddingCoverageRecord>, SearchError> {
+        let mut client = self.connect()?;
+        let active_keys = collect_active_embedding_keys(&mut client, self)?;
+        let active_payloads = active_keys.len();
+        let models = self.list_embedding_models(model_id, dimension)?;
+        if models.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let model_id =
+            model_id.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+        let dimension = dimension.map(|value| value as i32);
+        let mut query = format!(
+            "SELECT embedding_key, model_id, dimension
+             FROM {}
+             WHERE 1 = 1",
+            self.table("semantic_embeddings")
+        );
+        let mut params = Vec::<&(dyn postgres::types::ToSql + Sync)>::new();
+        if let Some(model_id) = model_id.as_ref() {
+            query.push_str(&format!(" AND model_id = ${}", params.len() + 1));
+            params.push(model_id);
+        }
+        if let Some(dimension) = dimension.as_ref() {
+            query.push_str(&format!(" AND dimension = ${}", params.len() + 1));
+            params.push(dimension);
+        }
+
+        let mut covered = HashMap::<(String, usize), HashSet<String>>::new();
+        for row in client.query(&query, &params)? {
+            let embedding_key: String = row.get("embedding_key");
+            if !active_keys.contains(&embedding_key) {
+                continue;
+            }
+            let model_id: String = row.get("model_id");
+            let dimension = row.get::<_, i32>("dimension") as usize;
+            covered.entry((model_id, dimension)).or_default().insert(embedding_key);
+        }
+
+        Ok(models
+            .into_iter()
+            .map(|model| {
+                let covered_payloads = covered
+                    .remove(&(model.model_id.clone(), model.dimension))
+                    .map(|keys| keys.len())
+                    .unwrap_or(0);
+                BaselineEmbeddingCoverageRecord {
+                    model_id: model.model_id,
+                    dimension: model.dimension,
+                    active_payloads,
+                    covered_payloads,
+                    embeddings: model.embeddings,
+                }
+            })
+            .collect())
+    }
+
+    pub fn garbage_collect(&self, execute: bool) -> Result<BaselineGcReport, SearchError> {
+        let mut client = self.connect()?;
+        let active_keys = collect_active_embedding_keys(&mut client, self)?;
+
+        let orphan_file_object_ids = query_string_column(
+            &mut client,
+            &format!(
+                "SELECT fo.id
+                 FROM {} fo
+                 LEFT JOIN {} sf ON sf.file_object_id = fo.id
+                 WHERE sf.file_object_id IS NULL
+                 ORDER BY fo.id",
+                self.table("file_objects"),
+                self.table("snapshot_files"),
+            ),
+            &[],
+        )?;
+
+        let orphan_file_object_item_rows = client.query(
+            &format!(
+                "SELECT foi.file_object_id
+                 FROM {} foi
+                 LEFT JOIN {} fo ON fo.id = foi.file_object_id
+                 WHERE fo.id IS NULL
+                 ORDER BY foi.file_object_id, foi.ordinal",
+                self.table("file_object_items"),
+                self.table("file_objects"),
+            ),
+            &[],
+        )?;
+        let orphan_file_object_items = orphan_file_object_item_rows.len();
+        let orphan_file_object_item_ids = orphan_file_object_item_rows
+            .into_iter()
+            .map(|row| row.get::<_, String>("file_object_id"))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let orphan_semantic_embedding_rows = client.query(
+            &format!(
+                "SELECT embedding_key
+                 FROM {}
+                 ORDER BY embedding_key",
+                self.table("semantic_embeddings")
+            ),
+            &[],
+        )?;
+        let orphan_semantic_embeddings = orphan_semantic_embedding_rows
+            .iter()
+            .filter(|row| !active_keys.contains(row.get::<_, String>("embedding_key").as_str()))
+            .count();
+        let orphan_semantic_embedding_keys = orphan_semantic_embedding_rows
+            .into_iter()
+            .map(|row| row.get::<_, String>("embedding_key"))
+            .filter(|key| !active_keys.contains(key))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let mut report = BaselineGcReport {
+            orphan_file_objects: orphan_file_object_ids.len(),
+            orphan_file_object_items,
+            orphan_semantic_embeddings,
+            deleted_file_objects: 0,
+            deleted_file_object_items: 0,
+            deleted_semantic_embeddings: 0,
+        };
+
+        if !execute {
+            return Ok(report);
+        }
+
+        let mut tx = client.transaction()?;
+        if !orphan_file_object_item_ids.is_empty() {
+            let delete = format!(
+                "DELETE FROM {}
+                 WHERE file_object_id = ANY($1)",
+                self.table("file_object_items")
+            );
+            report.deleted_file_object_items =
+                tx.execute(&delete, &[&orphan_file_object_item_ids])? as usize;
+        }
+        if !orphan_file_object_ids.is_empty() {
+            let delete = format!(
+                "DELETE FROM {}
+                 WHERE id = ANY($1)",
+                self.table("file_objects")
+            );
+            report.deleted_file_objects = tx.execute(&delete, &[&orphan_file_object_ids])? as usize;
+        }
+        if !orphan_semantic_embedding_keys.is_empty() {
+            let delete = format!(
+                "DELETE FROM {}
+                 WHERE embedding_key = ANY($1)",
+                self.table("semantic_embeddings")
+            );
+            report.deleted_semantic_embeddings =
+                tx.execute(&delete, &[&orphan_semantic_embedding_keys])? as usize;
+        }
+        tx.commit()?;
+
+        Ok(report)
     }
 }
 
@@ -835,6 +1121,73 @@ fn snapshot_record_from_row(row: Row) -> BaselineSnapshotRecord {
         files: row.get::<_, i64>("files") as usize,
         documents: row.get::<_, i64>("documents") as usize,
     }
+}
+
+fn file_object_record_from_row(row: Row) -> BaselineFileObjectRecord {
+    BaselineFileObjectRecord {
+        file_object_id: row.get("id"),
+        collection: row.get("collection"),
+        fingerprint: row.get("file_fingerprint"),
+        documents: row.get::<_, i32>("document_count") as usize,
+        snapshots: row.get::<_, i64>("snapshots") as usize,
+    }
+}
+
+fn collect_active_embedding_keys(
+    client: &mut Client,
+    adapter: &PostgresBaselineAdapter,
+) -> Result<HashSet<String>, SearchError> {
+    let shared_query = format!(
+        "SELECT sf.path,
+                foi.kind,
+                foi.symbol_name,
+                co.text
+         FROM {} sf
+         JOIN {} foi ON foi.file_object_id = sf.file_object_id
+         JOIN {} co ON co.content_hash = foi.content_hash
+         WHERE sf.file_object_id IS NOT NULL",
+        adapter.table("snapshot_files"),
+        adapter.table("file_object_items"),
+        adapter.table("content_objects")
+    );
+    let legacy_query = format!(
+        "SELECT si.path,
+                si.kind,
+                si.symbol_name,
+                co.text
+         FROM {} si
+         JOIN {} co ON co.content_hash = si.content_hash",
+        adapter.table("snapshot_items"),
+        adapter.table("content_objects")
+    );
+
+    let mut active_keys = HashSet::new();
+    for row in client.query(&shared_query, &[])? {
+        active_keys.insert(semantic_key_for_semantic_row(row));
+    }
+    for row in client.query(&legacy_query, &[])? {
+        active_keys.insert(semantic_key_for_semantic_row(row));
+    }
+    Ok(active_keys)
+}
+
+fn semantic_key_for_semantic_row(row: Row) -> String {
+    let payload = format!(
+        "Path: {}\nKind: {}\nSymbol: {}\n{}",
+        row.get::<_, String>("path"),
+        row.get::<_, String>("kind"),
+        row.get::<_, String>("symbol_name"),
+        row.get::<_, String>("text"),
+    );
+    blake3::hash(payload.as_bytes()).to_hex().to_string()
+}
+
+fn query_string_column(
+    client: &mut Client,
+    query: &str,
+    params: &[&(dyn postgres::types::ToSql + Sync)],
+) -> Result<Vec<String>, SearchError> {
+    Ok(client.query(query, params)?.into_iter().map(|row| row.get(0)).collect())
 }
 
 #[cfg(test)]
