@@ -65,6 +65,7 @@ pub trait BaselineSemanticSearch {
         snapshot_id: &str,
         query_embedding: &[f32],
         model_id: &str,
+        dimension: usize,
         collection: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SemanticHit>, SearchError>;

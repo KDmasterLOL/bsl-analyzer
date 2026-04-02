@@ -183,7 +183,6 @@ fn try_direct_lexical_code(
         Some("code"),
         limit * 2,
     ) {
-        Ok(hits) if hits.is_empty() => return DirectResult::Unavailable,
         Ok(hits) => hits,
         Err(e) => {
             warn!("direct lexical: serving query failed: {e}");
@@ -229,14 +228,17 @@ fn try_direct_semantic_code(
     let Some(model_id) = engine.embedding_model() else {
         return DirectResult::Unavailable;
     };
+    let Some(dim) = engine.embedding_dimension() else {
+        return DirectResult::Unavailable;
+    };
     let baseline_hits = match source.adapter().semantic_search_baseline(
         snapshot.id.0.as_str(),
         &query_embedding,
         model_id,
+        dim,
         Some("code"),
         limit * 2,
     ) {
-        Ok(hits) if hits.is_empty() => return DirectResult::Unavailable,
         Ok(hits) => hits,
         Err(e) => {
             warn!("direct semantic: serving query failed: {e}");
@@ -390,11 +392,18 @@ pub fn search_docs(
                         None,
                     )
                 })?;
+                let dim = engine.embedding_dimension().ok_or_else(|| {
+                    McpError::internal_error(
+                        "search error: embedding dimension is unavailable".to_owned(),
+                        None,
+                    )
+                })?;
 
                 match source.adapter().semantic_search_baseline(
                     snapshot.id.0.as_str(),
                     &query_embedding,
                     model_id,
+                    dim,
                     Some("platform"),
                     limit,
                 ) {
@@ -404,7 +413,11 @@ pub fn search_docs(
                         )]));
                     }
                     Ok(_) => {
-                        // Empty result — serving table may be absent for this snapshot.
+                        // Query succeeded — authoritative empty. Don't fall back
+                        // to local SQLite which may hold stale embeddings.
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            "No results found.",
+                        )]));
                     }
                     Err(error) => {
                         warn!(

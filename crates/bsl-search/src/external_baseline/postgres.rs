@@ -305,11 +305,37 @@ impl PostgresBaselineAdapter {
                 self.schema,
                 self.table("serving_lexical")
             ),
-            // pgvector extension — best-effort, may require superuser.
-            // If already installed, IF NOT EXISTS succeeds silently.
-            // If not installed and no privileges, the error is caught below
-            // and serving_semantic queries will return empty results.
-            "DO $$ BEGIN CREATE EXTENSION IF NOT EXISTS vector; EXCEPTION WHEN insufficient_privilege THEN NULL; END $$".to_owned(),
+            // pgvector-dependent DDL is handled separately in
+            // pgvector_schema_statements() — ensure_storage() runs it
+            // best-effort so non-superuser environments degrade gracefully.
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_file_objects_fingerprint
+                 ON {} (collection, file_fingerprint)",
+                self.schema,
+                self.table("file_objects")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_file_object_items_object
+                 ON {} (file_object_id, ordinal)",
+                self.schema,
+                self.table("file_object_items")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_semantic_embeddings_model_dim
+                 ON {} (model_id, dimension)",
+                self.schema,
+                self.table("semantic_embeddings")
+            ),
+        ]
+    }
+
+    /// DDL statements that require the pgvector extension.
+    /// Executed best-effort in `ensure_storage()` — if vector is unavailable,
+    /// semantic serving degrades gracefully (queries return errors that trigger
+    /// fallback to local SQLite).
+    fn pgvector_schema_statements(&self) -> Vec<String> {
+        vec![
+            "CREATE EXTENSION IF NOT EXISTS vector".to_owned(),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
                     snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
@@ -333,24 +359,6 @@ impl PostgresBaselineAdapter {
                  ON {} (snapshot_id, model_id)",
                 self.schema,
                 self.table("serving_semantic")
-            ),
-            format!(
-                "CREATE INDEX IF NOT EXISTS idx_{}_file_objects_fingerprint
-                 ON {} (collection, file_fingerprint)",
-                self.schema,
-                self.table("file_objects")
-            ),
-            format!(
-                "CREATE INDEX IF NOT EXISTS idx_{}_file_object_items_object
-                 ON {} (file_object_id, ordinal)",
-                self.schema,
-                self.table("file_object_items")
-            ),
-            format!(
-                "CREATE INDEX IF NOT EXISTS idx_{}_semantic_embeddings_model_dim
-                 ON {} (model_id, dimension)",
-                self.schema,
-                self.table("semantic_embeddings")
             ),
         ]
     }
@@ -1120,6 +1128,7 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
         snapshot_id: &str,
         query_embedding: &[f32],
         model_id: &str,
+        dimension: usize,
         collection: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SemanticHit>, SearchError> {
@@ -1130,6 +1139,7 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
         let collection =
             collection.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
         let limit = limit.clamp(1, 200) as i64;
+        let dimension = dimension as i32;
         let snapshot_id = snapshot_id.to_owned();
         let model_id = model_id.to_owned();
         let vector_text = format!(
@@ -1146,12 +1156,12 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
                     line_end,
                     1.0 - (embedding <=> $1::vector) AS score
              FROM {}
-             WHERE snapshot_id = $2 AND model_id = $3",
+             WHERE snapshot_id = $2 AND model_id = $3 AND dimension = $4",
             self.table("serving_semantic")
         );
 
         let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
-            vec![&vector_text, &snapshot_id, &model_id];
+            vec![&vector_text, &snapshot_id, &model_id, &dimension];
         if let Some(collection) = collection.as_ref() {
             sql.push_str(&format!(" AND collection = ${}", params.len() + 1));
             params.push(collection);
@@ -1181,6 +1191,16 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
         let mut client = self.connect()?;
         for statement in self.ensure_schema_statements() {
             client.batch_execute(&statement)?;
+        }
+        // pgvector-dependent DDL: best-effort. If the extension or table
+        // creation fails (non-superuser, vector not preinstalled), semantic
+        // serving degrades gracefully — queries will error and callers fall
+        // back to local SQLite.
+        for statement in self.pgvector_schema_statements() {
+            if let Err(e) = client.batch_execute(&statement) {
+                tracing::warn!("pgvector DDL skipped (semantic serving will be unavailable): {e}");
+                break;
+            }
         }
         Ok(())
     }
@@ -1804,7 +1824,7 @@ mod tests {
         .unwrap();
 
         let result =
-            adapter.semantic_search_baseline("snapshot-1", &[], "model-1", None, 10).unwrap();
+            adapter.semantic_search_baseline("snapshot-1", &[], "model-1", 1024, None, 10).unwrap();
         assert!(result.is_empty());
     }
 
@@ -1816,7 +1836,7 @@ mod tests {
         .unwrap();
 
         let error = adapter
-            .semantic_search_baseline("snapshot-1", &[0.1, 0.2, 0.3], "model-1", None, 10)
+            .semantic_search_baseline("snapshot-1", &[0.1, 0.2, 0.3], "model-1", 3, None, 10)
             .unwrap_err();
         assert!(error.to_string().contains("connection"));
     }

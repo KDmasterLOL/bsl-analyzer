@@ -235,6 +235,7 @@ impl ExternalBaselineAdapter {
         snapshot_id: &str,
         query_embedding: &[f32],
         model_id: &str,
+        dimension: usize,
         collection: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SemanticHit>, SearchError> {
@@ -243,6 +244,7 @@ impl ExternalBaselineAdapter {
                 snapshot_id,
                 query_embedding,
                 model_id,
+                dimension,
                 collection,
                 limit,
             ),
@@ -332,6 +334,7 @@ impl BaselineSemanticSearch for ExternalBaselineAdapter {
         snapshot_id: &str,
         query_embedding: &[f32],
         model_id: &str,
+        dimension: usize,
         collection: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SemanticHit>, SearchError> {
@@ -340,6 +343,7 @@ impl BaselineSemanticSearch for ExternalBaselineAdapter {
             snapshot_id,
             query_embedding,
             model_id,
+            dimension,
             collection,
             limit,
         )
