@@ -72,7 +72,7 @@ impl GlobalState {
 
         // Config files to watch for changes
         let config_files: Vec<paths::AbsPathBuf> =
-            [".bsl-analyzer.json", ".bsl-language-server.json"]
+            ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json"]
                 .iter()
                 .map(|name| root.join(name))
                 .filter(|p| p.exists())

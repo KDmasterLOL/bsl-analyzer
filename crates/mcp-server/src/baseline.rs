@@ -6,9 +6,10 @@ use bsl_search::{
 };
 use project_model::{
     current_git_branch, evaluate_workspace_baseline_support_now, parse_timestamp_utc,
-    resolve_workspace_branch_policy, ProjectConfig, ResolvedWorkspaceBaselineSupport,
-    SearchBaselineBackend, SearchBaselineConfig, SearchBaselinePolicyConfig,
-    SearchBaselineSupportState, SearchBaselineTargetConfig, SearchPostgresConfig,
+    resolve_postgres_url, resolve_workspace_branch_policy, PostgresCredentialConfig, ProjectConfig,
+    ResolvedWorkspaceBaselineSupport, SearchBaselineBackend, SearchBaselineConfig,
+    SearchBaselinePolicyConfig, SearchBaselineSupportState, SearchBaselineTargetConfig,
+    SearchPostgresConfig,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -49,6 +50,7 @@ impl BaselineRuntime {
             CorpusId::WorkspaceCode,
             project_root,
             Some(&project_config.search.baseline),
+            project_config.postgres_credentials.as_ref(),
             "BSL_SEARCH_BASELINE",
             &["BSL_SEARCH_BASELINE_PG_URL"],
             &["BSL_SEARCH_BASELINE_PG_SCHEMA"],
@@ -61,6 +63,7 @@ impl BaselineRuntime {
             CorpusId::Reference,
             None,
             project_config.map(|config| &config.search.baseline),
+            project_config.and_then(|config| config.postgres_credentials.as_ref()),
             "BSL_SEARCH_REFERENCE",
             &["BSL_SEARCH_REFERENCE_PG_URL", "BSL_SEARCH_BASELINE_PG_URL"],
             &["BSL_SEARCH_REFERENCE_PG_SCHEMA", "BSL_SEARCH_BASELINE_PG_SCHEMA"],
@@ -68,10 +71,12 @@ impl BaselineRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // private, all params are needed for resolution chain
     fn for_corpus(
         corpus: CorpusId,
         project_root: Option<&Path>,
         project_config: Option<&SearchBaselineConfig>,
+        credentials: Option<&PostgresCredentialConfig>,
         selection_prefix: &str,
         connection_keys: &[&str],
         schema_keys: &[&str],
@@ -118,7 +123,7 @@ impl BaselineRuntime {
             &explicit_baseline,
         );
 
-        let Some(connection) = resolve_connection(connection_keys, postgres) else {
+        let Some(connection) = resolve_connection(connection_keys, postgres, credentials) else {
             return Self {
                 configured_baseline: ConfiguredBaselineStatus {
                     backend: "postgres",
@@ -548,7 +553,24 @@ fn resolve_workspace_support_status(
     )
 }
 
-fn resolve_connection(connection_keys: &[&str], postgres: &SearchPostgresConfig) -> Option<String> {
+fn resolve_connection(
+    connection_keys: &[&str],
+    postgres: &SearchPostgresConfig,
+    credentials: Option<&PostgresCredentialConfig>,
+) -> Option<String> {
+    // Priority chain:
+    // 1. TOML credential resolver (url_env/url_file/url_command/url/credential_helper)
+    //    — authoritative when bsl-analyzer.toml is present. The resolver's own url_env
+    //    field typically points to the same BSL_SEARCH_BASELINE_PG_URL var, so there
+    //    is no loss of env-var control; the TOML just makes the var name explicit.
+    // 2. Hardcoded env vars (BSL_SEARCH_BASELINE_PG_URL etc.) — legacy fallback for
+    //    projects without bsl-analyzer.toml.
+    // 3. JSON config url (search.baseline.postgres.url) — lowest priority.
+    if let Some(creds) = credentials {
+        if let Some(url) = resolve_postgres_url(creds) {
+            return Some(url);
+        }
+    }
     resolve_env_value(connection_keys).or_else(|| postgres.url.clone())
 }
 

@@ -881,8 +881,11 @@ fn run_search_baseline_sync_pg(
         branch.as_deref(),
         commit.as_deref(),
     )?;
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+    let (pg_url, pg_schema) = resolve_pg_connection(
+        args.pg_url.as_deref(),
+        args.pg_schema.as_deref(),
+        project.config.postgres_credentials.as_ref(),
+    )?;
 
     let (indexed_files, documents) = match corpus {
         CorpusId::WorkspaceCode => build_workspace_code_baseline_documents(&source_path)?,
@@ -983,7 +986,7 @@ fn run_search_baseline_list_pg(
     args: SearchBaselineListPgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
     let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
     let corpus = args.corpus.map(search_baseline_corpus_cli_to_domain);
     let snapshots = adapter.list_snapshots(
@@ -1022,7 +1025,7 @@ fn run_search_baseline_show_pg(
     args: SearchBaselineShowPgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
     let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
     let Some(details) = adapter.snapshot_details(&args.snapshot_id)? else {
         return Err(io::Error::new(
@@ -1065,7 +1068,7 @@ fn run_search_baseline_list_file_objects_pg(
     args: SearchBaselineListFileObjectsPgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
     let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
     let file_objects = adapter.list_file_objects(args.collection.as_deref(), args.limit)?;
 
@@ -1091,7 +1094,7 @@ fn run_search_baseline_show_file_object_pg(
     args: SearchBaselineShowFileObjectPgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
     let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
     let Some(details) = adapter.file_object_details(&args.file_object_id)? else {
         return Err(io::Error::new(
@@ -1123,7 +1126,7 @@ fn run_search_baseline_list_embeddings_pg(
     args: SearchBaselineListEmbeddingsPgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
     let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
     let models = adapter.list_embedding_models(args.model_id.as_deref(), args.dimension)?;
 
@@ -1147,7 +1150,7 @@ fn run_search_baseline_show_embedding_coverage_pg(
     args: SearchBaselineShowEmbeddingCoveragePgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
     let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
     let coverage = adapter.embedding_coverage(args.model_id.as_deref(), args.dimension)?;
 
@@ -1177,7 +1180,7 @@ fn run_search_baseline_gc_pg(
     args: SearchBaselineGcPgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
     let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
     let report = adapter.garbage_collect(args.execute)?;
 
@@ -1241,7 +1244,7 @@ fn run_search_baseline_retention_pg(
     }
 
     let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref())?;
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
     let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
     let snapshots = adapter.list_snapshots(
         Some(bsl_search::CorpusId::WorkspaceCode.as_str()),
@@ -1512,15 +1515,36 @@ fn select_parent_snapshot_id(
 fn resolve_pg_connection(
     pg_url: Option<&str>,
     pg_schema: Option<&str>,
+    credentials: Option<&project_model::PostgresCredentialConfig>,
 ) -> Result<(String, Option<String>), io::Error> {
-    let pg_url =
-        pick_first_non_empty([pg_url, env::var("BSL_SEARCH_BASELINE_PG_URL").ok().as_deref()])
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--pg-url or BSL_SEARCH_BASELINE_PG_URL is required",
-                )
-            })?;
+    // Explicit --pg-url flag takes highest priority
+    if let Some(url) = pg_url.filter(|u| !u.trim().is_empty()) {
+        let pg_schema = pick_first_non_empty([
+            pg_schema,
+            env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
+        ]);
+        return Ok((url.to_owned(), pg_schema));
+    }
+    // Config-level credential resolver (from bsl-analyzer.toml)
+    if let Some(creds) = credentials {
+        if let Some(url) = project_model::resolve_postgres_url(creds) {
+            let pg_schema = pick_first_non_empty([
+                pg_schema,
+                env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
+            ]);
+            return Ok((url, pg_schema));
+        }
+    }
+    // Hardcoded env var fallback
+    let pg_url = env::var("BSL_SEARCH_BASELINE_PG_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--pg-url, config credential resolver, or BSL_SEARCH_BASELINE_PG_URL is required",
+            )
+        })?;
     let pg_schema = pick_first_non_empty([
         pg_schema,
         env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
