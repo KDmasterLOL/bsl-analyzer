@@ -960,8 +960,7 @@ pub fn resolve_postgres_url(creds: &PostgresCredentialConfig) -> Option<String> 
             }
         }
     }
-    // 3. url_command (Unix only, executes shell — trust the config source)
-    #[cfg(unix)]
+    // 3. url_command (executes shell — trust the config source)
     if let Some(ref cmd) = creds.url_command {
         tracing::info!(command = cmd, "executing url_command from config");
         match run_command_with_timeout(cmd, COMMAND_TIMEOUT) {
@@ -1038,16 +1037,29 @@ fn percent_encode(input: &str) -> String {
 }
 
 /// Timeout for external commands (`url_command`, `credential_helper`).
-#[cfg(unix)]
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Runs a shell command with a timeout, returns trimmed stdout.
-#[cfg(unix)]
-fn run_command_with_timeout(command: &str, timeout: std::time::Duration) -> Result<String, String> {
-    use std::process::{Command, Stdio};
+/// Creates a shell command: `sh -c` on Unix, `cmd /c` on Windows.
+fn shell_command(command: &str) -> std::process::Command {
+    #[cfg(unix)]
+    {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", command]);
+        cmd
+    }
+}
 
-    let mut child = Command::new("sh")
-        .args(["-c", command])
+/// Runs a shell command with a timeout, returns trimmed stdout.
+fn run_command_with_timeout(command: &str, timeout: std::time::Duration) -> Result<String, String> {
+    use std::process::Stdio;
+
+    let mut child = shell_command(command)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1082,7 +1094,6 @@ fn run_command_with_timeout(command: &str, timeout: std::time::Duration) -> Resu
 /// Sends `host=…\nport=…\ndbname=…\n\n` on stdin.
 /// Expects `username=…\npassword=…\n` on stdout.
 /// Times out after [`COMMAND_TIMEOUT`].
-#[cfg(unix)]
 fn run_credential_helper(
     command: &str,
     host: &str,
@@ -1090,10 +1101,9 @@ fn run_credential_helper(
     dbname: &str,
 ) -> Result<(String, String), String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    let mut child = Command::new("sh")
-        .args(["-c", command])
+    let mut child = shell_command(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
