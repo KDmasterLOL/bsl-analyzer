@@ -943,28 +943,6 @@ pub(crate) fn extend_range_with_semicolon(
 }
 
 // =============================================================================
-// ServerCallsInFormEvents detection
-// =============================================================================
-
-/// Forbidden form event suffixes (case-insensitive).
-///
-/// These events execute frequently during UI interactions and should not call server methods.
-const FORBIDDEN_EVENT_SUFFIXES: &[&str] =
-    &["приактивизациистроки", "onactivaterow", "началовыбора", "onstartchoice"];
-
-/// Check if method name ends with a forbidden form event suffix (case-insensitive).
-///
-/// Returns true if the method name matches one of:
-/// - ПриАктивизацииСтроки / OnActivateRow
-/// - НачалоВыбора / OnStartChoice
-///
-/// These are form events that should not call server-side methods.
-pub(crate) fn is_forbidden_form_event(method_name: &str) -> bool {
-    let name_lower = method_name.to_lowercase();
-    FORBIDDEN_EVENT_SUFFIXES.iter().any(|suffix| name_lower.ends_with(suffix))
-}
-
-// =============================================================================
 // UsingExternalCodeTools detection
 // =============================================================================
 
@@ -1211,54 +1189,4 @@ pub(crate) fn is_field_access_field(node: &SyntaxNode) -> bool {
         }
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_forbidden_form_event_russian() {
-        // Russian event names
-        assert!(is_forbidden_form_event("ПриАктивизацииСтроки"));
-        assert!(is_forbidden_form_event("НачалоВыбора"));
-
-        // With prefix
-        assert!(is_forbidden_form_event("ТаблицаФормыПриАктивизацииСтроки"));
-        assert!(is_forbidden_form_event("ПолеВыбораНачалоВыбора"));
-    }
-
-    #[test]
-    fn test_is_forbidden_form_event_english() {
-        // English event names
-        assert!(is_forbidden_form_event("OnActivateRow"));
-        assert!(is_forbidden_form_event("OnStartChoice"));
-
-        // With prefix
-        assert!(is_forbidden_form_event("FormTableOnActivateRow"));
-        assert!(is_forbidden_form_event("ChoiceFieldOnStartChoice"));
-    }
-
-    #[test]
-    fn test_is_forbidden_form_event_case_insensitive() {
-        // Case insensitive
-        assert!(is_forbidden_form_event("ПРИАКТИВИЗАЦИИСТРОКИ"));
-        assert!(is_forbidden_form_event("приактивизациистроки"));
-        assert!(is_forbidden_form_event("ONACTIVATEROW"));
-        assert!(is_forbidden_form_event("onactivaterow"));
-        assert!(is_forbidden_form_event("OnAcTiVaTeRoW"));
-    }
-
-    #[test]
-    fn test_is_forbidden_form_event_not_matching() {
-        // Not form events
-        assert!(!is_forbidden_form_event("ОбычнаяПроцедура"));
-        assert!(!is_forbidden_form_event("OnClick"));
-        assert!(!is_forbidden_form_event("ПриИзменении"));
-        assert!(!is_forbidden_form_event("ПриОткрытии"));
-
-        // Partial matches should not match
-        assert!(!is_forbidden_form_event("ПриАктивизации")); // Missing "Строки"
-        assert!(!is_forbidden_form_event("OnActivate")); // Missing "Row"
-    }
 }

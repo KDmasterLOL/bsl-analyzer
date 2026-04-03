@@ -174,6 +174,15 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(crate::build_module_metadata(file_path, configuration))
     }
 
+    fn call_summary(&self, module_id: ModuleId) -> Arc<hir::ModuleCallSummary> {
+        let item_tree = self.item_tree(module_id.file_id);
+        let module_bodies = self.module_bodies(module_id);
+        let metadata = self.module_metadata(module_id);
+        let form_handlers: &[bsl_metadata::FormEventHandler] =
+            metadata.form.as_ref().map(|f| f.event_handlers.as_slice()).unwrap_or(&[]);
+        Arc::new(hir::call_graph::extract_call_summary(&item_tree, &module_bodies, form_handlers))
+    }
+
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
         let text = self.file_text(file_id);
         Arc::new(line_index::LineIndex::new(&text))

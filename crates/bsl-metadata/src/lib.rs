@@ -118,7 +118,7 @@ pub use enums::{
 };
 pub use error::{MetadataError, Result};
 pub use event_subscription::{EventSubscription, EventSubscriptionHandler};
-pub use form::{Form, FormElement};
+pub use form::{Form, FormElement, FormEventHandler};
 pub use http_service::{
     HTTPService, HTTPServiceBuilder, HTTPServiceMethod, HTTPServiceMethodBuilder,
     HTTPServiceURLTemplate, HTTPServiceURLTemplateBuilder,

@@ -61,7 +61,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::SelfAssign,
     DiagnosticCode::SelfInsertion,
     DiagnosticCode::SemicolonPresence,
-    DiagnosticCode::ServerCallsInFormEvents,
     DiagnosticCode::SetPrivilegedMode,
     DiagnosticCode::StyleElementConstructors,
     DiagnosticCode::TempFilesDir,
@@ -271,9 +270,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::RedundantAccessToObject { kind, range } => {
             handlers::redundant_access_to_object::from_hir(kind, *range, ctx)
-        }
-        BodyDiagnostic::ServerCallsInFormEvents { callee, range } => {
-            handlers::server_calls_in_form_events::from_hir(callee, *range, ctx)
         }
         BodyDiagnostic::SetPrivilegedModeCall { range } => {
             handlers::set_privileged_mode::from_hir(*range, ctx)

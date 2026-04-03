@@ -246,6 +246,11 @@ impl DefDatabase for RootDatabaseImpl {
         module_metadata_query(self, file_id_input)
     }
 
+    fn module_call_summary(&self, module_id: ModuleId) -> Arc<hir::ModuleCallSummary> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::module_call_summary_query(self, file_id_input)
+    }
+
     fn method_docs(&self, method: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
         let symbol_tree = self.symbol_tree(method.module);
         let method_symbol = symbol_tree.find_method_by_id(method)?;

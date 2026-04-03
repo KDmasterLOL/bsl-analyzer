@@ -90,6 +90,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.module_metadata(module_id)
     }
 
+    fn call_summary(&self, module_id: ModuleId) -> Arc<hir::ModuleCallSummary> {
+        self.db.module_call_summary(module_id)
+    }
+
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
         let input = FileIdInput::new(self.db, file_id);
         self.db.line_index(input)

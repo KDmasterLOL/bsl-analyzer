@@ -25,6 +25,7 @@
 //! - **BodySourceMap**: Bidirectional mapping between HIR and AST
 
 pub mod body;
+pub mod call_graph;
 pub mod cognitive_complexity;
 pub mod conditional_tree;
 pub mod cyclomatic_complexity;
@@ -73,8 +74,8 @@ pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 // Re-export all Salsa query functions from the queries module
 pub use queries::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
-    module_bodies_query, module_data_query, module_index_query, region_tree_query,
-    symbol_tree_query, workspace_index_query, workspace_symbols_query,
+    module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
+    region_tree_query, symbol_tree_query, workspace_index_query, workspace_symbols_query,
 };
 
 /// HIR definition layer - lowering from AST to HIR.
@@ -233,6 +234,17 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// **Note:** Actual implementation is in ide-db (needs VFS access). The query
     /// in hir-def is a placeholder.
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
+
+    /// Get per-module call summary (methods, edges, notify/idle registrations, form entries).
+    ///
+    /// # Performance
+    /// - **LRU cache:** 256
+    /// - **Depends on:** [`module_bodies`](Self::module_bodies), [`item_tree`](Self::item_tree), [`module_metadata`](Self::module_metadata)
+    /// - **Typical time:** <2ms
+    ///
+    /// # Implementation
+    /// Should delegate to [`module_call_summary_query`].
+    fn module_call_summary(&self, module_id: ModuleId) -> Arc<call_graph::ModuleCallSummary>;
 
     /// Get parsed documentation for a method.
     ///

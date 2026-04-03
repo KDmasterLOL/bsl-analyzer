@@ -87,6 +87,11 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.symbol_tree(module_id))
     }
 
+    /// Get per-module call summary for specific module.
+    pub fn call_summary(&self, module_id: hir::ModuleId) -> Arc<hir::ModuleCallSummary> {
+        self.query(|p| p.call_summary(module_id))
+    }
+
     /// Get item tree for current file.
     pub fn item_tree(&self) -> Arc<hir::ItemTree> {
         self.query(|p| p.item_tree(self.file_id))

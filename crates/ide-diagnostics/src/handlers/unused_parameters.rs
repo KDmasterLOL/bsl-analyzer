@@ -20,7 +20,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::utils::platform_event_handlers::is_platform_event_handler;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Expr, Literal, ModItem};
+use hir::{Expr, ModItem};
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
 
@@ -68,7 +68,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut fixed_signature_handlers: FxHashSet<String> = FxHashSet::default();
     if let Some(ref form) = metadata.form {
         for handler in form.event_handlers() {
-            fixed_signature_handlers.insert(handler.to_lowercase());
+            fixed_signature_handlers.insert(handler.handler_name.to_lowercase());
         }
         for handler in form.command_handlers() {
             fixed_signature_handlers.insert(handler.to_lowercase());
@@ -82,8 +82,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    // Collect callback method names from NotifyDescription constructors in this module
-    collect_notify_description_callbacks(&module_bodies, &mut fixed_signature_handlers);
+    // Collect callback method names from NotifyDescription registrations (DRY: reuse call_graph)
+    let module_id = hir::ModuleId::new(ctx.file_id);
+    let summary = ctx.call_summary(module_id);
+    for reg in &summary.notify_regs {
+        if reg.target_module.is_none() {
+            // Only suppress for same-module callbacks (ЭтотОбъект/ThisObject)
+            fixed_signature_handlers.insert(reg.callback_name.as_str().to_lowercase());
+        }
+    }
 
     // Collect attachable method names (prefix-based) into fixed_signature_handlers
     for (local_id, _) in module_bodies.iter_bodies() {
@@ -170,71 +177,6 @@ fn check_method(
     }
 
     diagnostics
-}
-
-fn is_this_object(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "этотобъект" || lower == "thisobject"
-}
-
-fn is_notify_description(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "описаниеоповещения" || lower == "notifydescription"
-}
-
-fn collect_notify_description_callbacks(
-    module_bodies: &hir::ModuleBodies,
-    handlers: &mut FxHashSet<String>,
-) {
-    let mut scan_body = |body: &hir::Body| {
-        for (_, expr) in body.exprs_iter() {
-            if let Expr::New { type_name, args } = expr {
-                // Static form: Новый ОписаниеОповещения("Callback", ЭтотОбъект)
-                // Dynamic form: Новый("ОписаниеОповещения", "Callback", ЭтотОбъект)
-                let (method_idx, target_idx) = match type_name {
-                    Some(tn) if is_notify_description(tn.as_str()) => (0, 1),
-                    None if !args.is_empty() => {
-                        if let Expr::Literal(Literal::String(tn)) = body.expr_idx(args[0]) {
-                            if is_notify_description(tn) {
-                                (1, 2)
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                    _ => continue,
-                };
-
-                if args.len() <= target_idx {
-                    continue;
-                }
-
-                // Target arg must be ЭтотОбъект/ThisObject (same module callback)
-                if let Expr::Path(target) = body.expr_idx(args[target_idx]) {
-                    if !is_this_object(target.as_str()) {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-
-                // Method name arg must be a string literal
-                if let Expr::Literal(Literal::String(method_name)) = body.expr_idx(args[method_idx])
-                {
-                    handlers.insert(method_name.to_lowercase());
-                }
-            }
-        }
-    };
-
-    for (_, body) in module_bodies.iter_bodies() {
-        scan_body(body);
-    }
-    if let Some(module_code) = module_bodies.module_code() {
-        scan_body(module_code);
-    }
 }
 
 fn collect_used_identifiers(body: &hir::Body) -> FxHashSet<String> {

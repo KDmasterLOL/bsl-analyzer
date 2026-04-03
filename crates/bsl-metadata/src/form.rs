@@ -20,6 +20,15 @@ pub struct FormElement {
     pub data_path: Option<String>,
 }
 
+/// Form event handler metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormEventHandler {
+    /// Platform event type from the XML `name` attribute.
+    pub event_type: String,
+    /// Method name called for the event.
+    pub handler_name: String,
+}
+
 impl FormElement {
     /// Check if the element has a wrong (unresolved) data path.
     ///
@@ -43,11 +52,11 @@ pub struct Form {
     pub uuid: Uuid,
     /// Form elements with data path bindings
     pub elements: Vec<FormElement>,
-    /// Event handler method names (from `<Events><Event>handler</Event></Events>`)
+    /// Event handlers (from `<Events><Event>handler</Event></Events>`)
     ///
     /// These are methods called by the platform for form events like
     /// OnCreateAtServer, OnOpen, BeforeClose, etc.
-    pub event_handlers: Vec<String>,
+    pub event_handlers: Vec<FormEventHandler>,
     /// Command handler method names (from `<Commands><Command><Action>handler</Action></Command></Commands>`)
     ///
     /// These are methods called when form commands are executed.
@@ -98,7 +107,7 @@ impl Form {
         form_type: FormType,
         uuid: Uuid,
         elements: Vec<FormElement>,
-        event_handlers: Vec<String>,
+        event_handlers: Vec<FormEventHandler>,
         command_handlers: Vec<String>,
     ) -> Self {
         Self {
@@ -154,11 +163,16 @@ impl Form {
         self.form_type == FormType::Ordinary
     }
 
-    /// Get event handler method names.
+    /// Get event handlers.
     ///
     /// These methods are called by the platform for form events.
-    pub fn event_handlers(&self) -> &[String] {
+    pub fn event_handlers(&self) -> &[FormEventHandler] {
         &self.event_handlers
+    }
+
+    /// Get event handler method names.
+    pub fn event_handler_names(&self) -> Vec<&str> {
+        self.event_handlers.iter().map(|h| h.handler_name.as_str()).collect()
     }
 
     /// Get command handler method names.
@@ -173,7 +187,7 @@ impl Form {
     /// Comparison is case-insensitive.
     pub fn is_handler(&self, method_name: &str) -> bool {
         let name_lower = method_name.to_lowercase();
-        self.event_handlers.iter().any(|h| h.to_lowercase() == name_lower)
+        self.event_handlers.iter().any(|h| h.handler_name.to_lowercase() == name_lower)
             || self.command_handlers.iter().any(|h| h.to_lowercase() == name_lower)
     }
 }

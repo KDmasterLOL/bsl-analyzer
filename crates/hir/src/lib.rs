@@ -33,6 +33,8 @@ pub use hir_def::scope::{ExprScopes, ScopeDef};
 pub use hir_def::DefDatabase;
 
 // Re-export documentation types
+pub use hir_def::call_graph;
+pub use hir_def::call_graph::ModuleCallSummary;
 pub use hir_def::docs::{MethodDocs, ParameterDoc};
 
 // Re-export analysis modules
@@ -76,8 +78,8 @@ pub use hir_def::MethodIdInput;
 // Re-export Salsa query functions
 pub use hir_def::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
-    module_bodies_query, module_data_query, module_index_query, region_tree_query,
-    symbol_tree_query, workspace_index_query, workspace_symbols_query,
+    module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
+    region_tree_query, symbol_tree_query, workspace_index_query, workspace_symbols_query,
 };
 
 // Re-export hir-ty types and queries

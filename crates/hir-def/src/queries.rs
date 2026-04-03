@@ -153,6 +153,35 @@ pub fn workspace_symbols_query(
     Arc::new(crate::workspace::workspace_symbols(db, &files))
 }
 
+/// Extract per-module call summary (methods, edges, notify/idle registrations, form entries).
+///
+/// ## Salsa caching
+/// - LRU: 256 (similar weight to module_data)
+/// - Invalidation: Automatic when module_bodies or module_metadata change
+/// - Dependency: calls module_bodies() + item_tree() + module_metadata() internally
+///
+/// ## Performance
+/// - Computation: <2ms typical (flat scan of expressions)
+/// - Cached access: <1ms
+#[salsa::tracked(lru = 256)]
+pub fn module_call_summary_query<'db>(
+    db: &'db dyn DefDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<crate::call_graph::ModuleCallSummary> {
+    let _span = tracing::info_span!("module_call_summary", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
+
+    let item_tree = db.item_tree(file_id);
+    let module_bodies = db.module_bodies(module_id);
+    let module_metadata = db.module_metadata(module_id);
+
+    let form_handlers: &[bsl_metadata::FormEventHandler] =
+        module_metadata.form.as_ref().map(|f| f.event_handlers.as_slice()).unwrap_or(&[]);
+
+    Arc::new(crate::call_graph::extract_call_summary(&item_tree, &module_bodies, form_handlers))
+}
+
 /// Get external module references from a file.
 ///
 /// Extracts ExternalRef from module bodies (collected during HIR lowering).

@@ -71,6 +71,9 @@ pub trait AnalysisProvider {
     /// Get module metadata (type, execution context).
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
 
+    /// Get per-module call summary (methods, edges, registrations, form entries).
+    fn call_summary(&self, module_id: ModuleId) -> Arc<hir::ModuleCallSummary>;
+
     /// Get line index for byte offset -> line/column conversion.
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex>;
 

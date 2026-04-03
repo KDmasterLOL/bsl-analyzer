@@ -289,6 +289,51 @@ pub fn check_hir_diagnostic_with_fixtures(fixture_text: &str) -> Vec<Diagnostic>
     crate::diagnostics(&ctx)
 }
 
+/// Run diagnostics on multi-file fixtures with custom module metadata for the test file.
+pub fn check_metadata_diagnostic_with_fixtures<F>(
+    metadata: hir::ModuleMetadata,
+    fixture_text: &str,
+    check_fn: F,
+) -> Vec<Diagnostic>
+where
+    F: Fn(&hir::ModuleMetadata, &crate::DiagnosticsContext) -> Vec<Diagnostic>,
+{
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use test_fixture::Fixture;
+
+    let fixture = Fixture::parse(fixture_text);
+    let mut db = RootDatabaseImpl::new();
+
+    let mut file_set = vfs::FileSet::default();
+    for (file_id, file) in &fixture.files {
+        file_set.insert(*file_id, file.path.clone());
+        db.set_file_text(*file_id, &file.content);
+    }
+
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+
+    for file_id in fixture.files.keys() {
+        db.set_file_source_root(*file_id, SourceRootId(0));
+    }
+
+    let test_file = *fixture.files.keys().last().expect("Fixture should have at least one file");
+    let metadata_arc = Arc::new(metadata);
+    let config_rc = Rc::new(crate::DiagnosticsConfig::all_enabled());
+    let provider_impl = MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc) };
+    let ctx = crate::DiagnosticsContext::new(
+        &config_rc,
+        test_file,
+        &provider_impl as &dyn ide_db::provider::AnalysisProvider,
+    );
+
+    check_fn(&metadata_arc, &ctx)
+}
+
 /// Run diagnostics on SDBL test code.
 ///
 /// Convenience function for SDBL-based diagnostics.
@@ -369,6 +414,22 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
 
     fn module_metadata(&self, _module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleMetadata> {
         std::sync::Arc::clone(&self.metadata)
+    }
+
+    fn call_summary(&self, module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleCallSummary> {
+        use hir::DefDatabase;
+
+        let file_id = module_id.file_id;
+        let item_tree = self.db.item_tree(file_id);
+        let module_bodies = self.db.module_bodies(module_id);
+        let form_handlers: &[bsl_metadata::FormEventHandler] =
+            self.metadata.form.as_ref().map(|form| form.event_handlers.as_slice()).unwrap_or(&[]);
+
+        std::sync::Arc::new(hir::call_graph::extract_call_summary(
+            &item_tree,
+            &module_bodies,
+            form_handlers,
+        ))
     }
 
     fn module_liveness_analysis(

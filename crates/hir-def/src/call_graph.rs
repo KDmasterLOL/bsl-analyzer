@@ -1,0 +1,822 @@
+//! Per-module call graph facts extracted from HIR.
+//!
+//! This module defines the types and extraction logic for building
+//! a per-module call summary from HIR bodies and ItemTree metadata.
+//! No cross-module resolution or BFS traversal happens here —
+//! those belong in `ide-diagnostics`.
+
+use rustc_hash::FxHashMap;
+use syntax::TextRange;
+
+use crate::{
+    body::{Body, BodySourceMap, ManagerType},
+    hir::{Expr, ExprIdx, Literal},
+    item_tree::{AnnotationKind, ItemTree, ModItem},
+    name::Name,
+    ModuleBodies,
+};
+
+/// Per-module call facts extracted from HIR.
+/// No cross-module resolution, no BFS — pure per-module data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleCallSummary {
+    pub methods: Vec<MethodSummary>,
+    pub call_edges: Vec<CallEdge>,
+    pub notify_regs: Vec<NotifyReg>,
+    pub idle_handler_regs: Vec<IdleReg>,
+    pub form_entries: Vec<FormEventEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodSummary {
+    pub local_id: u32,
+    pub name: Name,
+    pub dispatch: MethodDispatch,
+    pub is_export: bool,
+}
+
+/// Dispatch classification computed from `AnnotationKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MethodDispatch {
+    pub can_run_on_client: bool,
+    pub can_run_on_server: bool,
+    pub no_context: bool,
+}
+
+impl MethodDispatch {
+    pub fn from_annotation(kind: Option<&AnnotationKind>) -> Self {
+        match kind {
+            Some(AnnotationKind::AtClient) => {
+                Self { can_run_on_client: true, can_run_on_server: false, no_context: false }
+            }
+            Some(AnnotationKind::AtServer) => {
+                Self { can_run_on_client: false, can_run_on_server: true, no_context: false }
+            }
+            Some(AnnotationKind::AtServerNoContext) => {
+                Self { can_run_on_client: false, can_run_on_server: true, no_context: true }
+            }
+            Some(AnnotationKind::AtClientAtServer) => {
+                Self { can_run_on_client: true, can_run_on_server: true, no_context: false }
+            }
+            Some(AnnotationKind::AtClientAtServerNoContext) => {
+                Self { can_run_on_client: true, can_run_on_server: true, no_context: true }
+            }
+            Some(
+                AnnotationKind::Before
+                | AnnotationKind::After
+                | AnnotationKind::Instead
+                | AnnotationKind::ChangeAndValidate,
+            )
+            | None => Self { can_run_on_client: true, can_run_on_server: false, no_context: false },
+        }
+    }
+
+    pub fn is_server_only(&self) -> bool {
+        self.can_run_on_server && !self.can_run_on_client
+    }
+}
+
+/// Synchronous call edge within a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallEdge {
+    pub caller: CallerId,
+    pub target: CallTarget,
+    pub kind: EdgeKind,
+    pub range: TextRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeKind {
+    DirectLocal,
+    DirectQualifiedModule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallTarget {
+    Local { callee_local_id: u32 },
+    QualifiedModule { module_name: Name, method_name: Name },
+    ManagerAccess { manager_type: ManagerType, object_name: Name, method_name: Option<Name> },
+    ThisObjectMethod { method_name: Name },
+    Unresolved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallerId {
+    Method(u32),
+    ModuleCode,
+}
+
+/// NotifyDescription registration (async, not a call edge).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyReg {
+    pub caller: CallerId,
+    pub callback_name: Name,
+    pub target_module: Option<Name>,
+    pub range: TextRange,
+}
+
+/// Idle handler registration (async, not a call edge).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleReg {
+    pub caller: CallerId,
+    pub handler_name: Name,
+    pub one_shot: bool,
+    pub range: TextRange,
+}
+
+/// Form event entry mapping event type to handler method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormEventEntry {
+    pub event_type: String,
+    pub handler_name: Name,
+}
+
+// ============================================================================
+// Extraction
+// ============================================================================
+
+/// Extract per-module call summary from HIR.
+///
+/// Iterates all method bodies and module-level code to collect:
+/// - Method summaries with dispatch classification
+/// - Synchronous call edges (DirectLocal, DirectQualifiedModule)
+/// - NotifyDescription registrations
+/// - Idle handler registrations
+/// - Form event entries
+pub fn extract_call_summary(
+    item_tree: &ItemTree,
+    module_bodies: &ModuleBodies,
+    form_event_handlers: &[bsl_metadata::FormEventHandler],
+) -> ModuleCallSummary {
+    // 1. Build method summaries from ItemTree
+    let mut methods = Vec::new();
+    let mut local_method_ids: FxHashMap<String, u32> = FxHashMap::default();
+
+    for (top_level_idx, item) in item_tree.top_level_items().iter().enumerate() {
+        let local_id = top_level_idx as u32;
+        match item {
+            ModItem::Procedure(idx) => {
+                let proc = item_tree.procedure(*idx);
+                let dispatch =
+                    MethodDispatch::from_annotation(proc.annotations.first().map(|a| &a.kind));
+                local_method_ids.entry(proc.name.as_str().to_lowercase()).or_insert(local_id);
+                methods.push(MethodSummary {
+                    local_id,
+                    name: proc.name.clone(),
+                    dispatch,
+                    is_export: proc.is_export,
+                });
+            }
+            ModItem::Function(idx) => {
+                let func = item_tree.function(*idx);
+                let dispatch =
+                    MethodDispatch::from_annotation(func.annotations.first().map(|a| &a.kind));
+                local_method_ids.entry(func.name.as_str().to_lowercase()).or_insert(local_id);
+                methods.push(MethodSummary {
+                    local_id,
+                    name: func.name.clone(),
+                    dispatch,
+                    is_export: func.is_export,
+                });
+            }
+            ModItem::Variable(_) => {}
+        }
+    }
+
+    // 2. Extract edges from all method bodies
+    //    Collect local_ids and sort for deterministic order
+    //    (ModuleBodies iterates FxHashMap which is non-deterministic)
+    let mut call_edges = Vec::new();
+    let mut notify_regs = Vec::new();
+    let mut idle_handler_regs = Vec::new();
+
+    let mut sorted_ids: Vec<u32> = module_bodies.iter_lower_results().map(|(id, _)| id).collect();
+    sorted_ids.sort_unstable();
+
+    for local_id in sorted_ids {
+        let lower_result = match module_bodies.lower_result(local_id) {
+            Some(lr) => lr,
+            None => continue,
+        };
+        extract_from_body(
+            &lower_result.body,
+            &lower_result.source_map,
+            CallerId::Method(local_id),
+            &local_method_ids,
+            &mut call_edges,
+            &mut notify_regs,
+            &mut idle_handler_regs,
+        );
+    }
+
+    // 3. Extract edges from module-level code
+    if let Some(module_code) = module_bodies.module_code_result() {
+        extract_from_body(
+            &module_code.body,
+            &module_code.source_map,
+            CallerId::ModuleCode,
+            &local_method_ids,
+            &mut call_edges,
+            &mut notify_regs,
+            &mut idle_handler_regs,
+        );
+    }
+
+    // 4. Build form entries
+    let form_entries = form_event_handlers
+        .iter()
+        .map(|h| FormEventEntry {
+            event_type: h.event_type.clone(),
+            handler_name: Name::new(&h.handler_name),
+        })
+        .collect();
+
+    ModuleCallSummary { methods, call_edges, notify_regs, idle_handler_regs, form_entries }
+}
+
+fn extract_from_body(
+    body: &Body,
+    source_map: &BodySourceMap,
+    caller: CallerId,
+    local_method_ids: &FxHashMap<String, u32>,
+    call_edges: &mut Vec<CallEdge>,
+    notify_regs: &mut Vec<NotifyReg>,
+    idle_handler_regs: &mut Vec<IdleReg>,
+) {
+    for (expr_id, expr) in body.exprs_iter() {
+        match expr {
+            Expr::Call { callee, args } => {
+                let callee_expr = body.expr_idx(*callee);
+                let range = source_map.expr_range(expr_id).unwrap_or(TextRange::empty(0.into()));
+
+                match callee_expr {
+                    Expr::Path(name) => {
+                        let name_lower = name.as_str().to_lowercase();
+
+                        if is_attach_idle_handler(&name_lower) {
+                            if let Some(reg) = extract_idle_reg(body, caller, args, range) {
+                                idle_handler_regs.push(reg);
+                            }
+                        } else if let Some(&callee_local_id) = local_method_ids.get(&name_lower) {
+                            call_edges.push(CallEdge {
+                                caller,
+                                target: CallTarget::Local { callee_local_id },
+                                kind: EdgeKind::DirectLocal,
+                                range,
+                            });
+                        }
+                    }
+                    Expr::QualifiedPath(qname) => {
+                        if let Some(edge) = qualified_path_to_edge(caller, qname.segments(), range)
+                        {
+                            call_edges.push(edge);
+                        }
+                    }
+                    // Field { base: Path(module), field: method } — streaming mode
+                    Expr::Field { base: field_base, field } => {
+                        if let Some(edge) =
+                            field_callee_to_edge(body, caller, *field_base, field, range)
+                        {
+                            call_edges.push(edge);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Expr::New { type_name, args } => {
+                // Static: Новый ОписаниеОповещения("Callback", ЭтотОбъект)
+                // Dynamic: Новый("ОписаниеОповещения", "Callback", ЭтотОбъект)
+                let offsets = match type_name {
+                    Some(tn) if is_notify_description(tn) => Some((0, 1)),
+                    None if !args.is_empty() => {
+                        if let Expr::Literal(Literal::String(tn)) = body.expr_idx(args[0]) {
+                            if is_notify_description_str(tn) {
+                                Some((1, 2))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some((method_idx, target_idx)) = offsets {
+                    let range =
+                        source_map.expr_range(expr_id).unwrap_or(TextRange::empty(0.into()));
+                    if let Some(reg) =
+                        extract_notify_reg_at(body, caller, args, method_idx, target_idx, range)
+                    {
+                        notify_regs.push(reg);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Check if a name (lowercased) matches `ПодключитьОбработчикОжидания` / `AttachIdleHandler`.
+fn is_attach_idle_handler(name_lower: &str) -> bool {
+    name_lower == "подключитьобработчикожидания" || name_lower == "attachidlehandler"
+}
+
+/// Check if a type name matches `ОписаниеОповещения` / `NotifyDescription`.
+fn is_notify_description(name: &Name) -> bool {
+    is_notify_description_str(name.as_str())
+}
+
+/// Check if a string matches `ОписаниеОповещения` / `NotifyDescription` (case-insensitive).
+fn is_notify_description_str(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "описаниеоповещения" || lower == "notifydescription"
+}
+
+/// Check if a name (lowercased) matches `ЭтотОбъект` / `ThisObject`.
+fn is_this_object(name_lower: &str) -> bool {
+    name_lower == "этотобъект" || name_lower == "thisobject"
+}
+
+/// Extract an IdleReg from `ПодключитьОбработчикОжидания("Handler", Interval, OneShot)`.
+fn extract_idle_reg(
+    body: &Body,
+    caller: CallerId,
+    args: &[ExprIdx],
+    range: TextRange,
+) -> Option<IdleReg> {
+    if args.is_empty() {
+        return None;
+    }
+    let handler_name = extract_string_literal(body, args[0])?;
+    let one_shot = args
+        .get(2)
+        .and_then(|&idx| match body.expr_idx(idx) {
+            Expr::Literal(Literal::Bool(v)) => Some(*v),
+            _ => None,
+        })
+        .unwrap_or(false);
+    Some(IdleReg { caller, handler_name: Name::new(&handler_name), one_shot, range })
+}
+
+/// Extract a NotifyReg with explicit arg offsets.
+///
+/// Static form: `Новый ОписаниеОповещения("Callback", ЭтотОбъект)` → method_idx=0, target_idx=1
+/// Dynamic form: `Новый("ОписаниеОповещения", "Callback", ЭтотОбъект)` → method_idx=1, target_idx=2
+fn extract_notify_reg_at(
+    body: &Body,
+    caller: CallerId,
+    args: &[ExprIdx],
+    method_idx: usize,
+    target_idx: usize,
+    range: TextRange,
+) -> Option<NotifyReg> {
+    let callback_name = extract_string_literal(body, *args.get(method_idx)?)?;
+    let target_module = args.get(target_idx).and_then(|&idx| match body.expr_idx(idx) {
+        Expr::Path(name) if is_this_object(&name.as_str().to_lowercase()) => None,
+        Expr::Path(name) => Some(name.clone()),
+        _ => None,
+    });
+    Some(NotifyReg { caller, callback_name: Name::new(&callback_name), target_module, range })
+}
+
+/// Build a CallEdge from QualifiedPath segments.
+fn qualified_path_to_edge(
+    caller: CallerId,
+    segments: &[Name],
+    range: TextRange,
+) -> Option<CallEdge> {
+    match segments.len() {
+        2 => Some(CallEdge {
+            caller,
+            target: CallTarget::QualifiedModule {
+                module_name: segments[0].clone(),
+                method_name: segments[1].clone(),
+            },
+            kind: EdgeKind::DirectQualifiedModule,
+            range,
+        }),
+        3 => {
+            let target = if let Some(manager_type) = ManagerType::from_name(segments[0].as_str()) {
+                CallTarget::ManagerAccess {
+                    manager_type,
+                    object_name: segments[1].clone(),
+                    method_name: Some(segments[2].clone()),
+                }
+            } else {
+                CallTarget::Unresolved
+            };
+            Some(CallEdge { caller, target, kind: EdgeKind::DirectQualifiedModule, range })
+        }
+        _ => None,
+    }
+}
+
+/// Build a CallEdge from `Call { callee: Field { base, field } }` pattern.
+///
+/// Handles two cases:
+/// - `Field { base: Path(module), field: method }` → 2-segment qualified call
+/// - `Field { base: Field { base: Path(mdo_type), field: mdo_name }, field: method }` → 3-segment manager access
+fn field_callee_to_edge(
+    body: &Body,
+    caller: CallerId,
+    field_base: ExprIdx,
+    field: &Name,
+    range: TextRange,
+) -> Option<CallEdge> {
+    match body.expr_idx(field_base) {
+        Expr::Path(module_name) => Some(CallEdge {
+            caller,
+            target: CallTarget::QualifiedModule {
+                module_name: module_name.clone(),
+                method_name: field.clone(),
+            },
+            kind: EdgeKind::DirectQualifiedModule,
+            range,
+        }),
+        Expr::Field { base: inner_base, field: inner_field } => {
+            if let Expr::Path(mdo_type_name) = body.expr_idx(*inner_base) {
+                let target =
+                    if let Some(manager_type) = ManagerType::from_name(mdo_type_name.as_str()) {
+                        CallTarget::ManagerAccess {
+                            manager_type,
+                            object_name: inner_field.clone(),
+                            method_name: Some(field.clone()),
+                        }
+                    } else {
+                        CallTarget::Unresolved
+                    };
+                Some(CallEdge { caller, target, kind: EdgeKind::DirectQualifiedModule, range })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract string content from a string literal expression.
+fn extract_string_literal(body: &Body, idx: ExprIdx) -> Option<String> {
+    match body.expr_idx(idx) {
+        Expr::Literal(Literal::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dispatch_from_annotation() {
+        let d = MethodDispatch::from_annotation(None);
+        assert!(d.can_run_on_client);
+        assert!(!d.can_run_on_server);
+        assert!(!d.is_server_only());
+
+        let d = MethodDispatch::from_annotation(Some(&AnnotationKind::AtServer));
+        assert!(!d.can_run_on_client);
+        assert!(d.can_run_on_server);
+        assert!(d.is_server_only());
+
+        let d = MethodDispatch::from_annotation(Some(&AnnotationKind::AtClient));
+        assert!(d.can_run_on_client);
+        assert!(!d.can_run_on_server);
+        assert!(!d.is_server_only());
+
+        let d = MethodDispatch::from_annotation(Some(&AnnotationKind::AtClientAtServer));
+        assert!(d.can_run_on_client);
+        assert!(d.can_run_on_server);
+        assert!(!d.is_server_only());
+
+        let d = MethodDispatch::from_annotation(Some(&AnnotationKind::AtServerNoContext));
+        assert!(!d.can_run_on_client);
+        assert!(d.can_run_on_server);
+        assert!(d.is_server_only());
+        assert!(d.no_context);
+
+        let d = MethodDispatch::from_annotation(Some(&AnnotationKind::AtClientAtServerNoContext));
+        assert!(d.can_run_on_client);
+        assert!(d.can_run_on_server);
+        assert!(!d.is_server_only());
+        assert!(d.no_context);
+
+        // Extension methods default to client
+        let d = MethodDispatch::from_annotation(Some(&AnnotationKind::Before));
+        assert!(d.can_run_on_client);
+        assert!(!d.can_run_on_server);
+    }
+
+    #[test]
+    fn test_is_attach_idle_handler() {
+        assert!(is_attach_idle_handler("подключитьобработчикожидания"));
+        assert!(is_attach_idle_handler("attachidlehandler"));
+        assert!(!is_attach_idle_handler("отключитьобработчикожидания"));
+    }
+
+    #[test]
+    fn test_is_notify_description() {
+        assert!(is_notify_description(&Name::new("ОписаниеОповещения")));
+        assert!(is_notify_description(&Name::new("NotifyDescription")));
+        assert!(is_notify_description(&Name::new("описаниеоповещения")));
+        assert!(!is_notify_description(&Name::new("ОписаниеОшибки")));
+    }
+
+    #[test]
+    fn test_is_this_object() {
+        assert!(is_this_object("этотобъект"));
+        assert!(is_this_object("thisobject"));
+        assert!(!is_this_object("другойобъект"));
+    }
+
+    #[test]
+    fn test_manager_type_from_name() {
+        assert_eq!(ManagerType::from_name("Документы"), Some(ManagerType::Documents));
+        assert_eq!(ManagerType::from_name("Documents"), Some(ManagerType::Documents));
+        assert_eq!(ManagerType::from_name("документы"), Some(ManagerType::Documents));
+        assert_eq!(ManagerType::from_name("Справочники"), Some(ManagerType::Catalogs));
+        assert_eq!(ManagerType::from_name("catalogs"), Some(ManagerType::Catalogs));
+        assert_eq!(ManagerType::from_name("НеизвестныйТип"), None);
+    }
+
+    #[test]
+    fn test_extract_call_summary_empty_module() {
+        let item_tree = ItemTree::default();
+        let module_bodies = ModuleBodies::new();
+        let summary = extract_call_summary(&item_tree, &module_bodies, &[]);
+
+        assert!(summary.methods.is_empty());
+        assert!(summary.call_edges.is_empty());
+        assert!(summary.notify_regs.is_empty());
+        assert!(summary.idle_handler_regs.is_empty());
+        assert!(summary.form_entries.is_empty());
+    }
+
+    #[test]
+    fn test_extract_form_entries() {
+        let item_tree = ItemTree::default();
+        let module_bodies = ModuleBodies::new();
+        let handlers = vec![
+            bsl_metadata::FormEventHandler {
+                event_type: "OnCreateAtServer".to_string(),
+                handler_name: "ПриСозданииНаСервере".to_string(),
+            },
+            bsl_metadata::FormEventHandler {
+                event_type: "OnActivateRow".to_string(),
+                handler_name: "СписокПриАктивизацииСтроки".to_string(),
+            },
+        ];
+        let summary = extract_call_summary(&item_tree, &module_bodies, &handlers);
+
+        assert_eq!(summary.form_entries.len(), 2);
+        assert_eq!(summary.form_entries[0].event_type, "OnCreateAtServer");
+        assert_eq!(summary.form_entries[0].handler_name, Name::new("ПриСозданииНаСервере"));
+        assert_eq!(summary.form_entries[1].event_type, "OnActivateRow");
+    }
+
+    // ====================================================================
+    // Integration tests: parse BSL → extract_call_summary
+    // ====================================================================
+
+    fn parse_and_extract(code: &str) -> ModuleCallSummary {
+        parse_and_extract_with_handlers(code, &[])
+    }
+
+    fn parse_and_extract_with_handlers(
+        code: &str,
+        handlers: &[bsl_metadata::FormEventHandler],
+    ) -> ModuleCallSummary {
+        let parse = parser::parse(code);
+        let item_tree = ItemTree::from_parse(&parse);
+        let module_id = crate::ModuleId::new(vfs::FileId(0));
+        let module_bodies = ModuleBodies::from_parse(&parse, module_id);
+        extract_call_summary(&item_tree, &module_bodies, handlers)
+    }
+
+    #[test]
+    fn test_handler_to_local_client_to_server_chain() {
+        let code = r#"
+&НаКлиенте
+Процедура ОбработчикСобытия()
+    КлиентскийМетод();
+КонецПроцедуры
+
+&НаКлиенте
+Процедура КлиентскийМетод()
+    СерверныйМетод();
+КонецПроцедуры
+
+&НаСервере
+Процедура СерверныйМетод()
+    // server logic
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        assert_eq!(summary.methods.len(), 3);
+        assert!(summary.methods[0].dispatch.can_run_on_client);
+        assert!(summary.methods[2].dispatch.is_server_only());
+
+        // Two DirectLocal edges: handler→client, client→server
+        let local_edges: Vec<_> =
+            summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
+        assert_eq!(local_edges.len(), 2);
+
+        // handler (local_id=0) → client (local_id=1)
+        assert_eq!(local_edges[0].caller, CallerId::Method(0));
+        assert!(matches!(&local_edges[0].target, CallTarget::Local { callee_local_id: 1 }));
+
+        // client (local_id=1) → server (local_id=2)
+        assert_eq!(local_edges[1].caller, CallerId::Method(1));
+        assert!(matches!(&local_edges[1].target, CallTarget::Local { callee_local_id: 2 }));
+    }
+
+    #[test]
+    fn test_qualified_call_to_common_module() {
+        let code = r#"
+Процедура МойМетод()
+    ОбщийМодуль.ВнешнийМетод();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        let qual_edges: Vec<_> = summary
+            .call_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::DirectQualifiedModule)
+            .collect();
+        assert_eq!(qual_edges.len(), 1);
+        assert!(matches!(
+            &qual_edges[0].target,
+            CallTarget::QualifiedModule { module_name, method_name }
+                if module_name.as_str() == "ОбщийМодуль"
+                    && method_name.as_str() == "ВнешнийМетод"
+        ));
+    }
+
+    #[test]
+    fn test_no_duplicate_edges_for_single_qualified_call() {
+        let code = r#"
+Процедура Тест()
+    ОбщийМодуль.Метод();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        let qual_edges: Vec<_> = summary
+            .call_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::DirectQualifiedModule)
+            .collect();
+        assert_eq!(qual_edges.len(), 1, "Should be exactly 1 edge, no duplicates");
+    }
+
+    #[test]
+    fn test_qualified_call_to_nonexistent_method_still_produces_edge() {
+        // Qualified calls to methods that may not exist in the target module
+        // still produce edges — resolution happens lazily during BFS (Phase 3).
+        let code = r#"
+Процедура Тест()
+    НесуществующийМодуль.НесуществующийМетод();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        let qual_edges: Vec<_> = summary
+            .call_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::DirectQualifiedModule)
+            .collect();
+        assert_eq!(qual_edges.len(), 1);
+        assert!(matches!(
+            &qual_edges[0].target,
+            CallTarget::QualifiedModule { module_name, method_name }
+                if module_name.as_str() == "НесуществующийМодуль"
+                    && method_name.as_str() == "НесуществующийМетод"
+        ));
+    }
+
+    #[test]
+    fn test_notify_description_in_module_code() {
+        let code = r#"
+Перем Оповещение;
+Оповещение = Новый ОписаниеОповещения("ОбработатьОповещение", ЭтотОбъект);
+
+Процедура ОбработатьОповещение(Результат, ДопПараметры) Экспорт
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        assert_eq!(summary.notify_regs.len(), 1);
+        assert_eq!(summary.notify_regs[0].caller, CallerId::ModuleCode);
+        assert_eq!(summary.notify_regs[0].callback_name, Name::new("ОбработатьОповещение"));
+        assert!(summary.notify_regs[0].target_module.is_none(), "ЭтотОбъект means current module");
+    }
+
+    #[test]
+    fn test_notify_description_english() {
+        let code = r#"
+Procedure Test()
+    Notification = New NotifyDescription("HandleResult", ThisObject);
+EndProcedure
+
+Procedure HandleResult(Result, AdditionalParameters) Export
+EndProcedure
+"#;
+        let summary = parse_and_extract(code);
+
+        assert_eq!(summary.notify_regs.len(), 1);
+        assert_eq!(summary.notify_regs[0].caller, CallerId::Method(0));
+        assert_eq!(summary.notify_regs[0].callback_name, Name::new("HandleResult"));
+        assert!(summary.notify_regs[0].target_module.is_none());
+    }
+
+    #[test]
+    fn test_manager_access_three_segment() {
+        let code = r#"
+Процедура Тест()
+    Документы.ПриходнаяНакладная.СоздатьЭлемент();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        let manager_edges: Vec<_> = summary
+            .call_edges
+            .iter()
+            .filter(|e| matches!(&e.target, CallTarget::ManagerAccess { .. }))
+            .collect();
+        assert_eq!(manager_edges.len(), 1);
+        assert!(matches!(
+            &manager_edges[0].target,
+            CallTarget::ManagerAccess {
+                manager_type: ManagerType::Documents,
+                object_name,
+                method_name: Some(method),
+            } if object_name.as_str() == "ПриходнаяНакладная"
+                && method.as_str() == "СоздатьЭлемент"
+        ));
+    }
+
+    #[test]
+    fn test_idle_handler_not_edge() {
+        let code = r#"
+&НаКлиенте
+Процедура ПриОткрытии()
+    ПодключитьОбработчикОжидания("Обновить", 5, Истина);
+КонецПроцедуры
+
+&НаКлиенте
+Процедура Обновить()
+    // update
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        // Idle handler goes to idle_handler_regs, NOT to call_edges
+        assert_eq!(summary.idle_handler_regs.len(), 1);
+        assert_eq!(summary.idle_handler_regs[0].handler_name, Name::new("Обновить"));
+        assert!(summary.idle_handler_regs[0].one_shot);
+        assert_eq!(summary.idle_handler_regs[0].caller, CallerId::Method(0));
+
+        // No DirectLocal edge for ПодключитьОбработчикОжидания
+        let local_edges: Vec<_> =
+            summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
+        assert!(local_edges.is_empty(), "Idle handler registration should not produce a call edge");
+    }
+
+    #[test]
+    fn test_method_dispatch_from_code() {
+        let code = r#"
+&НаКлиенте
+Процедура КлиентМетод()
+КонецПроцедуры
+
+&НаСервере
+Функция СерверФункция()
+    Возврат 1;
+КонецФункции
+
+&НаКлиентеНаСервереБезКонтекста
+Функция ОбщаяФункция()
+    Возврат 2;
+КонецФункции
+
+Процедура БезАннотации()
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+        assert_eq!(summary.methods.len(), 4);
+
+        assert!(summary.methods[0].dispatch.can_run_on_client);
+        assert!(!summary.methods[0].dispatch.can_run_on_server);
+
+        assert!(summary.methods[1].dispatch.is_server_only());
+
+        assert!(summary.methods[2].dispatch.can_run_on_client);
+        assert!(summary.methods[2].dispatch.can_run_on_server);
+        assert!(summary.methods[2].dispatch.no_context);
+
+        // No annotation → defaults to client
+        assert!(summary.methods[3].dispatch.can_run_on_client);
+        assert!(!summary.methods[3].dispatch.can_run_on_server);
+    }
+}

@@ -6,7 +6,7 @@
 
 use crate::enums::FormType;
 use crate::error::{MetadataError, Result};
-use crate::form::{Form, FormElement};
+use crate::form::{Form, FormElement, FormEventHandler};
 
 use super::helpers::parse_uuid;
 
@@ -132,20 +132,22 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
     Ok(form)
 }
 
-/// Recursively collect `<Event>` handler text from an element and all its descendants.
-fn collect_all_events(node: roxmltree::Node<'_, '_>) -> Vec<String> {
+/// Recursively collect `<Event>` handlers from an element and all its descendants.
+fn collect_all_events(node: roxmltree::Node<'_, '_>) -> Vec<FormEventHandler> {
     let mut handlers = Vec::new();
     collect_events_recursive(node, &mut handlers);
     handlers
 }
 
-fn collect_events_recursive(node: roxmltree::Node<'_, '_>, handlers: &mut Vec<String>) {
+fn collect_events_recursive(node: roxmltree::Node<'_, '_>, handlers: &mut Vec<FormEventHandler>) {
     for child in node.children().filter(|n| n.is_element()) {
         if child.tag_name().name() == "Event" {
             if let Some(text) = child.text() {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    handlers.push(trimmed.to_string());
+                    let event_type = child.attribute("name").unwrap_or("").to_string();
+                    handlers
+                        .push(FormEventHandler { event_type, handler_name: trimmed.to_string() });
                 }
             }
         } else {
@@ -447,9 +449,10 @@ mod tests {
         let form = parse_form_xml(xml).unwrap();
 
         // Check event handlers
-        assert_eq!(form.event_handlers().len(), 2);
-        assert!(form.event_handlers().contains(&"ПриСозданииНаСервере".to_string()));
-        assert!(form.event_handlers().contains(&"ПриОткрытии".to_string()));
+        let event_handler_names = form.event_handler_names();
+        assert_eq!(event_handler_names.len(), 2);
+        assert!(event_handler_names.contains(&"ПриСозданииНаСервере"));
+        assert!(event_handler_names.contains(&"ПриОткрытии"));
 
         // Check command handlers
         assert_eq!(form.command_handlers().len(), 2);
@@ -492,7 +495,7 @@ mod tests {
         let form = parse_form_xml(xml).unwrap();
 
         // All event handlers (form-level + element-level) should be collected
-        assert_eq!(form.event_handlers().len(), 4);
+        assert_eq!(form.event_handler_names().len(), 4);
         assert!(form.is_handler("ПриСозданииНаСервере"));
         assert!(form.is_handler("СписокПриАктивизацииСтроки"));
         assert!(form.is_handler("Поле1ПриИзменении"));
@@ -566,7 +569,7 @@ mod tests {
         assert_eq!(wrong[0].name, "НесуществующийРеквизит");
 
         // Form has one event handler
-        assert_eq!(form.event_handlers().len(), 1);
+        assert_eq!(form.event_handler_names().len(), 1);
         assert!(form.is_handler("ПриСозданииНаСервере"));
     }
 
@@ -624,7 +627,7 @@ mod tests {
         assert_eq!(form.form_type(), FormType::Managed);
 
         // Event handlers from Ext/Form.xml
-        assert_eq!(form.event_handlers().len(), 1);
+        assert_eq!(form.event_handler_names().len(), 1);
         assert!(form.is_handler("ПриСозданииНаСервере"));
     }
 }
