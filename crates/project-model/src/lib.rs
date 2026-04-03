@@ -1038,9 +1038,11 @@ fn percent_encode(input: &str) -> String {
 }
 
 /// Timeout for external commands (`url_command`, `credential_helper`).
+#[cfg(unix)]
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Runs a shell command with a timeout, returns trimmed stdout.
+#[cfg(unix)]
 fn run_command_with_timeout(command: &str, timeout: std::time::Duration) -> Result<String, String> {
     use std::process::{Command, Stdio};
 
@@ -1080,6 +1082,7 @@ fn run_command_with_timeout(command: &str, timeout: std::time::Duration) -> Resu
 /// Sends `host=…\nport=…\ndbname=…\n\n` on stdin.
 /// Expects `username=…\npassword=…\n` on stdout.
 /// Times out after [`COMMAND_TIMEOUT`].
+#[cfg(unix)]
 fn run_credential_helper(
     command: &str,
     host: &str,
