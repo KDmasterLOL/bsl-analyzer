@@ -108,12 +108,15 @@ pub fn ensure_specific_version(provider: &dyn ReleaseProvider, version: &str) ->
 
     if binary_path.exists() {
         if verify_existing_binary(provider, &resolved_version, &binary_path).is_ok() {
+            cleanup_cached_versions(&cache_dir, std::slice::from_ref(&resolved_version), 1);
             return Ok(binary_path);
         }
         let _ = fs::remove_file(&binary_path);
     }
 
-    download_version_without_linking(provider, &cache_dir, &resolved_version)
+    let path = download_version_without_linking(provider, &cache_dir, &resolved_version)?;
+    cleanup_cached_versions(&cache_dir, &[resolved_version], 1);
+    Ok(path)
 }
 
 fn check_updates_if_needed(
@@ -153,6 +156,7 @@ pub fn update_analyzer(provider: &dyn ReleaseProvider) -> Result<()> {
     let m = messages();
     if Some(&latest_version) == current_version.as_ref() {
         eprintln!("{}", m.up_to_date.replace("{}", &latest_version));
+        cleanup_cached_versions(&cache_dir, &[], 1);
         return Ok(());
     }
 
@@ -163,6 +167,7 @@ pub fn update_analyzer(provider: &dyn ReleaseProvider) -> Result<()> {
             .replace("{}", &latest_version)
     );
     download_version(provider, &cache_dir, &latest_version)?;
+    cleanup_cached_versions(&cache_dir, &[], 1);
 
     Ok(())
 }
@@ -328,6 +333,7 @@ fn download_version(
     if binary_path.exists() {
         if verify_existing_binary(provider, version, &binary_path).is_ok() {
             update_current_link(cache_dir, &binary_path)?;
+            cleanup_cached_versions(cache_dir, &[], 1);
             return Ok(binary_path);
         }
         let _ = fs::remove_file(&binary_path);
@@ -339,7 +345,7 @@ fn download_version(
     let m = messages();
     eprintln!("{}", m.installed.replace("{}", version));
 
-    auto_cleanup(cache_dir);
+    cleanup_cached_versions(cache_dir, &[], 1);
 
     Ok(path)
 }
@@ -356,7 +362,7 @@ fn download_version_without_linking(
     Ok(path)
 }
 
-fn auto_cleanup(cache_dir: &Path) {
+fn cleanup_cached_versions(cache_dir: &Path, preserve_versions: &[String], keep_count: usize) {
     let current_version = get_current_version(cache_dir);
 
     let mut versions: Vec<(String, PathBuf)> = Vec::new();
@@ -374,18 +380,50 @@ fn auto_cleanup(cache_dir: &Path) {
         time_b.cmp(&time_a)
     });
 
-    // Оставляем текущую + 1 предыдущую
-    let mut kept = 0;
+    let ordered_versions: Vec<String> =
+        versions.iter().map(|(version, _)| version.clone()).collect();
+    let versions_to_remove = select_versions_to_remove(
+        &ordered_versions,
+        current_version.as_deref(),
+        preserve_versions,
+        keep_count,
+    );
+
     for (version, path) in &versions {
-        let is_current = current_version.as_ref() == Some(version);
-        if is_current || kept < 1 {
-            if !is_current {
-                kept += 1;
-            }
-        } else {
+        if versions_to_remove.contains(version) {
             let _ = fs::remove_file(path);
         }
     }
+}
+
+fn select_versions_to_remove(
+    ordered_versions: &[String],
+    current_version: Option<&str>,
+    preserve_versions: &[String],
+    keep_count: usize,
+) -> std::collections::HashSet<String> {
+    let mut preserve: std::collections::HashSet<&str> =
+        preserve_versions.iter().map(String::as_str).collect();
+    if let Some(current) = current_version {
+        preserve.insert(current);
+    }
+
+    let mut kept = 0;
+    let mut versions_to_remove = std::collections::HashSet::new();
+
+    for version in ordered_versions {
+        if preserve.contains(version.as_str()) {
+            continue;
+        }
+
+        if kept < keep_count {
+            kept += 1;
+        } else {
+            versions_to_remove.insert(version.clone());
+        }
+    }
+
+    versions_to_remove
 }
 
 fn do_download(provider: &dyn ReleaseProvider, cache_dir: &Path, version: &str) -> Result<PathBuf> {
@@ -519,4 +557,113 @@ fn update_launcher_file(path: &Path, bytes: &[u8], is_current_exe: bool) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::thread::sleep;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new() -> Self {
+            let unique = format!(
+                "bsl-launcher-test-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time before unix epoch")
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            fs::create_dir_all(&path).expect("failed to create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn create_version_file(cache_dir: &Path, version: &str) -> PathBuf {
+        let path = cache_dir.join(format!("bsl-analyzer-{version}"));
+        fs::write(&path, version).expect("failed to create version file");
+        sleep(Duration::from_millis(20));
+        path
+    }
+
+    fn version_exists(cache_dir: &Path, version: &str) -> bool {
+        cache_dir.join(format!("bsl-analyzer-{version}")).exists()
+    }
+
+    #[test]
+    fn select_versions_to_remove_keeps_current_and_latest_previous() {
+        let versions =
+            vec!["0.1.2", "0.1.1", "0.1.0"].into_iter().map(str::to_string).collect::<Vec<_>>();
+
+        let to_remove = select_versions_to_remove(&versions, Some("0.1.2"), &[], 1);
+
+        assert!(!to_remove.contains("0.1.2"));
+        assert!(!to_remove.contains("0.1.1"));
+        assert!(to_remove.contains("0.1.0"));
+    }
+
+    #[test]
+    fn select_versions_to_remove_preserves_requested_version_for_pinned_run() {
+        let versions = vec!["0.1.2", "0.1.1", "0.1.0", "0.0.9"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let preserve = ["0.1.2".to_string()];
+
+        let to_remove = select_versions_to_remove(&versions, Some("0.1.0"), &preserve, 1);
+
+        assert!(!to_remove.contains("0.1.2"));
+        assert!(!to_remove.contains("0.1.1"));
+        assert!(!to_remove.contains("0.1.0"));
+        assert!(to_remove.contains("0.0.9"));
+    }
+
+    #[test]
+    fn cleanup_keeps_current_and_latest_previous() {
+        let dir = TestDir::new();
+        create_version_file(dir.path(), "0.1.0");
+        create_version_file(dir.path(), "0.1.1");
+        let current = create_version_file(dir.path(), "0.1.2");
+        update_current_link(dir.path(), &current).expect("failed to update current link");
+
+        cleanup_cached_versions(dir.path(), &[], 1);
+
+        assert!(version_exists(dir.path(), "0.1.2"));
+        assert!(version_exists(dir.path(), "0.1.1"));
+        assert!(!version_exists(dir.path(), "0.1.0"));
+    }
+
+    #[test]
+    fn cleanup_preserves_requested_version_for_pinned_run() {
+        let dir = TestDir::new();
+        create_version_file(dir.path(), "0.0.9");
+        let current = create_version_file(dir.path(), "0.1.0");
+        create_version_file(dir.path(), "0.1.1");
+        create_version_file(dir.path(), "0.1.2");
+        update_current_link(dir.path(), &current).expect("failed to update current link");
+
+        cleanup_cached_versions(dir.path(), &["0.1.2".to_string()], 1);
+
+        assert!(version_exists(dir.path(), "0.1.0"));
+        assert!(version_exists(dir.path(), "0.1.2"));
+        assert!(version_exists(dir.path(), "0.1.1"));
+        assert!(!version_exists(dir.path(), "0.0.9"));
+    }
 }
