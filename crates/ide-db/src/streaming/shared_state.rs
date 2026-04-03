@@ -397,10 +397,19 @@ pub struct SharedState {
 impl SharedState {
     /// Create a new SharedState from GlobalContext and sorted files.
     pub fn new(global: GlobalContext, sorted_files: Vec<FileId>) -> Arc<Self> {
-        let num_files = sorted_files.len();
+        // Size status/sync arrays by max FileId across ALL files in file_set,
+        // not just sorted_files. This is required because sorted_files may be
+        // a diff-filtered subset with non-contiguous FileIds.
+        let max_file_id = global
+            .file_set
+            .iter()
+            .map(|f| f.index() as usize)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(sorted_files.len());
 
         Arc::new(Self {
-            file_statuses: (0..num_files)
+            file_statuses: (0..max_file_id)
                 .map(|_| AtomicU8::new(FileStatus::NotStarted as u8))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -415,9 +424,15 @@ impl SharedState {
             sorted_files: Arc::new(sorted_files),
             next_file_idx: CachePadded::new(AtomicUsize::new(0)),
 
-            condvars: (0..num_files).map(|_| Condvar::new()).collect::<Vec<_>>().into_boxed_slice(),
+            condvars: (0..max_file_id)
+                .map(|_| Condvar::new())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
 
-            mutexes: (0..num_files).map(|_| Mutex::new(())).collect::<Vec<_>>().into_boxed_slice(),
+            mutexes: (0..max_file_id)
+                .map(|_| Mutex::new(()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
 
             configuration: global.configuration,
             module_index: global.module_index,
