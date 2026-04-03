@@ -447,11 +447,11 @@ impl AnalysisProvider for StreamingProvider {
         self.global.file_set.file_for_path(vfs_path).copied()
     }
 
-    fn resolve_module_file(&self, _relative_uri: &str) -> Option<FileId> {
-        // Not supported in streaming mode: cross-module file resolution
-        // (e.g. MissedRequiredParameter manager module lookup) will be skipped.
-        tracing::debug!("resolve_module_file not supported in streaming mode");
-        None
+    fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId> {
+        let config_root = self.global.config_root.as_ref()?;
+        let full_path = config_root.join(relative_uri);
+        let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
+        self.global.file_set.file_for_path(&vfs_path).copied()
     }
 }
 
@@ -477,6 +477,7 @@ mod tests {
             module_index: Arc::new(ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
+            config_root: None,
         });
 
         let provider = StreamingProvider::new(global);
@@ -500,6 +501,7 @@ mod tests {
             module_index: Arc::new(ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
+            config_root: None,
         });
 
         let provider = StreamingProvider::new(global);
@@ -523,11 +525,95 @@ mod tests {
             module_index: Arc::new(ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
+            config_root: None,
         });
 
         let provider = StreamingProvider::new(global);
         let module_id = ModuleId::new(file_id);
         let bodies = provider.module_bodies(module_id);
         assert_eq!(bodies.iter_bodies().count(), 1);
+    }
+
+    #[test]
+    fn test_resolve_module_file_with_config_root() {
+        let file_id = FileId(0);
+        let mut files = FxHashMap::default();
+        files.insert(file_id, "Процедура Тест() Экспорт КонецПроцедуры".to_string());
+
+        let mut file_set = FileSet::default();
+        // VFS path = config_root + relative URI
+        file_set.insert(
+            file_id,
+            VfsPath::new("/project/src/cf/CommonModules/МойМодуль/Ext/Module.bsl"),
+        );
+
+        let global = Arc::new(GlobalContext {
+            configuration: None,
+            symbol_trees: FxHashMap::default(),
+            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
+            module_index: Arc::new(ModuleIndex::new()),
+            file_set: Arc::new(file_set),
+            file_reader: FileReader::in_memory(files),
+            config_root: Some(std::path::PathBuf::from("/project/src/cf")),
+        });
+
+        let provider = StreamingProvider::new(global);
+
+        // Should resolve: config_root + relative_uri → VfsPath → FileId
+        let resolved = provider.resolve_module_file("CommonModules/МойМодуль/Ext/Module.bsl");
+        assert_eq!(resolved, Some(file_id));
+    }
+
+    #[test]
+    fn test_resolve_module_file_without_config_root() {
+        let file_id = FileId(0);
+        let mut files = FxHashMap::default();
+        files.insert(file_id, "".to_string());
+
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+
+        let global = Arc::new(GlobalContext {
+            configuration: None,
+            symbol_trees: FxHashMap::default(),
+            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
+            module_index: Arc::new(ModuleIndex::new()),
+            file_set: Arc::new(file_set),
+            file_reader: FileReader::in_memory(files),
+            config_root: None,
+        });
+
+        let provider = StreamingProvider::new(global);
+
+        // Without config_root, should return None
+        let resolved = provider.resolve_module_file("CommonModules/МойМодуль/Ext/Module.bsl");
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn test_resolve_module_file_not_in_vfs() {
+        let file_id = FileId(0);
+        let mut files = FxHashMap::default();
+        files.insert(file_id, "".to_string());
+
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/project/src/cf/other.bsl"));
+
+        let global = Arc::new(GlobalContext {
+            configuration: None,
+            symbol_trees: FxHashMap::default(),
+            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
+            module_index: Arc::new(ModuleIndex::new()),
+            file_set: Arc::new(file_set),
+            file_reader: FileReader::in_memory(files),
+            config_root: Some(std::path::PathBuf::from("/project/src/cf")),
+        });
+
+        let provider = StreamingProvider::new(global);
+
+        // File not in VFS — should return None
+        let resolved =
+            provider.resolve_module_file("CommonModules/НесуществующийМодуль/Ext/Module.bsl");
+        assert_eq!(resolved, None);
     }
 }

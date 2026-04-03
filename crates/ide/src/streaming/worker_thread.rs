@@ -286,6 +286,7 @@ mod tests {
             module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files.clone()),
+            config_root: None,
         });
 
         let provider = Arc::new(StreamingProvider::new(global));
@@ -512,6 +513,7 @@ mod tests {
             module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader,
+            config_root: None,
         };
 
         // Create SharedState with the GlobalContext (contains file_reader for tracking)
@@ -525,6 +527,7 @@ mod tests {
             module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: shared_state.file_set().clone(),
             file_reader: FileReader::empty(), // Provider uses SharedState's reader via cache
+            config_root: None,
         });
         let provider = Arc::new(StreamingProvider::with_shared_state(
             provider_global,

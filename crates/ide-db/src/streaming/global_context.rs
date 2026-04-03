@@ -1,5 +1,6 @@
 //! Global context for streaming analysis.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bsl_metadata::Configuration;
@@ -32,6 +33,10 @@ pub struct GlobalContext {
 
     /// File content provider.
     pub file_reader: FileReader,
+
+    /// Configuration root path for resolving module URIs.
+    /// Metadata URIs like "CommonModules/Foo/Ext/Module.bsl" are relative to this path.
+    pub config_root: Option<PathBuf>,
 }
 
 impl GlobalContext {
@@ -44,7 +49,15 @@ impl GlobalContext {
         file_set: Arc<FileSet>,
         file_reader: FileReader,
     ) -> Self {
-        Self { configuration, symbol_trees, workspace_symbols, module_index, file_set, file_reader }
+        Self {
+            configuration,
+            symbol_trees,
+            workspace_symbols,
+            module_index,
+            file_set,
+            file_reader,
+            config_root: None,
+        }
     }
 
     /// Create an empty GlobalContext (useful for testing).
@@ -56,6 +69,7 @@ impl GlobalContext {
             module_index: Arc::new(ModuleIndex::new()),
             file_set: Arc::new(FileSet::default()),
             file_reader: FileReader::empty(),
+            config_root: None,
         }
     }
 }

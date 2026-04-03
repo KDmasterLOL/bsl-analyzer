@@ -356,6 +356,7 @@ mod tests {
             module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
+            config_root: None,
         });
 
         let provider = Arc::new(StreamingProvider::new(global));
@@ -436,6 +437,7 @@ mod tests {
             module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
+            config_root: None,
         });
 
         let provider = Arc::new(StreamingProvider::new(global));
@@ -474,6 +476,7 @@ mod tests {
             module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
+            config_root: None,
         });
 
         let provider = Arc::new(StreamingProvider::new(global));

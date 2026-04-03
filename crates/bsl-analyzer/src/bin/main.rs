@@ -2439,28 +2439,37 @@ fn analyze_salsa(
 
     tracing::info!("Found {} BSL files", bsl_files.len());
 
-    // Filter files by diff if enabled
-    let total_files = bsl_files.len();
-    if let Some(ref filter) = diff_filter {
-        bsl_files.retain(|path| {
-            // Convert to relative path for matching
-            let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
-            filter.should_analyze(rel_path)
-        });
-        tracing::info!("After diff filter: {} files (from {} total)", bsl_files.len(), total_files);
-    }
-
-    // Build FileSet with all discovered files for VFS path resolution
+    // Build FileSet from ALL files (needed for cross-module resolution)
     tracing::info!("Loading files into database");
     let mut file_set = vfs::FileSet::new();
-    let mut file_ids = Vec::new();
+    let mut all_file_ids: Vec<(FileId, PathBuf)> = Vec::new();
 
     for (idx, path) in bsl_files.iter().enumerate() {
         let file_id = FileId(idx as u32);
         let vfs_path = vfs::VfsPath::new(path.clone());
         file_set.insert(file_id, vfs_path);
-        file_ids.push((file_id, path.clone()));
+        all_file_ids.push((file_id, path.clone()));
     }
+
+    // Filter to determine which files need diagnostics
+    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref filter) = diff_filter {
+        let filtered: Vec<_> = all_file_ids
+            .iter()
+            .filter(|(_, path)| {
+                let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
+                filter.should_analyze(rel_path)
+            })
+            .cloned()
+            .collect();
+        tracing::info!(
+            "After diff filter: {} files to analyze (from {} total in VFS)",
+            filtered.len(),
+            all_file_ids.len()
+        );
+        filtered
+    } else {
+        all_file_ids.clone()
+    };
 
     // Setup source root with FileSet for path resolution
     // (used by sdbl_hir_in_file_query to find configuration root)
@@ -2470,7 +2479,8 @@ fn analyze_salsa(
     db.set_source_root(source_root_id, source_root);
 
     // Load file contents into database
-    for (file_id, path) in &file_ids {
+    // Load ALL files into database (needed for cross-module resolution)
+    for (file_id, path) in &all_file_ids {
         let content = fs::read_to_string(path)?;
         db.set_file_source_root(*file_id, source_root_id);
         db.set_file_text(*file_id, &content);
@@ -2757,16 +2767,6 @@ fn analyze_streaming(
 
     tracing::info!("Found {} BSL files", bsl_files.len());
 
-    // Filter files by diff if enabled
-    let total_files = bsl_files.len();
-    if let Some(ref filter) = diff_filter {
-        bsl_files.retain(|path| {
-            let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
-            filter.should_analyze(rel_path)
-        });
-        tracing::info!("After diff filter: {} files (from {} total)", bsl_files.len(), total_files);
-    }
-
     if bsl_files.is_empty() {
         tracing::warn!("No BSL files found in {:?}", source_dir);
         if !matches!(format, OutputFormat::Jsonl) {
@@ -2775,16 +2775,36 @@ fn analyze_streaming(
         return Ok(());
     }
 
-    // Build FileSet and file IDs
+    // Build FileSet from ALL files (needed for cross-module resolution)
     let mut file_set = vfs::FileSet::new();
-    let mut file_ids = Vec::new();
+    let mut all_file_ids: Vec<(FileId, PathBuf)> = Vec::new();
 
     for (idx, path) in bsl_files.iter().enumerate() {
         let file_id = FileId(idx as u32);
         let vfs_path = vfs::VfsPath::new(path.clone());
         file_set.insert(file_id, vfs_path);
-        file_ids.push((file_id, path.clone()));
+        all_file_ids.push((file_id, path.clone()));
     }
+
+    // Filter to determine which files need diagnostics
+    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref filter) = diff_filter {
+        let filtered: Vec<_> = all_file_ids
+            .iter()
+            .filter(|(_, path)| {
+                let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
+                filter.should_analyze(rel_path)
+            })
+            .cloned()
+            .collect();
+        tracing::info!(
+            "After diff filter: {} files to analyze (from {} total in VFS)",
+            filtered.len(),
+            all_file_ids.len()
+        );
+        filtered
+    } else {
+        all_file_ids.clone()
+    };
 
     // Create orchestrator with diagnostics config
     let mut builder =
