@@ -493,6 +493,32 @@ mod tests {
     }
 
     #[test]
+    fn test_platform_handler_after_var_def() {
+        // Regression: Перем before procedure shifts item_tree indices
+        // get_method_name must still correctly resolve the method name
+        let code = r#"Перем МояПеременная;
+
+Процедура ПриЗаписи(Отказ)
+    Если ЧтоТо Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // ПриЗаписи is a platform event handler — must NOT flag unused params
+        // even when preceded by Перем declaration
+        assert_eq!(
+            unused.len(),
+            0,
+            "Platform handler after Перем should not flag unused params, got: {:?}",
+            unused.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_attachable_method_no_diagnostic() {
         let code = r#"&НаКлиенте
 Процедура Подключаемый_ПродолжитьВыполнениеКомандыНаСервере(ПараметрыВыполнения, ДополнительныеПараметры) Экспорт
