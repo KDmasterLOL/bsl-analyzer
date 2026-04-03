@@ -172,31 +172,57 @@ fn check_method(
     diagnostics
 }
 
+fn is_this_object(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "этотобъект" || lower == "thisobject"
+}
+
+fn is_notify_description(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "описаниеоповещения" || lower == "notifydescription"
+}
+
 fn collect_notify_description_callbacks(
     module_bodies: &hir::ModuleBodies,
     handlers: &mut FxHashSet<String>,
 ) {
     let mut scan_body = |body: &hir::Body| {
         for (_, expr) in body.exprs_iter() {
-            if let Expr::New { type_name: Some(type_name), args } = expr {
-                let tn = type_name.as_str().to_lowercase();
-                if tn != "описаниеоповещения" && tn != "notifydescription" {
+            if let Expr::New { type_name, args } = expr {
+                // Static form: Новый ОписаниеОповещения("Callback", ЭтотОбъект)
+                // Dynamic form: Новый("ОписаниеОповещения", "Callback", ЭтотОбъект)
+                let (method_idx, target_idx) = match type_name {
+                    Some(tn) if is_notify_description(tn.as_str()) => (0, 1),
+                    None if !args.is_empty() => {
+                        if let Expr::Literal(Literal::String(tn)) = body.expr_idx(args[0]) {
+                            if is_notify_description(tn) {
+                                (1, 2)
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                };
+
+                if args.len() <= target_idx {
                     continue;
                 }
-                if args.len() < 2 {
-                    continue;
-                }
-                // Second arg must be ЭтотОбъект/ThisObject (same module callback)
-                if let Expr::Path(target) = body.expr_idx(args[1]) {
-                    let target_lower = target.as_str().to_lowercase();
-                    if target_lower != "этотобъект" && target_lower != "thisobject" {
+
+                // Target arg must be ЭтотОбъект/ThisObject (same module callback)
+                if let Expr::Path(target) = body.expr_idx(args[target_idx]) {
+                    if !is_this_object(target.as_str()) {
                         continue;
                     }
                 } else {
                     continue;
                 }
-                // First arg must be a string literal with the method name
-                if let Expr::Literal(Literal::String(method_name)) = body.expr_idx(args[0]) {
+
+                // Method name arg must be a string literal
+                if let Expr::Literal(Literal::String(method_name)) = body.expr_idx(args[method_idx])
+                {
                     handlers.insert(method_name.to_lowercase());
                 }
             }
@@ -655,5 +681,70 @@ EndProcedure
         // Variable as first arg — can't statically resolve, so unused params are still flagged
         assert_eq!(unused.len(), 1);
         assert!(unused[0].message.contains("ДопПараметры"));
+    }
+
+    #[test]
+    fn test_notify_description_dynamic_constructor() {
+        let code = r#"&НаКлиенте
+Процедура Вызов()
+    Описание = Новый("ОписаниеОповещения", "ПослеВыбора", ЭтотОбъект);
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ПослеВыбора(Результат, ДопПараметры) Экспорт
+    Вызов(Результат);
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // Dynamic constructor Новый("ОписаниеОповещения", ...) must also suppress
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_notify_description_in_module_level_code() {
+        let code = r#"Описание = Новый ОписаниеОповещения("ОбработчикЗавершения", ЭтотОбъект);
+
+&НаКлиенте
+Процедура ОбработчикЗавершения(Результат, ДопПараметры) Экспорт
+    Вызов(Результат);
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // NotifyDescription created in module-level code must also suppress
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_custom_attachable_prefixes() {
+        let code = r#"Процедура Обр_СобытиеФормы(Параметр1, Параметр2) Экспорт
+    Вызов(Параметр1);
+КонецПроцедуры
+"#;
+
+        let mut config = crate::DiagnosticsConfig::default();
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "attachableMethodPrefixes".to_string(),
+            serde_json::Value::String("обр_,handler_".to_string()),
+        );
+        config
+            .parameters
+            .insert(DiagnosticCode::UnusedParameters, serde_json::Value::Object(params));
+
+        let diagnostics =
+            crate::test_utils::check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // Custom prefix "обр_" should suppress unused params for Обр_СобытиеФормы
+        assert_eq!(unused.len(), 0);
     }
 }
