@@ -118,6 +118,7 @@ The dedicated transition details are captured in
 - [Operations](./09-operations.md)
 - [Roadmap](./10-roadmap.md)
 - [Serving Transition](./11-serving-transition.md)
+- [Server Setup](./12-server-setup.md)
 
 ## Target Architecture Summary
 
