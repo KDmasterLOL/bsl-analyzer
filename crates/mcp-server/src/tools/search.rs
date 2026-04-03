@@ -31,37 +31,52 @@ pub fn find_code(
     ensure_workspace_search_allowed(configured_baseline)?;
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    if guard.is_none() {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "Search index is being built, please try again in a moment.",
-        )]));
-    }
-    let engine = guard.as_ref().expect("checked above");
 
     let hits = if let Some(source) = external_baseline {
-        match try_direct_lexical_code(engine, &source, query, limit) {
-            DirectResult::Found(hits) => hits,
-            DirectResult::Unavailable => {
-                // Fallback: load-all-then-search.
-                match source.resolve_workspace_view(engine) {
-                    Ok(Some(view)) => {
-                        lexical_hits_for_resolved_view(&view, query, limit, Some("code"))
+        match guard.as_ref() {
+            Some(engine) => match try_direct_lexical_code(engine, &source, query, limit) {
+                DirectResult::Found(hits) => hits,
+                DirectResult::Unavailable => {
+                    // Fallback: load-all-then-search.
+                    match source.resolve_workspace_view(engine) {
+                        Ok(Some(view)) => {
+                            lexical_hits_for_resolved_view(&view, query, limit, Some("code"))
+                        }
+                        Ok(None) => {
+                            engine.text_search(query, limit, Some("code")).map_err(|e| {
+                                McpError::internal_error(format!("search error: {e}"), None)
+                            })?
+                        }
+                        Err(error) => {
+                            warn!(
+                                "failed to resolve external baseline view for lexical search: {error}"
+                            );
+                            engine.text_search(query, limit, Some("code")).map_err(|e| {
+                                McpError::internal_error(format!("search error: {e}"), None)
+                            })?
+                        }
                     }
-                    Ok(None) => engine.text_search(query, limit, Some("code")).map_err(|e| {
-                        McpError::internal_error(format!("search error: {e}"), None)
-                    })?,
-                    Err(error) => {
-                        warn!(
-                            "failed to resolve external baseline view for lexical search: {error}"
-                        );
-                        engine.text_search(query, limit, Some("code")).map_err(|e| {
-                            McpError::internal_error(format!("search error: {e}"), None)
-                        })?
+                }
+            },
+            None => {
+                // Engine still building — try direct PG without overlay (no local
+                // changes have been tracked yet).
+                match try_direct_lexical_code_no_overlay(&source, query, limit) {
+                    DirectResult::Found(hits) => hits,
+                    DirectResult::Unavailable => {
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            "Search index is being built, please try again in a moment.",
+                        )]));
                     }
                 }
             }
         }
     } else {
+        let Some(engine) = guard.as_ref() else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Search index is being built, please try again in a moment.",
+            )]));
+        };
         engine
             .text_search(query, limit, Some("code"))
             .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
@@ -158,6 +173,31 @@ enum DirectResult {
     /// Serving table is unavailable or not populated for this snapshot — caller
     /// should fall back to load-all or local SQLite.
     Unavailable,
+}
+
+/// Try direct lexical search against the external baseline serving table
+/// without overlay merge. Used when the local search engine is still building
+/// and no overlay changes have been tracked yet.
+fn try_direct_lexical_code_no_overlay(
+    source: &ExternalBaselineSource,
+    query: &str,
+    limit: usize,
+) -> DirectResult {
+    let snapshot = match source.resolve_snapshot() {
+        Ok(Some((_, s))) => s,
+        Ok(None) => return DirectResult::Unavailable,
+        Err(e) => {
+            warn!("direct lexical (no overlay): snapshot resolution failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    match source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), limit) {
+        Ok(hits) => DirectResult::Found(hits.iter().map(SearchHit::from_lexical).collect()),
+        Err(e) => {
+            warn!("direct lexical (no overlay): serving query failed: {e}");
+            DirectResult::Unavailable
+        }
+    }
 }
 
 /// Try direct lexical search against the external baseline serving table,

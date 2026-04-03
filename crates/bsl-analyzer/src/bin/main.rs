@@ -853,7 +853,7 @@ fn run_search_baseline_sync_pg(
     use bsl_search::{
         fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
         Embedder, ExternalBaselineAdapter, ExternalBaselineConfig, Snapshot,
-        SnapshotPublishMetadata,
+        SnapshotPublishMetadata, SnapshotPublisher,
     };
 
     let project = project_model::Project::new(&args.source_dir);
@@ -905,6 +905,7 @@ fn run_search_baseline_sync_pg(
     let schema_label = config.schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
 
     let adapter = ExternalBaselineAdapter::new(config)?;
+    adapter.ensure_storage()?;
     let fingerprint = match corpus {
         CorpusId::WorkspaceCode => fingerprint_indexed_documents(&documents),
         CorpusId::Reference => {
@@ -962,10 +963,17 @@ fn run_search_baseline_sync_pg(
     println!("  Reused chunks: {}", publish_report.snapshot.reused_documents);
     println!("  Written chunks: {}", publish_report.snapshot.written_documents);
     println!("  Chunks:        {}", documents.len());
-    if let Some(embedding_stats) = publish_report.embeddings {
+    if let Some(ref embedding_stats) = publish_report.embeddings {
         println!("  Embedding model: {}", embedding_stats.model_id);
         println!("  Reused embeddings: {}", embedding_stats.reused);
         println!("  Stored embeddings: {}", embedding_stats.stored);
+
+        let serving_count = adapter.populate_serving_semantic(
+            &snapshot.id.0,
+            &embedding_stats.model_id,
+            embedding_stats.dimension,
+        )?;
+        println!("  Serving semantic: {}", serving_count);
     }
 
     Ok(())
