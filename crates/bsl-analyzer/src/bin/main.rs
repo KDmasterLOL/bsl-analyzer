@@ -3125,7 +3125,7 @@ mod tests {
     };
     use bsl_search::{BaselineSnapshotRecord, CorpusId};
     use chrono::{TimeZone, Utc};
-    use std::fs;
+    use std::{env, fs};
     use tempfile::tempdir;
 
     #[test]
@@ -3184,12 +3184,26 @@ mod tests {
 
     #[test]
     fn resolve_publish_branch_uses_git_when_cli_and_ci_are_missing() {
+        // Clear CI env vars that take priority over git in resolve_publish_branch
+        let saved_branch = env::var("CI_COMMIT_BRANCH").ok();
+        let saved_ref = env::var("CI_COMMIT_REF_NAME").ok();
+        env::remove_var("CI_COMMIT_BRANCH");
+        env::remove_var("CI_COMMIT_REF_NAME");
+
         let dir = tempdir().unwrap();
         let git_dir = dir.path().join(".git");
         fs::create_dir_all(&git_dir).unwrap();
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/demo\n").unwrap();
 
         let branch = resolve_publish_branch(None, dir.path());
+
+        // Restore env vars
+        if let Some(v) = saved_branch {
+            env::set_var("CI_COMMIT_BRANCH", v);
+        }
+        if let Some(v) = saved_ref {
+            env::set_var("CI_COMMIT_REF_NAME", v);
+        }
 
         assert_eq!(branch.as_deref(), Some("feature/demo"));
     }
