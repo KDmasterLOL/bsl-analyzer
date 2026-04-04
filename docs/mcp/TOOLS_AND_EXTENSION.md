@@ -41,6 +41,29 @@
 Без этой переменной остаётся доступен полнотекстовый поиск (`find_docs`,
 `find_code`).
 
+### `EMBEDDING_API_KEY`
+
+Нужен для OpenAI-совместимых embedding API, которые требуют Bearer-авторизацию.
+
+Типовые сценарии:
+
+- локальный Ollama или TEI обычно работают без ключа;
+- OpenRouter, OpenAI и похожие сервисы обычно требуют `EMBEDDING_API_KEY`;
+- модель при необходимости можно явно задать через `EMBEDDING_MODEL`.
+
+Пример:
+
+```bash
+EMBEDDING_URL=https://openrouter.ai/api \
+EMBEDDING_API_KEY=your_api_key \
+EMBEDDING_MODEL=text-embedding-3-small \
+bsl-analyzer mcp serve --profile reference
+```
+
+Сейчас клиент embedding API добавляет стандартный заголовок
+`Authorization: Bearer <ключ>`. Отдельные provider-specific заголовки
+автоматически не настраиваются.
+
 ### `NAPARNIK_TOKEN`
 
 Нужен только для `its_help`.

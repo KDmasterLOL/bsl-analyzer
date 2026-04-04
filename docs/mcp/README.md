@@ -52,6 +52,7 @@ bsl-analyzer mcp install \
   --source-dir ./my-project \
   --env NAPARNIK_TOKEN=your_token \
   --env EMBEDDING_URL=http://localhost:8000/v1/embeddings \
+  --env EMBEDDING_API_KEY=your_api_key \
   --onec-url http://localhost/base/hs/bsl-analyzer \
   --onec-user admin
 ```
@@ -66,7 +67,8 @@ bsl-analyzer mcp install \
   --preset reference \
   --scope user \
   --env NAPARNIK_TOKEN=your_token \
-  --env EMBEDDING_URL=http://localhost:8000/v1/embeddings
+  --env EMBEDDING_URL=http://localhost:8000/v1/embeddings \
+  --env EMBEDDING_API_KEY=your_api_key
 ```
 
 Только проектный профиль рабочего каталога:
@@ -138,15 +140,26 @@ bsl-analyzer mcp serve \
 - `search(action=search_docs)` в профиле `reference`;
 - `search(action=search_code)` в профиле `workspace`.
 
+Если embedding-провайдер требует Bearer-авторизацию
+(например, OpenRouter, OpenAI или совместимый сервис), дополнительно задайте
+`EMBEDDING_API_KEY`.
+
 Пример:
 
 ```bash
-EMBEDDING_URL=http://localhost:8000/v1/embeddings \
+EMBEDDING_URL=https://openrouter.ai/api \
+EMBEDDING_API_KEY=your_api_key \
+EMBEDDING_MODEL=text-embedding-3-small \
   bsl-analyzer mcp serve --profile reference
 ```
 
 Если `EMBEDDING_URL` не задан, полнотекстовый поиск (`find_docs`, `find_code`)
 остаётся доступным.
+
+Сейчас `bsl-analyzer` для embedding API поддерживает стандартный заголовок
+`Authorization: Bearer ...` через `EMBEDDING_API_KEY`. Если конкретный
+провайдер требует дополнительные нестандартные заголовки, это нужно учитывать
+отдельно.
 
 Если используется централизованный baseline в PostgreSQL, семантический поиск
 комбинирует локальный runtime и shared baseline. Подробности — в
