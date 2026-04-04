@@ -50,15 +50,17 @@
 - локальный Ollama или TEI обычно работают без ключа;
 - OpenRouter, OpenAI и похожие сервисы обычно требуют `EMBEDDING_API_KEY`;
 - модель при необходимости можно явно задать через `EMBEDDING_MODEL`;
-- для этой задачи имеет смысл смотреть в сторону `qwen/qwen3-embedding-8b` как
-  более сильного варианта или `qwen/qwen3-embedding-4b` как более лёгкого.
+- `Qwen/Qwen3-Embedding-0.6B` — минимальная рекомендуемая модель и текущий
+  дефолт;
+- `qwen/qwen3-embedding-4b` — усиленный компромиссный вариант;
+- `qwen/qwen3-embedding-8b` — более сильный вариант, если ресурс позволяет.
 
 Пример:
 
 ```bash
 EMBEDDING_URL=https://openrouter.ai/api \
 EMBEDDING_API_KEY=your_api_key \
-EMBEDDING_MODEL=qwen/qwen3-embedding-4b \
+EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B \
 bsl-analyzer mcp serve --profile reference
 ```
 

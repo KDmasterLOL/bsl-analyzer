@@ -147,15 +147,17 @@ bsl-analyzer mcp serve \
 Для задач семантического поиска по коду и документации разумно явно задавать
 `EMBEDDING_MODEL`. Практический ориентир:
 
-- `qwen/qwen3-embedding-8b` — более сильный вариант;
-- `qwen/qwen3-embedding-4b` — более лёгкий и тоже подходит для этой задачи.
+- `Qwen/Qwen3-Embedding-0.6B` — минимальная рекомендуемая модель и текущий
+  дефолт в `bsl-analyzer`;
+- `qwen/qwen3-embedding-4b` — усиленный компромиссный вариант;
+- `qwen/qwen3-embedding-8b` — предпочтительный вариант, если позволяет ресурс.
 
 Пример:
 
 ```bash
 EMBEDDING_URL=https://openrouter.ai/api \
 EMBEDDING_API_KEY=your_api_key \
-EMBEDDING_MODEL=qwen/qwen3-embedding-4b \
+EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B \
   bsl-analyzer mcp serve --profile reference
 ```
 
