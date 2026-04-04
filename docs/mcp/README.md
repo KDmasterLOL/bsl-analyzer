@@ -144,12 +144,18 @@ bsl-analyzer mcp serve \
 (например, OpenRouter, OpenAI или совместимый сервис), дополнительно задайте
 `EMBEDDING_API_KEY`.
 
+Для задач семантического поиска по коду и документации разумно явно задавать
+`EMBEDDING_MODEL`. Практический ориентир:
+
+- `qwen/qwen3-embedding-8b` — более сильный вариант;
+- `qwen/qwen3-embedding-4b` — более лёгкий и тоже подходит для этой задачи.
+
 Пример:
 
 ```bash
 EMBEDDING_URL=https://openrouter.ai/api \
 EMBEDDING_API_KEY=your_api_key \
-EMBEDDING_MODEL=text-embedding-3-small \
+EMBEDDING_MODEL=qwen/qwen3-embedding-4b \
   bsl-analyzer mcp serve --profile reference
 ```
 
