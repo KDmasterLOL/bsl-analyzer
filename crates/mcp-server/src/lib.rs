@@ -5,9 +5,13 @@
 //! capabilities LSP doesn't cover: metadata browsing, platform docs,
 //! ad-hoc query validation.
 
+mod baseline;
 mod state;
 mod tools;
 
+pub use baseline::{
+    resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
+};
 pub use state::SharedState;
 
 /// Start MCP server on stdio (stdin/stdout).
@@ -28,6 +32,12 @@ use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpProfile {
+    Workspace,
+    Reference,
+}
 
 // -- Parameter types for consolidated tools --
 
@@ -183,14 +193,19 @@ fn require<T>(val: Option<T>, field: &str, action: &str) -> Result<T, McpError> 
 /// MCP server exposing bsl-analyzer capabilities as tools.
 #[derive(Clone)]
 pub struct McpServer {
+    profile: McpProfile,
     state: SharedState,
     tool_router: ToolRouter<Self>,
 }
 
-#[tool_router]
+#[tool_router(router = workspace_tool_router)]
 impl McpServer {
-    pub fn new(state: SharedState) -> Self {
-        Self { state, tool_router: Self::tool_router() }
+    pub fn new(profile: McpProfile, state: SharedState) -> Self {
+        let tool_router = match profile {
+            McpProfile::Workspace => Self::workspace_tool_router(),
+            McpProfile::Reference => Self::reference_tool_router(),
+        };
+        Self { profile, state, tool_router }
     }
 
     /// Метаданные конфигурации 1С: общая информация, дерево объектов по категориям,
@@ -246,53 +261,67 @@ impl McpServer {
     }
 
     /// Поиск по коду и справке платформы 1С.
-    /// find_code/find_docs — полнотекстовый (точные имена). search_code/search_docs — семантический (по смыслу, требует EMBEDDING_URL).
-    /// action: find_code | search_code | find_docs | search_docs | status
+    /// find_code — полнотекстовый по коду. search_code — семантический по коду.
+    /// action: find_code | search_code | status
     #[tool(name = "search", annotations(read_only_hint = true))]
-    async fn search(&self, params: Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
+    async fn workspace_search(
+        &self,
+        params: Parameters<SearchParams>,
+    ) -> Result<CallToolResult, McpError> {
         let p = params.0;
         match p.action.as_str() {
             "status" => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
+                let semantic_runtime = self.state.semantic_runtime();
+                let configured_baseline = self.state.configured_baseline();
+                let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
-                    tools::search::search_status(&engine, &progress)
+                    tools::search::search_status(
+                        &engine,
+                        &progress,
+                        &semantic_runtime,
+                        configured_baseline,
+                        external_baseline,
+                    )
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            "find_code" | "search_code" | "find_docs" | "search_docs" => {
+            "find_code" | "search_code" => {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
+                let semantic_runtime = self.state.semantic_runtime();
+                let configured_baseline = self.state.configured_baseline();
+                let external_baseline = self.state.external_baseline();
                 let action = p.action.clone();
                 tokio::task::spawn_blocking(move || match action.as_str() {
-                    "find_code" => tools::search::find_code(&engine, &query, limit),
-                    "search_code" => tools::search::search_code(&engine, &query, limit),
-                    "find_docs" => tools::search::find_docs(&engine, &query, limit),
-                    "search_docs" => tools::search::search_docs(&engine, &query, limit),
+                    "find_code" => tools::search::find_code(
+                        &engine,
+                        configured_baseline.as_ref(),
+                        external_baseline,
+                        &query,
+                        limit,
+                    ),
+                    "search_code" => tools::search::search_code(
+                        &engine,
+                        &semantic_runtime,
+                        configured_baseline.as_ref(),
+                        external_baseline,
+                        &query,
+                        limit,
+                    ),
                     _ => unreachable!(),
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
             other => Err(McpError::invalid_params(
-                format!(
-                    "Unknown action '{other}'. Expected: find_code, search_code, find_docs, search_docs, status"
-                ),
+                format!("Unknown action '{other}'. Expected: find_code, search_code, status"),
                 None,
             )),
         }
-    }
-
-    /// Справка по типам, методам и глобальным функциям платформы 1С.
-    /// Точный поиск по имени. Для полнотекстового/семантического поиска используй search.
-    #[tool(name = "syntax_help", annotations(read_only_hint = true))]
-    async fn syntax_help(
-        &self,
-        params: Parameters<SyntaxHelpParams>,
-    ) -> Result<CallToolResult, McpError> {
-        tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
     }
 
     /// Запросы 1С (SDBL): проверка синтаксиса или выполнение SELECT с получением данных.
@@ -327,20 +356,6 @@ impl McpServer {
                 None,
             )),
         }
-    }
-
-    /// Вопрос эксперту по 1С:Предприятие через ИТС (1С:Напарник).
-    /// Используйте для: стандартов разработки ИТС, паттернов БСП,
-    /// методических рекомендаций, типовых решений, диагностики ошибок.
-    /// НЕ используйте для: сигнатур методов платформы (→ syntax_help),
-    /// поиска в коде конфигурации (→ search).
-    /// Требует NAPARNIK_TOKEN. Latency: 5-20 секунд.
-    #[tool(name = "its_help", annotations(read_only_hint = true))]
-    async fn its_help(
-        &self,
-        params: Parameters<ItsHelpParams>,
-    ) -> Result<CallToolResult, McpError> {
-        tools::its_help::its_help(&params.0.question).await
     }
 
     /// Отладчик 1С: подключение к серверу отладки, точки останова, пошаговое выполнение,
@@ -458,17 +473,104 @@ impl McpServer {
     }
 }
 
+#[tool_router(router = reference_tool_router)]
+impl McpServer {
+    /// Поиск по справке платформы 1С.
+    /// find_docs — полнотекстовый, search_docs — семантический.
+    /// action: find_docs | search_docs | status
+    #[tool(name = "search", annotations(read_only_hint = true))]
+    async fn reference_search(
+        &self,
+        params: Parameters<SearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        match p.action.as_str() {
+            "status" => {
+                let engine = self.state.search_engine().clone();
+                let progress = self.state.index_progress().clone();
+                let semantic_runtime = self.state.semantic_runtime();
+                let configured_baseline = self.state.configured_baseline();
+                let external_baseline = self.state.external_baseline();
+                tokio::task::spawn_blocking(move || {
+                    tools::search::search_status(
+                        &engine,
+                        &progress,
+                        &semantic_runtime,
+                        configured_baseline,
+                        external_baseline,
+                    )
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "find_docs" | "search_docs" => {
+                let query = require(p.query, "query", &p.action)?;
+                let limit = p.limit.unwrap_or(10).min(50);
+                let engine = self.state.search_engine().clone();
+                let external_baseline = self.state.external_baseline();
+                let action = p.action.clone();
+                tokio::task::spawn_blocking(move || match action.as_str() {
+                    "find_docs" => {
+                        tools::search::find_docs(&engine, external_baseline.clone(), &query, limit)
+                    }
+                    "search_docs" => {
+                        tools::search::search_docs(&engine, external_baseline, &query, limit)
+                    }
+                    _ => unreachable!(),
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            other => Err(McpError::invalid_params(
+                format!("Unknown action '{other}'. Expected: find_docs, search_docs, status"),
+                None,
+            )),
+        }
+    }
+
+    /// Справка по типам, методам и глобальным функциям платформы 1С.
+    /// Точный поиск по имени. Для полнотекстового/семантического поиска используй search.
+    #[tool(name = "syntax_help", annotations(read_only_hint = true))]
+    async fn syntax_help(
+        &self,
+        params: Parameters<SyntaxHelpParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
+    }
+
+    /// Вопрос эксперту по 1С:Предприятие через ИТС (1С:Напарник).
+    /// Используйте для: стандартов разработки ИТС, паттернов БСП,
+    /// методических рекомендаций, типовых решений, диагностики ошибок.
+    /// НЕ используйте для: сигнатур методов платформы (→ syntax_help),
+    /// поиска в коде конфигурации (→ search).
+    /// Требует NAPARNIK_TOKEN. Latency: 5-20 секунд.
+    #[tool(name = "its_help", annotations(read_only_hint = true))]
+    async fn its_help(
+        &self,
+        params: Parameters<ItsHelpParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::its_help::its_help(&params.0.question).await
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
-        info.instructions = Some(
-            "BSL Analyzer MCP server. Provides 1C:Enterprise metadata browsing, \
-             platform API reference, SDBL query validation, code execution, debugging, \
-             and code search (full-text and semantic). \
-             Tools: metadata, search, syntax_help, query, execute, debug, its_help."
-                .into(),
-        );
+        info.instructions = Some(match self.profile {
+            McpProfile::Workspace => {
+                "BSL Analyzer workspace MCP server. Provides project metadata browsing, \
+                 code search, SDBL query validation, code execution and debugging. \
+                 Tools: metadata, search, query, execute, debug."
+                    .into()
+            }
+            McpProfile::Reference => {
+                "BSL Analyzer reference MCP server. Provides platform API reference, \
+                 platform docs search and ITS expert help. \
+                 Tools: search, syntax_help, its_help."
+                    .into()
+            }
+        });
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = rmcp::model::Implementation::from_build_env();
         info

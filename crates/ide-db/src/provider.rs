@@ -71,6 +71,9 @@ pub trait AnalysisProvider {
     /// Get module metadata (type, execution context).
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
 
+    /// Get per-module call summary (methods, edges, registrations, form entries).
+    fn call_summary(&self, module_id: ModuleId) -> Arc<hir::ModuleCallSummary>;
+
     /// Get line index for byte offset -> line/column conversion.
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex>;
 
@@ -153,6 +156,23 @@ pub trait AnalysisProvider {
     ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>;
 
     // ========================================================================
+    // Cross-module References
+    // ========================================================================
+
+    /// Get external references (qualified calls) from a module.
+    ///
+    /// Returns list of cross-module references like `CommonModule.Method()`.
+    fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir::ExternalRef>>;
+
+    /// Get liveness analysis for module-level code.
+    ///
+    /// Returns `None` if no module-level code or analysis doesn't converge.
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: ModuleId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>;
+
+    // ========================================================================
     // VFS Resolution (for metadata lookups)
     // ========================================================================
 
@@ -161,6 +181,15 @@ pub trait AnalysisProvider {
     /// Used for finding metadata files (CommonModules, EventSubscriptions, etc.)
     /// given their URI from Configuration.
     fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
+
+    /// Resolve a relative module URI to FileId.
+    ///
+    /// Builds absolute path from workspace root + relative URI, then resolves
+    /// through file_set (fast path) or VFS. Used for cross-module diagnostics
+    /// that need to find CommonModule/ManagerModule files.
+    ///
+    /// Returns `None` if workspace root is not available or file not found.
+    fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId>;
 }
 
 #[cfg(test)]

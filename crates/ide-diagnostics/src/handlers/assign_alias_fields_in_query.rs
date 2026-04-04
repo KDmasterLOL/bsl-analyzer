@@ -164,16 +164,8 @@ mod tests {
         }
 
         let config = Rc::new(config);
-        let ctx = crate::DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         (super::check(&ctx), file_content)
     }

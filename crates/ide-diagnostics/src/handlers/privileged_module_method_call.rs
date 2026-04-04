@@ -26,7 +26,8 @@ use bsl_metadata::traits::MdObject;
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{ExternalRef, ModuleId, PathResolution};
+use hir::call_graph::{CallTarget, EdgeKind};
+use hir::PathResolution;
 use rustc_hash::FxHashSet;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -85,37 +86,40 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let module_id = ModuleId::new(ctx.file_id);
-    let external_refs = ctx.db.file_external_refs(module_id);
+    let summary = ctx.call_summary(hir::ModuleId::new(ctx.file_id));
 
     let mut diagnostics = Vec::new();
 
-    for external_ref in external_refs.iter() {
-        if let ExternalRef::QualifiedCall { receiver, method, range } = external_ref {
-            let receiver_lower = receiver.as_str().to_lowercase();
+    for edge in &summary.call_edges {
+        if edge.kind != EdgeKind::DirectQualifiedModule {
+            continue;
+        }
 
-            if !privileged_modules.contains(&receiver_lower) {
+        if let CallTarget::QualifiedModule { module_name, method_name } = &edge.target {
+            let module_lower = module_name.as_str().to_lowercase();
+
+            if !privileged_modules.contains(&module_lower) {
                 continue;
             }
 
             if !validate_nested_calls {
                 if let Some(ref current) = current_module_name {
-                    if current.to_lowercase() == receiver_lower {
+                    if current.to_lowercase() == module_lower {
                         continue;
                     }
                 }
             }
 
-            let resolution = ctx.resolve_qualified_path(receiver, method);
+            let resolution = ctx.resolve_qualified_path(module_name, method_name);
             if matches!(resolution, PathResolution::Method(_)) {
                 diagnostics.push(Diagnostic {
                     code,
                     message: format!(
                         "Проверьте обращение к методу {} привилегированного модуля",
-                        method.as_str()
+                        method_name.as_str()
                     ),
                     severity: ctx.severity(code),
-                    range: *range,
+                    range: edge.range,
                     tags: ctx.tags(code),
                     fixes: vec![],
                 });
@@ -156,16 +160,8 @@ mod tests {
 
         let config = DiagnosticsConfig::default();
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "No metadata should return empty diagnostics");
@@ -190,16 +186,8 @@ mod tests {
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::PrivilegedModuleMethodCall);
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "Disabled config should return empty diagnostics");

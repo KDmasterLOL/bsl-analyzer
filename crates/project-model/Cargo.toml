@@ -10,7 +10,10 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+chrono.workspace = true
+toml = "0.8"
 bsl-metadata = { path = "../bsl-metadata" }
 
 [dev-dependencies]
 expect-test.workspace = true
+tempfile.workspace = true

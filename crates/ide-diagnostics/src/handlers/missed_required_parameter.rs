@@ -52,10 +52,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use bsl_metadata::traits::{MdObject, Module};
 use hir::{MethodSymbol, ModuleId, Name};
 use ide_db::TextRange;
-use vfs::{FileId, VfsPath};
+use vfs::FileId;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -177,7 +176,7 @@ fn check_qualified_call(
     let common_module = configuration.find_common_module(module_name)?;
 
     // Resolve CommonModule file
-    let module_file_id = find_common_module_file(ctx, common_module)?;
+    let module_file_id = ctx.find_common_module_file(common_module)?;
 
     // Build SymbolTree
     let module_id = ModuleId::new(module_file_id);
@@ -273,51 +272,6 @@ fn check_manager_module_call(
 
 /// Find the FileId for a CommonModule by resolving its URI through VFS.
 ///
-/// ## Implementation
-///
-/// 1. Get CommonModule URI from metadata
-/// 2. Build absolute path: workspace_root + URI
-/// 3. Resolve FileId via ctx.file_set (bypasses Salsa for performance)
-///
-fn find_common_module_file(
-    ctx: &DiagnosticsContext,
-    common_module: &bsl_metadata::CommonModule,
-) -> Option<FileId> {
-    let module_name = common_module.name();
-
-    // Get the CommonModule's URI from metadata
-    // Example: "CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl"
-    let uri = common_module.uri()?;
-
-    // Get the configuration path (where metadata files are) to build absolute path
-    // Configuration path has priority because URIs are relative to it
-    let config_path = ctx.configuration_path.or(ctx.workspace_root)?;
-
-    // Build full absolute path: config_path + URI
-    let full_path = config_path.join(uri);
-    let vfs_path = VfsPath::new(full_path.clone());
-
-    // CRITICAL: Use ctx.file_set directly to bypass Salsa for performance
-    let file_id = if let Some(file_set) = ctx.file_set {
-        file_set.file_for_path(&vfs_path).copied()
-    } else {
-        // Fallback: Use provider/db (slower, for tests)
-        let source_root_id = ctx.source_root_id();
-        ctx.resolve_vfs_path(source_root_id, &vfs_path)
-    };
-
-    if file_id.is_none() {
-        tracing::warn!(
-            module_name,
-            uri,
-            full_path = ?full_path,
-            "CommonModule file not found in VFS - ensure file is loaded"
-        );
-    }
-
-    file_id
-}
-
 /// Find the FileId for a Manager Module by resolving its path through VFS.
 ///
 /// ## Implementation
@@ -373,27 +327,13 @@ fn find_manager_module_file(
 
     let manager_module_path = format!("{}/{}/Ext/ManagerModule.bsl", english_plural, mdo_name);
 
-    // Get configuration path (where metadata files are)
-    // Configuration path has priority because paths are relative to it
-    let config_path = ctx.configuration_path.or(ctx.workspace_root)?;
-    let full_path = config_path.join(&manager_module_path);
-    let vfs_path = VfsPath::new(full_path.clone());
-
-    // CRITICAL: Use ctx.file_set directly to bypass Salsa for performance
-    let file_id = if let Some(file_set) = ctx.file_set {
-        file_set.file_for_path(&vfs_path).copied()
-    } else {
-        // Fallback: Use provider/db (slower, for tests)
-        let source_root_id = ctx.source_root_id();
-        ctx.resolve_vfs_path(source_root_id, &vfs_path)
-    };
+    let file_id = ctx.resolve_module_file(&manager_module_path);
 
     if file_id.is_none() {
         tracing::warn!(
             mdo_type = ?mdo_type,
             mdo_name,
             manager_module_path,
-            full_path = ?full_path,
             "Manager Module file not found in VFS - ensure file is loaded"
         );
     }

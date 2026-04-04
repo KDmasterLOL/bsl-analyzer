@@ -6,9 +6,11 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{env, error::Error, fs, io, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, env, error::Error, fs, io, path::PathBuf, sync::Arc};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use chrono::{DateTime, Utc};
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use ide_db::metadata;
 
 /// Output format for analysis results.
@@ -32,12 +34,12 @@ struct Cli {
 
     /// Enable hierarchical profiling (filter syntax: pattern@depth>threshold_ms)
     /// Example: '*>10' profiles all operations taking >10ms
-    #[arg(long, global = true)]
+    #[arg(long = "trace-profile", global = true)]
     profile: Option<String>,
 
     /// Enable JSON profiling output (filter syntax: pattern)
     /// Example: '*' outputs timing for all spans as JSON to stderr
-    #[arg(long, global = true)]
+    #[arg(long = "trace-profile-json", global = true)]
     profile_json: Option<String>,
 
     #[command(subcommand)]
@@ -154,24 +156,10 @@ enum Commands {
     /// Start LSP server (default)
     Lsp,
 
-    /// Start MCP server (Model Context Protocol for AI agents)
+    /// Start MCP server or install MCP config into AI tools
     Mcp {
-        /// Source directory containing 1C configuration (with Configuration.xml)
-        #[arg(short = 's', long = "source-dir", default_value = ".")]
-        source_dir: PathBuf,
-
-        /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
-        #[arg(long)]
-        onec_url: Option<String>,
-
-        /// 1C username for HTTP service authentication
-        #[arg(long, default_value = "")]
-        onec_user: String,
-
-        /// 1C password for HTTP service authentication.
-        /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
-        #[arg(long, default_value = "")]
-        onec_password: String,
+        #[command(subcommand)]
+        command: McpCommand,
     },
 
     /// Export built-in 1C extension (BSL_Analyzer) to a directory
@@ -183,11 +171,395 @@ enum Commands {
     /// Start DAP debug adapter (Debug Adapter Protocol via stdio)
     Dap,
 
+    /// Search infrastructure commands
+    Search {
+        #[command(subcommand)]
+        command: SearchCommand,
+    },
+
     /// Export diagnostic rules metadata
     Rules {
         #[command(subcommand)]
         command: RulesCommands,
     },
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Start MCP server (Model Context Protocol for AI agents)
+    Serve(McpServeArgs),
+
+    /// Install MCP config into supported AI tools
+    Install(McpInstallArgs),
+}
+
+#[derive(Subcommand)]
+enum SearchCommand {
+    /// Baseline storage operations for centralized search
+    Baseline {
+        #[command(subcommand)]
+        command: SearchBaselineCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SearchBaselineCommand {
+    /// Build a local code snapshot and publish it into PostgreSQL
+    #[command(name = "sync-pg")]
+    Sync(SearchBaselineSyncPgArgs),
+
+    /// List published snapshots from centralized PostgreSQL storage
+    #[command(name = "list-pg")]
+    List(SearchBaselineListPgArgs),
+
+    /// Show one published snapshot from centralized PostgreSQL storage
+    #[command(name = "show-pg")]
+    Show(SearchBaselineShowPgArgs),
+
+    /// List shared file objects stored in centralized PostgreSQL storage
+    #[command(name = "list-file-objects-pg")]
+    ListFileObjects(SearchBaselineListFileObjectsPgArgs),
+
+    /// Show one shared file object from centralized PostgreSQL storage
+    #[command(name = "show-file-object-pg")]
+    ShowFileObject(SearchBaselineShowFileObjectPgArgs),
+
+    /// List embedding inventories stored in centralized PostgreSQL storage
+    #[command(name = "list-embeddings-pg")]
+    ListEmbeddings(SearchBaselineListEmbeddingsPgArgs),
+
+    /// Show active embedding coverage for centralized PostgreSQL storage
+    #[command(name = "show-embedding-coverage-pg")]
+    ShowEmbeddingCoverage(SearchBaselineShowEmbeddingCoveragePgArgs),
+
+    /// Garbage-collect unreferenced shared baseline objects in PostgreSQL storage
+    #[command(name = "gc-pg")]
+    GarbageCollect(SearchBaselineGcPgArgs),
+
+    /// Analyze snapshot retention policy for centralized PostgreSQL storage
+    #[command(name = "retention-pg")]
+    Retention(SearchBaselineRetentionPgArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SearchBaselineCorpusCli {
+    WorkspaceCode,
+    Reference,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineSyncPgArgs {
+    /// Corpus to publish into centralized baseline storage
+    #[arg(long, value_enum, default_value_t = SearchBaselineCorpusCli::WorkspaceCode)]
+    corpus: SearchBaselineCorpusCli,
+
+    /// Source directory containing 1C configuration (with Configuration.xml)
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Immutable snapshot identifier. Optional when --branch/--commit are provided.
+    #[arg(long = "snapshot-id")]
+    snapshot_id: Option<String>,
+
+    /// Optional branch name associated with the snapshot.
+    /// Falls back to CI_COMMIT_BRANCH or CI_COMMIT_REF_NAME.
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Optional commit SHA associated with the snapshot.
+    /// Falls back to CI_COMMIT_SHA or GITHUB_SHA.
+    #[arg(long)]
+    commit: Option<String>,
+
+    /// Optional parent snapshot identifier for lineage tracking.
+    /// When omitted, the CLI reuses the latest published snapshot in the same
+    /// corpus and branch, or the same corpus when branch is not specified.
+    #[arg(long = "parent-snapshot-id")]
+    parent_snapshot_id: Option<String>,
+
+    /// Allow publishing a workspace branch that is not listed in branch policy.
+    #[arg(long = "allow-non-policy-branch")]
+    allow_non_policy_branch: bool,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineListPgArgs {
+    /// Optional corpus filter
+    #[arg(long, value_enum)]
+    corpus: Option<SearchBaselineCorpusCli>,
+
+    /// Optional branch filter
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Optional commit filter
+    #[arg(long)]
+    commit: Option<String>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Maximum number of snapshots to return
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineShowPgArgs {
+    /// Snapshot identifier to inspect
+    #[arg(long = "snapshot-id")]
+    snapshot_id: String,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineListFileObjectsPgArgs {
+    /// Optional collection filter
+    #[arg(long)]
+    collection: Option<String>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Maximum number of file objects to return
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineShowFileObjectPgArgs {
+    /// File object identifier to inspect
+    #[arg(long = "file-object-id")]
+    file_object_id: String,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineListEmbeddingsPgArgs {
+    /// Optional embedding model filter
+    #[arg(long = "model")]
+    model_id: Option<String>,
+
+    /// Optional embedding dimension filter
+    #[arg(long)]
+    dimension: Option<usize>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineShowEmbeddingCoveragePgArgs {
+    /// Optional embedding model filter
+    #[arg(long = "model")]
+    model_id: Option<String>,
+
+    /// Optional embedding dimension filter
+    #[arg(long)]
+    dimension: Option<usize>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineGcPgArgs {
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Apply deletions. Without this flag the command reports a dry-run summary.
+    #[arg(long)]
+    execute: bool,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineRetentionPgArgs {
+    /// Project root containing .bsl-analyzer.json with workspace baseline policy
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
+    /// Optional branch filter
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Maximum number of snapshots to inspect
+    #[arg(long, default_value_t = 200)]
+    limit: usize,
+}
+
+#[derive(Args, Clone)]
+struct McpServeArgs {
+    /// Runtime profile
+    #[arg(long = "profile", value_enum)]
+    runtime_profile: McpProfileCli,
+
+    /// Source directory containing 1C configuration (with Configuration.xml)
+    #[arg(short = 's', long = "source-dir", required_if_eq("runtime_profile", "workspace"))]
+    source_dir: Option<PathBuf>,
+
+    /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
+    #[arg(long)]
+    onec_url: Option<String>,
+
+    /// 1C username for HTTP service authentication
+    #[arg(long, default_value = "")]
+    onec_user: String,
+
+    /// 1C password for HTTP service authentication.
+    /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
+    #[arg(long, default_value = "")]
+    onec_password: String,
+}
+
+#[derive(Args)]
+struct McpInstallArgs {
+    /// Target application: codex, gemini, claude, cursor or all
+    #[arg(long, value_enum)]
+    target: InstallTargetCli,
+
+    /// Configuration scope
+    #[arg(long, value_enum)]
+    scope: Option<InstallScopeCli>,
+
+    /// Installation preset or recommended bundle
+    #[arg(long, value_enum, default_value_t = InstallPresetCli::Workspace)]
+    preset: InstallPresetCli,
+
+    /// MCP server name inside target config
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Source directory containing 1C configuration (with Configuration.xml)
+    #[arg(short = 's', long = "source-dir")]
+    source_dir: Option<PathBuf>,
+
+    /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
+    #[arg(long)]
+    onec_url: Option<String>,
+
+    /// 1C username for HTTP service authentication
+    #[arg(long, default_value = "")]
+    onec_user: String,
+
+    /// 1C password for HTTP service authentication.
+    /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
+    #[arg(long, default_value = "")]
+    onec_password: String,
+
+    /// Extra environment variable for the spawned MCP server (repeatable KEY=value)
+    #[arg(long = "env", value_parser = parse_env_pair)]
+    env: Vec<(String, String)>,
+
+    /// Replace an existing MCP entry with the same name
+    #[arg(long)]
+    force: bool,
+
+    /// Print the generated command or config instead of writing it
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InstallTargetCli {
+    Codex,
+    Gemini,
+    Claude,
+    Cursor,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InstallScopeCli {
+    User,
+    Project,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum InstallPresetCli {
+    #[default]
+    Workspace,
+    Reference,
+    Recommended,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum McpProfileCli {
+    Workspace,
+    Reference,
 }
 
 #[derive(Subcommand)]
@@ -298,14 +670,1164 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Format { file, write, spaces, indent_size }) => {
             run_format(file, write, spaces, indent_size)
         }
-        Some(Commands::Mcp { source_dir, onec_url, onec_user, onec_password }) => {
-            let password = decode_password(&onec_password);
-            run_mcp_server(source_dir, onec_url, &onec_user, &password)
-        }
+        Some(Commands::Mcp { command }) => run_mcp_command(command),
         Some(Commands::Extension { command }) => run_extension_command(command),
         Some(Commands::Dap) => run_dap_server(),
+        Some(Commands::Search { command }) => run_search_command(command),
         Some(Commands::Rules { command }) => run_rules_command(command),
         Some(Commands::Lsp) | None => run_lsp_server(),
+    }
+}
+
+fn run_mcp_command(command: McpCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match command {
+        McpCommand::Serve(args) => run_mcp_serve(args),
+        McpCommand::Install(args) => run_mcp_install(args),
+    }
+}
+
+fn run_search_command(command: SearchCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match command {
+        SearchCommand::Baseline { command } => match command {
+            SearchBaselineCommand::Sync(args) => run_search_baseline_sync_pg(args),
+            SearchBaselineCommand::List(args) => run_search_baseline_list_pg(args),
+            SearchBaselineCommand::Show(args) => run_search_baseline_show_pg(args),
+            SearchBaselineCommand::ListFileObjects(args) => {
+                run_search_baseline_list_file_objects_pg(args)
+            }
+            SearchBaselineCommand::ShowFileObject(args) => {
+                run_search_baseline_show_file_object_pg(args)
+            }
+            SearchBaselineCommand::ListEmbeddings(args) => {
+                run_search_baseline_list_embeddings_pg(args)
+            }
+            SearchBaselineCommand::ShowEmbeddingCoverage(args) => {
+                run_search_baseline_show_embedding_coverage_pg(args)
+            }
+            SearchBaselineCommand::GarbageCollect(args) => run_search_baseline_gc_pg(args),
+            SearchBaselineCommand::Retention(args) => run_search_baseline_retention_pg(args),
+        },
+    }
+}
+
+fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let password = decode_password(&args.onec_password);
+    let profile = match args.runtime_profile {
+        McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
+        McpProfileCli::Reference => mcp_server::McpProfile::Reference,
+    };
+
+    if matches!(profile, mcp_server::McpProfile::Reference)
+        && (args.onec_url.is_some() || !args.onec_user.is_empty() || !args.onec_password.is_empty())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reference profile does not accept --onec-url/--onec-user/--onec-password",
+        )
+        .into());
+    }
+
+    run_mcp_server(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
+}
+
+fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use bsl_analyzer::mcp_install::{
+        self, default_server_name, InstallPreset, InstallRequest, InstallScope, InstallTarget,
+        InstallTargetSelector,
+    };
+
+    let project_dir = env::current_dir()?;
+    let env = args.env.into_iter().collect::<BTreeMap<_, _>>();
+    let password = decode_password(&args.onec_password);
+    let source_dir = args.source_dir.unwrap_or_else(|| project_dir.clone());
+    let name = args.name;
+
+    let target = match args.target {
+        InstallTargetCli::Codex => InstallTargetSelector::One(InstallTarget::Codex),
+        InstallTargetCli::Gemini => InstallTargetSelector::One(InstallTarget::Gemini),
+        InstallTargetCli::Claude => InstallTargetSelector::One(InstallTarget::Claude),
+        InstallTargetCli::Cursor => InstallTargetSelector::One(InstallTarget::Cursor),
+        InstallTargetCli::All => InstallTargetSelector::All,
+    };
+
+    let requests = match args.preset {
+        InstallPresetCli::Workspace => vec![InstallRequest {
+            target,
+            scope: resolve_scope(args.scope, InstallScope::Project)?,
+            preset: InstallPreset::Workspace,
+            name: name.unwrap_or_else(|| default_server_name(InstallPreset::Workspace).to_owned()),
+            project_dir: project_dir.clone(),
+            source_dir,
+            onec_url: args.onec_url,
+            onec_user: args.onec_user,
+            onec_password: password,
+            env,
+            force: args.force,
+            dry_run: args.dry_run,
+        }],
+        InstallPresetCli::Reference => vec![InstallRequest {
+            target,
+            scope: resolve_scope(args.scope, InstallScope::User)?,
+            preset: InstallPreset::Reference,
+            name: name.unwrap_or_else(|| default_server_name(InstallPreset::Reference).to_owned()),
+            project_dir: project_dir.clone(),
+            source_dir,
+            onec_url: args.onec_url,
+            onec_user: args.onec_user,
+            onec_password: password,
+            env,
+            force: args.force,
+            dry_run: args.dry_run,
+        }],
+        InstallPresetCli::Recommended => {
+            if args.scope.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--scope is not used with '--preset recommended'; it installs 'reference:user' and 'workspace:project'",
+                )
+                .into());
+            }
+
+            let (reference_name, workspace_name) = resolve_recommended_names(name.as_deref())?;
+
+            vec![
+                InstallRequest {
+                    target,
+                    scope: InstallScope::User,
+                    preset: InstallPreset::Reference,
+                    name: reference_name,
+                    project_dir: project_dir.clone(),
+                    source_dir: source_dir.clone(),
+                    onec_url: args.onec_url.clone(),
+                    onec_user: args.onec_user.clone(),
+                    onec_password: password.clone(),
+                    env: env.clone(),
+                    force: args.force,
+                    dry_run: args.dry_run,
+                },
+                InstallRequest {
+                    target,
+                    scope: InstallScope::Project,
+                    preset: InstallPreset::Workspace,
+                    name: workspace_name,
+                    project_dir,
+                    source_dir,
+                    onec_url: args.onec_url,
+                    onec_user: args.onec_user,
+                    onec_password: password,
+                    env,
+                    force: args.force,
+                    dry_run: args.dry_run,
+                },
+            ]
+        }
+    };
+
+    let result = match mcp_install::install_many(requests) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("{}", format_install_error(&err));
+            std::process::exit(2);
+        }
+    };
+
+    for entry in result.entries {
+        println!(
+            "[{}:{}] {} -> {}",
+            entry.target,
+            entry.scope,
+            status_label(entry.status),
+            entry.location
+        );
+        if !entry.detail.is_empty() {
+            println!("{}", entry.detail);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_sync_pg(
+    args: SearchBaselineSyncPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use bsl_search::{
+        fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
+        Embedder, ExternalBaselineAdapter, ExternalBaselineConfig, Snapshot,
+        SnapshotPublishMetadata, SnapshotPublisher,
+    };
+
+    let project = project_model::Project::new(&args.source_dir);
+    let source_path = project.source_path().to_path_buf();
+    let branch = resolve_publish_branch(args.branch.as_deref(), &project.root);
+    let commit = pick_first_non_empty([
+        args.commit.as_deref(),
+        env::var("CI_COMMIT_SHA").ok().as_deref(),
+        env::var("GITHUB_SHA").ok().as_deref(),
+    ]);
+    let corpus = match args.corpus {
+        SearchBaselineCorpusCli::WorkspaceCode => CorpusId::WorkspaceCode,
+        SearchBaselineCorpusCli::Reference => CorpusId::Reference,
+    };
+    if matches!(corpus, CorpusId::WorkspaceCode) {
+        validate_workspace_publish_policy(
+            &project.config.search.baseline.workspace_code.policy,
+            branch.as_deref(),
+            args.allow_non_policy_branch,
+        )?;
+    }
+    let snapshot_id = resolve_snapshot_id(
+        &corpus,
+        args.snapshot_id.as_deref(),
+        branch.as_deref(),
+        commit.as_deref(),
+    )?;
+    let (pg_url, pg_schema) = resolve_pg_connection(
+        args.pg_url.as_deref(),
+        args.pg_schema.as_deref(),
+        project.config.postgres_credentials.as_ref(),
+    )?;
+
+    let (indexed_files, documents) = match corpus {
+        CorpusId::WorkspaceCode => build_workspace_code_baseline_documents(&source_path)?,
+        CorpusId::Reference => build_reference_baseline_documents()?,
+        CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
+    };
+
+    if documents.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("no documents were indexed for corpus {}", corpus.as_str()),
+        )
+        .into());
+    }
+
+    let mut config = ExternalBaselineConfig::postgres(pg_url);
+    if let Some(schema) = pg_schema {
+        config = config.with_schema(schema);
+    }
+    let schema_label = config.schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
+
+    let adapter = ExternalBaselineAdapter::new(config)?;
+    adapter.ensure_storage()?;
+    let fingerprint = match corpus {
+        CorpusId::WorkspaceCode => fingerprint_indexed_documents(&documents),
+        CorpusId::Reference => {
+            let reference_documents = build_reference_source_documents();
+            fingerprint_documents(&reference_documents)
+        }
+        CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
+    };
+    let mut snapshot = Snapshot::new(snapshot_id, corpus.clone()).with_fingerprint(fingerprint);
+    if let Some(parent_snapshot_id) = resolve_parent_snapshot_id(
+        &adapter,
+        &corpus,
+        branch.as_deref(),
+        &snapshot.id.0,
+        args.parent_snapshot_id.as_deref(),
+        Some(&project.config.search.baseline.workspace_code.policy),
+    )? {
+        snapshot = snapshot.with_parent(parent_snapshot_id);
+    }
+    let publish_metadata =
+        SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
+    let embedder = embedding_config_from_env().map(Embedder::new);
+    let publish_report = BaselinePublisher::new(embedding_execution_policy_from_env()).publish(
+        &adapter,
+        &snapshot,
+        &publish_metadata,
+        &documents,
+        embedder.as_ref(),
+    )?;
+
+    let published_files = documents
+        .iter()
+        .map(|document| document.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let branch_label = branch.as_deref().unwrap_or("-");
+    let commit_label = commit.as_deref().unwrap_or("-");
+
+    println!("Published search baseline to PostgreSQL.");
+    println!("  Corpus:        {}", corpus.as_str());
+    println!("  Mode:          {}", if snapshot.parent_id.is_some() { "delta" } else { "root" });
+    println!("  Snapshot:      {}", snapshot.id.0);
+    println!("  Schema:        {}", schema_label);
+    println!(
+        "  Parent:        {}",
+        snapshot.parent_id.as_ref().map(|value| value.0.as_str()).unwrap_or("-")
+    );
+    println!("  Branch:        {}", branch_label);
+    println!("  Commit:        {}", commit_label);
+    println!("  Indexed files: {}", indexed_files);
+    println!("  Reused files:  {}", publish_report.snapshot.reused_files);
+    println!("  Written files: {}", publish_report.snapshot.written_files);
+    println!("  Deleted files: {}", publish_report.snapshot.deleted_files);
+    println!("  Files:         {}", published_files);
+    println!("  Reused chunks: {}", publish_report.snapshot.reused_documents);
+    println!("  Written chunks: {}", publish_report.snapshot.written_documents);
+    println!("  Chunks:        {}", documents.len());
+    if let Some(ref embedding_stats) = publish_report.embeddings {
+        println!("  Embedding model: {}", embedding_stats.model_id);
+        println!("  Reused embeddings: {}", embedding_stats.reused);
+        println!("  Stored embeddings: {}", embedding_stats.stored);
+
+        let serving_count = adapter.populate_serving_semantic(
+            &snapshot.id.0,
+            &embedding_stats.model_id,
+            embedding_stats.dimension,
+        )?;
+        println!("  Serving semantic: {}", serving_count);
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_list_pg(
+    args: SearchBaselineListPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let corpus = args.corpus.map(search_baseline_corpus_cli_to_domain);
+    let snapshots = adapter.list_snapshots(
+        corpus.as_ref().map(|corpus| corpus.as_str()),
+        args.branch.as_deref(),
+        args.commit.as_deref(),
+        args.limit,
+    )?;
+
+    if snapshots.is_empty() {
+        println!("No snapshots found.");
+        return Ok(());
+    }
+
+    println!("Published search baselines:");
+    for snapshot in snapshots {
+        println!();
+        println!("  Snapshot:  {}", snapshot.snapshot_id);
+        println!("  Corpus:    {}", snapshot.corpus);
+        println!("  Created:   {}", snapshot.created_at);
+        println!("  Parent:    {}", snapshot.parent_snapshot_id.as_deref().unwrap_or("-"));
+        println!("  Branch:    {}", snapshot.branch.as_deref().unwrap_or("-"));
+        println!("  Commit:    {}", snapshot.commit.as_deref().unwrap_or("-"));
+        println!("  Files:     {}", snapshot.files);
+        println!("  Chunks:    {}", snapshot.documents);
+        println!(
+            "  Fingerprint: {}",
+            snapshot.fingerprint.as_deref().map(shorten_fingerprint).unwrap_or("-")
+        );
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_show_pg(
+    args: SearchBaselineShowPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let Some(details) = adapter.snapshot_details(&args.snapshot_id)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("snapshot '{}' was not found", args.snapshot_id),
+        )
+        .into());
+    };
+
+    println!("Search baseline snapshot:");
+    println!("  Snapshot:    {}", details.snapshot.snapshot_id);
+    println!("  Corpus:      {}", details.snapshot.corpus);
+    println!("  Created:     {}", details.snapshot.created_at);
+    println!("  Parent:      {}", details.snapshot.parent_snapshot_id.as_deref().unwrap_or("-"));
+    println!("  Branch:      {}", details.snapshot.branch.as_deref().unwrap_or("-"));
+    println!("  Commit:      {}", details.snapshot.commit.as_deref().unwrap_or("-"));
+    println!("  Files:       {}", details.snapshot.files);
+    println!("  Chunks:      {}", details.snapshot.documents);
+    println!(
+        "  Fingerprint: {}",
+        details.snapshot.fingerprint.as_deref().map(shorten_fingerprint).unwrap_or("-")
+    );
+
+    if details.collections.is_empty() {
+        println!("  Collections: -");
+    } else {
+        println!("  Collections:");
+        for collection in details.collections {
+            println!(
+                "    {}: files={}, chunks={}",
+                collection.collection, collection.files, collection.documents
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_list_file_objects_pg(
+    args: SearchBaselineListFileObjectsPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let file_objects = adapter.list_file_objects(args.collection.as_deref(), args.limit)?;
+
+    if file_objects.is_empty() {
+        println!("No file objects found.");
+        return Ok(());
+    }
+
+    println!("Shared baseline file objects:");
+    for file_object in file_objects {
+        println!();
+        println!("  File object:  {}", file_object.file_object_id);
+        println!("  Collection:   {}", file_object.collection);
+        println!("  Snapshots:    {}", file_object.snapshots);
+        println!("  Chunks:       {}", file_object.documents);
+        println!("  Fingerprint:  {}", shorten_fingerprint(&file_object.fingerprint));
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_show_file_object_pg(
+    args: SearchBaselineShowFileObjectPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let Some(details) = adapter.file_object_details(&args.file_object_id)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("file object '{}' was not found", args.file_object_id),
+        )
+        .into());
+    };
+
+    println!("Shared baseline file object:");
+    println!("  File object:  {}", details.file_object.file_object_id);
+    println!("  Collection:   {}", details.file_object.collection);
+    println!("  Snapshots:    {}", details.file_object.snapshots);
+    println!("  Chunks:       {}", details.file_object.documents);
+    println!("  Fingerprint:  {}", shorten_fingerprint(&details.file_object.fingerprint));
+    if details.references.is_empty() {
+        println!("  References:   -");
+    } else {
+        println!("  References:");
+        for reference in details.references {
+            println!("    {} -> {}", reference.snapshot_id, reference.path);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_list_embeddings_pg(
+    args: SearchBaselineListEmbeddingsPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let models = adapter.list_embedding_models(args.model_id.as_deref(), args.dimension)?;
+
+    if models.is_empty() {
+        println!("No embeddings found.");
+        return Ok(());
+    }
+
+    println!("Shared embedding inventories:");
+    for model in models {
+        println!();
+        println!("  Model:       {}", model.model_id);
+        println!("  Dimension:   {}", model.dimension);
+        println!("  Embeddings:  {}", model.embeddings);
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_show_embedding_coverage_pg(
+    args: SearchBaselineShowEmbeddingCoveragePgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let coverage = adapter.embedding_coverage(args.model_id.as_deref(), args.dimension)?;
+
+    if coverage.is_empty() {
+        println!("No embedding inventories found.");
+        return Ok(());
+    }
+
+    println!("Shared embedding coverage:");
+    for record in coverage {
+        println!();
+        println!("  Model:            {}", record.model_id);
+        println!("  Dimension:        {}", record.dimension);
+        println!("  Active payloads:  {}", record.active_payloads);
+        println!("  Covered payloads: {}", record.covered_payloads);
+        println!(
+            "  Coverage:         {}",
+            format_ratio(record.covered_payloads, record.active_payloads)
+        );
+        println!("  Embeddings:       {}", record.embeddings);
+    }
+
+    Ok(())
+}
+
+fn run_search_baseline_gc_pg(
+    args: SearchBaselineGcPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let report = adapter.garbage_collect(args.execute)?;
+
+    if args.execute {
+        println!("Shared baseline garbage collection finished.");
+        println!("  Deleted file objects:       {}", report.deleted_file_objects);
+        println!("  Deleted file object items:  {}", report.deleted_file_object_items);
+        println!("  Deleted semantic rows:      {}", report.deleted_semantic_embeddings);
+    } else {
+        println!("Shared baseline garbage collection dry-run.");
+        println!("  Use --execute to apply deletions.");
+    }
+    println!("  Orphan file objects:        {}", report.orphan_file_objects);
+    println!("  Orphan file object items:   {}", report.orphan_file_object_items);
+    println!("  Orphan semantic rows:       {}", report.orphan_semantic_embeddings);
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotRetentionStatus {
+    ActiveHead,
+    SafetyHead,
+    WithinWindow,
+    ExpiredCandidate,
+}
+
+impl SnapshotRetentionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveHead => "active-head",
+            Self::SafetyHead => "safety-head",
+            Self::WithinWindow => "within-window",
+            Self::ExpiredCandidate => "expired-candidate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotRetentionAssessment {
+    snapshot_id: String,
+    branch: String,
+    created_at: String,
+    age_days: Option<u32>,
+    status: SnapshotRetentionStatus,
+    protections: Vec<String>,
+    reason: String,
+}
+
+fn run_search_baseline_retention_pg(
+    args: SearchBaselineRetentionPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let project = project_model::Project::new(&args.source_dir);
+    let policy = &project.config.search.baseline.workspace_code.policy;
+    if !policy.is_configured() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace baseline policy is not configured in .bsl-analyzer.json",
+        )
+        .into());
+    }
+
+    let (pg_url, pg_schema) =
+        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
+    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let snapshots = adapter.list_snapshots(
+        Some(bsl_search::CorpusId::WorkspaceCode.as_str()),
+        args.branch.as_deref(),
+        None,
+        args.limit,
+    )?;
+
+    if snapshots.is_empty() {
+        println!("No workspace-code snapshots found.");
+        return Ok(());
+    }
+
+    let assessments = analyze_snapshot_retention(policy, &snapshots, Utc::now());
+    let active_heads = assessments
+        .iter()
+        .filter(|assessment| matches!(assessment.status, SnapshotRetentionStatus::ActiveHead))
+        .count();
+    let safety_heads = assessments
+        .iter()
+        .filter(|assessment| matches!(assessment.status, SnapshotRetentionStatus::SafetyHead))
+        .count();
+    let within_window = assessments
+        .iter()
+        .filter(|assessment| matches!(assessment.status, SnapshotRetentionStatus::WithinWindow))
+        .count();
+    let expired_candidates = assessments
+        .iter()
+        .filter(|assessment| matches!(assessment.status, SnapshotRetentionStatus::ExpiredCandidate))
+        .count();
+    let protected_by_min = assessments
+        .iter()
+        .filter(|assessment| {
+            assessment.protections.iter().any(|value| value == "minimum-preservation")
+        })
+        .count();
+    let protected_by_ancestry = assessments
+        .iter()
+        .filter(|assessment| assessment.protections.iter().any(|value| value == "has-descendants"))
+        .count();
+
+    println!("Shared baseline retention analysis:");
+    println!("  Corpus:                     workspace-code");
+    println!("  Develop retention:          {} days", policy.retention.develop_retention_days);
+    println!("  Vendor heads kept:          {}", policy.retention.vendor_keep_heads);
+    println!("  Min snapshots per branch:   {}", policy.retention.min_snapshots_per_branch);
+    println!("  Note:                       destructive snapshot cleanup is not implemented; candidates are advisory only.");
+    println!();
+    println!("Summary:");
+    println!("  Active heads:               {}", active_heads);
+    println!("  Safety heads:               {}", safety_heads);
+    println!("  Within window:              {}", within_window);
+    println!("  Expired candidates:         {}", expired_candidates);
+    println!("  Protected by min rule:      {}", protected_by_min);
+    println!("  Protected by ancestry:      {}", protected_by_ancestry);
+
+    for assessment in assessments {
+        println!();
+        println!("  Snapshot:     {}", assessment.snapshot_id);
+        println!("  Branch:       {}", assessment.branch);
+        println!("  Created:      {}", assessment.created_at);
+        println!(
+            "  Age:          {}",
+            assessment
+                .age_days
+                .map(|days| format!("{days} days"))
+                .unwrap_or_else(|| "unknown".to_owned())
+        );
+        println!("  Retention:    {}", assessment.status.as_str());
+        println!("  Reason:       {}", assessment.reason);
+        println!(
+            "  Protections:  {}",
+            if assessment.protections.is_empty() {
+                "-".to_owned()
+            } else {
+                assessment.protections.join(", ")
+            }
+        );
+    }
+
+    Ok(())
+}
+
+fn analyze_snapshot_retention(
+    policy: &project_model::SearchBaselinePolicyConfig,
+    snapshots: &[bsl_search::BaselineSnapshotRecord],
+    now: DateTime<Utc>,
+) -> Vec<SnapshotRetentionAssessment> {
+    let mut by_branch = BTreeMap::<String, Vec<&bsl_search::BaselineSnapshotRecord>>::new();
+    let mut children = std::collections::HashMap::<String, usize>::new();
+
+    for snapshot in snapshots {
+        if let Some(parent_snapshot_id) = snapshot.parent_snapshot_id.as_deref() {
+            *children.entry(parent_snapshot_id.to_owned()).or_default() += 1;
+        }
+        if let Some(branch) = snapshot.branch.as_deref().filter(|branch| !branch.trim().is_empty())
+        {
+            by_branch.entry(branch.to_owned()).or_default().push(snapshot);
+        }
+    }
+
+    for branch_snapshots in by_branch.values_mut() {
+        branch_snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot_created_at(snapshot)));
+    }
+
+    let mut assessments = Vec::new();
+    for (branch, branch_snapshots) in by_branch {
+        for (index, snapshot) in branch_snapshots.into_iter().enumerate() {
+            let age_days = snapshot_created_at(snapshot).and_then(|created_at| {
+                now.signed_duration_since(created_at).num_days().try_into().ok()
+            });
+            let mut protections = Vec::new();
+            if index < policy.retention.min_snapshots_per_branch {
+                protections.push("minimum-preservation".to_owned());
+            }
+            if children.contains_key(&snapshot.snapshot_id) {
+                protections.push("has-descendants".to_owned());
+            }
+
+            let (status, reason) = if index == 0 {
+                (SnapshotRetentionStatus::ActiveHead, "latest snapshot for branch".to_owned())
+            } else if branch == "vendor" && index < policy.retention.vendor_keep_heads {
+                (
+                    SnapshotRetentionStatus::SafetyHead,
+                    format!("vendor keeps {} latest heads", policy.retention.vendor_keep_heads),
+                )
+            } else if branch != "vendor"
+                && age_days.is_some_and(|days| days <= policy.retention.develop_retention_days)
+            {
+                (
+                    SnapshotRetentionStatus::WithinWindow,
+                    format!(
+                        "branch is within {}-day retention window",
+                        policy.retention.develop_retention_days
+                    ),
+                )
+            } else {
+                (
+                    SnapshotRetentionStatus::ExpiredCandidate,
+                    format!(
+                        "outside branch retention policy (develop-like window: {} days)",
+                        policy.retention.develop_retention_days
+                    ),
+                )
+            };
+
+            assessments.push(SnapshotRetentionAssessment {
+                snapshot_id: snapshot.snapshot_id.clone(),
+                branch: branch.clone(),
+                created_at: snapshot.created_at.clone(),
+                age_days,
+                status,
+                protections,
+                reason,
+            });
+        }
+    }
+
+    assessments.sort_by(|lhs, rhs| {
+        rhs.branch
+            .cmp(&lhs.branch)
+            .then_with(|| rhs.age_days.unwrap_or(0).cmp(&lhs.age_days.unwrap_or(0)))
+            .then_with(|| lhs.snapshot_id.cmp(&rhs.snapshot_id))
+    });
+    assessments
+}
+
+fn snapshot_created_at(snapshot: &bsl_search::BaselineSnapshotRecord) -> Option<DateTime<Utc>> {
+    project_model::parse_timestamp_utc(&snapshot.created_at)
+}
+
+fn resolve_snapshot_id(
+    corpus: &bsl_search::CorpusId,
+    snapshot_id: Option<&str>,
+    branch: Option<&str>,
+    commit: Option<&str>,
+) -> Result<String, io::Error> {
+    if let Some(snapshot_id) = snapshot_id.filter(|value| !value.trim().is_empty()) {
+        return Ok(snapshot_id.to_owned());
+    }
+
+    let prefix = corpus.as_str();
+    match (
+        branch.filter(|value| !value.trim().is_empty()),
+        commit.filter(|value| !value.trim().is_empty()),
+    ) {
+        (Some(branch), Some(commit)) => Ok(format!("{prefix}:{branch}@{commit}")),
+        (None, Some(commit)) => Ok(format!("{prefix}:{commit}")),
+        _ if matches!(corpus, bsl_search::CorpusId::Reference) => {
+            Ok(format!("reference:{}", env!("CARGO_PKG_VERSION")))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--snapshot-id is required unless --commit is provided",
+        )),
+    }
+}
+
+fn resolve_parent_snapshot_id(
+    adapter: &bsl_search::ExternalBaselineAdapter,
+    corpus: &bsl_search::CorpusId,
+    branch: Option<&str>,
+    current_snapshot_id: &str,
+    explicit_parent_snapshot_id: Option<&str>,
+    workspace_policy: Option<&project_model::SearchBaselinePolicyConfig>,
+) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+    if let Some(parent_snapshot_id) =
+        explicit_parent_snapshot_id.map(str::trim).filter(|value| !value.is_empty())
+    {
+        return Ok(Some(parent_snapshot_id.to_owned()));
+    }
+
+    let mut snapshot_groups = Vec::new();
+    if let Some(branch) = branch.map(str::trim).filter(|value| !value.is_empty()) {
+        let mut branch_candidates = vec![branch.to_owned()];
+        if matches!(corpus, bsl_search::CorpusId::WorkspaceCode)
+            && workspace_policy
+                .is_some_and(project_model::SearchBaselinePolicyConfig::is_configured)
+        {
+            if let Some(policy) = workspace_policy {
+                if let Some(selection) =
+                    project_model::resolve_workspace_branch_policy(policy, Some(branch))
+                {
+                    for candidate in selection.candidate_branches() {
+                        if branch_candidates.iter().all(|existing| existing != &candidate) {
+                            branch_candidates.push(candidate);
+                        }
+                    }
+                }
+            }
+        }
+
+        for branch_candidate in branch_candidates {
+            snapshot_groups.push(adapter.list_snapshots(
+                Some(corpus.as_str()),
+                Some(branch_candidate.as_str()),
+                None,
+                2,
+            )?);
+        }
+
+        return Ok(select_parent_snapshot_id_from_groups(current_snapshot_id, &snapshot_groups));
+    }
+
+    let snapshots = adapter.list_snapshots(Some(corpus.as_str()), branch, None, 2)?;
+    Ok(select_parent_snapshot_id(current_snapshot_id, &snapshots))
+}
+
+fn select_parent_snapshot_id_from_groups(
+    current_snapshot_id: &str,
+    snapshot_groups: &[Vec<bsl_search::BaselineSnapshotRecord>],
+) -> Option<String> {
+    snapshot_groups
+        .iter()
+        .find_map(|snapshots| select_parent_snapshot_id(current_snapshot_id, snapshots))
+}
+
+fn select_parent_snapshot_id(
+    current_snapshot_id: &str,
+    snapshots: &[bsl_search::BaselineSnapshotRecord],
+) -> Option<String> {
+    snapshots
+        .iter()
+        .find(|snapshot| snapshot.snapshot_id != current_snapshot_id)
+        .map(|snapshot| snapshot.snapshot_id.clone())
+}
+
+fn resolve_pg_connection(
+    pg_url: Option<&str>,
+    pg_schema: Option<&str>,
+    credentials: Option<&project_model::PostgresCredentialConfig>,
+) -> Result<(String, Option<String>), io::Error> {
+    // Explicit --pg-url flag takes highest priority
+    if let Some(url) = pg_url.filter(|u| !u.trim().is_empty()) {
+        let pg_schema = pick_first_non_empty([
+            pg_schema,
+            env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
+        ]);
+        return Ok((url.to_owned(), pg_schema));
+    }
+    // Config-level credential resolver (from bsl-analyzer.toml)
+    if let Some(creds) = credentials {
+        if let Some(url) = project_model::resolve_postgres_url(creds) {
+            let pg_schema = pick_first_non_empty([
+                pg_schema,
+                env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
+            ]);
+            return Ok((url, pg_schema));
+        }
+    }
+    // Hardcoded env var fallback
+    let pg_url = env::var("BSL_SEARCH_BASELINE_PG_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--pg-url, config credential resolver, or BSL_SEARCH_BASELINE_PG_URL is required",
+            )
+        })?;
+    let pg_schema = pick_first_non_empty([
+        pg_schema,
+        env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
+    ]);
+    Ok((pg_url, pg_schema))
+}
+
+fn build_postgres_baseline_adapter(
+    pg_url: &str,
+    pg_schema: Option<&str>,
+) -> Result<bsl_search::ExternalBaselineAdapter, Box<dyn Error + Send + Sync>> {
+    let mut config = bsl_search::ExternalBaselineConfig::postgres(pg_url.to_owned());
+    if let Some(schema) = pg_schema {
+        config = config.with_schema(schema.to_owned());
+    }
+    Ok(bsl_search::ExternalBaselineAdapter::new(config)?)
+}
+
+fn embedding_config_from_env() -> Option<bsl_search::EmbedderConfig> {
+    let base_url = env::var("EMBEDDING_URL").ok()?;
+    let model =
+        env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
+    let dim = env::var("EMBEDDING_DIM").ok().and_then(|value| value.parse().ok()).or(Some(1024));
+
+    Some(bsl_search::EmbedderConfig {
+        base_url,
+        model,
+        dim,
+        api_key: env::var("EMBEDDING_API_KEY").ok(),
+    })
+}
+
+fn embedding_execution_policy_from_env() -> bsl_search::EmbeddingExecutionPolicy {
+    bsl_search::EmbeddingExecutionPolicy {
+        batch_size: env::var("EMBEDDING_BATCH_SIZE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(32),
+        concurrency: env::var("EMBEDDING_CONCURRENCY")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10),
+        progress_interval: env::var("EMBEDDING_PROGRESS_INTERVAL")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(20),
+    }
+}
+
+fn search_baseline_corpus_cli_to_domain(corpus: SearchBaselineCorpusCli) -> bsl_search::CorpusId {
+    match corpus {
+        SearchBaselineCorpusCli::WorkspaceCode => bsl_search::CorpusId::WorkspaceCode,
+        SearchBaselineCorpusCli::Reference => bsl_search::CorpusId::Reference,
+    }
+}
+
+fn shorten_fingerprint(fingerprint: &str) -> &str {
+    fingerprint.get(..12).unwrap_or(fingerprint)
+}
+
+fn format_ratio(numerator: usize, denominator: usize) -> String {
+    if denominator == 0 {
+        return "0/0 (n/a)".to_owned();
+    }
+
+    let percent = (numerator as f64 / denominator as f64) * 100.0;
+    format!("{numerator}/{denominator} ({percent:.1}%)")
+}
+
+fn pick_first_non_empty<'a>(
+    candidates: impl IntoIterator<Item = Option<&'a str>>,
+) -> Option<String> {
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn resolve_publish_branch(
+    project_branch: Option<&str>,
+    project_root: &std::path::Path,
+) -> Option<String> {
+    let git_branch = project_model::current_git_branch(project_root);
+    pick_first_non_empty([
+        project_branch,
+        env::var("CI_COMMIT_BRANCH").ok().as_deref(),
+        env::var("CI_COMMIT_REF_NAME").ok().as_deref(),
+        git_branch.as_deref(),
+    ])
+}
+
+fn validate_workspace_publish_policy(
+    policy: &project_model::SearchBaselinePolicyConfig,
+    branch: Option<&str>,
+    allow_non_policy_branch: bool,
+) -> Result<(), io::Error> {
+    if !policy.is_configured() {
+        return Ok(());
+    }
+
+    if policy.publish_branches.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace baseline policy is configured but 'workspaceCode.policy.publishBranches' is empty",
+        ));
+    }
+
+    let Some(branch) = branch.map(str::trim).filter(|branch| !branch.is_empty()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workspace baseline publish policy requires a branch; pass --branch, set CI_COMMIT_BRANCH, or run inside a git repository",
+        ));
+    };
+
+    if project_model::is_publish_branch_allowed(policy, branch) || allow_non_policy_branch {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "branch '{branch}' is not allowed by workspace baseline publish policy; use --allow-non-policy-branch to override"
+        ),
+    ))
+}
+
+fn build_workspace_code_baseline_documents(
+    source_path: &std::path::Path,
+) -> Result<(usize, Vec<bsl_search::IndexedDocument>), Box<dyn Error + Send + Sync>> {
+    use bsl_search::SearchEngine;
+
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("baseline-sync.db");
+    let mut engine = SearchEngine::fts_only(&db_path)?;
+    let indexed_files = engine.index_directory_fts(source_path)?;
+    let documents = engine.load_indexed_documents(Some("code"))?;
+    Ok((indexed_files, documents))
+}
+
+fn build_reference_baseline_documents(
+) -> Result<(usize, Vec<bsl_search::IndexedDocument>), Box<dyn Error + Send + Sync>> {
+    use bsl_search::SearchEngine;
+
+    let documents = build_reference_source_documents();
+
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("reference-baseline-sync.db");
+    let mut engine = SearchEngine::fts_only(&db_path)?;
+    let indexed_files = engine.index_documents(
+        "platform",
+        "platform://docs",
+        env!("CARGO_PKG_VERSION").as_bytes(),
+        &documents,
+        None,
+    )?;
+    let indexed_documents = engine.load_indexed_documents(Some("platform"))?;
+    Ok((indexed_files, indexed_documents))
+}
+
+fn build_reference_source_documents() -> Vec<bsl_search::Document> {
+    use bsl_platform::PlatformDataInner;
+    use bsl_search::Document;
+
+    let platform = PlatformDataInner::instance();
+    let mut documents = Vec::new();
+
+    for ty in platform.all_types() {
+        let methods = platform.get_type_methods(&ty.name);
+        let method_list: String = methods
+            .iter()
+            .map(|method| format!("{} / {}", method.name, method.english_name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        documents.push(Document {
+            title: format!("{} / {}", ty.name, ty.english_name),
+            body: format!("Тип: {} / {}\nМетоды: {method_list}", ty.name, ty.english_name),
+            kind: "type".to_owned(),
+        });
+    }
+
+    for method in platform.all_methods() {
+        let mut body = format!(
+            "Тип: {}\nМетод: {} / {}\n",
+            method.type_name, method.name, method.english_name
+        );
+        if let Some(ref ret) = method.return_type {
+            body.push_str(&format!("Возвращает: {ret}\n"));
+        }
+        if let Some(docs) = platform.get_method_docs(method.id) {
+            if !docs.syntax.is_empty() {
+                body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
+            }
+            if !docs.description.is_empty() {
+                body.push_str(&format!("Описание: {}\n", docs.description));
+            }
+            for param in &docs.params {
+                body.push_str(&format!("Параметр {}: {}\n", param.name, param.description));
+            }
+            for example in &docs.examples {
+                body.push_str(&format!("Пример: {}\n", example.code));
+            }
+        }
+        documents.push(Document {
+            title: format!(
+                "{}.{} / {}.{}",
+                method.type_name, method.name, method.type_name, method.english_name
+            ),
+            body,
+            kind: "method".to_owned(),
+        });
+    }
+
+    for func in platform.all_global_functions() {
+        let mut body = format!("Глобальная функция: {} / {}\n", func.name, func.english_name);
+        if let Some(ref ret) = func.return_type {
+            body.push_str(&format!("Возвращает: {ret}\n"));
+        }
+        if let Some(docs) = platform.get_global_function_docs(func.id) {
+            if !docs.syntax.is_empty() {
+                body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
+            }
+            if !docs.description.is_empty() {
+                body.push_str(&format!("Описание: {}\n", docs.description));
+            }
+            for param in &docs.params {
+                body.push_str(&format!("Параметр {}: {}\n", param.name, param.description));
+            }
+        }
+        documents.push(Document {
+            title: format!("{} / {}", func.name, func.english_name),
+            body,
+            kind: "global_function".to_owned(),
+        });
+    }
+
+    documents
+}
+
+fn resolve_scope(
+    scope: Option<InstallScopeCli>,
+    default: bsl_analyzer::mcp_install::InstallScope,
+) -> Result<bsl_analyzer::mcp_install::InstallScope, io::Error> {
+    Ok(match scope {
+        Some(InstallScopeCli::User) => bsl_analyzer::mcp_install::InstallScope::User,
+        Some(InstallScopeCli::Project) => bsl_analyzer::mcp_install::InstallScope::Project,
+        Some(InstallScopeCli::Local) => bsl_analyzer::mcp_install::InstallScope::Local,
+        None => default,
+    })
+}
+
+fn resolve_recommended_names(name: Option<&str>) -> Result<(String, String), io::Error> {
+    match name {
+        None => Ok((
+            bsl_analyzer::mcp_install::default_server_name(
+                bsl_analyzer::mcp_install::InstallPreset::Reference,
+            )
+            .to_owned(),
+            bsl_analyzer::mcp_install::default_server_name(
+                bsl_analyzer::mcp_install::InstallPreset::Workspace,
+            )
+            .to_owned(),
+        )),
+        Some(base) => {
+            let base = base.trim();
+            if base.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--name must not be empty",
+                ));
+            }
+            Ok((format!("{base}-reference"), format!("{base}-workspace")))
+        }
+    }
+}
+
+fn format_install_error(err: &bsl_analyzer::mcp_install::InstallError) -> String {
+    if let Some(hint) = err.hint() {
+        format!("{err}\nHint: {hint}")
+    } else {
+        err.to_string()
     }
 }
 
@@ -387,6 +1909,24 @@ fn run_extension_command(command: ExtensionCommands) -> Result<(), Box<dyn Error
     }
 
     Ok(())
+}
+
+fn parse_env_pair(input: &str) -> Result<(String, String), String> {
+    let Some((key, value)) = input.split_once('=') else {
+        return Err("expected KEY=value".to_owned());
+    };
+    if key.is_empty() {
+        return Err("environment variable name must not be empty".to_owned());
+    }
+    Ok((key.to_owned(), value.to_owned()))
+}
+
+fn status_label(status: bsl_analyzer::mcp_install::InstallStatus) -> &'static str {
+    match status {
+        bsl_analyzer::mcp_install::InstallStatus::Installed => "installed",
+        bsl_analyzer::mcp_install::InstallStatus::Updated => "updated",
+        bsl_analyzer::mcp_install::InstallStatus::DryRun => "dry-run",
+    }
 }
 
 /// Decode password: if prefixed with "base64:", decode from base64.
@@ -643,22 +2183,34 @@ fn escape_html(s: &str) -> String {
 }
 
 fn run_mcp_server(
-    source_dir: PathBuf,
+    profile: mcp_server::McpProfile,
+    source_dir: Option<PathBuf>,
     onec_url: Option<String>,
     onec_user: &str,
     onec_password: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing::info!(?source_dir, ?onec_url, "Starting MCP server (stdio)");
+    tracing::info!(?profile, ?source_dir, ?onec_url, "Starting MCP server (stdio)");
 
-    let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
-    let mut state = mcp_server::SharedState::standalone(source_dir);
+    let state = match profile {
+        mcp_server::McpProfile::Workspace => {
+            let source_dir = source_dir.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "workspace profile requires --source-dir",
+                )
+            })?;
+            let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
+            let mut state = mcp_server::SharedState::workspace(source_dir);
+            if let Some(ref url) = onec_url {
+                tracing::info!(%url, "Configuring 1C HTTP client");
+                state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
+            }
+            state
+        }
+        mcp_server::McpProfile::Reference => mcp_server::SharedState::reference(source_dir),
+    };
 
-    if let Some(ref url) = onec_url {
-        tracing::info!(%url, "Configuring 1C HTTP client");
-        state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
-    }
-
-    let server = mcp_server::McpServer::new(state);
+    let server = mcp_server::McpServer::new(profile, state);
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(mcp_server::serve_stdio(server))?;
@@ -887,28 +2439,37 @@ fn analyze_salsa(
 
     tracing::info!("Found {} BSL files", bsl_files.len());
 
-    // Filter files by diff if enabled
-    let total_files = bsl_files.len();
-    if let Some(ref filter) = diff_filter {
-        bsl_files.retain(|path| {
-            // Convert to relative path for matching
-            let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
-            filter.should_analyze(rel_path)
-        });
-        tracing::info!("After diff filter: {} files (from {} total)", bsl_files.len(), total_files);
-    }
-
-    // Build FileSet with all discovered files for VFS path resolution
+    // Build FileSet from ALL files (needed for cross-module resolution)
     tracing::info!("Loading files into database");
     let mut file_set = vfs::FileSet::new();
-    let mut file_ids = Vec::new();
+    let mut all_file_ids: Vec<(FileId, PathBuf)> = Vec::new();
 
     for (idx, path) in bsl_files.iter().enumerate() {
         let file_id = FileId(idx as u32);
         let vfs_path = vfs::VfsPath::new(path.clone());
         file_set.insert(file_id, vfs_path);
-        file_ids.push((file_id, path.clone()));
+        all_file_ids.push((file_id, path.clone()));
     }
+
+    // Filter to determine which files need diagnostics
+    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref filter) = diff_filter {
+        let filtered: Vec<_> = all_file_ids
+            .iter()
+            .filter(|(_, path)| {
+                let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
+                filter.should_analyze(rel_path)
+            })
+            .cloned()
+            .collect();
+        tracing::info!(
+            "After diff filter: {} files to analyze (from {} total in VFS)",
+            filtered.len(),
+            all_file_ids.len()
+        );
+        filtered
+    } else {
+        all_file_ids.clone()
+    };
 
     // Setup source root with FileSet for path resolution
     // (used by sdbl_hir_in_file_query to find configuration root)
@@ -918,7 +2479,8 @@ fn analyze_salsa(
     db.set_source_root(source_root_id, source_root);
 
     // Load file contents into database
-    for (file_id, path) in &file_ids {
+    // Load ALL files into database (needed for cross-module resolution)
+    for (file_id, path) in &all_file_ids {
         let content = fs::read_to_string(path)?;
         db.set_file_source_root(*file_id, source_root_id);
         db.set_file_text(*file_id, &content);
@@ -975,7 +2537,6 @@ fn analyze_salsa(
     let progress_arc = Arc::new(progress);
     let workspace_dir_arc = Arc::new(workspace_dir.clone());
     let source_dir_arc = Arc::new(source_dir.clone());
-    let configuration_path_arc = Arc::new(configuration_path);
     let diff_filter_arc = Arc::new(diff_filter);
     // file_set_arc is created above and stored in SourceRoot
 
@@ -983,16 +2544,12 @@ fn analyze_salsa(
     let results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = file_ids
         .par_iter()
         .map_with(db.clone(), |db_snapshot, (file_id, path)| {
-            let ctx = DiagnosticsContext {
-                db: db_snapshot,
-                config: &config,
-                file_id: *file_id,
-                provider: None,
-                workspace_root: Some(&source_dir_arc),
-                configuration_path: configuration_path_arc.as_deref(),
-                configuration_path_input: config_path_input,
-                file_set: Some(&file_set_arc),
-            };
+            let provider = ide_db::SalsaProvider::with_file_set(
+                db_snapshot,
+                config_path_input,
+                Some(&file_set_arc),
+            );
+            let ctx = DiagnosticsContext::new(&config, *file_id, &provider);
 
             // Catch panics to continue analyzing other files if one fails
             let file_start = std::time::Instant::now();
@@ -1210,16 +2767,6 @@ fn analyze_streaming(
 
     tracing::info!("Found {} BSL files", bsl_files.len());
 
-    // Filter files by diff if enabled
-    let total_files = bsl_files.len();
-    if let Some(ref filter) = diff_filter {
-        bsl_files.retain(|path| {
-            let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
-            filter.should_analyze(rel_path)
-        });
-        tracing::info!("After diff filter: {} files (from {} total)", bsl_files.len(), total_files);
-    }
-
     if bsl_files.is_empty() {
         tracing::warn!("No BSL files found in {:?}", source_dir);
         if !matches!(format, OutputFormat::Jsonl) {
@@ -1228,16 +2775,36 @@ fn analyze_streaming(
         return Ok(());
     }
 
-    // Build FileSet and file IDs
+    // Build FileSet from ALL files (needed for cross-module resolution)
     let mut file_set = vfs::FileSet::new();
-    let mut file_ids = Vec::new();
+    let mut all_file_ids: Vec<(FileId, PathBuf)> = Vec::new();
 
     for (idx, path) in bsl_files.iter().enumerate() {
         let file_id = FileId(idx as u32);
         let vfs_path = vfs::VfsPath::new(path.clone());
         file_set.insert(file_id, vfs_path);
-        file_ids.push((file_id, path.clone()));
+        all_file_ids.push((file_id, path.clone()));
     }
+
+    // Filter to determine which files need diagnostics
+    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref filter) = diff_filter {
+        let filtered: Vec<_> = all_file_ids
+            .iter()
+            .filter(|(_, path)| {
+                let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
+                filter.should_analyze(rel_path)
+            })
+            .cloned()
+            .collect();
+        tracing::info!(
+            "After diff filter: {} files to analyze (from {} total in VFS)",
+            filtered.len(),
+            all_file_ids.len()
+        );
+        filtered
+    } else {
+        all_file_ids.clone()
+    };
 
     // Create orchestrator with diagnostics config
     let mut builder =
@@ -1527,11 +3094,24 @@ fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send +
     tracing::info!("Checking configuration: {:?}", config);
 
     let content = std::fs::read_to_string(&config)?;
-    let _config: project_model::ProjectConfig = serde_json::from_str(&content)?;
+    let project_config: project_model::ProjectConfig = serde_json::from_str(&content)?;
+    let diagnostics =
+        mcp_server::resolve_project_baseline_diagnostics(config.parent(), &project_config);
 
-    println!("Configuration is valid!");
+    println!("Configuration is valid.");
+    println!();
+    println!("Search baseline:");
+    print_baseline_summary("Workspace", &diagnostics.workspace);
+    print_baseline_summary("Reference", &diagnostics.reference);
 
     Ok(())
+}
+
+fn print_baseline_summary(label: &str, summary: &mcp_server::BaselineResolutionSummary) {
+    println!("  {label}:");
+    println!("    Backend: {backend}", backend = summary.backend);
+    println!("    Select:  {selection}", selection = summary.selection);
+    println!("    Status:  {status}", status = summary.issue.as_deref().unwrap_or("ready"));
 }
 
 fn setup_logging(
@@ -1554,4 +3134,308 @@ fn setup_logging(
     bsl_analyzer::tracing::Config { writer, filter, profile_filter, json_profile_filter }.init()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        analyze_snapshot_retention, pick_first_non_empty, resolve_publish_branch,
+        resolve_snapshot_id, select_parent_snapshot_id, select_parent_snapshot_id_from_groups,
+        validate_workspace_publish_policy, SnapshotRetentionStatus,
+    };
+    use bsl_search::{BaselineSnapshotRecord, CorpusId};
+    use chrono::{TimeZone, Utc};
+    use std::{env, fs};
+    use tempfile::tempdir;
+
+    #[test]
+    fn explicit_snapshot_id_has_priority() {
+        let snapshot_id = resolve_snapshot_id(
+            &CorpusId::WorkspaceCode,
+            Some("manual-snapshot"),
+            Some("main"),
+            Some("abc123"),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot_id, "manual-snapshot");
+    }
+
+    #[test]
+    fn snapshot_id_is_derived_from_branch_and_commit() {
+        let snapshot_id =
+            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, Some("main"), Some("abc123"))
+                .unwrap();
+
+        assert_eq!(snapshot_id, "workspace-code:main@abc123");
+    }
+
+    #[test]
+    fn snapshot_id_is_derived_from_commit_when_branch_is_missing() {
+        let snapshot_id =
+            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, None, Some("abc123")).unwrap();
+
+        assert_eq!(snapshot_id, "workspace-code:abc123");
+    }
+
+    #[test]
+    fn commit_or_snapshot_id_is_required() {
+        let error =
+            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, Some("main"), None).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("--snapshot-id is required unless --commit is provided"));
+    }
+
+    #[test]
+    fn reference_snapshot_id_defaults_to_package_version() {
+        let snapshot_id = resolve_snapshot_id(&CorpusId::Reference, None, None, None).unwrap();
+
+        assert_eq!(snapshot_id, format!("reference:{}", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn pick_first_non_empty_skips_blank_values() {
+        let value = pick_first_non_empty([Some(""), Some("  "), None, Some("main")]);
+
+        assert_eq!(value.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn resolve_publish_branch_uses_git_when_cli_and_ci_are_missing() {
+        // Clear CI env vars that take priority over git in resolve_publish_branch
+        let saved_branch = env::var("CI_COMMIT_BRANCH").ok();
+        let saved_ref = env::var("CI_COMMIT_REF_NAME").ok();
+        env::remove_var("CI_COMMIT_BRANCH");
+        env::remove_var("CI_COMMIT_REF_NAME");
+
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/demo\n").unwrap();
+
+        let branch = resolve_publish_branch(None, dir.path());
+
+        // Restore env vars
+        if let Some(v) = saved_branch {
+            env::set_var("CI_COMMIT_BRANCH", v);
+        }
+        if let Some(v) = saved_ref {
+            env::set_var("CI_COMMIT_REF_NAME", v);
+        }
+
+        assert_eq!(branch.as_deref(), Some("feature/demo"));
+    }
+
+    #[test]
+    fn workspace_publish_policy_blocks_branch_outside_allowlist() {
+        let policy: project_model::SearchBaselinePolicyConfig =
+            serde_json::from_value(serde_json::json!({
+                "publishBranches": ["vendor", "develop"],
+                "branches": [
+                    { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
+                ]
+            }))
+            .unwrap();
+
+        let error =
+            validate_workspace_publish_policy(&policy, Some("feature/demo"), false).unwrap_err();
+
+        assert!(error.to_string().contains("not allowed by workspace baseline publish policy"));
+    }
+
+    #[test]
+    fn workspace_publish_policy_allows_override_flag() {
+        let policy: project_model::SearchBaselinePolicyConfig =
+            serde_json::from_value(serde_json::json!({
+                "publishBranches": ["vendor", "develop"],
+                "branches": [
+                    { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
+                ]
+            }))
+            .unwrap();
+
+        validate_workspace_publish_policy(&policy, Some("feature/demo"), true).unwrap();
+    }
+
+    #[test]
+    fn select_parent_snapshot_id_picks_latest_different_snapshot() {
+        let snapshots = vec![
+            baseline_snapshot_record("workspace-code:main@new"),
+            baseline_snapshot_record("workspace-code:main@old"),
+        ];
+
+        let parent = select_parent_snapshot_id("workspace-code:main@new", &snapshots);
+
+        assert_eq!(parent.as_deref(), Some("workspace-code:main@old"));
+    }
+
+    #[test]
+    fn select_parent_snapshot_id_uses_latest_when_current_is_not_published_yet() {
+        let snapshots = vec![baseline_snapshot_record("workspace-code:main@old")];
+
+        let parent = select_parent_snapshot_id("workspace-code:main@new", &snapshots);
+
+        assert_eq!(parent.as_deref(), Some("workspace-code:main@old"));
+    }
+
+    #[test]
+    fn select_parent_snapshot_id_returns_none_when_only_self_exists() {
+        let snapshots = vec![baseline_snapshot_record("workspace-code:main@same")];
+
+        let parent = select_parent_snapshot_id("workspace-code:main@same", &snapshots);
+
+        assert_eq!(parent, None);
+    }
+
+    #[test]
+    fn select_parent_snapshot_id_uses_fallback_branch_group() {
+        let feature_group = vec![baseline_snapshot_record("workspace-code:feature@same")];
+        let develop_group = vec![baseline_snapshot_record("workspace-code:develop@old")];
+        let vendor_group = vec![baseline_snapshot_record("workspace-code:vendor@old")];
+
+        let parent = select_parent_snapshot_id_from_groups(
+            "workspace-code:feature@same",
+            &[feature_group, develop_group, vendor_group],
+        );
+
+        assert_eq!(parent.as_deref(), Some("workspace-code:develop@old"));
+    }
+
+    #[test]
+    fn analyze_snapshot_retention_marks_vendor_safety_and_descendant_protection() {
+        let policy: project_model::SearchBaselinePolicyConfig = serde_json::from_value(serde_json::json!({
+            "publishBranches": ["vendor", "develop"],
+            "branches": [{ "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }],
+            "retention": { "developRetentionDays": 30, "vendorKeepHeads": 2, "minSnapshotsPerBranch": 1 }
+        }))
+        .unwrap();
+        let snapshots = vec![
+            snapshot_with_branch(
+                "workspace-code:vendor@new",
+                "vendor",
+                "2026-04-01T00:00:00Z",
+                None,
+            ),
+            snapshot_with_branch(
+                "workspace-code:vendor@old",
+                "vendor",
+                "2026-03-01T00:00:00Z",
+                Some("workspace-code:vendor@ancestor"),
+            ),
+            snapshot_with_branch(
+                "workspace-code:vendor@ancestor",
+                "vendor",
+                "2026-02-01T00:00:00Z",
+                None,
+            ),
+        ];
+
+        let assessments = analyze_snapshot_retention(
+            &policy,
+            &snapshots,
+            Utc.with_ymd_and_hms(2026, 4, 2, 0, 0, 0).unwrap(),
+        );
+
+        let new = assessments
+            .iter()
+            .find(|item| item.snapshot_id == "workspace-code:vendor@new")
+            .unwrap();
+        assert_eq!(new.status, SnapshotRetentionStatus::ActiveHead);
+
+        let old = assessments
+            .iter()
+            .find(|item| item.snapshot_id == "workspace-code:vendor@old")
+            .unwrap();
+        assert_eq!(old.status, SnapshotRetentionStatus::SafetyHead);
+
+        let ancestor = assessments
+            .iter()
+            .find(|item| item.snapshot_id == "workspace-code:vendor@ancestor")
+            .unwrap();
+        assert_eq!(ancestor.status, SnapshotRetentionStatus::ExpiredCandidate);
+        assert!(ancestor.protections.iter().any(|value| value == "has-descendants"));
+    }
+
+    #[test]
+    fn analyze_snapshot_retention_marks_recent_develop_snapshot_within_window() {
+        let policy: project_model::SearchBaselinePolicyConfig = serde_json::from_value(serde_json::json!({
+            "publishBranches": ["vendor", "develop"],
+            "branches": [{ "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }],
+            "retention": { "developRetentionDays": 30, "vendorKeepHeads": 2, "minSnapshotsPerBranch": 1 }
+        }))
+        .unwrap();
+        let snapshots = vec![
+            snapshot_with_branch(
+                "workspace-code:develop@new",
+                "develop",
+                "2026-04-01T00:00:00Z",
+                None,
+            ),
+            snapshot_with_branch(
+                "workspace-code:develop@recent",
+                "develop",
+                "2026-03-20T00:00:00Z",
+                None,
+            ),
+            snapshot_with_branch(
+                "workspace-code:develop@old",
+                "develop",
+                "2026-01-01T00:00:00Z",
+                None,
+            ),
+        ];
+
+        let assessments = analyze_snapshot_retention(
+            &policy,
+            &snapshots,
+            Utc.with_ymd_and_hms(2026, 4, 2, 0, 0, 0).unwrap(),
+        );
+
+        let recent = assessments
+            .iter()
+            .find(|item| item.snapshot_id == "workspace-code:develop@recent")
+            .unwrap();
+        assert_eq!(recent.status, SnapshotRetentionStatus::WithinWindow);
+
+        let old = assessments
+            .iter()
+            .find(|item| item.snapshot_id == "workspace-code:develop@old")
+            .unwrap();
+        assert_eq!(old.status, SnapshotRetentionStatus::ExpiredCandidate);
+    }
+
+    fn baseline_snapshot_record(snapshot_id: &str) -> BaselineSnapshotRecord {
+        BaselineSnapshotRecord {
+            snapshot_id: snapshot_id.to_owned(),
+            corpus: "workspace-code".to_owned(),
+            fingerprint: None,
+            parent_snapshot_id: None,
+            branch: Some("main".to_owned()),
+            commit: None,
+            created_at: "2026-04-02T00:00:00Z".to_owned(),
+            files: 0,
+            documents: 0,
+        }
+    }
+
+    fn snapshot_with_branch(
+        snapshot_id: &str,
+        branch: &str,
+        created_at: &str,
+        parent_snapshot_id: Option<&str>,
+    ) -> BaselineSnapshotRecord {
+        BaselineSnapshotRecord {
+            snapshot_id: snapshot_id.to_owned(),
+            corpus: "workspace-code".to_owned(),
+            fingerprint: None,
+            parent_snapshot_id: parent_snapshot_id.map(ToOwned::to_owned),
+            branch: Some(branch.to_owned()),
+            commit: None,
+            created_at: created_at.to_owned(),
+            files: 0,
+            documents: 0,
+        }
+    }
 }

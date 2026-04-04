@@ -25,6 +25,7 @@
 //! - **BodySourceMap**: Bidirectional mapping between HIR and AST
 
 pub mod body;
+pub mod call_graph;
 pub mod cognitive_complexity;
 pub mod conditional_tree;
 pub mod cyclomatic_complexity;
@@ -73,8 +74,8 @@ pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 // Re-export all Salsa query functions from the queries module
 pub use queries::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
-    module_bodies_query, module_data_query, module_index_query, region_tree_query,
-    symbol_tree_query, workspace_index_query, workspace_symbols_query,
+    module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
+    region_tree_query, symbol_tree_query, workspace_index_query, workspace_symbols_query,
 };
 
 /// HIR definition layer - lowering from AST to HIR.
@@ -233,6 +234,17 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// **Note:** Actual implementation is in ide-db (needs VFS access). The query
     /// in hir-def is a placeholder.
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
+
+    /// Get per-module call summary (methods, edges, notify/idle registrations, form entries).
+    ///
+    /// # Performance
+    /// - **LRU cache:** 256
+    /// - **Depends on:** [`module_bodies`](Self::module_bodies), [`item_tree`](Self::item_tree), [`module_metadata`](Self::module_metadata)
+    /// - **Typical time:** <2ms
+    ///
+    /// # Implementation
+    /// Should delegate to [`module_call_summary_query`].
+    fn module_call_summary(&self, module_id: ModuleId) -> Arc<call_graph::ModuleCallSummary>;
 
     /// Get parsed documentation for a method.
     ///
@@ -641,7 +653,9 @@ impl ModuleBodies {
         use syntax::SyntaxKind;
 
         let mut result = ModuleBodies::new();
-        let mut method_nodes: Vec<(syntax::SyntaxNode, bool)> = Vec::new();
+        // Track (top_level_idx, node, is_function) to match ItemTree index space
+        let mut method_nodes: Vec<(u32, syntax::SyntaxNode, bool)> = Vec::new();
+        let mut top_level_idx: u32 = 0;
 
         // Single pass to collect module variables and method nodes
         for node in root.descendants() {
@@ -652,13 +666,16 @@ impl ModuleBodies {
                     });
                     if !is_inside_method {
                         collect_module_vars(&node, &mut result.module_vars);
+                        top_level_idx += 1;
                     }
                 }
                 SyntaxKind::PROCEDURE_DEF => {
-                    method_nodes.push((node, false));
+                    method_nodes.push((top_level_idx, node, false));
+                    top_level_idx += 1;
                 }
                 SyntaxKind::FUNCTION_DEF => {
-                    method_nodes.push((node, true));
+                    method_nodes.push((top_level_idx, node, true));
+                    top_level_idx += 1;
                 }
                 _ => {}
             }
@@ -673,18 +690,17 @@ impl ModuleBodies {
             });
         }
 
-        // Lower all methods
-        for (method_idx, (node, is_function)) in method_nodes.into_iter().enumerate() {
-            let method_idx = method_idx as u32;
+        // Lower all methods — use top_level_idx to match ItemTree index space
+        for (item_tree_idx, node, is_function) in method_nodes.into_iter() {
             let lower_result =
                 body::lower_method_with_externals(&node, is_function, line_index.clone());
 
-            let method_id = MethodId { module: module_id, local_id: method_idx };
+            let method_id = MethodId { module: module_id, local_id: item_tree_idx };
             for diag in &lower_result.diagnostics {
                 result.all_diagnostics.push((method_id, diag.clone()));
             }
 
-            result.bodies.insert(method_idx, lower_result);
+            result.bodies.insert(item_tree_idx, lower_result);
         }
 
         // Lower module-level code

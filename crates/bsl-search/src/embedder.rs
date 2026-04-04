@@ -4,6 +4,7 @@
 //! the `/v1/embeddings` endpoint.
 
 use crate::error::SearchError;
+use crate::ports::EmbeddingGenerator;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the embedding API endpoint.
@@ -172,6 +173,20 @@ impl Embedder {
             )));
         }
         Ok(())
+    }
+}
+
+impl EmbeddingGenerator for Embedder {
+    fn model_id(&self) -> &str {
+        self.model()
+    }
+
+    fn dimension(&self) -> usize {
+        self.dim()
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError> {
+        Self::embed_batch(self, texts)
     }
 }
 

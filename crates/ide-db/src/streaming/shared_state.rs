@@ -58,6 +58,10 @@ pub struct ParsedFile {
     /// Lazily computed module metadata (FormModule handlers, CommonModule context, etc.).
     /// Computed on first access during Phase 2 (requires configuration).
     module_metadata: OnceLock<Arc<ModuleMetadata>>,
+
+    /// Lazily computed call summary (call edges, notify regs, idle handler regs, etc.).
+    /// Computed on first access during Phase 2 (requires module_bodies + module_metadata).
+    call_summary: OnceLock<Arc<hir::call_graph::ModuleCallSummary>>,
 }
 
 impl std::fmt::Debug for ParsedFile {
@@ -69,6 +73,7 @@ impl std::fmt::Debug for ParsedFile {
             .field("has_cfgs", &self.module_cfgs.get().is_some())
             .field("has_sdbl_hir", &self.sdbl_hir.get().is_some())
             .field("has_metadata", &self.module_metadata.get().is_some())
+            .field("has_call_summary", &self.call_summary.get().is_some())
             .finish()
     }
 }
@@ -92,6 +97,7 @@ impl ParsedFile {
             module_cfgs: OnceLock::new(),
             sdbl_hir: OnceLock::new(),
             module_metadata: OnceLock::new(),
+            call_summary: OnceLock::new(),
         }
     }
 
@@ -212,6 +218,30 @@ impl ParsedFile {
                     }
                 };
                 Arc::new(crate::build_module_metadata(file_path, configuration))
+            })
+            .clone()
+    }
+
+    /// Get or compute call summary.
+    ///
+    /// Thread-safe: computed only once even with concurrent access.
+    /// Requires module_bodies and module_metadata (which will be computed if needed).
+    pub fn call_summary(
+        &self,
+        configuration: Option<&bsl_metadata::Configuration>,
+    ) -> Arc<hir::call_graph::ModuleCallSummary> {
+        self.call_summary
+            .get_or_init(|| {
+                let item_tree = &self.item_tree;
+                let module_bodies = self.module_bodies();
+                let metadata = self.module_metadata(configuration);
+                let form_handlers: &[bsl_metadata::FormEventHandler] =
+                    metadata.form.as_ref().map(|f| f.event_handlers.as_slice()).unwrap_or(&[]);
+                Arc::new(hir::call_graph::extract_call_summary(
+                    item_tree,
+                    &module_bodies,
+                    form_handlers,
+                ))
             })
             .clone()
     }
@@ -397,10 +427,19 @@ pub struct SharedState {
 impl SharedState {
     /// Create a new SharedState from GlobalContext and sorted files.
     pub fn new(global: GlobalContext, sorted_files: Vec<FileId>) -> Arc<Self> {
-        let num_files = sorted_files.len();
+        // Size status/sync arrays by max FileId across ALL files in file_set,
+        // not just sorted_files. This is required because sorted_files may be
+        // a diff-filtered subset with non-contiguous FileIds.
+        let max_file_id = global
+            .file_set
+            .iter()
+            .map(|f| f.index() as usize)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(sorted_files.len());
 
         Arc::new(Self {
-            file_statuses: (0..num_files)
+            file_statuses: (0..max_file_id)
                 .map(|_| AtomicU8::new(FileStatus::NotStarted as u8))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -415,9 +454,15 @@ impl SharedState {
             sorted_files: Arc::new(sorted_files),
             next_file_idx: CachePadded::new(AtomicUsize::new(0)),
 
-            condvars: (0..num_files).map(|_| Condvar::new()).collect::<Vec<_>>().into_boxed_slice(),
+            condvars: (0..max_file_id)
+                .map(|_| Condvar::new())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
 
-            mutexes: (0..num_files).map(|_| Mutex::new(())).collect::<Vec<_>>().into_boxed_slice(),
+            mutexes: (0..max_file_id)
+                .map(|_| Mutex::new(()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
 
             configuration: global.configuration,
             module_index: global.module_index,

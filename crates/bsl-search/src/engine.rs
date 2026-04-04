@@ -13,14 +13,24 @@ use crate::document::Document;
 use crate::embedder::{Embedder, EmbedderConfig};
 use crate::error::SearchError;
 use crate::index::VectorIndex;
+use crate::local_baseline::LocalStoreBaselineAdapter;
+use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+use crate::publish::EmbeddingExecutionPolicy;
+use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
 use crate::store::Store;
+use crate::workspace_overlay::{
+    lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
+    WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
+};
+use crate::{
+    semantic_key_for_indexed_document, semantic_text_for_indexed_document,
+    BaselineOverlaySearchService, BaselineRef, CorpusId,
+};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
-
-/// Default number of concurrent embedding connections.
-const DEFAULT_CONCURRENCY: usize = 10;
 
 /// Progress tracker for indexing operations.
 ///
@@ -74,23 +84,12 @@ impl IndexProgress {
 }
 
 /// Configuration for the search engine.
+#[derive(Default)]
 pub struct SearchConfig {
     /// Embedding API configuration.
     pub embedder: EmbedderConfig,
-    /// Maximum batch size for embedding generation.
-    pub batch_size: usize,
-    /// Number of concurrent embedding connections (default 10).
-    pub concurrency: usize,
-}
-
-impl Default for SearchConfig {
-    fn default() -> Self {
-        Self {
-            embedder: EmbedderConfig::default(),
-            batch_size: 32,
-            concurrency: DEFAULT_CONCURRENCY,
-        }
-    }
+    /// Execution policy for embedding generation.
+    pub execution: EmbeddingExecutionPolicy,
 }
 
 /// A search result with chunk metadata and similarity score.
@@ -113,6 +112,63 @@ pub struct SearchHit {
     pub score: f32,
 }
 
+impl SearchHit {
+    /// Convert from a [`LexicalHit`] (baseline domain type).
+    pub fn from_lexical(hit: &crate::domain::LexicalHit) -> Self {
+        Self {
+            collection: hit.collection.clone(),
+            file_path: hit.path.clone(),
+            symbol_name: hit.symbol_name.clone(),
+            kind: hit.kind.clone(),
+            text: hit.text.clone(),
+            line_start: hit.line_start,
+            line_end: hit.line_end,
+            score: hit.rank,
+        }
+    }
+
+    /// Convert to a [`LexicalHit`] for merge input.
+    pub fn to_lexical(&self) -> crate::domain::LexicalHit {
+        crate::domain::LexicalHit {
+            collection: self.collection.clone(),
+            path: self.file_path.clone(),
+            symbol_name: self.symbol_name.clone(),
+            kind: self.kind.clone(),
+            line_start: self.line_start,
+            line_end: self.line_end,
+            text: self.text.clone(),
+            rank: self.score,
+        }
+    }
+
+    /// Convert to a [`SemanticHit`] for merge input.
+    pub fn to_semantic(&self) -> crate::domain::SemanticHit {
+        crate::domain::SemanticHit {
+            collection: self.collection.clone(),
+            path: self.file_path.clone(),
+            symbol_name: self.symbol_name.clone(),
+            kind: self.kind.clone(),
+            line_start: self.line_start,
+            line_end: self.line_end,
+            score: self.score,
+        }
+    }
+
+    /// Convert from a [`MergedHit`] (merge result).
+    pub fn from_merged(hit: crate::merge::MergedHit) -> Self {
+        Self {
+            collection: hit.collection,
+            file_path: hit.path,
+            symbol_name: hit.symbol_name,
+            kind: hit.kind,
+            text: hit.text.unwrap_or_default(),
+            line_start: hit.line_start,
+            line_end: hit.line_end,
+            score: hit.score,
+        }
+    }
+}
+
 /// The search engine: indexes BSL files and documents, performs search.
 pub struct SearchEngine {
     store: Store,
@@ -121,6 +177,9 @@ pub struct SearchEngine {
     dim: usize,
     batch_size: usize,
     concurrency: usize,
+    workspace_root: Option<std::path::PathBuf>,
+    workspace_overlay_cache: Mutex<WorkspaceOverlayCache>,
+    workspace_baseline_hash_mode: BaselineHashMode,
 }
 
 impl SearchEngine {
@@ -129,9 +188,10 @@ impl SearchEngine {
     /// - `db_path`: path to the SQLite database file
     /// - `config`: search configuration (embedder + batch size + concurrency)
     pub fn new(db_path: &Path, config: SearchConfig) -> Result<Self, SearchError> {
+        let SearchConfig { embedder: embedder_config, execution } = config;
         let store = Store::open(db_path)?;
-        let dim = config.embedder.dim.unwrap_or(1024);
-        let embedder = Embedder::new(config.embedder);
+        let dim = embedder_config.dim.unwrap_or(1024);
+        let embedder = Embedder::new(embedder_config);
 
         // Load existing embeddings from store into HNSW index.
         let data = store.load_all_embeddings(dim)?;
@@ -145,8 +205,11 @@ impl SearchEngine {
             embedder: Some(embedder),
             index,
             dim,
-            batch_size: config.batch_size,
-            concurrency: config.concurrency,
+            batch_size: execution.batch_size(),
+            concurrency: execution.concurrency(),
+            workspace_root: None,
+            workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
+            workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
         })
     }
 
@@ -166,8 +229,11 @@ impl SearchEngine {
             embedder: None,
             index,
             dim,
-            batch_size: 32,
-            concurrency: DEFAULT_CONCURRENCY,
+            batch_size: EmbeddingExecutionPolicy::default().batch_size(),
+            concurrency: EmbeddingExecutionPolicy::default().concurrency(),
+            workspace_root: None,
+            workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
+            workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
         })
     }
 
@@ -572,10 +638,207 @@ impl SearchEngine {
         self.embedder.is_some()
     }
 
+    pub fn embedding_model(&self) -> Option<&str> {
+        self.embedder.as_ref().map(Embedder::model)
+    }
+
+    pub fn embedding_dimension(&self) -> Option<usize> {
+        self.embedder.as_ref().map(Embedder::dim)
+    }
+
+    /// Generate an embedding vector for a single query string.
+    ///
+    /// Returns an error if the embedder is not configured.
+    pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, SearchError> {
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            SearchError::Index(
+                "semantic search not available: configure EMBEDDING_URL to enable embeddings"
+                    .to_owned(),
+            )
+        })?;
+        embedder.embed(query)
+    }
+
+    /// Attach a workspace source root for building a local overlay view.
+    pub fn set_workspace_root(&mut self, workspace_root: impl Into<std::path::PathBuf>) {
+        self.workspace_root = Some(workspace_root.into());
+        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+            cache.clear();
+        }
+    }
+
+    /// Enable watcher-driven overlay refresh mode.
+    pub fn enable_workspace_watcher_mode(&mut self) {
+        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+            cache.enable_watcher_mode();
+        }
+    }
+
+    pub fn set_workspace_baseline_hash_mode(&mut self, hash_mode: BaselineHashMode) {
+        self.workspace_baseline_hash_mode = hash_mode;
+        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+            cache.clear();
+        }
+    }
+
+    /// Mark one workspace file as dirty for the overlay cache.
+    ///
+    /// The path can be absolute inside the configured workspace root or already relative.
+    pub fn mark_workspace_path_dirty(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<bool, SearchError> {
+        let workspace_root = match &self.workspace_root {
+            Some(root) => root,
+            None => return Ok(false),
+        };
+        let path = path.as_ref();
+        let rel_path = if path.is_absolute() {
+            match path.strip_prefix(workspace_root) {
+                Ok(rel) => rel,
+                Err(_) => return Ok(false),
+            }
+        } else {
+            path
+        };
+
+        if !rel_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+            return Ok(false);
+        }
+
+        let rel_path = rel_path.to_string_lossy().to_string();
+        let mut cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        cache.enable_watcher_mode();
+        cache.mark_dirty_path(rel_path);
+        Ok(true)
+    }
+
+    /// Get current workspace overlay statistics.
+    ///
+    /// Performs a lightweight refresh using file metadata and hashes, but does not
+    /// force semantic embedding generation for status queries.
+    pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
+        let Some(workspace_root) = &self.workspace_root else {
+            return Ok(None);
+        };
+        let mut cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        cache.refresh(
+            &self.store,
+            workspace_root,
+            None,
+            self.batch_size,
+            self.workspace_baseline_hash_mode,
+        )?;
+        Ok(Some(cache.stats()))
+    }
+
+    /// Returns overlay-only lexical search hits and the set of paths hidden
+    /// by the overlay, for use with external baseline merge.
+    pub fn workspace_overlay_lexical_hits(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let overlay = self.workspace_overlay_snapshot(None)?;
+        if overlay.is_empty() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let hits = lexical_hits(&overlay, query, limit);
+        Ok((hits, overlay.hidden_paths.clone()))
+    }
+
+    /// Returns overlay-only semantic search hits and the set of paths hidden
+    /// by the overlay, for use with external baseline merge.
+    pub fn workspace_overlay_semantic_hits(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let Some(embedder) = &self.embedder else {
+            return Ok((Vec::new(), HashSet::new()));
+        };
+        let overlay = self.workspace_overlay_snapshot(Some(embedder))?;
+        if overlay.is_empty() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let query_embedding = embedder.embed(query)?;
+        let hits = semantic_hits(&overlay, &query_embedding, limit);
+        Ok((hits, overlay.hidden_paths.clone()))
+    }
+
+    /// Materialize the current workspace code view from the persisted local
+    /// baseline plus the live workspace overlay.
+    ///
+    /// This does not replace the current search runtime yet. It provides a
+    /// real runtime integration point for the baseline + overlay architecture
+    /// so diagnostics and future backend switching can reuse the same flow.
+    pub fn resolve_workspace_code_view(&self) -> Result<Option<ResolvedView>, SearchError> {
+        self.resolve_workspace_code_view_with(
+            BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline"),
+            LocalStoreBaselineAdapter::workspace_code(&self.store),
+            LocalStoreBaselineAdapter::workspace_code(&self.store),
+        )
+    }
+
+    /// Materialize the current workspace code view against an arbitrary
+    /// baseline source.
+    ///
+    /// This is the bridge between the local live overlay and pluggable
+    /// baseline backends such as SQLite today and PostgreSQL later.
+    pub fn resolve_workspace_code_view_with<C, S>(
+        &self,
+        baseline: BaselineRef,
+        catalog: C,
+        content_store: S,
+    ) -> Result<Option<ResolvedView>, SearchError>
+    where
+        C: SnapshotCatalog,
+        S: SnapshotContentStore,
+    {
+        if self.workspace_root.is_none() {
+            return Ok(None);
+        }
+
+        let overlay = self.workspace_overlay_snapshot(None)?;
+        let mut overlay = overlay.overlay;
+        overlay.baseline = baseline.clone();
+        let service =
+            BaselineOverlaySearchService::new(catalog, content_store, InMemoryResolvedViewResolver);
+
+        service.resolve_view(baseline, overlay)
+    }
+
     /// Semantic search, optionally filtered by collection.
     ///
     /// If `collection` is `None`, searches across all collections.
     pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        if collection == Some("code") {
+            if let Some(overlay_hits) = self.search_with_workspace_overlay(query, limit)? {
+                return Ok(overlay_hits);
+            }
+        }
+
+        self.search_persisted(query, limit, collection)
+    }
+
+    fn search_persisted(
         &self,
         query: &str,
         limit: usize,
@@ -619,11 +882,52 @@ impl SearchEngine {
         Ok(hits)
     }
 
+    fn search_with_workspace_overlay(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<SearchHit>>, SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok(None);
+        }
+        let Some(embedder) = &self.embedder else {
+            return Ok(None);
+        };
+
+        let overlay = self.workspace_overlay_snapshot(Some(embedder))?;
+        if overlay.is_empty() {
+            return Ok(None);
+        }
+
+        let query_embedding = embedder.embed(query)?;
+        let mut combined = self.search_persisted(query, limit * 3, Some("code"))?;
+        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.extend(semantic_hits(&overlay, &query_embedding, limit));
+        combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
+        combined.truncate(limit);
+        Ok(Some(combined))
+    }
+
     /// Full-text search, optionally filtered by collection.
     ///
     /// Uses SQLite FTS5 for lexical matching — good for exact names,
     /// variable references, API calls, and string literals.
     pub fn text_search(
+        &self,
+        query: &str,
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        if collection == Some("code") {
+            if let Some(overlay_hits) = self.text_search_with_workspace_overlay(query, limit)? {
+                return Ok(overlay_hits);
+            }
+        }
+
+        self.text_search_persisted(query, limit, collection)
+    }
+
+    fn text_search_persisted(
         &self,
         query: &str,
         limit: usize,
@@ -652,6 +956,168 @@ impl SearchEngine {
         Ok(hits)
     }
 
+    fn text_search_with_workspace_overlay(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<SearchHit>>, SearchError> {
+        let Some(workspace_root) = &self.workspace_root else {
+            return Ok(None);
+        };
+
+        let _ = workspace_root;
+        let overlay = self.workspace_overlay_snapshot(None)?;
+        if overlay.is_empty() {
+            return Ok(None);
+        }
+
+        let mut combined = self.text_search_persisted(query, limit * 3, Some("code"))?;
+        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.extend(lexical_hits(&overlay, query, limit));
+        combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
+        combined.truncate(limit);
+        Ok(Some(combined))
+    }
+
+    fn workspace_overlay_snapshot(
+        &self,
+        embedder: Option<&Embedder>,
+    ) -> Result<WorkspaceOverlayIndex, SearchError> {
+        let workspace_root = self
+            .workspace_root
+            .as_ref()
+            .ok_or_else(|| SearchError::Index("workspace root is not configured".to_owned()))?;
+        let mut cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        cache.refresh(
+            &self.store,
+            workspace_root,
+            embedder,
+            self.batch_size,
+            self.workspace_baseline_hash_mode,
+        )?;
+        Ok(cache.snapshot())
+    }
+
+    pub fn sync_indexed_documents_in_collection(
+        &mut self,
+        collection: &str,
+        documents: &[crate::IndexedDocument],
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<usize, SearchError> {
+        self.sync_indexed_documents_in_collection_with_embeddings(
+            collection, documents, None, progress,
+        )
+    }
+
+    pub fn sync_indexed_documents_in_collection_with_embeddings(
+        &mut self,
+        collection: &str,
+        documents: &[crate::IndexedDocument],
+        shared_embeddings: Option<&HashMap<String, Vec<f32>>>,
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<usize, SearchError> {
+        use std::collections::{BTreeMap, HashSet};
+
+        let mut grouped = BTreeMap::<String, Vec<crate::IndexedDocument>>::new();
+        for document in documents {
+            grouped.entry(document.path.clone()).or_default().push(document.clone());
+        }
+
+        let desired_paths: HashSet<&str> = grouped.keys().map(String::as_str).collect();
+        for (existing_path, _) in self.store.all_files_in_collection(collection)? {
+            if !desired_paths.contains(existing_path.as_str()) {
+                self.store.remove_file(&existing_path)?;
+            }
+        }
+
+        let total_chunks = documents.len();
+        if let Some(p) = progress {
+            p.active.store(true, Ordering::Relaxed);
+            p.total_files.store(grouped.len(), Ordering::Relaxed);
+            p.total_chunks.store(total_chunks, Ordering::Relaxed);
+            p.total_batches.store(total_chunks.div_ceil(self.batch_size.max(1)), Ordering::Relaxed);
+            p.done_batches.store(0, Ordering::Relaxed);
+            p.done_chunks.store(0, Ordering::Relaxed);
+        }
+
+        let mut indexed = 0usize;
+        for (path, mut file_documents) in grouped {
+            file_documents.sort_by(|lhs, rhs| {
+                (lhs.line_start, lhs.line_end, lhs.symbol_name.as_str()).cmp(&(
+                    rhs.line_start,
+                    rhs.line_end,
+                    rhs.symbol_name.as_str(),
+                ))
+            });
+
+            let file_hash = normalized_file_hash_for_indexed_documents(&file_documents);
+            if self.store.file_hash(&path)?.as_deref() == Some(file_hash.as_slice()) {
+                continue;
+            }
+
+            let embeddings = if let Some(embedder) = &self.embedder {
+                let mut vectors = vec![Vec::<f32>::new(); file_documents.len()];
+                let mut missing_indices = Vec::new();
+                let mut missing_texts = Vec::new();
+
+                for (idx, document) in file_documents.iter().enumerate() {
+                    let embedding_key = semantic_key_for_indexed_document(document);
+                    if let Some(shared_embedding) =
+                        shared_embeddings.and_then(|items| items.get(&embedding_key))
+                    {
+                        vectors[idx] = shared_embedding.clone();
+                        if let Some(p) = progress {
+                            p.done_chunks.fetch_add(1, Ordering::Relaxed);
+                        }
+                    } else {
+                        missing_indices.push(idx);
+                        missing_texts.push(semantic_text_for_indexed_document(document));
+                    }
+                }
+
+                let mut cursor = 0usize;
+                for batch in missing_texts.chunks(self.batch_size.max(1)) {
+                    let refs = batch.iter().map(String::as_str).collect::<Vec<_>>();
+                    let batch_vectors = embedder.embed_batch(&refs)?;
+                    if let Some(p) = progress {
+                        p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                        p.done_batches.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    for (offset, embedding) in batch_vectors.into_iter().enumerate() {
+                        let idx = missing_indices[cursor + offset];
+                        vectors[idx] = embedding;
+                    }
+                    cursor += batch.len();
+                }
+
+                Some(vectors)
+            } else {
+                None
+            };
+
+            self.store.reindex_indexed_documents_in_collection(
+                &path,
+                &file_hash,
+                collection,
+                &file_documents,
+                embeddings.as_deref(),
+            )?;
+            indexed += 1;
+        }
+
+        if let Some(p) = progress {
+            p.active.store(false, Ordering::Relaxed);
+        }
+
+        let data = self.store.load_all_embeddings(self.dim)?;
+        self.index = VectorIndex::build(self.dim, &data)?;
+        Ok(indexed)
+    }
+
     /// Number of indexed chunks.
     pub fn chunk_count(&self) -> Result<usize, SearchError> {
         self.store.chunk_count()
@@ -670,6 +1136,14 @@ impl SearchEngine {
     /// Count embeddings in a specific collection.
     pub fn embedding_count_by_collection(&self, collection: &str) -> Result<usize, SearchError> {
         self.store.embedding_count_by_collection(collection)
+    }
+
+    /// Export indexed documents, optionally filtered by collection.
+    pub fn load_indexed_documents(
+        &self,
+        collection: Option<&str>,
+    ) -> Result<Vec<crate::IndexedDocument>, SearchError> {
+        self.store.load_indexed_documents(collection)
     }
 
     /// Clear file hashes for a collection (forces re-indexing).
@@ -710,4 +1184,210 @@ struct FileResult {
     hash: Vec<u8>,
     chunks: Vec<crate::chunker::Chunk>,
     embeddings: Result<Vec<Vec<f32>>, SearchError>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SearchEngine;
+    use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+    use crate::{BaselineRef, CorpusId, IndexedDocument, SearchError, Snapshot};
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct TestCatalog {
+        snapshots: HashMap<String, Snapshot>,
+    }
+
+    impl SnapshotCatalog for TestCatalog {
+        fn resolve_baseline(
+            &self,
+            baseline: &BaselineRef,
+        ) -> Result<Option<Snapshot>, SearchError> {
+            let id = baseline.snapshot_id.as_ref().map(|id| id.0.as_str()).unwrap_or_default();
+            Ok(self.snapshots.get(id).cloned())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestContentStore {
+        documents: HashMap<String, Vec<IndexedDocument>>,
+    }
+
+    impl SnapshotContentStore for TestContentStore {
+        fn load_snapshot_documents(
+            &self,
+            snapshot: &Snapshot,
+        ) -> Result<Vec<IndexedDocument>, SearchError> {
+            Ok(self.documents.get(&snapshot.id.0).cloned().unwrap_or_default())
+        }
+    }
+
+    #[test]
+    fn text_search_sees_workspace_overlay_without_reindex() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let hits = engine.text_search("НоваяПроцедура", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_name, "НоваяПроцедура");
+    }
+
+    #[test]
+    fn text_search_hides_deleted_baseline_file() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура УдаляемаяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::remove_file(&file).unwrap();
+
+        let hits = engine.text_search("УдаляемаяПроцедура", 10, Some("code")).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn workspace_overlay_stats_report_changed_files() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.overlay_files, 1);
+        assert_eq!(stats.deleted_files, 0);
+        assert_eq!(stats.hidden_paths, 1);
+        assert_eq!(stats.lexical_chunks, 1);
+    }
+
+    #[test]
+    fn resolved_workspace_view_combines_local_baseline_with_overlay() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let changed = workspace.join("ChangedModule.bsl");
+        let stable = workspace.join("StableModule.bsl");
+        fs::write(&changed, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+        fs::write(&stable, "Процедура СтабильнаяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&changed, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let view = engine.resolve_workspace_code_view().unwrap().unwrap();
+        let symbols: HashSet<&str> =
+            view.documents().iter().map(|document| document.symbol_name.as_str()).collect();
+
+        assert!(symbols.contains("НоваяПроцедура"));
+        assert!(symbols.contains("СтабильнаяПроцедура"));
+        assert!(!symbols.contains("СтараяПроцедура"));
+    }
+
+    #[test]
+    fn resolved_workspace_view_can_target_explicit_baseline_snapshot() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let changed = workspace.join("ChangedModule.bsl");
+        fs::write(&changed, "Процедура ЛокальнаяВерсия()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&changed, "Процедура OverlayВерсия()\nКонецПроцедуры").unwrap();
+
+        let baseline = BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "external-main");
+        let snapshot = Snapshot::new("external-main", CorpusId::WorkspaceCode);
+        let mut catalog = TestCatalog::default();
+        catalog.snapshots.insert(snapshot.id.0.clone(), snapshot.clone());
+
+        let mut content_store = TestContentStore::default();
+        content_store.documents.insert(
+            snapshot.id.0.clone(),
+            vec![
+                IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "ChangedModule.bsl".to_owned(),
+                    symbol_name: "БазоваяВерсия".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: "базовая".to_owned(),
+                    content_hash: "base-changed".to_owned(),
+                },
+                IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "StableModule.bsl".to_owned(),
+                    symbol_name: "СтабильноИзBaseline".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: "stable".to_owned(),
+                    content_hash: "base-stable".to_owned(),
+                },
+            ],
+        );
+
+        let view = engine
+            .resolve_workspace_code_view_with(baseline, catalog, content_store)
+            .unwrap()
+            .unwrap();
+        let symbols: HashSet<&str> =
+            view.documents().iter().map(|document| document.symbol_name.as_str()).collect();
+
+        assert!(symbols.contains("OverlayВерсия"));
+        assert!(symbols.contains("СтабильноИзBaseline"));
+        assert!(!symbols.contains("БазоваяВерсия"));
+    }
+
+    #[test]
+    fn watcher_mode_applies_dirty_file_updates() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.enable_workspace_watcher_mode();
+
+        let initial = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert!(initial.watcher_mode);
+        assert_eq!(initial.overlay_files, 0);
+
+        fs::write(&file, "Процедура ОбновленаЧерезWatcher()\nКонецПроцедуры").unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+
+        let hits = engine.text_search("ОбновленаЧерезWatcher", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_name, "ОбновленаЧерезWatcher");
+    }
 }

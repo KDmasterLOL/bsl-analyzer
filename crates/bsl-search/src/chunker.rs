@@ -17,6 +17,16 @@ pub enum ChunkKind {
     Function,
 }
 
+impl ChunkKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ModuleHeader => "header",
+            Self::Procedure => "procedure",
+            Self::Function => "function",
+        }
+    }
+}
+
 /// A chunk of BSL source code with metadata.
 #[derive(Debug, Clone)]
 pub struct Chunk {

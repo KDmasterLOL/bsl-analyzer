@@ -1,30 +1,86 @@
 //! Search tools: full-text and semantic search across code and documentation.
 
-use bsl_search::{IndexProgress, SearchEngine};
+use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineSource, ExternalBaselineState};
+use crate::state::SemanticRuntimeStatus;
+use bsl_search::{
+    lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical, merge_semantic,
+    IndexProgress, LexicalHit, SearchEngine, SearchHit, SemanticHit,
+};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
+use serde_json::json;
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 
 /// Full-text search across indexed BSL code.
+///
+/// Resolution order when an external baseline is available:
+/// 1. Direct lexical search via the serving table + local overlay merge.
+/// 2. Fallback to loading all documents from the snapshot (old snapshots without serving tables).
+/// 3. Fallback to the local SQLite FTS index.
 pub fn find_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
+    ensure_workspace_search_allowed(configured_baseline)?;
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    if guard.is_none() {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "Search index is being built, please try again in a moment.",
-        )]));
-    }
-    let engine = guard.as_ref().expect("checked above");
 
-    let hits = engine
-        .text_search(query, limit, Some("code"))
-        .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+    let hits = if let Some(source) = external_baseline {
+        match guard.as_ref() {
+            Some(engine) => match try_direct_lexical_code(engine, &source, query, limit) {
+                DirectResult::Found(hits) => hits,
+                DirectResult::Unavailable => {
+                    // Fallback: load-all-then-search.
+                    match source.resolve_workspace_view(engine) {
+                        Ok(Some(view)) => {
+                            lexical_hits_for_resolved_view(&view, query, limit, Some("code"))
+                        }
+                        Ok(None) => {
+                            engine.text_search(query, limit, Some("code")).map_err(|e| {
+                                McpError::internal_error(format!("search error: {e}"), None)
+                            })?
+                        }
+                        Err(error) => {
+                            warn!(
+                                "failed to resolve external baseline view for lexical search: {error}"
+                            );
+                            engine.text_search(query, limit, Some("code")).map_err(|e| {
+                                McpError::internal_error(format!("search error: {e}"), None)
+                            })?
+                        }
+                    }
+                }
+            },
+            None => {
+                // Engine still building — try direct PG without overlay (no local
+                // changes have been tracked yet).
+                match try_direct_lexical_code_no_overlay(&source, query, limit) {
+                    DirectResult::Found(hits) => hits,
+                    DirectResult::Unavailable => {
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            "Search index is being built, please try again in a moment.",
+                        )]));
+                    }
+                }
+            }
+        }
+    } else {
+        let Some(engine) = guard.as_ref() else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Search index is being built, please try again in a moment.",
+            )]));
+        };
+        engine
+            .text_search(query, limit, Some("code"))
+            .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+    };
 
     if hits.is_empty() {
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
@@ -34,11 +90,23 @@ pub fn find_code(
 }
 
 /// Semantic search across indexed BSL code.
+///
+/// Resolution order when an external baseline is available:
+/// 1. Direct semantic search via the serving table + local overlay merge.
+/// 2. Fallback to the local SQLite semantic index.
 pub fn search_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
+    ensure_workspace_search_allowed(configured_baseline)?;
+    let semantic_runtime = semantic_runtime
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
+        .clone();
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
     if guard.is_none() {
@@ -48,6 +116,22 @@ pub fn search_code(
     }
     let engine = guard.as_ref().expect("checked above");
 
+    if matches!(semantic_runtime, SemanticRuntimeStatus::WarmingUp) {
+        return Ok(CallToolResult::success(vec![Content::text(
+            "Semantic search is warming up from the shared baseline. Use find_code for lexical search and check search(action=status) for progress.",
+        )]));
+    }
+
+    if let SemanticRuntimeStatus::Failed(error) = semantic_runtime {
+        return Err(McpError::invalid_params(
+            "Semantic search is temporarily unavailable because semantic warmup failed. Use find_code for lexical search and inspect search(action=status).",
+            Some(json!({
+                "reasonCode": "semantic_warmup_failed",
+                "details": error,
+            })),
+        ));
+    }
+
     if !engine.has_semantic() {
         return Err(McpError::invalid_params(
             "Semantic search not available. Set EMBEDDING_URL environment variable \
@@ -56,6 +140,20 @@ pub fn search_code(
         ));
     }
 
+    // Try direct PG baseline + local overlay merge.
+    if let Some(source) = external_baseline {
+        match try_direct_semantic_code(engine, &source, query, limit) {
+            DirectResult::Found(hits) => {
+                if hits.is_empty() {
+                    return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+                }
+                return Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]));
+            }
+            DirectResult::Unavailable => {}
+        }
+    }
+
+    // Fallback: local SQLite semantic index.
     let hits = engine
         .search(query, limit, Some("code"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
@@ -67,21 +165,216 @@ pub fn search_code(
     Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]))
 }
 
+/// Result of a direct baseline search attempt.
+enum DirectResult {
+    /// Baseline query returned results and merge is authoritative (may be empty
+    /// after overlay filtering — that is a valid final answer).
+    Found(Vec<SearchHit>),
+    /// Serving table is unavailable or not populated for this snapshot — caller
+    /// should fall back to load-all or local SQLite.
+    Unavailable,
+}
+
+/// Try direct lexical search against the external baseline serving table
+/// without overlay merge. Used when the local search engine is still building
+/// and no overlay changes have been tracked yet.
+fn try_direct_lexical_code_no_overlay(
+    source: &ExternalBaselineSource,
+    query: &str,
+    limit: usize,
+) -> DirectResult {
+    let snapshot = match source.resolve_snapshot() {
+        Ok(Some((_, s))) => s,
+        Ok(None) => return DirectResult::Unavailable,
+        Err(e) => {
+            warn!("direct lexical (no overlay): snapshot resolution failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    match source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), limit) {
+        Ok(hits) => DirectResult::Found(hits.iter().map(SearchHit::from_lexical).collect()),
+        Err(e) => {
+            warn!("direct lexical (no overlay): serving query failed: {e}");
+            DirectResult::Unavailable
+        }
+    }
+}
+
+/// Try direct lexical search against the external baseline serving table,
+/// merging with local overlay.
+fn try_direct_lexical_code(
+    engine: &SearchEngine,
+    source: &ExternalBaselineSource,
+    query: &str,
+    limit: usize,
+) -> DirectResult {
+    let snapshot = match source.resolve_snapshot() {
+        Ok(Some((_, s))) => s,
+        Ok(None) => return DirectResult::Unavailable,
+        Err(e) => {
+            warn!("direct lexical: snapshot resolution failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let baseline_hits =
+        match source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), limit * 2) {
+            Ok(hits) => hits,
+            Err(e) => {
+                warn!("direct lexical: serving query failed: {e}");
+                return DirectResult::Unavailable;
+            }
+        };
+    let (overlay_hits, hidden_paths) = match engine.workspace_overlay_lexical_hits(query, limit) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("direct lexical: overlay query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let context = merge_context_for_collection(&hidden_paths, "code");
+    let overlay_lexical: Vec<LexicalHit> = overlay_hits.iter().map(SearchHit::to_lexical).collect();
+    let merged = merge_lexical(&baseline_hits, &overlay_lexical, &context, limit);
+    DirectResult::Found(merged.into_iter().map(SearchHit::from_merged).collect())
+}
+
+/// Try direct semantic search against the external baseline serving table,
+/// merging with local overlay.
+fn try_direct_semantic_code(
+    engine: &SearchEngine,
+    source: &ExternalBaselineSource,
+    query: &str,
+    limit: usize,
+) -> DirectResult {
+    let snapshot = match source.resolve_snapshot() {
+        Ok(Some((_, s))) => s,
+        Ok(None) => return DirectResult::Unavailable,
+        Err(e) => {
+            warn!("direct semantic: snapshot resolution failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let query_embedding = match engine.embed_query(query) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("direct semantic: embed_query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let Some(model_id) = engine.embedding_model() else {
+        return DirectResult::Unavailable;
+    };
+    let Some(dim) = engine.embedding_dimension() else {
+        return DirectResult::Unavailable;
+    };
+    let baseline_hits = match source.semantic_search(
+        snapshot.id.0.as_str(),
+        &query_embedding,
+        model_id,
+        dim,
+        Some("code"),
+        limit * 2,
+    ) {
+        Ok(hits) => hits,
+        Err(e) => {
+            warn!("direct semantic: serving query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let (overlay_hits, hidden_paths) = match engine.workspace_overlay_semantic_hits(query, limit) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("direct semantic: overlay query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
+    let context = merge_context_for_collection(&hidden_paths, "code");
+    let overlay_semantic: Vec<SemanticHit> =
+        overlay_hits.iter().map(SearchHit::to_semantic).collect();
+    let merged = merge_semantic(&baseline_hits, &overlay_semantic, &context, limit);
+    DirectResult::Found(merged.into_iter().map(SearchHit::from_merged).collect())
+}
+
 /// Full-text search across platform documentation (types, methods, global functions).
+///
+/// Resolution order when an external baseline is available:
+/// 1. Direct lexical search via the serving table (`serving_lexical`).
+/// 2. Fallback to loading all documents from the snapshot (old snapshots without serving tables).
+/// 3. Fallback to the local SQLite FTS index.
 pub fn find_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    if guard.is_none() {
+
+    if let Some(source) = external_baseline {
+        match source.resolve_snapshot() {
+            Ok(Some((_, snapshot))) => {
+                // Try direct lexical search via the serving table first.
+                match source.lexical_search(snapshot.id.0.as_str(), query, Some("platform"), limit)
+                {
+                    Ok(hits) if !hits.is_empty() => {
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            format_lexical_doc_hits(&hits),
+                        )]));
+                    }
+                    Ok(_) => {
+                        // Query succeeded — authoritative empty. Don't fall back
+                        // to load-all or local SQLite which may hold stale data.
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            "No results found.",
+                        )]));
+                    }
+                    Err(error) => {
+                        warn!(
+                            snapshot_id = snapshot.id.0.as_str(),
+                            %error,
+                            "direct lexical search failed for external reference baseline, falling back",
+                        );
+                    }
+                }
+
+                // Fallback: load all documents from the snapshot and search in memory.
+                match source.resolve_reference_view() {
+                    Ok(Some(view)) => {
+                        let hits =
+                            lexical_hits_for_resolved_view(&view, query, limit, Some("platform"));
+                        if !hits.is_empty() {
+                            return Ok(CallToolResult::success(vec![Content::text(
+                                format_doc_hits(&hits),
+                            )]));
+                        }
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            "No results found.",
+                        )]));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(
+                            %error,
+                            "failed to resolve external reference baseline view for lexical search",
+                        );
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    "failed to resolve external reference baseline snapshot for lexical search",
+                );
+            }
+        }
+    }
+
+    // Final fallback: local SQLite FTS.
+    let Some(engine) = guard.as_ref() else {
         return Ok(CallToolResult::success(vec![Content::text(
             "Search index is being built, please try again in a moment.",
         )]));
-    }
-    let engine = guard.as_ref().expect("checked above");
-
+    };
     let hits = engine
         .text_search(query, limit, Some("platform"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
@@ -94,8 +387,13 @@ pub fn find_docs(
 }
 
 /// Semantic search across platform documentation.
+///
+/// Resolution order when an external baseline is available:
+/// 1. Direct semantic search via the serving table (`serving_semantic` + pgvector).
+/// 2. Fallback to the local SQLite semantic index.
 pub fn search_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -116,6 +414,66 @@ pub fn search_docs(
         ));
     }
 
+    // Try direct semantic search against the external baseline serving table.
+    if let Some(source) = external_baseline {
+        match source.resolve_snapshot() {
+            Ok(Some((_, snapshot))) => {
+                let query_embedding = engine
+                    .embed_query(query)
+                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+                let model_id = engine.embedding_model().ok_or_else(|| {
+                    McpError::internal_error(
+                        "search error: semantic model id is unavailable".to_owned(),
+                        None,
+                    )
+                })?;
+                let dim = engine.embedding_dimension().ok_or_else(|| {
+                    McpError::internal_error(
+                        "search error: embedding dimension is unavailable".to_owned(),
+                        None,
+                    )
+                })?;
+
+                match source.semantic_search(
+                    snapshot.id.0.as_str(),
+                    &query_embedding,
+                    model_id,
+                    dim,
+                    Some("platform"),
+                    limit,
+                ) {
+                    Ok(hits) if !hits.is_empty() => {
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            format_semantic_doc_hits(&hits),
+                        )]));
+                    }
+                    Ok(_) => {
+                        // Query succeeded — authoritative empty. Don't fall back
+                        // to local SQLite which may hold stale embeddings.
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            "No results found.",
+                        )]));
+                    }
+                    Err(error) => {
+                        warn!(
+                            snapshot_id = snapshot.id.0.as_str(),
+                            %error,
+                            "direct semantic search failed for external reference baseline, falling back",
+                        );
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    "failed to resolve external reference baseline snapshot for semantic search",
+                );
+            }
+        }
+    }
+
+    // Fallback: local SQLite semantic index.
     let hits = engine
         .search(query, limit, Some("platform"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
@@ -131,9 +489,40 @@ pub fn search_docs(
 pub fn search_status(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    configured_baseline: Option<ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
 ) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
 
+    if let Some(configured_baseline) = configured_baseline.as_ref() {
+        let _ = writeln!(out, "Configured baseline:");
+        let _ = writeln!(out, "  Backend:  {}", configured_baseline.backend);
+        let _ = writeln!(out, "  Select:   {}", configured_baseline.selection);
+        let _ = writeln!(
+            out,
+            "  Status:   {}",
+            configured_baseline.issue.as_deref().unwrap_or("ready")
+        );
+        if let Some(support) = configured_baseline.support.as_ref() {
+            let _ = writeln!(out, "  Support:  {}", support.state.as_str());
+            let _ = writeln!(out, "  Reason:   {}", support.reason);
+            let _ = writeln!(
+                out,
+                "  Policy:   stale after {}d, expire after {}d",
+                support.stale_after_days, support.expire_after_days
+            );
+            if matches!(support.state, project_model::SearchBaselineSupportState::Expired) {
+                let _ = writeln!(out, "  Action:   update the branch from develop and restart MCP");
+            }
+        }
+        let _ = writeln!(out);
+    }
+
+    let semantic_runtime = semantic_runtime
+        .lock()
+        .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
+        .clone();
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
 
@@ -146,22 +535,228 @@ pub fn search_status(
         let code_vectors = engine.embedding_count_by_collection("code").unwrap_or(0);
         let platform_vectors = engine.embedding_count_by_collection("platform").unwrap_or(0);
 
-        let _ = writeln!(out, "Search index: ready");
+        let search_state = match &semantic_runtime {
+            SemanticRuntimeStatus::WarmingUp => "ready (lexical only; semantic warmup in progress)",
+            SemanticRuntimeStatus::Failed(_) => "ready (lexical only; semantic warmup failed)",
+            _ => "ready",
+        };
+        let _ = writeln!(out, "Search index: {search_state}");
         let _ = writeln!(out, "  Files:    {files}");
         let _ = writeln!(out, "  Chunks:   {chunks}");
         let _ = writeln!(
             out,
             "  Vectors:  {vectors} (code: {code_vectors}, platform: {platform_vectors})"
         );
-        let _ = writeln!(
-            out,
-            "  Semantic: {}",
-            if semantic { "available" } else { "not configured (set EMBEDDING_URL)" }
-        );
+        let semantic_status = match &semantic_runtime {
+            SemanticRuntimeStatus::Disabled => {
+                if semantic {
+                    "available".to_owned()
+                } else {
+                    "not configured (set EMBEDDING_URL)".to_owned()
+                }
+            }
+            SemanticRuntimeStatus::WarmingUp => "warming up (use find_code until ready)".to_owned(),
+            SemanticRuntimeStatus::Ready => {
+                if semantic {
+                    "available".to_owned()
+                } else {
+                    "warming up".to_owned()
+                }
+            }
+            SemanticRuntimeStatus::Failed(_) => "failed (use find_code; inspect status)".to_owned(),
+        };
+        let _ = writeln!(out, "  Semantic: {semantic_status}");
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
         let _ = writeln!(out, "  Collections: code, platform");
+        let workspace_overlay = engine
+            .workspace_overlay_stats()
+            .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?;
+        if let Some(source) = external_baseline.as_ref() {
+            match source.corpus() {
+                bsl_search::CorpusId::WorkspaceCode => {
+                    let code_lexical_source = match source.resolve_workspace_view(engine) {
+                        Ok(Some(_)) => "external baseline + local overlay",
+                        Ok(None) => "local sqlite + local overlay",
+                        Err(_) => "local sqlite + local overlay",
+                    };
+                    let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
+                    let code_semantic_source = match &semantic_runtime {
+                        SemanticRuntimeStatus::WarmingUp => {
+                            "warming up (shared baseline semantic cache + local overlay)"
+                        }
+                        SemanticRuntimeStatus::Failed(_) => {
+                            "warmup failed (lexical search remains available)"
+                        }
+                        SemanticRuntimeStatus::Disabled => "not configured (set EMBEDDING_URL)",
+                        SemanticRuntimeStatus::Ready => {
+                            if semantic {
+                                "local semantic cache of external baseline + local overlay"
+                            } else {
+                                "warming up"
+                            }
+                        }
+                    };
+                    let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
+                }
+                bsl_search::CorpusId::Reference => {
+                    let docs_lexical_source = match source.resolve_reference_view() {
+                        Ok(Some(_)) => "external baseline",
+                        Ok(None) => "local sqlite",
+                        Err(_) => "local sqlite",
+                    };
+                    let _ = writeln!(out, "  Docs lexical source: {docs_lexical_source}");
+                    let docs_semantic_source = if semantic {
+                        "local semantic cache of external baseline"
+                    } else {
+                        "not configured (set EMBEDDING_URL)"
+                    };
+                    let _ = writeln!(out, "  Docs semantic source: {docs_semantic_source}");
+                }
+                bsl_search::CorpusId::Custom(_) => {}
+            }
+        } else if workspace_overlay.is_some() {
+            let _ = writeln!(out, "  Code lexical source: local sqlite + local overlay");
+            let code_semantic_source = if semantic {
+                "local sqlite + local overlay"
+            } else {
+                "not configured (set EMBEDDING_URL)"
+            };
+            let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
+        } else {
+            let _ = writeln!(out, "  Docs lexical source: local sqlite");
+            let docs_semantic_source =
+                if semantic { "local sqlite" } else { "not configured (set EMBEDDING_URL)" };
+            let _ = writeln!(out, "  Docs semantic source: {docs_semantic_source}");
+        }
+
+        if let Some(overlay) = workspace_overlay {
+            if let Some(view) = engine.resolve_workspace_code_view().map_err(|e| {
+                McpError::internal_error(format!("resolved workspace view error: {e}"), None)
+            })? {
+                let files: HashSet<&str> =
+                    view.documents().iter().map(|document| document.path.as_str()).collect();
+                let _ = writeln!(out);
+                let _ = writeln!(out, "Resolved workspace view: ready");
+                let _ = writeln!(out, "  Baseline: {}", format_baseline_ref(view.baseline()));
+                let _ = writeln!(out, "  Files:    {}", files.len());
+                let _ = writeln!(out, "  Chunks:   {}", view.documents().len());
+            }
+
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Workspace overlay: enabled");
+            let _ = writeln!(out, "  Files:    {}", overlay.overlay_files);
+            let _ = writeln!(out, "  Deleted:  {}", overlay.deleted_files);
+            let _ = writeln!(out, "  Hidden:   {}", overlay.hidden_paths);
+            let _ = writeln!(out, "  Chunks:   {}", overlay.lexical_chunks);
+            let _ = writeln!(out, "  Semantic: {}", overlay.semantic_chunks);
+            let _ = writeln!(out, "  Cached embeddings: {}", overlay.cached_embeddings);
+            let _ = writeln!(
+                out,
+                "  Watcher mode: {}",
+                if overlay.watcher_mode { "enabled" } else { "polling" }
+            );
+            let _ = writeln!(out, "  Pending dirty paths: {}", overlay.pending_dirty_paths);
+        }
     } else {
         let _ = writeln!(out, "Search index: building (background initialization in progress)");
+    }
+
+    if let Some(external_baseline) = external_baseline {
+        let status = external_baseline.probe_status();
+        let _ = writeln!(out);
+        let _ = writeln!(out, "External baseline: configured");
+        let _ = writeln!(out, "  Backend:  {}", status.backend);
+        let _ = writeln!(out, "  Schema:   {}", status.schema);
+        let _ = writeln!(out, "  Select:   {}", status.selection);
+        if let Some(resolved) = status.resolved.as_deref() {
+            let _ = writeln!(out, "  Resolved: {}", resolved);
+        }
+        match status.state {
+            ExternalBaselineState::Ready { snapshot_id, fingerprint, documents, files } => {
+                let _ = writeln!(out, "  Status:   ready");
+                let _ = writeln!(out, "  Snapshot: {}", snapshot_id);
+                let _ = writeln!(out, "  Files:    {}", files);
+                let _ = writeln!(out, "  Chunks:   {}", documents);
+                if let Some(fingerprint) = fingerprint.as_deref() {
+                    let _ = writeln!(out, "  Fingerprint: {}", shorten_fingerprint(fingerprint));
+                }
+                match external_baseline.corpus() {
+                    bsl_search::CorpusId::WorkspaceCode => {
+                        if let Some(engine) = guard.as_ref() {
+                            match external_baseline.resolve_workspace_view(engine) {
+                                Ok(Some(view)) => {
+                                    let resolved_files: HashSet<&str> = view
+                                        .documents()
+                                        .iter()
+                                        .map(|document| document.path.as_str())
+                                        .collect();
+                                    let _ = writeln!(out, "  Resolved view: ready");
+                                    let _ =
+                                        writeln!(out, "  Resolved files: {}", resolved_files.len());
+                                    let _ = writeln!(
+                                        out,
+                                        "  Resolved chunks: {}",
+                                        view.documents().len()
+                                    );
+                                }
+                                Ok(None) => {
+                                    let _ = writeln!(out, "  Resolved view: unavailable");
+                                }
+                                Err(error) => {
+                                    let _ = writeln!(out, "  Resolved view: error");
+                                    let _ = writeln!(out, "  Resolved error: {}", error);
+                                }
+                            }
+                        }
+                    }
+                    bsl_search::CorpusId::Reference => {
+                        if let Some(local_fingerprint) =
+                            external_baseline.local_reference_fingerprint()
+                        {
+                            let freshness = match fingerprint.as_deref() {
+                                Some(shared) if shared == local_fingerprint => "up to date",
+                                Some(_) => "stale",
+                                None => "unknown",
+                            };
+                            let _ = writeln!(out, "  Freshness: {}", freshness);
+                            let _ = writeln!(
+                                out,
+                                "  Local fingerprint: {}",
+                                shorten_fingerprint(&local_fingerprint)
+                            );
+                        }
+                        match external_baseline.resolve_reference_view() {
+                            Ok(Some(view)) => {
+                                let resolved_files: HashSet<&str> = view
+                                    .documents()
+                                    .iter()
+                                    .map(|document| document.path.as_str())
+                                    .collect();
+                                let _ = writeln!(out, "  Resolved view: ready");
+                                let _ = writeln!(out, "  Resolved files: {}", resolved_files.len());
+                                let _ =
+                                    writeln!(out, "  Resolved chunks: {}", view.documents().len());
+                            }
+                            Ok(None) => {
+                                let _ = writeln!(out, "  Resolved view: unavailable");
+                            }
+                            Err(error) => {
+                                let _ = writeln!(out, "  Resolved view: error");
+                                let _ = writeln!(out, "  Resolved error: {}", error);
+                            }
+                        }
+                    }
+                    bsl_search::CorpusId::Custom(_) => {}
+                }
+            }
+            ExternalBaselineState::Missing => {
+                let _ = writeln!(out, "  Status:   not found");
+            }
+            ExternalBaselineState::Error(error) => {
+                let _ = writeln!(out, "  Status:   error");
+                let _ = writeln!(out, "  Error:    {}", error);
+            }
+        }
     }
 
     if progress.is_active() {
@@ -170,14 +765,51 @@ pub fn search_status(
         let total_b = progress.total_batches.load(Ordering::Relaxed);
         let done_b = progress.done_batches.load(Ordering::Relaxed);
         let pct = progress.percent();
+        let heading =
+            if guard.is_some() && matches!(semantic_runtime, SemanticRuntimeStatus::WarmingUp) {
+                "Semantic warmup in progress"
+            } else {
+                "Indexing in progress"
+            };
 
         let _ = writeln!(out);
-        let _ = writeln!(out, "Indexing in progress: {pct}%");
+        let _ = writeln!(out, "{heading}: {pct}%");
         let _ = writeln!(out, "  Batches:  {done_b}/{total_b}");
         let _ = writeln!(out, "  Chunks:   {done}/{total}");
     }
 
     Ok(CallToolResult::success(vec![Content::text(out)]))
+}
+
+fn ensure_workspace_search_allowed(
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+) -> Result<(), McpError> {
+    let Some(configured_baseline) = configured_baseline else {
+        return Ok(());
+    };
+    let Some(support) = configured_baseline.support.as_ref() else {
+        return Ok(());
+    };
+
+    if !configured_baseline.search_is_expired() {
+        return Ok(());
+    }
+
+    Err(McpError::invalid_params(
+        format!(
+            "Shared baseline access is expired for this branch. {}. Update the branch from develop, restart MCP, and retry.",
+            support.reason
+        ),
+        Some(json!({
+            "reasonCode": "expired_branch",
+            "supportState": support.state.as_str(),
+            "workspaceBranch": support.workspace_branch,
+            "selectedBranch": support.selected_branch,
+            "snapshotAgeDays": support.snapshot_age_days,
+            "staleAfterDays": support.stale_after_days,
+            "expireAfterDays": support.expire_after_days
+        })),
+    ))
 }
 
 fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
@@ -229,4 +861,352 @@ fn format_doc_hits(hits: &[bsl_search::SearchHit]) -> String {
     }
 
     out
+}
+
+fn format_lexical_doc_hits(hits: &[LexicalHit]) -> String {
+    let mut out = String::new();
+
+    for (i, hit) in hits.iter().enumerate() {
+        let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+        let _ = writeln!(
+            out,
+            "#{} [{:.3}] {}:{}-{} :: {} ({})",
+            i + 1,
+            hit.rank,
+            hit.path,
+            hit.line_start + 1,
+            hit.line_end,
+            name,
+            hit.kind,
+        );
+
+        for line in hit.text.lines().take(5) {
+            let _ = writeln!(out, "  │ {line}");
+        }
+        let total_lines = hit.text.lines().count();
+        if total_lines > 5 {
+            let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn format_semantic_doc_hits(hits: &[SemanticHit]) -> String {
+    let mut out = String::new();
+
+    for (i, hit) in hits.iter().enumerate() {
+        let name = if hit.symbol_name.is_empty() { "<header>" } else { &hit.symbol_name };
+        let _ = writeln!(
+            out,
+            "#{} [{:.3}] {}:{}-{} :: {} ({})",
+            i + 1,
+            hit.score,
+            hit.path,
+            hit.line_start + 1,
+            hit.line_end,
+            name,
+            hit.kind,
+        );
+        out.push('\n');
+    }
+
+    out
+}
+
+fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String {
+    if let Some(snapshot_id) = &baseline.snapshot_id {
+        return format!("snapshot {}", snapshot_id.0);
+    }
+    if let (Some(branch), Some(commit)) = (&baseline.branch, &baseline.commit) {
+        return format!("branch {branch} @ {commit}");
+    }
+    if let Some(branch) = &baseline.branch {
+        return format!("branch {branch}");
+    }
+    if let Some(commit) = &baseline.commit {
+        return format!("commit {commit}");
+    }
+    format!("latest {}", baseline.corpus.as_str())
+}
+
+fn shorten_fingerprint(fingerprint: &str) -> &str {
+    fingerprint.get(..12).unwrap_or(fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        find_code, search_code, search_docs, search_status, ConfiguredBaselineStatus,
+        ExternalBaselineSource, SemanticRuntimeStatus,
+    };
+    use bsl_search::{
+        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
+        IndexedDocument, ResolvedView, SearchEngine,
+    };
+    use project_model::{ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState};
+    use std::fs;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    #[test]
+    fn search_status_shows_workspace_overlay_section() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            Some(ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "local workspace index".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Code lexical source: local sqlite + local overlay"));
+        assert!(text.contains("Resolved workspace view: ready"));
+        assert!(text.contains("Baseline: snapshot local-workspace-baseline"));
+        assert!(text.contains("Workspace overlay: enabled"));
+        assert!(text.contains("Files:    1"));
+        assert!(text.contains("Chunks:   1"));
+    }
+
+    #[test]
+    fn search_status_shows_external_baseline_probe_errors() {
+        let source = ExternalBaselineSource::new(
+            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            bsl_search::BaselineRef {
+                corpus: bsl_search::CorpusId::WorkspaceCode,
+                snapshot_id: None,
+                branch: Some("main".to_owned()),
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let result = search_status(
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Some(Arc::new(source)),
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Configured baseline:"));
+        assert!(text.contains("Select:   branch main"));
+        assert!(text.contains("External baseline: configured"));
+        assert!(text.contains("Backend:  postgres"));
+        assert!(text.contains("Status:   error"));
+    }
+
+    #[test]
+    fn search_status_shows_reference_docs_source() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine
+            .index_documents(
+                "platform",
+                "platform://docs",
+                b"v1",
+                &[Document {
+                    title: "Массив / Array".to_owned(),
+                    body: "Тип: Массив / Array".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            Some(ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "local reference index".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Docs lexical source: local sqlite"));
+        assert!(text.contains("Docs semantic source: not configured (set EMBEDDING_URL)"));
+    }
+
+    #[test]
+    fn search_docs_with_external_reference_baseline_uses_standard_semantic_validation() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+        let source = ExternalBaselineSource::new(
+            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            bsl_search::BaselineRef {
+                corpus: bsl_search::CorpusId::Reference,
+                snapshot_id: None,
+                branch: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let error =
+            search_docs(&Arc::new(Mutex::new(Some(engine))), Some(Arc::new(source)), "Массив", 10)
+                .unwrap_err();
+
+        assert!(error.message.contains("Semantic search not available"));
+        assert!(!error.message.contains("centralized reference baseline"));
+    }
+
+    #[test]
+    fn resolved_view_lexical_search_returns_exact_match_first() {
+        let view = ResolvedView::new(
+            BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "snapshot-1"),
+            vec![
+                IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "A.bsl".to_owned(),
+                    symbol_name: "НайтиПроцедуру".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: "body".to_owned(),
+                    content_hash: "a".to_owned(),
+                },
+                IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "B.bsl".to_owned(),
+                    symbol_name: "Другая".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: "внутри НайтиПроцедуру".to_owned(),
+                    content_hash: "b".to_owned(),
+                },
+            ],
+        );
+
+        let hits = lexical_hits_for_resolved_view(&view, "НайтиПроцедуру", 10, Some("code"));
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].file_path, "A.bsl");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn search_code_returns_warmup_message_while_semantic_runtime_is_warming_up() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+        let result = search_code(
+            &engine,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::WarmingUp)),
+            None,
+            None,
+            "обработка проведения документа",
+            10,
+        )
+        .unwrap();
+
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        assert!(text.contains("warming up"));
+        assert!(text.contains("find_code"));
+    }
+
+    #[test]
+    fn search_status_reports_semantic_warmup_for_ready_lexical_engine() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(
+            &file,
+            "Процедура СтараяПроцедура()
+КонецПроцедуры",
+        )
+        .unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let progress = Arc::new(IndexProgress::default());
+        progress.active.store(true, Ordering::Relaxed);
+        progress.total_chunks.store(200, Ordering::Relaxed);
+        progress.done_chunks.store(50, Ordering::Relaxed);
+        progress.total_batches.store(20, Ordering::Relaxed);
+        progress.done_batches.store(5, Ordering::Relaxed);
+
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &progress,
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::WarmingUp)),
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch develop".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            None,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Search index: ready (lexical only; semantic warmup in progress)"));
+        assert!(text.contains("Semantic: warming up"));
+        assert!(text.contains("Semantic warmup in progress: 25%"));
+    }
+
+    #[test]
+    fn find_code_returns_structured_error_when_workspace_branch_is_expired() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+        let configured = ConfiguredBaselineStatus {
+            backend: "postgres",
+            selection: "workspace branch feature/demo -> branch develop -> branch vendor".to_owned(),
+            issue: None,
+            support: Some(ResolvedWorkspaceBaselineSupport {
+                state: SearchBaselineSupportState::Expired,
+                workspace_branch: Some("feature/demo".to_owned()),
+                selected_branch: Some("develop".to_owned()),
+                snapshot_age_days: 45,
+                stale_after_days: 21,
+                expire_after_days: 30,
+                reason: "workspace branch 'feature/demo' uses shared baseline branch 'develop' published 45 days ago".to_owned(),
+            }),
+        };
+
+        let error = find_code(&engine, Some(&configured), None, "Процедура", 10).unwrap_err();
+
+        assert!(error.message.contains("expired"));
+        assert!(error.message.contains("Update the branch from develop"));
+    }
 }

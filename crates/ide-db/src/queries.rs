@@ -32,6 +32,23 @@ use crate::{metadata::ConfigurationPathInput, RootDatabase, SdblHirEntries};
 // Re-export query from metadata module
 pub use crate::metadata::load_configuration;
 
+/// Get ConfigurationPathInput for a file (for provider construction).
+///
+/// Resolves the configuration root directory from the file's path,
+/// returns None if the file path or configuration root cannot be found.
+pub fn configuration_path_for_file<'db>(
+    db: &'db dyn RootDatabase,
+    file_id: vfs::FileId,
+) -> Option<ConfigurationPathInput<'db>> {
+    let file_path = crate::vfs_helpers::get_file_path(db, file_id)?;
+    let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path)?;
+    Some(ConfigurationPathInput::new(
+        db,
+        config_root.to_string_lossy().to_string(),
+        db.metadata_version(),
+    ))
+}
+
 // Helper types for internal use
 type SdblInFile = Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>;
 

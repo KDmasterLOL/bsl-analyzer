@@ -486,7 +486,7 @@ fn format_form(form: &bsl_metadata::Form) -> String {
     if !form.event_handlers.is_empty() {
         let _ = writeln!(out, "\n## Обработчики событий ({})\n", form.event_handlers.len());
         for h in &form.event_handlers {
-            let _ = writeln!(out, "- {h}");
+            let _ = writeln!(out, "- {}", h.handler_name);
         }
     }
 

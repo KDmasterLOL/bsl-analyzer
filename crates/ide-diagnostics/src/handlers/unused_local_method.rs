@@ -70,23 +70,37 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let item_tree = ctx.item_tree();
-    let module_bodies = ctx.module_bodies();
+
+    // Collect called method names from ModuleCallSummary (DRY: reuse call_graph extraction)
+    let module_id = hir::ModuleId::new(ctx.file_id);
+    let summary = ctx.call_summary(module_id);
 
     let mut called_methods: FxHashSet<String> = FxHashSet::default();
 
-    for (_, body) in module_bodies.iter_bodies() {
-        collect_method_calls(body, &mut called_methods);
+    // DirectLocal call targets from call_edges
+    for edge in &summary.call_edges {
+        if let hir::call_graph::CallTarget::Local { callee_local_id } = &edge.target {
+            if let Some(method) = summary.methods.iter().find(|m| m.local_id == *callee_local_id) {
+                called_methods.insert(method.name.as_str().to_lowercase());
+            }
+        }
     }
 
+    // MethodCall names (obj.Method()) — conservative: prevents false positives
+    // for ЭтотОбъект.Метод() patterns not captured by call_edges
+    let module_bodies = ctx.module_bodies();
+    for (_, body) in module_bodies.iter_bodies() {
+        collect_method_call_names(body, &mut called_methods);
+    }
     if let Some(module_code) = module_bodies.module_code_result() {
-        collect_method_calls(&module_code.body, &mut called_methods);
+        collect_method_call_names(&module_code.body, &mut called_methods);
     }
 
     // Add form event and command handlers as "called" methods
     // These are called by the platform, not by code
     if let Some(ref form) = metadata.form {
         for handler in form.event_handlers() {
-            called_methods.insert(handler.to_lowercase());
+            called_methods.insert(handler.handler_name.to_lowercase());
         }
         for handler in form.command_handlers() {
             called_methods.insert(handler.to_lowercase());
@@ -138,21 +152,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn collect_method_calls(body: &hir::Body, called_methods: &mut FxHashSet<String>) {
-    use hir::IdConversion;
-
-    for (_expr_id, expr) in body.exprs_iter() {
-        match expr {
-            hir::Expr::Call { callee, .. } => {
-                let callee_opaque = hir::ExprId::from_idx(*callee);
-                if let hir::Expr::Path(name) = body.expr(callee_opaque) {
-                    called_methods.insert(name.as_str().to_lowercase());
-                }
-            }
-            hir::Expr::MethodCall { method, .. } => {
-                called_methods.insert(method.as_str().to_lowercase());
-            }
-            _ => {}
+/// Collect method names from `obj.Method()` calls (MethodCall pattern).
+///
+/// DirectLocal calls are already covered by `ModuleCallSummary.call_edges`.
+/// MethodCall names are collected separately as a conservative measure to prevent
+/// false positives for patterns like `ЭтотОбъект.Метод()`.
+fn collect_method_call_names(body: &hir::Body, called_methods: &mut FxHashSet<String>) {
+    for (_, expr) in body.exprs_iter() {
+        if let hir::Expr::MethodCall { method, .. } = expr {
+            called_methods.insert(method.as_str().to_lowercase());
         }
     }
 }

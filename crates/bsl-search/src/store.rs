@@ -327,6 +327,69 @@ impl Store {
         Ok(file_id)
     }
 
+    pub fn reindex_indexed_documents_in_collection(
+        &mut self,
+        path: &str,
+        hash: &[u8],
+        collection: &str,
+        documents: &[crate::IndexedDocument],
+        embeddings: Option<&[Vec<f32>]>,
+    ) -> Result<i64, SearchError> {
+        let tx = self.conn.transaction()?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        tx.execute(
+            "INSERT INTO files (path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+            params![path, hash, now, collection],
+        )?;
+        let file_id: i64 =
+            tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
+
+        tx.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+        tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
+                                     line_start, line_end, text, embedding)
+                 VALUES (?1, ?2, ?3, 0, NULL, ?4, ?5, ?6, ?7)",
+            )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
+
+            for (idx, document) in documents.iter().enumerate() {
+                let embedding_blob: Option<Vec<u8>> = embeddings
+                    .and_then(|embs| embs.get(idx))
+                    .map(|embedding| embedding.iter().flat_map(|f| f.to_le_bytes()).collect());
+
+                stmt.execute(params![
+                    file_id,
+                    document.kind,
+                    document.symbol_name,
+                    document.line_start,
+                    document.line_end,
+                    document.text,
+                    embedding_blob,
+                ])?;
+
+                let chunk_id = tx.last_insert_rowid();
+                fts_stmt.execute(params![chunk_id, document.symbol_name, document.text])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(file_id)
+    }
+
     /// Load all embeddings with their chunk ids for building the HNSW index.
     /// Returns (chunk_id, embedding) pairs.
     pub fn load_all_embeddings(&self, dim: usize) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {
@@ -395,11 +458,82 @@ impl Store {
         Ok(result)
     }
 
+    /// Get all indexed file paths with their hashes for a single collection.
+    pub fn all_files_in_collection(
+        &self,
+        collection: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
+        let mut stmt = self.conn.prepare("SELECT path, hash FROM files WHERE collection = ?1")?;
+        let rows = stmt.query_map(params![collection], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Total number of chunks in the store.
     pub fn chunk_count(&self) -> Result<usize, SearchError> {
         let count: i64 =
             self.conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
         Ok(count as usize)
+    }
+
+    /// Load indexed documents, optionally filtered by collection.
+    pub fn load_indexed_documents(
+        &self,
+        collection: Option<&str>,
+    ) -> Result<Vec<crate::IndexedDocument>, SearchError> {
+        let query = if collection.is_some() {
+            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE f.collection = ?1
+             ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
+        } else {
+            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
+        };
+
+        let mut stmt = self.conn.prepare(query)?;
+        let rows = if let Some(collection) = collection {
+            stmt.query_map(params![collection], |row| {
+                let text: String = row.get(6)?;
+                Ok(crate::IndexedDocument {
+                    collection: row.get(0)?,
+                    path: row.get(1)?,
+                    symbol_name: row.get(2)?,
+                    kind: row.get(3)?,
+                    line_start: row.get::<_, i64>(4)? as u32,
+                    line_end: row.get::<_, i64>(5)? as u32,
+                    content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
+                    text,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| {
+                let text: String = row.get(6)?;
+                Ok(crate::IndexedDocument {
+                    collection: row.get(0)?,
+                    path: row.get(1)?,
+                    symbol_name: row.get(2)?,
+                    kind: row.get(3)?,
+                    line_start: row.get::<_, i64>(4)? as u32,
+                    line_end: row.get::<_, i64>(5)? as u32,
+                    content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
+                    text,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+
+        Ok(rows)
     }
 
     /// Full-text search across chunk symbol names and text.
@@ -727,5 +861,33 @@ mod tests {
 
         store.remove_file("test.bsl").unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn load_indexed_documents_filters_by_collection() {
+        let mut store = Store::in_memory().unwrap();
+        let code = crate::Chunker::chunk("Процедура Код()\nКонецПроцедуры");
+        store.reindex_file("A.bsl", b"hash-a", &code, None).unwrap();
+        store
+            .reindex_documents(
+                "platform",
+                "platform://docs",
+                b"hash-docs",
+                &[crate::Document {
+                    title: "Строка".to_owned(),
+                    body: "Описание".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let code_docs = store.load_indexed_documents(Some("code")).unwrap();
+        let platform_docs = store.load_indexed_documents(Some("platform")).unwrap();
+
+        assert_eq!(code_docs.len(), 1);
+        assert_eq!(code_docs[0].collection, "code");
+        assert_eq!(platform_docs.len(), 1);
+        assert_eq!(platform_docs[0].collection, "platform");
     }
 }

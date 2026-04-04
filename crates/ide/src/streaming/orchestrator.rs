@@ -294,17 +294,20 @@ impl AnalysisOrchestrator {
         info!(num_files = files.len(), "Building GlobalContext");
 
         // 1. Load 1C metadata (Configuration.xml, CommonModules, etc.)
-        let configuration = self.load_metadata();
+        let (configuration, config_root) = self.load_metadata();
 
         // 2. Create FileReader
         let file_set_arc = Arc::new(file_set.clone());
         let file_reader = FileReader::from_disk(self.workspace_root.clone(), file_set_arc.clone());
 
         // 3. Build all SymbolTrees in parallel
+        // Build for ALL files in file_set (not just files to analyze),
+        // because cross-module diagnostics need SymbolTrees from other modules.
         use rayon::prelude::*;
-        info!(num_files = files.len(), "Building SymbolTrees");
+        let all_file_ids: Vec<FileId> = file_set.iter().collect();
+        info!(num_files = all_file_ids.len(), "Building SymbolTrees");
 
-        let symbol_trees: FxHashMap<_, _> = files
+        let symbol_trees: FxHashMap<_, _> = all_file_ids
             .par_iter()
             .map(|&file_id| {
                 let text = file_reader.read(file_id).unwrap_or_default();
@@ -325,8 +328,9 @@ impl AnalysisOrchestrator {
         info!("WorkspaceSymbols built (empty for now)");
 
         // 5. Build ModuleIndex from file paths (no parsing required)
+        // Use all files from file_set for complete cross-module resolution.
         let module_index = {
-            let paths = files.iter().filter_map(|&file_id| {
+            let paths = all_file_ids.iter().filter_map(|&file_id| {
                 let vfs_path = file_set.path_for_file(&file_id)?;
                 let path_str = vfs_path.as_path().to_str()?;
                 Some((file_id, path_str))
@@ -346,6 +350,7 @@ impl AnalysisOrchestrator {
             module_index,
             file_set: file_set_arc,
             file_reader,
+            config_root,
         }))
     }
 
@@ -432,14 +437,21 @@ impl AnalysisOrchestrator {
     }
 
     /// Load 1C metadata via ProjectConfig.
-    fn load_metadata(&self) -> Option<Arc<bsl_metadata::Configuration>> {
+    /// Returns (Configuration, config_root_path) tuple.
+    fn load_metadata(&self) -> (Option<Arc<bsl_metadata::Configuration>>, Option<PathBuf>) {
         let proj_config = if let Some(ref path) = self.configuration_path {
             project_model::ProjectConfig::load_from_file(path)
         } else {
             project_model::ProjectConfig::load(&self.workspace_root)
-        }?;
+        };
 
-        proj_config.load_metadata(&self.workspace_root).map(Arc::new)
+        let Some(proj_config) = proj_config else {
+            return (None, None);
+        };
+
+        let config_root = proj_config.configuration_path(&self.workspace_root);
+        let metadata = proj_config.load_metadata(&self.workspace_root).map(Arc::new);
+        (metadata, config_root)
     }
 
     /// Load diagnostics configuration.
@@ -887,6 +899,9 @@ mod tests {
 
         for (idx, (name, content)) in files.iter().enumerate() {
             let file_path = temp_dir.path().join(name);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
             fs::write(&file_path, content).unwrap();
 
             let file_id = FileId(idx as u32);
@@ -1029,5 +1044,104 @@ mod tests {
         let results = result.unwrap();
         assert_eq!(results.total_files, 10);
         assert_eq!(results.failed_files, 0);
+    }
+
+    /// Regression test: when diff-filter is active, only a subset of files is
+    /// passed for diagnostic analysis, but ALL files must be in file_set so that
+    /// cross-module resolution (SymbolTrees, ModuleIndex) works correctly.
+    ///
+    /// This simulates the scenario where module A (in diff) calls a method from
+    /// module B (not in diff). Module B must have its SymbolTree built so that
+    /// cross-module diagnostics like MissedRequiredParameter can resolve it.
+    #[test]
+    fn test_analyze_subset_with_full_file_set() {
+        // Create 3 files: all go into file_set, but only file 0 is analyzed
+        let (_temp_dir, all_file_ids, file_set) = create_test_workspace(vec![
+            ("analyzed.bsl", "Процедура Тест() КонецПроцедуры"),
+            ("dep1.bsl", "Процедура Зависимость1() Экспорт КонецПроцедуры"),
+            ("dep2.bsl", "Функция Зависимость2() Экспорт Возврат 1; КонецФункции"),
+        ]);
+
+        let orchestrator = AnalysisOrchestrator::builder()
+            .workspace_root(_temp_dir.path())
+            .num_workers(1)
+            .build()
+            .unwrap();
+
+        // Only analyze first file, but file_set contains ALL files
+        let files_to_analyze = vec![all_file_ids[0]];
+        let result = orchestrator.analyze(files_to_analyze, file_set);
+
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        // Only 1 file should be analyzed for diagnostics
+        assert_eq!(results.total_files, 1);
+        assert_eq!(results.failed_files, 0);
+    }
+
+    /// Regression test: GlobalContext must build SymbolTrees for ALL files
+    /// in file_set, not just the files passed for analysis.
+    /// Without this, cross-module diagnostics silently skip checks.
+    #[test]
+    fn test_global_context_builds_symbol_trees_for_all_files() {
+        let (_temp_dir, all_file_ids, file_set) = create_test_workspace(vec![
+            ("analyzed.bsl", "Процедура Анализируемый() КонецПроцедуры"),
+            ("dependency.bsl", "Процедура Зависимость(Парам1) Экспорт КонецПроцедуры"),
+        ]);
+
+        let orchestrator = AnalysisOrchestrator::builder()
+            .workspace_root(_temp_dir.path())
+            .num_workers(1)
+            .build()
+            .unwrap();
+
+        // Only analyze first file
+        let files_to_analyze = vec![all_file_ids[0]];
+
+        // Use initialize_global_context directly to verify SymbolTrees
+        let global_context =
+            orchestrator.initialize_global_context(&files_to_analyze, file_set).unwrap();
+
+        // SymbolTrees must be built for ALL files in file_set, not just analyzed files
+        assert!(
+            global_context.symbol_trees.contains_key(&all_file_ids[0]),
+            "SymbolTree for analyzed file must exist"
+        );
+        assert!(
+            global_context.symbol_trees.contains_key(&all_file_ids[1]),
+            "SymbolTree for dependency file must exist (cross-module resolution)"
+        );
+        assert_eq!(
+            global_context.symbol_trees.len(),
+            2,
+            "SymbolTrees must be built for ALL files in file_set"
+        );
+    }
+
+    /// Regression test: ModuleIndex must include ALL files from file_set.
+    #[test]
+    fn test_module_index_includes_all_files() {
+        let (_temp_dir, all_file_ids, file_set) = create_test_workspace(vec![
+            ("CommonModules/МодульА/Ext/Module.bsl", "Процедура МетодА() Экспорт КонецПроцедуры"),
+            ("CommonModules/МодульБ/Ext/Module.bsl", "Процедура МетодБ() Экспорт КонецПроцедуры"),
+        ]);
+
+        let orchestrator = AnalysisOrchestrator::builder()
+            .workspace_root(_temp_dir.path())
+            .num_workers(1)
+            .build()
+            .unwrap();
+
+        // Only analyze first module
+        let files_to_analyze = vec![all_file_ids[0]];
+        let global_context =
+            orchestrator.initialize_global_context(&files_to_analyze, file_set).unwrap();
+
+        // ModuleIndex must know about BOTH modules for cross-module resolution
+        assert_eq!(
+            global_context.module_index.common_module_count(),
+            2,
+            "ModuleIndex must include all CommonModules from file_set, not just analyzed files"
+        );
     }
 }

@@ -1,0 +1,416 @@
+//! RootDatabaseImpl — Salsa-backed implementation of RootDatabase.
+//!
+//! This module contains the concrete database struct and all trait implementations
+//! that wire Salsa queries to the trait methods defined in `root_db.rs`.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use base_db::{FileIdInput, Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
+use hir::{
+    ConditionalTree, DefDatabase, ItemTree, ModuleBodies, ModuleData, ModuleId, RegionTree,
+    SymbolTree,
+};
+use vfs::FileId;
+
+use crate::queries::{
+    all_sdbl_in_file_query, line_index_query, liveness_analysis_query, method_cfg_query,
+    module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
+};
+use crate::types::SdblHirEntries;
+use crate::{metadata, queries, vfs_helpers, RootDatabase};
+
+/// Default implementation of RootDatabase with Salsa integration.
+///
+/// All HIR queries are now managed by Salsa for automatic caching and invalidation!
+/// No manual DashMap caches needed for HIR - Salsa handles everything.
+#[salsa::db]
+pub struct RootDatabaseImpl {
+    /// Salsa storage for incremental computation
+    storage: salsa::Storage<Self>,
+
+    /// Base file storage
+    files: Files,
+
+    /// Generation counter for metadata cache invalidation.
+    /// Bumped when VFS detects .xml file changes in the configuration directory.
+    metadata_version: std::sync::atomic::AtomicU32,
+
+    /// All configuration paths: main config + extensions.
+    /// Each entry: (name or None for main, path).
+    /// Set by the LSP server when workspace root is configured.
+    all_config_paths: parking_lot::RwLock<Vec<(Option<String>, std::path::PathBuf)>>,
+}
+
+impl Default for RootDatabaseImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for RootDatabaseImpl {
+    fn clone(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+            files: self.files.clone(),
+            metadata_version: std::sync::atomic::AtomicU32::new(
+                self.metadata_version.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            all_config_paths: parking_lot::RwLock::new(self.all_config_paths.read().clone()),
+        }
+    }
+}
+
+impl RootDatabaseImpl {
+    /// Create a new empty database.
+    pub fn new() -> Self {
+        Self {
+            storage: salsa::Storage::default(),
+            files: Files::new(),
+            metadata_version: std::sync::atomic::AtomicU32::new(0),
+            all_config_paths: parking_lot::RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Get the current metadata version (for configuration cache invalidation).
+    pub fn metadata_version(&self) -> u32 {
+        self.metadata_version.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Bump metadata version to invalidate configuration cache.
+    /// Call this when .xml metadata files change.
+    pub fn bump_metadata_version(&self) {
+        self.metadata_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set all configuration paths: main + extensions.
+    /// Called from LSP when workspace root is set.
+    pub fn set_all_config_paths(&self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
+        *self.all_config_paths.write() = paths;
+    }
+
+    /// Get all registered configuration paths.
+    pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
+        self.all_config_paths.read().clone()
+    }
+
+    /// Get file path from FileId by traversing SourceRoot.
+    ///
+    /// Returns None if path cannot be resolved.
+    pub(crate) fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
+        let source_root_input = self.file_source_root_input(file_id);
+        let source_root_id = source_root_input.source_root_id(self);
+        let source_root_input = self.source_root_input(source_root_id);
+        let source_root = source_root_input.root(self);
+        let file_set = source_root.file_set();
+        let vfs_path = file_set.path_for_file(&file_id)?;
+        Some(PathBuf::from(vfs_path.as_path()))
+    }
+
+    /// Find configuration root directory by searching for Configuration.xml.
+    ///
+    /// Algorithm:
+    /// 1. Start from file's directory
+    /// 2. Look for CommonModules/ subdirectory or Configuration.xml
+    /// 3. Walk up parent directories until found or root reached
+    ///
+    /// Returns None if configuration cannot be found.
+    pub(crate) fn find_configuration_root(&self, file_path: &Path) -> Option<PathBuf> {
+        let mut current = file_path.parent()?;
+
+        // Walk up the directory tree looking for Configuration markers
+        loop {
+            // Check if CommonModules directory exists (typical Designer format structure)
+            let common_modules = current.join("CommonModules");
+            if common_modules.is_dir() {
+                tracing::debug!(?current, "Found configuration root via CommonModules/");
+                return Some(current.to_path_buf());
+            }
+
+            // Check if Configuration.xml exists
+            let config_xml = current.join("Configuration.xml");
+            if config_xml.is_file() {
+                tracing::debug!(?current, "Found configuration root via Configuration.xml");
+                return Some(current.to_path_buf());
+            }
+
+            // Move to parent directory
+            current = match current.parent() {
+                Some(parent) if parent != current => parent,
+                _ => return None, // Reached root without finding config
+            };
+        }
+    }
+}
+
+#[salsa::db]
+impl salsa::Database for RootDatabaseImpl {}
+
+#[salsa::db]
+impl SourceDatabase for RootDatabaseImpl {
+    fn file_text_input(&self, file_id: FileId) -> base_db::FileTextInput {
+        self.files.file_text(file_id)
+    }
+
+    fn source_root_input(&self, source_root_id: SourceRootId) -> base_db::SourceRootInput {
+        self.files.source_root(source_root_id)
+    }
+
+    fn file_source_root_input(&self, file_id: FileId) -> base_db::FileSourceRootInput {
+        self.files.file_source_root(file_id)
+    }
+
+    fn set_file_text(&mut self, file_id: FileId, text: &str) {
+        let files = self.files.clone();
+        // Use smart durability detection based on source root (library vs user code)
+        // This ensures library files get HIGH durability, user files get LOW
+        files.set_file_text_smart(self, file_id, text);
+    }
+
+    fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId) {
+        let files = self.files.clone();
+        files.set_file_source_root(self, file_id, source_root_id);
+    }
+
+    fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot) {
+        let files = self.files.clone();
+        files.set_source_root(self, source_root_id, source_root);
+    }
+
+    fn resolve_vfs_path(
+        &self,
+        source_root_id: SourceRootId,
+        vfs_path: &vfs::VfsPath,
+    ) -> Option<FileId> {
+        let source_root_input = self.source_root_input(source_root_id);
+        let vfs_path_str = vfs_path.as_path().to_string_lossy().to_string();
+        base_db::resolve_vfs_path_query(self, source_root_input, vfs_path_str)
+    }
+}
+
+#[salsa::db]
+impl RootQueryDb for RootDatabaseImpl {
+    fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
+        let input = self.file_text_input(file_id);
+        base_db::parse_query(self, input)
+    }
+
+    fn method_regions(
+        &self,
+        file_id: FileId,
+    ) -> Arc<std::collections::HashMap<syntax::TextRange, String>> {
+        let input = self.file_text_input(file_id);
+        base_db::method_regions_query(self, input)
+    }
+
+    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
+        let input = self.file_text_input(file_id);
+        base_db::module_level_regions_query(self, input)
+    }
+}
+
+#[salsa::db]
+impl DefDatabase for RootDatabaseImpl {
+    fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        hir::item_tree_query(self, file_id_input)
+    }
+
+    fn region_tree(&self, file_id: FileId) -> Arc<RegionTree> {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        hir::region_tree_query(self, file_id_input)
+    }
+
+    fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree> {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        hir::conditional_tree_query(self, file_id_input)
+    }
+
+    fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::module_data_query(self, file_id_input)
+    }
+
+    fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::symbol_tree_query(self, file_id_input)
+    }
+
+    fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::module_bodies_query(self, file_id_input)
+    }
+
+    fn module_metadata(&self, module_id: ModuleId) -> Arc<hir::ModuleMetadata> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        module_metadata_query(self, file_id_input)
+    }
+
+    fn module_call_summary(&self, module_id: ModuleId) -> Arc<hir::ModuleCallSummary> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::module_call_summary_query(self, file_id_input)
+    }
+
+    fn method_docs(&self, method: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
+        let symbol_tree = self.symbol_tree(method.module);
+        let method_symbol = symbol_tree.find_method_by_id(method)?;
+        method_symbol.docs.clone()
+    }
+
+    fn workspace_symbols(
+        &self,
+        source_root_id: base_db::SourceRootId,
+    ) -> Arc<hir::WorkspaceSymbols> {
+        let source_root_input = self.source_root_input(source_root_id);
+        hir::workspace_symbols_query(self, source_root_input)
+    }
+
+    fn workspace_index(&self, source_root_id: base_db::SourceRootId) -> Arc<hir::WorkspaceIndex> {
+        let source_root_input = self.source_root_input(source_root_id);
+        hir::workspace_index_query(self, source_root_input)
+    }
+
+    fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir::ExternalRef>> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::file_external_refs_query(self, file_id_input)
+    }
+
+    fn module_index(&self, source_root_id: base_db::SourceRootId) -> Arc<hir::ModuleIndex> {
+        let source_root_input = self.source_root_input(source_root_id);
+        hir::module_index_query(self, source_root_input)
+    }
+
+    fn file_dependencies(&self, module_id: ModuleId) -> Arc<Vec<FileId>> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::file_dependencies_query(self, file_id_input)
+    }
+}
+
+#[salsa::db]
+impl hir::HirDatabase for RootDatabaseImpl {
+    fn infer(&self, file_id: FileId) -> Arc<hir::InferenceResult> {
+        hir::infer_query(self, file_id)
+    }
+
+    fn type_of_expr(&self, file_id: FileId, expr: hir::ExprId) -> hir::Ty {
+        hir::type_of_expr_query(self, file_id, expr)
+    }
+}
+
+#[salsa::db]
+impl RootDatabase for RootDatabaseImpl {
+    fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>> {
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
+        let config_path_str = config_root.to_string_lossy().to_string();
+        let path_input =
+            metadata::ConfigurationPathInput::new(self, config_path_str, self.metadata_version());
+        Some(metadata::load_configuration(self, path_input))
+    }
+
+    fn get_all_configurations(
+        &self,
+        file_id: FileId,
+    ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)> {
+        let version = self.metadata_version();
+        let all_paths = self.all_config_paths();
+
+        if all_paths.is_empty() {
+            return self.get_configuration(file_id).into_iter().map(|c| (None, c)).collect();
+        }
+
+        all_paths
+            .into_iter()
+            .map(|(name, path)| {
+                let path_str = path.to_string_lossy().to_string();
+                let path_input = metadata::ConfigurationPathInput::new(self, path_str, version);
+                let config = metadata::load_configuration(self, path_input);
+                (name, config)
+            })
+            .collect()
+    }
+
+    fn all_sdbl_in_file(
+        &self,
+        file_id: FileId,
+    ) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        all_sdbl_in_file_query(self, file_id_input)
+    }
+
+    fn sdbl_hir_in_file(&self, file_id: FileId) -> SdblHirEntries {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        sdbl_hir_in_file_query(self, file_id_input)
+    }
+
+    fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<hir::cfg::ModuleCfgs> {
+        queries::module_cfgs_query(self, file_id_input)
+    }
+
+    fn module_reaching_definitions(
+        &self,
+        file_id_input: FileIdInput,
+    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
+        queries::module_reaching_definitions_query(self, file_id_input)
+    }
+
+    fn module_liveness_analysis(
+        &self,
+        file_id_input: FileIdInput,
+    ) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
+        queries::module_liveness_analysis_query(self, file_id_input)
+    }
+
+    fn reaching_definitions(
+        &self,
+        method_id: hir::MethodId,
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+        let method_id_input = hir::MethodIdInput::new(self, method_id);
+        reaching_definitions_query(self, method_id_input)
+    }
+
+    fn liveness_analysis(
+        &self,
+        method_id: hir::MethodId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
+        let method_id_input = hir::MethodIdInput::new(self, method_id);
+        liveness_analysis_query(self, method_id_input)
+    }
+
+    fn method_cfg(&self, method_id: hir::MethodId) -> Arc<hir::cfg::ControlFlowGraph> {
+        let method_id_input = hir::MethodIdInput::new(self, method_id);
+        method_cfg_query(self, method_id_input)
+    }
+
+    fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<hir::cfg::ControlFlowGraph> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        queries::module_level_cfg_query(self, file_id_input)
+    }
+
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: hir::ModuleId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        queries::module_level_liveness_analysis_query(self, file_id_input)
+    }
+
+    fn line_index(&self, file_id_input: base_db::FileIdInput) -> Arc<line_index::LineIndex> {
+        line_index_query(self, file_id_input)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn metadata_version(&self) -> u32 {
+        self.metadata_version.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[salsa::db]
+impl metadata::MetadataDb for RootDatabaseImpl {}
+
+#[cfg(test)]
+#[path = "database_impl_tests.rs"]
+mod database_impl_tests;

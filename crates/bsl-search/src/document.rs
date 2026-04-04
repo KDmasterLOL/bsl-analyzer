@@ -4,6 +4,8 @@
 //! to `Document` before being stored and searched. This is the
 //! domain-level abstraction shared across all search collections.
 
+use crate::domain::IndexedDocument;
+
 /// A searchable document — the universal unit of indexing.
 ///
 /// Used for platform reference items (types, methods, global functions)
@@ -17,4 +19,15 @@ pub struct Document {
     pub body: String,
     /// Document kind ("type", "method", "global_function", "keyword").
     pub kind: String,
+}
+
+pub fn semantic_text_for_indexed_document(document: &IndexedDocument) -> String {
+    format!(
+        "Path: {}\nKind: {}\nSymbol: {}\n{}",
+        document.path, document.kind, document.symbol_name, document.text
+    )
+}
+
+pub fn semantic_key_for_indexed_document(document: &IndexedDocument) -> String {
+    blake3::hash(semantic_text_for_indexed_document(document).as_bytes()).to_hex().to_string()
 }

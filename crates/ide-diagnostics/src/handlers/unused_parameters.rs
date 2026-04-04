@@ -10,6 +10,11 @@
 //! - Platform event handlers (fixed signature defined by 1C platform)
 //! - Form element event/command handlers
 //! - HTTP service handlers
+//! - Attachable methods (configurable prefix, default: подключаемый_, attachable_)
+//! - NotifyDescription callbacks (intra-module, detected by scanning for constructor calls)
+//!
+//! ## Configuration
+//! - **attachableMethodPrefixes** (string, default: "подключаемый_,attachable_") - comma-separated prefixes
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -33,12 +38,25 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+const DEFAULT_ATTACHABLE_PREFIXES: &str = "подключаемый_,attachable_";
+
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UnusedParameters;
 
     if ctx.is_disabled_with_metadata(code) {
         return vec![];
     }
+
+    let attachable_prefixes_str = ctx
+        .config
+        .get_string(code, "attachableMethodPrefixes")
+        .unwrap_or(DEFAULT_ATTACHABLE_PREFIXES);
+
+    let attachable_prefixes: Vec<String> = attachable_prefixes_str
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let mut diagnostics = Vec::new();
 
@@ -50,7 +68,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut fixed_signature_handlers: FxHashSet<String> = FxHashSet::default();
     if let Some(ref form) = metadata.form {
         for handler in form.event_handlers() {
-            fixed_signature_handlers.insert(handler.to_lowercase());
+            fixed_signature_handlers.insert(handler.handler_name.to_lowercase());
         }
         for handler in form.command_handlers() {
             fixed_signature_handlers.insert(handler.to_lowercase());
@@ -60,6 +78,26 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         for (_, method) in http_service.all_methods() {
             if !method.is_handler_empty() {
                 fixed_signature_handlers.insert(method.handler().to_lowercase());
+            }
+        }
+    }
+
+    // Collect callback method names from NotifyDescription registrations (DRY: reuse call_graph)
+    let module_id = hir::ModuleId::new(ctx.file_id);
+    let summary = ctx.call_summary(module_id);
+    for reg in &summary.notify_regs {
+        if reg.target_module.is_none() {
+            // Only suppress for same-module callbacks (ЭтотОбъект/ThisObject)
+            fixed_signature_handlers.insert(reg.callback_name.as_str().to_lowercase());
+        }
+    }
+
+    // Collect attachable method names (prefix-based) into fixed_signature_handlers
+    for (local_id, _) in module_bodies.iter_bodies() {
+        if let Some(name) = get_method_name(&item_tree, local_id) {
+            let lower = name.to_lowercase();
+            if attachable_prefixes.iter().any(|prefix| lower.starts_with(prefix)) {
+                fixed_signature_handlers.insert(lower);
             }
         }
     }
@@ -114,7 +152,7 @@ fn check_method(
         return diagnostics;
     }
 
-    // Form/HTTP service handlers have fixed signatures defined by the platform
+    // Form/HTTP/attachable/NotifyDescription handlers have fixed signatures
     if method_name.is_some_and(|name| fixed_signature_handlers.contains(&name.to_lowercase())) {
         return diagnostics;
     }
@@ -419,6 +457,236 @@ mod tests {
 
         // ЗапросPOST is an HTTP service handler — its parameter
         // signature is fixed by the platform, so unused params should not be flagged
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_platform_handler_after_var_def() {
+        // Regression: Перем before procedure shifts item_tree indices
+        // get_method_name must still correctly resolve the method name
+        let code = r#"Перем МояПеременная;
+
+Процедура ПриЗаписи(Отказ)
+    Если ЧтоТо Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // ПриЗаписи is a platform event handler — must NOT flag unused params
+        // even when preceded by Перем declaration
+        assert_eq!(
+            unused.len(),
+            0,
+            "Platform handler after Перем should not flag unused params, got: {:?}",
+            unused.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_attachable_method_no_diagnostic() {
+        let code = r#"&НаКлиенте
+Процедура Подключаемый_ПродолжитьВыполнениеКомандыНаСервере(ПараметрыВыполнения, ДополнительныеПараметры) Экспорт
+    ВыполнитьКомандуНаСервере(ПараметрыВыполнения);
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // Подключаемый_ methods have fixed signature by platform callback contract
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_attachable_method_english_no_diagnostic() {
+        let code = r#"&AtClient
+Procedure Attachable_ContinueCommandExecutionAtServer(ExecutionParameters, AdditionalParameters) Export
+    ExecuteCommandAtServer(ExecutionParameters);
+EndProcedure
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_non_attachable_still_flags_unused() {
+        let code = r#"Процедура ОбычнаяПроцедура(Параметр1, Параметр2) Экспорт
+    Вызов(Параметр1);
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        assert_eq!(unused.len(), 1);
+        assert!(unused[0].message.contains("Параметр2"));
+    }
+
+    #[test]
+    fn test_notify_description_callback_no_diagnostic() {
+        let code = r#"&НаКлиенте
+Процедура СоздатьНаОснованииАктУПД()
+    ОписаниеОповещения = Новый ОписаниеОповещения("ПослеВыбораОснования", ЭтотОбъект);
+    ТекущиеДанные.ПоказатьВыборЭлемента(ОписаниеОповещения, "Выбор");
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ПослеВыбораОснования(ВыбранныйЭлемент, Параметры) Экспорт
+    Если ВыбранныйЭлемент <> Неопределено Тогда
+        Вызов(ВыбранныйЭлемент.Значение);
+    КонецЕсли;
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // ПослеВыбораОснования is a NotifyDescription callback — its signature
+        // is fixed by the platform, so unused params should not be flagged
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_notify_description_english_no_diagnostic() {
+        let code = r#"&AtClient
+Procedure DoSomething()
+    Handler = New NotifyDescription("AfterSelection", ThisObject);
+EndProcedure
+
+&AtClient
+Procedure AfterSelection(SelectedItem, AdditionalParameters) Export
+    If SelectedItem <> Undefined Then
+        Call(SelectedItem.Value);
+    EndIf;
+EndProcedure
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_notify_description_cross_module_still_flags() {
+        let code = r#"&НаКлиенте
+Процедура Вызов()
+    Описание = Новый ОписаниеОповещения("Callback", КлиентскийМодуль);
+КонецПроцедуры
+
+&НаКлиенте
+Процедура Callback(Результат, ДопПараметры) Экспорт
+    Вызов(Результат);
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // Cross-module NotifyDescription (КлиентскийМодуль, not ЭтотОбъект) —
+        // we can't confirm the callback is in this module, so unused params are still flagged
+        assert_eq!(unused.len(), 1);
+        assert!(unused[0].message.contains("ДопПараметры"));
+    }
+
+    #[test]
+    fn test_notify_description_variable_arg_still_flags() {
+        let code = r#"&НаКлиенте
+Процедура Вызов()
+    ИмяМетода = "Callback";
+    Описание = Новый ОписаниеОповещения(ИмяМетода, ЭтотОбъект);
+КонецПроцедуры
+
+&НаКлиенте
+Процедура Callback(Результат, ДопПараметры) Экспорт
+    Вызов(Результат);
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // Variable as first arg — can't statically resolve, so unused params are still flagged
+        assert_eq!(unused.len(), 1);
+        assert!(unused[0].message.contains("ДопПараметры"));
+    }
+
+    #[test]
+    fn test_notify_description_dynamic_constructor() {
+        let code = r#"&НаКлиенте
+Процедура Вызов()
+    Описание = Новый("ОписаниеОповещения", "ПослеВыбора", ЭтотОбъект);
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ПослеВыбора(Результат, ДопПараметры) Экспорт
+    Вызов(Результат);
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // Dynamic constructor Новый("ОписаниеОповещения", ...) must also suppress
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_notify_description_in_module_level_code() {
+        let code = r#"Описание = Новый ОписаниеОповещения("ОбработчикЗавершения", ЭтотОбъект);
+
+&НаКлиенте
+Процедура ОбработчикЗавершения(Результат, ДопПараметры) Экспорт
+    Вызов(Результат);
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // NotifyDescription created in module-level code must also suppress
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_custom_attachable_prefixes() {
+        let code = r#"Процедура Обр_СобытиеФормы(Параметр1, Параметр2) Экспорт
+    Вызов(Параметр1);
+КонецПроцедуры
+"#;
+
+        let mut config = crate::DiagnosticsConfig::default();
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "attachableMethodPrefixes".to_string(),
+            serde_json::Value::String("обр_,handler_".to_string()),
+        );
+        config
+            .parameters
+            .insert(DiagnosticCode::UnusedParameters, serde_json::Value::Object(params));
+
+        let diagnostics =
+            crate::test_utils::check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // Custom prefix "обр_" should suppress unused params for Обр_СобытиеФормы
         assert_eq!(unused.len(), 0);
     }
 }

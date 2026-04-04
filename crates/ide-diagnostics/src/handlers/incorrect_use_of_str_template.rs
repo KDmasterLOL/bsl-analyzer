@@ -652,16 +652,8 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         // Call full diagnostic pipeline (includes both HIR lowering + post-HIR check())
         let diagnostics = crate::diagnostics(&ctx);
@@ -717,16 +709,8 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -771,16 +755,8 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -829,16 +805,8 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -885,16 +853,8 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -940,16 +900,8 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -997,16 +949,8 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -1054,16 +998,8 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics

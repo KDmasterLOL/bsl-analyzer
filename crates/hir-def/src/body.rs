@@ -608,19 +608,6 @@ pub enum BodyDiagnostic {
     /// - CommonModule with ReturnValueReuse != DontUse are NOT checked
     RedundantAccessToObject { kind: RedundantAccessKind, range: TextRange },
 
-    /// Server method call in form event handler (ПриАктивизацииСтроки / НачалоВыбора).
-    ///
-    /// Emitted during lowering for unqualified calls inside methods with forbidden event suffixes.
-    /// Validation of the called method's annotations (AtServer, AtServerNoContext) happens in from_hir().
-    ///
-    /// Only FormModule should trigger this diagnostic (checked in from_hir).
-    ServerCallsInFormEvents {
-        /// Name of the called method.
-        callee: String,
-        /// Range of the call expression.
-        range: TextRange,
-    },
-
     /// SetPrivilegedMode/УстановитьПривилегированныйРежим call that enables privileged mode.
     /// Safe mode calls (with False argument) are not flagged.
     SetPrivilegedModeCall { range: TextRange },
@@ -990,6 +977,45 @@ pub enum ManagerType {
 }
 
 impl ManagerType {
+    /// Parse manager type from BSL name (Russian or English, case-insensitive).
+    pub fn from_name(name: &str) -> Option<Self> {
+        let lower = name.to_lowercase();
+        match lower.as_str() {
+            "документы" | "documents" => Some(Self::Documents),
+            "справочники" | "catalogs" => Some(Self::Catalogs),
+            "обработки" | "dataprocessors" => Some(Self::DataProcessors),
+            "отчёты" | "отчеты" | "reports" => Some(Self::Reports),
+            "регистрысведений" | "informationregisters" => {
+                Some(Self::InformationRegisters)
+            }
+            "регистрынакопления" | "accumulationregisters" => {
+                Some(Self::AccumulationRegisters)
+            }
+            "регистрыбухгалтерии" | "accountingregisters" => {
+                Some(Self::AccountingRegisters)
+            }
+            "регистрырасчёта" | "регистрырасчета" | "calculationregisters" => {
+                Some(Self::CalculationRegisters)
+            }
+            "планывидовхарактеристик" | "chartsofcharacteristictypes" => {
+                Some(Self::ChartsOfCharacteristicTypes)
+            }
+            "планысчетов" | "chartsofaccounts" => Some(Self::ChartsOfAccounts),
+            "планывидоврасчёта" | "планывидоврасчета" | "chartsofcalculationtypes" => {
+                Some(Self::ChartsOfCalculationTypes)
+            }
+            "бизнеспроцессы" | "businessprocesses" => Some(Self::BusinessProcesses),
+            "задачи" | "tasks" => Some(Self::Tasks),
+            "перечисления" | "enums" => Some(Self::Enums),
+            "планыобмена" | "exchangeplans" => Some(Self::ExchangePlans),
+            "внешниеисточникиданных" | "externaldatasources" => {
+                Some(Self::ExternalDataSources)
+            }
+            "константы" | "constants" => Some(Self::Constants),
+            _ => None,
+        }
+    }
+
     /// Convert MdoType to ManagerType.
     ///
     /// Returns None for types that don't have manager modules
@@ -1070,7 +1096,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::ProcedureReturnsValue { range } => *range,
             BodyDiagnostic::ReservedWordAsMethodName { range, .. } => *range,
             BodyDiagnostic::RedundantAccessToObject { range, .. } => *range,
-            BodyDiagnostic::ServerCallsInFormEvents { range, .. } => *range,
             BodyDiagnostic::SetPrivilegedModeCall { range } => *range,
             BodyDiagnostic::StyleElementConstructors { range, .. } => *range,
             BodyDiagnostic::TempFilesDir { range, .. } => *range,

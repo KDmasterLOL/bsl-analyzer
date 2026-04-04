@@ -113,6 +113,7 @@ const MODULE_BODIES_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::InternetAccess,
     DiagnosticCode::IsInRoleMethod,
     DiagnosticCode::PairingBrokenTransaction,
+    DiagnosticCode::ServerCallsInFormEvents,
     DiagnosticCode::TimeoutsInExternalResources,
     DiagnosticCode::UsingHardcodeSecretInformation,
     DiagnosticCode::DataExchangeLoading,
@@ -467,6 +468,11 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
         "UnusedLocalMethod",
         ctx,
         handlers::unused_local_method::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "ServerCallsInFormEvents",
+        ctx,
+        handlers::server_calls_in_form_events::check,
     ));
 
     // Expression analysis

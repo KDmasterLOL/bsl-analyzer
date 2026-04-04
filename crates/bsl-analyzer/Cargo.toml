@@ -18,6 +18,7 @@ parser.workspace = true
 ide-db.workspace = true
 base-db.workspace = true
 bsl-metadata.workspace = true
+bsl-platform.workspace = true
 project-model.workspace = true
 vfs.workspace = true
 vfs-notify.workspace = true
@@ -28,6 +29,7 @@ profile.workspace = true
 mcp-server.workspace = true
 bsl-debug.workspace = true
 onec-client.workspace = true
+bsl-search.workspace = true
 
 # LSP
 lsp-types.workspace = true
@@ -48,6 +50,8 @@ parking_lot.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
+toml_edit = "0.22"
 
 # Logging
 tracing.workspace = true
@@ -57,9 +61,11 @@ rustc-hash.workspace = true
 
 # Error handling
 anyhow.workspace = true
+thiserror.workspace = true
 
 # Utilities
 walkdir.workspace = true
+tempfile.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Allocator (Unix only — reduces memory fragmentation in multithreaded workloads)

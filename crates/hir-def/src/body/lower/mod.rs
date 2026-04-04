@@ -113,7 +113,7 @@ pub(crate) struct LoweringCtx {
     /// Key: 0-based line number, Value: list of statement TextRanges starting on that line.
     pub(crate) statements_by_line: FxHashMap<u32, Vec<TextRange>>,
 
-    /// Current method name (for ServerCallsInFormEvents diagnostic).
+    /// Current method name for method-scoped diagnostics.
     /// Set at the beginning of method lowering.
     pub(crate) current_method_name: Option<String>,
 
@@ -685,7 +685,7 @@ pub fn lower_method_with_externals(
                 )
         });
 
-    // Set current method name for ServerCallsInFormEvents diagnostic
+    // Set current method name for method-scoped diagnostics
     if let Some(ref token) = name_token {
         ctx.current_method_name = Some(token.text().to_string());
     }
