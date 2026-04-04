@@ -99,35 +99,49 @@ For `reference`, the default snapshot id is `reference:<package-version>`.
 
 Runtime backend selection is now config-first.
 
-Example `.bsl-analyzer.json`:
+Example `bsl-analyzer.toml`:
 
-```json
-{
-  "search": {
-    "baseline": {
-      "backend": "postgres",
-      "postgres": {
-        "schema": "bsl_search"
-      },
-      "workspaceCode": {
-        "policy": {
-          "publishBranches": ["vendor", "develop"],
-          "branches": [
-            { "match": "vendor", "selectBranch": "vendor" },
-            { "match": "develop", "selectBranch": "develop", "fallbackBranch": "vendor" },
-            { "match": "feature/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
-            { "match": "fix/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
-            { "match": "bug/*", "selectBranch": "develop", "fallbackBranch": "vendor" },
-            { "match": "*", "selectBranch": "develop", "fallbackBranch": "vendor" }
-          ]
-        }
-      },
-      "reference": {
-        "snapshotId": "reference:0.1.104"
-      }
-    }
-  }
-}
+```toml
+[search.baseline]
+backend = "postgres"
+
+[search.baseline.postgres]
+schema = "bsl_search"
+
+[search.baseline.workspaceCode.policy]
+publishBranches = ["vendor", "develop"]
+
+[[search.baseline.workspaceCode.policy.branches]]
+match = "vendor"
+selectBranch = "vendor"
+
+[[search.baseline.workspaceCode.policy.branches]]
+match = "develop"
+selectBranch = "develop"
+fallbackBranch = "vendor"
+
+[[search.baseline.workspaceCode.policy.branches]]
+match = "feature/*"
+selectBranch = "develop"
+fallbackBranch = "vendor"
+
+[[search.baseline.workspaceCode.policy.branches]]
+match = "fix/*"
+selectBranch = "develop"
+fallbackBranch = "vendor"
+
+[[search.baseline.workspaceCode.policy.branches]]
+match = "bug/*"
+selectBranch = "develop"
+fallbackBranch = "vendor"
+
+[[search.baseline.workspaceCode.policy.branches]]
+match = "*"
+selectBranch = "develop"
+fallbackBranch = "vendor"
+
+[search.baseline.reference]
+snapshotId = "reference:0.1.104"
 ```
 
 Rules:
@@ -140,7 +154,7 @@ Rules:
   resolves the published baseline from the current git branch and a configured fallback chain;
 - reference profile may still use env-only PostgreSQL settings when it is started
   without a project root, because user-scope MCP installation has no
-  `.bsl-analyzer.json` to read from.
+  `bsl-analyzer.toml` to read from.
 
 Workspace MCP profile reads these PostgreSQL overrides:
 
@@ -165,14 +179,14 @@ Reference profile also falls back to shared connection settings:
 
 Resolution order for PostgreSQL mode:
 
-1. backend is selected from `.bsl-analyzer.json`;
+1. backend is selected from `bsl-analyzer.toml`;
 2. connection/schema are taken from env when present, otherwise from config;
 3. snapshot/branch/commit are taken from env when present, otherwise from config.
 
 To inspect the resolved runtime choice without starting MCP, use:
 
 ```bash
-bsl-analyzer-app check-config .bsl-analyzer.json
+bsl-analyzer-app check-config bsl-analyzer.toml
 ```
 
 The command now prints resolved `search.baseline` diagnostics for both:
@@ -190,8 +204,8 @@ Including:
 
 The current operational path is:
 
-1. Configure `.bsl-analyzer.json` with `search.baseline`.
-2. Run `bsl-analyzer-app check-config .bsl-analyzer.json`.
+1. Configure `bsl-analyzer.toml` with `search.baseline`.
+2. Run `bsl-analyzer-app check-config bsl-analyzer.toml`.
 3. Publish one or more snapshots with `search baseline sync-pg`.
 4. Start or install MCP.
 5. Verify runtime state with MCP `search(action=status)`.
@@ -200,7 +214,7 @@ Example:
 
 ```bash
 # Validate runtime resolution before publishing
-bsl-analyzer-app check-config .bsl-analyzer.json
+bsl-analyzer-app check-config bsl-analyzer.toml
 
 # Publish develop baseline
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \

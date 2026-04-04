@@ -2,9 +2,9 @@
 
 ## Overview
 
-bsl-analyzer uses the `.bsl-language-server.json` configuration format.
+bsl-analyzer uses the `bsl-analyzer.toml` configuration format.
 
-Configuration file: `.bsl-language-server.json` (placed in project root)
+Configuration file: `bsl-analyzer.toml` (placed in project root)
 
 ---
 
@@ -667,12 +667,12 @@ Warning is logged if analysis exceeds this limit.
 
 ## Configuration Discovery
 
-bsl-analyzer searches for `.bsl-language-server.json` in this order:
+bsl-analyzer searches for `bsl-analyzer.toml` in this order:
 
 1. Current working directory
 2. Project root (git repository root)
 3. Parent directories (up to filesystem root)
-4. User home directory (`~/.bsl-language-server.json`)
+4. User home directory (`~/bsl-analyzer.toml`)
 
 **Recommendation:** Place in project root alongside `.git/`
 
@@ -680,7 +680,7 @@ bsl-analyzer searches for `.bsl-language-server.json` in this order:
 
 ## Using existing configuration
 
-✅ **No changes required!** Existing `.bsl-language-server.json` files work without modification.
+✅ **No changes required!** Existing `bsl-analyzer.toml` files work without modification.
 
 ---
 
@@ -695,6 +695,6 @@ bsl-analyzer validates configuration on startup:
 Run `bsl-analyzer validate-config` to check configuration:
 
 ```bash
-bsl-analyzer validate-config .bsl-language-server.json
+bsl-analyzer validate-config bsl-analyzer.toml
 ```
 
