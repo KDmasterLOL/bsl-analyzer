@@ -2,7 +2,9 @@
 
 Used for code analysis to meet coding standards and search for possible errors.
 
-Some of diagnostics are disabled by default. Use [configuration file](../features/ConfigurationFile.md) to enable them.
+Some diagnostics are disabled by default. Use the
+[configuration guide](../../../../docs/configuration/DIAGNOSTICS.md) to enable them.
 
-To escape individual sections of code or files from triggering diagnostics, you can use special comments of the form `// BSLLS:DiagnosticKey-off` . This functionality is described in more detail in [Escaping sections of code](../features/DiagnosticIgnorance.md) .
+To suppress diagnostics for individual code sections or files, use special
+comments of the form `// BSLLS:DiagnosticKey-off`.
 ## Implemented diagnostics

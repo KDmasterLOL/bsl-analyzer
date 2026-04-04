@@ -1,14 +1,14 @@
-# PostgreSQL Baseline CLI Operations
+# CLI-операции для baseline в PostgreSQL
 
-Для проектов, использующих централизованный search baseline в PostgreSQL, BSL Analyzer предоставляет набор CLI-команд для публикации и управления индексами.
+Для централизованного поиска BSL Analyzer предоставляет набор команд под префиксом:
 
-Эта модель позволяет всем разработчикам переиспользовать единый проиндексированный корпус кода и справки (включая lexical и semantic embeddings), вместо того чтобы индексировать проект локально на каждой машине.
+```bash
+bsl-analyzer search baseline ...
+```
 
-## 1. Конфигурация проекта
+## Конфигурация проекта
 
-Централизованный backend задаётся в файле `bsl-analyzer.toml`. В конфигурации определяются политики выбора веток (например, если нет ветки `feature/*`, использовать `develop`), а параметры подключения (`url`, `schema`) могут быть переопределены через переменные окружения.
-
-Пример:
+Минимальный TOML-пример для PostgreSQL-бэкенда:
 
 ```toml
 [search.baseline]
@@ -16,147 +16,166 @@ backend = "postgres"
 
 [search.baseline.postgres]
 schema = "bsl_search"
+url_env = "BSL_SEARCH_BASELINE_PG_URL"
 
-[search.baseline.workspaceCode.policy]
-publishBranches = ["vendor", "develop"]
+[search.baseline.workspace_code.policy]
+publish_branches = ["vendor", "develop"]
 
-[[search.baseline.workspaceCode.policy.branches]]
+[[search.baseline.workspace_code.policy.branches]]
 match = "vendor"
-selectBranch = "vendor"
+select_branch = "vendor"
 
-[[search.baseline.workspaceCode.policy.branches]]
+[[search.baseline.workspace_code.policy.branches]]
 match = "develop"
-selectBranch = "develop"
-fallbackBranch = "vendor"
+select_branch = "develop"
+fallback_branch = "vendor"
 
-[[search.baseline.workspaceCode.policy.branches]]
+[[search.baseline.workspace_code.policy.branches]]
 match = "feature/*"
-selectBranch = "develop"
-fallbackBranch = "vendor"
+select_branch = "develop"
+fallback_branch = "vendor"
 
-[[search.baseline.workspaceCode.policy.branches]]
-match = "fix/*"
-selectBranch = "develop"
-fallbackBranch = "vendor"
-
-[[search.baseline.workspaceCode.policy.branches]]
-match = "bug/*"
-selectBranch = "develop"
-fallbackBranch = "vendor"
-
-[[search.baseline.workspaceCode.policy.branches]]
+[[search.baseline.workspace_code.policy.branches]]
 match = "*"
-selectBranch = "develop"
-fallbackBranch = "vendor"
+select_branch = "develop"
+fallback_branch = "vendor"
 
 [search.baseline.reference]
-snapshotId = "reference:0.1.104"
+snapshot_id = "reference:0.1.104"
 ```
 
-Проверить, как конфиг будет разрешён на runtime, можно командой:
+Общая структура конфигурации проекта описана в
+`docs/configuration/PROJECT_CONFIGURATION.md`. Здесь остаются только примеры,
+связанные с search baseline.
+
+## Публикация снимков
+
+### `sync-pg`
+
+Публикует snapshot в PostgreSQL.
+
 ```bash
-bsl-analyzer check-config bsl-analyzer.toml
-```
-Команда покажет итоговый `snapshot`, `branch`, `commit` и проблемы конфигурации (например, отсутствие `search.baseline.postgres.url`).
-
-## 2. Публикация Baseline (Publishing)
-
-Типовой workflow для CI/CD:
-
-```bash
-# 1. Опубликовать baseline develop в PostgreSQL
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline sync-pg \
   --source-dir ./my-project \
   --branch develop \
   --commit "$CI_COMMIT_SHA"
+```
 
-# 2. Обновить baseline vendor, когда приходит новая поставка
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
-bsl-analyzer search baseline sync-pg \
-  --source-dir ./my-project \
-  --branch vendor \
-  --commit "$CI_COMMIT_SHA"
+Для справки платформы:
 
-# 3. Опубликовать shared reference baseline (глобальная справка)
+```bash
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline sync-pg \
   --corpus reference
 ```
 
-`sync-pg` выводит итоговые параметры публикации:
-- `Corpus`, `Mode` (`root` или `delta`), `Snapshot`, `Schema`, `Parent`, `Branch`, `Commit`
-- Статистика: `Reused files` / `Written files` / `Deleted files`, `Reused chunks` / `Written chunks`
+Поддерживаемые полезные флаги:
 
-Если `--parent-snapshot-id` не передан, `sync-pg` сам выберет последний опубликованный snapshot в том же `corpus/branch`.
+- `--snapshot-id`
+- `--branch`
+- `--commit`
+- `--parent-snapshot-id`
+- `--allow-non-policy-branch`
+- `--pg-url`
+- `--pg-schema`
 
-> **Эмбеддинги:** Если при `sync-pg` заданы `EMBEDDING_URL` и `EMBEDDING_MODEL`, команда также публикует shared embeddings в PostgreSQL.
+## Просмотр и аудит
 
-## 3. Чтение и аудит (Read-only commands)
+### `list-pg`
 
-Команды для проверки содержимого shared PostgreSQL storage:
+Показать опубликованные snapshot'ы:
 
 ```bash
-# Показать последние snapshot'ы
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline list-pg --limit 20
+```
 
-# Отфильтровать по corpus/branch
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
-bsl-analyzer search baseline list-pg --corpus workspace-code --branch develop
+### `show-pg`
 
-# Посмотреть один snapshot подробно
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+Показать один snapshot:
+
+```bash
 bsl-analyzer search baseline show-pg --snapshot-id workspace-code:develop@abcdef
+```
 
-# Показать shared file objects
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+### `list-file-objects-pg`
+
+Показать общие file objects:
+
+```bash
 bsl-analyzer search baseline list-file-objects-pg --limit 20
+```
 
-# Посмотреть один file object и его ссылки из snapshot'ов
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+### `show-file-object-pg`
+
+Показать один file object:
+
+```bash
 bsl-analyzer search baseline show-file-object-pg --file-object-id abcdef
+```
 
-# Показать инвентарь shared embeddings
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+### `list-embeddings-pg`
+
+Показать список эмбеддингов:
+
+```bash
 bsl-analyzer search baseline list-embeddings-pg
+```
 
-# Показать покрытие active semantic payload'ов embeddings
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+### `show-embedding-coverage-pg`
+
+Показать покрытие embeddings:
+
+```bash
 bsl-analyzer search baseline show-embedding-coverage-pg
+```
 
-# Read-only анализ retention policy для snapshot-ов
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+## Retention и GC
+
+### `retention-pg`
+
+Проверить retention policy:
+
+```bash
 bsl-analyzer search baseline retention-pg --source-dir ./my-project
 ```
 
-`list-pg` показывает effective состояние snapshot после применения parent lineage (Количество файлов, чанков, fingerprint и т.д.).
+### `gc-pg`
 
-## 4. Очистка и Garbage Collection
-
-Publish использует shared file-object storage. Удалённые файлы фиксируются в `snapshot_deletions`. Старые данные удаляются через сборку мусора:
+Сначала dry-run:
 
 ```bash
-# Dry-run очистки мусора (покажет orphan file objects, items, semantic rows)
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline gc-pg
+```
 
-# Реальное удаление orphan-объектов
-BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+Затем реальное удаление:
+
+```bash
 bsl-analyzer search baseline gc-pg --execute
 ```
 
-## Как это работает на клиенте (MCP Runtime)
+## Проверка конфигурации
 
-После установки MCP проверьте состояние через инструмент `search(action=status)`:
-- В `workspace` покажет `Configured baseline`, `Action` (если ветка стала `stale` или `expired`), источники лексического и семантического кэша.
-- В `reference` покажет свежесть глобального baseline.
+Проверить, как конфиг разбирается и какой baseline будет выбран, можно так:
 
-Для централизованного **reference**:
-- Lexical (`find_docs`) читается из shared PostgreSQL baseline.
-- Semantic (`search_docs`) использует локальный кэш этого snapshot, который синхронизируется при старте без переэмбеддинга (если есть shared embeddings).
+```bash
+bsl-analyzer check-config --config ./bsl-analyzer.toml
+```
 
-Для централизованного **workspace**:
-- Lexical `find_code` читает baseline из shared snapshot и накладывает local overlay (изменённые локально файлы).
-- Semantic `search_code` использует локальный SQLite кэш поверх shared baseline. Shared embeddings скачиваются как первый источник, локальный embedder работает только как fallback.
-- Если политика ветки помечает shared baseline как `expired`, поиск возвращает ошибку `expired_branch`, требуя обновить ветку из `develop` (через `git pull` или `sync-pg`).
+Команда работает и для legacy JSON-конфига, если он ещё используется в проекте.
+В выводе будет краткая сводка по:
+
+- `source.root` и подключённым extensions;
+- diagnostics / code lens / formatting;
+- отключённым, явно включённым и параметризованным диагностическим правилам;
+- workspace/reference baseline selection.
+
+## Что смотреть в MCP-контуре
+
+После настройки baseline полезно проверить `search(action=status)`:
+
+- какой backend выбран;
+- какой snapshot разрешился;
+- не находится ли ветка в состоянии `stale` или `expired`;
+- какие полнотекстовые и семантические источники реально используются;
+- насколько готов прогрев семантического индекса и overlay.

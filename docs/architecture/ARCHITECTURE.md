@@ -1,230 +1,205 @@
-# BSL Analyzer - Architecture
+# Архитектура BSL Analyzer
 
-## Обзор
+Этот документ описывает текущее устройство проекта на уровне слоёв, крейтов и
+основных вычислительных пайплайнов. Он не дублирует внутренние детали каждой
+подсистемы, а фиксирует рабочую картину проекта в актуальном состоянии.
 
-BSL Analyzer использует инкрементальную архитектуру на базе Salsa с адаптацией под BSL/1C.
+## Краткая схема
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    bsl-analyzer (LSP Server)                 │
-│  - JSON-RPC, LSP protocol, CLI                              │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                         ide                                  │
-│  - High-level API (hover, completion, goto, diagnostics)    │
-└─────────────────────────────────────────────────────────────┘
-        │                     │                     │
-        ▼                     ▼                     ▼
-┌───────────────┐    ┌───────────────┐    ┌───────────────┐
-│ide-diagnostics│    │  ide-assists  │    │    ide-db     │
-│180+ diagnostics│   │ Code actions  │    │ RootDatabase  │
-└───────────────┘    └───────────────┘    └───────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    hir / hir-def / hir-ty                    │
-│  - ItemTree, SymbolTree, ModuleBodies                       │
-│  - Type inference, Name resolution                          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   syntax / parser / lexer                    │
-│  - Rowan CST (120+ nodes), typed AST wrappers               │
-│  - Event-based parser, logos tokenizer                      │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│                   Supporting Crates                          │
-├─────────────────────────────────────────────────────────────┤
-│ base-db      │ Source database, Salsa 0.25.2                │
-│ vfs          │ Virtual file system                          │
-│ bsl-metadata │ 1C metadata (Configuration, CommonModule)    │
-│ bsl-platform │ Platform types (Строка, Число, Массив)       │
-│ sdbl-hir     │ SDBL HIR + type inference                    │
-│ cfg          │ Control Flow Graph                           │
-│ dataflow     │ Reaching definitions, liveness               │
-│ project-model│ Project config (bsl-analyzer.toml)           │
-└─────────────────────────────────────────────────────────────┘
+```text
+bsl-analyzer
+  ├─ CLI: analyze / format / rules / search / mcp
+  ├─ LSP server
+  └─ MCP server
+       │
+       ▼
+      ide
+  ├─ ide-diagnostics
+  ├─ ide-assists
+  ├─ ide-db
+  └─ formatting / hover / completion / goto / references
+       │
+       ▼
+ hir / hir-def / hir-ty / sdbl-hir
+       │
+       ▼
+ syntax / parser / lexer
 ```
 
-## Структура крейтов
+## Слои системы
 
-| Слой | Крейты | Назначение |
-|------|--------|------------|
-| **Анализ** | lexer, parser, syntax | Tokenization (80+ BSL, 150+ SDBL), Rowan CST |
-| **Семантика** | hir-def, hir-ty, hir | ItemTree, SymbolTree, type inference |
-| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | 180+ диагностик, code actions, LSP API |
-| **SDBL** | sdbl-hir | Query language HIR + type inference |
-| **Dataflow** | cfg, cfg-types, dataflow | CFG, reaching definitions, liveness |
-| **Metadata** | bsl-metadata, bsl-platform | 1C configuration, platform types |
-| **Search** | bsl-search, mcp-server | FTS, semantic search, MCP search tools |
-| **Infra** | base-db, vfs, vfs-notify, project-model | Salsa, VFS, file watching |
-| **Utils** | line-index, intern, stdx, paths, profile | Helpers |
+### 1. Интерфейсный слой
 
-## Database Hierarchy (Salsa)
+Верхний бинарник `bsl-analyzer` объединяет несколько сценариев работы:
 
-```
-salsa::Database
-    ↓
-SourceDatabase (base-db)
-    - file_text(), source_root(), file_source_root()
-    ↓
-DefDatabase (hir-def)
-    - Invalidation Barriers:
-      • item_tree_query (LRU: 512) - method signatures
-      • region_tree_query (LRU: 128) - preprocessor regions
-      • conditional_tree_query (LRU: 128)
-    - Derived:
-      • symbol_tree_query (LRU: 128) - case-insensitive lookup
-      • module_data_query (LRU: 512)
-      • module_bodies_query (LRU: 256) - HIR bodies + diagnostics
-    - Type inference:
-      • infer_types_query (LRU: 16)
-    - Workspace:
-      • module_index_query (LRU: 512)
-      • file_dependencies_query (LRU: 16)
-    ↓
-RootDatabase (ide-db)
-    - Metadata:
-      • load_configuration (LRU: 16, Durability::HIGH)
-      • module_metadata_query (LRU: 128)
-    - SDBL:
-      • all_sdbl_in_file_query (LRU: 128)
-      • sdbl_hir_in_file_query (LRU: 64)
-    - Dataflow:
-      • method_cfg_query (LRU: 256)
-      • reaching_definitions_query (LRU: 256)
-      • liveness_analysis_query (LRU: 256)
-    - Utils:
-      • line_index_query (LRU: 256)
-```
+- LSP-сервер для IDE;
+- CLI-анализатор для CI и локального запуска;
+- MCP-сервер для AI-инструментов;
+- вспомогательные команды форматирования, экспорта правил и управления search baseline.
 
-### Durability
+Этот слой отвечает за:
 
-```rust
-SourceRoot::durability() → Durability {
-    HIGH: library files (is_library = true)  // не пересчитываются при изменении user code
-    LOW:  user code (is_library = false)     // пересчитываются при каждом изменении
-}
-```
+- разбор CLI-аргументов;
+- запуск нужного runtime-профиля;
+- инициализацию логирования;
+- загрузку конфигурации проекта;
+- сборку и публикацию результатов наружу.
 
-## Ключевые компоненты
+### 2. IDE-слой
 
-### Rowan (Syntax Trees)
+Крейт `ide` даёт высокоуровневый API над остальными подсистемами. Через него
+реализованы hover, completion, goto definition, references, formatting и
+запуск диагностик.
 
-Red-green trees для full-fidelity parsing:
-- Immutable CST с сохранением whitespace
-- Эффективное sharing памяти между версиями
-- Typed AST wrappers (`ast::Function`, `ast::Statement`)
+Сопутствующие крейты:
 
-### HIR-based Diagnostics
+- `ide-diagnostics` — 180 диагностик;
+- `ide-assists` — code actions и quick-fix сценарии;
+- `ide-db` — основная база запросов поверх Salsa.
 
-Диагностики собираются при HIR lowering, не отдельными traversals:
+### 3. Семантический слой
 
-```
-AST → [module_bodies_query] → ModuleBodies { diagnostics: Vec<BodyDiagnostic> }
-                                    ↓
-ide-diagnostics/lib.rs → match BodyDiagnostic { ... } → handlers/*
-```
+Семантика разделена на несколько крейтов:
 
-Преимущества: 1 traversal вместо N, автоматическое кеширование Salsa.
+- `hir-def` — декларации, item tree, module data, symbol tree;
+- `hir-ty` — вывод типов;
+- `hir` — HIR-представление и семантические операции;
+- `sdbl-hir` — отдельный HIR для языка запросов SDBL.
 
-### DiagnosticMetadata Architecture
+Именно здесь строятся структуры, на которых работают большинство
+диагностик, переходов по коду и подсказок.
 
-Metadata-driven система для всех 180+ диагностик (100% coverage):
-- **Zero-cost abstraction**: compile-time const metadata + runtime config merging
-- **Центральный registry**: все severity/tags/minutesToFix в `metadata_registry.rs`
-- **Runtime overrides**: JSON config может переопределить severity/type/tags
-- **Автоматический LSP mapping**: DiagnosticType + SeverityLevel → LSP Severity
-- **Метаданные диагностик**: 1:1 соответствие с форматом аннотаций диагностик
+### 4. Синтаксический слой
 
-Вместо hardcoded значений handlers используют `ctx.severity(code)` и `ctx.tags(code)`.
+Нижний слой состоит из:
 
-### Metadata (bsl-metadata)
+- `lexer` — токенизация BSL/SDBL;
+- `parser` — построение синтаксического дерева;
+- `syntax` — typed AST wrappers и CST на базе Rowan.
 
-1C configuration loading с Salsa кешированием:
-- Configuration, CommonModule, Register, EventSubscription
-- Designer format XML parsing
-- `load_configuration` query (LRU: 16, Durability::HIGH)
+Проект использует full-fidelity CST: дерево сохраняет пробелы, комментарии и
+прочие синтаксические детали, поэтому его можно использовать не только для
+анализа, но и для форматирования и точных правок.
 
-### SDBL (sdbl-hir)
+## Основные инфраструктурные крейты
 
-Query language analysis:
-- SDBL → HIR lowering
-- Type inference по metadata (таблицы, поля)
-- Name resolution (aliases, subqueries)
+| Крейты | Назначение |
+|--------|------------|
+| `base-db` | базовые Salsa-input'ы, source roots, file text |
+| `vfs`, `vfs-notify` | виртуальная файловая система и слежение за файлами |
+| `project-model` | загрузка конфигурации проекта, legacy JSON-конфигов и search-настроек |
+| `bsl-metadata` | чтение `Configuration.xml` и метаданных 1С |
+| `bsl-platform` | модели платформенных типов и API |
+| `cfg`, `cfg-types` | control-flow graph |
+| `dataflow` | reaching definitions и liveness analysis |
+| `bsl-search` | индексирование и поиск по коду/документации |
+| `mcp-server` | MCP runtime и интеграция с AI-клиентами |
 
-### CFG + Dataflow
+## Salsa и модель вычислений
 
-Control Flow Graph для flow-sensitive анализа:
-- `cfg` crate: CFG construction из Rowan AST
-- `dataflow` crate: reaching definitions, liveness analysis
-- Используется для: unreachable_code, missing_return, unused variables
+Проект построен вокруг инкрементальных вычислений на базе Salsa `0.25.2`.
 
-## Потоки данных
+Ключевая идея:
 
-### Parsing
-```
-Source Text → Lexer → Tokens → Parser → GreenNode → SyntaxNode → AST
+- исходные тексты и source roots задаются как входы;
+- парсинг, HIR, metadata, CFG и dataflow вычисляются как кэшируемые запросы;
+- при изменении файла пересчитываются только зависимые части графа.
+
+На практике это позволяет:
+
+- не перепарсивать весь проект при каждом изменении;
+- кэшировать дорогостоящие этапы анализа;
+- переиспользовать результаты между LSP, CLI и диагностическими проходами.
+
+## Пайплайны данных
+
+### Разбор исходника
+
+```text
+Текст файла
+  → lexer
+  → parser
+  → syntax::SyntaxNode
+  → AST wrappers
+  → HIR / SDBL HIR
 ```
 
-### Diagnostics
-```
-file_text → parse → item_tree → module_bodies → [BodyDiagnostic]
-                                     ↓
-                        ide-diagnostics → [Diagnostic] → LSP
-```
+### Выпуск диагностик
 
-### Incremental Update
-```
-File Change → VFS → Salsa Invalidation → Recompute affected queries only
-                            │
-                            ├─ .bsl changed → parse, HIR (metadata NOT invalidated)
-                            └─ Configuration.xml → load_configuration + dependents
-```
+Диагностики в проекте не сводятся к одному общему обходу дерева. Сейчас есть
+несколько независимых источников:
 
-## Search Architecture
+- line-based проверки;
+- syntax diagnostics;
+- item tree / module bodies diagnostics;
+- configuration-based diagnostics;
+- SDBL HIR diagnostics;
+- HIR diagnostics;
+- dataflow diagnostics;
+- metadata diagnostics.
 
-Поиск для MCP и справки платформы развивается как отдельная подсистема поверх
-`bsl-search` и `mcp-server`.
+Общий entrypoint — `ide::compute_diagnostics`, который собирает результаты из
+этих слоёв и затем устраняет известные дубликаты.
 
-Текущий runtime использует локальный SQLite store и in-memory HNSW. Следующий
-этап архитектуры описан в отдельном ADR:
+### Dataflow-диагностики
 
-- [Search Baseline + Overlay](./SEARCH_BASELINE_OVERLAY.md)
-- [Search Baseline Publishing](./SEARCH_BASELINE_PUBLISHING.md)
+Flow-sensitive анализ вынесен в отдельную подсистему.
 
-Цель этой модели:
+Сейчас:
 
-- хранить общую справку и baseline-индексы централизованно;
-- накладывать локальные изменения рабочей копии как overlay;
-- не переиндексировать полностью почти одинаковые ветки.
+- `IncorrectUseOfStrTemplate` использует reaching definitions;
+- `RewriteMethodParameter` использует module-level reaching definitions;
+- `UnusedLocalVariable` использует module-level liveness;
+- ещё несколько диагностик выполняются через flow-sensitive collector в `ide-diagnostics`.
 
-## Производительность
+Подробности — в `docs/architecture/DATAFLOW.md`.
 
-**Проект doc3 (121 MB, 6,540 файлов):**
+## Конфигурация проекта
 
-| Метрика | bsl-ls | Rust (bsl-analyzer) | Улучшение |
-|---------|---------------|---------------------|-----------|
-| Full analysis | 58.9s | **11.2s** | **5.3x** |
-| CPU time | 337.1s | 59.3s | **5.7x** |
-| I/O time | 28.8s | 2.8s | **10.3x** |
-| Peak memory | 3,822 MB | **1,426 MB** | **2.7x** |
+Основной формат конфигурации — `bsl-analyzer.toml`. Его загружает
+`project-model`, а затем нормализованные настройки передаются в диагностики,
+форматирование, code lens, поиск и разрешение source roots / extensions.
 
-## Логирование
+Если TOML-файл отсутствует, проект всё ещё умеет читать legacy-файлы
+`.bsl-analyzer.json` и `.bsl-language-server.json`, но в новых проектах они
+рассматриваются только как слой совместимости.
 
-```bash
-BSL_LOG=debug cargo run          # debug logs
-BSL_LOG=parser=trace cargo run   # trace только для parser
-BSL_PROFILE=* cargo run          # hierarchical profiling
-BSL_LOG_FILE=/tmp/bsl.log        # write to file
-```
+Подробности по структуре файла и diagnostic-параметрам вынесены в:
 
-## Совместимость
+- `docs/configuration/PROJECT_CONFIGURATION.md`
+- `docs/configuration/DIAGNOSTICS.md`
 
-Поддерживаемые форматы конфигурации:
-- Те же коды диагностик и severity
-- Поддержка `bsl-analyzer.toml`
+## Поиск и MCP
+
+Подсистема поиска обслуживает CLI и MCP-профили `workspace` / `reference`.
+На архитектурном уровне важно только следующее:
+
+- есть локальный runtime;
+- есть shared baseline для PostgreSQL;
+- для рабочей копии поверх baseline может накладываться локальный overlay;
+- MCP-профиль определяет, с какими источниками и tools работает сервер.
+
+Детали runtime, branch policy, merge baseline + overlay и deployment-вопросы
+вынесены в отдельные документы:
+
+- `docs/mcp/README.md`
+- `docs/mcp/TOOLS_AND_EXTENSION.md`
+- `docs/architecture/SEARCH_BASELINE_OVERLAY.md`
+- `docs/central-postgres-search/README.md`
+
+## Почему архитектура разделена именно так
+
+Такое разделение даёт несколько практических преимуществ:
+
+- синтаксис, семантика и IDE-функции можно развивать независимо;
+- диагностики могут переиспользовать HIR, metadata и dataflow вместо прямого обхода AST;
+- один и тот же набор вычислений обслуживает и LSP, и CLI, и MCP;
+- экспериментальные search/backend-решения не требуют ломать основной анализатор.
+
+## Полезные документы рядом
+
+- `docs/architecture/DATAFLOW.md` — flow-sensitive анализ и текущее покрытие диагностик
+- `docs/architecture/SEARCH_BASELINE_OVERLAY.md` — модель baseline + overlay
+- `docs/configuration/PROJECT_CONFIGURATION.md` — структура конфигурации проекта
+- `docs/configuration/DIAGNOSTICS.md` — параметры диагностических правил
+- `docs/contributing/SALSA_GUIDE.md` — практические рекомендации по работе с Salsa

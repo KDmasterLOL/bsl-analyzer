@@ -1,181 +1,123 @@
-# Architecture Decision Record: Search Baseline + Overlay Model
+# Архитектурная заметка: модель baseline + overlay
 
-**Status**: In Progress
-**Date**: 2026-04-01
-**Authors**: Codex + User
+**Статус:** в работе, но уже частично реализовано  
+**Дата:** 2026-04-01
 
-## Context
+Этот документ фиксирует текущую модель поиска, в которой общий baseline живёт в
+общем хранилище, а локальные изменения разработчика накладываются как
+`overlay`.
 
-`bsl-search` currently uses a local SQLite database with:
+## Зачем нужна эта модель
 
-- file hashes and chunks in relational tables;
-- FTS5 for lexical search;
-- embeddings stored as BLOBs;
-- in-memory HNSW rebuilt from persisted embeddings on startup.
+Если каждая рабочая копия хранит полностью независимый поисковый индекс, то
+почти одинаковые ветки начинают многократно дублировать:
 
-This works well for local indexing, but it does not model a corporate shared
-search base where:
+- тексты файлов;
+- чанки документов;
+- эмбеддинги;
+- время на индексацию и прогрев.
 
-- platform reference data is common for all users;
-- most code chunks are identical across branches;
-- local workspace changes must be searchable before they are pushed to GitLab;
-- central storage should be updated incrementally after merge.
+Для корпоративного сценария это невыгодно. Нам нужна модель, где:
 
-## Problem
+- общая справка и типовые baseline-ветки публикуются один раз;
+- локальные незакоммиченные изменения становятся видимыми сразу;
+- поиск по рабочей ветке не требует полной переиндексации общей части индекса.
 
-If each workspace or branch keeps a fully independent search database, then the
-system duplicates nearly identical chunks and embeddings. This increases:
+## Основная идея
 
-- indexing time;
-- embedding costs;
-- storage footprint;
-- synchronization complexity between local and shared search data.
+Итоговое поисковое представление строится так:
 
-The core problem is not only vector storage. The system needs a domain model for
-combining:
+```text
+resolved view = shared baseline + local overlay
+```
 
-- a shared baseline snapshot;
-- a local or branch-specific overlay with file replacements and deletions;
-- a resolved search view used by lexical and semantic search.
+Где:
 
-## Decision
+- `shared baseline` — опубликованный снимок для `reference` или `workspace-code`;
+- `local overlay` — локальные новые, изменённые и удалённые файлы;
+- `resolved view` — логическое представление, по которому выполняется поиск.
 
-Introduce a search architecture based on `baseline + overlay + resolved view`.
+## Базовые сущности
 
-### Domain concepts
+- `Corpus` — логический корпус (`reference`, `workspace-code`);
+- `Snapshot` — неизменяемое опубликованное состояние корпуса;
+- `BaselineRef` — правило, по которому рабочий контур выбирает снимок;
+- `FileObject` — дедуплицированное файловое содержимое;
+- `Embedding` — семантическое представление стабильного содержимого;
+- `OverlayChange` — локальная замена или удаление файла относительно baseline;
+- `ResolvedView` — итоговое видимое множество документов после применения overlay.
 
-- `Corpus`
-  Logical search corpus such as `reference` or `workspace-code`.
-- `Snapshot`
-  Immutable baseline state for a corpus at a specific revision.
-- `BaselineRef`
-  How the runtime selects the baseline snapshot for a workspace.
-- `ContentObject`
-  Deduplicated chunk content identified by `content_hash`.
-- `FileObject`
-  Deduplicated logical file representation identified by per-file fingerprint.
-- `Embedding`
-  Vector representation for a stable semantic payload and one model/dimension pair.
-- `SnapshotItem`
-  Legacy mapping of a content object into a logical file/document path.
-- `SnapshotFile`
-  Snapshot-local mapping from a logical path to a shared `FileObject`.
-- `SnapshotDeletion`
-  Snapshot-local tombstone that hides one logical path inherited from a parent snapshot.
-- `OverlayChange`
-  Local replacement or deletion relative to the baseline.
-- `ResolvedView`
-  Final visible set of searchable documents after applying overlay changes to a
-  baseline.
+## Что уже есть в проекте
 
-### Current implementation state
+На текущем этапе реализованы следующие части модели:
 
-The current iteration already includes:
+- доменные типы для snapshot и overlay;
+- абстрактные интерфейсы чтения baseline;
+- локальный SQLite-контур поиска;
+- PostgreSQL-бэкенд для общего baseline;
+- политика веток и выбор baseline для workspace;
+- объединение полнотекстовых и семантических результатов с учётом скрытых и замещённых путей;
+- публикация baseline snapshot в PostgreSQL из CLI.
 
-- domain types for snapshots and overlays;
-- ports for storage-agnostic baseline access and publishing;
-- an in-memory resolver that merges baseline documents and overlay changes;
-- local SQLite baseline adapters;
-- PostgreSQL baseline read adapters;
-- PostgreSQL ancestry-aware read reconstruction for delta snapshots;
-- CLI publishing of file-level delta snapshots into PostgreSQL;
-- shared file-object materialization for PostgreSQL publish/read paths;
-- shared embedding storage for PostgreSQL publish/read paths;
+## Локальный overlay
 
-The default standalone developer path still uses local SQLite. PostgreSQL is an
-additional backend for shared baseline scenarios.
+Первая полезная версия overlay работает на уровне файла.
 
-### Delta lineage
+Если файл меняется локально:
 
-The current shared-baseline model uses file-level delta lineage:
+1. baseline-результаты для этого пути скрываются;
+2. файл повторно индексируется локально;
+3. в итоговый поиск попадает уже локальная версия.
 
-- each published snapshot may reference one parent snapshot;
-- parent linkage belongs to the baseline publishing model, not to MCP runtime;
-- unchanged files are inherited through the parent chain instead of being
-  rewritten into every snapshot;
-- deleted files are represented as snapshot-local tombstones;
-- branch and commit stay operational publish metadata, while parent snapshot is
-  immutable baseline metadata.
+Если файл удалён локально, baseline-результаты по нему не должны быть видны.
 
-This keeps the read model clean: MCP resolves one visible baseline view, while
-the PostgreSQL adapter owns ancestry traversal and delta materialization.
+Если файл новый, он участвует только через overlay.
 
-## Architectural boundaries
+## Объединение на уровне приложения
 
-### Domain
+Объединение baseline и overlay выполняется не в SQL, а в прикладном слое.
 
-Pure types and invariants:
+Почему это правильно:
 
-- snapshot identity;
-- snapshot lineage;
-- snapshot deletions;
-- corpus identity;
-- file-object identity;
-- file-level overlay changes;
-- rules for resolved visibility.
+- общий baseline хранится централизованно;
+- overlay отражает текущее незакоммиченное состояние рабочей копии;
+- локальное состояние не должно публиковаться на сервер при каждом изменении;
+- логика объединения должна учитывать скрытие и замену путей, а не только «сырые» оценки релевантности.
 
-### Application
+## Текущее поведение поиска
 
-Use cases:
+Для `workspace` сейчас поддерживается такой порядок:
 
-- publish one immutable delta snapshot with its branch/commit metadata;
-- resolve baseline documents into a visible view;
-- replace one file with overlay content;
-- delete one file from the resolved view;
-- provide candidate documents to lexical and semantic search layers.
+- полнотекстовый поиск: прямой запрос к внешнему baseline, затем объединение с локальным overlay;
+- семантический поиск: прямой запрос к внешнему baseline, затем объединение с локальным overlay;
+- резервный сценарий: при недоступности serving path контур может откатиться к локальному SQLite.
 
-### Infrastructure
+Для `reference`:
 
-Adapters:
+- полнотекстовый и семантический поиск могут идти напрямую во внешний baseline;
+- при необходимости используется резервный путь через локальный кэш или SQLite.
 
-- current SQLite store and local HNSW index;
-- PostgreSQL catalog, shared file storage, delta materialization, shared content storage, and shared embedding storage;
-- future centralized vector storage;
-- future GitLab ingestion worker.
+## Ограничения и компромиссы
 
-### Interface
+Модель даёт выигрыш в повторном использовании общих данных, но добавляет
+сложность в нескольких местах:
 
-- MCP runtime;
-- CLI commands;
-- future ingestion CLI/service.
+- нормализация оценок полнотекстового и семантического поиска между разными источниками;
+- детерминизм алгоритма объединения;
+- диагностика причин деградированного режима;
+- тестирование семантики скрытых, замещённых и удалённых путей.
 
-Interface code must depend on application services, not directly on SQLite or a
-future PostgreSQL adapter.
+## Почему это направление сохраняется
 
-## Why file-level overlay first
+Несмотря на усложнение рабочего контура, модель `baseline + overlay` хорошо соответствует
+реальному процессу разработки:
 
-The first useful version of local changes does not require chunk-level merge.
-When a file changes:
+- baseline — общий, стабильный, публикуемый;
+- overlay — локальный, быстрый, часто меняющийся;
+- итоговый поиск должен учитывать обе части одновременно.
 
-1. baseline chunks for that file become hidden;
-2. the file is re-chunked locally;
-3. the new chunks are exposed through the overlay.
+## Связанные документы
 
-This is enough to avoid reindexing 98% of unchanged files while keeping the
-model simple and correct.
-
-## Future direction
-
-After the current iteration stabilizes:
-
-1. Keep local overlays ephemeral and workspace-specific.
-2. Run GitLab ingestion after merge to update shared baselines incrementally.
-3. Strengthen operational workflows for republish, retention, and cleanup.
-4. Reuse shared `Embedding` records across branches and
-   snapshots.
-
-## Consequences
-
-Positive:
-
-- clean separation between domain model and storage backend;
-- central storage can be introduced without another large refactor;
-- local changes can be searchable without full workspace reindexing;
-- shared corpora such as platform reference become natural first-class citizens.
-
-Tradeoffs:
-
-- the search subsystem becomes more explicit and layered;
-- first iteration adds abstractions before a new backend exists;
-- lexical and semantic search will later need to operate on a resolved view,
-  not only on one concrete database.
+- `docs/central-postgres-search/README.md` — общая карта централизованного поиска
+- `docs/central-postgres-search/06-runtime-workspace.md` — рабочий контур `workspace` подробнее
+- `docs/central-postgres-search/07-overlay-merge.md` — семантика объединения и инварианты

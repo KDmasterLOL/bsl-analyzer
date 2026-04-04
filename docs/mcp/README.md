@@ -1,33 +1,49 @@
-# MCP-сервер и интеграция с AI
+# MCP-сервер: установка и профили
 
-BSL Analyzer включает встроенный [MCP-сервер](https://modelcontextprotocol.io/) (Model Context Protocol). Он позволяет AI-агентам (Claude, Cursor, Gemini, Codex и др.) взаимодействовать с кодовой базой 1С, документацией платформы, выполнять SDBL-запросы и запускать отладку.
+Этот документ отвечает на два вопроса:
 
-## Профили MCP
+- какой MCP-профиль нужен в вашем сценарии;
+- как установить его в AI-клиент без ручного редактирования конфигов.
 
-Сервер разделён на два явных профиля:
+Описание самих инструментов и подключение к базе 1С вынесены в
+`docs/mcp/TOOLS_AND_EXTENSION.md`.
 
-- `reference` — глобальная справка платформы и ИТС, устанавливается один раз в `user scope`. Не требует привязки к проекту.
-- `workspace` — работа с конкретным проектом и конкретной базой, устанавливается отдельно в каждый проект (`project scope`).
+## Как устроены профили
 
-> **Внимание:** MCP-сервер с подключением к 1С (через профиль `workspace`) предоставляет полный доступ к базе данных, включая выполнение произвольного кода и запросов. Используйте только в контуре разработки или тестирования. Подключение к продуктивной базе крайне не рекомендуется.
+`bsl-analyzer` публикует два отдельных MCP-профиля.
 
-### Ручной запуск серверов
+| Профиль | Для чего нужен | Что обычно требуется |
+|--------|----------------|----------------------|
+| `reference` | справка платформы, поиск по документации, `syntax_help`, `its_help` | при необходимости `EMBEDDING_URL` и `NAPARNIK_TOKEN` |
+| `workspace` | поиск по коду проекта, metadata, SDBL, выполнение BSL-кода, debug | `--source-dir`; для live-инструментов ещё `--onec-url` и учётные данные |
+
+Практическое правило:
+
+- ставьте `reference`, если AI должен знать платформу и ИТС;
+- ставьте `workspace`, если AI должен работать с конкретным репозиторием;
+- чаще всего нужен комплект из обоих профилей.
+
+> `reference` не использует `--source-dir` и не принимает параметры подключения
+> к 1С. Live-доступ к базе относится только к `workspace`.
+
+## Рекомендуемая установка
+
+Самый удобный сценарий — установить оба профиля сразу:
 
 ```bash
-# Глобальная справка
-bsl-analyzer mcp serve --profile reference
-
-# Проектный сервер
-bsl-analyzer mcp serve --profile workspace --source-dir ./my-project
+bsl-analyzer mcp install \
+  --target all \
+  --preset recommended \
+  --source-dir ./my-project
 ```
 
-## Установка в AI-инструменты (`mcp install`)
+Этот preset делает следующее:
 
-Команда `mcp install` автоматически настраивает конфигурацию AI-инструментов.
+- `reference` ставится как user-scoped конфигурация;
+- `workspace` ставится как project-scoped конфигурация для текущего репозитория.
 
-### Рекомендуемый сценарий
-
-Одной командой устанавливает **global reference** (для пользователя) и **project workspace** (для текущего проекта):
+Если нужны дополнительные возможности, добавьте переменные окружения и
+параметры подключения:
 
 ```bash
 bsl-analyzer mcp install \
@@ -35,12 +51,15 @@ bsl-analyzer mcp install \
   --preset recommended \
   --source-dir ./my-project \
   --env NAPARNIK_TOKEN=your_token \
-  --env EMBEDDING_URL=http://localhost:8000/v1/embeddings
+  --env EMBEDDING_URL=http://localhost:8000/v1/embeddings \
+  --onec-url http://localhost/base/hs/bsl-analyzer \
+  --onec-user admin
 ```
 
-### Раздельная установка
+## Установка по отдельности
 
-Установить только глобальный MCP справки:
+Только глобальный профиль справки:
+
 ```bash
 bsl-analyzer mcp install \
   --target all \
@@ -50,7 +69,8 @@ bsl-analyzer mcp install \
   --env EMBEDDING_URL=http://localhost:8000/v1/embeddings
 ```
 
-Установить project-scoped MCP workspace для конкретного проекта:
+Только проектный профиль рабочего каталога:
+
 ```bash
 bsl-analyzer mcp install \
   --target all \
@@ -59,78 +79,80 @@ bsl-analyzer mcp install \
   --source-dir ./my-project
 ```
 
-### Дополнительные опции
+Поддерживаемые scope'ы по целевым клиентам:
 
-- `--dry-run` — посмотреть, что будет записано, без изменений на диске. Показывает итоговый CLI-вызов или файл конфигурации.
-- `--force` — обновить существующую запись MCP с тем же именем.
-- `--name custom-bsl` — изменить базовое имя (будут созданы серверы `custom-bsl-reference` и `custom-bsl-workspace`).
-- `--onec-password` — если передать пароль, он будет сохранён в конфиге целевого инструмента.
+| Target | Поддерживаемые scope'ы | Как применяется |
+|--------|-------------------------|-----------------|
+| `codex` | `user`, `project` | user через CLI `codex mcp add`, project через `.codex/config.toml` |
+| `gemini` | `user`, `project` | через CLI `gemini mcp add` |
+| `claude` | `user`, `project`, `local` | через CLI `claude mcp add` |
+| `cursor` | `user`, `project` | через merge в `mcp.json` |
 
-### Поддерживаемые Targets
+## Полезные флаги `mcp install`
 
-| Target | Способ установки |
-|--------|------------------|
-| `codex` | `user` через `codex mcp add`, `project` через merge в `.codex/config.toml` |
-| `gemini` | через `gemini mcp add` |
-| `claude` | через `claude mcp add` |
-| `cursor` | через merge в `~/.cursor/mcp.json` или `.cursor/mcp.json` |
+- `--dry-run` — показать итоговую команду или конфиг без записи на диск;
+- `--force` — обновить существующую MCP-запись с тем же именем;
+- `--name custom-bsl` — изменить базовое имя сервера;
+- `--env KEY=value` — передать переменные окружения для MCP-процесса;
+- `--onec-password` — сохранить пароль в конфиге целевого клиента.
 
-## Настройка вручную
+Если пароль передаётся через `--onec-password`, он попадает в аргументы
+запуска MCP-сервера. Для небезопасных контуров лучше использовать отдельные
+тестовые учётные данные.
 
-Если вы не используете `mcp install`, вы можете настроить инструменты вручную.
+## Ручной запуск серверов
 
-### Claude Desktop / Claude Code
+Если нужно сначала проверить профиль локально, можно запустить его вручную.
 
-Добавьте в конфигурацию MCP (`claude_desktop_config.json` или `.mcp.json`) оба сервера:
-
-```json
-{
-  "mcpServers": {
-    "bsl-analyzer-reference": {
-      "command": "bsl-analyzer",
-      "args": ["mcp", "serve", "--profile", "reference"],
-      "env": {
-        "NAPARNIK_TOKEN": "ваш_токен_с_code.1c.ai",
-        "EMBEDDING_URL": "http://localhost:8000/v1/embeddings"
-      }
-    },
-    "bsl-analyzer-workspace": {
-      "command": "bsl-analyzer",
-      "args": [
-        "mcp",
-        "serve",
-        "--profile", "workspace",
-        "--source-dir", "/path/to/project",
-        "--onec-url", "http://localhost/base/hs/bsl-analyzer",
-        "--onec-user", "admin",
-        "--onec-password", "secret"
-      ]
-    }
-  }
-}
-```
-
-### VS Code (Copilot / Continue / Cline)
-
-Добавьте в `.vscode/mcp.json` в корне проекта:
-
-```json
-{
-  "servers": {
-    "bsl-analyzer-workspace": {
-      "command": "bsl-analyzer",
-      "args": ["mcp", "serve", "--profile", "workspace", "--source-dir", "${workspaceFolder}"]
-    }
-  }
-}
-```
-
-## Семантический поиск
-
-Для работы инструментов семантического поиска (`search_code`, `search_docs`) необходим эмбеддинг-сервер, совместимый с OpenAI API:
+Глобальный профиль справки:
 
 ```bash
-EMBEDDING_URL=http://localhost:8000/v1/embeddings bsl-analyzer mcp serve --profile reference
+bsl-analyzer mcp serve --profile reference
 ```
 
-Если вы используете централизованный baseline в PostgreSQL (подробнее в `docs/central-postgres-search/`), семантический поиск комбинирует локальный кэш и данные из PostgreSQL.
+Профиль проекта:
+
+```bash
+bsl-analyzer mcp serve --profile workspace --source-dir ./my-project
+```
+
+Профиль проекта с live-доступом к базе 1С:
+
+```bash
+bsl-analyzer mcp serve \
+  --profile workspace \
+  --source-dir ./my-project \
+  --onec-url http://localhost/base/hs/bsl-analyzer \
+  --onec-user admin \
+  --onec-password secret
+```
+
+Если нужна ручная интеграция в конкретный AI-клиент, обычно проще не писать
+конфиг с нуля, а сначала выполнить `mcp install --dry-run` и использовать
+показанную команду или сгенерированный фрагмент как образец.
+
+## Эмбеддинги и семантический поиск
+
+Семантические режимы поиска требуют `EMBEDDING_URL`:
+
+- `search(action=search_docs)` в профиле `reference`;
+- `search(action=search_code)` в профиле `workspace`.
+
+Пример:
+
+```bash
+EMBEDDING_URL=http://localhost:8000/v1/embeddings \
+  bsl-analyzer mcp serve --profile reference
+```
+
+Если `EMBEDDING_URL` не задан, полнотекстовый поиск (`find_docs`, `find_code`)
+остаётся доступным.
+
+Если используется централизованный baseline в PostgreSQL, семантический поиск
+комбинирует локальный runtime и shared baseline. Подробности — в
+`docs/central-postgres-search/README.md`.
+
+## Что читать дальше
+
+- `docs/mcp/TOOLS_AND_EXTENSION.md` — доступные инструменты, prerequisites и расширение 1С
+- `docs/central-postgres-search/README.md` — shared baseline и overlay для поиска

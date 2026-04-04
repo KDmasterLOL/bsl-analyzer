@@ -6,7 +6,9 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{collections::BTreeMap, env, error::Error, fs, io, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap, env, error::Error, fmt::Write as _, fs, io, path::PathBuf, sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 
@@ -3093,25 +3095,168 @@ fn run_format(
 fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!("Checking configuration: {:?}", config);
 
-    let content = std::fs::read_to_string(&config)?;
-    let project_config: project_model::ProjectConfig = serde_json::from_str(&content)?;
+    let project_config = project_model::ProjectConfig::load_from_file(&config).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to parse configuration file '{}'; expected a valid bsl-analyzer.toml, .bsl-analyzer.json, or .bsl-language-server.json",
+                config.display()
+            ),
+        )
+    })?;
+    let diagnostics_config = diagnostics_config_from_project(&project_config)?;
     let diagnostics =
         mcp_server::resolve_project_baseline_diagnostics(config.parent(), &project_config);
 
-    println!("Configuration is valid.");
-    println!();
-    println!("Search baseline:");
-    print_baseline_summary("Workspace", &diagnostics.workspace);
-    print_baseline_summary("Reference", &diagnostics.reference);
+    print!(
+        "{}",
+        build_check_config_report(&config, &project_config, &diagnostics_config, &diagnostics)
+    );
 
     Ok(())
 }
 
-fn print_baseline_summary(label: &str, summary: &mcp_server::BaselineResolutionSummary) {
-    println!("  {label}:");
-    println!("    Backend: {backend}", backend = summary.backend);
-    println!("    Select:  {selection}", selection = summary.selection);
-    println!("    Status:  {status}", status = summary.issue.as_deref().unwrap_or("ready"));
+fn diagnostics_config_from_project(
+    project_config: &project_model::ProjectConfig,
+) -> Result<ide::DiagnosticsConfig, Box<dyn Error + Send + Sync>> {
+    if project_config.diagnostics.is_null() {
+        return Ok(ide::DiagnosticsConfig::default());
+    }
+
+    serde_json::from_value(project_config.diagnostics.clone()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to parse diagnostics section: {error}"),
+        )
+        .into()
+    })
+}
+
+fn build_check_config_report(
+    config_path: &std::path::Path,
+    project_config: &project_model::ProjectConfig,
+    diagnostics_config: &ide::DiagnosticsConfig,
+    baseline_diagnostics: &mcp_server::BaselineConfigDiagnostics,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Configuration is valid.");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Config file: {}", config_path.display());
+    let _ = writeln!(
+        out,
+        "Format: {}",
+        match config_path.extension().and_then(|ext| ext.to_str()) {
+            Some("toml") => "TOML",
+            Some("json") => "JSON",
+            _ => "auto",
+        }
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Project:");
+    let _ = writeln!(
+        out,
+        "  Source root: {}",
+        project_config.configuration_root.as_deref().unwrap_or("auto-discovery")
+    );
+    let _ = writeln!(
+        out,
+        "  Extensions:  {}",
+        if project_config.extensions.is_empty() {
+            "none".to_owned()
+        } else {
+            project_config.extensions.join(", ")
+        }
+    );
+    let _ =
+        writeln!(out, "  Language:    {}", project_config.language.as_deref().unwrap_or("default"));
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Diagnostics:");
+    let _ = writeln!(out, "  ordinaryAppSupport: {}", diagnostics_config.ordinary_app_support);
+    let _ =
+        writeln!(out, "  dataflowMaxIterations: {}", diagnostics_config.dataflow_max_iterations);
+    let _ = writeln!(out, "  Disabled:   {}", diagnostics_config.disabled.len());
+    let _ = writeln!(out, "  Enabled:    {}", diagnostics_config.enabled.len());
+    let _ = writeln!(out, "  Parameters: {}", diagnostics_config.parameters.len());
+    let _ = writeln!(
+        out,
+        "  Disabled codes: {}",
+        summarize_diagnostic_codes(diagnostics_config.disabled.iter().map(ToString::to_string))
+    );
+    let _ = writeln!(
+        out,
+        "  Explicitly enabled: {}",
+        summarize_diagnostic_codes(diagnostics_config.enabled.iter().map(ToString::to_string))
+    );
+    let _ = writeln!(
+        out,
+        "  Parameterized: {}",
+        summarize_diagnostic_codes(diagnostics_config.parameters.keys().map(ToString::to_string))
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Code lens:");
+    let _ = writeln!(
+        out,
+        "  Cognitive complexity: {}",
+        on_off(project_config.code_lens.show_cognitive_complexity)
+    );
+    let _ = writeln!(
+        out,
+        "  Cyclomatic complexity: {}",
+        on_off(project_config.code_lens.show_cyclomatic_complexity)
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Formatting:");
+    let _ = writeln!(out, "  Indent: {}", formatting_summary(&project_config.formatting));
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Search baseline:");
+    append_baseline_summary(&mut out, "Workspace", &baseline_diagnostics.workspace);
+    append_baseline_summary(&mut out, "Reference", &baseline_diagnostics.reference);
+    out
+}
+
+fn append_baseline_summary(
+    out: &mut String,
+    label: &str,
+    summary: &mcp_server::BaselineResolutionSummary,
+) {
+    let _ = writeln!(out, "  {label}:");
+    let _ = writeln!(out, "    Backend: {}", summary.backend);
+    let _ = writeln!(out, "    Select:  {}", summary.selection);
+    let _ = writeln!(out, "    Status:  {}", summary.issue.as_deref().unwrap_or("ready"));
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn formatting_summary(config: &project_model::FormattingConfig) -> String {
+    if config.indent_size == 0 && !config.use_tabs {
+        "not configured".to_owned()
+    } else if config.use_tabs {
+        format!("tabs x{}", config.indent_size)
+    } else {
+        format!("spaces x{}", config.indent_size)
+    }
+}
+
+fn summarize_diagnostic_codes(codes: impl Iterator<Item = String>) -> String {
+    let mut codes: Vec<String> = codes.collect();
+    if codes.is_empty() {
+        return "none".to_owned();
+    }
+
+    codes.sort();
+    const LIMIT: usize = 8;
+    if codes.len() <= LIMIT {
+        return codes.join(", ");
+    }
+
+    let remaining = codes.len() - LIMIT;
+    format!("{}, … (+{remaining} more)", codes[..LIMIT].join(", "))
 }
 
 fn setup_logging(
@@ -3139,7 +3284,8 @@ fn setup_logging(
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_snapshot_retention, pick_first_non_empty, resolve_publish_branch,
+        analyze_snapshot_retention, build_check_config_report, check_config,
+        diagnostics_config_from_project, pick_first_non_empty, resolve_publish_branch,
         resolve_snapshot_id, select_parent_snapshot_id, select_parent_snapshot_id_from_groups,
         validate_workspace_publish_policy, SnapshotRetentionStatus,
     };
@@ -3257,6 +3403,156 @@ mod tests {
             .unwrap();
 
         validate_workspace_publish_policy(&policy, Some("feature/demo"), true).unwrap();
+    }
+
+    #[test]
+    fn check_config_accepts_toml_project_config() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("bsl-analyzer.toml");
+        fs::write(
+            &config,
+            r#"
+[source]
+root = "src/cf"
+
+[search.baseline]
+backend = "postgres"
+
+[search.baseline.postgres]
+url = "postgres://shared-search"
+schema = "bsl_search"
+
+[search.baseline.workspace_code.policy]
+publish_branches = ["develop"]
+
+[[search.baseline.workspace_code.policy.branches]]
+match = "*"
+select_branch = "develop"
+"#,
+        )
+        .unwrap();
+
+        check_config(config).unwrap();
+    }
+
+    #[test]
+    fn check_config_accepts_legacy_json_project_config() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join(".bsl-analyzer.json");
+        fs::write(
+            &config,
+            r#"{
+                "search": {
+                    "baseline": {
+                        "backend": "postgres",
+                        "postgres": {
+                            "url": "postgres://shared-search",
+                            "schema": "bsl_search"
+                        },
+                        "workspaceCode": {
+                            "policy": {
+                                "publishBranches": ["develop"],
+                                "branches": [
+                                    { "match": "*", "selectBranch": "develop" }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        check_config(config).unwrap();
+    }
+
+    #[test]
+    fn check_config_rejects_invalid_toml() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("bsl-analyzer.toml");
+        fs::write(&config, "invalid {{{ toml").unwrap();
+
+        let error = check_config(config).unwrap_err();
+
+        assert!(error.to_string().contains("failed to parse configuration file"));
+    }
+
+    #[test]
+    fn diagnostics_section_must_be_object_when_present() {
+        let project_config: project_model::ProjectConfig = serde_json::from_str(
+            r#"{
+                "diagnostics": []
+            }"#,
+        )
+        .unwrap();
+
+        let error = diagnostics_config_from_project(&project_config).unwrap_err();
+
+        assert!(error.to_string().contains("failed to parse diagnostics section"));
+    }
+
+    #[test]
+    fn check_config_report_contains_project_and_diagnostics_summary() {
+        let project_config: project_model::ProjectConfig = serde_json::from_str(
+            r#"{
+                "configurationRoot": "src/cf",
+                "extensions": ["src/cfe/ExtA"],
+                "formatting": { "use_tabs": true, "indent_size": 1 },
+                "codeLens": {
+                    "showCognitiveComplexity": true,
+                    "showCyclomaticComplexity": false
+                },
+                "diagnostics": {
+                    "ordinaryAppSupport": true,
+                    "dataflowMaxIterations": 20000,
+                    "parameters": {
+                        "CommentedCode": false,
+                        "BadWords": true,
+                        "CyclomaticComplexity": { "complexityThreshold": 15 }
+                    }
+                },
+                "search": {
+                    "baseline": {
+                        "backend": "postgres",
+                        "workspaceCode": {
+                            "policy": {
+                                "publishBranches": ["develop"],
+                                "branches": [
+                                    { "match": "*", "selectBranch": "develop" }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let diag_config = diagnostics_config_from_project(&project_config).unwrap();
+        let baseline = mcp_server::resolve_project_baseline_diagnostics(
+            Some(std::path::Path::new(".")),
+            &project_config,
+        );
+
+        let report = build_check_config_report(
+            std::path::Path::new("bsl-analyzer.toml"),
+            &project_config,
+            &diag_config,
+            &baseline,
+        );
+
+        assert!(report.contains("Project:"));
+        assert!(report.contains("Source root: src/cf"));
+        assert!(report.contains("Extensions:  src/cfe/ExtA"));
+        assert!(report.contains("ordinaryAppSupport: true"));
+        assert!(report.contains("dataflowMaxIterations: 20000"));
+        assert!(report.contains("Disabled codes: CommentedCode"));
+        assert!(report.contains("Explicitly enabled: BadWords"));
+        assert!(report.contains("Parameterized: CyclomaticComplexity"));
+        assert!(report.contains("Code lens:"));
+        assert!(report.contains("Cognitive complexity: on"));
+        assert!(report.contains("Formatting:"));
+        assert!(report.contains("Indent: tabs x1"));
+        assert!(report.contains("Search baseline:"));
     }
 
     #[test]

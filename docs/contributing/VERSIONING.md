@@ -5,15 +5,17 @@
 bsl-analyzer использует [SemVer](https://semver.org/) в формате `0.1.XX`:
 
 ```
-0.1.36  — текущая версия
-0.1.37  — следующий релиз
+0.1.x    — текущий релиз
+0.1.x+1  — следующий релиз
 ```
 
 Пока проект в фазе `0.x`, breaking changes возможны в любом релизе.
 
 ### Внутренние крейты
 
-Все крейты в `crates/` используют версию `0.0.0` — они не публикуются на crates.io.
+Внутренние крейты не являются публичным API проекта и могут версионироваться
+независимо от CLI-бинаря. Источником истины для пользовательского релиза служит
+`[workspace.package].version` в корневом `Cargo.toml`.
 
 ## Теги Git
 
@@ -21,8 +23,8 @@ bsl-analyzer использует [SemVer](https://semver.org/) в формат�
 
 ```bash
 # Создание тега
-git tag v0.1.37
-git push origin v0.1.37
+git tag v0.1.<next>
+git push origin v0.1.<next>
 ```
 
 Версии только идут вперёд. Нельзя переиспользовать или перемещать тег на другой коммит.
@@ -38,8 +40,8 @@ git push origin v0.1.37
 # Пример
 cargo build --release  # проверить сборку
 git add Cargo.toml Cargo.lock
-git commit -m "chore: bump version to 0.1.37"
-git tag v0.1.37
+git commit -m "chore: bump version to 0.1.<next>"
+git tag v0.1.<next>
 git push origin main --tags
 ```
 
@@ -53,6 +55,6 @@ git push origin main --tags
 
 ```toml
 [workspace.dependencies]
-rowan = "=0.15.15"      # Закреплено
-salsa = "0.17"          # Разрешены patch-обновления
+rowan = "=0.16.1"       # Закреплено
+salsa = "0.25.2"        # Разрешены patch-обновления
 ```

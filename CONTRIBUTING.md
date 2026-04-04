@@ -1,157 +1,111 @@
-# Contributing to bsl-analyzer
+# Участие в разработке `bsl-analyzer`
 
-Спасибо за интерес к проекту! Этот документ описывает процесс контрибуции.
+Спасибо за интерес к проекту. Этот документ служит точкой входа для
+контрибьюторов: здесь собраны ожидания по процессу, а профильные правила вынесены
+в отдельные документы.
 
-## Быстрый старт
+## С чего начать
 
-### 1. Настройка окружения
+Минимальное окружение:
 
-**Требования:**
-- Rust 1.91+ (`rustup install stable`)
+- Rust 1.91+
 - Git
-- jq (для скрипта проверки CI)
+- `jq` для `./scripts/ci-status.sh`
 
-**Клонирование:**
+Базовая подготовка репозитория:
+
 ```bash
 git clone https://github.com/itrous/bsl-analyzer.git
 cd bsl-analyzer
-```
-
-**Установка pre-commit hooks:**
-```bash
 ./scripts/setup-hooks.sh
 ```
 
-Это автоматически запустит `cargo fmt` и `cargo clippy` перед каждым коммитом.
-
-### 2. Проверка работоспособности
+После клонирования убедитесь, что проект собирается и тесты проходят:
 
 ```bash
-# Сборка
 cargo build
-
-# Тесты
 cargo test --all
+```
 
-# Проверка форматирования
-cargo fmt --all -- --check
+Полный список локальных проверок и правила по качеству кода описаны в
+`docs/contributing/DEVELOPMENT_RULES.md`.
 
-# Clippy
+## Куда смотреть дальше
+
+- `docs/README.md` — карта документации проекта
+- `docs/contributing/DEVELOPMENT_RULES.md` — код-стайл, тесты, правила по диагностике и производительности
+- `docs/contributing/LOGGING.md` — `tracing`, profiling и переменные окружения
+- `docs/contributing/VERSIONING.md` — релизы, теги и обновление версий
+- `docs/contributing/SALSA_GUIDE.md` — практические заметки по Salsa
+- `docs/architecture/ARCHITECTURE.md` — обзор слоёв и основных пайплайнов
+
+## Рабочий цикл контрибуции
+
+1. Создайте ветку от `main`.
+2. Если изменение заметное по масштабу, сначала зафиксируйте задачу в issue или
+   опишите её в Merge Request.
+3. Вносите изменения вместе с тестами и обновлением релевантной документации.
+4. Перед публикацией прогоните локальные проверки.
+5. Откройте Merge Request с кратким описанием, ссылками на связанные задачи и
+   перечислением затронутых сценариев.
+
+Типичная последовательность команд:
+
+```bash
+git checkout -b feature/my-change
+cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
+git push -u origin feature/my-change
 ```
 
-### 3. Внесение изменений
+Если нужно быстро проверить состояние CI по текущей ветке, используйте
+`./scripts/ci-status.sh`.
 
-1. Создайте ветку от `main`:
-   ```bash
-   git checkout -b feature/my-feature
-   ```
+## Что считается хорошим вкладом
 
-2. Вносите изменения согласно [правилам разработки](docs/contributing/DEVELOPMENT_RULES.md)
+- изменение сопровождается тестами или понятным объяснением, почему тест не нужен;
+- документация обновляется вместе с кодом, если меняется поведение CLI, конфигов,
+  диагностик или архитектурных ограничений;
+- новые diagnostics оформлены полностью: код обработчика, metadata, тесты и
+  справка в `crates/ide-diagnostics/docs/`;
+- локальные проверки проходят без warnings и случайного отладочного вывода.
 
-3. Коммитьте с осмысленными сообщениями:
-   ```bash
-   git commit -m "feat: add new diagnostic for empty code blocks"
-   ```
+Подробные правила и примеры остаются в
+`docs/contributing/DEVELOPMENT_RULES.md`, чтобы не дублировать их здесь.
 
-4. Пушьте и создавайте Merge Request:
-   ```bash
-   git push -u origin feature/my-feature
-   ```
+## Коммиты и Merge Request
 
-## Правила разработки
+Для сообщений коммитов используем
+[Conventional Commits](https://www.conventionalcommits.org/):
+`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:` и т.д.
 
-### Обязательно к прочтению
+Для Merge Request важно:
 
-- **[DEVELOPMENT_RULES.md](docs/contributing/DEVELOPMENT_RULES.md)** — правила написания кода
-- **[VERSIONING.md](docs/contributing/VERSIONING.md)** — политика версионирования
-- **[ROADMAP.md](docs/planning/ROADMAP.md)** — план разработки
-- **[SOURCES.md](docs/planning/SOURCES.md)** — проекты-источники
+- понятно описать, что изменилось и зачем;
+- указать влияние на пользователей, конфигурацию и документацию;
+- приложить ссылки на issue или обсуждение, если они есть.
 
-### Ключевые правила
+Политика версий, релизные шаги и правила работы с тегами вынесены в
+`docs/contributing/VERSIONING.md`.
 
-1. **Перед использованием библиотеки** — изучите актуальную документацию (Context7 плагин для AI)
-2. **Код без warnings** — `cargo clippy` должен проходить без ошибок
-3. **Форматирование** — `cargo fmt` перед коммитом
-4. **Тесты обязательны** — новый функционал = новые тесты
-5. **Не ломайте старые тесты** — если тест упал, разберитесь почему
+## Если вы меняете диагностики
 
-## Структура коммитов
+Минимальный маршрут почти всегда такой:
 
-Используем [Conventional Commits](https://www.conventionalcommits.org/):
+1. добавить или обновить обработчик в `crates/ide-diagnostics/src/handlers/`;
+2. обновить metadata и регистрацию кода диагностики;
+3. добавить тесты;
+4. обновить справку в `crates/ide-diagnostics/docs/`;
+5. проверить результат через `bsl-analyzer rules list` или профильные тесты.
 
-- `feat:` — новая функциональность
-- `fix:` — исправление бага
-- `docs:` — изменения документации
-- `style:` — форматирование (не влияет на код)
-- `refactor:` — рефакторинг
-- `test:` — добавление тестов
-- `chore:` — вспомогательные задачи (CI, build, etc.)
+За детальными шаблонами и критериями выбора между AST/HIR/CFG/Dataflow/SDBL
+смотрите `docs/contributing/DEVELOPMENT_RULES.md`.
 
-**Примеры:**
-```
-feat: implement CanonicalSpellingKeywords diagnostic
-fix: handle empty files in parser
-docs: update ROADMAP with iteration 5 details
-test: add snapshot tests for expression parsing
-```
+## Вопросы и лицензия
 
-## Процесс Merge Request
+- Issues: https://github.com/itrous/bsl-analyzer/issues
+- Pull Requests: https://github.com/itrous/bsl-analyzer/pulls
 
-1. **Убедитесь, что CI проходит:**
-   ```bash
-   ./scripts/ci-status.sh
-   ```
-
-2. **Merge Request должен содержать:**
-   - Описание изменений
-   - Ссылку на issue (если есть)
-   - Скриншоты (для UI изменений)
-
-3. **Review:**
-   - Минимум 1 approver
-   - Все комментарии должны быть разрешены
-   - CI должен быть зелёным
-
-4. **Merge:**
-   - Используем "Squash and merge" для чистой истории
-   - Удаляем ветку после merge
-
-## Работа с итерациями
-
-Проект разбит на 30 итераций (см. [ITERATIONS.md](docs/planning/ITERATIONS.md)).
-
-**Перед началом работы над итерацией:**
-
-1. Прочитайте описание итерации
-2. Изучите проекты-источники для данной итерации
-3. Создайте issue для итерации
-4. Разбейте на подзадачи если нужно
-
-**При завершении итерации:**
-
-1. Все тесты проходят
-2. Документация обновлена
-3. CHANGELOG.md обновлён
-4. CI зелёный
-
-## Разработка диагностик
-
-См. [DIAGNOSTICS_MIGRATION.md](docs/planning/DIAGNOSTICS_MIGRATION.md) для детального плана миграции 181 диагностики.
-
-**Шаблон для новой диагностики:**
-
-1. Создайте файл в `crates/ide-diagnostics/src/handlers/`
-2. Добавьте код диагностики в `DiagnosticCode` enum
-3. Реализуйте функцию `check(ctx: &DiagnosticsContext) -> Vec<Diagnostic>`
-4. Добавьте тесты с тестовыми данными
-5. Обновите документацию
-
-## Вопросы и помощь
-
-- **Issues:** https://github.com/itrous/bsl-analyzer/issues
-- **Pull Requests:** https://github.com/itrous/bsl-analyzer/pulls
-
-## Лицензия
-
-Контрибутируя в проект, вы соглашаетесь с тем, что ваш вклад будет лицензирован под MIT OR Apache-2.0.
+Отправляя изменения в репозиторий, вы соглашаетесь, что вклад будет
+распространяться на условиях `MIT OR Apache-2.0`.
