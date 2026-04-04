@@ -14,7 +14,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{AnnotationKind, Expr, IdConversion, Name, Stmt};
+use hir::call_graph::{CallTarget, CallerId, EdgeKind};
+use hir::{AnnotationKind, Expr, IdConversion, Stmt};
 use rustc_hash::FxHashSet;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -46,7 +47,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let symbol_tree = ctx.symbol_tree();
     let module_bodies = ctx.module_bodies();
+    let summary = ctx.call_summary(hir::ModuleId::new(ctx.file_id));
     let mut diagnostics = Vec::new();
+
+    // Precompute client-only method local_ids (AtClient annotation)
+    let client_method_ids: FxHashSet<u32> = symbol_tree
+        .methods()
+        .filter(|m| m.annotations.iter().any(|ann| ann.kind == CLIENT_ANNOTATION))
+        .map(|m| m.id.local_id)
+        .collect();
 
     for method in symbol_tree.methods() {
         let has_server_annotation =
@@ -63,13 +72,24 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         }
 
+        // Check once per method: is this server method called from any client method?
+        let server_local_id = method.id.local_id;
+        let has_client_call = summary.call_edges.iter().any(|edge| {
+            edge.kind == EdgeKind::DirectLocal
+                && matches!(&edge.target, CallTarget::Local { callee_local_id } if *callee_local_id == server_local_id)
+                && matches!(edge.caller, CallerId::Method(caller_id) if client_method_ids.contains(&caller_id))
+        });
+
+        if !has_client_call {
+            continue;
+        }
+
         let local_id = method.id.local_id;
         let Some(lower_result) = module_bodies.lower_result(local_id) else {
             continue;
         };
 
         let body = &lower_result.body;
-
         let assigned_params = collect_assigned_params(body);
 
         for (param_idx, param) in by_ref_params {
@@ -79,48 +99,46 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 continue;
             }
 
-            if has_client_calls(ctx, &method.name) {
-                let item_tree = ctx.item_tree();
-                let mut param_range = None;
+            let item_tree = ctx.item_tree();
+            let mut param_range = None;
 
-                for item in item_tree.top_level_items() {
-                    match item {
-                        hir::ModItem::Procedure(proc_idx) => {
-                            let proc = item_tree.procedure(*proc_idx);
-                            if proc.name == method.name {
-                                if let Some(param_info) = proc.params.get(param_idx) {
-                                    param_range = Some(param_info.name_range);
-                                }
-                                break;
+            for item in item_tree.top_level_items() {
+                match item {
+                    hir::ModItem::Procedure(proc_idx) => {
+                        let proc = item_tree.procedure(*proc_idx);
+                        if proc.name == method.name {
+                            if let Some(param_info) = proc.params.get(param_idx) {
+                                param_range = Some(param_info.name_range);
                             }
+                            break;
                         }
-                        hir::ModItem::Function(func_idx) => {
-                            let func = item_tree.function(*func_idx);
-                            if func.name == method.name {
-                                if let Some(param_info) = func.params.get(param_idx) {
-                                    param_range = Some(param_info.name_range);
-                                }
-                                break;
-                            }
-                        }
-                        _ => {}
                     }
+                    hir::ModItem::Function(func_idx) => {
+                        let func = item_tree.function(*func_idx);
+                        if func.name == method.name {
+                            if let Some(param_info) = func.params.get(param_idx) {
+                                param_range = Some(param_info.name_range);
+                            }
+                            break;
+                        }
+                    }
+                    _ => {}
                 }
+            }
 
-                if let Some(range) = param_range {
-                    diagnostics.push(Diagnostic {
-                        code,
-                        message: format!(
-                            "Установите модификатор \"Знач\" для параметра {} метода {}",
-                            param.name.as_str(),
-                            method.name.as_str()
-                        ),
-                        severity: ctx.severity(code),
-                        range,
-                        tags: ctx.tags(code),
-                        fixes: vec![],
-                    });
-                }
+            if let Some(range) = param_range {
+                diagnostics.push(Diagnostic {
+                    code,
+                    message: format!(
+                        "Установите модификатор \"Знач\" для параметра {} метода {}",
+                        param.name.as_str(),
+                        method.name.as_str()
+                    ),
+                    severity: ctx.severity(code),
+                    range,
+                    tags: ctx.tags(code),
+                    fixes: vec![],
+                });
             }
         }
     }
@@ -184,121 +202,6 @@ fn collect_assigned_from_stmt(stmt: &Stmt, body: &hir::Body, assigned: &mut FxHa
         }
         _ => {}
     }
-}
-
-fn has_client_calls(ctx: &DiagnosticsContext, server_method_name: &Name) -> bool {
-    let symbol_tree = ctx.symbol_tree();
-    let module_bodies = ctx.module_bodies();
-    let target_lower = server_method_name.as_str().to_lowercase();
-
-    for method in symbol_tree.methods() {
-        let is_client = method.annotations.iter().any(|ann| ann.kind == CLIENT_ANNOTATION);
-
-        if !is_client {
-            continue;
-        }
-
-        let local_id = method.id.local_id;
-        let Some(lower_result) = module_bodies.lower_result(local_id) else {
-            continue;
-        };
-
-        let body = &lower_result.body;
-
-        if has_call_to(body, &target_lower) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn has_call_to(body: &hir::Body, target_method_lower: &str) -> bool {
-    for (_expr_id, expr) in body.exprs_iter() {
-        if check_expr_for_call(expr, target_method_lower, body) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn check_expr_for_call(expr: &Expr, target_method_lower: &str, body: &hir::Body) -> bool {
-    match expr {
-        Expr::Call { callee, args } => {
-            let callee_id = hir::ExprId::from_idx(*callee);
-            if let Expr::Path(name) = body.expr(callee_id) {
-                if name.as_str().to_lowercase() == target_method_lower {
-                    return true;
-                }
-            }
-            for &arg_idx in args.iter() {
-                let arg_id = hir::ExprId::from_idx(arg_idx);
-                if check_expr_for_call(body.expr(arg_id), target_method_lower, body) {
-                    return true;
-                }
-            }
-        }
-        Expr::BinaryOp { lhs, rhs, .. } => {
-            let lhs_id = hir::ExprId::from_idx(*lhs);
-            let rhs_id = hir::ExprId::from_idx(*rhs);
-            return check_expr_for_call(body.expr(lhs_id), target_method_lower, body)
-                || check_expr_for_call(body.expr(rhs_id), target_method_lower, body);
-        }
-        Expr::UnaryOp { expr: inner, .. } | Expr::Await { expr: inner } => {
-            let inner_id = hir::ExprId::from_idx(*inner);
-            return check_expr_for_call(body.expr(inner_id), target_method_lower, body);
-        }
-        Expr::Ternary { condition, then_expr, else_expr } => {
-            let condition_id = hir::ExprId::from_idx(*condition);
-            let then_id = hir::ExprId::from_idx(*then_expr);
-            let else_id = hir::ExprId::from_idx(*else_expr);
-            return check_expr_for_call(body.expr(condition_id), target_method_lower, body)
-                || check_expr_for_call(body.expr(then_id), target_method_lower, body)
-                || check_expr_for_call(body.expr(else_id), target_method_lower, body);
-        }
-        Expr::MethodCall { receiver, args, .. } => {
-            let receiver_id = hir::ExprId::from_idx(*receiver);
-            if check_expr_for_call(body.expr(receiver_id), target_method_lower, body) {
-                return true;
-            }
-            for &arg_idx in args.iter() {
-                let arg_id = hir::ExprId::from_idx(arg_idx);
-                if check_expr_for_call(body.expr(arg_id), target_method_lower, body) {
-                    return true;
-                }
-            }
-        }
-        Expr::Index { base, index } => {
-            let base_id = hir::ExprId::from_idx(*base);
-            let index_id = hir::ExprId::from_idx(*index);
-            return check_expr_for_call(body.expr(base_id), target_method_lower, body)
-                || check_expr_for_call(body.expr(index_id), target_method_lower, body);
-        }
-        Expr::Field { base, .. } => {
-            let base_id = hir::ExprId::from_idx(*base);
-            return check_expr_for_call(body.expr(base_id), target_method_lower, body);
-        }
-        Expr::New { args, .. } => {
-            for &arg_idx in args.iter() {
-                let arg_id = hir::ExprId::from_idx(arg_idx);
-                if check_expr_for_call(body.expr(arg_id), target_method_lower, body) {
-                    return true;
-                }
-            }
-        }
-        Expr::Array(exprs) => {
-            for &expr_idx in exprs.iter() {
-                let opaque_id = hir::ExprId::from_idx(expr_idx);
-                if check_expr_for_call(body.expr(opaque_id), target_method_lower, body) {
-                    return true;
-                }
-            }
-        }
-        _ => {}
-    }
-
-    false
 }
 
 #[cfg(test)]
