@@ -567,7 +567,7 @@ fn resolve_connection(
     //    projects without bsl-analyzer.toml.
     // 3. JSON config url (search.baseline.postgres.url) — lowest priority.
     if let Some(creds) = credentials {
-        if let Some(url) = resolve_postgres_url(creds) {
+        if let Some(url) = resolve_postgres_url(creds, "read") {
             return Some(url);
         }
     }

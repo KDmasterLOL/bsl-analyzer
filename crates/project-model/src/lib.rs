@@ -938,7 +938,9 @@ fn toml_value_to_json(value: toml::Value) -> serde_json::Value {
 }
 
 /// Resolves a PostgreSQL connection URL using the credential resolver chain.
-pub fn resolve_postgres_url(creds: &PostgresCredentialConfig) -> Option<String> {
+///
+/// `mode` is passed to the credential helper: `"read"` for queries, `"write"` for publishing.
+pub fn resolve_postgres_url(creds: &PostgresCredentialConfig, mode: &str) -> Option<String> {
     // 1. url_env
     if let Some(ref key) = creds.url_env {
         if let Ok(val) = std::env::var(key) {
@@ -988,7 +990,7 @@ pub fn resolve_postgres_url(creds: &PostgresCredentialConfig) -> Option<String> 
         let port = creds.port.unwrap_or(5432);
         if let Some(ref helper) = creds.credential_helper {
             tracing::info!(command = helper, "executing credential_helper from config");
-            match run_credential_helper(helper, host, port, dbname) {
+            match run_credential_helper(helper, host, port, dbname, mode) {
                 Ok((username, password)) => {
                     let url = format!(
                         "postgres://{}:{}@{}:{}/{}",
@@ -1091,7 +1093,7 @@ fn run_command_with_timeout(command: &str, timeout: std::time::Duration) -> Resu
 
 /// Runs a credential helper (custom bsl-analyzer protocol, not git-credential).
 ///
-/// Sends `host=…\nport=…\ndbname=…\n\n` on stdin.
+/// Sends `host=…\nport=…\ndbname=…\nmode=…\n\n` on stdin.
 /// Expects `username=…\npassword=…\n` on stdout.
 /// Times out after [`COMMAND_TIMEOUT`].
 fn run_credential_helper(
@@ -1099,6 +1101,7 @@ fn run_credential_helper(
     host: &str,
     port: u16,
     dbname: &str,
+    mode: &str,
 ) -> Result<(String, String), String> {
     use std::io::Write;
     use std::process::Stdio;
@@ -1111,7 +1114,7 @@ fn run_credential_helper(
         .map_err(|e| format!("failed to spawn credential helper: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = write!(stdin, "host={host}\nport={port}\ndbname={dbname}\n\n");
+        let _ = write!(stdin, "host={host}\nport={port}\ndbname={dbname}\nmode={mode}\n\n");
     }
 
     let deadline = std::time::Instant::now() + COMMAND_TIMEOUT;
@@ -1456,7 +1459,7 @@ port = 5432
 dbname = "bsl_search"
 schema = "bsl_search"
 url_env = "BSL_SEARCH_BASELINE_PG_URL"
-credential_helper = "rtools vault credential-helper --engine bsl-search"
+credential_helper = "rtools vault credential-helper"
 
 [search.baseline.workspace_code]
 branch = "develop"
@@ -1490,10 +1493,7 @@ fallback_branch = "vendor"
         assert_eq!(creds.port, Some(5432));
         assert_eq!(creds.dbname.as_deref(), Some("bsl_search"));
         assert_eq!(creds.url_env.as_deref(), Some("BSL_SEARCH_BASELINE_PG_URL"));
-        assert_eq!(
-            creds.credential_helper.as_deref(),
-            Some("rtools vault credential-helper --engine bsl-search")
-        );
+        assert_eq!(creds.credential_helper.as_deref(), Some("rtools vault credential-helper"));
     }
 
     #[test]
@@ -1538,7 +1538,7 @@ LineLength = { maxLineLength = 120 }
             url: Some("postgres://fallback".to_owned()),
             ..Default::default()
         };
-        let resolved = resolve_postgres_url(&creds);
+        let resolved = resolve_postgres_url(&creds, "read");
         assert_eq!(resolved.as_deref(), Some("postgres://from-env"));
         std::env::remove_var("_BSL_TEST_PG_URL_CR1");
     }
@@ -1553,7 +1553,7 @@ LineLength = { maxLineLength = 120 }
             url: Some("postgres://fallback".to_owned()),
             ..Default::default()
         };
-        let resolved = resolve_postgres_url(&creds);
+        let resolved = resolve_postgres_url(&creds, "read");
         assert_eq!(resolved.as_deref(), Some("postgres://from-file"));
     }
 
@@ -1563,7 +1563,7 @@ LineLength = { maxLineLength = 120 }
             url_command: Some("echo postgres://from-command".to_owned()),
             ..Default::default()
         };
-        let resolved = resolve_postgres_url(&creds);
+        let resolved = resolve_postgres_url(&creds, "read");
         assert_eq!(resolved.as_deref(), Some("postgres://from-command"));
     }
 
@@ -1573,7 +1573,7 @@ LineLength = { maxLineLength = 120 }
             url: Some("postgres://plaintext".to_owned()),
             ..Default::default()
         };
-        let resolved = resolve_postgres_url(&creds);
+        let resolved = resolve_postgres_url(&creds, "read");
         assert_eq!(resolved.as_deref(), Some("postgres://plaintext"));
     }
 
@@ -1585,14 +1585,14 @@ LineLength = { maxLineLength = 120 }
             dbname: Some("mydb".to_owned()),
             ..Default::default()
         };
-        let resolved = resolve_postgres_url(&creds);
+        let resolved = resolve_postgres_url(&creds, "read");
         assert_eq!(resolved.as_deref(), Some("postgres://db.example.com:5433/mydb"));
     }
 
     #[test]
     fn credential_resolver_returns_none_when_empty() {
         let creds = super::PostgresCredentialConfig::default();
-        assert!(resolve_postgres_url(&creds).is_none());
+        assert!(resolve_postgres_url(&creds, "read").is_none());
     }
 
     #[test]
@@ -1605,7 +1605,7 @@ LineLength = { maxLineLength = 120 }
             ),
             ..Default::default()
         };
-        let resolved = resolve_postgres_url(&creds).unwrap();
+        let resolved = resolve_postgres_url(&creds, "read").unwrap();
         assert!(resolved.starts_with("postgres://testuser:testpass@localhost:5432/testdb"));
     }
 
@@ -1650,7 +1650,7 @@ LineLength = { maxLineLength = 120 }
             url: Some("postgres://fallback".to_owned()),
             ..Default::default()
         };
-        let resolved = super::resolve_postgres_url(&creds);
+        let resolved = super::resolve_postgres_url(&creds, "read");
         // Empty env var should be skipped, fallback to plaintext url
         assert_eq!(resolved.as_deref(), Some("postgres://fallback"));
         std::env::remove_var("_BSL_TEST_EMPTY_URL");
@@ -1663,7 +1663,7 @@ LineLength = { maxLineLength = 120 }
             url: Some("postgres://fallback".to_owned()),
             ..Default::default()
         };
-        let resolved = super::resolve_postgres_url(&creds);
+        let resolved = super::resolve_postgres_url(&creds, "read");
         assert_eq!(resolved.as_deref(), Some("postgres://fallback"));
     }
 
@@ -1676,7 +1676,7 @@ LineLength = { maxLineLength = 120 }
             ..Default::default()
         };
         // Failed helper → None (no further fallback)
-        let resolved = super::resolve_postgres_url(&creds);
+        let resolved = super::resolve_postgres_url(&creds, "read");
         assert!(resolved.is_none());
     }
 

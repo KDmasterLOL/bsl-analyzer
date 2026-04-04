@@ -1529,7 +1529,7 @@ fn resolve_pg_connection(
     }
     // Config-level credential resolver (from bsl-analyzer.toml)
     if let Some(creds) = credentials {
-        if let Some(url) = project_model::resolve_postgres_url(creds) {
+        if let Some(url) = project_model::resolve_postgres_url(creds, "write") {
             let pg_schema = pick_first_non_empty([
                 pg_schema,
                 env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
