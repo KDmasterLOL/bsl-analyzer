@@ -72,17 +72,25 @@ const FORBIDDEN_EVENT_TYPES: &[&str] = &["OnActivateRow", "OnStartChoice"];
 const MAX_DEPTH: usize = 64;
 const MAX_VISITED: usize = 10_000;
 
+/// Result of BFS: call site range, method name, whether path goes through idle handler.
+struct ServerCallFinding {
+    range: TextRange,
+    method_name: String,
+    through_idle: bool,
+}
+
 fn bfs_find_server_calls(
     summary: &hir::ModuleCallSummary,
     start_local_id: u32,
     ctx: &DiagnosticsContext,
-) -> Vec<(TextRange, String)> {
+) -> Vec<ServerCallFinding> {
     let mut results = Vec::new();
     let mut visited: FxHashSet<(vfs::FileId, u32)> = FxHashSet::default();
-    let mut queue: VecDeque<(vfs::FileId, u32)> = VecDeque::new();
+    // Queue: (file_id, local_id, through_idle)
+    let mut queue: VecDeque<(vfs::FileId, u32, bool)> = VecDeque::new();
 
     let file_id = ctx.file_id;
-    queue.push_back((file_id, start_local_id));
+    queue.push_back((file_id, start_local_id, false));
     visited.insert((file_id, start_local_id));
 
     let mut depth = 0;
@@ -92,7 +100,7 @@ fn bfs_find_server_calls(
         let level_size = queue.len();
 
         for _ in 0..level_size {
-            let Some((current_file, current_id)) = queue.pop_front() else {
+            let Some((current_file, current_id, through_idle)) = queue.pop_front() else {
                 continue;
             };
 
@@ -106,6 +114,8 @@ fn bfs_find_server_calls(
             }
 
             let caller = CallerId::Method(current_id);
+
+            // Follow synchronous call edges
             for edge in &summary.call_edges {
                 if edge.caller != caller {
                     continue;
@@ -121,15 +131,19 @@ fn bfs_find_server_calls(
                             continue;
                         };
 
-                        if method.dispatch.is_server_only() {
-                            results.push((edge.range, method.name.to_string()));
+                        if method.dispatch.is_server_only() && !method.dispatch.no_context {
+                            results.push(ServerCallFinding {
+                                range: edge.range,
+                                method_name: method.name.to_string(),
+                                through_idle,
+                            });
                             continue;
                         }
 
                         if method.dispatch.can_run_on_client {
                             let key = (current_file, *callee_local_id);
                             if visited.insert(key) {
-                                queue.push_back(key);
+                                queue.push_back((key.0, key.1, through_idle));
                             }
                         }
                     }
@@ -157,11 +171,33 @@ fn bfs_find_server_calls(
                             method_symbol.annotations.first().map(|annotation| &annotation.kind),
                         );
 
-                        if dispatch.is_server_only() {
-                            results.push((edge.range, method_name.to_string()));
+                        if dispatch.is_server_only() && !dispatch.no_context {
+                            results.push(ServerCallFinding {
+                                range: edge.range,
+                                method_name: method_name.to_string(),
+                                through_idle,
+                            });
                         }
                     }
                     _ => {}
+                }
+            }
+
+            // Follow idle handler registrations (findings get lowered severity)
+            for idle_reg in &summary.idle_handler_regs {
+                if idle_reg.caller != caller {
+                    continue;
+                }
+
+                let Some(handler_method) =
+                    summary.methods.iter().find(|m| m.name.eq_ignore_case(&idle_reg.handler_name))
+                else {
+                    continue;
+                };
+
+                let key = (file_id, handler_method.local_id);
+                if visited.insert(key) {
+                    queue.push_back((key.0, key.1, true));
                 }
             }
         }
@@ -209,15 +245,30 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         };
 
-        for (range, method_name) in bfs_find_server_calls(&summary, handler_local_id, ctx) {
+        for finding in bfs_find_server_calls(&summary, handler_local_id, ctx) {
+            let (severity, message) = if finding.through_idle {
+                (
+                    crate::Severity::Information,
+                    format!(
+                        "В обработчике ожидания, подключённом из события формы, рекомендуется использовать &НаСервереБезКонтекста. Процедура \"{}\" выполняется на сервере с контекстом",
+                        finding.method_name
+                    ),
+                )
+            } else {
+                (
+                    ctx.severity(code),
+                    format!(
+                        "В событиях ПриАктивизацииСтроки и НачалоВыбора не должно быть вызовов серверных процедур. Процедура \"{}\" выполняется на сервере",
+                        finding.method_name
+                    ),
+                )
+            };
+
             diagnostics.push(Diagnostic {
                 code,
-                message: format!(
-                    "В событиях ПриАктивизацииСтроки и НачалоВыбора не должно быть вызовов серверных процедур. Процедура \"{}\" выполняется на сервере",
-                    method_name
-                ),
-                severity: ctx.severity(code),
-                range,
+                message,
+                severity,
+                range: finding.range,
                 tags: ctx.tags(code),
                 fixes: vec![],
             });
@@ -398,6 +449,93 @@ mod tests {
         assert!(
             server_calls_diags[0].message.contains("СерверныйМетод"),
             "unexpected message: {}",
+            server_calls_diags[0].message
+        );
+    }
+
+    #[test]
+    fn test_no_diagnostic_for_server_no_context_call() {
+        let code = r#"
+&НаСервереБезКонтекста
+Процедура СерверныйМетодБезКонтекста()
+КонецПроцедуры
+
+&НаКлиенте
+Процедура СписокПриАктивизацииСтроки(Элемент)
+    СерверныйМетодБезКонтекста();
+КонецПроцедуры
+"#;
+
+        let form_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+    <ChildItems>
+        <Table name="Список" id="1">
+            <Events>
+                <Event name="OnActivateRow">СписокПриАктивизацииСтроки</Event>
+            </Events>
+        </Table>
+    </ChildItems>
+</Form>"#;
+
+        let metadata = form_module_metadata(form_xml);
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_metadata, ctx| check(ctx));
+        let server_calls_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
+            .collect();
+
+        assert_eq!(
+            server_calls_diags.len(),
+            0,
+            "НаСервереБезКонтекста не должен вызывать диагностику"
+        );
+    }
+
+    #[test]
+    fn test_idle_handler_with_server_call_produces_info_diagnostic() {
+        let code = r#"
+&НаСервере
+Процедура СерверныйМетод()
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ОтложенноеОбновление()
+    СерверныйМетод();
+КонецПроцедуры
+
+&НаКлиенте
+Процедура СписокПриАктивизацииСтроки(Элемент)
+    ПодключитьОбработчикОжидания("ОтложенноеОбновление", 0.5, Истина);
+КонецПроцедуры
+"#;
+
+        let form_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+    <ChildItems>
+        <Table name="Список" id="1">
+            <Events>
+                <Event name="OnActivateRow">СписокПриАктивизацииСтроки</Event>
+            </Events>
+        </Table>
+    </ChildItems>
+</Form>"#;
+
+        let metadata = form_module_metadata(form_xml);
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_metadata, ctx| check(ctx));
+        let server_calls_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
+            .collect();
+
+        assert_eq!(server_calls_diags.len(), 1, "Should detect server call through idle handler");
+        assert_eq!(
+            server_calls_diags[0].severity,
+            crate::Severity::Information,
+            "Severity should be Information for idle handler path"
+        );
+        assert!(
+            server_calls_diags[0].message.contains("обработчике ожидания"),
+            "Message should mention idle handler: {}",
             server_calls_diags[0].message
         );
     }
