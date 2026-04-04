@@ -7,6 +7,15 @@ use std::collections::BTreeMap;
 use std::thread;
 use tracing::info;
 
+/// Progress events emitted during embedding generation.
+#[derive(Debug, Clone)]
+pub enum EmbeddingProgress {
+    /// Emitted once before computation starts.
+    Plan { total_unique: usize, cached: usize, to_compute: usize },
+    /// Emitted periodically during batch processing.
+    Batch { processed: usize, total: usize, batches_done: usize, total_batches: usize },
+}
+
 const DEFAULT_BATCH_SIZE: usize = 32;
 const DEFAULT_CONCURRENCY: usize = 10;
 const DEFAULT_PROGRESS_INTERVAL: usize = 20;
@@ -76,6 +85,7 @@ impl SharedEmbeddingPublisher {
         store: &S,
         embedder: &E,
         documents: &[IndexedDocument],
+        progress: Option<&dyn Fn(EmbeddingProgress)>,
     ) -> Result<SharedEmbeddingPublishStats, SearchError>
     where
         S: EmbeddingStore,
@@ -84,6 +94,9 @@ impl SharedEmbeddingPublisher {
         let dimension = embedder.dimension();
         let model_id = embedder.model_id().to_owned();
         if documents.is_empty() {
+            if let Some(on_progress) = progress {
+                on_progress(EmbeddingProgress::Plan { total_unique: 0, cached: 0, to_compute: 0 });
+            }
             return Ok(SharedEmbeddingPublishStats {
                 model_id,
                 dimension,
@@ -111,6 +124,15 @@ impl SharedEmbeddingPublisher {
             .into_iter()
             .filter(|(key, _)| !existing.contains_key(key))
             .collect::<Vec<_>>();
+
+        if let Some(on_progress) = progress {
+            on_progress(EmbeddingProgress::Plan {
+                total_unique,
+                cached: reused,
+                to_compute: missing.len(),
+            });
+        }
+
         if missing.is_empty() {
             return Ok(SharedEmbeddingPublishStats {
                 model_id,
@@ -198,6 +220,14 @@ impl SharedEmbeddingPublisher {
                             reused_total,
                             "shared embedding publish progress"
                         );
+                        if let Some(on_progress) = progress {
+                            on_progress(EmbeddingProgress::Batch {
+                                processed,
+                                total: total_missing,
+                                batches_done: batch_index,
+                                total_batches,
+                            });
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -247,6 +277,7 @@ impl BaselinePublisher {
         metadata: &SnapshotPublishMetadata,
         documents: &[IndexedDocument],
         embedder: Option<&E>,
+        embedding_progress: Option<&dyn Fn(EmbeddingProgress)>,
     ) -> Result<BaselinePublishReport, SearchError>
     where
         S: SnapshotPublisher + EmbeddingStore,
@@ -255,7 +286,12 @@ impl BaselinePublisher {
         store.ensure_storage()?;
         let snapshot_stats = store.publish_snapshot(snapshot, metadata, documents)?;
         let embeddings = match embedder {
-            Some(embedder) => Some(self.shared_embeddings.publish(store, embedder, documents)?),
+            Some(embedder) => Some(self.shared_embeddings.publish(
+                store,
+                embedder,
+                documents,
+                embedding_progress,
+            )?),
             None => None,
         };
         Ok(BaselinePublishReport { snapshot: snapshot_stats, embeddings })
@@ -392,7 +428,7 @@ mod tests {
             concurrency: 3,
             progress_interval: 1,
         });
-        let stats = publisher.publish(&store, &FakeEmbedder::default(), &documents).unwrap();
+        let stats = publisher.publish(&store, &FakeEmbedder::default(), &documents, None).unwrap();
 
         assert_eq!(stats.model_id, "fake-model");
         assert_eq!(stats.dimension, 3);
@@ -419,6 +455,7 @@ mod tests {
                 },
                 &documents,
                 Some(&FakeEmbedder::default()),
+                None,
             )
             .unwrap();
 

@@ -854,7 +854,7 @@ fn run_search_baseline_sync_pg(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
         fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
-        Embedder, ExternalBaselineAdapter, ExternalBaselineConfig, Snapshot,
+        Embedder, EmbeddingProgress, ExternalBaselineAdapter, ExternalBaselineConfig, Snapshot,
         SnapshotPublishMetadata, SnapshotPublisher,
     };
 
@@ -889,11 +889,13 @@ fn run_search_baseline_sync_pg(
         project.config.postgres_credentials.as_ref(),
     )?;
 
+    eprintln!("[1/5] Indexing source files...");
     let (indexed_files, documents) = match corpus {
         CorpusId::WorkspaceCode => build_workspace_code_baseline_documents(&source_path)?,
         CorpusId::Reference => build_reference_baseline_documents()?,
         CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
     };
+    eprintln!("      {} files -> {} chunks", indexed_files, documents.len());
 
     if documents.is_empty() {
         return Err(io::Error::new(
@@ -909,6 +911,7 @@ fn run_search_baseline_sync_pg(
     }
     let schema_label = config.schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
 
+    eprintln!("[2/5] Connecting to PostgreSQL (schema: {})...", schema_label);
     let adapter = ExternalBaselineAdapter::new(config)?;
     adapter.ensure_storage()?;
     let fingerprint = match corpus {
@@ -932,14 +935,52 @@ fn run_search_baseline_sync_pg(
     }
     let publish_metadata =
         SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
+
+    eprintln!("[3/5] Publishing snapshot ({} chunks)...", documents.len());
     let embedder = embedding_config_from_env().map(Embedder::new);
+    let has_embedder = embedder.is_some();
+    let embedding_progress = |event: EmbeddingProgress| match event {
+        EmbeddingProgress::Plan { total_unique, cached, to_compute } => {
+            eprintln!(
+                "[4/5] Computing embeddings ({} unique, {} cached, {} to compute)...",
+                total_unique, cached, to_compute
+            );
+        }
+        EmbeddingProgress::Batch { processed, total, batches_done, total_batches } => {
+            let pct = if total > 0 { processed * 100 / total } else { 100 };
+            eprintln!(
+                "      {}/{} ({}%) — batch {}/{}",
+                processed, total, pct, batches_done, total_batches
+            );
+        }
+    };
     let publish_report = BaselinePublisher::new(embedding_execution_policy_from_env()).publish(
         &adapter,
         &snapshot,
         &publish_metadata,
         &documents,
         embedder.as_ref(),
+        if has_embedder { Some(&embedding_progress) } else { None },
     )?;
+    eprintln!(
+        "      Reused {} files, wrote {}, deleted {}",
+        publish_report.snapshot.reused_files,
+        publish_report.snapshot.written_files,
+        publish_report.snapshot.deleted_files,
+    );
+
+    if let Some(ref embedding_stats) = publish_report.embeddings {
+        eprintln!("[5/5] Populating serving semantic index...");
+        let serving_count = adapter.populate_serving_semantic(
+            &snapshot.id.0,
+            &embedding_stats.model_id,
+            embedding_stats.dimension,
+        )?;
+        eprintln!("      {} rows", serving_count);
+    } else {
+        eprintln!("[4/5] Skipped (no embedding config)");
+        eprintln!("[5/5] Skipped (no embeddings)");
+    }
 
     let published_files = documents
         .iter()
@@ -949,6 +990,7 @@ fn run_search_baseline_sync_pg(
     let branch_label = branch.as_deref().unwrap_or("-");
     let commit_label = commit.as_deref().unwrap_or("-");
 
+    println!();
     println!("Published search baseline to PostgreSQL.");
     println!("  Corpus:        {}", corpus.as_str());
     println!("  Mode:          {}", if snapshot.parent_id.is_some() { "delta" } else { "root" });
@@ -972,13 +1014,6 @@ fn run_search_baseline_sync_pg(
         println!("  Embedding model: {}", embedding_stats.model_id);
         println!("  Reused embeddings: {}", embedding_stats.reused);
         println!("  Stored embeddings: {}", embedding_stats.stored);
-
-        let serving_count = adapter.populate_serving_semantic(
-            &snapshot.id.0,
-            &embedding_stats.model_id,
-            embedding_stats.dimension,
-        )?;
-        println!("  Serving semantic: {}", serving_count);
     }
 
     Ok(())

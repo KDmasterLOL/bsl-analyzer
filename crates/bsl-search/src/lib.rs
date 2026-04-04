@@ -61,7 +61,7 @@ pub use ports::{
     SnapshotPublisher, VectorSearchIndex,
 };
 pub use publish::{
-    BaselinePublishReport, BaselinePublisher, EmbeddingExecutionPolicy,
+    BaselinePublishReport, BaselinePublisher, EmbeddingExecutionPolicy, EmbeddingProgress,
     SharedEmbeddingPublishStats, SharedEmbeddingPublisher,
 };
 pub use resolved_view_search::lexical_hits as lexical_hits_for_resolved_view;
