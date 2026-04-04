@@ -46,7 +46,7 @@ BSL Analyzer использует инкрементальную архитек�
 │ sdbl-hir     │ SDBL HIR + type inference                    │
 │ cfg          │ Control Flow Graph                           │
 │ dataflow     │ Reaching definitions, liveness               │
-│ project-model│ Project config (.bsl-analyzer.json)          │
+│ project-model│ Project config (bsl-analyzer.toml)           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -227,4 +227,4 @@ BSL_LOG_FILE=/tmp/bsl.log        # write to file
 
 Поддерживаемые форматы конфигурации:
 - Те же коды диагностик и severity
-- Поддержка `.bsl-analyzer.json` и `.bsl-language-server.json`
+- Поддержка `bsl-analyzer.toml`

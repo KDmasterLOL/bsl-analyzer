@@ -135,7 +135,7 @@ All test files in repo. Never use absolute paths: `include_str!("fixtures/Module
 
 ## Architecture Highlights
 
-**Configuration format:** `.bsl-analyzer.json` or `.bsl-language-server.json`
+**Configuration format:** `bsl-analyzer.toml`
 
 **Diagnostic metadata system:**
 - ✅ **DiagnosticMetadata:** Compile-time const + runtime JSON overrides

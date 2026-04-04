@@ -740,7 +740,7 @@ impl RootDatabase for RootDatabaseImpl {
 4. **Convergence Limits** (configurable):
    - Default: 10000 iterations (increased from 5000 in 2025-01-09)
    - Configurable via `DiagnosticsConfig.dataflow_max_iterations`
-   - Set in `.bsl-language-server.json`: `"dataflow_max_iterations": 20000`
+   - Set in `bsl-analyzer.toml`: `dataflow_max_iterations = 20000`
    - **When to increase**: Extremely complex methods with deep nesting or many loops
    - **Warning logged**: If analysis exceeds limit without convergence
 
