@@ -175,6 +175,15 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn call_summary(&self, module_id: ModuleId) -> Arc<hir::ModuleCallSummary> {
+        // Check ParsedFile cache (lazy computation via OnceLock)
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(parsed) = shared_state.get_parsed_file(module_id.file_id) {
+                let configuration = self.global.configuration.as_deref();
+                return parsed.call_summary(configuration);
+            }
+        }
+
+        // Fallback - compute on-the-fly (when not in streaming mode or cache miss)
         let item_tree = self.item_tree(module_id.file_id);
         let module_bodies = self.module_bodies(module_id);
         let metadata = self.module_metadata(module_id);

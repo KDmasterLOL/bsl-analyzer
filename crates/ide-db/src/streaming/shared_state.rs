@@ -58,6 +58,10 @@ pub struct ParsedFile {
     /// Lazily computed module metadata (FormModule handlers, CommonModule context, etc.).
     /// Computed on first access during Phase 2 (requires configuration).
     module_metadata: OnceLock<Arc<ModuleMetadata>>,
+
+    /// Lazily computed call summary (call edges, notify regs, idle handler regs, etc.).
+    /// Computed on first access during Phase 2 (requires module_bodies + module_metadata).
+    call_summary: OnceLock<Arc<hir::call_graph::ModuleCallSummary>>,
 }
 
 impl std::fmt::Debug for ParsedFile {
@@ -69,6 +73,7 @@ impl std::fmt::Debug for ParsedFile {
             .field("has_cfgs", &self.module_cfgs.get().is_some())
             .field("has_sdbl_hir", &self.sdbl_hir.get().is_some())
             .field("has_metadata", &self.module_metadata.get().is_some())
+            .field("has_call_summary", &self.call_summary.get().is_some())
             .finish()
     }
 }
@@ -92,6 +97,7 @@ impl ParsedFile {
             module_cfgs: OnceLock::new(),
             sdbl_hir: OnceLock::new(),
             module_metadata: OnceLock::new(),
+            call_summary: OnceLock::new(),
         }
     }
 
@@ -212,6 +218,30 @@ impl ParsedFile {
                     }
                 };
                 Arc::new(crate::build_module_metadata(file_path, configuration))
+            })
+            .clone()
+    }
+
+    /// Get or compute call summary.
+    ///
+    /// Thread-safe: computed only once even with concurrent access.
+    /// Requires module_bodies and module_metadata (which will be computed if needed).
+    pub fn call_summary(
+        &self,
+        configuration: Option<&bsl_metadata::Configuration>,
+    ) -> Arc<hir::call_graph::ModuleCallSummary> {
+        self.call_summary
+            .get_or_init(|| {
+                let item_tree = &self.item_tree;
+                let module_bodies = self.module_bodies();
+                let metadata = self.module_metadata(configuration);
+                let form_handlers: &[bsl_metadata::FormEventHandler] =
+                    metadata.form.as_ref().map(|f| f.event_handlers.as_slice()).unwrap_or(&[]);
+                Arc::new(hir::call_graph::extract_call_summary(
+                    item_tree,
+                    &module_bodies,
+                    form_handlers,
+                ))
             })
             .clone()
     }
