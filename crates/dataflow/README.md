@@ -356,6 +356,6 @@ fn test_sequential_assignments() {
 
 ## See Also
 
-- [`crates/cfg/`](../cfg/README.md) - Control Flow Graph construction
+- [`crates/cfg/src/lib.rs`](../cfg/src/lib.rs) - построение Control Flow Graph
 - [`crates/hir-def/`](../hir-def/src/lib.rs) - HIR definitions
 - [`docs/architecture/DATAFLOW.md`](../../docs/architecture/DATAFLOW.md) - Architecture decisions

@@ -1,24 +1,24 @@
-# Server Setup
+# Настройка сервера
 
-Step-by-step guide for deploying a PostgreSQL server for central code search
-with Vault-managed dynamic credentials.
+Ниже — пример базового развёртывания PostgreSQL для централизованного поиска с
+Vault-managed credentials.
 
-## Prerequisites
+## Предпосылки
 
-- Ubuntu 24.04 (or compatible)
-- PostgreSQL 17
-- HashiCorp Vault with `database` secrets engine enabled
-- Network access from Vault to PostgreSQL
+- Ubuntu 24.04 или совместимая система;
+- PostgreSQL 17;
+- Vault с включённым `database` secrets engine;
+- сетевой доступ от Vault к PostgreSQL.
 
 ## PostgreSQL
 
-### Install PostgreSQL 17 and pgvector
+### Установка PostgreSQL 17 и `pgvector`
 
 ```bash
 sudo apt install postgresql-17 postgresql-17-pgvector
 ```
 
-If a previous PostgreSQL version is installed, remove it:
+Если в системе уже есть старая версия PostgreSQL:
 
 ```bash
 sudo pg_dropcluster --stop <ver> main
@@ -26,7 +26,9 @@ sudo apt purge postgresql-<ver> postgresql-client-<ver>
 sudo apt autoremove
 ```
 
-Ensure PostgreSQL 17 is on the standard port:
+### Базовая конфигурация
+
+Убедитесь, что сервер слушает стандартный порт:
 
 ```bash
 # /etc/postgresql/17/main/postgresql.conf
@@ -38,7 +40,7 @@ listen_addresses = '*'
 sudo systemctl restart postgresql@17-main
 ```
 
-### Create database, schema, and extensions
+### Создание базы, схемы и расширений
 
 ```bash
 sudo -u postgres psql -p 5432 <<'SQL'
@@ -49,7 +51,7 @@ CREATE SCHEMA bsl_search;
 SQL
 ```
 
-### Create Vault admin role
+### Роль администратора для Vault
 
 ```bash
 sudo -u postgres psql -p 5432 -d bsl_search <<'SQL'
@@ -60,24 +62,18 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA bsl_search GRANT ALL ON TABLES TO vault_pg_ad
 SQL
 ```
 
-> After Vault connection is created, Vault rotates this password automatically.
-> The initial password stops working — this is expected.
+После подключения Vault этот пароль обычно ротируется автоматически.
 
-### Configure pg_hba.conf
+### `pg_hba.conf`
 
-Add to `/etc/postgresql/17/main/pg_hba.conf`:
+Добавьте правила доступа:
 
-```
+```text
 host    bsl_search    vault_pg_admin    0.0.0.0/0    scram-sha-256
 host    bsl_search    all               0.0.0.0/0    scram-sha-256
 ```
 
-For production, restrict `0.0.0.0/0` to specific networks:
-
-```
-host    bsl_search    vault_pg_admin    10.173.42.0/24    scram-sha-256
-host    bsl_search    all               10.173.42.0/24    scram-sha-256
-```
+Для production ограничьте подсети вместо `0.0.0.0/0`.
 
 ```bash
 sudo systemctl reload postgresql@17-main
@@ -85,7 +81,7 @@ sudo systemctl reload postgresql@17-main
 
 ## Vault
 
-### Connection config
+### Конфигурация подключения
 
 ```bash
 vault write database/config/bsl-search \
@@ -98,7 +94,7 @@ vault write database/config/bsl-search \
 
 ### Writer role
 
-Used by CI pipelines and `bsl-analyzer sync-pg` for publishing.
+Используется CI и `sync-pg`:
 
 ```bash
 vault write database/roles/bsl-search-writer \
@@ -120,7 +116,7 @@ vault write database/roles/bsl-search-writer \
 
 ### Reader role
 
-Used by developer runtimes (MCP server) for search queries.
+Используется developer runtime:
 
 ```bash
 vault write database/roles/bsl-search-reader \
@@ -137,61 +133,22 @@ vault write database/roles/bsl-search-reader \
     DROP ROLE IF EXISTS \"{{name}}\";"
 ```
 
-### Vault policy for credential helper
+## Почему в revoke используется `SET ROLE`
 
-Minimal policy for `rtools credential-helper bsl-search`:
+`vault_pg_admin` не является `SUPERUSER`, поэтому revoke должен выполняться от
+того grantor'а, который выдавал права. Иначе `ALTER DEFAULT PRIVILEGES ... REVOKE`
+будет падать по permission error.
 
-```hcl
-path "database/creds/bsl-search-writer" {
-  capabilities = ["read"]
-}
-path "database/creds/bsl-search-reader" {
-  capabilities = ["read"]
-}
-```
-
-## Revocation statements — why SET ROLE
-
-`vault_pg_admin` is CREATEROLE but not SUPERUSER. Dynamic role grants are
-issued by `vault_pg_admin` (it's the connection user). When Vault revokes a
-lease, it needs to:
-
-1. Revoke default privileges — requires being the grantor (`vault_pg_admin`)
-2. Revoke schema/table privileges — requires being the grantor
-3. Drop the role — requires no remaining dependencies
-
-Without `SET ROLE vault_pg_admin` in revocation_statements, Vault executes
-revocation as the connection user directly, but PG checks the grantor for
-`ALTER DEFAULT PRIVILEGES ... REVOKE` and fails with permission errors.
-
-`REASSIGN OWNED BY` and `DROP OWNED BY` also fail because they require
-SUPERUSER or membership in the target role — which vault_pg_admin does not
-have for the dynamic roles it created.
-
-The solution: `SET ROLE vault_pg_admin` → revoke all grants → `RESET ROLE` →
-`DROP ROLE`.
-
-## Verification
-
-Full lifecycle test:
+## Проверка
 
 ```bash
-# 1. Generate credentials
+# 1. Получить временные креды
 vault read database/creds/bsl-search-writer
-# → username, password, lease_id
 
-# 2. Connect
+# 2. Подключиться и проверить права
 PGPASSWORD=<password> psql -h <PG_HOST> -U <username> -d bsl_search \
   -c "CREATE TABLE bsl_search.test_tbl (id int); DROP TABLE bsl_search.test_tbl;"
 
-# 3. Revoke
+# 3. Отозвать lease
 vault lease revoke <lease_id>
-
-# 4. Verify role is gone
-psql -U postgres -d bsl_search \
-  -c "SELECT rolname FROM pg_roles WHERE rolname LIKE 'v-root-%';"
-# → 0 rows
 ```
-
-If step 4 shows remaining roles, check that revocation_statements include
-`SET ROLE vault_pg_admin` and the correct `ALTER DEFAULT PRIVILEGES` revoke.

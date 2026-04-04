@@ -1,119 +1,52 @@
-# Reference Runtime
+# Рабочий контур для `reference`
 
-## Purpose
+## Что такое `reference`
 
-This document defines the runtime model for the shared `reference` corpus in
-the central PostgreSQL architecture.
+Профиль `reference` обслуживает общую документацию платформы. В отличие от
+workspace-поиска, ему не нужен overlay рабочей копии.
 
-Unlike workspace search, reference search does not need a per-project overlay.
-This makes it the simplest and safest first candidate for direct Postgres-first
-serving.
+Это делает `reference` самым простым случаем централизованного рабочего контура.
 
-## Current Implementation Status
+## Текущее поведение
 
-The current codebase only partially matches the target runtime:
+Сейчас `find_docs` и `search_docs` работают так:
 
-- `reference` snapshots can already be published to and loaded from PostgreSQL
-- `find_docs` can resolve a reference snapshot from PostgreSQL, materialize a
-  resolved view locally, and run lexical search against that local view
-- `search_docs` still executes against the local `SearchEngine`; it
-  receives an external baseline parameter but intentionally ignores it
-- direct PostgreSQL lexical and semantic serving for `reference` is still
-  target-state work
+1. если настроен внешний baseline, контур пытается взять активный snapshot;
+2. сначала выполняется прямой запрос к слою serving в PostgreSQL;
+3. если прямой serving недоступен, контур может перейти к resolved view или локальному резервному пути;
+4. если внешний baseline не настроен, используется локальный SQLite-контур.
 
-So today `reference` uses PostgreSQL as a shared snapshot source, but not yet
-as the direct search backend.
+## Полнотекстовый поиск (`find_docs`)
 
-## Why `reference` Is Simpler
+Порядок разрешения:
 
-The `reference` corpus differs from `workspace-code` in several important ways:
+1. прямой полнотекстовый поиск по внешнему baseline;
+2. резервный переход к resolved reference view;
+3. резервный переход к локальному SQLite FTS.
 
-- it is shared by all users
-- it is not tied to one developer branch
-- it does not depend on uncommitted local code changes
-- it does not require hidden/replaced/deleted path semantics
+Для `reference` это основной путь: если direct-query вернула пустой ответ,
+локальный stale-кэш не должен подменять его своими данными.
 
-Because of that, `reference` runtime should be fully centralized.
+## Семантический поиск (`search_docs`)
 
-## Runtime Inputs
+Порядок похожий:
 
-Reference runtime needs:
+1. прямой семантический поиск по внешнему baseline;
+2. резервный переход к локальному семантическому SQLite-контуру.
 
-- centralized PostgreSQL connection settings
-- corpus selection for `reference`
-- optional snapshot selection when a non-head snapshot is requested
-- semantic model selection for vector queries
+Семантический поиск требует настроенного embedder'а (`EMBEDDING_URL`).
 
-It does not require:
+## Что показывает `search(action=status)`
 
-- workspace root
-- local overlay state
-- branch policy for feature branches
+Для `reference` статус сообщает:
 
-## Target Runtime Flow
+- backend и schema внешнего baseline;
+- выбранный snapshot;
+- fingerprint и freshness локального кэша;
+- готовность resolved view;
+- доступность полнотекстовых и семантических источников.
 
-### `find_docs`
+## Почему `reference` — хороший кандидат для общего рабочего контура
 
-Target flow:
-
-1. resolve the active `reference` snapshot
-2. run lexical search directly in PostgreSQL
-3. return results without local merge
-
-### `search_docs`
-
-Target flow:
-
-1. resolve the active `reference` snapshot
-2. compute query embedding locally
-3. run semantic nearest-neighbor search directly in PostgreSQL via `pgvector`
-4. return results without local merge
-
-### `search(status)`
-
-Target flow:
-
-1. report backend as PostgreSQL
-2. report selected reference snapshot
-3. report snapshot freshness and metadata
-4. report semantic availability state
-
-## Expected Properties
-
-Once direct serving is implemented, reference runtime should have these
-properties:
-
-- no per-project reindexing
-- no local baseline hydration before search is usable
-- one canonical shared help corpus for all developers
-- one publication pipeline for platform help updates
-
-## Failure Modes
-
-### PostgreSQL unavailable
-
-Expected behavior:
-
-- reference search fails clearly
-- status response explains connection issue
-- fallback is used only if explicitly configured
-
-### Semantic unavailable
-
-Expected behavior:
-
-- `find_docs` remains available
-- `search_docs` reports semantic unavailability
-- status explains current degraded mode
-
-## Why This Is the First Migration Target
-
-Reference runtime is the best first Postgres-first serving target because:
-
-- it exercises centralized lexical serving
-- it exercises centralized vector serving
-- it does not require overlay merge
-- it is shared across all projects and therefore has immediate value
-
-A successful direct reference runtime validates the serving architecture before
-workspace merge complexity is introduced.
+У него нет overlay и branch policy на каждую рабочую копию, поэтому он даёт
+самую прямую пользу от централизованного хранения и обслуживания.

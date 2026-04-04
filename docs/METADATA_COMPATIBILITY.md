@@ -1,152 +1,100 @@
-# DiagnosticMetadata Compatibility Verification
+# Совместимость metadata диагностик
 
-This document describes the BSL Analyzer diagnostic metadata definitions and verification.
+Этот документ описывает текущее состояние metadata-слоя для диагностик в
+`ide-diagnostics` и то, что именно сейчас проверяется тестами.
 
-## Overview
+## Текущее состояние
 
-All 180 diagnostic metadata definitions are verified for correctness and consistency.
+На текущий момент в проекте:
 
-## Verification Status
+- **180 диагностик** в `DiagnosticCode`;
+- **180/180 диагностик** имеют metadata в `handlers::get_metadata()`;
+- **180/180 диагностик** имеют rule-документацию в `crates/ide-diagnostics/docs/ru` и `crates/ide-diagnostics/docs/en`.
 
-**180/180 diagnostics have metadata definitions (100%)**
+Это подтверждается локальными проверками и тестами в `crates/ide-diagnostics`.
 
-### Verified Diagnostic Categories
+## Что входит в metadata
 
-The following diagnostic categories have been verified for compatibility:
+Для каждой диагностики metadata-слой задаёт как минимум:
 
-#### DISABLED_BY_DEFAULT Diagnostics (11 total)
-- ✅ TernaryOperatorUsage
-- ✅ BadWords  
-- ✅ TooManyReturns
-- ✅ CodeAfterAsyncCall
-- ✅ DenyIncompleteValues
-- ✅ FieldsFromJoinsWithoutIsNull
-- ✅ FileSystemAccess
-- ✅ FunctionNameStartsWithGet
-- ✅ FunctionOutParameter
-- ✅ InternetAccess
-- ✅ MissingTempStorageDeletion
+- тип (`Error`, `Vulnerability`, `CodeSmell`, `SecurityHotspot`);
+- severity-уровень;
+- `minutes_to_fix`;
+- `activated_by_default`;
+- scope;
+- теги;
+- дополнительные признаки вроде `can_locate_on_project`.
 
-All 11 diagnostics have `activatedByDefault = false`.
+## Что проверяется автоматически
 
-#### Error Diagnostics
-- ✅ DataExchangeLoading (ERROR/CRITICAL, 5min)
-- ✅ SameMetadataObjectAndChildNames (ERROR/CRITICAL, 30min)
-- ✅ MetadataObjectNameLength (ERROR/MAJOR, 10min)
+Полезные точки проверки:
 
-#### Vulnerability Diagnostics
-- ✅ ExecuteExternalCode (VULNERABILITY/CRITICAL, 1min)
+- `crates/ide-diagnostics/src/handlers.rs` — тест `test_all_diagnostics_have_metadata()`;
+- `crates/ide-diagnostics/build.rs` — сборка списка документированных правил;
+- `crates/ide-diagnostics/src/docs.rs` — доступ к встроенной документации правил.
 
-#### Code Smell Diagnostics
-- ✅ UnusedLocalVariable (CODE_SMELL/MAJOR, 1min)
-- ✅ RedundantAccessToObject (CODE_SMELL/INFO, 1min)
-- ✅ LineLength (CODE_SMELL/MINOR, 1min)
+Практически это покрывает такие инварианты:
 
-## Metadata Mapping
+- у каждого `DiagnosticCode` есть metadata;
+- metadata не теряются при добавлении новых правил;
+- rule-документация в `docs/ru` и `docs/en` существует для всех кодов;
+- mapping severity и тегов остаётся согласованным.
 
-### Severity Levels
+## Mapping severity
 
-| Diagnostic Type           | Rust                         | LSP Severity |
-|---------------------------|------------------------------|--------------|
-| DiagnosticType.ERROR      | DiagnosticType::Error        | Error        |
-| DiagnosticType.VULNERABILITY | DiagnosticType::Vulnerability | Error     |
-| DiagnosticType.CODE_SMELL | DiagnosticType::CodeSmell    | Hint/Info/Warning |
-| DiagnosticType.SECURITY_HOTSPOT | DiagnosticType::SecurityHotspot | Warning |
+### Тип диагностики -> итоговая severity
 
-### LSP Severity Calculation
+| Тип диагностики | Итоговая LSP/Rust severity |
+|-----------------|----------------------------|
+| `Error` | error-подобная severity |
+| `Vulnerability` | error-подобная severity |
+| `CodeSmell` | hint / information / warning |
+| `SecurityHotspot` | warning |
 
-The Rust implementation uses the following severity calculation logic:
+### Как это трактуется в коде
 
-```rust
-DiagnosticType::CodeSmell => match severity {
-    Info => Severity::Hint,
-    Minor => Severity::Information,
-    Major | Critical | Blocker => Severity::Warning,
-},
-DiagnosticType::SecurityHotspot => Severity::Warning,
-DiagnosticType::Error | Vulnerability => match severity {
-    Blocker => Severity::Blocker,
-    Critical => Severity::Critical,
-    Major => Severity::Major,
-    Minor | Info => Severity::Error,
-},
-```
+`CodeSmell` может понижаться до `Hint` или `Information`, тогда как
+`Error`/`Vulnerability` остаются в error-классе severity.
 
-### Tags Mapping
+Это важно, потому что metadata влияет не только на описание правила, но и на то,
+как оно выглядит в LSP-клиенте и в экспортируемых форматах.
 
-All diagnostic tags are mapped to equivalent Rust enum variants:
+## Mapping тегов
 
-- STANDARD → Standard
-- BADPRACTICE → Badpractice
-- BRAINOVERLOAD → Brainoverload
-- CLUMSY → Clumsy
-- DESIGN → Design
-- ERROR → Error
-- LOCKINOS → Lockinos
-- PERFORMANCE → Performance
-- SQL → Sql
-- SUSPICIOUS → Suspicious
-- UNPREDICTABLE → Unpredictable
-- DEPRECATED → Deprecated
-- UNUSED → Unused
-- LOCALIZE → Localize
+Теги metadata сопоставляются внутренним enum-вариантам Rust, например:
 
-## Test Suite
+- `STANDARD` -> `Standard`
+- `BADPRACTICE` -> `Badpractice`
+- `BRAINOVERLOAD` -> `Brainoverload`
+- `PERFORMANCE` -> `Performance`
+- `SQL` -> `Sql`
+- `DEPRECATED` -> `Deprecated`
+- `UNUSED` -> `Unused`
 
-Run the comprehensive metadata test suite:
+## Что это даёт на практике
+
+Наличие полного metadata-слоя позволяет:
+
+- централизованно управлять severity и tags;
+- не дублировать эти значения в каждом handler'е;
+- надёжно экспортировать правила в внешние форматы;
+- поддерживать совместимость между LSP, CLI и rule-документацией.
+
+## Полезные команды
+
+Проверить metadata и связанные тесты:
 
 ```bash
-cargo test -p ide-diagnostics metadata_registry::tests
+cargo test -p ide-diagnostics metadata_tests -- --nocapture
 ```
 
-Test coverage:
-- All diagnostics have metadata (180/180)
-- ✅ LSP severity mapping
-- ✅ Tags coverage
-- ✅ activatedByDefault consistency
-- ✅ Scope consistency (Bsl vs All)
-- ✅ minutes_to_fix reasonable (1-60)
-- ✅ can_locate_on_project support
+Проверить встроенную документацию правил:
 
-## Recent Additions
+```bash
+cargo test -p ide-diagnostics docs::tests -- --nocapture
+```
 
-The following 5 diagnostics were recently added to achieve 100% coverage:
+## Итог
 
-1. **DataExchangeLoading** - Detects missing DataExchange.Load guard
-2. **ExecuteExternalCode** - Detects use of Execute() with external code
-3. **RedundantAccessToObject** - Detects redundant object property access
-4. **SameMetadataObjectAndChildNames** - Detects child names matching parent
-5. **UnusedLocalVariable** - Detects unused local variables
-
-All have complete metadata definitions.
-
-## Known Differences
-
-### ModuleType Variants
-
-The Rust implementation does not have `HTTPServiceModule` (not available in current 1C platform metadata). This diagnostic uses a subset of module types.
-
-**Affected diagnostic:** ExecuteExternalCode
-
-**Full module list:**
-- CommandModule
-- ExternalConnectionModule
-- FormModule
-- HTTPServiceModule ← not currently supported
-- ObjectModule
-- OrdinaryApplicationModule
-
-**Supported modules:**
-- CommandModule
-- ExternalConnectionModule
-- FormModule
-- ObjectModule
-- OrdinaryApplicationModule
-
-This is the only known difference and does not affect compatibility.
-
-## Status
-
-**100% Coverage Achieved**
-
-All 180 DiagnosticCode variants have complete metadata definitions.
+Сейчас metadata-слой можно считать полностью покрытым для всех существующих
+диагностик проекта: **180 кодов, 180 metadata-описаний, 180 документированных правил**.

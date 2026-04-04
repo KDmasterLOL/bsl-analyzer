@@ -1,80 +1,45 @@
-# Vision
+# Видение
 
-## Goal
+## Зачем нужен централизованный поиск
 
-Build a central search architecture where team-wide knowledge is stored once in
-PostgreSQL and served consistently to all developers, while local developer work
-still remains fast and immediately visible through overlay merge.
+Если каждый разработчик и каждый проект строит полностью локальный поисковый
+индекс, инфраструктура начинает дублировать почти одинаковые данные:
 
-## Product Direction
+- одну и ту же справку платформы;
+- одинаковые baseline-ветки вроде `vendor` и `develop`;
+- одни и те же эмбеддинги для неизменившихся фрагментов кода.
 
-The target user experience is:
+Централизованный поиск нужен для того, чтобы общую часть данных хранить и
+обслуживать один раз, а локальные изменения разработчика учитывать отдельно.
 
-- platform reference is indexed once and reused by everyone
-- shared code baselines such as `vendor` and `develop` are published centrally
-- feature branch developers do not need to publish their transient branch state
-  to get relevant search results
-- uncommitted local changes affect search immediately
-- search status is explainable and reflects baseline selection, branch support,
-  overlay state, and semantic availability
+## Целевая картина
 
-## What Success Looks Like
+Разработчик должен иметь возможность:
 
-A developer should be able to:
+1. открыть проект на своей ветке;
+2. сразу получить доступ к релевантному baseline;
+3. видеть локальные изменения в поиске без публикации каждого коммита;
+4. пользоваться общей справкой платформы без повторной индексации на каждой машине.
 
-1. open a project on a feature branch
-2. start MCP without waiting for a full local baseline rebuild
-3. search shared code from the correct baseline
-4. see local branch changes override baseline results immediately
-5. use one shared platform reference without per-project duplication
+Команда должна иметь возможность:
 
-A team should be able to:
+1. централизованно публиковать `reference`, `vendor`, `develop`;
+2. управлять retention и GC;
+3. наблюдать состояние snapshot'ов и политики выбора baseline;
+4. не переиндексировать одинаковые корпуса по кругу.
 
-1. publish `vendor`, `develop`, and `reference` centrally from CI
-2. control retention and visibility at snapshot level
-3. inspect baseline health and runtime behavior clearly
-4. avoid repeated reindexing of identical corpora on every machine
+## Главная ставка архитектуры
 
-## Main Architectural Bet
+Архитектурная ставка здесь простая:
 
-The key architectural bet is:
+- общие опубликованные данные хранятся в PostgreSQL;
+- текущее состояние рабочей копии живёт локально;
+- поиск работает не по «одной физической базе», а по логическому объединённому представлению.
 
-- centralized published content belongs in PostgreSQL
-- transient local development state belongs in a local overlay
-- the correct runtime abstraction is a merged logical search view, not one
-  physical index copied everywhere
+## Что не является целью
 
-## Why This Direction Matters
+Этот трек не пытается:
 
-Without this shift:
-
-- platform reference remains duplicated per project and per machine
-- startup cost continues to be dominated by local baseline hydration
-- centralized publication gives only partial value
-- corporate shared knowledge remains operationally fragmented
-
-With this shift:
-
-- shared search becomes an actual team service
-- local development remains fast and precise
-- runtime behavior aligns with real branch workflows such as
-  `vendor -> develop -> feature/*`
-
-## Non-Goals
-
-This architecture does not try to:
-
-- publish every developer branch state on every MCP startup
-- eliminate local runtime state completely
-- collapse baseline and overlay into one physical storage backend at any cost
-- optimize ranking quality before correctness and explainability are established
-
-## Guiding Principles
-
-1. Shared data should be stored once.
-2. Local changes should be visible immediately.
-3. Runtime behavior should be explainable through status and diagnostics.
-4. Branch workflow should be modeled explicitly, not implied accidentally by
-   storage shape.
-5. Architecture should optimize for long-term operational sanity, not only for
-   short-term implementation convenience.
+- публиковать каждую feature-ветку при каждом старте MCP;
+- полностью убрать локальное состояние рабочего контура;
+- свести baseline и overlay в одно физическое хранилище любой ценой.

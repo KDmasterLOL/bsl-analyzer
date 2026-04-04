@@ -1,6 +1,6 @@
 //! Diagnostics for bsl-analyzer.
 //!
-//! This crate implements all 181 diagnostics.
+//! This crate implements all 180 diagnostics.
 
 mod code;
 mod config;

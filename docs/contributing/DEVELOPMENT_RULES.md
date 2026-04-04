@@ -1,5 +1,15 @@
 # Правила разработки
 
+Этот документ описывает именно инженерные правила: как выбирать тип
+диагностики, как писать тесты, на что смотреть в производительности и как не
+ломать существующий пайплайн. За процесс контрибуции, Merge Request и релизы
+отвечают отдельные документы:
+
+- `CONTRIBUTING.md`
+- `docs/contributing/LOGGING.md`
+- `docs/contributing/VERSIONING.md`
+- `docs/contributing/SALSA_GUIDE.md`
+
 ## Архитектура диагностик
 
 ### Выбор типа диагностики
@@ -134,15 +144,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ### 3. Логирование
 
-```rust
-// ✅ tracing
-use tracing::{debug, info, warn};
-info!("parsing started");
-debug!(file_id = ?file_id, "processing");
-
-// ❌ Запрещено
-println!(); dbg!(); eprintln!();
-```
+- Для отладки и телеметрии используйте `tracing`.
+- Не используйте `println!`, `dbg!` и `eprintln!` как механизм штатного
+  логирования.
+- Соглашения по уровням, `span`, `BSL_LOG`, `BSL_PROFILE` и другим переменным
+  окружения описаны в `docs/contributing/LOGGING.md`.
 
 ### 4. Документация
 

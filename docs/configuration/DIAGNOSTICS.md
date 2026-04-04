@@ -1,700 +1,187 @@
-# Diagnostic Configuration Schema
+# Настройка диагностик
 
-## Overview
+Этот документ описывает только диагностики: общие флаги анализа, включение и
+отключение правил, а также параметры конкретных диагностических правил.
 
-bsl-analyzer uses the `bsl-analyzer.toml` configuration format.
+Общая структура `bsl-analyzer.toml`, секции `source`, `formatting`,
+`code_lens`, `extensions` и `search.baseline` описаны в
+`docs/configuration/PROJECT_CONFIGURATION.md`.
 
-Configuration file: `bsl-analyzer.toml` (placed in project root)
+## Базовая схема
 
----
+Все настройки диагностик живут в двух местах:
 
-## Complete Configuration Schema
+- `[diagnostics]` — общие флаги подсистемы;
+- `[diagnostics.parameters]` — включение, выключение и параметры отдельных правил.
 
-```json
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "BSL Language Server Configuration",
-  "type": "object",
-  "properties": {
-    "language": {
-      "description": "Interface language",
-      "type": "string",
-      "enum": ["ru", "en"],
-      "default": "ru"
-    },
-    "diagnostics": {
-      "description": "Diagnostic configuration",
-      "type": "object",
-      "properties": {
-        "computeTrigger": {
-          "description": "When to compute diagnostics",
-          "type": "string",
-          "enum": ["onSave", "onType"],
-          "default": "onSave"
-        },
-        "skipSupport": {
-          "description": "Skip support level",
-          "type": "string",
-          "enum": ["never", "withSupport", "withSupportLocked"],
-          "default": "never"
-        },
-        "mode": {
-          "description": "Diagnostic execution mode",
-          "type": "string",
-          "enum": ["on", "off", "only", "except"],
-          "default": "on"
-        },
-        "parameters": {
-          "description": "Diagnostic-specific parameters",
-          "type": "object",
-          "additionalProperties": true
-        }
-      }
-    },
-    "codeLens": {
-      "description": "Code lens configuration",
-      "type": "object",
-      "properties": {
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "cognitiveComplexity": {"type": "boolean", "default": false},
-            "cyclomaticComplexity": {"type": "boolean", "default": false}
-          }
-        }
-      }
-    },
-    "configurationRoot": {
-      "description": "Path to 1C configuration root (Configuration.xml)",
-      "type": "string"
-    }
-  }
-}
+Минимальный пример:
+
+```toml
+[diagnostics]
+ordinaryAppSupport = false
+dataflowMaxIterations = 10000
+
+[diagnostics.parameters]
+CommentedCode = false
+BadWords = true
+
+[diagnostics.parameters.CyclomaticComplexity]
+complexityThreshold = 20
 ```
 
----
+## Общие настройки `[diagnostics]`
 
-## Diagnostic Modes
+В этом разделе поддерживаются только подтверждённые кодом поля:
 
-### Mode: `on` (default)
-
-Run all diagnostics enabled by default.
-
-```json
-{
-  "diagnostics": {
-    "mode": "on"
-  }
-}
+```toml
+[diagnostics]
+ordinaryAppSupport = false
+dataflowMaxIterations = 10000
 ```
 
----
+Поддерживаемые ключи:
 
-### Mode: `off`
+- `ordinaryAppSupport` — учитывать проверки для обычных форм и обычного приложения;
+- `dataflowMaxIterations` — верхняя граница итераций для dataflow-анализа.
 
-Disable all diagnostics.
+Значение по умолчанию для `dataflowMaxIterations` — `10000`.
 
-```json
-{
-  "diagnostics": {
-    "mode": "off"
-  }
-}
+### `ordinaryAppSupport`
+
+```toml
+[diagnostics]
+ordinaryAppSupport = true
 ```
 
----
+Нужно только для части диагностик, которые учитывают поддержку обычного
+приложения в общих модулях.
 
-### Mode: `only`
+### `dataflowMaxIterations`
 
-Run **only** specified diagnostics.
-
-```json
-{
-  "diagnostics": {
-    "mode": "only",
-    "parameters": {
-      "LineLength": true,
-      "MethodSize": true,
-      "CyclomaticComplexity": {
-        "complexityThreshold": 15
-      }
-    }
-  }
-}
+```toml
+[diagnostics]
+dataflowMaxIterations = 20000
 ```
 
----
+Используется flow-sensitive диагностикой и влияет, например, на liveness и
+reaching definitions. Обычно значения по умолчанию достаточно; увеличивать его
+имеет смысл только для действительно тяжёлых методов со сложным CFG.
 
-### Mode: `except`
+## Настройка отдельных правил: `[diagnostics.parameters]`
 
-Run all diagnostics **except** specified ones.
+Для каждой диагностики поддерживаются три формы значения:
 
-```json
-{
-  "diagnostics": {
-    "mode": "except",
-    "parameters": {
-      "CommentedCode": false,
-      "MagicNumber": false
-    }
-  }
-}
+- `false` — отключить правило;
+- `true` — явно включить правило, которое по умолчанию выключено;
+- `{ ... }` — передать параметры конкретной диагностике.
+
+Пример:
+
+```toml
+[diagnostics.parameters]
+CommentedCode = false
+BadWords = true
+LineLength = { maxLineLength = 140 }
+MethodSize = { maxMethodSize = 250 }
 ```
 
----
+## Часто используемые параметры
 
-## Diagnostic Parameters
+Ниже перечислены параметры, которые подтверждены реализацией в
+`crates/ide-diagnostics/src/handlers/`.
 
-Each diagnostic can be:
-1. **Disabled:** Set to `false`
-2. **Enabled with defaults:** Set to `true` or omit
-3. **Configured:** Set to object with parameters
+| Диагностика | Параметр | Значение по умолчанию |
+|-------------|----------|-----------------------|
+| `LineLength` | `maxLineLength` | `120` |
+| `MethodSize` | `maxMethodSize` | `200` |
+| `CyclomaticComplexity` | `complexityThreshold` | `20` |
+| `CognitiveComplexity` | `complexityThreshold` | `15` |
+| `NestedStatements` | `maxAllowedLevel` | `4` |
+| `NumberOfParams` | `maxParamsCount` | `7` |
+| `NumberOfOptionalParams` | `maxOptionalParamsCount` | `3` |
+| `NumberOfValuesInStructureConstructor` | `maxValuesCount` | `3` |
+| `TooManyReturns` | `maxReturnsCount` | `3` |
+| `IfConditionComplexity` | `maxIfConditionComplexity` | `3` |
+| `MagicNumber` | `authorizedNumbers` | `-1,0,1` |
+| `MagicDate` | `authorizedDates` | встроенный набор разрешённых дат |
+| `BadWords` | `badWords` | пусто |
+| `CommentedCode` | `threshold` | `0.9` |
+| `ConsecutiveEmptyLines` | `allowedEmptyLinesCount` | `1` |
 
-### Disable Diagnostic
+Примеры:
 
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "MethodSize": false
-    }
-  }
-}
+```toml
+[diagnostics.parameters.LineLength]
+maxLineLength = 140
+
+[diagnostics.parameters.MethodSize]
+maxMethodSize = 250
+
+[diagnostics.parameters.CognitiveComplexity]
+complexityThreshold = 12
+
+[diagnostics.parameters.MagicNumber]
+authorizedNumbers = "-1,0,1,2,10,100"
+
+[diagnostics.parameters.BadWords]
+badWords = "хрень,костыль,тупой"
 ```
 
----
+## Как включать правила, выключенные по умолчанию
 
-### Configure Diagnostic
+Некоторые diagnostics не активны по умолчанию. Их можно явно включить через
+`true` или через объект параметров:
 
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "LineLength": {
-        "maxLineLength": 140
-      }
-    }
-  }
-}
+```toml
+[diagnostics.parameters]
+BadWords = true
+TooManyReturns = { maxReturnsCount = 5 }
 ```
 
----
+## Что больше неактуально
 
-## Global Analyzer Parameters
+Следующие вещи не стоит использовать в новой документации и в новых примерах:
 
-### dataflow_max_iterations
+- `validate-config` — такой команды в CLI нет;
+- `skipSupport`, `computeTrigger`, `mode`, `skip` — эти поля не поддерживаются
+  текущим TOML-конфигом проекта;
+- примеры, где JSON выступает как основной формат конфигурации.
 
-**Default:** 10000 iterations
+## Проверка diagnostic-конфига
 
-**Description:** Maximum iterations for dataflow analysis (liveness, reaching definitions, etc.).
-
-Controls convergence limit for dataflow algorithms used by diagnostics like `UnusedLocalVariable`.
-Increase this for extremely complex methods with deep nesting or many loops.
-Warning is logged if analysis exceeds this limit.
-
-**Configuration:**
-
-```json
-{
-  "diagnostics": {
-    "dataflow_max_iterations": 20000
-  }
-}
-```
-
-**When to increase:**
-- Methods with extremely deep nesting (>15 levels)
-- Methods with very many loops (>30 loops)
-- Highly complex control flow (many nested `Если`/`Пока`/`Для` combinations)
-- Warning message: `WARN Backward dataflow analysis exceeded max iterations: N iterations`
-
-**Note:** Higher values increase analysis time but improve accuracy for complex code. Default of 10000 handles most real-world code.
-
----
-
-## Common Diagnostic Parameters
-
-### LineLength
-
-**Default:** 120 characters
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "LineLength": {
-        "maxLineLength": 140
-      }
-    }
-  }
-}
-```
-
----
-
-### MethodSize
-
-**Default:** 200 lines
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "MethodSize": {
-        "maxMethodSize": 250
-      }
-    }
-  }
-}
-```
-
----
-
-### CyclomaticComplexity
-
-**Defaults:**
-- `complexityThreshold`: 20
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "CyclomaticComplexity": {
-        "complexityThreshold": 15
-      }
-    }
-  }
-}
-```
-
----
-
-### CognitiveComplexity
-
-**Default:** 15
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "CognitiveComplexity": {
-        "complexityThreshold": 12
-      }
-    }
-  }
-}
-```
-
----
-
-### NestedStatements
-
-**Default:** 4 levels
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "NestedStatements": {
-        "maxAllowedLevel": 5
-      }
-    }
-  }
-}
-```
-
----
-
-### NumberOfParams
-
-**Default:** 7 parameters
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "NumberOfParams": {
-        "maxParamsCount": 5
-      }
-    }
-  }
-}
-```
-
----
-
-### NumberOfOptionalParams
-
-**Default:** 3 parameters
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "NumberOfOptionalParams": {
-        "maxOptionalParamsCount": 2
-      }
-    }
-  }
-}
-```
-
----
-
-### NumberOfValuesInStructureConstructor
-
-**Default:** 3 values
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "NumberOfValuesInStructureConstructor": {
-        "maxValuesCount": 5
-      }
-    }
-  }
-}
-```
-
----
-
-### TooManyReturns
-
-**Default:** 3 returns
-**Enabled by default:** ❌ No
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "TooManyReturns": {
-        "maxReturnsCount": 5
-      }
-    }
-  }
-}
-```
-
----
-
-### IfConditionComplexity
-
-**Default:** 3 boolean operators
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "IfConditionComplexity": {
-        "maxIfConditionComplexity": 5
-      }
-    }
-  }
-}
-```
-
----
-
-### MagicNumber
-
-**Defaults:**
-- Allow: -1, 0, 1
-- Configurable authorized numbers
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "MagicNumber": {
-        "authorizedNumbers": "-1,0,1,2,10,100,1000"
-      }
-    }
-  }
-}
-```
-
----
-
-### MagicDate
-
-**Configurable authorized dates:**
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "MagicDate": {
-        "authorizedDates": "00010101,00010101000000"
-      }
-    }
-  }
-}
-```
-
----
-
-### BadWords
-
-**Enabled by default:** ❌ No
-**Requires word list:**
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "BadWords": {
-        "words": "хрень,дурацкий,тупой,костыль"
-      }
-    }
-  }
-}
-```
-
----
-
-### CommentedCode
-
-**Default threshold:** 0.9 (90% code confidence)
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "CommentedCode": {
-        "threshold": 0.85
-      }
-    }
-  }
-}
-```
-
----
-
-### ConsecutiveEmptyLines
-
-**Default:** 1 empty line allowed
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "ConsecutiveEmptyLines": {
-        "allowedEmptyLinesCount": 2
-      }
-    }
-  }
-}
-```
-
----
-
-### DuplicateStringLiteral
-
-**Defaults:**
-- `minLength`: 50 characters
-- `threshold`: 2 occurrences
-
-```json
-{
-  "diagnostics": {
-    "parameters": {
-      "DuplicateStringLiteral": {
-        "minLength": 100,
-        "threshold": 3
-      }
-    }
-  }
-}
-```
-
----
-
-## Complete Example Configuration
-
-```json
-{
-  "language": "en",
-  "configurationRoot": "src/cf",
-  "diagnostics": {
-    "computeTrigger": "onType",
-    "skipSupport": "withSupportLocked",
-    "mode": "on",
-    "parameters": {
-      // Disable specific diagnostics
-      "CommentedCode": false,
-      "MagicNumber": false,
-
-      // Configure thresholds
-      "LineLength": {
-        "maxLineLength": 140
-      },
-      "MethodSize": {
-        "maxMethodSize": 250
-      },
-      "CyclomaticComplexity": {
-        "complexityThreshold": 15
-      },
-      "CognitiveComplexity": {
-        "complexityThreshold": 12
-      },
-      "NestedStatements": {
-        "maxAllowedLevel": 5
-      },
-      "NumberOfParams": {
-        "maxParamsCount": 5
-      },
-      "IfConditionComplexity": {
-        "maxIfConditionComplexity": 4
-      },
-
-      // Enable disabled-by-default diagnostics
-      "BadWords": {
-        "words": "хрень,костыль,тупой"
-      },
-      "TooManyReturns": {
-        "maxReturnsCount": 4
-      }
-    }
-  },
-  "codeLens": {
-    "parameters": {
-      "cognitiveComplexity": true,
-      "cyclomaticComplexity": true
-    }
-  }
-}
-```
-
----
-
-## Environment-Specific Configurations
-
-### Development (Strict)
-
-```json
-{
-  "diagnostics": {
-    "mode": "on",
-    "parameters": {
-      "LineLength": {"maxLineLength": 120},
-      "MethodSize": {"maxMethodSize": 150},
-      "CyclomaticComplexity": {"complexityThreshold": 10},
-      "CognitiveComplexity": {"complexityThreshold": 10}
-    }
-  }
-}
-```
-
----
-
-### Legacy Code (Relaxed)
-
-```json
-{
-  "diagnostics": {
-    "mode": "except",
-    "parameters": {
-      "MagicNumber": false,
-      "CommentedCode": false,
-      "MethodSize": false,
-      "CyclomaticComplexity": false,
-      "CognitiveComplexity": false
-    }
-  }
-}
-```
-
----
-
-### Security Audit (Security Focus)
-
-```json
-{
-  "diagnostics": {
-    "mode": "only",
-    "parameters": {
-      "DisableSafeMode": true,
-      "ExecuteExternalCode": true,
-      "ExecuteExternalCodeInCommonModule": true,
-      "ExternalAppStarting": true,
-      "FileSystemAccess": true,
-      "InternetAccess": true,
-      "OSUsersMethod": true,
-      "PrivilegedModuleMethodCall": true,
-      "SetPermissionsForNewObjects": true,
-      "SetPrivilegedMode": true,
-      "UsingExternalCodeTools": true,
-      "UsingHardcodeNetworkAddress": true,
-      "UsingHardcodePath": true,
-      "UsingHardcodeSecretInformation": true,
-      "UseSystemInformation": true
-    }
-  }
-}
-```
-
----
-
-### Performance Audit (Performance Focus)
-
-```json
-{
-  "diagnostics": {
-    "mode": "only",
-    "parameters": {
-      "CreateQueryInCycle": true,
-      "DeletingCollectionItem": true,
-      "FieldsFromJoinsWithoutIsNull": true,
-      "FullOuterJoinQuery": true,
-      "JoinWithSubQuery": true,
-      "JoinWithVirtualTable": true,
-      "LogicalOrInJoinQuerySection": true,
-      "LogicalOrInTheWhereSectionOfQuery": true,
-      "MissingTempStorageDeletion": true,
-      "QueryNestedFieldsByDot": true,
-      "RefOveruse": true,
-      "SelectTopWithoutOrderBy": true,
-      "TransferringParametersBetweenClientAndServer": true,
-      "UsingFindElementByString": true,
-      "VirtualTableCallWithoutParameters": true
-    }
-  }
-}
-```
-
----
-
-## Configuration Discovery
-
-bsl-analyzer searches for `bsl-analyzer.toml` in this order:
-
-1. Current working directory
-2. Project root (git repository root)
-3. Parent directories (up to filesystem root)
-4. User home directory (`~/bsl-analyzer.toml`)
-
-**Recommendation:** Place in project root alongside `.git/`
-
----
-
-## Using existing configuration
-
-✅ **No changes required!** Existing `bsl-analyzer.toml` files work without modification.
-
----
-
-## Validation
-
-bsl-analyzer validates configuration on startup:
-
-- Unknown diagnostics → **Warning** (ignored)
-- Invalid parameters → **Error** (use defaults)
-- Invalid JSON → **Error** (use defaults)
-
-Run `bsl-analyzer validate-config` to check configuration:
+Надёжный способ проверить разбор конфигурации — `check-config`:
 
 ```bash
-bsl-analyzer validate-config bsl-analyzer.toml
+bsl-analyzer check-config --config ./bsl-analyzer.toml
 ```
 
+Команда печатает сводку по общим настройкам диагностик и показывает:
+
+- `ordinaryAppSupport`;
+- `dataflowMaxIterations`;
+- количество правил;
+- список отключённых, явно включённых и параметризованных диагностик.
+
+Для end-to-end проверки можно запустить анализ с явным конфигом:
+
+```bash
+bsl-analyzer analyze -s ./my-project -c ./bsl-analyzer.toml
+```
+
+## Совместимость с legacy JSON
+
+Legacy-формат всё ещё поддерживается. В нём используются camelCase-ключи:
+
+```json
+{
+  "diagnostics": {
+    "ordinaryAppSupport": false,
+    "dataflowMaxIterations": 10000,
+    "parameters": {
+      "LineLength": { "maxLineLength": 120 }
+    }
+  }
+}
+```
+
+Для новых проектов рекомендуется `bsl-analyzer.toml`.

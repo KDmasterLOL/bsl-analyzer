@@ -4,11 +4,11 @@
 
 ## Возможности
 
-- **180+ диагностик** качества кода BSL
+- **180 диагностик** качества кода BSL
 - **LSP** — поддержка Language Server Protocol для IDE
 - **MCP** — встроенный сервер Model Context Protocol для AI-агентов
 - **SonarQube** — отчёты SARIF, потоковый режим для крупных проектов
-- **Совместимость** с форматом конфигурации `bsl-analyzer.toml`
+- **Конфигурация проекта** через `bsl-analyzer.toml`
 - **Кроссплатформенность** — Linux, Windows, macOS (Apple Silicon)
 
 ## Установка
@@ -23,7 +23,7 @@ curl -fsSL https://dev.runsystems.ru/releases/static/install.sh | bash
 Или с указанием версии:
 
 ```bash
-curl -fsSL https://dev.runsystems.ru/releases/static/install.sh | bash -s -- --version 0.1.38
+curl -fsSL https://dev.runsystems.ru/releases/static/install.sh | bash -s -- --version <version>
 ```
 <!-- /INSTALL_URL -->
 
@@ -41,7 +41,7 @@ Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/downlo
 bsl-analyzer lsp
 ```
 
-### Анализ (SonarQube)
+### Анализ проекта
 
 ```bash
 # Консольный вывод
@@ -50,42 +50,67 @@ bsl-analyzer analyze -s ./my-project
 # SARIF-отчёт
 bsl-analyzer analyze -s ./my-project -r sarif -o ./reports
 
-# JSONL-вывод (для SonarQube)
+# JSONL-вывод
 bsl-analyzer analyze -s ./my-project --format=jsonl > report.jsonl
 ```
 
-### Интеграция с AI (MCP-сервер)
+### Интеграция с AI через MCP
 
-BSL Analyzer включает встроенный [MCP-сервер](https://modelcontextprotocol.io/) (Model Context Protocol), который позволяет AI-агентам (Claude, Cursor, Gemini, Codex) взаимодействовать с кодом 1С, справкой платформы, а также выполнять запросы и отладку.
+BSL Analyzer включает встроенный [MCP-сервер](https://modelcontextprotocol.io/) (Model Context Protocol), который позволяет AI-агентам работать с кодом 1С, справкой платформы, SDBL-запросами и отладкой.
 
-Самый простой способ подключить инструменты к вашим AI-агентам — выполнить автоустановку:
+Самый простой способ подключить инструменты к AI-клиентам — выполнить автоустановку:
 
 ```bash
-# Устанавливает глобальную справку (reference) и проектный скоуп (workspace)
+# Устанавливает global reference и project workspace
 bsl-analyzer mcp install \
   --target all \
   --preset recommended \
   --source-dir ./my-project
 ```
 
-Подробную информацию о ручном запуске, интеграции с 1С (HTTP-расширение), настройке семантического поиска и списках доступных инструментов читайте в документации:
+Подробности:
 
-- 📖 **[Инструкция по настройке MCP и профилей](docs/mcp/README.md)**
-- 🛠️ **[Инструменты AI и расширение для 1С (query, execute, debug)](docs/mcp/TOOLS_AND_EXTENSION.md)**
+- 📖 [Настройка MCP и профилей](docs/mcp/README.md)
+- 🛠️ [Инструменты AI и расширение для 1С](docs/mcp/TOOLS_AND_EXTENSION.md)
+
+## Куда идти дальше
+
+`README.md` остаётся короткой продуктовой точкой входа: установка, запуск и
+основные сценарии. Детальная навигация по документации собрана в
+`docs/README.md`.
+
+Быстрые ссылки:
+
+- [Карта документации](docs/README.md) — полный обзор пользовательских и внутренних документов
+- [Конфигурация проекта](docs/configuration/PROJECT_CONFIGURATION.md) — структура `bsl-analyzer.toml`
+- [Конфигурация диагностик](docs/configuration/DIAGNOSTICS.md) — параметры диагностических правил
+- [Настройка MCP](docs/mcp/README.md) — профили, `mcp install` и ручной запуск
+- [Архитектура](docs/architecture/ARCHITECTURE.md) — устройство анализатора и основные пайплайны
 
 ## Конфигурация
 
-Файл настройки проекта `bsl-analyzer.toml` располагается в корне проекта. Пример конфигурации диагностик:
+Основной файл настройки проекта — `bsl-analyzer.toml` в корне репозитория.
+
+Минимальный пример:
 
 ```toml
+[source]
+root = "src/cf"
+
 [diagnostics]
-skip = ["CommentedCode"]
+ordinaryAppSupport = false
+dataflowMaxIterations = 10000
+
+[diagnostics.parameters]
+CommentedCode = false
+BadWords = true
 
 [diagnostics.parameters.CyclomaticComplexity]
 complexityThreshold = 20
 ```
 
-> **Для продвинутых пользователей**: BSL Analyzer поддерживает централизованный распределённый индекс поиска на базе PostgreSQL, чтобы не индексировать крупные конфигурации локально. Подробнее об архитектуре и CLI-командах (`sync-pg`, `gc-pg`) читайте в разделе [Central Postgres Search](docs/central-postgres-search/).
+Общая структура файла описана в `docs/configuration/PROJECT_CONFIGURATION.md`,
+а параметры диагностических правил — в `docs/configuration/DIAGNOSTICS.md`.
 
 ## Сборка из исходников
 
@@ -97,12 +122,15 @@ cd bsl-analyzer
 cargo build --release
 ```
 
+Если вы планируете менять код проекта, процесс контрибуции и профильная
+документация для разработчиков собраны в `CONTRIBUTING.md` и `docs/README.md`.
+
 ## Производительность
 
 Сравнительный бенчмарк с [bsl-language-server](https://github.com/1c-syntax/bsl-language-server) на реальном проекте.
 
 **Тестовый проект:** Управление торговлей 11.5.22.134 (12 519 BSL-файлов, 500 MB кода)  
-**Конфигурация:** настройки по умолчанию, отключена только Typo. Без skipSupport.  
+**Конфигурация:** настройки по умолчанию, отключена только `Typo`, без дополнительных фильтров диагностик.  
 **Система:** AMD Ryzen 5 5600X (6 ядер / 12 потоков), 32 GB RAM, Linux 6.19, NVMe SSD
 
 | Метрика | bsl-language-server 0.28.5 | bsl-analyzer 0.1.111 | Разница |
@@ -112,24 +140,21 @@ cargo build --release
 | **Files/sec** | 94 | 263 | 2.8x пропускная способность |
 | **Диагностик** | 552 111 | 610 477 | На 11% больше точных диагностик |
 
-## Архитектура
+## Архитектура проекта
 
+```text
+bsl-analyzer (LSP/CLI/MCP)
+    └── ide
+        ├── ide-diagnostics
+        ├── ide-assists
+        └── ide-db
+            └── hir / hir-def / hir-ty
+                └── syntax / parser / lexer
 ```
-bsl-analyzer (LSP-сервер)
-    └── ide (API верхнего уровня)
-        ├── ide-diagnostics (180+ диагностик)
-        ├── ide-assists (Quick-fix действия)
-        └── ide-db (Salsa — инкрементальные вычисления)
-            └── hir (семантический анализ)
-                └── syntax (CST, Rowan)
-                    └── parser → lexer
-```
 
-Подробнее об архитектуре компилятора и пайплайнах читайте в [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md).
-
-## Участие в разработке
-
-Инструкции для разработчиков и правила приёма Pull Requests описаны в [CONTRIBUTING.md](CONTRIBUTING.md).
+Подробнее об архитектуре, Salsa, dataflow и centralized search — в
+`docs/architecture/ARCHITECTURE.md`, `docs/architecture/DATAFLOW.md` и
+`docs/central-postgres-search/README.md`.
 
 ## Благодарности
 
@@ -137,8 +162,8 @@ bsl-analyzer (LSP-сервер)
 
 - [bsl-language-server](https://github.com/1c-syntax/bsl-language-server) — статический анализатор BSL (Java, LGPL-3.0)
 - [1c-syntax](https://github.com/1c-syntax) — сообщество разработчиков инструментов для 1С
-- [RDT1C](https://github.com/Segate-ekb/1c_RDT) — «Инструменты разработчика» для 1С. Реализация интеграции с API 1С:Напарник (FIM completion, context/update) использована как референс для модуля `naparnik`.
+- [RDT1C](https://github.com/Segate-ekb/1c_RDT) — «Инструменты разработчика» для 1С; использован как референс для модуля `naparnik`
 
 ## Лицензия
 
-MIT или Apache-2.0, на выбор. См. [LICENSE-MIT](LICENSE-MIT) и [LICENSE-APACHE](LICENSE-APACHE).
+MIT или Apache-2.0, на выбор. См. `LICENSE-MIT` и `LICENSE-APACHE`.

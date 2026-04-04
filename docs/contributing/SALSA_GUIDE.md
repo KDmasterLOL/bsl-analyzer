@@ -1,86 +1,52 @@
-# Salsa Developer Guide
+# Руководство по Salsa для разработчиков
 
-**Version:** Salsa 0.25.2
-**Last Updated:** 2025-12-30
-**Status:** Production-ready
+**Версия:** Salsa 0.25.2  
+**Статус:** актуальная памятка для проекта
 
-This guide explains how to work with Salsa in bsl-analyzer for incremental computation and caching.
+Этот документ — практическое руководство по тому, как в `bsl-analyzer`
+используется Salsa для инкрементальных вычислений и кэширования.
 
-## Table of Contents
+## Что даёт Salsa проекту
 
-1. [What is Salsa?](#what-is-salsa)
-2. [Architecture Overview](#architecture-overview)
-3. [Working with Salsa Queries](#working-with-salsa-queries)
-4. [Adding New Queries](#adding-new-queries)
-5. [Durability Levels](#durability-levels)
-6. [LRU Configuration](#lru-configuration)
-7. [Testing Salsa Integration](#testing-salsa-integration)
-8. [Common Pitfalls](#common-pitfalls)
-9. [Performance Guidelines](#performance-guidelines)
+Salsa автоматически:
 
----
+- отслеживает зависимости между запросами;
+- кэширует вычисленные результаты;
+- инвалидирует только затронутые части графа запросов;
+- позволяет переиспользовать результаты между LSP, CLI и MCP.
 
-## What is Salsa?
+Для `bsl-analyzer` это особенно важно, потому что проект многоступенчатый:
+текст файла влияет на parsing, HIR, metadata, CFG, dataflow и на IDE-функции.
 
-Salsa is an **incremental computation framework** that automatically:
-- Tracks dependencies between queries
-- Caches computation results
-- Invalidates caches when inputs change
-- Enables parallel query execution
+## Как Salsa встроена в проект
 
-**Key Benefits:**
-- **Automatic invalidation**: No manual cache management
-- **Lazy evaluation**: Computes only when needed
-- **Memory bounds**: LRU eviction prevents unbounded growth
-- **Performance**: Cache hits are ~5-22 nanoseconds
+Упрощённая схема:
 
----
-
-## Architecture Overview
-
-### Current Salsa Integration
-
-```
-┌─────────────────────────────────────────────┐
-│         RootDatabaseImpl                    │
-│  (salsa::Storage<Self>)                     │
-├─────────────────────────────────────────────┤
-│  Salsa Inputs:                              │
-│  - FileTextInput                            │
-│  - SourceRootInput                          │
-│  - FileSourceRootInput                      │
-├─────────────────────────────────────────────┤
-│  Salsa Tracked Queries:                     │
-│  - parse_query (LRU=128) ✅                 │
-├─────────────────────────────────────────────┤
-│  Manual Caching (temporary):                │
-│  - item_tree (DashMap)                      │
-│  - module_data (DashMap)                    │
-│  - symbol_tree (DashMap)                    │
-└─────────────────────────────────────────────┘
+```text
+SourceDatabase (base-db)
+  ├─ file_text
+  ├─ source_root
+  └─ file_source_root
+        ↓
+DefDatabase / ide-db
+  ├─ parse
+  ├─ item_tree / module_data / module_bodies
+  ├─ metadata
+  ├─ CFG
+  ├─ reaching definitions / liveness
+  └─ IDE-facing queries
 ```
 
-### Traits Hierarchy
+Важно: проект давно использует Salsa не только для парсинга. На ней уже сидят
+синтаксис, HIR, metadata, часть dataflow и заметная часть IDE-операций.
 
-```rust
-salsa::Database
-    ↑
-SourceDatabase (#[salsa::db])
-    ↑
-RootQueryDb (#[salsa::db])
-    ↑
-DefDatabase
-    ↑
-RootDatabase
-```
+## Базовые понятия
 
----
+### Input'ы
 
-## Working with Salsa Queries
+Input-структуры представляют изменяемые входные данные.
 
-### Salsa Input Structs
-
-Input structs represent **mutable base data**:
+Пример:
 
 ```rust
 #[salsa::input(debug)]
@@ -89,29 +55,12 @@ pub struct FileTextInput {
 }
 ```
 
-**Key Points:**
-- Use `#[salsa::input(debug)]` for Debug support
-- Fields are accessed via generated getter methods
-- Changes trigger automatic invalidation
-- Inputs are Copy types (cheap to pass around)
+Когда input меняется, Salsa автоматически помечает зависимые запросы как
+устаревшие.
 
-**Usage:**
+### Tracked-функции
 
-```rust
-// Create input
-let input = FileTextInput::new(db, "Процедура Тест() КонецПроцедуры".to_string());
-
-// Access field
-let text = input.text(db);
-
-// Update field (triggers invalidation)
-use salsa::Setter;
-input.set_text(db).to("Новый текст".to_string());
-```
-
-### Salsa Tracked Functions
-
-Tracked functions are **cached derived queries**:
+Tracked-функции — это кэшируемые производные запросы.
 
 ```rust
 #[salsa::tracked(lru = 128)]
@@ -124,466 +73,151 @@ pub fn parse_query(
 }
 ```
 
-**Key Points:**
-- `lru = N`: Maximum cached results (128-512 recommended)
-- First parameter must be `&dyn salsa::Database` or trait marked `#[salsa::db]`
-- Value parameters must be Salsa types (inputs or tracked structs) or primitives
-- Return value is cached automatically
-- Invalidated when dependencies change
+Практические правила:
 
----
+- первый аргумент — база данных или `#[salsa::db]`-trait;
+- параметры должны быть Salsa-совместимыми типами;
+- возврат должен быть детерминированным для одинаковых входов;
+- дорогие результаты часто стоит оборачивать в `Arc`.
 
-## Adding New Queries
+## Как добавлять новый запрос
 
-### Step 1: Define Salsa Input (if needed)
+### 1. Определите источник данных
 
-If you're adding a new input source:
+Если запрос зависит от новых изменяемых входов, сначала создайте input.
 
 ```rust
-// In base-db/src/input.rs
-
 #[salsa::input(debug)]
-pub struct MyNewInput {
-    pub data: String,
+pub struct MyInput {
+    pub value: String,
 }
 ```
 
-### Step 2: Create Tracked Function
+### 2. Создайте tracked-запрос
 
 ```rust
-// In base-db/src/lib.rs or your crate
-
 #[salsa::tracked(lru = 256)]
 pub fn my_query(
     db: &dyn RootQueryDb,
-    input: MyNewInput,
+    input: MyInput,
 ) -> Arc<MyResult> {
-    let _span = tracing::info_span!("my_query").entered();
-
-    // Your computation here
-    let data = input.data(db);
-    let result = expensive_computation(&data);
-
-    Arc::new(result)
+    let value = input.value(db);
+    Arc::new(expensive_computation(&value))
 }
 ```
 
-### Step 3: Add Convenience Trait Method
-
-```rust
-pub trait MyDatabase: RootQueryDb {
-    fn my_result(&self, input: MyNewInput) -> Arc<MyResult>
-    where
-        Self: Sized,
-    {
-        my_query(self, input)
-    }
-}
-```
-
-**Why `where Self: Sized`?**
-Allows calling the method on concrete types while preventing calls on trait objects.
-
-### Step 4: Update Database Implementation
-
-```rust
-#[salsa::db]
-impl MyDatabase for RootDatabaseImpl {}
-```
-
-### Step 5: Add Tests
-
-```rust
-#[test]
-fn test_my_query_caching() {
-    let mut db = RootDatabaseImpl::new();
-    let input = MyNewInput::new(&db, "test".to_string());
-
-    // First call computes
-    let result1 = my_query(&db, input);
-
-    // Second call returns cached
-    let result2 = my_query(&db, input);
-
-    // Should be same Arc (pointer equality)
-    assert!(Arc::ptr_eq(&result1, &result2));
-}
-```
-
----
-
-## Durability Levels
-
-Durability tells Salsa how often data changes:
-
-```rust
-pub enum Durability {
-    LOW,     // Changes frequently (user code)
-    MEDIUM,  // Changes occasionally (dependencies) [not currently used]
-    HIGH,    // Rarely changes (libraries)
-}
-```
-
-### Using Durability
-
-**Automatic (Recommended):**
-
-```rust
-// Automatically detects based on source root
-files.set_file_text_smart(db, file_id, text);
-```
-
-**Explicit:**
-
-```rust
-// For library files
-files.set_file_text_with_durability(
-    db,
-    file_id,
-    text,
-    salsa::Durability::HIGH
-);
-
-// For user code
-files.set_file_text_with_durability(
-    db,
-    file_id,
-    text,
-    salsa::Durability::LOW
-);
-```
-
-**How it works:**
-
-```rust
-impl SourceRoot {
-    pub fn durability(&self) -> salsa::Durability {
-        if self.is_library {
-            salsa::Durability::HIGH  // External dependencies
-        } else {
-            salsa::Durability::LOW   // Project code
-        }
-    }
-}
-```
-
----
-
-## LRU Configuration
-
-LRU (Least Recently Used) prevents unbounded memory growth:
-
-### Current Configuration
-
-```rust
-parse_query:        LRU = 128   // Base parse results
-// Future:
-item_tree_query:    LRU = 256   // More expensive, keep more
-module_data_query:  LRU = 256
-symbol_tree_query:  LRU = 256
-```
-
-### Sizing Guidelines
-
-| Query Type | Complexity | LRU Size | Reason |
-|------------|-----------|----------|--------|
-| Parse | Low-Medium | 128 | Many files, frequent access |
-| Item Tree | Medium | 256 | More expensive to recompute |
-| Module Data | Low | 256 | Cheap but many files |
-| Symbol Tree | Medium | 256 | Lookup tables, reused often |
-
-### Tuning LRU
-
-```rust
-#[salsa::tracked(lru = 512)]  // Increase for expensive queries
-pub fn expensive_query(...) -> Result {
-    // Complex computation
-}
-
-#[salsa::tracked(lru = 64)]   // Decrease for cheap queries
-pub fn cheap_query(...) -> Result {
-    // Simple lookup
-}
-```
-
-**When to tune:**
-- Profiling shows excessive recomputation → Increase LRU
-- Memory pressure → Decrease LRU
-- Benchmark before and after changes
+### 3. Дайте удобную обёртку на уровне trait/database
 
----
+Это делает API проекта понятнее и позволяет скрыть детали wiring'а.
 
-## Testing Salsa Integration
+### 4. Добавьте тест
 
-### Test Database Setup
+Минимально полезно проверить:
 
-```rust
-#[salsa::db]
-#[derive(Clone, Default)]
-struct TestDatabase {
-    storage: salsa::Storage<Self>,
-    files: Files,
-}
-
-#[salsa::db]
-impl salsa::Database for TestDatabase {}
-
-#[salsa::db]
-impl SourceDatabase for TestDatabase {
-    fn file_text_input(&self, file_id: FileId) -> FileTextInput {
-        self.files.file_text(file_id)
-    }
-    // ... other methods
-}
+- что запрос даёт корректный результат;
+- что при одинаковых входах результат переиспользуется;
+- что после изменения input происходит пересчёт.
 
-#[salsa::db]
-impl RootQueryDb for TestDatabase {
-    fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
-        let input = self.file_text_input(file_id);
-        parse_query(self, input)
-    }
-}
-```
-
-**Important:**
-- Must derive `Clone` (not `Debug` - salsa::Storage doesn't implement Debug)
-- Must implement `salsa::Database`
-- All trait impls need `#[salsa::db]` marker
-
-### Testing Cache Invalidation
-
-```rust
-#[test]
-fn test_incremental_invalidation() {
-    let mut db = TestDatabase::default();
-    let file_id = FileId(0);
-
-    // Setup
-    setup_file(&mut db, file_id, "Процедура Тест1()");
-
-    // First parse
-    let parse1 = db.parse(file_id);
-    assert!(!parse1.has_errors());
-
-    // Change file
-    db.set_file_text(file_id, "Процедура Тест2()");
-
-    // Should reparse
-    let parse2 = db.parse(file_id);
-    assert!(!parse2.has_errors());
-
-    // Text should be different
-    assert_ne!(parse1.syntax_node().text(), parse2.syntax_node().text());
-}
-```
+## Durability в проекте
 
-### Benchmarking
+Проект использует разный уровень durability для разных source roots:
 
-```rust
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-
-fn bench_cache_hit(c: &mut Criterion) {
-    let db = setup_db(100);
-    let file_id = FileId(50);
-    let _ = db.parse(file_id);  // Prime cache
+- `HIGH` — библиотечные/редко меняющиеся данные;
+- `LOW` — обычный пользовательский код.
 
-    c.bench_function("cache_hit", |b| {
-        b.iter(|| {
-            let _ = db.parse(black_box(file_id));
-        });
-    });
-}
-```
+Это позволяет не пересчитывать лишнее при типичной разработке, когда меняется
+только рабочая конфигурация.
 
-See `crates/ide-db/benches/salsa_incremental.rs` for full examples.
+## LRU и размер кэшей
 
----
+Во многих tracked-запросах используются `lru = N`.
 
-## Common Pitfalls
+Зачем это нужно:
 
-### 1. Trait Object Size Error
+- не раздувать память бесконечно;
+- удерживать самые полезные результаты рядом;
+- сохранять баланс между latency и RAM.
 
-**Problem:**
-```rust
-error[E0277]: the size for values of type `Self` cannot be known at compilation time
-```
+Общее правило: если запрос дешёвый — большой кэш не нужен. Если запрос тяжёлый
+и многократно переиспользуется, LRU имеет смысл увеличивать, но только после
+замеров.
 
-**Cause:** Trying to call a method with `where Self: Sized` on a trait object.
+## Что важно для корректности
 
-**Solution:** Add `where Self: Sized` to the trait method:
+### Детерминизм
 
-```rust
-pub trait RootQueryDb: SourceDatabase {
-    fn parse(&self, file_id: FileId) -> Parse<SyntaxNode>
-    where
-        Self: Sized,  // Add this
-    {
-        let input = self.file_text_input(file_id);
-        parse_query(self, input)
-    }
-}
-```
+Одинаковый набор входов должен давать одинаковый результат.
 
-### 2. Salsa Type Parameters
-
-**Problem:**
-```rust
-error[E0277]: the trait bound `FileId: SalsaStructInDb` is not satisfied
-```
-
-**Cause:** Tracked functions require Salsa types (inputs/tracked structs) as value parameters.
+Избегайте внутри tracked-запросов:
 
-**Solution:** Use Salsa inputs instead of plain types:
-
-```rust
-// ❌ Wrong: FileId is not a Salsa type
-#[salsa::tracked(lru = 128)]
-pub fn my_query(db: &dyn salsa::Database, file_id: FileId) -> Result {
-    // ...
-}
-
-// ✅ Correct: Use FileTextInput
-#[salsa::tracked(lru = 128)]
-pub fn my_query(db: &dyn salsa::Database, input: FileTextInput) -> Result {
-    let file_id = /* extract from input */;
-    // ...
-}
-```
+- неупорядоченных `HashMap`/`HashSet`, если порядок влияет на результат;
+- чтения случайных внешних состояний без явного input;
+- обращения к системному времени или окружению без моделирования их как входов.
 
-### 3. Clone on Copy Types
+### Узкие зависимости
 
-**Problem:**
-```rust
-warning: using `clone` on type `FileTextInput` which implements the `Copy` trait
-```
+Не тащите в один запрос больше данных, чем реально нужно. Чем шире зависимость,
+тем чаще будет происходить лишняя инвалидизация.
 
-**Solution:** Use dereference instead:
+### Разделение фаз
 
-```rust
-// ❌ Wrong
-self.file_texts.get(&file_id).map(|e| e.value().clone())
+В проекте хорошо работает схема:
 
-// ✅ Correct
-self.file_texts.get(&file_id).map(|e| *e.value())
-```
+- сначала компактные структурные запросы;
+- потом более тяжёлые производные;
+- поверх них — IDE-операции и диагностики.
 
-### 4. Missing #[salsa::db] Markers
+Если склеить слишком много логики в один большой запрос, его сложнее кэшировать,
+отлаживать и переиспользовать.
 
-**Problem:**
-```rust
-error: cannot find method or associated constant `zalsa_register_downcaster`
-```
+## Типичные ошибки
 
-**Cause:** Missing `#[salsa::db]` attribute on trait or impl.
+### 1. Слишком «широкий» input
 
-**Solution:** Add markers to all database traits and impls:
+Если в input положить слишком большой и часто меняющийся объект, будут чаще
+инвалидироваться вообще все зависимые вычисления.
 
-```rust
-#[salsa::db]
-pub trait MyDatabase: SourceDatabase { }
+### 2. Лишние аллокации в tracked-запросах
 
-#[salsa::db]
-impl MyDatabase for RootDatabaseImpl { }
-```
+Если результат тяжёлый и переиспользуемый, лучше хранить `Arc<T>`, а не каждый
+раз возвращать большой объект по значению.
 
----
+### 3. Скрытые внешние зависимости
 
-## Performance Guidelines
+Если запрос читает файл, переменную окружения или глобальное состояние в обход
+модели input'ов, кэш может стать некорректным.
 
-### Benchmark Results (Reference)
+### 4. Плохая граница ответственности
 
-From `docs/planning/PHASE3_BENCHMARKS.md`:
+Не стоит смешивать в одном запросе:
 
-```
-Operation               Time        Notes
-─────────────────────────────────────────────
-Cache hit               21.8 ns     Arc clone cost
-Incremental update      1.96 μs     Small files
-Item tree cache hit     4.79 ns     DashMap + Arc
-Large file set (200)    4.14 μs     LRU eviction
-```
+- построение структуры данных;
+- побочные эффекты;
+- форматирование вывода наружу.
 
-### Optimization Tips
+## Где смотреть примеры в проекте
 
-1. **Use LRU appropriately**
-   - More expensive queries → larger LRU
-   - Frequently accessed → larger LRU
-   - Memory constrained → smaller LRU
+Полезные точки входа:
 
-2. **Batch operations**
-   ```rust
-   // ❌ Bad: Multiple DB accesses
-   for file_id in files {
-       db.parse(file_id);  // Separate Salsa calls
-   }
+- `crates/base-db/` — базовые input'ы и source roots;
+- `crates/hir-def/` — структурные запросы и семантические производные;
+- `crates/ide-db/` — запросы, которые используются IDE-слоем;
+- `crates/dataflow/` — пример тяжёлых производных вычислений поверх CFG.
 
-   // ✅ Better: Collect inputs first
-   let inputs: Vec<_> = files.iter()
-       .map(|&file_id| db.file_text_input(file_id))
-       .collect();
+## Когда нужен новый Salsa-запрос, а когда нет
 
-   for input in inputs {
-       parse_query(&db, input);  // Salsa can parallelize
-   }
-   ```
+Добавляйте новый запрос, если результат:
 
-3. **Use durability wisely**
-   - Set HIGH for library files
-   - Set LOW for actively edited code
-   - Salsa optimizes based on durability
+- дорогой в вычислении;
+- переиспользуется несколькими подсистемами;
+- естественно зависит от уже существующих Salsa-входов;
+- выигрывает от инкрементальности.
 
-4. **Profile before optimizing**
-   ```bash
-   BSL_PROFILE=* cargo run
-   cargo bench --bench salsa_incremental
-   ```
+Необязательно выносить в Salsa всё подряд. Если операция дёшево считается один
+раз и нигде больше не нужна, обычная функция может быть лучше.
 
----
+## Что почитать дальше
 
-## Future Work
-
-### DefDatabase Salsa Migration
-
-**Current State:** Manual DashMap caching with `invalidate_file()`
-
-**Target:** Full Salsa tracked functions
-
-**Blocker:** `FileId` and `ModuleId` are plain structs, not Salsa types
-
-**Options:**
-1. Create Salsa input wrappers for FileId/ModuleId
-2. Convert to Salsa tracked structs
-3. Use different architectural pattern
-
-**Timeline:** Iteration 10+ (future)
-
----
-
-## Resources
-
-### Documentation
-- Official Salsa Book: https://salsa-rs.github.io/salsa/
-- Salsa crate documentation: https://docs.rs/salsa/latest/salsa/
-
-### BSL-Analyzer Files
-- Base-DB: `crates/base-db/src/lib.rs` (parse_query implementation)
-- IDE-DB: `crates/ide-db/src/lib.rs` (RootDatabaseImpl)
-- Benchmarks: `crates/ide-db/benches/salsa_incremental.rs`
-- Results: `docs/planning/PHASE3_BENCHMARKS.md`
-
-### Performance
-- Benchmark Results: `docs/planning/PHASE3_BENCHMARKS.md`
-- Salsa TODO: `docs/planning/SALSA_TODO.md`
-- Architecture: `docs/architecture/ARCHITECTURE.md`
-
----
-
-## Questions?
-
-If you encounter issues:
-1. Check this guide's [Common Pitfalls](#common-pitfalls) section
-2. Review existing tests in `crates/base-db/` and `crates/ide-db/`
-3. Run benchmarks to verify performance
-4. Consult Salsa documentation and examples
-
-**Remember:** Salsa is production-ready in bsl-analyzer with excellent performance (100-25,000x better than targets). Focus on correctness first, profile before optimizing!
+- `docs/architecture/ARCHITECTURE.md` — как Salsa вписана в общую архитектуру
+- `docs/architecture/DATAFLOW.md` — пример подсистемы, которая активно использует кэшируемые вычисления
+- `docs/contributing/DEVELOPMENT_RULES.md` — общие правила разработки и тестирования
