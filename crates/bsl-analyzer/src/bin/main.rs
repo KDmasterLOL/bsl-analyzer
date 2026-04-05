@@ -1469,13 +1469,14 @@ fn resolve_snapshot_id(
         commit.filter(|value| !value.trim().is_empty()),
     ) {
         (Some(branch), Some(commit)) => Ok(format!("{prefix}:{branch}@{commit}")),
+        (Some(branch), None) => Ok(format!("{prefix}:{branch}")),
         (None, Some(commit)) => Ok(format!("{prefix}:{commit}")),
         _ if matches!(corpus, bsl_search::CorpusId::Reference) => {
             Ok(format!("reference:{}", env!("CARGO_PKG_VERSION")))
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--snapshot-id is required unless --commit is provided",
+            "--snapshot-id is required unless --branch or --commit is provided",
         )),
     }
 }
