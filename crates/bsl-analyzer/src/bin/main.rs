@@ -1611,6 +1611,7 @@ fn embedding_config_from_env() -> Option<bsl_search::EmbedderConfig> {
         model,
         dim,
         api_key: env::var("EMBEDDING_API_KEY").ok(),
+        provider: env::var("EMBEDDING_PROVIDER").ok(),
     })
 }
 

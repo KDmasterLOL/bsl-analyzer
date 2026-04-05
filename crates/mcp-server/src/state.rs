@@ -389,6 +389,7 @@ impl SharedState {
                 model,
                 dim: Some(dim),
                 api_key: std::env::var("EMBEDDING_API_KEY").ok(),
+                provider: std::env::var("EMBEDDING_PROVIDER").ok(),
             },
             execution: bsl_search::EmbeddingExecutionPolicy {
                 batch_size: std::env::var("EMBEDDING_BATCH_SIZE")
