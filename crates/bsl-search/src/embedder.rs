@@ -138,10 +138,14 @@ impl Embedder {
             }
         };
 
-        let response: EmbeddingResponse = resp
+        let body = resp
             .body_mut()
-            .read_json()
-            .map_err(|e| SearchError::Embedder(format!("failed to parse response: {e}")))?;
+            .read_to_string()
+            .map_err(|e| SearchError::Embedder(format!("failed to read response body: {e}")))?;
+        let response: EmbeddingResponse = serde_json::from_str(&body).map_err(|e| {
+            let preview = if body.len() > 200 { &body[..200] } else { &body };
+            SearchError::Embedder(format!("failed to parse response: {e}\n  body: {preview}"))
+        })?;
 
         // Sort by index to ensure correct ordering.
         let mut data = response.data;

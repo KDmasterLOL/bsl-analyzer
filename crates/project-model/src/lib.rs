@@ -847,6 +847,8 @@ struct TomlSearchPostgresConfig {
     url: Option<String>,
     #[serde(default)]
     credential_helper: Option<String>,
+    #[serde(default)]
+    credential_helper_windows: Option<String>,
 }
 
 fn default_toml_table() -> toml::Value {
@@ -871,6 +873,7 @@ pub struct PostgresCredentialConfig {
     pub url_command: Option<String>,
     pub url: Option<String>,
     pub credential_helper: Option<String>,
+    pub credential_helper_windows: Option<String>,
 }
 
 impl From<TomlConfig> for ProjectConfig {
@@ -882,7 +885,8 @@ impl From<TomlConfig> for ProjectConfig {
             || pg.url_env.is_some()
             || pg.url_file.is_some()
             || pg.url_command.is_some()
-            || pg.credential_helper.is_some();
+            || pg.credential_helper.is_some()
+            || pg.credential_helper_windows.is_some();
         let postgres_credentials = if has_any_pg_field {
             Some(PostgresCredentialConfig {
                 host: pg.host.clone(),
@@ -893,6 +897,7 @@ impl From<TomlConfig> for ProjectConfig {
                 url_command: pg.url_command.clone(),
                 url: pg.url.clone(),
                 credential_helper: pg.credential_helper.clone(),
+                credential_helper_windows: pg.credential_helper_windows.clone(),
             })
         } else {
             None
@@ -988,7 +993,12 @@ pub fn resolve_postgres_url(creds: &PostgresCredentialConfig, mode: &str) -> Opt
     // 5. host/port/dbname + credential_helper (custom protocol, not git-credential)
     if let (Some(ref host), Some(ref dbname)) = (&creds.host, &creds.dbname) {
         let port = creds.port.unwrap_or(5432);
-        if let Some(ref helper) = creds.credential_helper {
+        let helper_ref = if cfg!(windows) {
+            creds.credential_helper_windows.as_ref().or(creds.credential_helper.as_ref())
+        } else {
+            creds.credential_helper.as_ref()
+        };
+        if let Some(helper) = helper_ref {
             tracing::info!(command = helper, "executing credential_helper from config");
             match run_credential_helper(helper, host, port, dbname, mode) {
                 Ok((username, password)) => {
