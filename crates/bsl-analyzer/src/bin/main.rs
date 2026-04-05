@@ -3362,13 +3362,20 @@ mod tests {
     }
 
     #[test]
-    fn commit_or_snapshot_id_is_required() {
-        let error =
-            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, Some("main"), None).unwrap_err();
+    fn snapshot_id_from_branch_alone() {
+        let snapshot_id =
+            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, Some("main"), None).unwrap();
+
+        assert_eq!(snapshot_id, "workspace-code:main");
+    }
+
+    #[test]
+    fn snapshot_id_requires_branch_or_commit() {
+        let error = resolve_snapshot_id(&CorpusId::WorkspaceCode, None, None, None).unwrap_err();
 
         assert!(error
             .to_string()
-            .contains("--snapshot-id is required unless --commit is provided"));
+            .contains("--snapshot-id is required unless --branch or --commit is provided"));
     }
 
     #[test]
