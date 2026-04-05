@@ -898,7 +898,7 @@ impl PostgresBaselineAdapter {
             "INSERT INTO {} (
                 snapshot_id, collection, path, ordinal, symbol_name, kind,
                 line_start, line_end, model_id, dimension, embedding
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::vector)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::vector)",
             self.table("serving_semantic")
         );
 
