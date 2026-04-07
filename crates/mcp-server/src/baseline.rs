@@ -6,7 +6,7 @@ use bsl_search::{
 };
 use project_model::{
     current_git_branch, evaluate_workspace_baseline_support_now, parse_timestamp_utc,
-    resolve_postgres_url, resolve_workspace_branch_policy, PostgresCredentialConfig, ProjectConfig,
+    resolve_postgres_url, resolve_workspace_branch_policy, PostgresAccessMode, ProjectConfig,
     ResolvedWorkspaceBaselineSupport, SearchBaselineBackend, SearchBaselineConfig,
     SearchBaselinePolicyConfig, SearchBaselineSupportState, SearchBaselineTargetConfig,
     SearchPostgresConfig,
@@ -15,7 +15,10 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineResolutionSummary {
@@ -41,7 +44,7 @@ pub(crate) struct BaselineSnapshotDocuments {
 #[derive(Debug, Clone)]
 pub(crate) struct BaselineRuntime {
     pub configured_baseline: ConfiguredBaselineStatus,
-    pub external_baseline: Option<Arc<ExternalBaselineSource>>,
+    pub external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
 }
 
 impl BaselineRuntime {
@@ -50,9 +53,7 @@ impl BaselineRuntime {
             CorpusId::WorkspaceCode,
             project_root,
             Some(&project_config.search.baseline),
-            project_config.postgres_credentials.as_ref(),
             "BSL_SEARCH_BASELINE",
-            &["BSL_SEARCH_BASELINE_PG_URL"],
             &["BSL_SEARCH_BASELINE_PG_SCHEMA"],
             false,
         )
@@ -63,9 +64,7 @@ impl BaselineRuntime {
             CorpusId::Reference,
             None,
             project_config.map(|config| &config.search.baseline),
-            project_config.and_then(|config| config.postgres_credentials.as_ref()),
             "BSL_SEARCH_REFERENCE",
-            &["BSL_SEARCH_REFERENCE_PG_URL", "BSL_SEARCH_BASELINE_PG_URL"],
             &["BSL_SEARCH_REFERENCE_PG_SCHEMA", "BSL_SEARCH_BASELINE_PG_SCHEMA"],
             project_config.is_none(),
         )
@@ -76,22 +75,13 @@ impl BaselineRuntime {
         corpus: CorpusId,
         project_root: Option<&Path>,
         project_config: Option<&SearchBaselineConfig>,
-        credentials: Option<&PostgresCredentialConfig>,
         selection_prefix: &str,
-        connection_keys: &[&str],
         schema_keys: &[&str],
         allow_env_backend_without_config: bool,
     ) -> Self {
         let configured_backend = project_config.map(|config| config.backend.clone());
-        let use_postgres = match configured_backend {
-            Some(SearchBaselineBackend::Postgres) => true,
-            Some(SearchBaselineBackend::Sqlite) => false,
-            None => {
-                allow_env_backend_without_config && resolve_env_value(connection_keys).is_some()
-            }
-        };
-
-        if !use_postgres {
+        let use_postgres = matches!(configured_backend, Some(SearchBaselineBackend::Postgres));
+        if !use_postgres && !allow_env_backend_without_config {
             return Self {
                 configured_baseline: ConfiguredBaselineStatus {
                     backend: "sqlite",
@@ -103,8 +93,6 @@ impl BaselineRuntime {
             };
         }
 
-        let default_postgres = SearchPostgresConfig::default();
-        let postgres = project_config.map(|config| &config.postgres).unwrap_or(&default_postgres);
         let default_target = SearchBaselineTargetConfig::default();
         let baseline_target = project_config
             .map(|config| match corpus {
@@ -123,34 +111,70 @@ impl BaselineRuntime {
             &explicit_baseline,
         );
 
-        let Some(connection) = resolve_connection(connection_keys, postgres, credentials) else {
+        let default_postgres = SearchPostgresConfig::default();
+        let postgres = project_config.map(|config| &config.postgres).unwrap_or(&default_postgres);
+
+        if !postgres.is_configured() {
+            if use_postgres {
+                return Self {
+                    configured_baseline: ConfiguredBaselineStatus {
+                        backend: "postgres",
+                        selection,
+                        issue: Some(
+                            "search.baseline.postgres is not configured; set host, dbname, schema, vault_role_base, and credential_helper.program"
+                                .to_owned(),
+                        ),
+                        support: None,
+                    },
+                    external_baseline: None,
+                };
+            }
+
             return Self {
                 configured_baseline: ConfiguredBaselineStatus {
-                    backend: "postgres",
-                    selection,
-                    issue: Some(format!(
-                        "connection string is not configured; set search.baseline.postgres.url or {}",
-                        connection_keys.join(", ")
-                    )),
+                    backend: "sqlite",
+                    selection: local_baseline_description(&corpus),
+                    issue: None,
                     support: None,
                 },
                 external_baseline: None,
             };
-        };
-
-        let mut config = ExternalBaselineConfig::postgres(connection);
-        if let Some(schema) = resolve_schema(schema_keys, postgres) {
-            config = config.with_schema(schema);
         }
 
-        match ExternalBaselineSource::new_with_candidates(config, baselines, selection.clone()) {
+        let connection = match resolve_postgres_url(postgres, PostgresAccessMode::Reader) {
+            Ok(resolved) => resolved.url,
+            Err(error) => {
+                return Self {
+                    configured_baseline: ConfiguredBaselineStatus {
+                        backend: "postgres",
+                        selection,
+                        issue: Some(format!(
+                            "failed to resolve PostgreSQL reader credentials: {error}"
+                        )),
+                        support: None,
+                    },
+                    external_baseline: None,
+                };
+            }
+        };
+
+        let schema = resolve_schema(schema_keys, postgres);
+
+        let context = RefreshContext {
+            postgres: postgres.clone(),
+            baselines: baselines.clone(),
+            selection: selection.clone(),
+            schema_keys: schema_keys.iter().map(|s| s.to_string()).collect(),
+        };
+
+        match RefreshableExternalBaselineSource::new(connection, schema.clone(), context) {
             Ok(source) => {
                 let support = if matches!(corpus, CorpusId::WorkspaceCode) {
                     resolve_workspace_support_status(project_root, &baseline_target.policy, &source)
                 } else {
                     None
                 };
-                tracing::info!(corpus = %corpus, "external baseline source configured");
+                tracing::info!(corpus = %corpus, "refreshable external baseline source configured");
                 Self {
                     configured_baseline: ConfiguredBaselineStatus {
                         backend: "postgres",
@@ -162,7 +186,7 @@ impl BaselineRuntime {
                 }
             }
             Err(error) => {
-                tracing::warn!(corpus = %corpus, "failed to configure external baseline source: {error}");
+                tracing::warn!(corpus = %corpus, "failed to configure refreshable external baseline source: {error}");
                 Self {
                     configured_baseline: ConfiguredBaselineStatus {
                         backend: "postgres",
@@ -200,6 +224,422 @@ pub(crate) struct ExternalBaselineSource {
     adapter: ExternalBaselineAdapter,
     baselines: Vec<BaselineRef>,
     selection: String,
+}
+
+/// Data needed to re-resolve a PostgreSQL credential URL.
+/// Stored inside `RefreshableExternalBaselineSource` so that on a retryable
+/// auth / connectivity failure we can invalidate the current reader and
+/// re-run `resolve_postgres_url` → rebuild the adapter / source once.
+#[derive(Debug)]
+struct RefreshContext {
+    postgres: SearchPostgresConfig,
+    baselines: Vec<BaselineRef>,
+    selection: String,
+    schema_keys: Vec<String>,
+}
+
+/// A wrapper around `ExternalBaselineSource` that can re-resolve
+/// credentials and rebuild the inner source once, on retryable
+/// PostgreSQL auth/connectivity errors.
+///
+/// On retryable failures the flow is:
+/// 1. Invalidate current reader.
+/// 2. Re-run `resolve_postgres_url(..., Reader)`.
+/// 3. Rebuild adapter + source.
+/// 4. Retry the original operation once.
+///
+/// Terminal errors (helper/config/protocol/target/storage/schema) are
+/// surfaced explicitly rather than silently falling back to sqlite.
+#[derive(Debug)]
+pub(crate) struct RefreshableExternalBaselineSource {
+    inner: StdRwLock<ExternalBaselineSource>,
+    context: RefreshContext,
+    refresh_generation: AtomicUsize,
+    refresh_lock: StdMutex<()>,
+}
+
+impl RefreshableExternalBaselineSource {
+    /// Build a new refreshable source from an already-resolved connection URL.
+    fn new(
+        connection_url: String,
+        schema: Option<String>,
+        context: RefreshContext,
+    ) -> Result<Self, bsl_search::SearchError> {
+        let mut config = ExternalBaselineConfig::postgres(connection_url);
+        if let Some(schema) = schema {
+            config = config.with_schema(schema);
+        }
+        let inner = StdRwLock::new(ExternalBaselineSource::new_with_candidates(
+            config,
+            context.baselines.clone(),
+            context.selection.clone(),
+        )?);
+        Ok(Self {
+            inner,
+            context,
+            refresh_generation: AtomicUsize::new(0),
+            refresh_lock: StdMutex::new(()),
+        })
+    }
+
+    /// Test constructor: builds a refreshable source directly from config and
+    /// baseline, without going through the full credential resolution chain.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        config: ExternalBaselineConfig,
+        baseline: BaselineRef,
+    ) -> Result<Self, bsl_search::SearchError> {
+        let selection = baseline_description(&baseline);
+        let inner = StdRwLock::new(ExternalBaselineSource::new_with_candidates(
+            config,
+            vec![baseline.clone()],
+            selection.clone(),
+        )?);
+        // Test-only default: refresh attempts are intentionally non-functional here
+        // and surface as `missing_config` unless the caller provides explicit
+        // refresh context via `for_test_with_refresh_context`.
+        let context = RefreshContext {
+            postgres: SearchPostgresConfig::default(),
+            baselines: vec![baseline],
+            selection,
+            schema_keys: vec![],
+        };
+        Ok(Self {
+            inner,
+            context,
+            refresh_generation: AtomicUsize::new(0),
+            refresh_lock: StdMutex::new(()),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_refresh_context(
+        config: ExternalBaselineConfig,
+        baseline: BaselineRef,
+        postgres: SearchPostgresConfig,
+    ) -> Result<Self, bsl_search::SearchError> {
+        let selection = baseline_description(&baseline);
+        let inner = StdRwLock::new(ExternalBaselineSource::new_with_candidates(
+            config,
+            vec![baseline.clone()],
+            selection.clone(),
+        )?);
+        let context =
+            RefreshContext { postgres, baselines: vec![baseline], selection, schema_keys: vec![] };
+        Ok(Self {
+            inner,
+            context,
+            refresh_generation: AtomicUsize::new(0),
+            refresh_lock: StdMutex::new(()),
+        })
+    }
+
+    /// Execute a fallible operation against the current inner source.
+    /// If the error is retryable, perform exactly one credential refresh
+    /// and retry. Any failure after the refresh is surfaced as terminal so
+    /// callers do not silently fall back to stale local SQLite data.
+    fn run_with_refresh<F, T>(&self, operation: F) -> Result<T, RefreshOrTerminalError>
+    where
+        F: Fn(&ExternalBaselineSource) -> Result<T, bsl_search::SearchError>,
+    {
+        // Fast path: try with current reader.
+        let first_error = {
+            let reader = self.inner.read().expect("baseline source lock poisoned");
+            match operation(&reader) {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    if !error.is_retryable() {
+                        return Err(RefreshOrTerminalError::Terminal(error));
+                    }
+                    error
+                }
+            }
+        };
+
+        // Refresh path: invalidate, re-resolve, rebuild, retry once.
+        let generation_before = self.refresh_generation.load(Ordering::Acquire);
+        let _refresh_guard = self.refresh_lock.lock().expect("baseline refresh lock poisoned");
+
+        if self.refresh_generation.load(Ordering::Acquire) != generation_before {
+            let reader = self.inner.read().expect("baseline source lock poisoned");
+            return match operation(&reader) {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    tracing::warn!(
+                        generation = generation_before,
+                        "refreshable external baseline source retry after concurrent refresh failed: {error}"
+                    );
+                    if error.is_retryable() {
+                        Err(RefreshOrTerminalError::Terminal(
+                            RefreshAttemptError::RetryExhausted { source: error }
+                                .into_search_error(),
+                        ))
+                    } else {
+                        Err(RefreshOrTerminalError::Terminal(error))
+                    }
+                }
+            };
+        }
+
+        match self.refresh_inner() {
+            Ok(()) => {
+                let reader = self.inner.read().expect("baseline source lock poisoned");
+                match operation(&reader) {
+                    Ok(value) => {
+                        tracing::info!(
+                            generation = generation_before,
+                            "refreshable external baseline source recovered after credential refresh"
+                        );
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            generation = generation_before,
+                            "refreshable external baseline source retry after refresh failed: {error}"
+                        );
+                        if error.is_retryable() {
+                            Err(RefreshOrTerminalError::Terminal(
+                                RefreshAttemptError::RetryExhausted { source: error }
+                                    .into_search_error(),
+                            ))
+                        } else {
+                            Err(RefreshOrTerminalError::Terminal(error))
+                        }
+                    }
+                }
+            }
+            Err(refresh_err) => {
+                tracing::warn!(
+                    generation = generation_before,
+                    first_error = %first_error,
+                    "refreshable external baseline source re-resolve failed: {refresh_err}"
+                );
+                Err(RefreshOrTerminalError::Terminal(refresh_err.into_search_error()))
+            }
+        }
+    }
+
+    /// Re-resolve credentials and replace the inner source.
+    fn refresh_inner(&self) -> Result<(), RefreshAttemptError> {
+        let resolved = resolve_postgres_url(&self.context.postgres, PostgresAccessMode::Reader)
+            .map_err(RefreshAttemptError::Resolve)?;
+        let schema = resolve_schema_vec(&self.context.schema_keys, &self.context.postgres);
+
+        let mut fresh_config = ExternalBaselineConfig::postgres(resolved.url);
+        if let Some(schema) = schema {
+            fresh_config = fresh_config.with_schema(schema);
+        }
+
+        let fresh_source = ExternalBaselineSource::new_with_candidates(
+            fresh_config,
+            self.context.baselines.clone(),
+            self.context.selection.clone(),
+        )
+        .map_err(RefreshAttemptError::Build)?;
+
+        {
+            let mut writer = self.inner.write().expect("baseline source lock poisoned");
+            *writer = fresh_source;
+        }
+
+        let old = self.refresh_generation.fetch_add(1, Ordering::SeqCst);
+        tracing::info!(
+            old_generation = old,
+            new_generation = old + 1,
+            "refreshable external baseline source credentials refreshed"
+        );
+
+        Ok(())
+    }
+
+    fn delegate<F, T>(&self, operation: F) -> Result<T, bsl_search::SearchError>
+    where
+        F: Fn(&ExternalBaselineSource) -> Result<T, bsl_search::SearchError>,
+    {
+        self.run_with_refresh(operation).map_err(|e| match e {
+            RefreshOrTerminalError::Terminal(err) => err,
+        })
+    }
+
+    pub(crate) fn lexical_search(
+        &self,
+        snapshot_id: &str,
+        query: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<bsl_search::LexicalHit>, bsl_search::SearchError> {
+        self.delegate(|source| source.lexical_search(snapshot_id, query, collection, limit))
+    }
+
+    pub(crate) fn semantic_search(
+        &self,
+        snapshot_id: &str,
+        query_embedding: &[f32],
+        model_id: &str,
+        dimension: usize,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<bsl_search::SemanticHit>, bsl_search::SearchError> {
+        self.delegate(|source| {
+            source.semantic_search(
+                snapshot_id,
+                query_embedding,
+                model_id,
+                dimension,
+                collection,
+                limit,
+            )
+        })
+    }
+
+    pub(crate) fn probe_status(&self) -> ExternalBaselineStatus {
+        let (backend, schema, selection) = {
+            let reader = self.inner.read().expect("baseline source lock poisoned");
+            let backend = match reader.adapter.config().backend {
+                ExternalBaselineBackend::Postgres => "postgres",
+            };
+            let schema =
+                reader.adapter.config().schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
+            (backend, schema, reader.selection.clone())
+        };
+
+        match self.run_with_refresh(|source| source.probe_status_result()) {
+            Ok(status) => status,
+            Err(RefreshOrTerminalError::Terminal(error)) => ExternalBaselineStatus {
+                backend,
+                schema,
+                selection,
+                resolved: None,
+                state: ExternalBaselineState::Error(error.to_string()),
+            },
+        }
+    }
+
+    pub(crate) fn resolve_workspace_view(
+        &self,
+        engine: &SearchEngine,
+    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
+        self.delegate(|source| source.resolve_workspace_view(engine))
+    }
+
+    pub(crate) fn resolve_reference_view(
+        &self,
+    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
+        self.delegate(|source| source.resolve_reference_view())
+    }
+
+    pub(crate) fn load_workspace_snapshot_documents(
+        &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
+    ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
+        self.delegate(|source| source.load_workspace_snapshot_documents(model_id, dimension))
+    }
+
+    pub(crate) fn load_reference_snapshot_documents(
+        &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
+    ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
+        self.delegate(|source| source.load_reference_snapshot_documents(model_id, dimension))
+    }
+
+    pub(crate) fn corpus(&self) -> CorpusId {
+        let reader = self.inner.read().expect("baseline source lock poisoned");
+        reader.corpus().clone()
+    }
+
+    /// Returns the snapshot details from the current source.
+    /// Used by `resolve_workspace_support_status` for branch policy validation.
+    pub(crate) fn snapshot_details(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<bsl_search::BaselineSnapshotDetails>, bsl_search::SearchError> {
+        self.delegate(|source| source.snapshot_details(snapshot_id))
+    }
+
+    pub(crate) fn local_reference_fingerprint(&self) -> Option<String> {
+        let reader = self.inner.read().expect("baseline source lock poisoned");
+        reader.local_reference_fingerprint()
+    }
+
+    pub(crate) fn resolve_snapshot(
+        &self,
+    ) -> Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError> {
+        self.delegate(|source| source.resolve_snapshot())
+    }
+
+    /// The current selection string (for diagnostics).
+    pub(crate) fn _selection(&self) -> String {
+        self.context.selection.clone()
+    }
+
+    pub(crate) fn _schema_for_status(&self) -> String {
+        let reader = self.inner.read().expect("baseline source lock poisoned");
+        reader.adapter.config().schema.clone().unwrap_or_else(|| "bsl_search".to_owned())
+    }
+}
+
+/// Result of a `run_with_refresh` execution.
+///
+/// - `Ok(T)`: operation succeeded (either on first attempt or after refresh).
+/// - `Terminal(SearchError)`: the underlying operation returned a terminal
+///   (non-retryable) error, or the retryable first failure still failed after
+///   a credential refresh attempt.
+enum RefreshOrTerminalError {
+    Terminal(bsl_search::SearchError),
+}
+
+/// Why a credential refresh attempt failed.
+/// These errors are always terminal from the caller's perspective:
+/// - `Resolve`: `project_model::ResolvePostgresUrlError` (helper / config / protocol / target).
+/// - `Build`: `SearchError` during adapter construction (typically storage / schema).
+#[derive(Debug)]
+enum RefreshAttemptError {
+    Resolve(project_model::ResolvePostgresUrlError),
+    Build(bsl_search::SearchError),
+    RetryExhausted { source: bsl_search::SearchError },
+}
+
+impl RefreshAttemptError {
+    fn into_search_error(self) -> bsl_search::SearchError {
+        match self {
+            Self::Resolve(error) => bsl_search::SearchError::ExternalBaseline(format!(
+                "{}: {error}",
+                resolve_reason_code(&error)
+            )),
+            Self::Build(error) => error,
+            Self::RetryExhausted { source } => bsl_search::SearchError::ExternalBaseline(format!(
+                "refresh_retry_exhausted: {source}"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for RefreshAttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolve(err) => write!(f, "resolve: {err}"),
+            Self::Build(err) => write!(f, "build: {err}"),
+            Self::RetryExhausted { source } => write!(f, "retry exhausted: {source}"),
+        }
+    }
+}
+
+fn resolve_reason_code(error: &project_model::ResolvePostgresUrlError) -> &'static str {
+    use project_model::ResolvePostgresUrlError;
+
+    match error {
+        ResolvePostgresUrlError::MissingField(_)
+        | ResolvePostgresUrlError::MissingCredentialHelper => "missing_config",
+        ResolvePostgresUrlError::HelperSpawn { .. } => "helper_spawn_failed",
+        ResolvePostgresUrlError::HelperTimeout { .. } => "helper_timeout",
+        ResolvePostgresUrlError::HelperProtocol { .. } => "helper_protocol_error",
+        ResolvePostgresUrlError::HelperRejected { .. } => "helper_rejected",
+        ResolvePostgresUrlError::UnsupportedUrlScheme(_)
+        | ResolvePostgresUrlError::InvalidResolvedUrl(_) => "helper_protocol_error",
+        ResolvePostgresUrlError::TargetMismatch { .. } => "resolved_target_mismatch",
+    }
 }
 
 impl ExternalBaselineSource {
@@ -250,7 +690,28 @@ impl ExternalBaselineSource {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn probe_status(&self) -> ExternalBaselineStatus {
+        match self.probe_status_result() {
+            Ok(status) => status,
+            Err(error) => ExternalBaselineStatus {
+                backend: match self.adapter.config().backend {
+                    ExternalBaselineBackend::Postgres => "postgres",
+                },
+                schema: self
+                    .adapter
+                    .config()
+                    .schema
+                    .clone()
+                    .unwrap_or_else(|| "bsl_search".to_owned()),
+                selection: self.selection.clone(),
+                resolved: None,
+                state: ExternalBaselineState::Error(error.to_string()),
+            },
+        }
+    }
+
+    fn probe_status_result(&self) -> Result<ExternalBaselineStatus, bsl_search::SearchError> {
         let backend = match self.adapter.config().backend {
             ExternalBaselineBackend::Postgres => "postgres",
         };
@@ -258,49 +719,39 @@ impl ExternalBaselineSource {
             self.adapter.config().schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
         let selection = self.selection.clone();
 
-        match self.resolve_snapshot() {
-            Ok(Some((resolved_baseline, snapshot))) => {
-                match self.adapter.load_snapshot_documents(&snapshot) {
-                    Ok(documents) => {
-                        let files: HashSet<&str> =
-                            documents.iter().map(|document| document.path.as_str()).collect();
-                        ExternalBaselineStatus {
-                            backend,
-                            schema,
-                            selection,
-                            resolved: Some(baseline_description(&resolved_baseline)),
-                            state: ExternalBaselineState::Ready {
-                                snapshot_id: snapshot.id.0,
-                                fingerprint: snapshot.fingerprint,
-                                documents: documents.len(),
-                                files: files.len(),
-                            },
-                        }
-                    }
-                    Err(error) => ExternalBaselineStatus {
-                        backend,
-                        schema,
-                        selection,
-                        resolved: Some(baseline_description(&resolved_baseline)),
-                        state: ExternalBaselineState::Error(error.to_string()),
+        match self.resolve_snapshot()? {
+            Some((resolved_baseline, snapshot)) => {
+                let documents = self.adapter.load_snapshot_documents(&snapshot)?;
+                let files: HashSet<&str> =
+                    documents.iter().map(|document| document.path.as_str()).collect();
+                Ok(ExternalBaselineStatus {
+                    backend,
+                    schema,
+                    selection,
+                    resolved: Some(baseline_description(&resolved_baseline)),
+                    state: ExternalBaselineState::Ready {
+                        snapshot_id: snapshot.id.0,
+                        fingerprint: snapshot.fingerprint,
+                        documents: documents.len(),
+                        files: files.len(),
                     },
-                }
+                })
             }
-            Ok(None) => ExternalBaselineStatus {
+            None => Ok(ExternalBaselineStatus {
                 backend,
                 schema,
                 selection,
                 resolved: None,
                 state: ExternalBaselineState::Missing,
-            },
-            Err(error) => ExternalBaselineStatus {
-                backend,
-                schema,
-                selection,
-                resolved: None,
-                state: ExternalBaselineState::Error(error.to_string()),
-            },
+            }),
         }
+    }
+
+    pub(crate) fn snapshot_details(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<bsl_search::BaselineSnapshotDetails>, bsl_search::SearchError> {
+        self.adapter.snapshot_details(snapshot_id)
     }
 
     pub(crate) fn resolve_workspace_view(
@@ -532,7 +983,7 @@ fn resolve_workspace_branch(project_root: Option<&Path>) -> Option<String> {
 fn resolve_workspace_support_status(
     project_root: Option<&Path>,
     policy: &SearchBaselinePolicyConfig,
-    source: &ExternalBaselineSource,
+    source: &RefreshableExternalBaselineSource,
 ) -> Option<ResolvedWorkspaceBaselineSupport> {
     if !policy.is_configured() {
         return None;
@@ -540,7 +991,7 @@ fn resolve_workspace_support_status(
 
     let workspace_branch = resolve_workspace_branch(project_root);
     let (resolved_baseline, snapshot) = source.resolve_snapshot().ok().flatten()?;
-    let details = source.adapter.snapshot_details(&snapshot.id.0).ok().flatten()?;
+    let details = source.snapshot_details(&snapshot.id.0).ok().flatten()?;
     let snapshot_created_at = parse_timestamp_utc(&details.snapshot.created_at);
     let selected_branch =
         resolved_baseline.branch.as_deref().or(details.snapshot.branch.as_deref());
@@ -553,29 +1004,21 @@ fn resolve_workspace_support_status(
     )
 }
 
-fn resolve_connection(
-    connection_keys: &[&str],
-    postgres: &SearchPostgresConfig,
-    credentials: Option<&PostgresCredentialConfig>,
-) -> Option<String> {
-    // Priority chain:
-    // 1. TOML credential resolver (url_env/url_file/url_command/url/credential_helper)
-    //    — authoritative when bsl-analyzer.toml is present. The resolver's own url_env
-    //    field typically points to the same BSL_SEARCH_BASELINE_PG_URL var, so there
-    //    is no loss of env-var control; the TOML just makes the var name explicit.
-    // 2. Hardcoded env vars (BSL_SEARCH_BASELINE_PG_URL etc.) — legacy fallback for
-    //    projects without bsl-analyzer.toml.
-    // 3. JSON config url (search.baseline.postgres.url) — lowest priority.
-    if let Some(creds) = credentials {
-        if let Some(url) = resolve_postgres_url(creds, "read") {
-            return Some(url);
-        }
-    }
-    resolve_env_value(connection_keys).or_else(|| postgres.url.clone())
+fn resolve_schema(schema_keys: &[&str], postgres: &SearchPostgresConfig) -> Option<String> {
+    resolve_env_value(schema_keys)
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| postgres.schema.clone())
 }
 
-fn resolve_schema(schema_keys: &[&str], postgres: &SearchPostgresConfig) -> Option<String> {
-    resolve_env_value(schema_keys).or_else(|| postgres.schema.clone())
+/// Re-reads the schema from env / config given stored `Vec<String>` keys.
+fn resolve_schema_vec(schema_keys: &[String], postgres: &SearchPostgresConfig) -> Option<String> {
+    resolve_env_value_from_vec(schema_keys)
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| postgres.schema.clone())
+}
+
+fn resolve_env_value_from_vec(keys: &[String]) -> Option<String> {
+    keys.iter().find_map(|key| env::var(key.as_str()).ok().filter(|value| !value.trim().is_empty()))
 }
 
 fn resolve_env_value(keys: &[&str]) -> Option<String> {
@@ -662,16 +1105,17 @@ fn platform_reference_documents() -> Vec<Document> {
 #[cfg(test)]
 mod tests {
     use super::{
-        baseline_description, resolve_project_baseline_diagnostics, BaselineConfigDiagnostics,
-        BaselineResolutionSummary, BaselineRuntime, ConfiguredBaselineStatus,
-        ExternalBaselineSource, ExternalBaselineState,
+        baseline_description, resolve_project_baseline_diagnostics, BaselineRuntime,
+        ConfiguredBaselineStatus, ExternalBaselineSource, ExternalBaselineState,
+        RefreshOrTerminalError, RefreshableExternalBaselineSource,
     };
-    use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig};
+    use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig, SearchError};
     use project_model::{
         ProjectConfig, SearchBaselineBackend, SearchBaselineConfig, SearchBaselineTargetConfig,
-        SearchConfig, SearchPostgresConfig,
+        SearchConfig, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
     };
     use std::fs;
+    use std::sync::atomic::Ordering;
     use tempfile::tempdir;
 
     #[test]
@@ -715,7 +1159,33 @@ mod tests {
     }
 
     #[test]
-    fn workspace_uses_postgres_config_selection() {
+    fn workspace_reports_error_when_postgres_backend_lacks_postgres_config() {
+        let runtime = BaselineRuntime::workspace(
+            None,
+            &ProjectConfig {
+                search: SearchConfig {
+                    baseline: SearchBaselineConfig {
+                        backend: SearchBaselineBackend::Postgres,
+                        ..SearchBaselineConfig::default()
+                    },
+                },
+                ..ProjectConfig::default()
+            },
+        );
+
+        assert_eq!(runtime.configured_baseline.backend, "postgres");
+        assert_eq!(runtime.configured_baseline.selection, "latest workspace-code");
+        assert_eq!(
+            runtime.configured_baseline.issue.as_deref(),
+            Some(
+                "search.baseline.postgres is not configured; set host, dbname, schema, vault_role_base, and credential_helper.program"
+            )
+        );
+        assert!(runtime.external_baseline.is_none());
+    }
+
+    #[test]
+    fn workspace_uses_postgres_when_helper_configured() {
         let runtime = BaselineRuntime::workspace(
             None,
             &ProjectConfig {
@@ -723,8 +1193,15 @@ mod tests {
                     baseline: SearchBaselineConfig {
                         backend: SearchBaselineBackend::Postgres,
                         postgres: SearchPostgresConfig {
-                            url: Some("postgres://shared-search".to_owned()),
+                            host: Some("pg-central.company.com".to_owned()),
+                            port: Some(5432),
+                            dbname: Some("bsl_search".to_owned()),
                             schema: Some("corp_search".to_owned()),
+                            vault_role_base: Some("prod/search/bsl-analyzer".to_owned()),
+                            credential_helper: SearchPostgresCredentialHelperConfig {
+                                program: Some("echo".to_owned()),
+                                args: vec![],
+                            },
                         },
                         workspace_code: SearchBaselineTargetConfig {
                             branch: Some("main".to_owned()),
@@ -737,20 +1214,33 @@ mod tests {
             },
         );
 
-        assert!(runtime.external_baseline.is_some());
+        // Helper returns non-postgres URL, so resolution fails; selection still computed
         assert_eq!(runtime.configured_baseline.backend, "postgres");
         assert_eq!(runtime.configured_baseline.selection, "branch main");
-        assert!(runtime.configured_baseline.issue.is_none());
+        // The echo helper returns an echo line back, which fails protocol validation
+        assert!(runtime.configured_baseline.issue.is_some());
+        assert!(runtime.external_baseline.is_none());
     }
 
     #[test]
-    fn workspace_reports_missing_postgres_connection() {
+    fn workspace_reports_missing_credential_helper() {
         let runtime = BaselineRuntime::workspace(
             None,
             &ProjectConfig {
                 search: SearchConfig {
                     baseline: SearchBaselineConfig {
                         backend: SearchBaselineBackend::Postgres,
+                        postgres: SearchPostgresConfig {
+                            host: Some("pg-central.company.com".to_owned()),
+                            dbname: Some("bsl_search".to_owned()),
+                            port: None,
+                            schema: Some("bsl_search".to_owned()),
+                            vault_role_base: Some("prod/search/bsl-analyzer".to_owned()),
+                            credential_helper: SearchPostgresCredentialHelperConfig {
+                                program: None,
+                                args: vec![],
+                            },
+                        },
                         workspace_code: SearchBaselineTargetConfig {
                             branch: Some("main".to_owned()),
                             ..SearchBaselineTargetConfig::default()
@@ -768,7 +1258,7 @@ mod tests {
             .configured_baseline
             .issue
             .as_deref()
-            .is_some_and(|issue| issue.contains("search.baseline.postgres.url")));
+            .is_some_and(|issue| issue.contains("credential_helper")));
         assert!(runtime.external_baseline.is_none());
     }
 
@@ -779,16 +1269,17 @@ mod tests {
         fs::create_dir_all(&git_dir).unwrap();
         fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/demo\n").unwrap();
 
+        // Build a postgres config; the helper will fail, but selection logic
+        // runs before the helper, so we can still verify the policy selection path.
+        let postgres_config = build_dummy_postgres_config();
+
         let runtime = BaselineRuntime::workspace(
             Some(dir.path()),
             &ProjectConfig {
                 search: SearchConfig {
                     baseline: SearchBaselineConfig {
                         backend: SearchBaselineBackend::Postgres,
-                        postgres: SearchPostgresConfig {
-                            url: Some("postgres://shared-search".to_owned()),
-                            schema: Some("corp_search".to_owned()),
-                        },
+                        postgres: postgres_config,
                         workspace_code: serde_json::from_value(serde_json::json!({
                             "policy": {
                                 "publishBranches": ["vendor", "develop"],
@@ -814,27 +1305,26 @@ mod tests {
             },
         );
 
-        assert!(runtime.external_baseline.is_some());
         assert_eq!(runtime.configured_baseline.backend, "postgres");
         assert_eq!(
             runtime.configured_baseline.selection,
             "workspace branch feature/demo -> branch develop -> branch vendor"
         );
-        assert!(runtime.configured_baseline.issue.is_none());
+        // Helper fails, so external_baseline is None but selection is still correct
+        assert!(runtime.external_baseline.is_none());
     }
 
     #[test]
     fn project_baseline_diagnostics_returns_workspace_and_reference_summaries() {
+        let postgres_config = build_dummy_postgres_config();
+
         let diagnostics = resolve_project_baseline_diagnostics(
             None,
             &ProjectConfig {
                 search: SearchConfig {
                     baseline: SearchBaselineConfig {
                         backend: SearchBaselineBackend::Postgres,
-                        postgres: SearchPostgresConfig {
-                            url: Some("postgres://shared-search".to_owned()),
-                            schema: Some("corp_search".to_owned()),
-                        },
+                        postgres: postgres_config,
                         workspace_code: SearchBaselineTargetConfig {
                             branch: Some("main".to_owned()),
                             ..SearchBaselineTargetConfig::default()
@@ -849,20 +1339,241 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            diagnostics,
-            BaselineConfigDiagnostics {
-                workspace: BaselineResolutionSummary {
-                    backend: "postgres".to_owned(),
-                    selection: "branch main".to_owned(),
-                    issue: None,
-                },
-                reference: BaselineResolutionSummary {
-                    backend: "postgres".to_owned(),
-                    selection: "snapshot reference:0.1.104".to_owned(),
-                    issue: None,
-                },
+        // Both workspace and reference are postgres-backed; helper will fail
+        // but diagnostics should still capture the backend and selection.
+        assert_eq!(diagnostics.workspace.backend, "postgres");
+        assert_eq!(diagnostics.workspace.selection, "branch main");
+        // Helper failure recorded as issue
+        assert!(diagnostics.workspace.issue.is_some());
+        assert_eq!(diagnostics.reference.backend, "postgres");
+        assert_eq!(diagnostics.reference.selection, "snapshot reference:0.1.104");
+        assert!(diagnostics.reference.issue.is_some());
+    }
+
+    /// Helper to construct a valid-but-dummy PostgresConfig for tests.
+    /// The helper program will fail protocol validation, but the config structure
+    /// is complete enough for selection logic.
+    fn build_dummy_postgres_config() -> SearchPostgresConfig {
+        SearchPostgresConfig {
+            host: Some("pg-central.company.com".to_owned()),
+            port: Some(5432),
+            dbname: Some("bsl_search".to_owned()),
+            schema: Some("corp_search".to_owned()),
+            vault_role_base: Some("prod/search/bsl-analyzer".to_owned()),
+            credential_helper: SearchPostgresCredentialHelperConfig {
+                program: Some("echo".to_owned()),
+                args: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn refreshable_source_constructs_from_test_config() {
+        let source = RefreshableExternalBaselineSource::for_test(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::WorkspaceCode,
+                snapshot_id: None,
+                branch: Some("main".to_owned()),
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        // corpus() must return without panicking even if the internal adapter
+        // cannot connect.
+        assert!(matches!(source.corpus(), CorpusId::WorkspaceCode));
+    }
+
+    #[test]
+    fn refreshable_source_probe_status_reports_connection_error() {
+        let source = RefreshableExternalBaselineSource::for_test(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::Reference,
+                snapshot_id: Some(bsl_search::SnapshotId::new("ref:0.1.0")),
+                branch: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let status = source.probe_status();
+        assert_eq!(status.backend, "postgres");
+        assert!(matches!(status.state, ExternalBaselineState::Error(_)));
+    }
+
+    #[test]
+    fn refreshable_source_probe_status_refreshes_retryable_failures() {
+        let postgres = SearchPostgresConfig {
+            host: Some("127.0.0.1".to_owned()),
+            port: Some(1),
+            dbname: Some("bsl_search".to_owned()),
+            schema: Some("bsl_search".to_owned()),
+            vault_role_base: Some("prod/search/bsl-analyzer".to_owned()),
+            credential_helper: SearchPostgresCredentialHelperConfig {
+                program: Some("python3".to_owned()),
+                args: vec![
+                    "-c".to_owned(),
+                    "import json; print(json.dumps({'protocol':'bsl-analyzer.postgres-helper.v1','ok':True,'url':'postgres://127.0.0.1:1/bsl_search'}))"
+                        .to_owned(),
+                ],
+            },
+        };
+        let source = RefreshableExternalBaselineSource::for_test_with_refresh_context(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1/bsl_search"),
+            BaselineRef {
+                corpus: CorpusId::Reference,
+                snapshot_id: Some(bsl_search::SnapshotId::new("ref:0.1.0")),
+                branch: None,
+                commit: None,
+            },
+            postgres,
+        )
+        .unwrap();
+
+        let generation_before = source.refresh_generation.load(Ordering::SeqCst);
+        let status = source.probe_status();
+
+        assert!(matches!(status.state, ExternalBaselineState::Error(_)));
+        assert_eq!(source.refresh_generation.load(Ordering::SeqCst), generation_before + 1);
+    }
+
+    #[test]
+    fn refreshable_source_terminal_error_does_not_trigger_refresh() {
+        let source = RefreshableExternalBaselineSource::for_test(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::WorkspaceCode,
+                snapshot_id: None,
+                branch: Some("main".to_owned()),
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let generation_before = source.refresh_generation.load(Ordering::SeqCst);
+        let result: Result<(), RefreshOrTerminalError> = source.run_with_refresh(|_| {
+            Err(SearchError::StorageNotInitialized { schema: "bsl_search".to_owned() })
+        });
+
+        assert!(matches!(
+            result,
+            Err(RefreshOrTerminalError::Terminal(SearchError::StorageNotInitialized { .. }))
+        ));
+        assert_eq!(source.refresh_generation.load(Ordering::SeqCst), generation_before);
+    }
+
+    #[test]
+    fn refreshable_source_retryable_error_refresh_failure_surfaces_missing_config() {
+        let source = RefreshableExternalBaselineSource::for_test(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::WorkspaceCode,
+                snapshot_id: None,
+                branch: Some("main".to_owned()),
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let generation_before = source.refresh_generation.load(Ordering::SeqCst);
+        let result: Result<(), RefreshOrTerminalError> = source.run_with_refresh(|_| {
+            Err(SearchError::from(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            )))
+        });
+
+        match result {
+            Err(RefreshOrTerminalError::Terminal(SearchError::ExternalBaseline(message))) => {
+                assert!(message.starts_with("missing_config:"), "unexpected message: {message}");
             }
+            Err(RefreshOrTerminalError::Terminal(other)) => {
+                panic!("expected missing_config terminal error, got {other}");
+            }
+            Ok(()) => panic!("expected refresh attempt to fail"),
+        }
+        assert_eq!(source.refresh_generation.load(Ordering::SeqCst), generation_before);
+    }
+
+    #[test]
+    fn refreshable_source_preserves_non_terminal_fallback_error_after_refresh() {
+        let postgres = SearchPostgresConfig {
+            host: Some("127.0.0.1".to_owned()),
+            port: Some(1),
+            dbname: Some("bsl_search".to_owned()),
+            schema: Some("bsl_search".to_owned()),
+            vault_role_base: Some("prod/search/bsl-analyzer".to_owned()),
+            credential_helper: SearchPostgresCredentialHelperConfig {
+                program: Some("python3".to_owned()),
+                args: vec![
+                    "-c".to_owned(),
+                    "import json; print(json.dumps({'protocol':'bsl-analyzer.postgres-helper.v1','ok':True,'url':'postgres://127.0.0.1:1/bsl_search'}))"
+                        .to_owned(),
+                ],
+            },
+        };
+        let source = RefreshableExternalBaselineSource::for_test_with_refresh_context(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1/bsl_search"),
+            BaselineRef {
+                corpus: CorpusId::Reference,
+                snapshot_id: Some(bsl_search::SnapshotId::new("ref:0.1.0")),
+                branch: None,
+                commit: None,
+            },
+            postgres,
+        )
+        .unwrap();
+
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result: Result<(), RefreshOrTerminalError> =
+            source.run_with_refresh(|_| match calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(SearchError::from(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "refused",
+                ))),
+                _ => Err(SearchError::ExternalBaseline(
+                    "serving_lexical_unavailable: serving_lexical is empty".to_owned(),
+                )),
+            });
+
+        match result {
+            Err(RefreshOrTerminalError::Terminal(SearchError::ExternalBaseline(message))) => {
+                assert!(
+                    message.starts_with("serving_lexical_unavailable:"),
+                    "unexpected message: {message}"
+                );
+            }
+            Err(RefreshOrTerminalError::Terminal(other)) => {
+                panic!("expected serving_lexical_unavailable error, got {other}");
+            }
+            Ok(()) => panic!("expected refresh attempt to surface fallback-worthy error"),
+        }
+    }
+
+    #[test]
+    fn refreshable_source_resolve_snapshot_returns_error_for_unreachable_host() {
+        let source = RefreshableExternalBaselineSource::for_test(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::Reference,
+                snapshot_id: Some(bsl_search::SnapshotId::new("nonexistent:0.1.0")),
+                branch: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let result = source.resolve_snapshot();
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("credential refresh")
+                || err_msg.contains("postgres")
+                || err_msg.contains("missing_config"),
+            "expected wrapper to surface error, got: {err_msg}"
         );
     }
 }

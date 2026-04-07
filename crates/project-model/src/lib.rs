@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A BSL project.
 #[derive(Debug, Clone)]
@@ -228,9 +228,6 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub search: SearchConfig,
-
-    #[serde(skip)]
-    pub postgres_credentials: Option<PostgresCredentialConfig>,
 }
 
 impl ProjectConfig {
@@ -434,10 +431,44 @@ pub enum SearchBaselineBackend {
 #[serde(rename_all = "camelCase")]
 pub struct SearchPostgresConfig {
     #[serde(default)]
-    pub url: Option<String>,
+    pub host: Option<String>,
+
+    #[serde(default)]
+    pub port: Option<u16>,
+
+    #[serde(default)]
+    pub dbname: Option<String>,
 
     #[serde(default)]
     pub schema: Option<String>,
+
+    #[serde(default)]
+    pub vault_role_base: Option<String>,
+
+    #[serde(default)]
+    pub credential_helper: SearchPostgresCredentialHelperConfig,
+}
+
+impl SearchPostgresConfig {
+    pub fn is_configured(&self) -> bool {
+        self.host.is_some()
+            || self.port.is_some()
+            || self.dbname.is_some()
+            || self.schema.is_some()
+            || self.vault_role_base.is_some()
+            || self.credential_helper.program.is_some()
+            || !self.credential_helper.args.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPostgresCredentialHelperConfig {
+    #[serde(default)]
+    pub program: Option<String>,
+
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -838,70 +869,27 @@ struct TomlSearchPostgresConfig {
     #[serde(default)]
     schema: Option<String>,
     #[serde(default)]
-    url_env: Option<String>,
+    vault_role_base: Option<String>,
     #[serde(default)]
-    url_file: Option<String>,
+    credential_helper: TomlSearchPostgresCredentialHelperConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct TomlSearchPostgresCredentialHelperConfig {
     #[serde(default)]
-    url_command: Option<String>,
+    program: Option<String>,
     #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    credential_helper: Option<String>,
-    #[serde(default)]
-    credential_helper_windows: Option<String>,
+    args: Vec<String>,
 }
 
 fn default_toml_table() -> toml::Value {
     toml::Value::Table(Default::default())
 }
 
-/// Credential resolution configuration for PostgreSQL connections.
-///
-/// Resolution priority:
-/// 1. `url_env` — read from named environment variable
-/// 2. `url_file` — read URL from file (tilde-expanded)
-/// 3. `url_command` — execute shell command, read stdout
-/// 4. `url` — plaintext URL
-/// 5. Build from `host`/`port`/`dbname` + `credential_helper`
-#[derive(Debug, Clone, Default)]
-pub struct PostgresCredentialConfig {
-    pub host: Option<String>,
-    pub port: Option<u16>,
-    pub dbname: Option<String>,
-    pub url_env: Option<String>,
-    pub url_file: Option<String>,
-    pub url_command: Option<String>,
-    pub url: Option<String>,
-    pub credential_helper: Option<String>,
-    pub credential_helper_windows: Option<String>,
-}
-
 impl From<TomlConfig> for ProjectConfig {
     fn from(toml: TomlConfig) -> Self {
         let diagnostics = toml_value_to_json(toml.diagnostics);
-        let pg = &toml.search.baseline.postgres;
-        let has_any_pg_field = pg.host.is_some()
-            || pg.url.is_some()
-            || pg.url_env.is_some()
-            || pg.url_file.is_some()
-            || pg.url_command.is_some()
-            || pg.credential_helper.is_some()
-            || pg.credential_helper_windows.is_some();
-        let postgres_credentials = if has_any_pg_field {
-            Some(PostgresCredentialConfig {
-                host: pg.host.clone(),
-                port: pg.port,
-                dbname: pg.dbname.clone(),
-                url_env: pg.url_env.clone(),
-                url_file: pg.url_file.clone(),
-                url_command: pg.url_command.clone(),
-                url: pg.url.clone(),
-                credential_helper: pg.credential_helper.clone(),
-                credential_helper_windows: pg.credential_helper_windows.clone(),
-            })
-        } else {
-            None
-        };
+        let pg = toml.search.baseline.postgres;
         Self {
             diagnostics,
             code_lens: toml.code_lens,
@@ -913,14 +901,20 @@ impl From<TomlConfig> for ProjectConfig {
                 baseline: SearchBaselineConfig {
                     backend: toml.search.baseline.backend,
                     postgres: SearchPostgresConfig {
-                        url: pg.url.clone(),
-                        schema: pg.schema.clone(),
+                        host: pg.host,
+                        port: pg.port,
+                        dbname: pg.dbname,
+                        schema: pg.schema,
+                        vault_role_base: pg.vault_role_base,
+                        credential_helper: SearchPostgresCredentialHelperConfig {
+                            program: pg.credential_helper.program,
+                            args: pg.credential_helper.args,
+                        },
                     },
                     workspace_code: toml.search.baseline.workspace_code,
                     reference: toml.search.baseline.reference,
                 },
             },
-            postgres_credentials,
         }
     }
 }
@@ -942,244 +936,400 @@ fn toml_value_to_json(value: toml::Value) -> serde_json::Value {
     }
 }
 
-/// Resolves a PostgreSQL connection URL using the credential resolver chain.
-///
-/// `mode` is passed to the credential helper: `"read"` for queries, `"write"` for publishing.
-pub fn resolve_postgres_url(creds: &PostgresCredentialConfig, mode: &str) -> Option<String> {
-    // 1. url_env
-    if let Some(ref key) = creds.url_env {
-        if let Ok(val) = std::env::var(key) {
-            let val = val.trim().to_owned();
-            if !val.is_empty() {
-                tracing::debug!(env_var = key, "resolved PG URL from url_env");
-                return Some(val);
-            }
-        }
-    }
-    // 2. url_file
-    if let Some(ref path) = creds.url_file {
-        let expanded = expand_tilde(path);
-        if let Ok(content) = std::fs::read_to_string(&expanded) {
-            let url = content.trim().to_owned();
-            if !url.is_empty() {
-                tracing::debug!(path = %expanded.display(), "resolved PG URL from url_file");
-                return Some(url);
-            }
-        }
-    }
-    // 3. url_command (executes shell — trust the config source)
-    if let Some(ref cmd) = creds.url_command {
-        tracing::info!(command = cmd, "executing url_command from config");
-        match run_command_with_timeout(cmd, COMMAND_TIMEOUT) {
-            Ok(url) if !url.is_empty() => {
-                tracing::debug!("resolved PG URL from url_command");
-                return Some(url);
-            }
-            Ok(_) => {
-                tracing::warn!(command = cmd, "url_command returned empty output");
-            }
-            Err(e) => {
-                tracing::warn!(command = cmd, error = %e, "url_command failed");
-            }
-        }
-    }
-    // 4. url (plaintext)
-    if let Some(ref url) = creds.url {
-        let url = url.trim();
-        if !url.is_empty() {
-            return Some(url.to_owned());
-        }
-    }
-    // 5. host/port/dbname + credential_helper (custom protocol, not git-credential)
-    if let (Some(ref host), Some(ref dbname)) = (&creds.host, &creds.dbname) {
-        let port = creds.port.unwrap_or(5432);
-        let helper_ref = if cfg!(windows) {
-            creds.credential_helper_windows.as_ref().or(creds.credential_helper.as_ref())
-        } else {
-            creds.credential_helper.as_ref()
-        };
-        if let Some(helper) = helper_ref {
-            tracing::info!(command = helper, "executing credential_helper from config");
-            match run_credential_helper(helper, host, port, dbname, mode) {
-                Ok((username, password)) => {
-                    let url = format!(
-                        "postgres://{}:{}@{}:{}/{}",
-                        percent_encode(&username),
-                        percent_encode(&password),
-                        host,
-                        port,
-                        dbname
-                    );
-                    tracing::debug!("resolved PG URL from credential_helper");
-                    return Some(url);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "credential_helper failed");
-                }
-            }
-        } else {
-            return Some(format!("postgres://{}:{}/{}", host, port, dbname));
-        }
-    }
-    None
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PostgresAccessMode {
+    Reader,
+    Writer,
+    Migrator,
 }
 
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
+impl PostgresAccessMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reader => "reader",
+            Self::Writer => "writer",
+            Self::Migrator => "migrator",
         }
     }
-    PathBuf::from(path)
 }
 
-fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => {
-                out.push_str(&format!("%{byte:02X}"));
-            }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPostgresUrl {
+    pub url: String,
+    pub lease_id: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub renewable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPostgresTarget {
+    pub host: String,
+    pub port: u16,
+    pub dbname: String,
+    pub schema: String,
+}
+
+impl SearchPostgresConfig {
+    pub fn resolved_target(&self) -> Result<ResolvedPostgresTarget, ResolvePostgresUrlError> {
+        let host = self
+            .host
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(ResolvePostgresUrlError::MissingField("search.baseline.postgres.host"))?
+            .to_owned();
+        let dbname = self
+            .dbname
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(ResolvePostgresUrlError::MissingField("search.baseline.postgres.dbname"))?
+            .to_owned();
+        let schema = self
+            .schema
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(ResolvePostgresUrlError::MissingField("search.baseline.postgres.schema"))?
+            .to_owned();
+        Ok(ResolvedPostgresTarget { host, port: self.port.unwrap_or(5432), dbname, schema })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvePostgresUrlError {
+    MissingField(&'static str),
+    MissingCredentialHelper,
+    HelperSpawn {
+        program: String,
+        message: String,
+    },
+    HelperTimeout {
+        program: String,
+        timeout: std::time::Duration,
+    },
+    HelperProtocol {
+        program: String,
+        message: String,
+        stderr: String,
+        stdout: String,
+    },
+    HelperRejected {
+        program: String,
+        exit_code: Option<i32>,
+        stderr: String,
+        error: CredentialHelperErrorPayload,
+    },
+    UnsupportedUrlScheme(String),
+    InvalidResolvedUrl(String),
+    TargetMismatch {
+        expected_host: String,
+        expected_port: u16,
+        expected_dbname: String,
+        actual_host: Option<String>,
+        actual_port: Option<u16>,
+        actual_dbname: String,
+    },
+}
+
+impl ResolvePostgresUrlError {
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::HelperTimeout { .. } => true,
+            Self::HelperRejected { error, .. } => error.retryable,
+            _ => false,
         }
     }
-    out
 }
 
-/// Timeout for external commands (`url_command`, `credential_helper`).
+impl std::fmt::Display for ResolvePostgresUrlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField(field) => write!(f, "missing required PostgreSQL config field: {field}"),
+            Self::MissingCredentialHelper => write!(
+                f,
+                "missing required PostgreSQL credential helper config: search.baseline.postgres.credential_helper.program"
+            ),
+            Self::HelperSpawn { program, message } => {
+                write!(f, "failed to spawn credential helper '{program}': {message}")
+            }
+            Self::HelperTimeout { program, timeout } => write!(
+                f,
+                "credential helper '{program}' timed out after {}s",
+                timeout.as_secs()
+            ),
+            Self::HelperProtocol { program, message, .. } => {
+                write!(f, "credential helper '{program}' returned an invalid response: {message}")
+            }
+            Self::HelperRejected { program, exit_code, error, .. } => {
+                write!(
+                    f,
+                    "credential helper '{program}' rejected the request{}: {}: {}",
+                    exit_code
+                        .map(|code| format!(" (exit {code})"))
+                        .unwrap_or_default(),
+                    error.code,
+                    error.message
+                )
+            }
+            Self::UnsupportedUrlScheme(scheme) => {
+                write!(f, "credential helper returned unsupported URL scheme '{scheme}'")
+            }
+            Self::InvalidResolvedUrl(message) => write!(f, "credential helper returned invalid URL: {message}"),
+            Self::TargetMismatch {
+                expected_host,
+                expected_port,
+                expected_dbname,
+                actual_host,
+                actual_port,
+                actual_dbname,
+            } => write!(
+                f,
+                "credential helper returned URL for unexpected target: expected {}:{}/{} but got {}:{}/{}",
+                expected_host,
+                expected_port,
+                expected_dbname,
+                actual_host.as_deref().unwrap_or("<missing-host>"),
+                actual_port.unwrap_or(5432),
+                actual_dbname
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolvePostgresUrlError {}
+
+#[derive(Debug, Clone, Serialize)]
+struct CredentialHelperRequest {
+    protocol: &'static str,
+    action: &'static str,
+    mode: PostgresAccessMode,
+    vault_role_base: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CredentialHelperResponse {
+    protocol: String,
+    ok: bool,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    lease_id: Option<String>,
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    renewable: bool,
+    #[serde(default)]
+    error: Option<CredentialHelperErrorPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CredentialHelperErrorPayload {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
+}
+
+const POSTGRES_HELPER_PROTOCOL: &str = "bsl-analyzer.postgres-helper.v1";
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Creates a shell command: `sh -c` on Unix, `cmd /c` on Windows.
-fn shell_command(command: &str) -> std::process::Command {
-    #[cfg(unix)]
-    {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", command]);
-        cmd
-    }
-    #[cfg(windows)]
-    {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/c", command]);
-        cmd
-    }
+pub fn resolve_postgres_url(
+    postgres: &SearchPostgresConfig,
+    mode: PostgresAccessMode,
+) -> Result<ResolvedPostgresUrl, ResolvePostgresUrlError> {
+    let target = postgres.resolved_target()?;
+    let vault_role_base = postgres
+        .vault_role_base
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(ResolvePostgresUrlError::MissingField("search.baseline.postgres.vault_role_base"))?
+        .to_owned();
+    let program = postgres
+        .credential_helper
+        .program
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(ResolvePostgresUrlError::MissingCredentialHelper)?
+        .to_owned();
+    let request = CredentialHelperRequest {
+        protocol: POSTGRES_HELPER_PROTOCOL,
+        action: "resolve-url",
+        mode,
+        vault_role_base,
+    };
+    let response = run_credential_helper(&program, &postgres.credential_helper.args, &request)?;
+    let url = response.url.ok_or_else(|| ResolvePostgresUrlError::HelperProtocol {
+        program: program.clone(),
+        message: "missing url in successful response".to_owned(),
+        stderr: String::new(),
+        stdout: String::new(),
+    })?;
+    validate_resolved_postgres_url(&url, &target)?;
+    Ok(ResolvedPostgresUrl {
+        url,
+        lease_id: response.lease_id,
+        expires_at: response.expires_at,
+        renewable: response.renewable,
+    })
 }
 
-/// Runs a shell command with a timeout, returns trimmed stdout.
-fn run_command_with_timeout(command: &str, timeout: std::time::Duration) -> Result<String, String> {
-    use std::process::Stdio;
-
-    let mut child = shell_command(command)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to spawn: {e}"))?;
-
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output =
-                    child.wait_with_output().map_err(|e| format!("read output failed: {e}"))?;
-                if !status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(format!("exited with {status}: {stderr}"));
-                }
-                return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    return Err(format!("timed out after {}s", timeout.as_secs()));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(e) => return Err(format!("wait failed: {e}")),
-        }
-    }
-}
-
-/// Runs a credential helper (custom bsl-analyzer protocol, not git-credential).
-///
-/// Sends `host=…\nport=…\ndbname=…\nmode=…\n\n` on stdin.
-/// Expects `username=…\npassword=…\n` on stdout.
-/// Times out after [`COMMAND_TIMEOUT`].
 fn run_credential_helper(
-    command: &str,
-    host: &str,
-    port: u16,
-    dbname: &str,
-    mode: &str,
-) -> Result<(String, String), String> {
+    program: &str,
+    args: &[String],
+    request: &CredentialHelperRequest,
+) -> Result<CredentialHelperResponse, ResolvePostgresUrlError> {
     use std::io::Write;
     use std::process::Stdio;
 
-    let mut child = shell_command(command)
+    let mut child = std::process::Command::new(program)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("failed to spawn credential helper: {e}"))?;
+        .map_err(|error| ResolvePostgresUrlError::HelperSpawn {
+            program: program.to_owned(),
+            message: error.to_string(),
+        })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = write!(stdin, "host={host}\nport={port}\ndbname={dbname}\nmode={mode}\n\n");
+        let payload = serde_json::to_vec(request).map_err(|error| {
+            ResolvePostgresUrlError::HelperProtocol {
+                program: program.to_owned(),
+                message: format!("failed to serialize helper request: {error}"),
+                stderr: String::new(),
+                stdout: String::new(),
+            }
+        })?;
+        stdin.write_all(&payload).and_then(|_| stdin.write_all(b"\n")).map_err(|error| {
+            ResolvePostgresUrlError::HelperProtocol {
+                program: program.to_owned(),
+                message: format!("failed to write helper request: {error}"),
+                stderr: String::new(),
+                stdout: String::new(),
+            }
+        })?;
     }
 
     let deadline = std::time::Instant::now() + COMMAND_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|e| format!("credential helper read failed: {e}"))?;
-                if !status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(format!(
-                        "credential helper exited with {}: {stderr}",
-                        output.status
-                    ));
-                }
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                return parse_credential_output(&stdout);
+                let output = child.wait_with_output().map_err(|error| {
+                    ResolvePostgresUrlError::HelperProtocol {
+                        program: program.to_owned(),
+                        message: format!("failed to read helper output: {error}"),
+                        stderr: String::new(),
+                        stdout: String::new(),
+                    }
+                })?;
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                return parse_credential_helper_response(program, status.code(), &stdout, &stderr);
             }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
-                    return Err(format!(
-                        "credential helper timed out after {}s",
-                        COMMAND_TIMEOUT.as_secs()
-                    ));
+                    let _ = child.wait();
+                    return Err(ResolvePostgresUrlError::HelperTimeout {
+                        program: program.to_owned(),
+                        timeout: COMMAND_TIMEOUT,
+                    });
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(e) => return Err(format!("credential helper wait failed: {e}")),
+            Err(error) => {
+                return Err(ResolvePostgresUrlError::HelperProtocol {
+                    program: program.to_owned(),
+                    message: format!("failed to wait for helper: {error}"),
+                    stderr: String::new(),
+                    stdout: String::new(),
+                });
+            }
         }
     }
 }
 
-fn parse_credential_output(stdout: &str) -> Result<(String, String), String> {
-    let mut username = None;
-    let mut password = None;
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            break;
+fn parse_credential_helper_response(
+    program: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> Result<CredentialHelperResponse, ResolvePostgresUrlError> {
+    let response = serde_json::from_str::<CredentialHelperResponse>(stdout).map_err(|error| {
+        ResolvePostgresUrlError::HelperProtocol {
+            program: program.to_owned(),
+            message: format!("failed to parse helper JSON: {error}"),
+            stderr: stderr.to_owned(),
+            stdout: stdout.to_owned(),
         }
-        if let Some((key, value)) = line.split_once('=') {
-            match key.trim() {
-                "username" => username = Some(value.trim().to_owned()),
-                "password" => password = Some(value.trim().to_owned()),
-                _ => {}
-            }
-        }
+    })?;
+    if response.protocol != POSTGRES_HELPER_PROTOCOL {
+        return Err(ResolvePostgresUrlError::HelperProtocol {
+            program: program.to_owned(),
+            message: format!("unexpected helper protocol '{}'", response.protocol),
+            stderr: stderr.to_owned(),
+            stdout: stdout.to_owned(),
+        });
     }
+    if response.ok {
+        if exit_code.unwrap_or(0) != 0 {
+            return Err(ResolvePostgresUrlError::HelperProtocol {
+                program: program.to_owned(),
+                message: format!(
+                    "successful helper response used non-zero exit code {:?}",
+                    exit_code
+                ),
+                stderr: stderr.to_owned(),
+                stdout: stdout.to_owned(),
+            });
+        }
+        return Ok(response);
+    }
+    let error = response.error.ok_or_else(|| ResolvePostgresUrlError::HelperProtocol {
+        program: program.to_owned(),
+        message: "missing error payload in failed helper response".to_owned(),
+        stderr: stderr.to_owned(),
+        stdout: stdout.to_owned(),
+    })?;
+    Err(ResolvePostgresUrlError::HelperRejected {
+        program: program.to_owned(),
+        exit_code,
+        stderr: stderr.to_owned(),
+        error,
+    })
+}
 
-    match (username, password) {
-        (Some(u), Some(p)) => Ok((u, p)),
-        _ => Err("credential helper did not return username and password".to_owned()),
+fn validate_resolved_postgres_url(
+    url: &str,
+    target: &ResolvedPostgresTarget,
+) -> Result<(), ResolvePostgresUrlError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|error| ResolvePostgresUrlError::InvalidResolvedUrl(error.to_string()))?;
+    if parsed.scheme() != "postgres" {
+        return Err(ResolvePostgresUrlError::UnsupportedUrlScheme(parsed.scheme().to_owned()));
     }
+    let actual_host = parsed.host_str().map(ToOwned::to_owned);
+    let actual_port = parsed.port_or_known_default();
+    let actual_dbname = parsed.path().trim_start_matches('/').to_owned();
+    if actual_host.as_deref() != Some(target.host.as_str())
+        || actual_port != Some(target.port)
+        || actual_dbname != target.dbname
+    {
+        return Err(ResolvePostgresUrlError::TargetMismatch {
+            expected_host: target.host.clone(),
+            expected_port: target.port,
+            expected_dbname: target.dbname.clone(),
+            actual_host,
+            actual_port,
+            actual_dbname,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1187,20 +1337,33 @@ mod tests {
     use super::{
         branch_pattern_matches, current_git_branch, evaluate_workspace_baseline_support,
         is_publish_branch_allowed, parse_timestamp_utc, resolve_postgres_url,
-        resolve_workspace_branch_policy, ProjectConfig, SearchBaselineBackend,
-        SearchBaselinePolicyConfig, SearchBaselineSupportState,
+        resolve_workspace_branch_policy, PostgresAccessMode, ProjectConfig,
+        ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
+        SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
     };
     use chrono::{Duration, TimeZone, Utc};
     use std::fs;
-    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn helper_program(response: &str, exit_code: i32) -> SearchPostgresCredentialHelperConfig {
+        SearchPostgresCredentialHelperConfig {
+            program: Some("python3".to_owned()),
+            args: vec![
+                "-c".to_owned(),
+                "import sys; sys.stdin.readline(); sys.stdout.write(sys.argv[1]); sys.exit(int(sys.argv[2]))"
+                    .to_owned(),
+                response.to_owned(),
+                exit_code.to_string(),
+            ],
+        }
+    }
 
     #[test]
     fn project_config_defaults_search_baseline_to_sqlite() {
         let config: ProjectConfig = serde_json::from_str("{}").unwrap();
 
         assert_eq!(config.search.baseline.backend, SearchBaselineBackend::Sqlite);
-        assert!(config.search.baseline.postgres.url.is_none());
+        assert!(!config.search.baseline.postgres.is_configured());
         assert!(config.search.baseline.workspace_code.branch.is_none());
         assert!(config.search.baseline.reference.snapshot_id.is_none());
     }
@@ -1213,8 +1376,15 @@ mod tests {
                     "baseline": {
                         "backend": "postgres",
                         "postgres": {
-                            "url": "postgres://shared-search",
-                            "schema": "corp_search"
+                            "host": "pg-central",
+                            "port": 5432,
+                            "dbname": "bsl_search",
+                            "schema": "corp_search",
+                            "vaultRoleBase": "search/bsl",
+                            "credentialHelper": {
+                                "program": "vault-helper",
+                                "args": ["--mode"]
+                            }
                         },
                         "workspaceCode": {
                             "branch": "main",
@@ -1230,11 +1400,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.search.baseline.backend, SearchBaselineBackend::Postgres);
-        assert_eq!(
-            config.search.baseline.postgres.url.as_deref(),
-            Some("postgres://shared-search")
-        );
+        assert_eq!(config.search.baseline.postgres.host.as_deref(), Some("pg-central"));
+        assert_eq!(config.search.baseline.postgres.port, Some(5432));
+        assert_eq!(config.search.baseline.postgres.dbname.as_deref(), Some("bsl_search"));
         assert_eq!(config.search.baseline.postgres.schema.as_deref(), Some("corp_search"));
+        assert_eq!(config.search.baseline.postgres.vault_role_base.as_deref(), Some("search/bsl"));
+        assert_eq!(
+            config.search.baseline.postgres.credential_helper.program.as_deref(),
+            Some("vault-helper")
+        );
+        assert_eq!(config.search.baseline.postgres.credential_helper.args, vec!["--mode"]);
         assert_eq!(config.search.baseline.workspace_code.branch.as_deref(), Some("main"));
         assert_eq!(config.search.baseline.workspace_code.commit.as_deref(), Some("abc123"));
         assert_eq!(
@@ -1451,7 +1626,7 @@ mod tests {
         let project = ProjectConfig::from(config);
         assert_eq!(project.search.baseline.backend, SearchBaselineBackend::Sqlite);
         assert!(project.configuration_root.is_none());
-        assert!(project.postgres_credentials.is_none()); // no PG fields in minimal config
+        assert!(!project.search.baseline.postgres.is_configured());
     }
 
     #[test]
@@ -1468,8 +1643,11 @@ host = "pg-central.company.com"
 port = 5432
 dbname = "bsl_search"
 schema = "bsl_search"
-url_env = "BSL_SEARCH_BASELINE_PG_URL"
-credential_helper = "rtools vault credential-helper"
+vault_role_base = "prod/search/bsl-analyzer"
+
+[search.baseline.postgres.credential_helper]
+program = "rtools"
+args = ["vault", "credential-helper"]
 
 [search.baseline.workspace_code]
 branch = "develop"
@@ -1498,12 +1676,15 @@ fallback_branch = "vendor"
         );
         assert_eq!(project.search.baseline.workspace_code.policy.branches.len(), 2);
         assert_eq!(project.search.baseline.workspace_code.policy.branches[0].pattern, "develop");
-        let creds = project.postgres_credentials.as_ref().unwrap();
-        assert_eq!(creds.host.as_deref(), Some("pg-central.company.com"));
-        assert_eq!(creds.port, Some(5432));
-        assert_eq!(creds.dbname.as_deref(), Some("bsl_search"));
-        assert_eq!(creds.url_env.as_deref(), Some("BSL_SEARCH_BASELINE_PG_URL"));
-        assert_eq!(creds.credential_helper.as_deref(), Some("rtools vault credential-helper"));
+
+        let pg = &project.search.baseline.postgres;
+        assert_eq!(pg.host.as_deref(), Some("pg-central.company.com"));
+        assert_eq!(pg.port, Some(5432));
+        assert_eq!(pg.dbname.as_deref(), Some("bsl_search"));
+        assert_eq!(pg.schema.as_deref(), Some("bsl_search"));
+        assert_eq!(pg.vault_role_base.as_deref(), Some("prod/search/bsl-analyzer"));
+        assert_eq!(pg.credential_helper.program.as_deref(), Some("rtools"));
+        assert_eq!(pg.credential_helper.args, vec!["vault", "credential-helper"]);
     }
 
     #[test]
@@ -1540,106 +1721,7 @@ LineLength = { maxLineLength = 120 }
         assert_eq!(config.configuration_root.as_deref(), Some("from-json"));
     }
 
-    #[test]
-    fn credential_resolver_uses_url_env() {
-        std::env::set_var("_BSL_TEST_PG_URL_CR1", "postgres://from-env");
-        let creds = super::PostgresCredentialConfig {
-            url_env: Some("_BSL_TEST_PG_URL_CR1".to_owned()),
-            url: Some("postgres://fallback".to_owned()),
-            ..Default::default()
-        };
-        let resolved = resolve_postgres_url(&creds, "read");
-        assert_eq!(resolved.as_deref(), Some("postgres://from-env"));
-        std::env::remove_var("_BSL_TEST_PG_URL_CR1");
-    }
-
-    #[test]
-    fn credential_resolver_uses_url_file() {
-        let dir = tempdir().unwrap();
-        let file = dir.path().join("pg-url");
-        fs::write(&file, "postgres://from-file\n").unwrap();
-        let creds = super::PostgresCredentialConfig {
-            url_file: Some(file.to_str().unwrap().to_owned()),
-            url: Some("postgres://fallback".to_owned()),
-            ..Default::default()
-        };
-        let resolved = resolve_postgres_url(&creds, "read");
-        assert_eq!(resolved.as_deref(), Some("postgres://from-file"));
-    }
-
-    #[test]
-    fn credential_resolver_uses_url_command() {
-        let creds = super::PostgresCredentialConfig {
-            url_command: Some("echo postgres://from-command".to_owned()),
-            ..Default::default()
-        };
-        let resolved = resolve_postgres_url(&creds, "read");
-        assert_eq!(resolved.as_deref(), Some("postgres://from-command"));
-    }
-
-    #[test]
-    fn credential_resolver_uses_plaintext_url() {
-        let creds = super::PostgresCredentialConfig {
-            url: Some("postgres://plaintext".to_owned()),
-            ..Default::default()
-        };
-        let resolved = resolve_postgres_url(&creds, "read");
-        assert_eq!(resolved.as_deref(), Some("postgres://plaintext"));
-    }
-
-    #[test]
-    fn credential_resolver_builds_url_from_host_parts() {
-        let creds = super::PostgresCredentialConfig {
-            host: Some("db.example.com".to_owned()),
-            port: Some(5433),
-            dbname: Some("mydb".to_owned()),
-            ..Default::default()
-        };
-        let resolved = resolve_postgres_url(&creds, "read");
-        assert_eq!(resolved.as_deref(), Some("postgres://db.example.com:5433/mydb"));
-    }
-
-    #[test]
-    fn credential_resolver_returns_none_when_empty() {
-        let creds = super::PostgresCredentialConfig::default();
-        assert!(resolve_postgres_url(&creds, "read").is_none());
-    }
-
-    #[test]
-    fn credential_resolver_runs_credential_helper() {
-        let creds = super::PostgresCredentialConfig {
-            host: Some("localhost".to_owned()),
-            dbname: Some("testdb".to_owned()),
-            credential_helper: Some(
-                "echo 'username=testuser'; echo 'password=testpass'".to_owned(),
-            ),
-            ..Default::default()
-        };
-        let resolved = resolve_postgres_url(&creds, "read").unwrap();
-        assert!(resolved.starts_with("postgres://testuser:testpass@localhost:5432/testdb"));
-    }
-
-    #[test]
-    fn expand_tilde_expands_home() {
-        let expanded = super::expand_tilde("~/foo/bar");
-        assert!(!expanded.to_str().unwrap().starts_with('~'));
-        assert!(expanded.to_str().unwrap().ends_with("foo/bar"));
-    }
-
-    #[test]
-    fn expand_tilde_preserves_absolute_paths() {
-        let expanded = super::expand_tilde("/absolute/path");
-        assert_eq!(expanded, PathBuf::from("/absolute/path"));
-    }
-
-    #[test]
-    fn percent_encode_encodes_special_chars() {
-        assert_eq!(super::percent_encode("user@host"), "user%40host");
-        assert_eq!(super::percent_encode("p:ss/w rd"), "p%3Ass%2Fw%20rd");
-        assert_eq!(super::percent_encode("simple"), "simple");
-    }
-
-    // --- Negative path tests ---
+    // --- Config loading tests ---
 
     #[test]
     fn toml_present_but_invalid_blocks_json_fallback() {
@@ -1652,69 +1734,231 @@ LineLength = { maxLineLength = 120 }
         assert!(config.is_none());
     }
 
-    #[test]
-    fn credential_resolver_skips_empty_env_var() {
-        std::env::set_var("_BSL_TEST_EMPTY_URL", "   ");
-        let creds = super::PostgresCredentialConfig {
-            url_env: Some("_BSL_TEST_EMPTY_URL".to_owned()),
-            url: Some("postgres://fallback".to_owned()),
-            ..Default::default()
-        };
-        let resolved = super::resolve_postgres_url(&creds, "read");
-        // Empty env var should be skipped, fallback to plaintext url
-        assert_eq!(resolved.as_deref(), Some("postgres://fallback"));
-        std::env::remove_var("_BSL_TEST_EMPTY_URL");
-    }
+    // --- Credential helper resolver tests ---
 
     #[test]
-    fn credential_resolver_url_command_failure_falls_through() {
-        let creds = super::PostgresCredentialConfig {
-            url_command: Some("exit 1".to_owned()),
-            url: Some("postgres://fallback".to_owned()),
-            ..Default::default()
-        };
-        let resolved = super::resolve_postgres_url(&creds, "read");
-        assert_eq!(resolved.as_deref(), Some("postgres://fallback"));
-    }
-
-    #[test]
-    fn credential_helper_failure_falls_through() {
-        let creds = super::PostgresCredentialConfig {
+    fn resolve_postgres_url_fails_when_helper_not_configured() {
+        let config = SearchPostgresConfig {
             host: Some("localhost".to_owned()),
             dbname: Some("testdb".to_owned()),
-            credential_helper: Some("exit 1".to_owned()),
-            ..Default::default()
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: SearchPostgresCredentialHelperConfig { program: None, args: vec![] },
         };
-        // Failed helper → None (no further fallback)
-        let resolved = super::resolve_postgres_url(&creds, "read");
-        assert!(resolved.is_none());
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Reader);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::MissingCredentialHelper)));
     }
 
     #[test]
-    fn credential_helper_incomplete_output_fails() {
-        let result = super::parse_credential_output("username=only_user\n");
-        assert!(result.is_err());
+    fn resolve_postgres_url_fails_when_missing_vault_role_base() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            dbname: Some("testdb".to_owned()),
+            port: None,
+            schema: Some("public".to_owned()),
+            vault_role_base: None,
+            credential_helper: SearchPostgresCredentialHelperConfig {
+                program: Some("echo".to_owned()),
+                args: vec![],
+            },
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Reader);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::MissingField(_))));
     }
 
     #[test]
-    fn postgres_credentials_none_when_no_pg_fields_in_toml() {
-        let config: super::TomlConfig = toml::from_str("[source]\nroot = \"src/cf\"\n").unwrap();
-        let project = ProjectConfig::from(config);
-        assert!(project.postgres_credentials.is_none());
+    fn resolve_postgres_url_fails_when_missing_required_target_field() {
+        let config = SearchPostgresConfig {
+            host: None,
+            dbname: Some("testdb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: SearchPostgresCredentialHelperConfig {
+                program: Some("echo".to_owned()),
+                args: vec![],
+            },
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Writer);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::MissingField(_))));
     }
 
     #[test]
-    fn postgres_credentials_some_when_pg_fields_present() {
-        let toml_str = r#"
-[search.baseline.postgres]
-url_env = "MY_PG_URL"
-"#;
-        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
-        let project = ProjectConfig::from(config);
-        assert!(project.postgres_credentials.is_some());
-        assert_eq!(
-            project.postgres_credentials.as_ref().unwrap().url_env.as_deref(),
-            Some("MY_PG_URL")
-        );
+    fn resolve_postgres_url_spawn_failure_is_terminal() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            dbname: Some("testdb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: SearchPostgresCredentialHelperConfig {
+                program: Some("nonexistent-program-xyz".to_owned()),
+                args: vec![],
+            },
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Reader);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::HelperSpawn { .. })));
+    }
+
+    #[test]
+    fn resolve_postgres_url_invalid_helper_response_is_protocol_error() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            dbname: Some("testdb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: helper_program("just-a-plain-line", 0),
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Reader);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::HelperProtocol { .. })));
+    }
+
+    #[test]
+    fn resolve_postgres_url_helper_returns_wrong_protocol() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            dbname: Some("testdb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: helper_program(
+                r#"{"protocol":"wrong","ok":true,"url":"postgres://localhost:5432/testdb"}"#,
+                0,
+            ),
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Reader);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::HelperProtocol { .. })));
+    }
+
+    #[test]
+    fn resolve_postgres_url_helper_returns_unsupported_scheme() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            dbname: Some("testdb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: helper_program(
+                r#"{"protocol":"bsl-analyzer.postgres-helper.v1","ok":true,"url":"mysql://localhost:5432/testdb"}"#,
+                0,
+            ),
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Reader);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::UnsupportedUrlScheme(_))));
+    }
+
+    #[test]
+    fn resolve_postgres_url_target_mismatch_host() {
+        let config = SearchPostgresConfig {
+            host: Some("expected-host".to_owned()),
+            dbname: Some("testdb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: helper_program(
+                r#"{"protocol":"bsl-analyzer.postgres-helper.v1","ok":true,"url":"postgres://different-host:5432/testdb","lease_id":"l1","renewable":false}"#,
+                0,
+            ),
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Reader);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::TargetMismatch { .. })));
+    }
+
+    #[test]
+    fn resolve_postgres_url_target_mismatch_dbname() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            port: Some(5433),
+            dbname: Some("expected-db".to_owned()),
+            schema: Some("public".to_owned()),
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: helper_program(
+                r#"{"protocol":"bsl-analyzer.postgres-helper.v1","ok":true,"url":"postgres://localhost:5433/other-db","lease_id":"l1","renewable":false}"#,
+                0,
+            ),
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Reader);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::TargetMismatch { .. })));
+    }
+
+    #[test]
+    fn resolve_postgres_url_resolves_via_tiny_helper_program() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            port: Some(5433),
+            dbname: Some("mydb".to_owned()),
+            schema: Some("bsl_search".to_owned()),
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: helper_program(
+                r#"{"protocol":"bsl-analyzer.postgres-helper.v1","ok":true,"url":"postgres://user:pass@localhost:5433/mydb","lease_id":"vault/lease/123","expires_at":"2026-06-01T00:00:00Z","renewable":false}"#,
+                0,
+            ),
+        };
+        let resolved = resolve_postgres_url(&config, PostgresAccessMode::Reader).unwrap();
+        assert_eq!(resolved.url, "postgres://user:pass@localhost:5433/mydb");
+        assert_eq!(resolved.lease_id.as_deref(), Some("vault/lease/123"));
+        assert!(!resolved.renewable);
+    }
+
+    #[test]
+    fn resolve_postgres_url_rejected_by_helper_is_terminal() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            dbname: Some("testdb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: helper_program(
+                r#"{"protocol":"bsl-analyzer.postgres-helper.v1","ok":false,"error":{"code":"vault_access_denied","message":"role not allowed","retryable":false}}"#,
+                1,
+            ),
+        };
+        let result = resolve_postgres_url(&config, PostgresAccessMode::Writer);
+        assert!(matches!(result, Err(ResolvePostgresUrlError::HelperRejected { .. })));
+        if let Err(ResolvePostgresUrlError::HelperRejected { error, .. }) = result {
+            assert_eq!(error.code, "vault_access_denied");
+            assert!(!error.retryable);
+        }
+    }
+
+    #[test]
+    fn resolved_target_defaults_port_to_5432() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            dbname: Some("mydb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: None,
+            credential_helper: SearchPostgresCredentialHelperConfig::default(),
+        };
+        let target = config.resolved_target().unwrap();
+        assert_eq!(target.host, "localhost");
+        assert_eq!(target.port, 5432);
+        assert_eq!(target.dbname, "mydb");
+        assert_eq!(target.schema, "public");
+    }
+
+    #[test]
+    fn is_configured_returns_false_for_empty_postgres_config() {
+        let config = SearchPostgresConfig::default();
+        assert!(!config.is_configured());
+    }
+
+    #[test]
+    fn is_configured_returns_true_when_helper_present() {
+        let config = SearchPostgresConfig {
+            host: Some("localhost".to_owned()),
+            dbname: Some("mydb".to_owned()),
+            schema: Some("public".to_owned()),
+            port: None,
+            vault_role_base: Some("search/base".to_owned()),
+            credential_helper: SearchPostgresCredentialHelperConfig {
+                program: Some("helper".to_owned()),
+                args: vec![],
+            },
+        };
+        assert!(config.is_configured());
     }
 }

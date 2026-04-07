@@ -2835,6 +2835,7 @@ dependencies = [
  "tempfile",
  "toml",
  "tracing",
+ "url",
 ]
 
 [[package]]

@@ -1,7 +1,8 @@
 //! Shared state for MCP server tools.
 
 use crate::baseline::{
-    BaselineRuntime, BaselineSnapshotDocuments, ConfiguredBaselineStatus, ExternalBaselineSource,
+    BaselineRuntime, BaselineSnapshotDocuments, ConfiguredBaselineStatus,
+    RefreshableExternalBaselineSource,
 };
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
@@ -37,7 +38,7 @@ pub struct SharedState {
     search_engine: Arc<Mutex<Option<SearchEngine>>>,
     index_progress: Arc<IndexProgress>,
     semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-    external_baseline: Option<Arc<ExternalBaselineSource>>,
+    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
 }
 
@@ -57,7 +58,7 @@ struct WorkspaceSearchInit {
 struct WorkspaceSemanticWarmup {
     db_path: PathBuf,
     workspace_source_root: PathBuf,
-    external_baseline: Arc<ExternalBaselineSource>,
+    external_baseline: Arc<RefreshableExternalBaselineSource>,
     config: bsl_search::SearchConfig,
 }
 
@@ -145,7 +146,7 @@ impl SharedState {
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
-        external_baseline: Option<Arc<ExternalBaselineSource>>,
+        external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -364,7 +365,7 @@ impl SharedState {
     }
 
     /// Access configured external baseline source.
-    pub(crate) fn external_baseline(&self) -> Option<Arc<ExternalBaselineSource>> {
+    pub(crate) fn external_baseline(&self) -> Option<Arc<RefreshableExternalBaselineSource>> {
         self.external_baseline.clone()
     }
 
@@ -492,7 +493,7 @@ impl SharedState {
         workspace_root: &std::path::Path,
         progress: &Arc<IndexProgress>,
         watcher_ready: &Arc<AtomicBool>,
-        external_baseline: Option<Arc<ExternalBaselineSource>>,
+        external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
     ) -> Option<WorkspaceSearchInit> {
         let build_dir = workspace_root.join(".build");
         std::fs::create_dir_all(&build_dir).ok();
@@ -514,43 +515,98 @@ impl SharedState {
                 BaselineHashMode::NormalizedChunks,
             );
 
-            if let Some(snapshot) =
-                external_baseline.load_workspace_snapshot_documents(None, None).ok().flatten()
+            let needs_local_fts_fallback = match external_baseline
+                .load_workspace_snapshot_documents(None, None)
             {
-                match engine.sync_indexed_documents_in_collection(
-                    "code",
-                    &snapshot.documents,
-                    Some(progress),
-                ) {
-                    Ok(indexed_files) => {
-                        if indexed_files > 0 {
-                            tracing::info!(
-                                indexed_files,
-                                "external workspace baseline cached locally for lexical startup"
-                            );
-                        } else {
-                            tracing::info!("external workspace lexical cache is up to date");
+                Ok(Some(snapshot)) => {
+                    match engine.sync_indexed_documents_in_collection(
+                        "code",
+                        &snapshot.documents,
+                        Some(progress),
+                    ) {
+                        Ok(indexed_files) => {
+                            if indexed_files > 0 {
+                                tracing::info!(
+                                    indexed_files,
+                                    "external workspace baseline cached locally for lexical startup"
+                                );
+                            } else {
+                                tracing::info!(
+                                    documents = snapshot.documents.len(),
+                                    "external workspace lexical cache is up to date"
+                                );
+                            }
+                            false
+                        }
+                        Err(error) => {
+                            tracing::warn!("failed to cache external workspace baseline for lexical startup: {error}");
+                            true
                         }
                     }
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        ?source_path,
+                        "external workspace baseline is configured but no snapshot was resolved; building local lexical fallback cache"
+                    );
+                    true
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?source_path,
+                        "failed to load external workspace baseline for lexical startup cache: {error}; building local lexical fallback cache"
+                    );
+                    true
+                }
+            };
+
+            if needs_local_fts_fallback {
+                drop(engine);
+                let _ = std::fs::remove_file(&db_path);
+
+                let mut fallback_engine = Self::open_fts_only_search_engine(&db_path)?;
+                Self::configure_workspace_engine(
+                    &mut fallback_engine,
+                    &source_path,
+                    watcher_ready,
+                    BaselineHashMode::NormalizedChunks,
+                );
+                match fallback_engine.index_directory_fts(&source_path) {
+                    Ok(indexed) => {
+                        tracing::info!(indexed, "workspace lexical fallback cache built")
+                    }
                     Err(error) => {
-                        tracing::warn!("failed to cache external workspace baseline for lexical startup: {error}");
-                        return None;
+                        tracing::warn!("failed to build workspace lexical fallback cache: {error}");
                     }
                 }
+                engine = fallback_engine;
+            }
+
+            if !needs_local_fts_fallback {
+                tracing::info!(
+                    "external workspace baseline is configured; lexical search is ready and semantic warmup will continue in background"
+                );
+
+                let semantic_warmup = semantic_config.map(|config| WorkspaceSemanticWarmup {
+                    db_path,
+                    workspace_source_root: source_path,
+                    external_baseline: Arc::clone(external_baseline),
+                    config,
+                });
+
+                return Some(WorkspaceSearchInit { engine, semantic_warmup });
+            }
+
+            if semantic_config.is_none() {
+                tracing::info!(
+                    "external workspace baseline is unavailable during startup; using local lexical fallback only"
+                );
+                return Some(WorkspaceSearchInit { engine, semantic_warmup: None });
             }
 
             tracing::info!(
-                "external workspace baseline is configured; lexical search is ready and semantic warmup will continue in background"
+                "external workspace baseline is unavailable during startup; falling back to local semantic indexing from workspace"
             );
-
-            let semantic_warmup = semantic_config.map(|config| WorkspaceSemanticWarmup {
-                db_path,
-                workspace_source_root: source_path,
-                external_baseline: Arc::clone(external_baseline),
-                config,
-            });
-
-            return Some(WorkspaceSearchInit { engine, semantic_warmup });
         }
 
         let mut engine = Self::open_search_engine(&db_path)?;
@@ -682,6 +738,13 @@ impl SharedState {
                 } else {
                     tracing::info!("workspace semantic warmup found cache up to date");
                 }
+                if watcher_ready.load(Ordering::SeqCst) {
+                    if let Err(error) = engine.workspace_overlay_stats() {
+                        tracing::warn!(
+                            "failed to prime workspace overlay after semantic warmup: {error}"
+                        );
+                    }
+                }
                 if let Ok(mut guard) = engine_arc.lock() {
                     *guard = Some(engine);
                 }
@@ -703,49 +766,60 @@ impl SharedState {
 
     fn init_reference_search_engine(
         progress: &Arc<IndexProgress>,
-        external_baseline: Option<Arc<ExternalBaselineSource>>,
+        external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
     ) -> Option<SearchEngine> {
         let db_path = Self::reference_search_db_path()?;
+        Self::init_reference_search_engine_at(&db_path, progress, external_baseline)
+    }
+
+    fn init_reference_search_engine_at(
+        db_path: &Path,
+        progress: &Arc<IndexProgress>,
+        external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+    ) -> Option<SearchEngine> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
 
-        let mut engine = Self::open_search_engine(&db_path)?;
+        let mut engine = Self::open_search_engine(db_path)?;
         if external_baseline
             .as_ref()
             .is_some_and(|baseline| matches!(baseline.corpus(), CorpusId::Reference))
         {
-            if let Err(error) = engine.remove_file("platform://docs") {
-                tracing::warn!("failed to clear local reference docs cache before external baseline mode: {error}");
-            }
             if let Some(external_baseline) = external_baseline.as_ref() {
-                if engine.has_semantic() {
-                    let cleared =
-                        engine.clear_file_hashes_without_embeddings("platform").unwrap_or(0);
-                    if cleared > 0 {
-                        tracing::info!(
-                            cleared,
-                            "cleared hashes for reference cache files without embeddings"
-                        );
-                    }
-                }
                 let model_id = engine.embedding_model().map(ToOwned::to_owned);
                 let dimension = engine.embedding_dimension();
                 match external_baseline
                     .load_reference_snapshot_documents(model_id.as_deref(), dimension)
                 {
                     Ok(Some(snapshot)) => {
+                        if engine.has_semantic() {
+                            let cleared = engine
+                                .clear_file_hashes_without_embeddings("platform")
+                                .unwrap_or(0);
+                            if cleared > 0 {
+                                tracing::info!(
+                                    cleared,
+                                    "cleared hashes for reference cache files without embeddings"
+                                );
+                            }
+                        }
+                        if let Err(error) = engine.remove_file("platform://docs") {
+                            tracing::warn!("failed to clear local reference docs cache before external baseline mode: {error}");
+                        }
                         Self::index_external_reference_docs(&mut engine, progress, snapshot);
                     }
                     Ok(None) => {
                         tracing::warn!(
-                            "external reference baseline is configured but no snapshot was resolved"
+                            "external reference baseline is configured but no snapshot was resolved; rebuilding local reference docs cache"
                         );
+                        Self::rebuild_local_reference_docs_cache(&mut engine, progress);
                     }
                     Err(error) => {
                         tracing::warn!(
-                            "failed to load external reference baseline snapshot for local semantic cache: {error}"
+                            "failed to load external reference baseline snapshot for local semantic cache: {error}; rebuilding local reference docs cache"
                         );
+                        Self::rebuild_local_reference_docs_cache(&mut engine, progress);
                     }
                 }
             }
@@ -789,6 +863,27 @@ impl SharedState {
                 tracing::warn!("failed to cache external reference docs locally: {error}");
             }
         }
+    }
+
+    fn rebuild_local_reference_docs_cache(
+        engine: &mut SearchEngine,
+        progress: &Arc<IndexProgress>,
+    ) {
+        match engine.sync_indexed_documents_in_collection(
+            "platform",
+            &[] as &[bsl_search::IndexedDocument],
+            None,
+        ) {
+            Ok(removed_files) => {
+                if removed_files > 0 {
+                    tracing::info!(removed_files, "cleared stale reference docs cache files");
+                }
+            }
+            Err(error) => {
+                tracing::warn!("failed to clear stale reference docs cache: {error}");
+            }
+        }
+        Self::index_platform_docs(engine, progress);
     }
 
     /// Index platform reference documentation into the search engine.
@@ -1001,5 +1096,210 @@ impl SharedState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedState;
+    use crate::baseline::RefreshableExternalBaselineSource;
+    use bsl_search::{
+        BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexProgress, IndexedDocument,
+        SearchEngine,
+    };
+    use std::env;
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tempfile::tempdir;
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var_os(key);
+            env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                env::set_var(self.key, value);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_external_failure_rebuilds_local_fts_cache_from_workspace() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(
+            workspace.join("CommonModule.bsl"),
+            "Процедура ЛокальнаяПроцедура()\nКонецПроцедуры",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join(".build")).unwrap();
+
+        let db_path = workspace.join(".build").join("bsl-search.db");
+        let mut stale_engine = SearchEngine::fts_only(&db_path).unwrap();
+        stale_engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "GhostModule.bsl".to_owned(),
+                    symbol_name: "ПризрачнаяПроцедура".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 1,
+                    text: "Процедура ПризрачнаяПроцедура()\nКонецПроцедуры".to_owned(),
+                    content_hash: "ghost".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+        assert_eq!(stale_engine.file_count().unwrap(), 1);
+
+        let progress = Arc::new(IndexProgress::default());
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+        let external = Arc::new(
+            RefreshableExternalBaselineSource::for_test(
+                ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+                BaselineRef {
+                    corpus: CorpusId::WorkspaceCode,
+                    snapshot_id: None,
+                    branch: Some("main".to_owned()),
+                    commit: None,
+                },
+            )
+            .unwrap(),
+        );
+
+        let init = SharedState::init_workspace_search_engine(
+            workspace,
+            &progress,
+            &watcher_ready,
+            Some(external),
+        )
+        .unwrap();
+
+        assert_eq!(init.engine.file_count().unwrap(), 1);
+        assert_eq!(
+            init.engine.text_search("ЛокальнаяПроцедура", 10, Some("code")).unwrap().len(),
+            1
+        );
+        assert!(init
+            .engine
+            .text_search("ПризрачнаяПроцедура", 10, Some("code"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn workspace_external_failure_with_embeddings_falls_back_to_local_semantic_indexing() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::set("EMBEDDING_URL", "http://127.0.0.1:9/v1");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::create_dir_all(workspace.join(".build")).unwrap();
+
+        let progress = Arc::new(IndexProgress::default());
+        let watcher_ready = Arc::new(AtomicBool::new(false));
+        let external = Arc::new(
+            RefreshableExternalBaselineSource::for_test(
+                ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+                BaselineRef {
+                    corpus: CorpusId::WorkspaceCode,
+                    snapshot_id: None,
+                    branch: Some("main".to_owned()),
+                    commit: None,
+                },
+            )
+            .unwrap(),
+        );
+
+        let init = SharedState::init_workspace_search_engine(
+            workspace,
+            &progress,
+            &watcher_ready,
+            Some(external),
+        )
+        .unwrap();
+
+        assert!(init.semantic_warmup.is_none());
+    }
+
+    #[test]
+    fn reference_external_failure_clears_stale_local_docs_cache() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let mut stale_engine = SearchEngine::fts_only(&db_path).unwrap();
+        stale_engine
+            .index_documents(
+                "platform",
+                "platform://docs",
+                b"stale-docs",
+                &[Document {
+                    title: "СтарыйДокумент".to_owned(),
+                    body: "Описание СтарыйДокумент".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+        stale_engine
+            .index_documents(
+                "platform",
+                "platform://legacy/external",
+                b"stale-external-docs",
+                &[Document {
+                    title: "СтарыйВнешнийДокумент".to_owned(),
+                    body: "Описание СтарыйВнешнийДокумент".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            stale_engine.text_search("СтарыйДокумент", 10, Some("platform")).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            stale_engine.text_search("СтарыйВнешнийДокумент", 10, Some("platform")).unwrap().len(),
+            1
+        );
+
+        let progress = Arc::new(IndexProgress::default());
+        let external = Arc::new(
+            RefreshableExternalBaselineSource::for_test(
+                ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+                BaselineRef {
+                    corpus: CorpusId::Reference,
+                    snapshot_id: None,
+                    branch: None,
+                    commit: None,
+                },
+            )
+            .unwrap(),
+        );
+
+        let engine =
+            SharedState::init_reference_search_engine_at(&db_path, &progress, Some(external))
+                .unwrap();
+
+        assert!(engine.text_search("СтарыйДокумент", 10, Some("platform")).unwrap().is_empty());
+        assert!(engine
+            .text_search("СтарыйВнешнийДокумент", 10, Some("platform"))
+            .unwrap()
+            .is_empty());
     }
 }

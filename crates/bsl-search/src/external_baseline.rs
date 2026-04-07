@@ -203,6 +203,30 @@ impl ExternalBaselineAdapter {
         }
     }
 
+    pub fn migrate_storage(&self) -> Result<(), SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.migrate_storage(),
+        }
+    }
+
+    /// Checks if the external baseline storage is fully initialized and
+    /// the schema version is compatible with the current analyzer.
+    ///
+    /// Returns typed errors for unverified/mismatched storage instead
+    /// of letting downstream operations fail with raw database errors.
+    pub fn check_storage_readiness(&self) -> Result<(), SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.check_storage_readiness(),
+        }
+    }
+
+    /// Returns the schema version stored in the database, if any.
+    pub fn get_schema_version(&self) -> Result<Option<i32>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.get_schema_version(),
+        }
+    }
+
     pub fn lexical_search_baseline(
         &self,
         snapshot_id: &str,
@@ -292,12 +316,6 @@ impl SnapshotContentStore for ExternalBaselineAdapter {
 }
 
 impl SnapshotPublisher for ExternalBaselineAdapter {
-    fn ensure_storage(&self) -> Result<(), SearchError> {
-        match self {
-            Self::Postgres(adapter) => adapter.ensure_storage(),
-        }
-    }
-
     fn publish_snapshot(
         &self,
         snapshot: &Snapshot,

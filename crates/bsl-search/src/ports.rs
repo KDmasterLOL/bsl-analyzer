@@ -73,8 +73,6 @@ pub trait BaselineSemanticSearch {
 
 /// Publishes immutable baseline snapshots into a backing store.
 pub trait SnapshotPublisher {
-    fn ensure_storage(&self) -> Result<(), SearchError>;
-
     fn publish_snapshot(
         &self,
         snapshot: &Snapshot,

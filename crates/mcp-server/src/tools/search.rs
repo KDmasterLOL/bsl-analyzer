@@ -1,10 +1,12 @@
 //! Search tools: full-text and semantic search across code and documentation.
 
-use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineSource, ExternalBaselineState};
+use crate::baseline::{
+    ConfiguredBaselineStatus, ExternalBaselineState, RefreshableExternalBaselineSource,
+};
 use crate::state::SemanticRuntimeStatus;
 use bsl_search::{
     lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical, merge_semantic,
-    IndexProgress, LexicalHit, SearchEngine, SearchHit, SemanticHit,
+    IndexProgress, LexicalHit, SearchEngine, SearchError, SearchHit, SemanticHit,
 };
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -24,11 +26,12 @@ use tracing::warn;
 pub fn find_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
-    external_baseline: Option<Arc<ExternalBaselineSource>>,
+    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
+    ensure_workspace_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
 
@@ -36,6 +39,9 @@ pub fn find_code(
         match guard.as_ref() {
             Some(engine) => match try_direct_lexical_code(engine, &source, query, limit) {
                 DirectResult::Found(hits) => hits,
+                DirectResult::Terminal(error) => {
+                    return Err(external_baseline_mcp_error(&error));
+                }
                 DirectResult::Unavailable => {
                     // Fallback: load-all-then-search.
                     match source.resolve_workspace_view(engine) {
@@ -48,6 +54,9 @@ pub fn find_code(
                             })?
                         }
                         Err(error) => {
+                            if error.is_terminal() {
+                                return Err(external_baseline_mcp_error(&error));
+                            }
                             warn!(
                                 "failed to resolve external baseline view for lexical search: {error}"
                             );
@@ -63,6 +72,9 @@ pub fn find_code(
                 // changes have been tracked yet).
                 match try_direct_lexical_code_no_overlay(&source, query, limit) {
                     DirectResult::Found(hits) => hits,
+                    DirectResult::Terminal(error) => {
+                        return Err(external_baseline_mcp_error(&error));
+                    }
                     DirectResult::Unavailable => {
                         return Ok(CallToolResult::success(vec![Content::text(
                             "Search index is being built, please try again in a moment.",
@@ -98,11 +110,12 @@ pub fn search_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
-    external_baseline: Option<Arc<ExternalBaselineSource>>,
+    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
+    ensure_workspace_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
     let semantic_runtime = semantic_runtime
         .lock()
         .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
@@ -149,6 +162,9 @@ pub fn search_code(
                 }
                 return Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]));
             }
+            DirectResult::Terminal(error) => {
+                return Err(external_baseline_mcp_error(&error));
+            }
             DirectResult::Unavailable => {}
         }
     }
@@ -166,6 +182,7 @@ pub fn search_code(
 }
 
 /// Result of a direct baseline search attempt.
+#[derive(Debug)]
 enum DirectResult {
     /// Baseline query returned results and merge is authoritative (may be empty
     /// after overlay filtering — that is a valid final answer).
@@ -173,13 +190,16 @@ enum DirectResult {
     /// Serving table is unavailable or not populated for this snapshot — caller
     /// should fall back to load-all or local SQLite.
     Unavailable,
+    /// Terminal error (schema / config / storage / credential resolution) that
+    /// must **not** be silently swallowed — caller should surface it to the user.
+    Terminal(bsl_search::SearchError),
 }
 
 /// Try direct lexical search against the external baseline serving table
 /// without overlay merge. Used when the local search engine is still building
 /// and no overlay changes have been tracked yet.
 fn try_direct_lexical_code_no_overlay(
-    source: &ExternalBaselineSource,
+    source: &RefreshableExternalBaselineSource,
     query: &str,
     limit: usize,
 ) -> DirectResult {
@@ -187,6 +207,10 @@ fn try_direct_lexical_code_no_overlay(
         Ok(Some((_, s))) => s,
         Ok(None) => return DirectResult::Unavailable,
         Err(e) => {
+            if e.is_terminal() {
+                warn!("direct lexical (no overlay): terminal snapshot resolution error: {e}");
+                return DirectResult::Terminal(e);
+            }
             warn!("direct lexical (no overlay): snapshot resolution failed: {e}");
             return DirectResult::Unavailable;
         }
@@ -194,6 +218,10 @@ fn try_direct_lexical_code_no_overlay(
     match source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), limit) {
         Ok(hits) => DirectResult::Found(hits.iter().map(SearchHit::from_lexical).collect()),
         Err(e) => {
+            if e.is_terminal() {
+                warn!("direct lexical (no overlay): terminal serving query error: {e}");
+                return DirectResult::Terminal(e);
+            }
             warn!("direct lexical (no overlay): serving query failed: {e}");
             DirectResult::Unavailable
         }
@@ -204,7 +232,7 @@ fn try_direct_lexical_code_no_overlay(
 /// merging with local overlay.
 fn try_direct_lexical_code(
     engine: &SearchEngine,
-    source: &ExternalBaselineSource,
+    source: &RefreshableExternalBaselineSource,
     query: &str,
     limit: usize,
 ) -> DirectResult {
@@ -212,6 +240,10 @@ fn try_direct_lexical_code(
         Ok(Some((_, s))) => s,
         Ok(None) => return DirectResult::Unavailable,
         Err(e) => {
+            if e.is_terminal() {
+                warn!("direct lexical: terminal snapshot resolution error: {e}");
+                return DirectResult::Terminal(e);
+            }
             warn!("direct lexical: snapshot resolution failed: {e}");
             return DirectResult::Unavailable;
         }
@@ -220,6 +252,10 @@ fn try_direct_lexical_code(
         match source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), limit * 2) {
             Ok(hits) => hits,
             Err(e) => {
+                if e.is_terminal() {
+                    warn!("direct lexical: terminal serving query error: {e}");
+                    return DirectResult::Terminal(e);
+                }
                 warn!("direct lexical: serving query failed: {e}");
                 return DirectResult::Unavailable;
             }
@@ -241,7 +277,7 @@ fn try_direct_lexical_code(
 /// merging with local overlay.
 fn try_direct_semantic_code(
     engine: &SearchEngine,
-    source: &ExternalBaselineSource,
+    source: &RefreshableExternalBaselineSource,
     query: &str,
     limit: usize,
 ) -> DirectResult {
@@ -249,6 +285,10 @@ fn try_direct_semantic_code(
         Ok(Some((_, s))) => s,
         Ok(None) => return DirectResult::Unavailable,
         Err(e) => {
+            if e.is_terminal() {
+                warn!("direct semantic: terminal snapshot resolution error: {e}");
+                return DirectResult::Terminal(e);
+            }
             warn!("direct semantic: snapshot resolution failed: {e}");
             return DirectResult::Unavailable;
         }
@@ -276,6 +316,10 @@ fn try_direct_semantic_code(
     ) {
         Ok(hits) => hits,
         Err(e) => {
+            if e.is_terminal() {
+                warn!("direct semantic: terminal serving query error: {e}");
+                return DirectResult::Terminal(e);
+            }
             warn!("direct semantic: serving query failed: {e}");
             return DirectResult::Unavailable;
         }
@@ -302,69 +346,58 @@ fn try_direct_semantic_code(
 /// 3. Fallback to the local SQLite FTS index.
 pub fn find_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
-    external_baseline: Option<Arc<ExternalBaselineSource>>,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
+    ensure_reference_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
 
     if let Some(source) = external_baseline {
-        match source.resolve_snapshot() {
-            Ok(Some((_, snapshot))) => {
-                // Try direct lexical search via the serving table first.
-                match source.lexical_search(snapshot.id.0.as_str(), query, Some("platform"), limit)
-                {
-                    Ok(hits) if !hits.is_empty() => {
-                        return Ok(CallToolResult::success(vec![Content::text(
-                            format_lexical_doc_hits(&hits),
-                        )]));
-                    }
-                    Ok(_) => {
-                        // Query succeeded — authoritative empty. Don't fall back
-                        // to load-all or local SQLite which may hold stale data.
-                        return Ok(CallToolResult::success(vec![Content::text(
-                            "No results found.",
-                        )]));
-                    }
-                    Err(error) => {
-                        warn!(
-                            snapshot_id = snapshot.id.0.as_str(),
-                            %error,
-                            "direct lexical search failed for external reference baseline, falling back",
-                        );
-                    }
+        if let Some((_, snapshot)) = map_reference_baseline_resolution(
+            configured_baseline,
+            source.resolve_snapshot(),
+            "failed to resolve external reference baseline snapshot for lexical search",
+        )? {
+            // Try direct lexical search via the serving table first.
+            match source.lexical_search(snapshot.id.0.as_str(), query, Some("platform"), limit) {
+                Ok(hits) if !hits.is_empty() => {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        format_lexical_doc_hits(&hits),
+                    )]));
                 }
-
-                // Fallback: load all documents from the snapshot and search in memory.
-                match source.resolve_reference_view() {
-                    Ok(Some(view)) => {
-                        let hits =
-                            lexical_hits_for_resolved_view(&view, query, limit, Some("platform"));
-                        if !hits.is_empty() {
-                            return Ok(CallToolResult::success(vec![Content::text(
-                                format_doc_hits(&hits),
-                            )]));
-                        }
-                        return Ok(CallToolResult::success(vec![Content::text(
-                            "No results found.",
-                        )]));
+                Ok(_) => {
+                    // Query succeeded — authoritative empty. Don't fall back
+                    // to load-all or local SQLite which may hold stale data.
+                    return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+                }
+                Err(error) => {
+                    if error.is_terminal() {
+                        return Err(external_baseline_mcp_error(&error));
                     }
-                    Ok(None) => {}
-                    Err(error) => {
-                        warn!(
-                            %error,
-                            "failed to resolve external reference baseline view for lexical search",
-                        );
-                    }
+                    warn!(
+                        snapshot_id = snapshot.id.0.as_str(),
+                        %error,
+                        "direct lexical search failed for external reference baseline, falling back",
+                    );
                 }
             }
-            Ok(None) => {}
-            Err(error) => {
-                warn!(
-                    %error,
-                    "failed to resolve external reference baseline snapshot for lexical search",
-                );
+
+            // Fallback: load all documents from the snapshot and search in memory.
+            if let Some(view) = map_reference_baseline_resolution(
+                configured_baseline,
+                source.resolve_reference_view(),
+                "failed to resolve external reference baseline view for lexical search",
+            )? {
+                let hits = lexical_hits_for_resolved_view(&view, query, limit, Some("platform"));
+                if !hits.is_empty() {
+                    return Ok(CallToolResult::success(vec![Content::text(format_doc_hits(
+                        &hits,
+                    ))]));
+                }
+                return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
             }
         }
     }
@@ -393,10 +426,12 @@ pub fn find_docs(
 /// 2. Fallback to the local SQLite semantic index.
 pub fn search_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
-    external_baseline: Option<Arc<ExternalBaselineSource>>,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
+    ensure_reference_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
     if guard.is_none() {
@@ -416,59 +451,55 @@ pub fn search_docs(
 
     // Try direct semantic search against the external baseline serving table.
     if let Some(source) = external_baseline {
-        match source.resolve_snapshot() {
-            Ok(Some((_, snapshot))) => {
-                let query_embedding = engine
-                    .embed_query(query)
-                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
-                let model_id = engine.embedding_model().ok_or_else(|| {
-                    McpError::internal_error(
-                        "search error: semantic model id is unavailable".to_owned(),
-                        None,
-                    )
-                })?;
-                let dim = engine.embedding_dimension().ok_or_else(|| {
-                    McpError::internal_error(
-                        "search error: embedding dimension is unavailable".to_owned(),
-                        None,
-                    )
-                })?;
+        if let Some((_, snapshot)) = map_reference_baseline_resolution(
+            configured_baseline,
+            source.resolve_snapshot(),
+            "failed to resolve external reference baseline snapshot for semantic search",
+        )? {
+            let query_embedding = engine
+                .embed_query(query)
+                .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+            let model_id = engine.embedding_model().ok_or_else(|| {
+                McpError::internal_error(
+                    "search error: semantic model id is unavailable".to_owned(),
+                    None,
+                )
+            })?;
+            let dim = engine.embedding_dimension().ok_or_else(|| {
+                McpError::internal_error(
+                    "search error: embedding dimension is unavailable".to_owned(),
+                    None,
+                )
+            })?;
 
-                match source.semantic_search(
-                    snapshot.id.0.as_str(),
-                    &query_embedding,
-                    model_id,
-                    dim,
-                    Some("platform"),
-                    limit,
-                ) {
-                    Ok(hits) if !hits.is_empty() => {
-                        return Ok(CallToolResult::success(vec![Content::text(
-                            format_semantic_doc_hits(&hits),
-                        )]));
-                    }
-                    Ok(_) => {
-                        // Query succeeded — authoritative empty. Don't fall back
-                        // to local SQLite which may hold stale embeddings.
-                        return Ok(CallToolResult::success(vec![Content::text(
-                            "No results found.",
-                        )]));
-                    }
-                    Err(error) => {
-                        warn!(
-                            snapshot_id = snapshot.id.0.as_str(),
-                            %error,
-                            "direct semantic search failed for external reference baseline, falling back",
-                        );
-                    }
+            match source.semantic_search(
+                snapshot.id.0.as_str(),
+                &query_embedding,
+                model_id,
+                dim,
+                Some("platform"),
+                limit,
+            ) {
+                Ok(hits) if !hits.is_empty() => {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        format_semantic_doc_hits(&hits),
+                    )]));
                 }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                warn!(
-                    %error,
-                    "failed to resolve external reference baseline snapshot for semantic search",
-                );
+                Ok(_) => {
+                    // Query succeeded — authoritative empty. Don't fall back
+                    // to local SQLite which may hold stale embeddings.
+                    return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+                }
+                Err(error) => {
+                    if error.is_terminal() {
+                        return Err(external_baseline_mcp_error(&error));
+                    }
+                    warn!(
+                        snapshot_id = snapshot.id.0.as_str(),
+                        %error,
+                        "direct semantic search failed for external reference baseline, falling back",
+                    );
+                }
             }
         }
     }
@@ -491,7 +522,7 @@ pub fn search_status(
     progress: &Arc<IndexProgress>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
-    external_baseline: Option<Arc<ExternalBaselineSource>>,
+    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
 ) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
 
@@ -781,6 +812,77 @@ pub fn search_status(
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
+fn map_reference_baseline_resolution<T>(
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    resolution: Result<Option<T>, SearchError>,
+    failure_message: &'static str,
+) -> Result<Option<T>, McpError> {
+    match resolution {
+        Ok(Some(value)) => Ok(Some(value)),
+        Ok(None) => {
+            if configured_baseline.is_some_and(|baseline| baseline.backend == "postgres") {
+                return Err(reference_baseline_unavailable_mcp_error(configured_baseline));
+            }
+            Ok(None)
+        }
+        Err(error) => {
+            if error.is_terminal() {
+                return Err(external_baseline_mcp_error(&error));
+            }
+            warn!(%error, "{failure_message}");
+            Ok(None)
+        }
+    }
+}
+
+fn reference_baseline_unavailable_mcp_error(
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+) -> McpError {
+    let selection = configured_baseline
+        .map(|baseline| baseline.selection.as_str())
+        .unwrap_or("configured shared reference baseline");
+    McpError::invalid_params(
+        format!(
+            "Shared reference baseline is unavailable. No published snapshot matched {selection}. Publish the selected baseline, restart MCP, and retry."
+        ),
+        Some(json!({
+            "reasonCode": "baseline_unavailable",
+            "selection": selection,
+        })),
+    )
+}
+
+fn external_baseline_mcp_error(error: &SearchError) -> McpError {
+    let reason_code = error.reason_code();
+    let details = json!({
+        "reasonCode": reason_code,
+        "details": error.to_string(),
+    });
+
+    let invalid_params_reason = matches!(
+        reason_code,
+        Some(
+            "helper_spawn_failed"
+                | "helper_timeout"
+                | "helper_protocol_error"
+                | "helper_rejected"
+                | "resolved_target_mismatch"
+                | "missing_config"
+                | "storage_not_initialized"
+                | "schema_version_mismatch"
+        )
+    );
+
+    if invalid_params_reason {
+        return McpError::invalid_params(
+            format!("external baseline error: {error}"),
+            Some(details),
+        );
+    }
+
+    McpError::internal_error(format!("external baseline error: {error}"), Some(details))
+}
+
 fn ensure_workspace_search_allowed(
     configured_baseline: Option<&ConfiguredBaselineStatus>,
 ) -> Result<(), McpError> {
@@ -810,6 +912,72 @@ fn ensure_workspace_search_allowed(
             "expireAfterDays": support.expire_after_days
         })),
     ))
+}
+
+fn ensure_workspace_baseline_runtime_ready(
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<&Arc<RefreshableExternalBaselineSource>>,
+) -> Result<(), McpError> {
+    let Some(configured_baseline) = configured_baseline else {
+        return Ok(());
+    };
+    if configured_baseline.backend != "postgres" {
+        return Ok(());
+    }
+    if let Some(issue) = configured_baseline.issue.as_deref() {
+        return Err(McpError::invalid_params(
+            format!(
+                "Shared baseline is unavailable. Fix the PostgreSQL baseline configuration, restart MCP, and retry. {issue}"
+            ),
+            Some(json!({
+                "reasonCode": "baseline_unavailable",
+                "details": issue,
+            })),
+        ));
+    }
+    if external_baseline.is_none() {
+        return Err(McpError::invalid_params(
+            "Shared baseline is unavailable. Restart MCP after fixing the PostgreSQL baseline configuration and retry."
+                .to_owned(),
+            Some(json!({
+                "reasonCode": "baseline_unavailable",
+            })),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_reference_baseline_runtime_ready(
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<&Arc<RefreshableExternalBaselineSource>>,
+) -> Result<(), McpError> {
+    let Some(configured_baseline) = configured_baseline else {
+        return Ok(());
+    };
+    if configured_baseline.backend != "postgres" {
+        return Ok(());
+    }
+    if let Some(issue) = configured_baseline.issue.as_deref() {
+        return Err(McpError::invalid_params(
+            format!(
+                "Shared reference baseline is unavailable. Fix the PostgreSQL baseline configuration, restart MCP, and retry. {issue}"
+            ),
+            Some(json!({
+                "reasonCode": "baseline_unavailable",
+                "details": issue,
+            })),
+        ));
+    }
+    if external_baseline.is_none() {
+        return Err(McpError::invalid_params(
+            "Shared reference baseline is unavailable. Restart MCP after fixing the PostgreSQL baseline configuration and retry."
+                .to_owned(),
+            Some(json!({
+                "reasonCode": "baseline_unavailable",
+            })),
+        ));
+    }
+    Ok(())
 }
 
 fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
@@ -938,18 +1106,53 @@ fn shorten_fingerprint(fingerprint: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_code, search_code, search_docs, search_status, ConfiguredBaselineStatus,
-        ExternalBaselineSource, SemanticRuntimeStatus,
+        external_baseline_mcp_error, find_code, find_docs, map_reference_baseline_resolution,
+        search_code, search_docs, search_status, ConfiguredBaselineStatus,
+        RefreshableExternalBaselineSource, SemanticRuntimeStatus,
     };
     use bsl_search::{
         lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
-        IndexedDocument, ResolvedView, SearchEngine,
+        IndexedDocument, ResolvedView, SearchEngine, SearchError,
     };
-    use project_model::{ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState};
+    use project_model::{
+        ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState, SearchPostgresConfig,
+        SearchPostgresCredentialHelperConfig,
+    };
+    use rmcp::model::ErrorCode;
     use std::fs;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    fn retryable_postgres_source() -> Arc<RefreshableExternalBaselineSource> {
+        let postgres = SearchPostgresConfig {
+            host: Some("127.0.0.1".to_owned()),
+            port: Some(1),
+            dbname: Some("bsl_search".to_owned()),
+            schema: Some("bsl_search".to_owned()),
+            vault_role_base: Some("prod/search/bsl-analyzer".to_owned()),
+            credential_helper: SearchPostgresCredentialHelperConfig {
+                program: Some("python3".to_owned()),
+                args: vec![
+                    "-c".to_owned(),
+                    "import json; print(json.dumps({'protocol':'bsl-analyzer.postgres-helper.v1','ok':True,'url':'postgres://127.0.0.1:1/bsl_search'}))".to_owned(),
+                ],
+            },
+        };
+        Arc::new(
+            RefreshableExternalBaselineSource::for_test_with_refresh_context(
+                bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1/bsl_search"),
+                BaselineRef {
+                    corpus: CorpusId::WorkspaceCode,
+                    snapshot_id: None,
+                    branch: Some("main".to_owned()),
+                    commit: None,
+                },
+                postgres,
+            )
+            .unwrap(),
+        )
+    }
 
     #[test]
     fn search_status_shows_workspace_overlay_section() {
@@ -990,7 +1193,7 @@ mod tests {
 
     #[test]
     fn search_status_shows_external_baseline_probe_errors() {
-        let source = ExternalBaselineSource::new(
+        let source = RefreshableExternalBaselineSource::for_test(
             bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
             bsl_search::BaselineRef {
                 corpus: bsl_search::CorpusId::WorkspaceCode,
@@ -1066,7 +1269,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("reference-search.db");
         let engine = SearchEngine::fts_only(&db_path).unwrap();
-        let source = ExternalBaselineSource::new(
+        let source = RefreshableExternalBaselineSource::for_test(
             bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
             bsl_search::BaselineRef {
                 corpus: bsl_search::CorpusId::Reference,
@@ -1077,12 +1280,138 @@ mod tests {
         )
         .unwrap();
 
-        let error =
-            search_docs(&Arc::new(Mutex::new(Some(engine))), Some(Arc::new(source)), "Массив", 10)
-                .unwrap_err();
+        let error = search_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            None,
+            Some(Arc::new(source)),
+            "Массив",
+            10,
+        )
+        .unwrap_err();
 
         assert!(error.message.contains("Semantic search not available"));
         assert!(!error.message.contains("centralized reference baseline"));
+    }
+
+    #[test]
+    fn find_docs_rejects_local_fallback_when_reference_postgres_baseline_is_unavailable() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine
+            .index_documents(
+                "platform",
+                "platform://docs",
+                b"v1",
+                &[Document {
+                    title: "Массив / Array".to_owned(),
+                    body: "Тип: Массив / Array".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let error = find_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "latest reference".to_owned(),
+                issue: Some("failed to resolve PostgreSQL reader credentials".to_owned()),
+                support: None,
+            }),
+            None,
+            "Массив",
+            10,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("Shared reference baseline is unavailable"));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("baseline_unavailable")
+        );
+    }
+
+    #[test]
+    fn search_docs_rejects_reference_postgres_baseline_unavailability_before_semantic_validation() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+
+        let error = search_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "latest reference".to_owned(),
+                issue: Some("failed to resolve PostgreSQL reader credentials".to_owned()),
+                support: None,
+            }),
+            None,
+            "Массив",
+            10,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("Shared reference baseline is unavailable"));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("baseline_unavailable")
+        );
+    }
+
+    #[test]
+    fn missing_reference_snapshot_maps_to_baseline_unavailable_error() {
+        let error = map_reference_baseline_resolution::<()>(
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "snapshot reference:0.1.104".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Ok(None),
+            "test reference snapshot resolution",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("Shared reference baseline is unavailable"));
+        assert!(error.message.contains("snapshot reference:0.1.104"));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("baseline_unavailable")
+        );
+    }
+
+    #[test]
+    fn missing_reference_snapshot_still_allows_local_sqlite_mode() {
+        let result = map_reference_baseline_resolution::<()>(
+            Some(&ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "local reference index".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Ok(None),
+            "test reference snapshot resolution",
+        )
+        .unwrap();
+
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1208,5 +1537,180 @@ mod tests {
 
         assert!(error.message.contains("expired"));
         assert!(error.message.contains("Update the branch from develop"));
+    }
+
+    #[test]
+    fn find_code_rejects_local_fallback_when_postgres_baseline_is_unavailable() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура ТестоваПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let error = find_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: Some("failed to resolve PostgreSQL reader credentials".to_owned()),
+                support: None,
+            }),
+            None,
+            "ТестоваПроцедура",
+            10,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("Shared baseline is unavailable"));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("baseline_unavailable")
+        );
+    }
+
+    #[test]
+    fn find_code_surfaces_retry_exhausted_external_baseline_errors() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура ТестоваПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        let error = find_code(
+            &Arc::new(Mutex::new(Some(engine))),
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Some(retryable_postgres_source()),
+            "ТестоваПроцедура",
+            10,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(error.message.contains("external baseline error"));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("refresh_retry_exhausted")
+        );
+    }
+
+    #[test]
+    fn find_code_surfaces_retry_exhausted_errors_for_empty_queries() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("workspace-search.db");
+        let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
+
+        let error = find_code(
+            &engine,
+            Some(&ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+                support: None,
+            }),
+            Some(retryable_postgres_source()),
+            "НесуществующееСлово",
+            10,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("refresh_retry_exhausted")
+        );
+    }
+
+    #[test]
+    fn search_docs_falls_back_to_local_sqlite_when_external_semantic_fails() {
+        // Engine has no semantic, so semantic search returns an error
+        // before touching the external baseline. Verifies standard validation.
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+
+        let source = RefreshableExternalBaselineSource::for_test(
+            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::Reference,
+                snapshot_id: Some(bsl_search::SnapshotId::new("ref:0.1.0")),
+                branch: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let result = search_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            None,
+            Some(Arc::new(source)),
+            "Массив",
+            10,
+        )
+        .unwrap_err();
+
+        assert!(result.message.contains("Semantic search not available"));
+    }
+
+    #[test]
+    fn external_baseline_storage_error_maps_to_invalid_params() {
+        let error = SearchError::StorageNotInitialized { schema: "bsl_search".to_owned() };
+
+        let mcp_error = external_baseline_mcp_error(&error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INVALID_PARAMS);
+        assert!(mcp_error.message.contains("external baseline error"));
+        assert_eq!(
+            mcp_error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("storage_not_initialized")
+        );
+    }
+
+    #[test]
+    fn external_baseline_connectivity_error_maps_to_internal_error() {
+        let error =
+            SearchError::ExternalBaseline("postgres_connect_failed: connection refused".to_owned());
+
+        let mcp_error = external_baseline_mcp_error(&error);
+
+        assert_eq!(mcp_error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(mcp_error.message.contains("external baseline error"));
+        assert_eq!(
+            mcp_error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("postgres_connect_failed")
+        );
     }
 }

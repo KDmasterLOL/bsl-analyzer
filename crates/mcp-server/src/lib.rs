@@ -507,15 +507,24 @@ impl McpServer {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
+                let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 let action = p.action.clone();
                 tokio::task::spawn_blocking(move || match action.as_str() {
-                    "find_docs" => {
-                        tools::search::find_docs(&engine, external_baseline.clone(), &query, limit)
-                    }
-                    "search_docs" => {
-                        tools::search::search_docs(&engine, external_baseline, &query, limit)
-                    }
+                    "find_docs" => tools::search::find_docs(
+                        &engine,
+                        configured_baseline.as_ref(),
+                        external_baseline.clone(),
+                        &query,
+                        limit,
+                    ),
+                    "search_docs" => tools::search::search_docs(
+                        &engine,
+                        configured_baseline.as_ref(),
+                        external_baseline,
+                        &query,
+                        limit,
+                    ),
                     _ => unreachable!(),
                 })
                 .await

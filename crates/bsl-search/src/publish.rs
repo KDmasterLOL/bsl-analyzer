@@ -283,7 +283,6 @@ impl BaselinePublisher {
         S: SnapshotPublisher + EmbeddingStore,
         E: EmbeddingGenerator + Clone + Send + 'static,
     {
-        store.ensure_storage()?;
         let snapshot_stats = store.publish_snapshot(snapshot, metadata, documents)?;
         let embeddings = match embedder {
             Some(embedder) => Some(self.shared_embeddings.publish(
@@ -316,7 +315,6 @@ mod tests {
     struct FakeEmbeddingStore {
         embeddings: SharedEmbeddingMap,
         stored_batches: Arc<Mutex<Vec<usize>>>,
-        ensure_storage_calls: Arc<Mutex<usize>>,
         publish_calls: Arc<Mutex<usize>>,
     }
 
@@ -362,11 +360,6 @@ mod tests {
     }
 
     impl SnapshotPublisher for FakeEmbeddingStore {
-        fn ensure_storage(&self) -> Result<(), SearchError> {
-            *self.ensure_storage_calls.lock().unwrap() += 1;
-            Ok(())
-        }
-
         fn publish_snapshot(
             &self,
             _snapshot: &Snapshot,
@@ -459,7 +452,6 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(*store.ensure_storage_calls.lock().unwrap(), 1);
         assert_eq!(*store.publish_calls.lock().unwrap(), 1);
         assert_eq!(report.snapshot.written_files, 2);
         assert!(report.embeddings.is_some());

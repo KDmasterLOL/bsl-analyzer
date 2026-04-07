@@ -42,6 +42,7 @@ pub use domain::{
 pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{IndexProgress, SearchConfig, SearchEngine, SearchHit};
 pub use error::SearchError;
+pub use error::SCHEMA_VERSION_CURRENT;
 pub use external_baseline::ExternalBaselineAdapter;
 pub use external_baseline::{
     BaselineCollectionRecord, BaselineEmbeddingCoverageRecord, BaselineEmbeddingModelRecord,

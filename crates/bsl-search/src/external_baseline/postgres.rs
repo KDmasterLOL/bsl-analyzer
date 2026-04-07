@@ -16,6 +16,21 @@ use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Name of the table that stores schema version metadata.
+const SCHEMA_METADATA_TABLE: &str = "_schema_metadata_";
+const REQUIRED_STORAGE_TABLES: &[&str] = &[
+    SCHEMA_METADATA_TABLE,
+    "snapshots",
+    "snapshot_files",
+    "snapshot_deletions",
+    "snapshot_heads",
+    "content_objects",
+    "semantic_embeddings",
+    "file_objects",
+    "file_object_items",
+    "serving_lexical",
+];
+
 type PgPooledConnection = r2d2_postgres::r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
 
 /// PostgreSQL adapter for centralized baseline storage.
@@ -118,12 +133,147 @@ impl PostgresBaselineAdapter {
 
     fn connect(&self) -> Result<PgPooledConnection, SearchError> {
         self.pool.get().map_err(|err| {
-            SearchError::ExternalBaseline(format!("failed to get pooled connection: {err}"))
+            let reason = pool_connection_reason_code(&err.to_string());
+            SearchError::ExternalBaseline(format!(
+                "{reason}: failed to get pooled connection: {err}"
+            ))
         })
     }
 
     fn table(&self, table: &str) -> String {
         format!("{}.{}", self.schema, table)
+    }
+
+    fn storage_table_exists(
+        &self,
+        client: &mut impl GenericClient,
+        table_name: &str,
+    ) -> Result<bool, SearchError> {
+        Ok(client
+            .query_opt(
+                "SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = $1 AND table_name = $2
+                 LIMIT 1",
+                &[&self.schema, &table_name],
+            )?
+            .is_some())
+    }
+
+    fn lexical_serving_rows_exist(
+        &self,
+        client: &mut impl GenericClient,
+        snapshot_id: &str,
+        collection: Option<&str>,
+    ) -> Result<bool, SearchError> {
+        let mut sql =
+            format!("SELECT 1 FROM {} WHERE snapshot_id = $1", self.table("serving_lexical"));
+        let snapshot_id = snapshot_id.to_owned();
+        let collection = collection.map(ToOwned::to_owned);
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![&snapshot_id];
+        if let Some(collection) = collection.as_ref() {
+            sql.push_str(&format!(" AND collection = ${}", params.len() + 1));
+            params.push(collection);
+        }
+        sql.push_str(" LIMIT 1");
+        Ok(client.query_opt(&sql, &params)?.is_some())
+    }
+
+    fn semantic_serving_rows_exist(
+        &self,
+        client: &mut impl GenericClient,
+        snapshot_id: &str,
+        model_id: &str,
+        dimension: i32,
+        collection: Option<&str>,
+    ) -> Result<bool, SearchError> {
+        let mut sql = format!(
+            "SELECT 1 FROM {} WHERE snapshot_id = $1 AND model_id = $2 AND dimension = $3",
+            self.table("serving_semantic")
+        );
+        let snapshot_id = snapshot_id.to_owned();
+        let model_id = model_id.to_owned();
+        let collection = collection.map(ToOwned::to_owned);
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            vec![&snapshot_id, &model_id, &dimension];
+        if let Some(collection) = collection.as_ref() {
+            sql.push_str(&format!(" AND collection = ${}", params.len() + 1));
+            params.push(collection);
+        }
+        sql.push_str(" LIMIT 1");
+        Ok(client.query_opt(&sql, &params)?.is_some())
+    }
+
+    /// Checks whether the storage is ready for steady-state operations.
+    ///
+    /// Probes for the schema metadata table and the core baseline tables.
+    /// If metadata exists, validates the schema version.
+    /// Returns a typed error instead of letting downstream queries fail
+    /// with raw missing-table errors.
+    pub fn check_storage_readiness(&self) -> Result<(), SearchError> {
+        let mut client = self.connect()?;
+        for table_name in REQUIRED_STORAGE_TABLES {
+            let exists = client.query_opt(
+                "SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = $1 AND table_name = $2
+                 LIMIT 1",
+                &[&self.schema, table_name],
+            )?;
+            if exists.is_none() {
+                return Err(SearchError::StorageNotInitialized { schema: self.schema.clone() });
+            }
+        }
+
+        let version = {
+            let row = client.query_opt(
+                &format!(
+                    "SELECT value::INTEGER FROM {} WHERE setting = 'schema_version' LIMIT 1",
+                    self.table(SCHEMA_METADATA_TABLE)
+                ),
+                &[],
+            )?;
+            row.map(|r| r.get::<_, i32>(0))
+        };
+        if let Some(version) = version {
+            if version != crate::error::SCHEMA_VERSION_CURRENT {
+                return Err(SearchError::SchemaVersionMismatch {
+                    expected: crate::error::SCHEMA_VERSION_CURRENT,
+                    actual: Some(version),
+                });
+            }
+        } else {
+            // Metadata table present but version row missing means storage
+            // was partially initialized (pre-versioning or interrupted migrate).
+            return Err(SearchError::StorageNotInitialized { schema: self.schema.clone() });
+        }
+
+        Ok(())
+    }
+
+    /// Reads the stored schema version, if any.
+    /// Only queries the metadata table; does not validate version compatibility.
+    pub fn get_schema_version(&self) -> Result<Option<i32>, SearchError> {
+        let mut client = self.connect()?;
+        let row = client.query_opt(
+            &format!(
+                "SELECT value::INTEGER FROM {} WHERE setting = 'schema_version' LIMIT 1",
+                self.table(SCHEMA_METADATA_TABLE)
+            ),
+            &[],
+        )?;
+        Ok(row.map(|r| r.get::<_, i32>(0)))
+    }
+
+    fn write_schema_version(&self, tx: &mut Transaction<'_>) -> Result<(), SearchError> {
+        tx.execute(
+            &format!(
+                "INSERT INTO {} (setting, value)
+                 VALUES ('schema_version', $1::TEXT)
+                 ON CONFLICT (setting) DO UPDATE SET value = EXCLUDED.value",
+                self.table(SCHEMA_METADATA_TABLE)
+            ),
+            &[&crate::error::SCHEMA_VERSION_CURRENT],
+        )?;
+        Ok(())
     }
 
     fn snapshot_row_to_model(row: Row) -> Snapshot {
@@ -150,6 +300,13 @@ impl PostgresBaselineAdapter {
     fn ensure_schema_statements(&self) -> Vec<String> {
         vec![
             format!("CREATE SCHEMA IF NOT EXISTS {}", self.schema),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    setting TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )",
+                self.table(SCHEMA_METADATA_TABLE)
+            ),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
                     id TEXT PRIMARY KEY,
@@ -306,7 +463,7 @@ impl PostgresBaselineAdapter {
                 self.table("serving_lexical")
             ),
             // pgvector-dependent DDL is handled separately in
-            // pgvector_schema_statements() — ensure_storage() runs it
+            // pgvector_schema_statements() — migrate_storage() runs it
             // best-effort so non-superuser environments degrade gracefully.
             format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_file_objects_fingerprint
@@ -330,7 +487,7 @@ impl PostgresBaselineAdapter {
     }
 
     /// DDL statements that require the pgvector extension.
-    /// Executed best-effort in `ensure_storage()` — if vector is unavailable,
+    /// Executed best-effort in `migrate_storage()` — if vector is unavailable,
     /// semantic serving degrades gracefully (queries return errors that trigger
     /// fallback to local SQLite).
     fn pgvector_schema_statements(&self) -> Vec<String> {
@@ -370,6 +527,7 @@ impl PostgresBaselineAdapter {
         commit: Option<&str>,
         limit: usize,
     ) -> Result<Vec<BaselineSnapshotRecord>, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
         let limit = limit.clamp(1, 200) as i64;
         let corpus = corpus.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
@@ -422,6 +580,7 @@ impl PostgresBaselineAdapter {
         &self,
         snapshot_id: &str,
     ) -> Result<Option<BaselineSnapshotDetails>, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
 
         let summary_query = format!(
@@ -454,6 +613,7 @@ impl PostgresBaselineAdapter {
         collection: Option<&str>,
         limit: usize,
     ) -> Result<Vec<BaselineFileObjectRecord>, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
         let limit = limit.clamp(1, 200) as i64;
         let collection =
@@ -490,6 +650,7 @@ impl PostgresBaselineAdapter {
         &self,
         file_object_id: &str,
     ) -> Result<Option<BaselineFileObjectDetails>, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
         let summary_query = format!(
             "SELECT fo.id,
@@ -537,7 +698,7 @@ impl PostgresBaselineAdapter {
         dimension: usize,
         embeddings: &[(String, Vec<f32>)],
     ) -> Result<BaselineEmbeddingStats, SearchError> {
-        self.ensure_storage()?;
+        self.check_storage_readiness()?;
         if embeddings.is_empty() {
             return Ok(BaselineEmbeddingStats { stored: 0, reused: 0 });
         }
@@ -573,6 +734,7 @@ impl PostgresBaselineAdapter {
         model_id: &str,
         dimension: usize,
     ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+        self.check_storage_readiness()?;
         if embedding_keys.is_empty() {
             return Ok(HashMap::new());
         }
@@ -607,6 +769,7 @@ impl PostgresBaselineAdapter {
         model_id: Option<&str>,
         dimension: Option<usize>,
     ) -> Result<Vec<BaselineEmbeddingModelRecord>, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
         let model_id =
             model_id.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
@@ -645,6 +808,7 @@ impl PostgresBaselineAdapter {
         model_id: Option<&str>,
         dimension: Option<usize>,
     ) -> Result<Vec<BaselineEmbeddingCoverageRecord>, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
         let active_keys = collect_active_embedding_keys(&mut *client, self)?;
         let active_payloads = active_keys.len();
@@ -702,6 +866,7 @@ impl PostgresBaselineAdapter {
     }
 
     pub fn garbage_collect(&self, execute: bool) -> Result<BaselineGcReport, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
         let active_keys = collect_active_embedding_keys(&mut *client, self)?;
 
@@ -816,7 +981,7 @@ impl PostgresBaselineAdapter {
         model_id: &str,
         dimension: usize,
     ) -> Result<usize, SearchError> {
-        self.ensure_storage()?;
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
 
         let visible_files = materialize_visible_snapshot_files(&mut *client, self, snapshot_id)?;
@@ -937,6 +1102,7 @@ impl PostgresBaselineAdapter {
 
 impl SnapshotCatalog for PostgresBaselineAdapter {
     fn resolve_baseline(&self, baseline: &BaselineRef) -> Result<Option<Snapshot>, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
         let corpus = baseline.corpus.as_str();
 
@@ -989,6 +1155,7 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
         &self,
         snapshot: &Snapshot,
     ) -> Result<Vec<IndexedDocument>, SearchError> {
+        self.check_storage_readiness()?;
         let mut client = self.connect()?;
         let visible_files = materialize_visible_snapshot_files(&mut *client, self, &snapshot.id.0)?;
         if visible_files.is_empty() {
@@ -1075,6 +1242,7 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
             return Ok(Vec::new());
         }
 
+        self.check_storage_readiness()?;
         let collection =
             collection.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
         let limit = limit.clamp(1, 200) as i64;
@@ -1105,8 +1273,21 @@ impl BaselineLexicalSearch for PostgresBaselineAdapter {
         sql.push_str(&format!(" LIMIT ${}", params.len() + 1));
         params.push(&limit);
 
-        Ok(client
-            .query(&sql, &params)?
+        let rows = client.query(&sql, &params)?;
+        if rows.is_empty()
+            && !self.lexical_serving_rows_exist(
+                &mut *client,
+                &snapshot_id,
+                collection.as_deref(),
+            )?
+        {
+            return Err(SearchError::ExternalBaseline(
+                "serving_lexical_unavailable: snapshot has no serving rows for lexical search"
+                    .to_owned(),
+            ));
+        }
+
+        Ok(rows
             .into_iter()
             .map(|row| LexicalHit {
                 collection: row.get("collection"),
@@ -1136,6 +1317,7 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
             return Ok(Vec::new());
         }
 
+        self.check_storage_readiness()?;
         let collection =
             collection.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
         let limit = limit.clamp(1, 200) as i64;
@@ -1170,8 +1352,29 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
         params.push(&limit);
 
         let mut client = self.connect()?;
-        Ok(client
-            .query(&sql, &params)?
+        if !self.storage_table_exists(&mut *client, "serving_semantic")? {
+            return Err(SearchError::ExternalBaseline(
+                "serving_semantic_unavailable: semantic serving table is not initialized"
+                    .to_owned(),
+            ));
+        }
+
+        let rows = client.query(&sql, &params)?;
+        if rows.is_empty()
+            && !self.semantic_serving_rows_exist(
+                &mut *client,
+                &snapshot_id,
+                &model_id,
+                dimension,
+                collection.as_deref(),
+            )?
+        {
+            return Err(SearchError::ExternalBaseline(
+                "serving_semantic_unavailable: snapshot has no semantic serving rows".to_owned(),
+            ));
+        }
+
+        Ok(rows
             .into_iter()
             .map(|row| SemanticHit {
                 collection: row.get("collection"),
@@ -1186,8 +1389,8 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
     }
 }
 
-impl SnapshotPublisher for PostgresBaselineAdapter {
-    fn ensure_storage(&self) -> Result<(), SearchError> {
+impl PostgresBaselineAdapter {
+    pub fn migrate_storage(&self) -> Result<(), SearchError> {
         let mut client = self.connect()?;
         for statement in self.ensure_schema_statements() {
             client.batch_execute(&statement)?;
@@ -1202,22 +1405,32 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
                 break;
             }
         }
+
+        // Write schema version metadata.  Use a transaction so the version
+        // row lands atomically (CREATE TABLE IF NOT EXISTS is safe to run
+        // outside a transaction on PG).
+        let mut tx = client.transaction()?;
+        self.write_schema_version(&mut tx)?;
+        tx.commit()?;
+
         Ok(())
     }
+}
 
+impl SnapshotPublisher for PostgresBaselineAdapter {
     fn publish_snapshot(
         &self,
         snapshot: &Snapshot,
         metadata: &SnapshotPublishMetadata,
         documents: &[IndexedDocument],
     ) -> Result<SnapshotPublishStats, SearchError> {
-        self.ensure_storage()?;
-
         if snapshot.parent_id.as_ref().is_some_and(|parent| parent.0 == snapshot.id.0) {
             return Err(SearchError::ExternalBaseline(
                 "snapshot cannot reference itself as parent".to_owned(),
             ));
         }
+
+        self.check_storage_readiness()?;
 
         let mut client = self.connect()?;
         let mut tx = client.transaction()?;
@@ -1519,6 +1732,19 @@ fn replace_serving_lexical_rows(
     Ok(())
 }
 
+fn pool_connection_reason_code(message: &str) -> &'static str {
+    let message = message.to_ascii_lowercase();
+    if message.contains("password authentication failed")
+        || message.contains("authentication failed")
+        || message.contains("invalid password")
+        || message.contains("saslauth")
+    {
+        "postgres_auth_failed"
+    } else {
+        "postgres_connect_failed"
+    }
+}
+
 fn validate_identifier(identifier: &str) -> Result<(), SearchError> {
     if identifier.is_empty()
         || !identifier.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
@@ -1743,9 +1969,7 @@ mod tests {
         PostgresBaselineAdapter,
     };
     use crate::domain::{CorpusId, ExternalBaselineConfig};
-    use crate::ports::{
-        BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotPublisher,
-    };
+    use crate::ports::{BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog};
     use crate::{BaselineRef, IndexedDocument};
 
     #[test]
@@ -1781,13 +2005,13 @@ mod tests {
     }
 
     #[test]
-    fn connection_errors_surface_from_storage_initialization() {
+    fn connection_errors_surface_from_storage_migration() {
         let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
             "postgres://127.0.0.1:1",
         ))
         .unwrap();
 
-        let error = adapter.ensure_storage().unwrap_err();
+        let error = adapter.migrate_storage().unwrap_err();
         assert!(error.to_string().contains("connection"));
     }
 
