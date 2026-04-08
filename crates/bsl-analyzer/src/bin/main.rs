@@ -836,11 +836,7 @@ fn run_search_baseline_publish(
     let project = project_model::Project::new(&args.source_dir);
     let source_path = project.source_path().to_path_buf();
     let branch = resolve_publish_branch(args.branch.as_deref(), &project.root);
-    let commit = pick_first_non_empty([
-        args.commit.as_deref(),
-        env::var("CI_COMMIT_SHA").ok().as_deref(),
-        env::var("GITHUB_SHA").ok().as_deref(),
-    ]);
+    let commit = resolve_publish_commit(args.commit.as_deref(), &project.root);
     let corpus = match args.corpus {
         SearchBaselineCorpusCli::WorkspaceCode => CorpusId::WorkspaceCode,
         SearchBaselineCorpusCli::Reference => CorpusId::Reference,
@@ -1687,6 +1683,19 @@ fn resolve_publish_branch(
         env::var("CI_COMMIT_BRANCH").ok().as_deref(),
         env::var("CI_COMMIT_REF_NAME").ok().as_deref(),
         git_branch.as_deref(),
+    ])
+}
+
+fn resolve_publish_commit(
+    explicit_commit: Option<&str>,
+    project_root: &std::path::Path,
+) -> Option<String> {
+    let git_commit = project_model::current_git_commit(project_root);
+    pick_first_non_empty([
+        explicit_commit,
+        env::var("CI_COMMIT_SHA").ok().as_deref(),
+        env::var("GITHUB_SHA").ok().as_deref(),
+        git_commit.as_deref(),
     ])
 }
 
@@ -3353,8 +3362,9 @@ mod tests {
     use super::{
         analyze_snapshot_retention, build_check_config_report, check_config,
         diagnostics_config_from_project, pick_first_non_empty, resolve_publish_branch,
-        resolve_snapshot_id, select_parent_snapshot_id, select_parent_snapshot_id_from_groups,
-        validate_workspace_publish_policy, SnapshotRetentionStatus,
+        resolve_publish_commit, resolve_snapshot_id, select_parent_snapshot_id,
+        select_parent_snapshot_id_from_groups, validate_workspace_publish_policy,
+        SnapshotRetentionStatus,
     };
     use bsl_search::{BaselineSnapshotRecord, CorpusId};
     use chrono::{TimeZone, Utc};
@@ -3446,6 +3456,32 @@ mod tests {
         }
 
         assert_eq!(branch.as_deref(), Some("feature/demo"));
+    }
+
+    #[test]
+    fn resolve_publish_commit_uses_git_when_cli_and_ci_are_missing() {
+        let saved_ci = env::var("CI_COMMIT_SHA").ok();
+        let saved_gha = env::var("GITHUB_SHA").ok();
+        env::remove_var("CI_COMMIT_SHA");
+        env::remove_var("GITHUB_SHA");
+
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        let ref_file = git_dir.join("refs/heads/feature/demo");
+        fs::create_dir_all(ref_file.parent().unwrap()).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/demo\n").unwrap();
+        fs::write(&ref_file, "0123456789abcdef\n").unwrap();
+
+        let commit = resolve_publish_commit(None, dir.path());
+
+        if let Some(v) = saved_ci {
+            env::set_var("CI_COMMIT_SHA", v);
+        }
+        if let Some(v) = saved_gha {
+            env::set_var("GITHUB_SHA", v);
+        }
+
+        assert_eq!(commit.as_deref(), Some("0123456789abcdef"));
     }
 
     #[test]

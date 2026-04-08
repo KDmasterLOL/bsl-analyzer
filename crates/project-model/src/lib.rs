@@ -680,6 +680,20 @@ pub fn current_git_branch(start_dir: &Path) -> Option<String> {
     ref_path.strip_prefix("refs/heads/").map(ToOwned::to_owned)
 }
 
+pub fn current_git_commit(start_dir: &Path) -> Option<String> {
+    let git_dir = discover_git_dir(start_dir)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(ref_path) = head.strip_prefix("ref: ") {
+        return std::fs::read_to_string(git_dir.join(ref_path))
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+    }
+
+    (!head.is_empty()).then(|| head.to_owned())
+}
+
 pub fn parse_timestamp_utc(value: &str) -> Option<DateTime<Utc>> {
     let value = value.trim();
     if value.is_empty() {
@@ -1335,9 +1349,9 @@ fn validate_resolved_postgres_url(
 #[cfg(test)]
 mod tests {
     use super::{
-        branch_pattern_matches, current_git_branch, evaluate_workspace_baseline_support,
-        is_publish_branch_allowed, parse_timestamp_utc, resolve_postgres_url,
-        resolve_workspace_branch_policy, PostgresAccessMode, ProjectConfig,
+        branch_pattern_matches, current_git_branch, current_git_commit,
+        evaluate_workspace_baseline_support, is_publish_branch_allowed, parse_timestamp_utc,
+        resolve_postgres_url, resolve_workspace_branch_policy, PostgresAccessMode, ProjectConfig,
         ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
         SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
     };
@@ -1610,6 +1624,28 @@ mod tests {
         fs::write(git_dir.join("HEAD"), "0123456789abcdef\n").unwrap();
 
         assert_eq!(current_git_branch(dir.path()), None);
+    }
+
+    #[test]
+    fn current_git_commit_reads_direct_git_dir_ref() {
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        let ref_file = git_dir.join("refs/heads/feature/test");
+        fs::create_dir_all(ref_file.parent().unwrap()).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/test\n").unwrap();
+        fs::write(&ref_file, "0123456789abcdef\n").unwrap();
+
+        assert_eq!(current_git_commit(dir.path()).as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn current_git_commit_reads_detached_head() {
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "0123456789abcdef\n").unwrap();
+
+        assert_eq!(current_git_commit(dir.path()).as_deref(), Some("0123456789abcdef"));
     }
 
     #[test]
