@@ -1,8 +1,6 @@
 //! Search tools: full-text and semantic search across code and documentation.
 
-use crate::baseline::{
-    ConfiguredBaselineStatus, ExternalBaselineState, RefreshableExternalBaselineSource,
-};
+use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState};
 use crate::state::SemanticRuntimeStatus;
 use bsl_search::{
     lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical, merge_semantic,
@@ -17,6 +15,11 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
+const DIRECT_SEARCH_INITIAL_WINDOW_MULTIPLIER: usize = 3;
+const DIRECT_SEARCH_MAX_WINDOW_MULTIPLIER: usize = 10;
+const DIRECT_SEARCH_MIN_MAX_WINDOW: usize = 100;
+const DIRECT_SEARCH_MAX_REFILL_ROUNDS: usize = 4;
+
 /// Full-text search across indexed BSL code.
 ///
 /// Resolution order when an external baseline is available:
@@ -26,7 +29,7 @@ use tracing::warn;
 pub fn find_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
-    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -110,7 +113,7 @@ pub fn search_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
-    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -199,7 +202,7 @@ enum DirectResult {
 /// without overlay merge. Used when the local search engine is still building
 /// and no overlay changes have been tracked yet.
 fn try_direct_lexical_code_no_overlay(
-    source: &RefreshableExternalBaselineSource,
+    source: &ExternalBaselineService,
     query: &str,
     limit: usize,
 ) -> DirectResult {
@@ -232,7 +235,7 @@ fn try_direct_lexical_code_no_overlay(
 /// merging with local overlay.
 fn try_direct_lexical_code(
     engine: &SearchEngine,
-    source: &RefreshableExternalBaselineSource,
+    source: &ExternalBaselineService,
     query: &str,
     limit: usize,
 ) -> DirectResult {
@@ -248,18 +251,6 @@ fn try_direct_lexical_code(
             return DirectResult::Unavailable;
         }
     };
-    let baseline_hits =
-        match source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), limit * 2) {
-            Ok(hits) => hits,
-            Err(e) => {
-                if e.is_terminal() {
-                    warn!("direct lexical: terminal serving query error: {e}");
-                    return DirectResult::Terminal(e);
-                }
-                warn!("direct lexical: serving query failed: {e}");
-                return DirectResult::Unavailable;
-            }
-        };
     let (overlay_hits, hidden_paths) = match engine.workspace_overlay_lexical_hits(query, limit) {
         Ok(r) => r,
         Err(e) => {
@@ -267,17 +258,17 @@ fn try_direct_lexical_code(
             return DirectResult::Unavailable;
         }
     };
-    let context = merge_context_for_collection(&hidden_paths, "code");
     let overlay_lexical: Vec<LexicalHit> = overlay_hits.iter().map(SearchHit::to_lexical).collect();
-    let merged = merge_lexical(&baseline_hits, &overlay_lexical, &context, limit);
-    DirectResult::Found(merged.into_iter().map(SearchHit::from_merged).collect())
+    merge_direct_lexical_with_refill(&overlay_lexical, &hidden_paths, limit, |fetch_limit| {
+        source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), fetch_limit)
+    })
 }
 
 /// Try direct semantic search against the external baseline serving table,
 /// merging with local overlay.
 fn try_direct_semantic_code(
     engine: &SearchEngine,
-    source: &RefreshableExternalBaselineSource,
+    source: &ExternalBaselineService,
     query: &str,
     limit: usize,
 ) -> DirectResult {
@@ -306,24 +297,6 @@ fn try_direct_semantic_code(
     let Some(dim) = engine.embedding_dimension() else {
         return DirectResult::Unavailable;
     };
-    let baseline_hits = match source.semantic_search(
-        snapshot.id.0.as_str(),
-        &query_embedding,
-        model_id,
-        dim,
-        Some("code"),
-        limit * 2,
-    ) {
-        Ok(hits) => hits,
-        Err(e) => {
-            if e.is_terminal() {
-                warn!("direct semantic: terminal serving query error: {e}");
-                return DirectResult::Terminal(e);
-            }
-            warn!("direct semantic: serving query failed: {e}");
-            return DirectResult::Unavailable;
-        }
-    };
     let (overlay_hits, hidden_paths) = match engine.workspace_overlay_semantic_hits(query, limit) {
         Ok(r) => r,
         Err(e) => {
@@ -331,11 +304,142 @@ fn try_direct_semantic_code(
             return DirectResult::Unavailable;
         }
     };
-    let context = merge_context_for_collection(&hidden_paths, "code");
     let overlay_semantic: Vec<SemanticHit> =
         overlay_hits.iter().map(SearchHit::to_semantic).collect();
-    let merged = merge_semantic(&baseline_hits, &overlay_semantic, &context, limit);
-    DirectResult::Found(merged.into_iter().map(SearchHit::from_merged).collect())
+    merge_direct_semantic_with_refill(&overlay_semantic, &hidden_paths, limit, |fetch_limit| {
+        source.semantic_search(
+            snapshot.id.0.as_str(),
+            &query_embedding,
+            model_id,
+            dim,
+            Some("code"),
+            fetch_limit,
+        )
+    })
+}
+
+fn direct_search_initial_window(limit: usize) -> usize {
+    limit.max(1).saturating_mul(DIRECT_SEARCH_INITIAL_WINDOW_MULTIPLIER)
+}
+
+fn direct_search_max_window(limit: usize) -> usize {
+    direct_search_initial_window(limit).max(
+        limit.saturating_mul(DIRECT_SEARCH_MAX_WINDOW_MULTIPLIER).max(DIRECT_SEARCH_MIN_MAX_WINDOW),
+    )
+}
+
+fn merge_direct_lexical_with_refill<F>(
+    overlay_hits: &[LexicalHit],
+    hidden_paths: &HashSet<String>,
+    limit: usize,
+    mut fetch_baseline: F,
+) -> DirectResult
+where
+    F: FnMut(usize) -> Result<Vec<LexicalHit>, SearchError>,
+{
+    let context = merge_context_for_collection(hidden_paths, "code");
+    let mut fetch_limit = direct_search_initial_window(limit);
+    let max_fetch_limit = direct_search_max_window(limit);
+    let mut previous_baseline_count = 0usize;
+    let mut best = Vec::new();
+
+    for _ in 0..DIRECT_SEARCH_MAX_REFILL_ROUNDS {
+        let baseline_hits = match fetch_baseline(fetch_limit) {
+            Ok(hits) => hits,
+            Err(e) => {
+                if e.is_terminal() {
+                    warn!("direct lexical: terminal serving query error: {e}");
+                    return DirectResult::Terminal(e);
+                }
+                warn!("direct lexical: serving query failed: {e}");
+                return DirectResult::Unavailable;
+            }
+        };
+
+        best = merge_lexical(&baseline_hits, overlay_hits, &context, limit)
+            .into_iter()
+            .map(SearchHit::from_merged)
+            .collect();
+
+        if best.len() >= limit {
+            return DirectResult::Found(best);
+        }
+
+        let baseline_count = baseline_hits.len();
+        if baseline_count < fetch_limit || baseline_count <= previous_baseline_count {
+            return DirectResult::Found(best);
+        }
+
+        previous_baseline_count = baseline_count;
+        if fetch_limit >= max_fetch_limit {
+            return DirectResult::Found(best);
+        }
+
+        let next_fetch_limit = fetch_limit.saturating_mul(2).min(max_fetch_limit);
+        if next_fetch_limit == fetch_limit {
+            return DirectResult::Found(best);
+        }
+        fetch_limit = next_fetch_limit;
+    }
+
+    DirectResult::Found(best)
+}
+
+fn merge_direct_semantic_with_refill<F>(
+    overlay_hits: &[SemanticHit],
+    hidden_paths: &HashSet<String>,
+    limit: usize,
+    mut fetch_baseline: F,
+) -> DirectResult
+where
+    F: FnMut(usize) -> Result<Vec<SemanticHit>, SearchError>,
+{
+    let context = merge_context_for_collection(hidden_paths, "code");
+    let mut fetch_limit = direct_search_initial_window(limit);
+    let max_fetch_limit = direct_search_max_window(limit);
+    let mut previous_baseline_count = 0usize;
+    let mut best = Vec::new();
+
+    for _ in 0..DIRECT_SEARCH_MAX_REFILL_ROUNDS {
+        let baseline_hits = match fetch_baseline(fetch_limit) {
+            Ok(hits) => hits,
+            Err(e) => {
+                if e.is_terminal() {
+                    warn!("direct semantic: terminal serving query error: {e}");
+                    return DirectResult::Terminal(e);
+                }
+                warn!("direct semantic: serving query failed: {e}");
+                return DirectResult::Unavailable;
+            }
+        };
+
+        best = merge_semantic(&baseline_hits, overlay_hits, &context, limit)
+            .into_iter()
+            .map(SearchHit::from_merged)
+            .collect();
+
+        if best.len() >= limit {
+            return DirectResult::Found(best);
+        }
+
+        let baseline_count = baseline_hits.len();
+        if baseline_count < fetch_limit || baseline_count <= previous_baseline_count {
+            return DirectResult::Found(best);
+        }
+
+        previous_baseline_count = baseline_count;
+        if fetch_limit >= max_fetch_limit {
+            return DirectResult::Found(best);
+        }
+
+        let next_fetch_limit = fetch_limit.saturating_mul(2).min(max_fetch_limit);
+        if next_fetch_limit == fetch_limit {
+            return DirectResult::Found(best);
+        }
+        fetch_limit = next_fetch_limit;
+    }
+
+    DirectResult::Found(best)
 }
 
 /// Full-text search across platform documentation (types, methods, global functions).
@@ -347,7 +451,7 @@ fn try_direct_semantic_code(
 pub fn find_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
-    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -427,7 +531,7 @@ pub fn find_docs(
 pub fn search_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
-    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -522,7 +626,7 @@ pub fn search_status(
     progress: &Arc<IndexProgress>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
-    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
 ) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
 
@@ -916,7 +1020,7 @@ fn ensure_workspace_search_allowed(
 
 fn ensure_workspace_baseline_runtime_ready(
     configured_baseline: Option<&ConfiguredBaselineStatus>,
-    external_baseline: Option<&Arc<RefreshableExternalBaselineSource>>,
+    external_baseline: Option<&Arc<ExternalBaselineService>>,
 ) -> Result<(), McpError> {
     let Some(configured_baseline) = configured_baseline else {
         return Ok(());
@@ -949,7 +1053,7 @@ fn ensure_workspace_baseline_runtime_ready(
 
 fn ensure_reference_baseline_runtime_ready(
     configured_baseline: Option<&ConfiguredBaselineStatus>,
-    external_baseline: Option<&Arc<RefreshableExternalBaselineSource>>,
+    external_baseline: Option<&Arc<ExternalBaselineService>>,
 ) -> Result<(), McpError> {
     let Some(configured_baseline) = configured_baseline else {
         return Ok(());
@@ -1107,24 +1211,27 @@ fn shorten_fingerprint(fingerprint: &str) -> &str {
 mod tests {
     use super::{
         external_baseline_mcp_error, find_code, find_docs, map_reference_baseline_resolution,
-        search_code, search_docs, search_status, ConfiguredBaselineStatus,
-        RefreshableExternalBaselineSource, SemanticRuntimeStatus,
+        merge_direct_lexical_with_refill, merge_direct_semantic_with_refill, search_code,
+        search_docs, search_status, ConfiguredBaselineStatus, DirectResult,
+        ExternalBaselineService, SemanticRuntimeStatus,
     };
+    use crate::baseline::RefreshableExternalBaselineSource;
     use bsl_search::{
         lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
-        IndexedDocument, ResolvedView, SearchEngine, SearchError,
+        IndexedDocument, LexicalHit, ResolvedView, SearchEngine, SearchError, SemanticHit,
     };
     use project_model::{
         ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState, SearchPostgresConfig,
         SearchPostgresCredentialHelperConfig,
     };
     use rmcp::model::ErrorCode;
+    use std::collections::HashSet;
     use std::fs;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
-    fn retryable_postgres_source() -> Arc<RefreshableExternalBaselineSource> {
+    fn retryable_postgres_source() -> Arc<ExternalBaselineService> {
         let postgres = SearchPostgresConfig {
             host: Some("127.0.0.1".to_owned()),
             port: Some(1),
@@ -1139,7 +1246,7 @@ mod tests {
                 ],
             },
         };
-        Arc::new(
+        ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test_with_refresh_context(
                 bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1/bsl_search"),
                 BaselineRef {
@@ -1152,6 +1259,121 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    fn lexical_hit(path: &str, symbol_name: &str, rank: f32) -> LexicalHit {
+        LexicalHit {
+            collection: "code".to_owned(),
+            path: path.to_owned(),
+            symbol_name: symbol_name.to_owned(),
+            kind: "procedure".to_owned(),
+            line_start: 1,
+            line_end: 10,
+            text: format!("procedure {symbol_name}"),
+            rank,
+        }
+    }
+
+    fn semantic_hit(path: &str, symbol_name: &str, score: f32) -> SemanticHit {
+        SemanticHit {
+            collection: "code".to_owned(),
+            path: path.to_owned(),
+            symbol_name: symbol_name.to_owned(),
+            kind: "procedure".to_owned(),
+            line_start: 1,
+            line_end: 10,
+            score,
+        }
+    }
+
+    #[test]
+    fn direct_lexical_refill_recovers_results_hidden_by_overlay() {
+        let hidden_paths = HashSet::from([
+            "src/hidden1.bsl".to_owned(),
+            "src/hidden2.bsl".to_owned(),
+            "src/hidden3.bsl".to_owned(),
+            "src/hidden4.bsl".to_owned(),
+            "src/hidden5.bsl".to_owned(),
+            "src/hidden6.bsl".to_owned(),
+            "src/hidden7.bsl".to_owned(),
+            "src/hidden8.bsl".to_owned(),
+            "src/hidden9.bsl".to_owned(),
+        ]);
+        let baseline = vec![
+            lexical_hit("src/hidden1.bsl", "Hidden1", 100.0),
+            lexical_hit("src/hidden2.bsl", "Hidden2", 99.0),
+            lexical_hit("src/hidden3.bsl", "Hidden3", 98.0),
+            lexical_hit("src/hidden4.bsl", "Hidden4", 97.0),
+            lexical_hit("src/hidden5.bsl", "Hidden5", 96.0),
+            lexical_hit("src/hidden6.bsl", "Hidden6", 95.0),
+            lexical_hit("src/hidden7.bsl", "Hidden7", 94.0),
+            lexical_hit("src/hidden8.bsl", "Hidden8", 93.0),
+            lexical_hit("src/hidden9.bsl", "Hidden9", 92.0),
+            lexical_hit("src/visible1.bsl", "Visible1", 91.0),
+            lexical_hit("src/visible2.bsl", "Visible2", 90.0),
+            lexical_hit("src/visible3.bsl", "Visible3", 89.0),
+        ];
+        let mut requested_limits = Vec::new();
+
+        let result = merge_direct_lexical_with_refill(&[], &hidden_paths, 3, |fetch_limit| {
+            requested_limits.push(fetch_limit);
+            Ok(baseline.iter().take(fetch_limit).cloned().collect())
+        });
+
+        let DirectResult::Found(hits) = result else {
+            panic!("expected lexical refill to produce hits");
+        };
+        assert_eq!(hits.len(), 3);
+        assert_eq!(
+            hits.iter().map(|hit| hit.file_path.as_str()).collect::<Vec<_>>(),
+            vec!["src/visible1.bsl", "src/visible2.bsl", "src/visible3.bsl"]
+        );
+        assert_eq!(requested_limits, vec![9, 18]);
+    }
+
+    #[test]
+    fn direct_semantic_refill_recovers_results_hidden_by_overlay() {
+        let hidden_paths = HashSet::from([
+            "src/hidden1.bsl".to_owned(),
+            "src/hidden2.bsl".to_owned(),
+            "src/hidden3.bsl".to_owned(),
+            "src/hidden4.bsl".to_owned(),
+            "src/hidden5.bsl".to_owned(),
+            "src/hidden6.bsl".to_owned(),
+            "src/hidden7.bsl".to_owned(),
+            "src/hidden8.bsl".to_owned(),
+            "src/hidden9.bsl".to_owned(),
+        ]);
+        let baseline = vec![
+            semantic_hit("src/hidden1.bsl", "Hidden1", 1.00),
+            semantic_hit("src/hidden2.bsl", "Hidden2", 0.99),
+            semantic_hit("src/hidden3.bsl", "Hidden3", 0.98),
+            semantic_hit("src/hidden4.bsl", "Hidden4", 0.97),
+            semantic_hit("src/hidden5.bsl", "Hidden5", 0.96),
+            semantic_hit("src/hidden6.bsl", "Hidden6", 0.95),
+            semantic_hit("src/hidden7.bsl", "Hidden7", 0.94),
+            semantic_hit("src/hidden8.bsl", "Hidden8", 0.93),
+            semantic_hit("src/hidden9.bsl", "Hidden9", 0.92),
+            semantic_hit("src/visible1.bsl", "Visible1", 0.91),
+            semantic_hit("src/visible2.bsl", "Visible2", 0.90),
+            semantic_hit("src/visible3.bsl", "Visible3", 0.89),
+        ];
+        let mut requested_limits = Vec::new();
+
+        let result = merge_direct_semantic_with_refill(&[], &hidden_paths, 3, |fetch_limit| {
+            requested_limits.push(fetch_limit);
+            Ok(baseline.iter().take(fetch_limit).cloned().collect())
+        });
+
+        let DirectResult::Found(hits) = result else {
+            panic!("expected semantic refill to produce hits");
+        };
+        assert_eq!(hits.len(), 3);
+        assert_eq!(
+            hits.iter().map(|hit| hit.file_path.as_str()).collect::<Vec<_>>(),
+            vec!["src/visible1.bsl", "src/visible2.bsl", "src/visible3.bsl"]
+        );
+        assert_eq!(requested_limits, vec![9, 18]);
     }
 
     #[test]
@@ -1193,16 +1415,18 @@ mod tests {
 
     #[test]
     fn search_status_shows_external_baseline_probe_errors() {
-        let source = RefreshableExternalBaselineSource::for_test(
-            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
-            bsl_search::BaselineRef {
-                corpus: bsl_search::CorpusId::WorkspaceCode,
-                snapshot_id: None,
-                branch: Some("main".to_owned()),
-                commit: None,
-            },
-        )
-        .unwrap();
+        let source = ExternalBaselineService::for_test(
+            RefreshableExternalBaselineSource::for_test(
+                bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+                bsl_search::BaselineRef {
+                    corpus: bsl_search::CorpusId::WorkspaceCode,
+                    snapshot_id: None,
+                    branch: Some("main".to_owned()),
+                    commit: None,
+                },
+            )
+            .unwrap(),
+        );
 
         let result = search_status(
             &Arc::new(Mutex::new(None)),
@@ -1214,7 +1438,7 @@ mod tests {
                 issue: None,
                 support: None,
             }),
-            Some(Arc::new(source)),
+            Some(source),
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
@@ -1269,25 +1493,22 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("reference-search.db");
         let engine = SearchEngine::fts_only(&db_path).unwrap();
-        let source = RefreshableExternalBaselineSource::for_test(
-            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
-            bsl_search::BaselineRef {
-                corpus: bsl_search::CorpusId::Reference,
-                snapshot_id: None,
-                branch: None,
-                commit: None,
-            },
-        )
-        .unwrap();
+        let source = ExternalBaselineService::for_test(
+            RefreshableExternalBaselineSource::for_test(
+                bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+                bsl_search::BaselineRef {
+                    corpus: bsl_search::CorpusId::Reference,
+                    snapshot_id: None,
+                    branch: None,
+                    commit: None,
+                },
+            )
+            .unwrap(),
+        );
 
-        let error = search_docs(
-            &Arc::new(Mutex::new(Some(engine))),
-            None,
-            Some(Arc::new(source)),
-            "Массив",
-            10,
-        )
-        .unwrap_err();
+        let error =
+            search_docs(&Arc::new(Mutex::new(Some(engine))), None, Some(source), "Массив", 10)
+                .unwrap_err();
 
         assert!(error.message.contains("Semantic search not available"));
         assert!(!error.message.contains("centralized reference baseline"));
@@ -1654,25 +1875,22 @@ mod tests {
         let db_path = dir.path().join("reference-search.db");
         let engine = SearchEngine::fts_only(&db_path).unwrap();
 
-        let source = RefreshableExternalBaselineSource::for_test(
-            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
-            BaselineRef {
-                corpus: CorpusId::Reference,
-                snapshot_id: Some(bsl_search::SnapshotId::new("ref:0.1.0")),
-                branch: None,
-                commit: None,
-            },
-        )
-        .unwrap();
+        let source = ExternalBaselineService::for_test(
+            RefreshableExternalBaselineSource::for_test(
+                bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+                BaselineRef {
+                    corpus: CorpusId::Reference,
+                    snapshot_id: Some(bsl_search::SnapshotId::new("ref:0.1.0")),
+                    branch: None,
+                    commit: None,
+                },
+            )
+            .unwrap(),
+        );
 
-        let result = search_docs(
-            &Arc::new(Mutex::new(Some(engine))),
-            None,
-            Some(Arc::new(source)),
-            "Массив",
-            10,
-        )
-        .unwrap_err();
+        let result =
+            search_docs(&Arc::new(Mutex::new(Some(engine))), None, Some(source), "Массив", 10)
+                .unwrap_err();
 
         assert!(result.message.contains("Semantic search not available"));
     }

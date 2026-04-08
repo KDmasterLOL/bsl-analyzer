@@ -1,8 +1,7 @@
 //! Shared state for MCP server tools.
 
 use crate::baseline::{
-    BaselineRuntime, BaselineSnapshotDocuments, ConfiguredBaselineStatus,
-    RefreshableExternalBaselineSource,
+    BaselineRuntime, BaselineSnapshotDocuments, ConfiguredBaselineStatus, ExternalBaselineService,
 };
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
@@ -38,7 +37,7 @@ pub struct SharedState {
     search_engine: Arc<Mutex<Option<SearchEngine>>>,
     index_progress: Arc<IndexProgress>,
     semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-    external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
 }
 
@@ -58,7 +57,7 @@ struct WorkspaceSearchInit {
 struct WorkspaceSemanticWarmup {
     db_path: PathBuf,
     workspace_source_root: PathBuf,
-    external_baseline: Arc<RefreshableExternalBaselineSource>,
+    external_baseline: Arc<ExternalBaselineService>,
     config: bsl_search::SearchConfig,
 }
 
@@ -146,7 +145,7 @@ impl SharedState {
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         workspace_root: PathBuf,
         watcher_ready: Arc<AtomicBool>,
-        external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+        external_baseline: Option<Arc<ExternalBaselineService>>,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -364,14 +363,21 @@ impl SharedState {
         Arc::clone(&self.semantic_runtime)
     }
 
-    /// Access configured external baseline source.
-    pub(crate) fn external_baseline(&self) -> Option<Arc<RefreshableExternalBaselineSource>> {
+    /// Access configured external baseline service.
+    pub(crate) fn external_baseline(&self) -> Option<Arc<ExternalBaselineService>> {
         self.external_baseline.clone()
     }
 
     /// Access configured baseline runtime diagnostics.
     pub(crate) fn configured_baseline(&self) -> Option<ConfiguredBaselineStatus> {
         self.configured_baseline.clone()
+    }
+
+    /// Shutdown the external baseline service (called after Tokio runtime is dropped).
+    pub fn shutdown(&self) {
+        if let Some(ref service) = self.external_baseline {
+            service.shutdown();
+        }
     }
 
     /// Read embedding configuration from environment variables.
@@ -493,7 +499,7 @@ impl SharedState {
         workspace_root: &std::path::Path,
         progress: &Arc<IndexProgress>,
         watcher_ready: &Arc<AtomicBool>,
-        external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+        external_baseline: Option<Arc<ExternalBaselineService>>,
     ) -> Option<WorkspaceSearchInit> {
         let build_dir = workspace_root.join(".build");
         std::fs::create_dir_all(&build_dir).ok();
@@ -573,7 +579,7 @@ impl SharedState {
                 );
                 match fallback_engine.index_directory_fts(&source_path) {
                     Ok(indexed) => {
-                        tracing::info!(indexed, "workspace lexical fallback cache built")
+                        tracing::info!(indexed, "workspace lexical fallback cache built");
                     }
                     Err(error) => {
                         tracing::warn!("failed to build workspace lexical fallback cache: {error}");
@@ -766,7 +772,7 @@ impl SharedState {
 
     fn init_reference_search_engine(
         progress: &Arc<IndexProgress>,
-        external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+        external_baseline: Option<Arc<ExternalBaselineService>>,
     ) -> Option<SearchEngine> {
         let db_path = Self::reference_search_db_path()?;
         Self::init_reference_search_engine_at(&db_path, progress, external_baseline)
@@ -775,7 +781,7 @@ impl SharedState {
     fn init_reference_search_engine_at(
         db_path: &Path,
         progress: &Arc<IndexProgress>,
-        external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+        external_baseline: Option<Arc<ExternalBaselineService>>,
     ) -> Option<SearchEngine> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -869,6 +875,11 @@ impl SharedState {
         engine: &mut SearchEngine,
         progress: &Arc<IndexProgress>,
     ) {
+        Self::clear_reference_docs_cache(engine);
+        Self::index_platform_docs(engine, progress);
+    }
+
+    fn clear_reference_docs_cache(engine: &mut SearchEngine) {
         match engine.sync_indexed_documents_in_collection(
             "platform",
             &[] as &[bsl_search::IndexedDocument],
@@ -883,7 +894,6 @@ impl SharedState {
                 tracing::warn!("failed to clear stale reference docs cache: {error}");
             }
         }
-        Self::index_platform_docs(engine, progress);
     }
 
     /// Index platform reference documentation into the search engine.
@@ -1102,7 +1112,7 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::SharedState;
-    use crate::baseline::RefreshableExternalBaselineSource;
+    use crate::baseline::{ExternalBaselineService, RefreshableExternalBaselineSource};
     use bsl_search::{
         BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexProgress, IndexedDocument,
         SearchEngine,
@@ -1125,6 +1135,12 @@ mod tests {
             env::set_var(key, value);
             Self { key, previous }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = env::var_os(key);
+            env::remove_var(key);
+            Self { key, previous }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -1139,6 +1155,8 @@ mod tests {
 
     #[test]
     fn workspace_external_failure_rebuilds_local_fts_cache_from_workspace() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         fs::write(
@@ -1167,10 +1185,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stale_engine.file_count().unwrap(), 1);
+        drop(stale_engine);
 
         let progress = Arc::new(IndexProgress::default());
         let watcher_ready = Arc::new(AtomicBool::new(false));
-        let external = Arc::new(
+        let external = ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
                 ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
                 BaselineRef {
@@ -1214,7 +1233,7 @@ mod tests {
 
         let progress = Arc::new(IndexProgress::default());
         let watcher_ready = Arc::new(AtomicBool::new(false));
-        let external = Arc::new(
+        let external = ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
                 ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
                 BaselineRef {
@@ -1239,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_external_failure_clears_stale_local_docs_cache() {
+    fn clear_reference_docs_cache_removes_stale_local_and_external_docs() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("reference-search.db");
         let mut stale_engine = SearchEngine::fts_only(&db_path).unwrap();
@@ -1277,24 +1296,10 @@ mod tests {
             stale_engine.text_search("СтарыйВнешнийДокумент", 10, Some("platform")).unwrap().len(),
             1
         );
+        drop(stale_engine);
 
-        let progress = Arc::new(IndexProgress::default());
-        let external = Arc::new(
-            RefreshableExternalBaselineSource::for_test(
-                ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
-                BaselineRef {
-                    corpus: CorpusId::Reference,
-                    snapshot_id: None,
-                    branch: None,
-                    commit: None,
-                },
-            )
-            .unwrap(),
-        );
-
-        let engine =
-            SharedState::init_reference_search_engine_at(&db_path, &progress, Some(external))
-                .unwrap();
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        SharedState::clear_reference_docs_cache(&mut engine);
 
         assert!(engine.text_search("СтарыйДокумент", 10, Some("platform")).unwrap().is_empty());
         assert!(engine

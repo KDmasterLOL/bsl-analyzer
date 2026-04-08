@@ -830,7 +830,8 @@ fn run_search_baseline_publish(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
         fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
-        Embedder, EmbeddingProgress, Snapshot, SnapshotPublishMetadata,
+        Embedder, EmbeddingProgress, SemanticPublishPhase, SemanticPublishProgress, Snapshot,
+        SnapshotPublishMetadata,
     };
 
     let project = project_model::Project::new(&args.source_dir);
@@ -951,11 +952,78 @@ fn run_search_baseline_publish(
     );
 
     if let Some(ref embedding_stats) = publish_report.embeddings {
-        eprintln!("[5/5] Populating serving semantic index...");
-        let serving_count = adapter.populate_serving_semantic(
+        let format_duration = |duration: std::time::Duration| {
+            if duration.as_secs() >= 1 {
+                format!("{:.1}s", duration.as_secs_f64())
+            } else {
+                format!("{}ms", duration.as_millis())
+            }
+        };
+        let semantic_phase_label = |phase: &SemanticPublishPhase| match phase {
+            SemanticPublishPhase::PrepareRows => "Prepare semantic rows",
+            SemanticPublishPhase::CopyParentRows => "Copy unchanged rows from parent",
+            SemanticPublishPhase::WriteServingRows => "Write serving rows",
+        };
+        let semantic_progress = |event: SemanticPublishProgress| match event {
+            SemanticPublishProgress::Plan {
+                strategy,
+                changed_files,
+                deleted_paths,
+                parent_snapshot_id,
+                phase_count,
+            } => {
+                let parent_label = parent_snapshot_id.as_deref().unwrap_or("-");
+                eprintln!(
+                    "[5/5] Populating serving semantic index ({strategy}; {changed_files} changed files; {deleted_paths} deletions; {phase_count} phases; parent: {parent_label})..."
+                );
+            }
+            SemanticPublishProgress::PhaseStarted { phase, phase_index, phase_count, detail } => {
+                eprintln!(
+                    "      [{}/{}] {} — {}",
+                    phase_index,
+                    phase_count,
+                    semantic_phase_label(&phase),
+                    detail
+                );
+            }
+            SemanticPublishProgress::PhaseCompleted {
+                phase,
+                phase_index,
+                phase_count,
+                elapsed,
+                output_rows,
+            } => {
+                eprintln!(
+                    "      [{}/{}] {} done in {} ({} rows)",
+                    phase_index,
+                    phase_count,
+                    semantic_phase_label(&phase),
+                    format_duration(elapsed),
+                    output_rows
+                );
+            }
+            SemanticPublishProgress::Completed {
+                total_rows,
+                copied_rows,
+                inserted_rows,
+                missing_embeddings,
+                total_elapsed,
+            } => {
+                eprintln!(
+                    "      Done in {} — total {} rows (copied {}, inserted {}, missing embeddings {})",
+                    format_duration(total_elapsed),
+                    total_rows,
+                    copied_rows,
+                    inserted_rows,
+                    missing_embeddings
+                );
+            }
+        };
+        let serving_count = adapter.populate_serving_semantic_with_progress(
             &snapshot.id.0,
             &embedding_stats.model_id,
             embedding_stats.dimension,
+            Some(&semantic_progress),
         )?;
         eprintln!("      {} rows", serving_count);
     } else {
@@ -2272,10 +2340,20 @@ fn run_mcp_server(
     };
 
     let server = mcp_server::McpServer::new(profile, state);
+    let shutdown_guard = server.clone();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(mcp_server::serve_stdio(server))?;
+    let serve_result = rt.block_on(mcp_server::serve_stdio(server));
 
+    // Keep one clone alive until after the Tokio runtime is dropped.
+    // This ensures sync PostgreSQL baseline clients/pools are destroyed
+    // outside the active runtime context and avoids nested-runtime panics
+    // during MCP stdio shutdown.
+    drop(rt);
+    shutdown_guard.shutdown();
+    drop(shutdown_guard);
+
+    serve_result?;
     Ok(())
 }
 

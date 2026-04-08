@@ -7,6 +7,7 @@ use crate::external_baseline::{
     BaselineCollectionRecord, BaselineEmbeddingCoverageRecord, BaselineEmbeddingModelRecord,
     BaselineEmbeddingStats, BaselineFileObjectDetails, BaselineFileObjectRecord,
     BaselineFileObjectReference, BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
+    SemanticPublishPhase, SemanticPublishProgress,
 };
 use crate::ports::{
     BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotContentStore,
@@ -14,7 +15,7 @@ use crate::ports::{
 };
 use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Name of the table that stores schema version metadata.
@@ -39,6 +40,8 @@ const FILE_OBJECT_ITEM_BATCH_SIZE: usize = 2_000;
 const SNAPSHOT_FILE_BATCH_SIZE: usize = 2_000;
 const SNAPSHOT_DELETION_BATCH_SIZE: usize = 5_000;
 const SERVING_LEXICAL_BATCH_SIZE: usize = 2_000;
+const SERVING_SEMANTIC_BATCH_SIZE: usize = 256;
+const SEMANTIC_PUBLICATION_COMPLETE_PREFIX: &str = "semantic_publication_complete:";
 
 /// PostgreSQL adapter for centralized baseline storage.
 ///
@@ -743,33 +746,8 @@ impl PostgresBaselineAdapter {
         dimension: usize,
     ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
         self.check_storage_readiness()?;
-        if embedding_keys.is_empty() {
-            return Ok(HashMap::new());
-        }
-
         let mut client = self.connect()?;
-        let query = format!(
-            "SELECT embedding_key, embedding
-             FROM {}
-             WHERE model_id = $1 AND dimension = $2 AND embedding_key = ANY($3)",
-            self.table("semantic_embeddings")
-        );
-        let rows = client.query(&query, &[&model_id, &(dimension as i32), &embedding_keys])?;
-
-        let mut result = HashMap::new();
-        for row in rows {
-            let key: String = row.get("embedding_key");
-            let blob: Vec<u8> = row.get("embedding");
-            if blob.len() != dimension * 4 {
-                continue;
-            }
-            let embedding = blob
-                .chunks_exact(4)
-                .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-                .collect::<Vec<_>>();
-            result.insert(key, embedding);
-        }
-        Ok(result)
+        load_embeddings_from_client(&mut *client, self, embedding_keys, model_id, dimension)
     }
 
     pub fn list_embedding_models(
@@ -980,131 +958,273 @@ impl PostgresBaselineAdapter {
 
     /// Populates the `serving_semantic` table for a published snapshot.
     ///
-    /// Computes embedding keys for all visible documents, loads matching
-    /// embeddings from `semantic_embeddings`, and inserts them into the
-    /// serving table. Call after both snapshot and embeddings are published.
+    /// Computes embedding keys for visible documents, loads matching embeddings
+    /// from `semantic_embeddings`, and inserts them into the serving table.
+    /// Call after both snapshot and embeddings are published.
     pub fn populate_serving_semantic(
         &self,
         snapshot_id: &str,
         model_id: &str,
         dimension: usize,
     ) -> Result<usize, SearchError> {
+        self.populate_serving_semantic_with_progress(snapshot_id, model_id, dimension, None)
+    }
+
+    pub fn populate_serving_semantic_with_progress(
+        &self,
+        snapshot_id: &str,
+        model_id: &str,
+        dimension: usize,
+        progress: Option<&dyn Fn(SemanticPublishProgress)>,
+    ) -> Result<usize, SearchError> {
         self.check_storage_readiness()?;
         let mut client = self.connect()?;
-
-        let visible_files = materialize_visible_snapshot_files(&mut *client, self, snapshot_id)?;
-        if visible_files.is_empty() {
-            return Ok(0);
+        if !self.storage_table_exists(&mut *client, "serving_semantic")? {
+            return Err(SearchError::ExternalBaseline(
+                "serving_semantic_unavailable: semantic serving table is not initialized"
+                    .to_owned(),
+            ));
         }
 
-        // Build a map from file_object_id to (collection, path) from the fully
-        // materialized visible set — this includes inherited files, not just the
-        // current snapshot's delta in snapshot_files.
-        let file_object_ids =
-            visible_files.iter().map(|f| f.file_object_id.clone()).collect::<Vec<_>>();
-        let file_meta: HashMap<String, (&str, &str)> = visible_files
-            .iter()
-            .map(|f| (f.file_object_id.clone(), (f.collection.as_str(), f.path.as_str())))
-            .collect();
-
-        let items_query = format!(
-            "SELECT foi.file_object_id, foi.ordinal, foi.symbol_name, foi.kind,
-                    foi.line_start, foi.line_end, co.text
-             FROM {} foi
-             JOIN {} co ON co.content_hash = foi.content_hash
-             WHERE foi.file_object_id = ANY($1)
-             ORDER BY foi.file_object_id, foi.ordinal",
-            self.table("file_object_items"),
-            self.table("content_objects"),
+        let planning_started = Instant::now();
+        let parent_snapshot_id = snapshot_parent_id(&mut *client, self, snapshot_id)?;
+        let current_snapshot_files = load_snapshot_file_rows(&mut *client, self, snapshot_id)?;
+        let deleted_paths = load_snapshot_deletion_keys(&mut *client, self, snapshot_id)?;
+        let parent_complete = match parent_snapshot_id.as_deref() {
+            Some(parent_snapshot_id) => semantic_publication_complete(
+                &mut *client,
+                self,
+                parent_snapshot_id,
+                model_id,
+                dimension,
+            )?,
+            None => false,
+        };
+        let plan = semantic_publish_plan(
+            parent_snapshot_id.clone(),
+            parent_complete,
+            &current_snapshot_files,
+            &deleted_paths,
         );
-        let item_rows = client.query(&items_query, &[&file_object_ids])?;
-
-        let mut embedding_keys = Vec::with_capacity(item_rows.len());
-        struct DocInfo {
-            collection: String,
-            path: String,
-            ordinal: i32,
-            symbol_name: String,
-            kind: String,
-            line_start: i32,
-            line_end: i32,
-            embedding_key: String,
-        }
-        let mut doc_infos = Vec::with_capacity(item_rows.len());
-        for row in &item_rows {
-            let fo_id: String = row.get("file_object_id");
-            let Some(&(collection, path)) = file_meta.get(&fo_id) else {
-                continue;
-            };
-            let key = semantic_key_for_document(
-                path,
-                row.get("kind"),
-                row.get("symbol_name"),
-                row.get("text"),
-            );
-            embedding_keys.push(key.clone());
-            doc_infos.push(DocInfo {
-                collection: collection.to_owned(),
-                path: path.to_owned(),
-                ordinal: row.get("ordinal"),
-                symbol_name: row.get("symbol_name"),
-                kind: row.get("kind"),
-                line_start: row.get("line_start"),
-                line_end: row.get("line_end"),
-                embedding_key: key,
+        let strategy = plan.strategy.clone();
+        let phase_count = semantic_publish_phase_count(&strategy);
+        if let Some(on_progress) = progress {
+            on_progress(SemanticPublishProgress::Plan {
+                strategy: strategy.label().to_owned(),
+                changed_files: plan.changed_paths.len(),
+                deleted_paths: plan.deleted_paths.len(),
+                parent_snapshot_id: strategy.parent_snapshot_id().map(str::to_owned),
+                phase_count,
             });
         }
 
-        let embeddings = self.load_embeddings(&embedding_keys, model_id, dimension)?;
-        if embeddings.is_empty() {
-            return Ok(0);
-        }
+        let mut timings = SemanticPublishPhaseTimings {
+            ancestry_materialization: planning_started.elapsed(),
+            ..SemanticPublishPhaseTimings::default()
+        };
 
-        let mut tx = client.transaction()?;
-        let delete = format!(
-            "DELETE FROM {} WHERE snapshot_id = $1 AND model_id = $2",
-            self.table("serving_semantic")
-        );
-        tx.execute(&delete, &[&snapshot_id, &model_id])?;
-
-        let insert = format!(
-            "INSERT INTO {} (
-                snapshot_id, collection, path, ordinal, symbol_name, kind,
-                line_start, line_end, model_id, dimension, embedding
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::vector)",
-            self.table("serving_semantic")
-        );
-
-        let dim = dimension as i32;
-        let mut inserted = 0usize;
-        for doc in &doc_infos {
-            if let Some(embedding) = embeddings.get(&doc.embedding_key) {
-                let vector_text = format!(
-                    "[{}]",
-                    embedding.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
-                );
-                tx.execute(
-                    &insert,
-                    &[
-                        &snapshot_id,
-                        &doc.collection,
-                        &doc.path,
-                        &doc.ordinal,
-                        &doc.symbol_name,
-                        &doc.kind,
-                        &doc.line_start,
-                        &doc.line_end,
-                        &model_id,
-                        &dim,
-                        &vector_text,
-                    ],
+        let (prepared_rows, missing_embeddings) = match &strategy {
+            SemanticPublishStrategy::CurrentSnapshotOnly => {
+                let recompute_started = Instant::now();
+                if let Some(on_progress) = progress {
+                    on_progress(SemanticPublishProgress::PhaseStarted {
+                        phase: SemanticPublishPhase::PrepareRows,
+                        phase_index: 1,
+                        phase_count,
+                        detail: format!(
+                            "Preparing semantic rows for {} changed files",
+                            plan.changed_paths.len()
+                        ),
+                    });
+                }
+                let prepared = prepare_semantic_rows_for_files(
+                    &mut *client,
+                    self,
+                    &current_snapshot_files,
+                    model_id,
+                    dimension,
                 )?;
-                inserted += 1;
+                timings.changed_recompute = recompute_started.elapsed();
+                if let Some(on_progress) = progress {
+                    on_progress(SemanticPublishProgress::PhaseCompleted {
+                        phase: SemanticPublishPhase::PrepareRows,
+                        phase_index: 1,
+                        phase_count,
+                        elapsed: timings.changed_recompute,
+                        output_rows: prepared.rows.len(),
+                    });
+                }
+                (prepared.rows, prepared.missing_embeddings)
             }
+            SemanticPublishStrategy::IncrementalFromParent { .. } => {
+                let recompute_started = Instant::now();
+                if let Some(on_progress) = progress {
+                    on_progress(SemanticPublishProgress::PhaseStarted {
+                        phase: SemanticPublishPhase::PrepareRows,
+                        phase_index: 1,
+                        phase_count,
+                        detail: format!(
+                            "Preparing semantic rows for {} changed files",
+                            plan.changed_paths.len()
+                        ),
+                    });
+                }
+                let prepared = prepare_semantic_rows_for_files(
+                    &mut *client,
+                    self,
+                    &current_snapshot_files,
+                    model_id,
+                    dimension,
+                )?;
+                timings.changed_recompute = recompute_started.elapsed();
+                if let Some(on_progress) = progress {
+                    on_progress(SemanticPublishProgress::PhaseCompleted {
+                        phase: SemanticPublishPhase::PrepareRows,
+                        phase_index: 1,
+                        phase_count,
+                        elapsed: timings.changed_recompute,
+                        output_rows: prepared.rows.len(),
+                    });
+                }
+                (prepared.rows, prepared.missing_embeddings)
+            }
+            SemanticPublishStrategy::FullRebuild => {
+                let rebuild_started = Instant::now();
+                if let Some(on_progress) = progress {
+                    on_progress(SemanticPublishProgress::PhaseStarted {
+                        phase: SemanticPublishPhase::PrepareRows,
+                        phase_index: 1,
+                        phase_count,
+                        detail: "Recomputing semantic rows for the full visible snapshot"
+                            .to_owned(),
+                    });
+                }
+                let visible_files =
+                    materialize_visible_snapshot_files(&mut *client, self, snapshot_id)?;
+                timings.ancestry_materialization = rebuild_started.elapsed();
+
+                let recompute_started = Instant::now();
+                let prepared = prepare_semantic_rows_for_files(
+                    &mut *client,
+                    self,
+                    &visible_files,
+                    model_id,
+                    dimension,
+                )?;
+                timings.changed_recompute = recompute_started.elapsed();
+                if let Some(on_progress) = progress {
+                    on_progress(SemanticPublishProgress::PhaseCompleted {
+                        phase: SemanticPublishPhase::PrepareRows,
+                        phase_index: 1,
+                        phase_count,
+                        elapsed: timings.ancestry_materialization + timings.changed_recompute,
+                        output_rows: prepared.rows.len(),
+                    });
+                }
+                (prepared.rows, prepared.missing_embeddings)
+            }
+        };
+
+        let changed_rows = prepared_rows.len();
+        let changed_files = plan.changed_paths.len();
+        let final_sync_started = Instant::now();
+        let mut tx = client.transaction()?;
+        clear_semantic_publication_complete(&mut tx, self, snapshot_id, model_id, dimension)?;
+        delete_serving_semantic_rows(&mut tx, self, snapshot_id, model_id, dimension)?;
+
+        let copied_rows = match &strategy {
+            SemanticPublishStrategy::IncrementalFromParent { parent_snapshot_id } => {
+                let copy_started = Instant::now();
+                if let Some(on_progress) = progress {
+                    on_progress(SemanticPublishProgress::PhaseStarted {
+                        phase: SemanticPublishPhase::CopyParentRows,
+                        phase_index: 2,
+                        phase_count,
+                        detail: format!(
+                            "Copying unchanged rows from parent snapshot {}",
+                            parent_snapshot_id
+                        ),
+                    });
+                }
+                let copied = copy_parent_serving_semantic_rows(
+                    &mut tx,
+                    self,
+                    snapshot_id,
+                    parent_snapshot_id,
+                    model_id,
+                    dimension,
+                )?;
+                timings.parent_copy = copy_started.elapsed();
+                if let Some(on_progress) = progress {
+                    on_progress(SemanticPublishProgress::PhaseCompleted {
+                        phase: SemanticPublishPhase::CopyParentRows,
+                        phase_index: 2,
+                        phase_count,
+                        elapsed: timings.parent_copy,
+                        output_rows: copied,
+                    });
+                }
+                copied
+            }
+            _ => 0,
+        };
+        if let Some(on_progress) = progress {
+            on_progress(SemanticPublishProgress::PhaseStarted {
+                phase: SemanticPublishPhase::WriteServingRows,
+                phase_index: phase_count,
+                phase_count,
+                detail: format!(
+                    "Writing {} changed rows into serving_semantic",
+                    prepared_rows.len()
+                ),
+            });
+        }
+        let inserted_rows = insert_serving_semantic_rows(
+            &mut tx,
+            self,
+            snapshot_id,
+            model_id,
+            dimension,
+            &prepared_rows,
+        )?;
+        if missing_embeddings == 0 {
+            mark_semantic_publication_complete(&mut tx, self, snapshot_id, model_id, dimension)?;
+        }
+        tx.commit()?;
+        timings.final_sync = final_sync_started.elapsed();
+        if let Some(on_progress) = progress {
+            on_progress(SemanticPublishProgress::PhaseCompleted {
+                phase: SemanticPublishPhase::WriteServingRows,
+                phase_index: phase_count,
+                phase_count,
+                elapsed: timings.final_sync,
+                output_rows: inserted_rows,
+            });
+            on_progress(SemanticPublishProgress::Completed {
+                total_rows: copied_rows + inserted_rows,
+                copied_rows,
+                inserted_rows,
+                missing_embeddings,
+                total_elapsed: planning_started.elapsed(),
+            });
         }
 
-        tx.commit()?;
-        Ok(inserted)
+        log_semantic_publish_phase_timings(
+            snapshot_id,
+            model_id,
+            dimension,
+            &strategy,
+            &timings,
+            &SemanticPublishLogStats {
+                copied_rows,
+                inserted_rows,
+                missing_embeddings,
+                changed_files,
+                changed_rows,
+                deleted_paths: plan.deleted_paths.len(),
+            },
+        );
+        Ok(copied_rows + inserted_rows)
     }
 }
 
@@ -1477,6 +1597,7 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
         let delete_snapshot_deletions =
             format!("DELETE FROM {} WHERE snapshot_id = $1", self.table("snapshot_deletions"));
         tx.execute(&delete_snapshot_deletions, &[&snapshot.id.0])?;
+        invalidate_semantic_publication_for_snapshot(&mut tx, self, &snapshot.id.0)?;
 
         let parent_files = if let Some(parent_id) = snapshot.parent_id.as_ref() {
             materialize_visible_snapshot_file_map(&mut tx, self, &parent_id.0)?
@@ -1572,6 +1693,55 @@ struct SnapshotPublishPhaseTimings {
     final_activation: Duration,
 }
 
+#[derive(Debug, Clone, Default)]
+struct SemanticPublishPhaseTimings {
+    ancestry_materialization: Duration,
+    parent_copy: Duration,
+    changed_recompute: Duration,
+    final_sync: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SemanticPublishLogStats {
+    copied_rows: usize,
+    inserted_rows: usize,
+    missing_embeddings: usize,
+    changed_files: usize,
+    changed_rows: usize,
+    deleted_paths: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticPublishPlan {
+    strategy: SemanticPublishStrategy,
+    changed_paths: BTreeSet<(String, String)>,
+    deleted_paths: BTreeSet<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SemanticPublishStrategy {
+    CurrentSnapshotOnly,
+    IncrementalFromParent { parent_snapshot_id: String },
+    FullRebuild,
+}
+
+impl SemanticPublishStrategy {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::CurrentSnapshotOnly => "current_snapshot_only",
+            Self::IncrementalFromParent { .. } => "incremental_copy_forward",
+            Self::FullRebuild => "full_rebuild",
+        }
+    }
+
+    fn parent_snapshot_id(&self) -> Option<&str> {
+        match self {
+            Self::IncrementalFromParent { parent_snapshot_id } => Some(parent_snapshot_id.as_str()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PublishedFileGroup {
     collection: String,
@@ -1647,10 +1817,449 @@ struct ServingLexicalRow {
 }
 
 #[derive(Debug, Clone)]
+struct PendingSemanticRow {
+    collection: String,
+    path: String,
+    ordinal: i32,
+    symbol_name: String,
+    kind: String,
+    line_start: i32,
+    line_end: i32,
+    embedding_key: String,
+}
+
+#[derive(Debug, Clone)]
+struct ServingSemanticRow {
+    collection: String,
+    path: String,
+    ordinal: i32,
+    symbol_name: String,
+    kind: String,
+    line_start: i32,
+    line_end: i32,
+    vector_text: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreparedSemanticRows {
+    rows: Vec<ServingSemanticRow>,
+    missing_embeddings: usize,
+}
+
+#[derive(Debug, Clone)]
 struct EffectiveSnapshotSummary {
     total_files: usize,
     total_documents: usize,
     collections: Vec<BaselineCollectionRecord>,
+}
+
+fn load_embeddings_from_client(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    embedding_keys: &[String],
+    model_id: &str,
+    dimension: usize,
+) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+    if embedding_keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let query = format!(
+        "SELECT embedding_key, embedding
+         FROM {}
+         WHERE model_id = $1 AND dimension = $2 AND embedding_key = ANY($3)",
+        adapter.table("semantic_embeddings")
+    );
+    let rows = client.query(&query, &[&model_id, &(dimension as i32), &embedding_keys])?;
+
+    let mut result = HashMap::new();
+    for row in rows {
+        let key: String = row.get("embedding_key");
+        let blob: Vec<u8> = row.get("embedding");
+        if blob.len() != dimension * 4 {
+            continue;
+        }
+        let embedding = blob
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect::<Vec<_>>();
+        result.insert(key, embedding);
+    }
+    Ok(result)
+}
+
+fn semantic_publication_setting(snapshot_id: &str, model_id: &str, dimension: usize) -> String {
+    format!("{SEMANTIC_PUBLICATION_COMPLETE_PREFIX}{snapshot_id}:{model_id}:{dimension}")
+}
+
+fn semantic_publication_complete(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+    model_id: &str,
+    dimension: usize,
+) -> Result<bool, SearchError> {
+    let setting = semantic_publication_setting(snapshot_id, model_id, dimension);
+    Ok(client
+        .query_opt(
+            &format!(
+                "SELECT 1 FROM {} WHERE setting = $1 AND value = 'complete' LIMIT 1",
+                adapter.table(SCHEMA_METADATA_TABLE)
+            ),
+            &[&setting],
+        )?
+        .is_some())
+}
+
+fn clear_semantic_publication_complete(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+    model_id: &str,
+    dimension: usize,
+) -> Result<(), SearchError> {
+    let setting = semantic_publication_setting(snapshot_id, model_id, dimension);
+    tx.execute(
+        &format!("DELETE FROM {} WHERE setting = $1", adapter.table(SCHEMA_METADATA_TABLE)),
+        &[&setting],
+    )?;
+    Ok(())
+}
+
+fn mark_semantic_publication_complete(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+    model_id: &str,
+    dimension: usize,
+) -> Result<(), SearchError> {
+    let setting = semantic_publication_setting(snapshot_id, model_id, dimension);
+    let value = "complete".to_owned();
+    tx.execute(
+        &format!(
+            "INSERT INTO {} (setting, value)
+             VALUES ($1, $2)
+             ON CONFLICT (setting) DO UPDATE SET value = EXCLUDED.value",
+            adapter.table(SCHEMA_METADATA_TABLE)
+        ),
+        &[&setting, &value],
+    )?;
+    Ok(())
+}
+
+fn invalidate_semantic_publication_for_snapshot(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<(), SearchError> {
+    let settings_prefix = format!("{SEMANTIC_PUBLICATION_COMPLETE_PREFIX}{snapshot_id}:%");
+    tx.execute(
+        &format!("DELETE FROM {} WHERE setting LIKE $1", adapter.table(SCHEMA_METADATA_TABLE)),
+        &[&settings_prefix],
+    )?;
+    if adapter.storage_table_exists(tx, "serving_semantic")? {
+        tx.execute(
+            &format!("DELETE FROM {} WHERE snapshot_id = $1", adapter.table("serving_semantic")),
+            &[&snapshot_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn snapshot_parent_id(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<Option<String>, SearchError> {
+    let query = format!(
+        "SELECT parent_snapshot_id FROM {} WHERE id = $1 LIMIT 1",
+        adapter.table("snapshots")
+    );
+    let Some(row) = client.query_opt(&query, &[&snapshot_id])? else {
+        return Err(SearchError::ExternalBaseline(format!(
+            "snapshot '{}' was not found",
+            snapshot_id
+        )));
+    };
+    Ok(row.get("parent_snapshot_id"))
+}
+
+fn semantic_publish_phase_count(strategy: &SemanticPublishStrategy) -> usize {
+    match strategy {
+        SemanticPublishStrategy::IncrementalFromParent { .. } => 3,
+        SemanticPublishStrategy::CurrentSnapshotOnly | SemanticPublishStrategy::FullRebuild => 2,
+    }
+}
+
+fn semantic_publish_strategy(
+    parent_snapshot_id: Option<String>,
+    parent_complete: bool,
+) -> SemanticPublishStrategy {
+    match parent_snapshot_id {
+        Some(parent_snapshot_id) if parent_complete => {
+            SemanticPublishStrategy::IncrementalFromParent { parent_snapshot_id }
+        }
+        Some(_) => SemanticPublishStrategy::FullRebuild,
+        None => SemanticPublishStrategy::CurrentSnapshotOnly,
+    }
+}
+
+fn semantic_publish_plan(
+    parent_snapshot_id: Option<String>,
+    parent_complete: bool,
+    current_snapshot_files: &[VisibleSnapshotFile],
+    deleted_paths: &[(String, String)],
+) -> SemanticPublishPlan {
+    SemanticPublishPlan {
+        strategy: semantic_publish_strategy(parent_snapshot_id, parent_complete),
+        changed_paths: current_snapshot_files
+            .iter()
+            .map(|file| (file.collection.clone(), file.path.clone()))
+            .collect(),
+        deleted_paths: deleted_paths.iter().cloned().collect(),
+    }
+}
+
+fn load_snapshot_file_rows(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<Vec<VisibleSnapshotFile>, SearchError> {
+    let query = format!(
+        "SELECT collection, path, file_fingerprint, document_count, file_object_id
+         FROM {}
+         WHERE snapshot_id = $1
+         ORDER BY collection, path",
+        adapter.table("snapshot_files")
+    );
+    Ok(client
+        .query(&query, &[&snapshot_id])?
+        .into_iter()
+        .map(|row| VisibleSnapshotFile {
+            collection: row.get("collection"),
+            path: row.get("path"),
+            file_fingerprint: row.get("file_fingerprint"),
+            document_count: row.get::<_, i32>("document_count") as usize,
+            file_object_id: row.get("file_object_id"),
+        })
+        .collect())
+}
+
+fn load_snapshot_deletion_keys(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+) -> Result<Vec<(String, String)>, SearchError> {
+    let query = format!(
+        "SELECT collection, path FROM {} WHERE snapshot_id = $1 ORDER BY collection, path",
+        adapter.table("snapshot_deletions")
+    );
+    Ok(client
+        .query(&query, &[&snapshot_id])?
+        .into_iter()
+        .map(|row| (row.get("collection"), row.get("path")))
+        .collect())
+}
+
+fn prepare_semantic_rows_for_files(
+    client: &mut impl GenericClient,
+    adapter: &PostgresBaselineAdapter,
+    visible_files: &[VisibleSnapshotFile],
+    model_id: &str,
+    dimension: usize,
+) -> Result<PreparedSemanticRows, SearchError> {
+    if visible_files.is_empty() {
+        return Ok(PreparedSemanticRows::default());
+    }
+
+    let file_object_ids =
+        visible_files.iter().map(|file| file.file_object_id.clone()).collect::<Vec<_>>();
+    let file_meta = visible_files
+        .iter()
+        .map(|file| (file.file_object_id.clone(), (file.collection.clone(), file.path.clone())))
+        .collect::<HashMap<_, _>>();
+    let items_query = format!(
+        "SELECT foi.file_object_id, foi.ordinal, foi.symbol_name, foi.kind,
+                foi.line_start, foi.line_end, co.text
+         FROM {} foi
+         JOIN {} co ON co.content_hash = foi.content_hash
+         WHERE foi.file_object_id = ANY($1)
+         ORDER BY foi.file_object_id, foi.ordinal",
+        adapter.table("file_object_items"),
+        adapter.table("content_objects"),
+    );
+    let item_rows = client.query(&items_query, &[&file_object_ids])?;
+
+    let mut pending_rows = Vec::with_capacity(item_rows.len());
+    let mut embedding_keys = Vec::with_capacity(item_rows.len());
+    let mut seen_keys = HashSet::with_capacity(item_rows.len());
+    for row in item_rows {
+        let file_object_id: String = row.get("file_object_id");
+        let Some((collection, path)) = file_meta.get(&file_object_id) else {
+            continue;
+        };
+        let embedding_key = semantic_key_for_document(
+            path,
+            row.get("kind"),
+            row.get("symbol_name"),
+            row.get("text"),
+        );
+        if seen_keys.insert(embedding_key.clone()) {
+            embedding_keys.push(embedding_key.clone());
+        }
+        pending_rows.push(PendingSemanticRow {
+            collection: collection.clone(),
+            path: path.clone(),
+            ordinal: row.get("ordinal"),
+            symbol_name: row.get("symbol_name"),
+            kind: row.get("kind"),
+            line_start: row.get("line_start"),
+            line_end: row.get("line_end"),
+            embedding_key,
+        });
+    }
+
+    let embeddings =
+        load_embeddings_from_client(client, adapter, &embedding_keys, model_id, dimension)?;
+    let mut prepared_rows = PreparedSemanticRows::default();
+    prepared_rows.rows.reserve(pending_rows.len());
+    for pending_row in pending_rows {
+        if let Some(embedding) = embeddings.get(&pending_row.embedding_key) {
+            prepared_rows.rows.push(ServingSemanticRow {
+                collection: pending_row.collection,
+                path: pending_row.path,
+                ordinal: pending_row.ordinal,
+                symbol_name: pending_row.symbol_name,
+                kind: pending_row.kind,
+                line_start: pending_row.line_start,
+                line_end: pending_row.line_end,
+                vector_text: format_pgvector_text(embedding),
+            });
+        } else {
+            prepared_rows.missing_embeddings += 1;
+        }
+    }
+    Ok(prepared_rows)
+}
+
+fn delete_serving_semantic_rows(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+    model_id: &str,
+    dimension: usize,
+) -> Result<(), SearchError> {
+    tx.execute(
+        &format!(
+            "DELETE FROM {} WHERE snapshot_id = $1 AND model_id = $2 AND dimension = $3",
+            adapter.table("serving_semantic")
+        ),
+        &[&snapshot_id, &model_id, &(dimension as i32)],
+    )?;
+    Ok(())
+}
+
+fn copy_parent_serving_semantic_rows(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+    parent_snapshot_id: &str,
+    model_id: &str,
+    dimension: usize,
+) -> Result<usize, SearchError> {
+    let query = format!(
+        "INSERT INTO {} (
+            snapshot_id, collection, path, ordinal, symbol_name, kind,
+            line_start, line_end, model_id, dimension, embedding
+         )
+         SELECT $1, parent.collection, parent.path, parent.ordinal, parent.symbol_name, parent.kind,
+                parent.line_start, parent.line_end, parent.model_id, parent.dimension, parent.embedding
+         FROM {} parent
+         WHERE parent.snapshot_id = $2
+           AND parent.model_id = $3
+           AND parent.dimension = $4
+           AND NOT EXISTS (
+               SELECT 1 FROM {} sf
+               WHERE sf.snapshot_id = $1
+                 AND sf.collection = parent.collection
+                 AND sf.path = parent.path
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM {} sd
+               WHERE sd.snapshot_id = $1
+                 AND sd.collection = parent.collection
+                 AND sd.path = parent.path
+           )",
+        adapter.table("serving_semantic"),
+        adapter.table("serving_semantic"),
+        adapter.table("snapshot_files"),
+        adapter.table("snapshot_deletions"),
+    );
+    Ok(tx.execute(&query, &[&snapshot_id, &parent_snapshot_id, &model_id, &(dimension as i32)])?
+        as usize)
+}
+
+fn insert_serving_semantic_rows(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    snapshot_id: &str,
+    model_id: &str,
+    dimension: usize,
+    rows: &[ServingSemanticRow],
+) -> Result<usize, SearchError> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let dimension = dimension as i32;
+    let mut inserted = 0usize;
+    for batch in rows.chunks(SERVING_SEMANTIC_BATCH_SIZE) {
+        let mut values = Vec::with_capacity(batch.len());
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            Vec::with_capacity(batch.len() * 11);
+        for (index, row) in batch.iter().enumerate() {
+            let base = index * 11;
+            values.push(format!(
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}::text::vector)",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9,
+                base + 10,
+                base + 11
+            ));
+            params.push(&snapshot_id);
+            params.push(&row.collection);
+            params.push(&row.path);
+            params.push(&row.ordinal);
+            params.push(&row.symbol_name);
+            params.push(&row.kind);
+            params.push(&row.line_start);
+            params.push(&row.line_end);
+            params.push(&model_id);
+            params.push(&dimension);
+            params.push(&row.vector_text);
+        }
+        let query = format!(
+            "INSERT INTO {} (
+                snapshot_id, collection, path, ordinal, symbol_name, kind,
+                line_start, line_end, model_id, dimension, embedding
+             ) VALUES {}",
+            adapter.table("serving_semantic"),
+            values.join(", ")
+        );
+        inserted += tx.execute(&query, &params)? as usize;
+    }
+    Ok(inserted)
+}
+
+fn format_pgvector_text(embedding: &[f32]) -> String {
+    format!("[{}]", embedding.iter().map(|value| value.to_string()).collect::<Vec<_>>().join(","))
 }
 
 fn group_documents_by_file(documents: &[IndexedDocument]) -> Vec<PublishedFileGroup> {
@@ -2029,6 +2638,50 @@ fn log_snapshot_publish_phase_timings(
     );
 }
 
+fn log_semantic_publish_phase_timings(
+    snapshot_id: &str,
+    model_id: &str,
+    dimension: usize,
+    strategy: &SemanticPublishStrategy,
+    timings: &SemanticPublishPhaseTimings,
+    stats: &SemanticPublishLogStats,
+) {
+    let parent_snapshot_id = match strategy {
+        SemanticPublishStrategy::IncrementalFromParent { parent_snapshot_id } => {
+            parent_snapshot_id.as_str()
+        }
+        _ => "-",
+    };
+    tracing::info!(
+        snapshot_id,
+        model_id,
+        dimension,
+        strategy = strategy.label(),
+        parent_snapshot_id,
+        ancestry_materialization_ms = timings.ancestry_materialization.as_millis() as u64,
+        parent_copy_ms = timings.parent_copy.as_millis() as u64,
+        changed_recompute_ms = timings.changed_recompute.as_millis() as u64,
+        final_sync_ms = timings.final_sync.as_millis() as u64,
+        copied_rows = stats.copied_rows,
+        inserted_rows = stats.inserted_rows,
+        missing_embeddings = stats.missing_embeddings,
+        changed_files = stats.changed_files,
+        changed_rows = stats.changed_rows,
+        deleted_paths = stats.deleted_paths,
+        "postgres semantic publish phase timings"
+    );
+    if stats.missing_embeddings > 0 {
+        tracing::warn!(
+            snapshot_id,
+            model_id,
+            dimension,
+            missing_embeddings = stats.missing_embeddings,
+            strategy = strategy.label(),
+            "semantic publish completed without readiness marker because embeddings were missing"
+        );
+    }
+}
+
 fn pool_connection_reason_code(message: &str) -> &'static str {
     let message = message.to_ascii_lowercase();
     if message.contains("password authentication failed")
@@ -2263,7 +2916,9 @@ fn query_string_column(
 mod tests {
     use super::{
         file_object_id_for, fingerprint_file_documents, group_documents_by_file,
-        unique_content_object_rows, ContentObjectRow, PostgresBaselineAdapter,
+        semantic_publish_phase_count, semantic_publish_plan, semantic_publish_strategy,
+        unique_content_object_rows, ContentObjectRow, PostgresBaselineAdapter, SemanticPublishPlan,
+        SemanticPublishStrategy, VisibleSnapshotFile,
     };
     use crate::domain::{CorpusId, ExternalBaselineConfig};
     use crate::ports::{BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog};
@@ -2363,6 +3018,98 @@ mod tests {
     }
 
     #[test]
+    fn semantic_publish_phase_count_matches_strategy() {
+        assert_eq!(semantic_publish_phase_count(&SemanticPublishStrategy::CurrentSnapshotOnly), 2);
+        assert_eq!(semantic_publish_phase_count(&SemanticPublishStrategy::FullRebuild), 2);
+        assert_eq!(
+            semantic_publish_phase_count(&SemanticPublishStrategy::IncrementalFromParent {
+                parent_snapshot_id: "parent-1".to_owned()
+            }),
+            3
+        );
+    }
+
+    #[test]
+    fn semantic_publish_strategy_exposes_parent_snapshot_id_only_for_incremental_reuse() {
+        assert_eq!(SemanticPublishStrategy::CurrentSnapshotOnly.parent_snapshot_id(), None);
+        assert_eq!(SemanticPublishStrategy::FullRebuild.parent_snapshot_id(), None);
+        assert_eq!(
+            SemanticPublishStrategy::IncrementalFromParent {
+                parent_snapshot_id: "parent-1".to_owned()
+            }
+            .parent_snapshot_id(),
+            Some("parent-1")
+        );
+    }
+
+    #[test]
+    fn semantic_publish_requires_completion_marker_for_parent_reuse() {
+        assert_eq!(
+            semantic_publish_strategy(Some("parent-1".to_owned()), false),
+            SemanticPublishStrategy::FullRebuild
+        );
+        assert_eq!(
+            semantic_publish_strategy(Some("parent-1".to_owned()), true),
+            SemanticPublishStrategy::IncrementalFromParent {
+                parent_snapshot_id: "parent-1".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_publish_plan_tracks_changed_and_deleted_paths_for_incremental_reuse() {
+        let plan = semantic_publish_plan(
+            Some("parent-1".to_owned()),
+            true,
+            &[
+                visible_snapshot_file("code", "src/New.bsl"),
+                visible_snapshot_file("code", "src/Renamed.bsl"),
+            ],
+            &[("code".to_owned(), "src/Old.bsl".to_owned())],
+        );
+
+        assert_eq!(
+            plan,
+            SemanticPublishPlan {
+                strategy: SemanticPublishStrategy::IncrementalFromParent {
+                    parent_snapshot_id: "parent-1".to_owned()
+                },
+                changed_paths: [
+                    ("code".to_owned(), "src/New.bsl".to_owned()),
+                    ("code".to_owned(), "src/Renamed.bsl".to_owned())
+                ]
+                .into_iter()
+                .collect(),
+                deleted_paths: [("code".to_owned(), "src/Old.bsl".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }
+        );
+    }
+
+    #[test]
+    fn semantic_publish_plan_falls_back_to_full_rebuild_without_parent_marker() {
+        let plan = semantic_publish_plan(
+            Some("parent-1".to_owned()),
+            false,
+            &[visible_snapshot_file("code", "src/Changed.bsl")],
+            &[("code".to_owned(), "src/Deleted.bsl".to_owned())],
+        );
+
+        assert_eq!(plan.strategy, SemanticPublishStrategy::FullRebuild);
+        assert_eq!(plan.changed_paths.len(), 1);
+        assert_eq!(plan.deleted_paths.len(), 1);
+    }
+
+    #[test]
+    fn semantic_publish_uses_current_snapshot_only_without_parent() {
+        assert_eq!(
+            semantic_publish_strategy(None, false),
+            SemanticPublishStrategy::CurrentSnapshotOnly
+        );
+    }
+
+    #[test]
     fn unique_content_object_rows_deduplicates_repeated_hashes() {
         let rows = vec![
             ContentObjectRow { content_hash: "hash-a".to_owned(), text: "text-a".to_owned() },
@@ -2443,6 +3190,16 @@ mod tests {
             line_end: line_start + 1,
             text: text.to_owned(),
             content_hash: content_hash.to_owned(),
+        }
+    }
+
+    fn visible_snapshot_file(collection: &str, path: &str) -> VisibleSnapshotFile {
+        VisibleSnapshotFile {
+            collection: collection.to_owned(),
+            path: path.to_owned(),
+            file_fingerprint: format!("fp:{collection}:{path}"),
+            document_count: 1,
+            file_object_id: format!("fo:{collection}:{path}"),
         }
     }
 }

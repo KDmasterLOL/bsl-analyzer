@@ -47,7 +47,8 @@ pub use external_baseline::ExternalBaselineAdapter;
 pub use external_baseline::{
     BaselineCollectionRecord, BaselineEmbeddingCoverageRecord, BaselineEmbeddingModelRecord,
     BaselineFileObjectDetails, BaselineFileObjectRecord, BaselineFileObjectReference,
-    BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
+    BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord, SemanticPublishPhase,
+    SemanticPublishProgress,
 };
 pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
 pub use index::{SearchResult, VectorIndex};

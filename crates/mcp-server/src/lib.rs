@@ -208,6 +208,10 @@ impl McpServer {
         Self { profile, state, tool_router }
     }
 
+    pub fn shutdown(&self) {
+        self.state.shutdown();
+    }
+
     /// Метаданные конфигурации 1С: общая информация, дерево объектов по категориям,
     /// структура объекта (реквизиты, ТЧ, измерения, ресурсы), структура формы.
     /// action: info | tree | object | form

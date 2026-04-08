@@ -820,6 +820,24 @@ impl SearchEngine {
         service.resolve_view(baseline, overlay)
     }
 
+    /// Materialize the current workspace code view from baseline documents plus
+    /// the live workspace overlay.
+    pub fn resolve_workspace_code_view_from_documents(
+        &self,
+        baseline: BaselineRef,
+        baseline_documents: Vec<crate::IndexedDocument>,
+    ) -> Result<Option<ResolvedView>, SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok(None);
+        }
+
+        let overlay = self.workspace_overlay_snapshot(None)?;
+        let mut overlay = overlay.overlay;
+        overlay.baseline = baseline.clone();
+
+        InMemoryResolvedViewResolver.resolve(baseline, baseline_documents, overlay).map(Some)
+    }
+
     /// Semantic search, optionally filtered by collection.
     ///
     /// If `collection` is `None`, searches across all collections.

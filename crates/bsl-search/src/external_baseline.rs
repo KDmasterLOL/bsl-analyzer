@@ -8,6 +8,7 @@ use crate::ports::{
     SnapshotContentStore, SnapshotPublisher,
 };
 use std::collections::HashMap;
+use std::time::Duration;
 
 mod postgres;
 
@@ -88,6 +89,44 @@ pub struct BaselineGcReport {
     pub deleted_file_objects: usize,
     pub deleted_file_object_items: usize,
     pub deleted_semantic_embeddings: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticPublishPhase {
+    PrepareRows,
+    CopyParentRows,
+    WriteServingRows,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SemanticPublishProgress {
+    Plan {
+        strategy: String,
+        changed_files: usize,
+        deleted_paths: usize,
+        parent_snapshot_id: Option<String>,
+        phase_count: usize,
+    },
+    PhaseStarted {
+        phase: SemanticPublishPhase,
+        phase_index: usize,
+        phase_count: usize,
+        detail: String,
+    },
+    PhaseCompleted {
+        phase: SemanticPublishPhase,
+        phase_index: usize,
+        phase_count: usize,
+        elapsed: Duration,
+        output_rows: usize,
+    },
+    Completed {
+        total_rows: usize,
+        copied_rows: usize,
+        inserted_rows: usize,
+        missing_embeddings: usize,
+        total_elapsed: Duration,
+    },
 }
 
 /// Infrastructure adapter for centralized baseline storage.
@@ -247,10 +286,23 @@ impl ExternalBaselineAdapter {
         model_id: &str,
         dimension: usize,
     ) -> Result<usize, SearchError> {
+        self.populate_serving_semantic_with_progress(snapshot_id, model_id, dimension, None)
+    }
+
+    pub fn populate_serving_semantic_with_progress(
+        &self,
+        snapshot_id: &str,
+        model_id: &str,
+        dimension: usize,
+        progress: Option<&dyn Fn(SemanticPublishProgress)>,
+    ) -> Result<usize, SearchError> {
         match self {
-            Self::Postgres(adapter) => {
-                adapter.populate_serving_semantic(snapshot_id, model_id, dimension)
-            }
+            Self::Postgres(adapter) => adapter.populate_serving_semantic_with_progress(
+                snapshot_id,
+                model_id,
+                dimension,
+                progress,
+            ),
         }
     }
 

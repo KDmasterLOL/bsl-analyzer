@@ -15,10 +15,13 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineResolutionSummary {
@@ -44,7 +47,59 @@ pub(crate) struct BaselineSnapshotDocuments {
 #[derive(Debug, Clone)]
 pub(crate) struct BaselineRuntime {
     pub configured_baseline: ConfiguredBaselineStatus,
-    pub external_baseline: Option<Arc<RefreshableExternalBaselineSource>>,
+    pub external_baseline: Option<Arc<ExternalBaselineService>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExternalBaselineService {
+    corpus: CorpusId,
+    schema: String,
+    selection: String,
+    local_reference_fingerprint: Option<String>,
+    sender: mpsc::Sender<BaselineServiceRequest>,
+    worker: StdMutex<Option<JoinHandle<()>>>,
+    closed: AtomicBool,
+}
+
+#[derive(Debug)]
+enum BaselineServiceRequest {
+    ProbeStatus {
+        reply: mpsc::Sender<ExternalBaselineStatus>,
+    },
+    ResolveSnapshot {
+        reply: mpsc::Sender<
+            Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError>,
+        >,
+    },
+    LexicalSearch {
+        snapshot_id: String,
+        query: String,
+        collection: Option<String>,
+        limit: usize,
+        reply: mpsc::Sender<Result<Vec<bsl_search::LexicalHit>, bsl_search::SearchError>>,
+    },
+    SemanticSearch {
+        snapshot_id: String,
+        query_embedding: Vec<f32>,
+        model_id: String,
+        dimension: usize,
+        collection: Option<String>,
+        limit: usize,
+        reply: mpsc::Sender<Result<Vec<bsl_search::SemanticHit>, bsl_search::SearchError>>,
+    },
+    LoadWorkspaceSnapshotDocuments {
+        model_id: Option<String>,
+        dimension: Option<usize>,
+        reply: mpsc::Sender<Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError>>,
+    },
+    LoadReferenceSnapshotDocuments {
+        model_id: Option<String>,
+        dimension: Option<usize>,
+        reply: mpsc::Sender<Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError>>,
+    },
+    Shutdown {
+        reply: mpsc::Sender<()>,
+    },
 }
 
 impl BaselineRuntime {
@@ -174,6 +229,7 @@ impl BaselineRuntime {
                 } else {
                     None
                 };
+                let service = ExternalBaselineService::spawn(source);
                 tracing::info!(corpus = %corpus, "refreshable external baseline source configured");
                 Self {
                     configured_baseline: ConfiguredBaselineStatus {
@@ -182,7 +238,7 @@ impl BaselineRuntime {
                         issue: None,
                         support,
                     },
-                    external_baseline: Some(Arc::new(source)),
+                    external_baseline: Some(Arc::new(service)),
                 }
             }
             Err(error) => {
@@ -213,10 +269,299 @@ pub fn resolve_project_baseline_diagnostics(
     project_root: Option<&Path>,
     project_config: &ProjectConfig,
 ) -> BaselineConfigDiagnostics {
-    let workspace = BaselineRuntime::workspace(project_root, project_config);
-    let reference = BaselineRuntime::reference(Some(project_config));
+    let workspace = BaselineRuntime::workspace(project_root, project_config).summary();
+    let reference = BaselineRuntime::reference(Some(project_config)).summary();
+    BaselineConfigDiagnostics { workspace, reference }
+}
 
-    BaselineConfigDiagnostics { workspace: workspace.summary(), reference: reference.summary() }
+impl ExternalBaselineService {
+    fn spawn(source: RefreshableExternalBaselineSource) -> Self {
+        let corpus = source.corpus().clone();
+        let schema = source._schema_for_status();
+        let selection = source._selection();
+        let local_reference_fingerprint = source.local_reference_fingerprint();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name(format!("baseline-service-{}", corpus.as_str()))
+            .spawn(move || Self::worker_loop(source, receiver))
+            .expect("failed to spawn external baseline service worker");
+
+        Self {
+            corpus,
+            schema,
+            selection,
+            local_reference_fingerprint,
+            sender,
+            worker: StdMutex::new(Some(worker)),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(source: RefreshableExternalBaselineSource) -> Arc<Self> {
+        Arc::new(Self::spawn(source))
+    }
+
+    fn worker_loop(
+        source: RefreshableExternalBaselineSource,
+        receiver: mpsc::Receiver<BaselineServiceRequest>,
+    ) {
+        while let Ok(request) = receiver.recv() {
+            match request {
+                BaselineServiceRequest::ProbeStatus { reply } => {
+                    let _ = reply.send(source.probe_status());
+                }
+                BaselineServiceRequest::ResolveSnapshot { reply } => {
+                    let _ = reply.send(source.resolve_snapshot());
+                }
+                BaselineServiceRequest::LexicalSearch {
+                    snapshot_id,
+                    query,
+                    collection,
+                    limit,
+                    reply,
+                } => {
+                    let result =
+                        source.lexical_search(&snapshot_id, &query, collection.as_deref(), limit);
+                    let _ = reply.send(result);
+                }
+                BaselineServiceRequest::SemanticSearch {
+                    snapshot_id,
+                    query_embedding,
+                    model_id,
+                    dimension,
+                    collection,
+                    limit,
+                    reply,
+                } => {
+                    let result = source.semantic_search(
+                        &snapshot_id,
+                        &query_embedding,
+                        &model_id,
+                        dimension,
+                        collection.as_deref(),
+                        limit,
+                    );
+                    let _ = reply.send(result);
+                }
+                BaselineServiceRequest::LoadWorkspaceSnapshotDocuments {
+                    model_id,
+                    dimension,
+                    reply,
+                } => {
+                    let result =
+                        source.load_workspace_snapshot_documents(model_id.as_deref(), dimension);
+                    let _ = reply.send(result);
+                }
+                BaselineServiceRequest::LoadReferenceSnapshotDocuments {
+                    model_id,
+                    dimension,
+                    reply,
+                } => {
+                    let result =
+                        source.load_reference_snapshot_documents(model_id.as_deref(), dimension);
+                    let _ = reply.send(result);
+                }
+                BaselineServiceRequest::Shutdown { reply } => {
+                    let _ = reply.send(());
+                    break;
+                }
+            }
+        }
+    }
+
+    fn request<R>(
+        &self,
+        build: impl FnOnce(mpsc::Sender<R>) -> BaselineServiceRequest,
+    ) -> Result<R, bsl_search::SearchError>
+    where
+        R: Send + 'static,
+    {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(service_closed_error(&self.corpus));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender.send(build(reply_tx)).map_err(|_| service_closed_error(&self.corpus))?;
+        reply_rx.recv().map_err(|_| service_closed_error(&self.corpus))
+    }
+
+    pub(crate) fn lexical_search(
+        &self,
+        snapshot_id: &str,
+        query: &str,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<bsl_search::LexicalHit>, bsl_search::SearchError> {
+        self.request(|reply| BaselineServiceRequest::LexicalSearch {
+            snapshot_id: snapshot_id.to_owned(),
+            query: query.to_owned(),
+            collection: collection.map(ToOwned::to_owned),
+            limit,
+            reply,
+        })?
+    }
+
+    pub(crate) fn semantic_search(
+        &self,
+        snapshot_id: &str,
+        query_embedding: &[f32],
+        model_id: &str,
+        dimension: usize,
+        collection: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<bsl_search::SemanticHit>, bsl_search::SearchError> {
+        self.request(|reply| BaselineServiceRequest::SemanticSearch {
+            snapshot_id: snapshot_id.to_owned(),
+            query_embedding: query_embedding.to_vec(),
+            model_id: model_id.to_owned(),
+            dimension,
+            collection: collection.map(ToOwned::to_owned),
+            limit,
+            reply,
+        })?
+    }
+
+    pub(crate) fn probe_status(&self) -> ExternalBaselineStatus {
+        self.request(|reply| BaselineServiceRequest::ProbeStatus { reply }).unwrap_or_else(
+            |error| ExternalBaselineStatus {
+                backend: "postgres",
+                schema: self.schema.clone(),
+                selection: self.selection.clone(),
+                resolved: None,
+                state: ExternalBaselineState::Error(error.to_string()),
+            },
+        )
+    }
+
+    pub(crate) fn resolve_workspace_view(
+        &self,
+        engine: &SearchEngine,
+    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
+        let Some(snapshot) = self.load_workspace_snapshot_documents(None, None)? else {
+            return Ok(None);
+        };
+        let baseline = BaselineRef::for_snapshot(self.corpus.clone(), snapshot.snapshot_id);
+        engine.resolve_workspace_code_view_from_documents(baseline, snapshot.documents)
+    }
+
+    pub(crate) fn resolve_reference_view(
+        &self,
+    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
+        let Some(snapshot) = self.load_reference_snapshot_documents(None, None)? else {
+            return Ok(None);
+        };
+        let baseline = BaselineRef::for_snapshot(self.corpus.clone(), snapshot.snapshot_id);
+        Ok(Some(ResolvedView::new(baseline, snapshot.documents)))
+    }
+
+    pub(crate) fn load_workspace_snapshot_documents(
+        &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
+    ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
+        self.request(|reply| BaselineServiceRequest::LoadWorkspaceSnapshotDocuments {
+            model_id: model_id.map(ToOwned::to_owned),
+            dimension,
+            reply,
+        })?
+    }
+
+    pub(crate) fn load_reference_snapshot_documents(
+        &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
+    ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
+        self.request(|reply| BaselineServiceRequest::LoadReferenceSnapshotDocuments {
+            model_id: model_id.map(ToOwned::to_owned),
+            dimension,
+            reply,
+        })?
+    }
+
+    pub(crate) fn corpus(&self) -> CorpusId {
+        self.corpus.clone()
+    }
+
+    pub(crate) fn local_reference_fingerprint(&self) -> Option<String> {
+        self.local_reference_fingerprint.clone()
+    }
+
+    pub(crate) fn resolve_snapshot(
+        &self,
+    ) -> Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError> {
+        self.request(|reply| BaselineServiceRequest::ResolveSnapshot { reply })?
+    }
+
+    pub(crate) fn shutdown(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let acknowledged = match self
+            .sender
+            .send(BaselineServiceRequest::Shutdown { reply: reply_tx })
+        {
+            Ok(()) => match reply_rx.recv_timeout(shutdown_ack_timeout()) {
+                Ok(()) => true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    tracing::warn!(
+                        corpus = %self.corpus,
+                        timeout_ms = shutdown_ack_timeout().as_millis(),
+                        "external baseline service shutdown timed out waiting for worker acknowledgement"
+                    );
+                    false
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    tracing::warn!(
+                        corpus = %self.corpus,
+                        "external baseline service shutdown acknowledgement channel disconnected"
+                    );
+                    false
+                }
+            },
+            Err(_) => {
+                tracing::warn!(
+                    corpus = %self.corpus,
+                    "external baseline service shutdown request could not be sent"
+                );
+                false
+            }
+        };
+
+        if let Ok(mut worker) = self.worker.lock() {
+            if let Some(handle) = worker.take() {
+                if acknowledged || handle.is_finished() {
+                    let _ = handle.join();
+                } else {
+                    drop(handle);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ExternalBaselineService {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn service_closed_error(corpus: &CorpusId) -> bsl_search::SearchError {
+    bsl_search::SearchError::ExternalBaseline(format!(
+        "baseline_service_closed: external baseline service for {} is not available",
+        corpus.as_str()
+    ))
+}
+
+#[cfg(test)]
+fn shutdown_ack_timeout() -> Duration {
+    Duration::from_millis(100)
+}
+
+#[cfg(not(test))]
+fn shutdown_ack_timeout() -> Duration {
+    Duration::from_secs(2)
 }
 
 #[derive(Debug)]
@@ -515,19 +860,6 @@ impl RefreshableExternalBaselineSource {
         }
     }
 
-    pub(crate) fn resolve_workspace_view(
-        &self,
-        engine: &SearchEngine,
-    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
-        self.delegate(|source| source.resolve_workspace_view(engine))
-    }
-
-    pub(crate) fn resolve_reference_view(
-        &self,
-    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
-        self.delegate(|source| source.resolve_reference_view())
-    }
-
     pub(crate) fn load_workspace_snapshot_documents(
         &self,
         model_id: Option<&str>,
@@ -752,31 +1084,6 @@ impl ExternalBaselineSource {
         snapshot_id: &str,
     ) -> Result<Option<bsl_search::BaselineSnapshotDetails>, bsl_search::SearchError> {
         self.adapter.snapshot_details(snapshot_id)
-    }
-
-    pub(crate) fn resolve_workspace_view(
-        &self,
-        engine: &SearchEngine,
-    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
-        let Some((_, snapshot)) = self.resolve_snapshot()? else {
-            return Ok(None);
-        };
-        engine.resolve_workspace_code_view_with(
-            BaselineRef::for_snapshot(snapshot.corpus.clone(), snapshot.id.0.clone()),
-            self.adapter.clone(),
-            self.adapter.clone(),
-        )
-    }
-
-    pub(crate) fn resolve_reference_view(
-        &self,
-    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
-        let Some((_, snapshot)) = self.resolve_snapshot()? else {
-            return Ok(None);
-        };
-        let documents = self.adapter.load_snapshot_documents(&snapshot)?;
-        let baseline = BaselineRef::for_snapshot(snapshot.corpus.clone(), snapshot.id.0.clone());
-        Ok(Some(ResolvedView::new(baseline, documents)))
     }
 
     pub(crate) fn load_workspace_snapshot_documents(
@@ -1106,7 +1413,8 @@ fn platform_reference_documents() -> Vec<Document> {
 mod tests {
     use super::{
         baseline_description, resolve_project_baseline_diagnostics, BaselineRuntime,
-        ConfiguredBaselineStatus, ExternalBaselineSource, ExternalBaselineState,
+        BaselineServiceRequest, ConfiguredBaselineStatus, ExternalBaselineService,
+        ExternalBaselineSource, ExternalBaselineState, ExternalBaselineStatus,
         RefreshOrTerminalError, RefreshableExternalBaselineSource,
     };
     use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig, SearchError};
@@ -1115,7 +1423,10 @@ mod tests {
         SearchConfig, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
     };
     use std::fs;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     #[test]
@@ -1575,5 +1886,72 @@ mod tests {
                 || err_msg.contains("missing_config"),
             "expected wrapper to surface error, got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn external_baseline_service_shutdown_times_out_without_blocking_future_requests() {
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("baseline-service-test-timeout".to_owned())
+            .spawn(move || {
+                while let Ok(request) = receiver.recv() {
+                    match request {
+                        BaselineServiceRequest::ProbeStatus { reply } => {
+                            std::thread::sleep(Duration::from_millis(250));
+                            let _ = reply.send(ExternalBaselineStatus {
+                                backend: "postgres",
+                                schema: "test".to_owned(),
+                                selection: "test".to_owned(),
+                                resolved: None,
+                                state: ExternalBaselineState::Ready {
+                                    snapshot_id: "snapshot:test".to_owned(),
+                                    fingerprint: None,
+                                    documents: 0,
+                                    files: 0,
+                                },
+                            });
+                        }
+                        BaselineServiceRequest::Shutdown { reply } => {
+                            let _ = reply.send(());
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .unwrap();
+        let service = Arc::new(ExternalBaselineService {
+            corpus: CorpusId::WorkspaceCode,
+            schema: "test".to_owned(),
+            selection: "test".to_owned(),
+            local_reference_fingerprint: None,
+            sender,
+            worker: StdMutex::new(Some(worker)),
+            closed: AtomicBool::new(false),
+        });
+
+        let probe_service = Arc::clone(&service);
+        let probe_thread = std::thread::spawn(move || {
+            let _ = probe_service.probe_status();
+        });
+        std::thread::sleep(Duration::from_millis(20));
+
+        let started = Instant::now();
+        service.shutdown();
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "shutdown blocked for {:?}",
+            started.elapsed()
+        );
+
+        let error = service.resolve_snapshot().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("baseline_service_closed: external baseline service for workspace-code"),
+            "unexpected error: {error}"
+        );
+
+        probe_thread.join().unwrap();
     }
 }
