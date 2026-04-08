@@ -15,6 +15,7 @@ use crate::ports::{
 use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 /// Name of the table that stores schema version metadata.
 const SCHEMA_METADATA_TABLE: &str = "_schema_metadata_";
@@ -32,6 +33,12 @@ const REQUIRED_STORAGE_TABLES: &[&str] = &[
 ];
 
 type PgPooledConnection = r2d2_postgres::r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
+
+const CONTENT_OBJECT_BATCH_SIZE: usize = 5_000;
+const FILE_OBJECT_ITEM_BATCH_SIZE: usize = 2_000;
+const SNAPSHOT_FILE_BATCH_SIZE: usize = 2_000;
+const SNAPSHOT_DELETION_BATCH_SIZE: usize = 5_000;
+const SERVING_LEXICAL_BATCH_SIZE: usize = 2_000;
 
 /// PostgreSQL adapter for centralized baseline storage.
 ///
@@ -264,14 +271,15 @@ impl PostgresBaselineAdapter {
     }
 
     fn write_schema_version(&self, tx: &mut Transaction<'_>) -> Result<(), SearchError> {
+        let schema_version = crate::error::SCHEMA_VERSION_CURRENT.to_string();
         tx.execute(
             &format!(
                 "INSERT INTO {} (setting, value)
                  VALUES ('schema_version', $1::TEXT)
                  ON CONFLICT (setting) DO UPDATE SET value = EXCLUDED.value",
-                self.table(SCHEMA_METADATA_TABLE)
+                self.table(SCHEMA_METADATA_TABLE),
             ),
-            &[&crate::error::SCHEMA_VERSION_CURRENT],
+            &[&schema_version],
         )?;
         Ok(())
     }
@@ -1432,9 +1440,13 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
 
         self.check_storage_readiness()?;
 
+        let mut phase_timings = SnapshotPublishPhaseTimings::default();
+        let grouping_started = Instant::now();
+        let file_groups = group_documents_by_file(documents);
+        phase_timings.grouping = grouping_started.elapsed();
+
         let mut client = self.connect()?;
         let mut tx = client.transaction()?;
-        let file_groups = group_documents_by_file(documents);
 
         let upsert_snapshot = format!(
             "INSERT INTO {} (id, corpus, fingerprint, parent_snapshot_id, branch, commit_sha)
@@ -1472,20 +1484,11 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
             BTreeMap::new()
         };
 
-        let insert_snapshot_file = format!(
-            "INSERT INTO {} (
-                snapshot_id, collection, path, file_fingerprint, document_count, file_object_id
-             ) VALUES ($1, $2, $3, $4, $5, $6)",
-            self.table("snapshot_files")
-        );
-        let insert_snapshot_deletion = format!(
-            "INSERT INTO {} (snapshot_id, collection, path)
-             VALUES ($1, $2, $3)",
-            self.table("snapshot_deletions")
-        );
-
         let mut stats = SnapshotPublishStats::default();
         let mut remaining_parent_files = parent_files;
+        let mut snapshot_file_rows = Vec::new();
+        let mut snapshot_deletion_rows = Vec::new();
+        let normalized_content_started = Instant::now();
         for file_group in &file_groups {
             let file_key = (file_group.collection.clone(), file_group.path.clone());
             let parent_entry = remaining_parent_files.remove(&file_key);
@@ -1500,29 +1503,45 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
 
             let file_object_id =
                 file_object_id_for(&file_group.collection, &file_group.file_fingerprint);
-            let _ = try_insert_file_object(&mut tx, self, &file_object_id, file_group)?;
-            tx.execute(
-                &insert_snapshot_file,
-                &[
-                    &snapshot.id.0,
-                    &file_group.collection,
-                    &file_group.path,
-                    &file_group.file_fingerprint,
-                    &(file_group.documents.len() as i32),
-                    &file_object_id,
-                ],
-            )?;
+            let inserted = try_insert_file_object(&mut tx, self, &file_object_id, file_group)?;
+            snapshot_file_rows.push(SnapshotFileRow {
+                snapshot_id: snapshot.id.0.clone(),
+                collection: file_group.collection.clone(),
+                path: file_group.path.clone(),
+                file_fingerprint: file_group.file_fingerprint.clone(),
+                document_count: file_group.documents.len() as i32,
+                file_object_id,
+            });
             stats.written_files += 1;
             stats.written_documents += file_group.documents.len();
+            if !inserted {
+                tracing::trace!(
+                    collection = %file_group.collection,
+                    path = %file_group.path,
+                    documents = file_group.documents.len(),
+                    "reused existing file object during snapshot publish"
+                );
+            }
         }
 
         for ((collection, path), _) in remaining_parent_files {
-            tx.execute(&insert_snapshot_deletion, &[&snapshot.id.0, &collection, &path])?;
+            snapshot_deletion_rows.push(SnapshotDeletionRow {
+                snapshot_id: snapshot.id.0.clone(),
+                collection,
+                path,
+            });
             stats.deleted_files += 1;
         }
 
-        replace_serving_lexical_rows(&mut tx, self, &snapshot.id.0, &file_groups)?;
+        insert_snapshot_file_rows(&mut tx, self, &snapshot_file_rows)?;
+        insert_snapshot_deletion_rows(&mut tx, self, &snapshot_deletion_rows)?;
+        phase_timings.normalized_content = normalized_content_started.elapsed();
 
+        let lexical_started = Instant::now();
+        replace_serving_lexical_rows(&mut tx, self, &snapshot.id.0, &file_groups)?;
+        phase_timings.lexical_rebuild = lexical_started.elapsed();
+
+        let final_activation_started = Instant::now();
         if let Some(branch) = metadata.branch.as_deref() {
             let upsert_head = format!(
                 "INSERT INTO {heads} (corpus, branch, snapshot_id, updated_at)
@@ -1539,8 +1558,18 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
         }
 
         tx.commit()?;
+        phase_timings.final_activation = final_activation_started.elapsed();
+        log_snapshot_publish_phase_timings(snapshot, &phase_timings, &stats, documents.len());
         Ok(stats)
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SnapshotPublishPhaseTimings {
+    grouping: Duration,
+    normalized_content: Duration,
+    lexical_rebuild: Duration,
+    final_activation: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -1568,6 +1597,53 @@ struct FileObjectItem {
     line_end: u32,
     text: String,
     content_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct ContentObjectRow {
+    content_hash: String,
+    text: String,
+}
+
+#[derive(Debug, Clone)]
+struct FileObjectItemRow {
+    file_object_id: String,
+    ordinal: i32,
+    symbol_name: String,
+    kind: String,
+    line_start: i32,
+    line_end: i32,
+    content_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotFileRow {
+    snapshot_id: String,
+    collection: String,
+    path: String,
+    file_fingerprint: String,
+    document_count: i32,
+    file_object_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotDeletionRow {
+    snapshot_id: String,
+    collection: String,
+    path: String,
+}
+
+#[derive(Debug, Clone)]
+struct ServingLexicalRow {
+    snapshot_id: String,
+    collection: String,
+    path: String,
+    ordinal: i32,
+    symbol_name: String,
+    kind: String,
+    line_start: i32,
+    line_end: i32,
+    text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1664,34 +1740,202 @@ fn try_insert_file_object(
         return Ok(false);
     }
 
-    let upsert_content = format!(
-        "INSERT INTO {} (content_hash, text)
-         VALUES ($1, $2)
-         ON CONFLICT (content_hash) DO UPDATE SET text = EXCLUDED.text",
-        adapter.table("content_objects")
-    );
-    let insert_item = format!(
-        "INSERT INTO {} (
-            file_object_id, ordinal, symbol_name, kind, line_start, line_end, content_hash
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        adapter.table("file_object_items")
-    );
+    let mut content_rows = Vec::with_capacity(file_group.documents.len());
+    let mut item_rows = Vec::with_capacity(file_group.documents.len());
     for (ordinal, document) in file_group.documents.iter().enumerate() {
-        tx.execute(&upsert_content, &[&document.content_hash, &document.text])?;
-        tx.execute(
-            &insert_item,
-            &[
-                &file_object_id,
-                &(ordinal as i32),
-                &document.symbol_name,
-                &document.kind,
-                &(document.line_start as i32),
-                &(document.line_end as i32),
-                &document.content_hash,
-            ],
-        )?;
+        content_rows.push(ContentObjectRow {
+            content_hash: document.content_hash.clone(),
+            text: document.text.clone(),
+        });
+        item_rows.push(FileObjectItemRow {
+            file_object_id: file_object_id.to_owned(),
+            ordinal: ordinal as i32,
+            symbol_name: document.symbol_name.clone(),
+            kind: document.kind.clone(),
+            line_start: document.line_start as i32,
+            line_end: document.line_end as i32,
+            content_hash: document.content_hash.clone(),
+        });
     }
+
+    upsert_content_objects(tx, adapter, &content_rows)?;
+    insert_file_object_items(tx, adapter, &item_rows)?;
     Ok(true)
+}
+
+fn unique_content_object_rows(
+    rows: &[ContentObjectRow],
+) -> Result<Vec<&ContentObjectRow>, SearchError> {
+    let mut seen = HashMap::with_capacity(rows.len());
+    let mut unique_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(existing) = seen.get(row.content_hash.as_str()) {
+            if existing != &row.text {
+                return Err(SearchError::ExternalBaseline(format!(
+                    "content hash collision within publish batch: hash {} maps to multiple texts",
+                    row.content_hash
+                )));
+            }
+            continue;
+        }
+
+        seen.insert(row.content_hash.as_str(), row.text.as_str());
+        unique_rows.push(row);
+    }
+    Ok(unique_rows)
+}
+
+fn upsert_content_objects(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    rows: &[ContentObjectRow],
+) -> Result<(), SearchError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let unique_rows = unique_content_object_rows(rows)?;
+    for batch in unique_rows.chunks(CONTENT_OBJECT_BATCH_SIZE) {
+        let mut values = Vec::with_capacity(batch.len());
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            Vec::with_capacity(batch.len() * 2);
+        for (index, row) in batch.iter().enumerate() {
+            let base = index * 2;
+            values.push(format!("(${}, ${})", base + 1, base + 2));
+            params.push(&row.content_hash);
+            params.push(&row.text);
+        }
+        let query = format!(
+            "INSERT INTO {} (content_hash, text) VALUES {} \
+             ON CONFLICT (content_hash) DO UPDATE SET text = EXCLUDED.text",
+            adapter.table("content_objects"),
+            values.join(", ")
+        );
+        tx.execute(&query, &params)?;
+    }
+
+    Ok(())
+}
+
+fn insert_file_object_items(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    rows: &[FileObjectItemRow],
+) -> Result<(), SearchError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    for batch in rows.chunks(FILE_OBJECT_ITEM_BATCH_SIZE) {
+        let mut values = Vec::with_capacity(batch.len());
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            Vec::with_capacity(batch.len() * 7);
+        for (index, row) in batch.iter().enumerate() {
+            let base = index * 7;
+            values.push(format!(
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7
+            ));
+            params.push(&row.file_object_id);
+            params.push(&row.ordinal);
+            params.push(&row.symbol_name);
+            params.push(&row.kind);
+            params.push(&row.line_start);
+            params.push(&row.line_end);
+            params.push(&row.content_hash);
+        }
+        let query = format!(
+            "INSERT INTO {} (
+                file_object_id, ordinal, symbol_name, kind, line_start, line_end, content_hash
+             ) VALUES {}",
+            adapter.table("file_object_items"),
+            values.join(", ")
+        );
+        tx.execute(&query, &params)?;
+    }
+
+    Ok(())
+}
+
+fn insert_snapshot_file_rows(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    rows: &[SnapshotFileRow],
+) -> Result<(), SearchError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    for batch in rows.chunks(SNAPSHOT_FILE_BATCH_SIZE) {
+        let mut values = Vec::with_capacity(batch.len());
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            Vec::with_capacity(batch.len() * 6);
+        for (index, row) in batch.iter().enumerate() {
+            let base = index * 6;
+            values.push(format!(
+                "(${}, ${}, ${}, ${}, ${}, ${})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6
+            ));
+            params.push(&row.snapshot_id);
+            params.push(&row.collection);
+            params.push(&row.path);
+            params.push(&row.file_fingerprint);
+            params.push(&row.document_count);
+            params.push(&row.file_object_id);
+        }
+        let query = format!(
+            "INSERT INTO {} (
+                snapshot_id, collection, path, file_fingerprint, document_count, file_object_id
+             ) VALUES {}",
+            adapter.table("snapshot_files"),
+            values.join(", ")
+        );
+        tx.execute(&query, &params)?;
+    }
+
+    Ok(())
+}
+
+fn insert_snapshot_deletion_rows(
+    tx: &mut Transaction<'_>,
+    adapter: &PostgresBaselineAdapter,
+    rows: &[SnapshotDeletionRow],
+) -> Result<(), SearchError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    for batch in rows.chunks(SNAPSHOT_DELETION_BATCH_SIZE) {
+        let mut values = Vec::with_capacity(batch.len());
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            Vec::with_capacity(batch.len() * 3);
+        for (index, row) in batch.iter().enumerate() {
+            let base = index * 3;
+            values.push(format!("(${}, ${}, ${})", base + 1, base + 2, base + 3));
+            params.push(&row.snapshot_id);
+            params.push(&row.collection);
+            params.push(&row.path);
+        }
+        let query = format!(
+            "INSERT INTO {} (snapshot_id, collection, path) VALUES {}",
+            adapter.table("snapshot_deletions"),
+            values.join(", ")
+        );
+        tx.execute(&query, &params)?;
+    }
+
+    Ok(())
 }
 
 fn replace_serving_lexical_rows(
@@ -1703,33 +1947,86 @@ fn replace_serving_lexical_rows(
     let delete = format!("DELETE FROM {} WHERE snapshot_id = $1", adapter.table("serving_lexical"));
     tx.execute(&delete, &[&snapshot_id])?;
 
-    let insert = format!(
-        "INSERT INTO {} (
-            snapshot_id, collection, path, ordinal, symbol_name, kind,
-            line_start, line_end, text, tsv
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_tsvector('simple', $9))",
-        adapter.table("serving_lexical")
-    );
-
+    let mut rows = Vec::new();
     for file_group in file_groups {
         for (ordinal, document) in file_group.documents.iter().enumerate() {
-            tx.execute(
-                &insert,
-                &[
-                    &snapshot_id,
-                    &file_group.collection,
-                    &file_group.path,
-                    &(ordinal as i32),
-                    &document.symbol_name,
-                    &document.kind,
-                    &(document.line_start as i32),
-                    &(document.line_end as i32),
-                    &document.text,
-                ],
-            )?;
+            rows.push(ServingLexicalRow {
+                snapshot_id: snapshot_id.to_owned(),
+                collection: file_group.collection.clone(),
+                path: file_group.path.clone(),
+                ordinal: ordinal as i32,
+                symbol_name: document.symbol_name.clone(),
+                kind: document.kind.clone(),
+                line_start: document.line_start as i32,
+                line_end: document.line_end as i32,
+                text: document.text.clone(),
+            });
         }
     }
+
+    for batch in rows.chunks(SERVING_LEXICAL_BATCH_SIZE) {
+        let mut values = Vec::with_capacity(batch.len());
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            Vec::with_capacity(batch.len() * 9);
+        for (index, row) in batch.iter().enumerate() {
+            let base = index * 9;
+            values.push(format!(
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, to_tsvector('simple', ${}))",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9,
+                base + 9
+            ));
+            params.push(&row.snapshot_id);
+            params.push(&row.collection);
+            params.push(&row.path);
+            params.push(&row.ordinal);
+            params.push(&row.symbol_name);
+            params.push(&row.kind);
+            params.push(&row.line_start);
+            params.push(&row.line_end);
+            params.push(&row.text);
+        }
+        let query = format!(
+            "INSERT INTO {} (
+                snapshot_id, collection, path, ordinal, symbol_name, kind,
+                line_start, line_end, text, tsv
+             ) VALUES {}",
+            adapter.table("serving_lexical"),
+            values.join(", ")
+        );
+        tx.execute(&query, &params)?;
+    }
     Ok(())
+}
+
+fn log_snapshot_publish_phase_timings(
+    snapshot: &Snapshot,
+    timings: &SnapshotPublishPhaseTimings,
+    stats: &SnapshotPublishStats,
+    total_documents: usize,
+) {
+    tracing::info!(
+        snapshot_id = %snapshot.id.0,
+        corpus = %snapshot.corpus.as_str(),
+        total_documents,
+        grouping_ms = timings.grouping.as_millis() as u64,
+        normalized_content_ms = timings.normalized_content.as_millis() as u64,
+        lexical_rebuild_ms = timings.lexical_rebuild.as_millis() as u64,
+        final_activation_ms = timings.final_activation.as_millis() as u64,
+        written_files = stats.written_files,
+        reused_files = stats.reused_files,
+        deleted_files = stats.deleted_files,
+        written_documents = stats.written_documents,
+        reused_documents = stats.reused_documents,
+        "postgres snapshot publish phase timings"
+    );
 }
 
 fn pool_connection_reason_code(message: &str) -> &'static str {
@@ -1966,7 +2263,7 @@ fn query_string_column(
 mod tests {
     use super::{
         file_object_id_for, fingerprint_file_documents, group_documents_by_file,
-        PostgresBaselineAdapter,
+        unique_content_object_rows, ContentObjectRow, PostgresBaselineAdapter,
     };
     use crate::domain::{CorpusId, ExternalBaselineConfig};
     use crate::ports::{BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog};
@@ -2063,6 +2360,33 @@ mod tests {
             .semantic_search_baseline("snapshot-1", &[0.1, 0.2, 0.3], "model-1", 3, None, 10)
             .unwrap_err();
         assert!(error.to_string().contains("connection"));
+    }
+
+    #[test]
+    fn unique_content_object_rows_deduplicates_repeated_hashes() {
+        let rows = vec![
+            ContentObjectRow { content_hash: "hash-a".to_owned(), text: "text-a".to_owned() },
+            ContentObjectRow { content_hash: "hash-a".to_owned(), text: "text-a".to_owned() },
+            ContentObjectRow { content_hash: "hash-b".to_owned(), text: "text-b".to_owned() },
+        ];
+
+        let unique_rows = unique_content_object_rows(&rows).unwrap();
+
+        assert_eq!(unique_rows.len(), 2);
+        assert_eq!(unique_rows[0].content_hash, "hash-a");
+        assert_eq!(unique_rows[1].content_hash, "hash-b");
+    }
+
+    #[test]
+    fn unique_content_object_rows_rejects_conflicting_text_for_same_hash() {
+        let rows = vec![
+            ContentObjectRow { content_hash: "hash-a".to_owned(), text: "text-a".to_owned() },
+            ContentObjectRow { content_hash: "hash-a".to_owned(), text: "text-b".to_owned() },
+        ];
+
+        let error = unique_content_object_rows(&rows).unwrap_err();
+
+        assert!(error.to_string().contains("content hash collision within publish batch"));
     }
 
     #[test]

@@ -38,6 +38,11 @@ coverage/
 *.log
 /experiments/
 
+# Local planning / env
+.env
+.codex
+plans/
+
 # 1C platform auto-generated
 **/ConfigDumpInfo.xml
 
