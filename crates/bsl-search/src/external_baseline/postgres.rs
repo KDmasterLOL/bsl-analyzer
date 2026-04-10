@@ -11,7 +11,7 @@ use crate::external_baseline::{
 };
 use crate::ports::{
     BaselineLexicalSearch, BaselineSemanticSearch, SnapshotCatalog, SnapshotContentStore,
-    SnapshotPublisher,
+    SnapshotPublisher, WorkspaceBaselineManifestStore,
 };
 use postgres::{GenericClient, NoTls, Row, Transaction};
 use r2d2_postgres::{r2d2::Pool, PostgresConnectionManager};
@@ -1514,6 +1514,50 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
                 score: row.get::<_, f64>("score") as f32,
             })
             .collect())
+    }
+}
+
+impl WorkspaceBaselineManifestStore for PostgresBaselineAdapter {
+    fn load_baseline_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<crate::ports::WorkspaceBaselineManifest, SearchError> {
+        self.check_storage_readiness()?;
+        let mut client = self.connect()?;
+
+        // Read snapshot metadata.
+        let meta_query = format!(
+            "SELECT id, fingerprint FROM {} WHERE id = $1 LIMIT 1",
+            self.table("snapshots")
+        );
+        let Some(meta_row) = client.query_opt(&meta_query, &[&snapshot_id])? else {
+            return Err(SearchError::ExternalBaseline(format!(
+                "snapshot '{}' not found for manifest loading",
+                snapshot_id
+            )));
+        };
+        let snapshot_fingerprint: Option<String> = meta_row.get("fingerprint");
+
+        // Load visible-file manifest rows.
+        let visible_files = materialize_visible_snapshot_files(&mut *client, self, snapshot_id)?;
+
+        let files = visible_files
+            .into_iter()
+            .filter(|f| f.collection == "code")
+            .map(|f| crate::ports::BaselineManifestFile {
+                collection: f.collection,
+                path: f.path,
+                file_fingerprint: f.file_fingerprint,
+                document_count: f.document_count,
+                file_object_id: f.file_object_id,
+            })
+            .collect();
+
+        Ok(crate::ports::WorkspaceBaselineManifest {
+            snapshot_id: snapshot_id.to_owned(),
+            snapshot_fingerprint,
+            files,
+        })
     }
 }
 

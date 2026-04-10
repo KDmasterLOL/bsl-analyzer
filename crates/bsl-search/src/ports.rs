@@ -119,3 +119,32 @@ pub trait ResolvedViewService {
         overlay: SearchOverlay,
     ) -> Result<ResolvedView, SearchError>;
 }
+
+/// A single row in the workspace baseline manifest: one visible file in the
+/// selected PostgreSQL snapshot.
+#[derive(Debug, Clone)]
+pub struct BaselineManifestFile {
+    pub collection: String,
+    pub path: String,
+    pub file_fingerprint: String,
+    pub document_count: usize,
+    pub file_object_id: String,
+}
+
+/// The workspace baseline manifest returned by Postgres: selected snapshot
+/// metadata plus the list of visible files.
+#[derive(Debug, Clone)]
+pub struct WorkspaceBaselineManifest {
+    pub snapshot_id: String,
+    pub snapshot_fingerprint: Option<String>,
+    pub files: Vec<BaselineManifestFile>,
+}
+
+/// Returns the selected snapshot metadata and visible-file manifest for
+/// workspace code from a PostgreSQL baseline.
+pub trait WorkspaceBaselineManifestStore {
+    fn load_baseline_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<WorkspaceBaselineManifest, SearchError>;
+}

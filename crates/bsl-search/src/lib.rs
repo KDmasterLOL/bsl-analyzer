@@ -58,9 +58,10 @@ pub use merge::{
     MergeContext, MergedHit,
 };
 pub use ports::{
-    BaselineLexicalSearch, BaselineSemanticSearch, EmbeddingGenerator, EmbeddingStore,
-    LexicalSearchIndex, OverlayBuilder, ResolvedViewService, SnapshotCatalog, SnapshotContentStore,
-    SnapshotPublisher, VectorSearchIndex,
+    BaselineLexicalSearch, BaselineManifestFile, BaselineSemanticSearch, EmbeddingGenerator,
+    EmbeddingStore, LexicalSearchIndex, OverlayBuilder, ResolvedViewService, SnapshotCatalog,
+    SnapshotContentStore, SnapshotPublisher, VectorSearchIndex, WorkspaceBaselineManifest,
+    WorkspaceBaselineManifestStore,
 };
 pub use publish::{
     BaselinePublishReport, BaselinePublisher, EmbeddingExecutionPolicy, EmbeddingProgress,
@@ -68,5 +69,5 @@ pub use publish::{
 };
 pub use resolved_view_search::lexical_hits as lexical_hits_for_resolved_view;
 pub use resolver::{InMemoryResolvedViewResolver, ResolvedView};
-pub use store::{ChunkInfo, Store, TextSearchResult};
+pub use store::{BaselineManifestRecord, ChunkInfo, Store, TextSearchResult};
 pub use workspace_overlay::{BaselineHashMode, WorkspaceOverlayStats};

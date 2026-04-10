@@ -2,7 +2,7 @@ use bsl_platform::PlatformDataInner;
 use bsl_search::{
     fingerprint_documents, BaselineRef, CorpusId, Document, ExternalBaselineAdapter,
     ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, ResolvedView, SearchEngine,
-    SnapshotCatalog, SnapshotContentStore,
+    SnapshotCatalog, SnapshotContentStore, WorkspaceBaselineManifest,
 };
 use project_model::{
     current_git_branch, evaluate_workspace_baseline_support_now, parse_timestamp_utc,
@@ -96,6 +96,10 @@ enum BaselineServiceRequest {
         model_id: Option<String>,
         dimension: Option<usize>,
         reply: mpsc::Sender<Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError>>,
+    },
+    LoadBaselineManifest {
+        snapshot_id: String,
+        reply: mpsc::Sender<Result<WorkspaceBaselineManifest, bsl_search::SearchError>>,
     },
     Shutdown {
         reply: mpsc::Sender<()>,
@@ -362,6 +366,10 @@ impl ExternalBaselineService {
                         source.load_reference_snapshot_documents(model_id.as_deref(), dimension);
                     let _ = reply.send(result);
                 }
+                BaselineServiceRequest::LoadBaselineManifest { snapshot_id, reply } => {
+                    let result = source.load_baseline_manifest(&snapshot_id);
+                    let _ = reply.send(result);
+                }
                 BaselineServiceRequest::Shutdown { reply } => {
                     let _ = reply.send(());
                     break;
@@ -474,6 +482,16 @@ impl ExternalBaselineService {
         self.request(|reply| BaselineServiceRequest::LoadReferenceSnapshotDocuments {
             model_id: model_id.map(ToOwned::to_owned),
             dimension,
+            reply,
+        })?
+    }
+
+    pub(crate) fn load_baseline_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<WorkspaceBaselineManifest, bsl_search::SearchError> {
+        self.request(|reply| BaselineServiceRequest::LoadBaselineManifest {
+            snapshot_id: snapshot_id.to_owned(),
             reply,
         })?
     }
@@ -876,6 +894,13 @@ impl RefreshableExternalBaselineSource {
         self.delegate(|source| source.load_reference_snapshot_documents(model_id, dimension))
     }
 
+    pub(crate) fn load_baseline_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<WorkspaceBaselineManifest, bsl_search::SearchError> {
+        self.delegate(|source| source.load_baseline_manifest(snapshot_id))
+    }
+
     pub(crate) fn corpus(&self) -> CorpusId {
         let reader = self.inner.read().expect("baseline source lock poisoned");
         reader.corpus().clone()
@@ -1132,6 +1157,13 @@ impl ExternalBaselineSource {
             documents,
             shared_embeddings,
         }))
+    }
+
+    pub(crate) fn load_baseline_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<WorkspaceBaselineManifest, bsl_search::SearchError> {
+        self.adapter.load_baseline_manifest(snapshot_id)
     }
 
     pub(crate) fn corpus(&self) -> &CorpusId {

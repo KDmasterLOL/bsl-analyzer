@@ -690,10 +690,12 @@ pub fn search_status(
                     "not configured (set EMBEDDING_URL)".to_owned()
                 }
             }
-            SemanticRuntimeStatus::WarmingUp => "warming up (use find_code until ready)".to_owned(),
+            SemanticRuntimeStatus::WarmingUp => {
+                "warming up (remote shared baseline semantic + local overlay)".to_owned()
+            }
             SemanticRuntimeStatus::Ready => {
                 if semantic {
-                    "available".to_owned()
+                    "available (remote shared baseline semantic + local overlay)".to_owned()
                 } else {
                     "warming up".to_owned()
                 }
@@ -717,7 +719,7 @@ pub fn search_status(
                     let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
                     let code_semantic_source = match &semantic_runtime {
                         SemanticRuntimeStatus::WarmingUp => {
-                            "warming up (shared baseline semantic cache + local overlay)"
+                            "warming up (remote shared baseline semantic + local overlay)"
                         }
                         SemanticRuntimeStatus::Failed(_) => {
                             "warmup failed (lexical search remains available)"
@@ -725,7 +727,7 @@ pub fn search_status(
                         SemanticRuntimeStatus::Disabled => "not configured (set EMBEDDING_URL)",
                         SemanticRuntimeStatus::Ready => {
                             if semantic {
-                                "local semantic cache of external baseline + local overlay"
+                                "remote shared baseline semantic + local overlay"
                             } else {
                                 "warming up"
                             }
@@ -1730,7 +1732,9 @@ mod tests {
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
         assert!(text.contains("Search index: ready (lexical only; semantic warmup in progress)"));
-        assert!(text.contains("Semantic: warming up"));
+        assert!(
+            text.contains("Semantic: warming up (remote shared baseline semantic + local overlay)")
+        );
         assert!(text.contains("Semantic warmup in progress: 25%"));
     }
 

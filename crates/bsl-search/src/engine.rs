@@ -237,6 +237,36 @@ impl SearchEngine {
         })
     }
 
+    /// Create a semantic-capable engine for overlay-only workspace mode.
+    ///
+    /// Unlike [`Self::new`], this does not preload persisted vectors into the
+    /// in-memory index. Baseline semantic results are expected to come from the
+    /// external source, while local overlay vectors are built on demand.
+    pub fn semantic_overlay_only(
+        db_path: &Path,
+        config: SearchConfig,
+    ) -> Result<Self, SearchError> {
+        let SearchConfig { embedder: embedder_config, execution } = config;
+        let store = Store::open(db_path)?;
+        let dim = embedder_config.dim.unwrap_or(1024);
+        let embedder = Embedder::new(embedder_config);
+        let index = VectorIndex::new(dim)?;
+
+        Self::ensure_fts(&store)?;
+
+        Ok(Self {
+            store,
+            embedder: Some(embedder),
+            index,
+            dim,
+            batch_size: execution.batch_size(),
+            concurrency: execution.concurrency(),
+            workspace_root: None,
+            workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
+            workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+        })
+    }
+
     /// Auto-populate FTS index from existing chunk data if needed.
     fn ensure_fts(store: &Store) -> Result<(), SearchError> {
         let chunk_count = store.chunk_count()?;
@@ -246,6 +276,11 @@ impl SearchEngine {
             store.rebuild_fts()?;
         }
         Ok(())
+    }
+
+    /// Returns a reference to the underlying store for metadata operations.
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     /// Index all BSL files in a directory with embeddings.
@@ -728,13 +763,24 @@ impl SearchEngine {
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
-        cache.refresh(
-            &self.store,
-            workspace_root,
-            None,
-            self.batch_size,
-            self.workspace_baseline_hash_mode,
-        )?;
+        if let Some(manifest_fingerprints) =
+            self.store.load_baseline_manifest_fingerprints("code")?
+        {
+            cache.refresh_with_manifest(
+                &manifest_fingerprints,
+                workspace_root,
+                None,
+                self.batch_size,
+            )?;
+        } else {
+            cache.refresh(
+                &self.store,
+                workspace_root,
+                None,
+                self.batch_size,
+                self.workspace_baseline_hash_mode,
+            )?;
+        }
         Ok(Some(cache.stats()))
     }
 
@@ -1009,13 +1055,24 @@ impl SearchEngine {
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
-        cache.refresh(
-            &self.store,
-            workspace_root,
-            embedder,
-            self.batch_size,
-            self.workspace_baseline_hash_mode,
-        )?;
+        if let Some(manifest_fingerprints) =
+            self.store.load_baseline_manifest_fingerprints("code")?
+        {
+            cache.refresh_with_manifest(
+                &manifest_fingerprints,
+                workspace_root,
+                embedder,
+                self.batch_size,
+            )?;
+        } else {
+            cache.refresh(
+                &self.store,
+                workspace_root,
+                embedder,
+                self.batch_size,
+                self.workspace_baseline_hash_mode,
+            )?;
+        }
         Ok(cache.snapshot())
     }
 
@@ -1382,6 +1439,72 @@ mod tests {
         assert!(symbols.contains("OverlayВерсия"));
         assert!(symbols.contains("СтабильноИзBaseline"));
         assert!(!symbols.contains("БазоваяВерсия"));
+    }
+
+    #[test]
+    fn workspace_overlay_stats_use_persisted_manifest_without_hiding_unchanged_files() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура БазоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-1".to_owned(),
+                snapshot_fingerprint: Some("fp-1".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "CommonModule.bsl".to_owned(),
+                    file_fingerprint: crate::workspace_overlay::fingerprint_content(
+                        "Процедура БазоваяПроцедура()\nКонецПроцедуры",
+                        "CommonModule.bsl",
+                    ),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.overlay_files, 0);
+        assert_eq!(stats.deleted_files, 0);
+        assert_eq!(stats.hidden_paths, 0);
+    }
+
+    #[test]
+    fn workspace_overlay_lexical_hits_use_persisted_manifest_for_modified_file() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура ЛокальнаяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-1".to_owned(),
+                snapshot_fingerprint: Some("fp-1".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    collection: "code".to_owned(),
+                    path: "CommonModule.bsl".to_owned(),
+                    file_fingerprint: "different-fingerprint".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        let (hits, hidden_paths) =
+            engine.workspace_overlay_lexical_hits("ЛокальнаяПроцедура", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_name, "ЛокальнаяПроцедура");
+        assert!(hidden_paths.contains("CommonModule.bsl"));
     }
 
     #[test]

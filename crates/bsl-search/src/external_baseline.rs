@@ -5,7 +5,8 @@ use crate::domain::{
 use crate::error::SearchError;
 use crate::ports::{
     BaselineLexicalSearch, BaselineSemanticSearch, EmbeddingStore, SnapshotCatalog,
-    SnapshotContentStore, SnapshotPublisher,
+    SnapshotContentStore, SnapshotPublisher, WorkspaceBaselineManifest,
+    WorkspaceBaselineManifestStore,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -324,6 +325,15 @@ impl ExternalBaselineAdapter {
                 collection,
                 limit,
             ),
+        }
+    }
+
+    pub fn load_baseline_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<WorkspaceBaselineManifest, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_baseline_manifest(snapshot_id),
         }
     }
 }

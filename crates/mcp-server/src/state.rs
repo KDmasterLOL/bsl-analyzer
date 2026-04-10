@@ -460,6 +460,29 @@ impl SharedState {
         Self::open_fts_only_search_engine(db_path)
     }
 
+    fn open_workspace_overlay_search_engine(db_path: &Path) -> Option<SearchEngine> {
+        if let Some(config) = Self::embedding_config() {
+            let model = config.embedder.model.clone();
+            return match SearchEngine::semantic_overlay_only(db_path, config) {
+                Ok(engine) => {
+                    tracing::info!(
+                        files = engine.file_count().unwrap_or(0),
+                        chunks = engine.chunk_count().unwrap_or(0),
+                        vectors = engine.vector_count(),
+                        model,
+                        "workspace overlay engine loaded (remote baseline + local overlay semantic)"
+                    );
+                    Some(engine)
+                }
+                Err(e) => {
+                    tracing::warn!("failed to init overlay-only semantic search engine: {e}");
+                    None
+                }
+            };
+        }
+        Self::open_fts_only_search_engine(db_path)
+    }
+
     fn configure_workspace_engine(
         engine: &mut SearchEngine,
         workspace_source_root: &Path,
@@ -513,7 +536,10 @@ impl SharedState {
             .as_ref()
             .filter(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
         {
-            let mut engine = Self::open_fts_only_search_engine(&db_path)?;
+            // Overlay-only path: load baseline manifest from Postgres,
+            // persist metadata locally, clear stale local baseline rows, and prepare the overlay engine.
+            // Baseline search remains remote; SQLite stores only overlay state and metadata.
+            let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
             Self::configure_workspace_engine(
                 &mut engine,
                 &source_path,
@@ -521,98 +547,71 @@ impl SharedState {
                 BaselineHashMode::NormalizedChunks,
             );
 
-            let needs_local_fts_fallback = match external_baseline
-                .load_workspace_snapshot_documents(None, None)
-            {
-                Ok(Some(snapshot)) => {
-                    match engine.sync_indexed_documents_in_collection(
-                        "code",
-                        &snapshot.documents,
-                        Some(progress),
-                    ) {
-                        Ok(indexed_files) => {
-                            if indexed_files > 0 {
-                                tracing::info!(
-                                    indexed_files,
-                                    "external workspace baseline cached locally for lexical startup"
-                                );
-                            } else {
-                                tracing::info!(
-                                    documents = snapshot.documents.len(),
-                                    "external workspace lexical cache is up to date"
-                                );
-                            }
-                            false
-                        }
-                        Err(error) => {
-                            tracing::warn!("failed to cache external workspace baseline for lexical startup: {error}");
-                            true
-                        }
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        ?source_path,
-                        "external workspace baseline is configured but no snapshot was resolved; building local lexical fallback cache"
-                    );
-                    true
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        ?source_path,
-                        "failed to load external workspace baseline for lexical startup cache: {error}; building local lexical fallback cache"
-                    );
-                    true
-                }
-            };
-
-            if needs_local_fts_fallback {
-                drop(engine);
-                let _ = std::fs::remove_file(&db_path);
-
-                let mut fallback_engine = Self::open_fts_only_search_engine(&db_path)?;
-                Self::configure_workspace_engine(
-                    &mut fallback_engine,
-                    &source_path,
-                    watcher_ready,
-                    BaselineHashMode::NormalizedChunks,
-                );
-                match fallback_engine.index_directory_fts(&source_path) {
-                    Ok(indexed) => {
-                        tracing::info!(indexed, "workspace lexical fallback cache built");
-                    }
-                    Err(error) => {
-                        tracing::warn!("failed to build workspace lexical fallback cache: {error}");
-                    }
-                }
-                engine = fallback_engine;
+            let store = engine.store();
+            if let Err(error) = store.clear_collection("code") {
+                tracing::warn!("failed to clear stale local workspace baseline rows: {error}");
+                return None;
+            }
+            if let Err(error) = store.clear_overlay_state("code") {
+                tracing::warn!("failed to clear stale local overlay state: {error}");
+                return None;
+            }
+            if let Err(error) = store.clear_baseline_manifest() {
+                tracing::warn!("failed to clear stale workspace baseline manifest: {error}");
+                return None;
             }
 
-            if !needs_local_fts_fallback {
-                tracing::info!(
-                    "external workspace baseline is configured; lexical search is ready and semantic warmup will continue in background"
-                );
+            // Attempt to load and persist baseline manifest metadata.
+            // This is best-effort — if Postgres is unavailable, the overlay
+            // will still work but will treat all workspace files as new.
+            let manifest_result = external_baseline.resolve_snapshot().ok().flatten().and_then(
+                |(_baseline_ref, snapshot)| match external_baseline
+                    .load_baseline_manifest(&snapshot.id.0)
+                {
+                    Ok(manifest) => {
+                        let store = engine.store();
+                        if let Err(error) = store.save_baseline_manifest(&manifest) {
+                            tracing::warn!(
+                                "failed to persist workspace baseline manifest: {error}"
+                            );
+                            return None;
+                        }
+                        tracing::info!(
+                            snapshot_id = %snapshot.id.0,
+                            manifest_files = manifest.files.len(),
+                            "workspace baseline manifest loaded and persisted"
+                        );
+                        Some(manifest)
+                    }
+                    Err(error) => {
+                        tracing::warn!("failed to load workspace baseline manifest: {error}");
+                        None
+                    }
+                },
+            );
 
-                let semantic_warmup = semantic_config.map(|config| WorkspaceSemanticWarmup {
+            // Build overlay from workspace files compared against the manifest.
+            if let Some(ref manifest) = manifest_result {
+                tracing::info!(
+                    manifest_files = manifest.files.len(),
+                    "workspace overlay-only baseline initialized; baseline search served from Postgres"
+                );
+            } else {
+                tracing::info!(
+                    "workspace baseline manifest unavailable; overlay will treat all files as new"
+                );
+            }
+
+            let semantic_warmup = semantic_config.and_then(|config| {
+                manifest_result.as_ref().map(|_| WorkspaceSemanticWarmup {
                     db_path,
                     workspace_source_root: source_path,
                     external_baseline: Arc::clone(external_baseline),
                     config,
-                });
+                })
+            });
 
-                return Some(WorkspaceSearchInit { engine, semantic_warmup });
-            }
-
-            if semantic_config.is_none() {
-                tracing::info!(
-                    "external workspace baseline is unavailable during startup; using local lexical fallback only"
-                );
-                return Some(WorkspaceSearchInit { engine, semantic_warmup: None });
-            }
-
-            tracing::info!(
-                "external workspace baseline is unavailable during startup; falling back to local semantic indexing from workspace"
-            );
+            return Some(WorkspaceSearchInit { engine, semantic_warmup });
         }
 
         let mut engine = Self::open_search_engine(&db_path)?;
@@ -1210,7 +1209,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(init.engine.file_count().unwrap(), 1);
+        assert_eq!(init.engine.file_count().unwrap(), 0);
+        assert_eq!(init.engine.workspace_overlay_stats().unwrap().unwrap().overlay_files, 1);
         assert_eq!(
             init.engine.text_search("ЛокальнаяПроцедура", 10, Some("code")).unwrap().len(),
             1

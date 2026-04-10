@@ -73,6 +73,38 @@ impl WorkspaceOverlayCache {
         self.dirty_paths.insert(rel_path.into());
     }
 
+    /// Refresh the overlay by comparing workspace files against a remote
+    /// baseline manifest. The manifest provides per-file fingerprints that
+    /// are compared against locally computed normalized chunk hashes.
+    ///
+    /// `manifest_fingerprints` maps relative file paths to their published
+    /// file fingerprint (hex-encoded normalized chunk hash).
+    pub fn refresh_with_manifest(
+        &mut self,
+        manifest_fingerprints: &HashMap<String, String>,
+        workspace_root: &Path,
+        embedder: Option<&Embedder>,
+        batch_size: usize,
+    ) -> Result<(), SearchError> {
+        if !self.initialized || !self.watcher_mode {
+            self.full_refresh_from_manifest(
+                manifest_fingerprints,
+                workspace_root,
+                embedder,
+                batch_size,
+            )?;
+        } else if !self.dirty_paths.is_empty() {
+            self.refresh_dirty_paths_from_manifest(
+                manifest_fingerprints,
+                workspace_root,
+                embedder,
+                batch_size,
+            )?;
+        }
+        self.initialized = true;
+        Ok(())
+    }
+
     pub fn refresh(
         &mut self,
         store: &Store,
@@ -271,6 +303,187 @@ impl WorkspaceOverlayCache {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // Manifest-based refresh (overlay-only, no SQLite baseline dependency)
+    // -----------------------------------------------------------------------
+
+    fn full_refresh_from_manifest(
+        &mut self,
+        manifest_fingerprints: &HashMap<String, String>,
+        workspace_root: &Path,
+        embedder: Option<&Embedder>,
+        batch_size: usize,
+    ) -> Result<(), SearchError> {
+        let workspace_files = scan_workspace_files(workspace_root);
+        let mut seen_paths = HashSet::new();
+        let mut hidden_paths = HashSet::new();
+
+        for file in workspace_files {
+            seen_paths.insert(file.rel_path.clone());
+            let baseline_fingerprint = manifest_fingerprints.get(&file.rel_path);
+
+            let mut should_remove_cached_entry = false;
+            if let Some(entry) = self.entries.get_mut(&file.rel_path) {
+                if entry.fingerprint == file.fingerprint {
+                    let local_fp =
+                        fingerprint_overlay_documents(&entry.lexical_documents, &file.rel_path);
+                    if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
+                        should_remove_cached_entry = true;
+                    } else {
+                        if baseline_fingerprint.is_some() {
+                            hidden_paths.insert(file.rel_path.clone());
+                        }
+                        if let Some(embedder) = embedder {
+                            if entry.vector_documents.is_empty() {
+                                entry.vector_documents = build_overlay_vectors(
+                                    embedder,
+                                    batch_size,
+                                    &entry.lexical_documents,
+                                    &entry.embedding_inputs,
+                                    &mut self.embedding_cache,
+                                )?;
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+            if should_remove_cached_entry {
+                self.entries.remove(&file.rel_path);
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&file.abs_path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let file_hash = normalized_file_hash_for_content(&content);
+            let local_fp = fingerprint_content(&content, &file.rel_path);
+            if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
+                self.entries.remove(&file.rel_path);
+                continue;
+            }
+
+            let entry = build_overlay_entry(
+                &file.rel_path,
+                &content,
+                file.fingerprint,
+                file_hash,
+                embedder,
+                batch_size,
+                &mut self.embedding_cache,
+            )?;
+            if baseline_fingerprint.is_some() {
+                hidden_paths.insert(file.rel_path.clone());
+            }
+            self.entries.insert(file.rel_path, entry);
+        }
+
+        self.entries.retain(|path, _| seen_paths.contains(path));
+
+        for rel_path in manifest_fingerprints.keys() {
+            if !seen_paths.contains(rel_path) {
+                hidden_paths.insert(rel_path.clone());
+            }
+        }
+
+        self.hidden_paths = hidden_paths;
+        self.dirty_paths.clear();
+        Ok(())
+    }
+
+    fn refresh_dirty_paths_from_manifest(
+        &mut self,
+        manifest_fingerprints: &HashMap<String, String>,
+        workspace_root: &Path,
+        embedder: Option<&Embedder>,
+        batch_size: usize,
+    ) -> Result<(), SearchError> {
+        let dirty_paths: Vec<String> = self.dirty_paths.drain().collect();
+
+        for rel_path in dirty_paths {
+            let baseline_fingerprint = manifest_fingerprints.get(&rel_path);
+            let abs_path = workspace_root.join(&rel_path);
+
+            if !abs_path.exists() {
+                self.entries.remove(&rel_path);
+                if baseline_fingerprint.is_some() {
+                    self.hidden_paths.insert(rel_path);
+                } else {
+                    self.hidden_paths.remove(&rel_path);
+                }
+                continue;
+            }
+
+            let metadata = match std::fs::metadata(&abs_path) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            let fingerprint =
+                FileFingerprint { len: metadata.len(), modified: metadata.modified().ok() };
+
+            if let Some(entry) = self.entries.get_mut(&rel_path) {
+                if entry.fingerprint == fingerprint {
+                    let local_fp =
+                        fingerprint_overlay_documents(&entry.lexical_documents, &rel_path);
+                    if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
+                        self.entries.remove(&rel_path);
+                        self.hidden_paths.remove(&rel_path);
+                    } else {
+                        if baseline_fingerprint.is_some() {
+                            self.hidden_paths.insert(rel_path.clone());
+                        } else {
+                            self.hidden_paths.remove(&rel_path);
+                        }
+                        if let Some(embedder) = embedder {
+                            if entry.vector_documents.is_empty() {
+                                entry.vector_documents = build_overlay_vectors(
+                                    embedder,
+                                    batch_size,
+                                    &entry.lexical_documents,
+                                    &entry.embedding_inputs,
+                                    &mut self.embedding_cache,
+                                )?;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let file_hash = normalized_file_hash_for_content(&content);
+            let local_fp = fingerprint_content(&content, &rel_path);
+            if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
+                self.entries.remove(&rel_path);
+                self.hidden_paths.remove(&rel_path);
+                continue;
+            }
+
+            let entry = build_overlay_entry(
+                &rel_path,
+                &content,
+                fingerprint,
+                file_hash,
+                embedder,
+                batch_size,
+                &mut self.embedding_cache,
+            )?;
+
+            if baseline_fingerprint.is_some() {
+                self.hidden_paths.insert(rel_path.clone());
+            } else {
+                self.hidden_paths.remove(&rel_path);
+            }
+            self.entries.insert(rel_path, entry);
+        }
+
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> WorkspaceOverlayIndex {
         let baseline =
             BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline");
@@ -455,6 +668,61 @@ fn normalized_file_hash_for_chunks<'a>(
     hasher.finalize().as_bytes().to_vec()
 }
 
+/// Computes a file fingerprint that matches the Postgres publish-time
+/// `fingerprint_file_documents` algorithm. Returns a hex-encoded blake3 hash.
+/// This is used for comparing local overlay files against the remote manifest.
+pub(crate) fn fingerprint_content(content: &str, rel_path: &str) -> String {
+    let documents = Chunker::chunk(content);
+    let mut hasher = blake3::Hasher::new();
+    for chunk in &documents {
+        let kind = match chunk.kind {
+            crate::chunker::ChunkKind::ModuleHeader => "header",
+            crate::chunker::ChunkKind::Procedure => "procedure",
+            crate::chunker::ChunkKind::Function => "function",
+        };
+        let content_hash = blake3::hash(chunk.text.as_bytes()).to_hex().to_string();
+        hasher.update("code".as_bytes());
+        hasher.update(&[0]);
+        hasher.update(rel_path.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(chunk.name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(kind.as_bytes());
+        hasher.update(&chunk.line_start.to_le_bytes());
+        hasher.update(&chunk.line_end.to_le_bytes());
+        hasher.update(content_hash.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(chunk.text.as_bytes());
+        hasher.update(&[0xff]);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Computes the fingerprint for already-built overlay documents, matching
+/// the Postgres publish-time algorithm.
+pub(crate) fn fingerprint_overlay_documents(
+    documents: &[IndexedDocument],
+    rel_path: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for document in documents {
+        hasher.update(document.collection.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(rel_path.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(document.symbol_name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(document.kind.as_bytes());
+        hasher.update(&document.line_start.to_le_bytes());
+        hasher.update(&document.line_end.to_le_bytes());
+        hasher.update(document.content_hash.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(document.text.as_bytes());
+        hasher.update(&[0xff]);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 fn build_overlay_documents(rel_path: &str, content: &str) -> (Vec<IndexedDocument>, Vec<String>) {
     let chunks = Chunker::chunk(content);
     let module_path = file_path_to_module_path(rel_path);
@@ -588,8 +856,12 @@ fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{lexical_hits, BaselineHashMode, WorkspaceOverlayCache, WorkspaceOverlayStats};
+    use super::{
+        fingerprint_content, lexical_hits, BaselineHashMode, WorkspaceOverlayCache,
+        WorkspaceOverlayStats,
+    };
     use crate::store::Store;
+    use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
 
@@ -732,5 +1004,86 @@ mod tests {
         assert_eq!(overlay.lexical_documents[0].symbol_name, "ИзWatcher");
         assert_eq!(cache.stats().pending_dirty_paths, 0);
         assert!(cache.stats().watcher_mode);
+    }
+
+    #[test]
+    fn manifest_refresh_treats_all_files_as_new_without_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Новая()\nКонецПроцедуры").unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        // Empty manifest means no baseline — all files are new.
+        let manifest: HashMap<String, String> = HashMap::new();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32).unwrap();
+
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 1);
+        assert_eq!(overlay.lexical_documents[0].symbol_name, "Новая");
+        assert!(overlay.hidden_paths.is_empty());
+    }
+
+    #[test]
+    fn manifest_refresh_detects_unchanged_file() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let content = "Процедура Базовая()\nКонецПроцедуры";
+        let file = workspace.join("A.bsl");
+        fs::write(&file, content).unwrap();
+
+        // Compute the fingerprint that Postgres would store for this file.
+        let fp = fingerprint_content(content, "A.bsl");
+        let mut manifest = HashMap::new();
+        manifest.insert("A.bsl".to_owned(), fp);
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32).unwrap();
+
+        let overlay = cache.snapshot();
+        // File matches manifest — no overlay entry or hidden path needed.
+        assert_eq!(overlay.lexical_documents.len(), 0);
+        assert!(!overlay.hidden_paths.contains("A.bsl"));
+    }
+
+    #[test]
+    fn manifest_refresh_detects_modified_file() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Старая()\nКонецПроцедуры").unwrap();
+
+        // Manifest has a different fingerprint (simulating baseline version).
+        let mut manifest = HashMap::new();
+        manifest.insert("A.bsl".to_owned(), "different-fingerprint".to_owned());
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32).unwrap();
+
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 1);
+        assert_eq!(overlay.lexical_documents[0].symbol_name, "Старая");
+        assert!(overlay.hidden_paths.contains("A.bsl"));
+    }
+
+    #[test]
+    fn manifest_refresh_detects_deleted_baseline_file() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        // No files on disk.
+
+        let mut manifest = HashMap::new();
+        manifest.insert("A.bsl".to_owned(), "some-fp".to_owned());
+        manifest.insert("B.bsl".to_owned(), "other-fp".to_owned());
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32).unwrap();
+
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 0);
+        // Both files are deleted relative to manifest.
+        assert_eq!(overlay.hidden_paths.len(), 2);
+        assert!(overlay.hidden_paths.contains("A.bsl"));
+        assert!(overlay.hidden_paths.contains("B.bsl"));
     }
 }
