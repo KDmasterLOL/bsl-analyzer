@@ -784,6 +784,17 @@ impl SearchEngine {
         Ok(Some(cache.stats()))
     }
 
+    /// Pre-compute the workspace overlay including semantic embeddings for
+    /// changed files.  Call from a background thread so the cache is warm
+    /// by the time the first search query arrives.
+    pub fn prime_workspace_overlay(&self) -> Result<(), SearchError> {
+        if self.workspace_root.is_none() {
+            return Ok(());
+        }
+        let _ = self.workspace_overlay_snapshot(self.embedder.as_ref())?;
+        Ok(())
+    }
+
     /// Returns overlay-only lexical search hits and the set of paths hidden
     /// by the overlay, for use with external baseline merge.
     pub fn workspace_overlay_lexical_hits(

@@ -1464,7 +1464,7 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
                     kind,
                     line_start,
                     line_end,
-                    1.0 - (embedding <=> $1::vector) AS score
+                    1.0 - (embedding <=> $1::text::vector) AS score
              FROM {}
              WHERE snapshot_id = $2 AND model_id = $3 AND dimension = $4",
             self.table("serving_semantic")
@@ -1476,7 +1476,10 @@ impl BaselineSemanticSearch for PostgresBaselineAdapter {
             sql.push_str(&format!(" AND collection = ${}", params.len() + 1));
             params.push(collection);
         }
-        sql.push_str(&format!(" ORDER BY embedding <=> $1::vector LIMIT ${}", params.len() + 1));
+        sql.push_str(&format!(
+            " ORDER BY embedding <=> $1::text::vector LIMIT ${}",
+            params.len() + 1
+        ));
         params.push(&limit);
 
         let mut client = self.connect()?;

@@ -1,8 +1,6 @@
 //! Shared state for MCP server tools.
 
-use crate::baseline::{
-    BaselineRuntime, BaselineSnapshotDocuments, ConfiguredBaselineStatus, ExternalBaselineService,
-};
+use crate::baseline::{BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineService};
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
@@ -37,28 +35,29 @@ pub struct SharedState {
     search_engine: Arc<Mutex<Option<SearchEngine>>>,
     index_progress: Arc<IndexProgress>,
     semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     configured_baseline: Option<ConfiguredBaselineStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceSearchMode {
+    SqliteLocal,
+    PostgresRemoteOverlay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SemanticRuntimeStatus {
     Disabled,
-    WarmingUp,
+    #[allow(dead_code)] // used in status display; set when overlay background sync is implemented
+    OverlaySyncing,
     Ready,
     Failed(String),
 }
 
 struct WorkspaceSearchInit {
     engine: SearchEngine,
-    semantic_warmup: Option<WorkspaceSemanticWarmup>,
-}
-
-struct WorkspaceSemanticWarmup {
-    db_path: PathBuf,
-    workspace_source_root: PathBuf,
-    external_baseline: Arc<ExternalBaselineService>,
-    config: bsl_search::SearchConfig,
+    mode: WorkspaceSearchMode,
 }
 
 impl SharedState {
@@ -83,6 +82,15 @@ impl SharedState {
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let watcher_ready = Arc::new(AtomicBool::new(false));
         let baseline_runtime = BaselineRuntime::workspace(Some(&project.root), &project.config);
+        let workspace_search_mode = if baseline_runtime
+            .external_baseline
+            .as_ref()
+            .is_some_and(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
+        {
+            WorkspaceSearchMode::PostgresRemoteOverlay
+        } else {
+            WorkspaceSearchMode::SqliteLocal
+        };
 
         // Spawn background thread so standalone() returns immediately.
         // MCP tools check engine readiness and return a friendly message while init is in progress.
@@ -134,6 +142,7 @@ impl SharedState {
             search_engine,
             index_progress,
             semantic_runtime,
+            workspace_search_mode,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
         }
@@ -169,41 +178,64 @@ impl SharedState {
                     return;
                 };
 
-                let semantic_ready = init
-                    .semantic_warmup
-                    .is_none()
-                    .then(|| Self::semantic_runtime_status_from_engine(&init.engine));
+                let semantic_status =
+                    Self::semantic_runtime_status_for_mode(&init.engine, &init.mode);
+                let needs_overlay_warmup =
+                    matches!(init.mode, WorkspaceSearchMode::PostgresRemoteOverlay);
 
                 if let Ok(mut guard) = search_engine.lock() {
                     *guard = Some(init.engine);
                 }
 
-                if let Some(warmup) = init.semantic_warmup {
+                Self::set_semantic_runtime_status(&semantic_runtime, semantic_status);
+
+                tracing::info!("search engine initialization complete");
+
+                // Spawn a background thread to pre-compute overlay embeddings
+                // for locally changed files.  The engine Mutex is held for the
+                // duration of the warmup so search queries that need the
+                // overlay will block, but this is preferred to blocking on the
+                // first user query.  Lexical baseline search via Postgres
+                // (find_code without overlay) remains available because it
+                // does not need the local engine.
+                if needs_overlay_warmup {
                     Self::set_semantic_runtime_status(
                         &semantic_runtime,
-                        SemanticRuntimeStatus::WarmingUp,
+                        SemanticRuntimeStatus::OverlaySyncing,
                     );
                     let search_engine = Arc::clone(&search_engine);
-                    let index_progress = Arc::clone(&index_progress);
                     let semantic_runtime = Arc::clone(&semantic_runtime);
-                    let watcher_ready = Arc::clone(&watcher_ready);
                     std::thread::Builder::new()
-                        .name("bsl-search-semantic-warmup".to_owned())
+                        .name("bsl-search-overlay-warmup".to_owned())
                         .spawn(move || {
-                            Self::run_workspace_semantic_warmup(
-                                search_engine,
-                                index_progress,
-                                watcher_ready,
-                                semantic_runtime,
-                                warmup,
+                            tracing::info!("workspace overlay semantic warmup started");
+                            let result = match search_engine.lock() {
+                                Ok(guard) => match guard.as_ref() {
+                                    Some(engine) => engine.prime_workspace_overlay(),
+                                    None => return,
+                                },
+                                Err(e) => {
+                                    tracing::warn!("overlay warmup: engine lock error: {e}");
+                                    return;
+                                }
+                            };
+                            match result {
+                                Ok(()) => {
+                                    tracing::info!("workspace overlay semantic warmup complete");
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "workspace overlay semantic warmup failed: {error}"
+                                    );
+                                }
+                            }
+                            Self::set_semantic_runtime_status(
+                                &semantic_runtime,
+                                SemanticRuntimeStatus::Ready,
                             );
                         })
                         .ok();
-                } else if let Some(status) = semantic_ready {
-                    Self::set_semantic_runtime_status(&semantic_runtime, status);
                 }
-
-                tracing::info!("search engine initialization complete");
             })
             .ok();
     }
@@ -231,7 +263,12 @@ impl SharedState {
                         Self::init_reference_search_engine(&progress_arc, external_baseline);
                     let semantic_status = engine
                         .as_ref()
-                        .map(Self::semantic_runtime_status_from_engine)
+                        .map(|engine| {
+                            Self::semantic_runtime_status_for_mode(
+                                engine,
+                                &WorkspaceSearchMode::SqliteLocal,
+                            )
+                        })
                         .unwrap_or_else(|| {
                             SemanticRuntimeStatus::Failed(
                                 "reference search engine initialization failed".to_owned(),
@@ -255,6 +292,7 @@ impl SharedState {
             search_engine,
             index_progress,
             semantic_runtime,
+            workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             external_baseline: baseline_runtime.external_baseline,
             configured_baseline: Some(baseline_runtime.configured_baseline),
         }
@@ -273,6 +311,7 @@ impl SharedState {
             search_engine: Arc::new(Mutex::new(None)),
             index_progress: IndexProgress::new(),
             semantic_runtime: Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             external_baseline: None,
             configured_baseline: None,
         }
@@ -361,6 +400,11 @@ impl SharedState {
     /// Access the semantic runtime status.
     pub(crate) fn semantic_runtime(&self) -> Arc<Mutex<SemanticRuntimeStatus>> {
         Arc::clone(&self.semantic_runtime)
+    }
+
+    /// Access the workspace search operating mode.
+    pub(crate) fn workspace_search_mode(&self) -> WorkspaceSearchMode {
+        self.workspace_search_mode.clone()
     }
 
     /// Access configured external baseline service.
@@ -505,11 +549,18 @@ impl SharedState {
         }
     }
 
-    fn semantic_runtime_status_from_engine(engine: &SearchEngine) -> SemanticRuntimeStatus {
-        if engine.has_semantic() {
-            SemanticRuntimeStatus::Ready
-        } else {
-            SemanticRuntimeStatus::Disabled
+    fn semantic_runtime_status_for_mode(
+        engine: &SearchEngine,
+        mode: &WorkspaceSearchMode,
+    ) -> SemanticRuntimeStatus {
+        match mode {
+            WorkspaceSearchMode::SqliteLocal | WorkspaceSearchMode::PostgresRemoteOverlay => {
+                if engine.has_semantic() {
+                    SemanticRuntimeStatus::Ready
+                } else {
+                    SemanticRuntimeStatus::Disabled
+                }
+            }
         }
     }
 
@@ -530,7 +581,6 @@ impl SharedState {
 
         let project = project_model::Project::new(workspace_root);
         let source_path = project.source_path().to_path_buf();
-        let semantic_config = Self::embedding_config();
 
         if let Some(external_baseline) = external_baseline
             .as_ref()
@@ -562,56 +612,53 @@ impl SharedState {
             }
 
             // Attempt to load and persist baseline manifest metadata.
-            // This is best-effort — if Postgres is unavailable, the overlay
-            // will still work but will treat all workspace files as new.
-            let manifest_result = external_baseline.resolve_snapshot().ok().flatten().and_then(
-                |(_baseline_ref, snapshot)| match external_baseline
-                    .load_baseline_manifest(&snapshot.id.0)
-                {
-                    Ok(manifest) => {
-                        let store = engine.store();
-                        if let Err(error) = store.save_baseline_manifest(&manifest) {
-                            tracing::warn!(
-                                "failed to persist workspace baseline manifest: {error}"
+            // In Postgres mode baseline availability is mandatory; initialization
+            // fails closed when snapshot resolution or manifest loading fails.
+            let manifest = match external_baseline.resolve_snapshot() {
+                Ok(Some((_baseline_ref, snapshot))) => {
+                    match external_baseline.load_baseline_manifest(&snapshot.id.0) {
+                        Ok(manifest) => {
+                            let store = engine.store();
+                            if let Err(error) = store.save_baseline_manifest(&manifest) {
+                                tracing::warn!(
+                                    "failed to persist workspace baseline manifest: {error}"
+                                );
+                                return None;
+                            }
+                            tracing::info!(
+                                snapshot_id = %snapshot.id.0,
+                                manifest_files = manifest.files.len(),
+                                "workspace baseline manifest loaded and persisted"
                             );
+                            manifest
+                        }
+                        Err(error) => {
+                            tracing::warn!("failed to load workspace baseline manifest: {error}");
                             return None;
                         }
-                        tracing::info!(
-                            snapshot_id = %snapshot.id.0,
-                            manifest_files = manifest.files.len(),
-                            "workspace baseline manifest loaded and persisted"
-                        );
-                        Some(manifest)
                     }
-                    Err(error) => {
-                        tracing::warn!("failed to load workspace baseline manifest: {error}");
-                        None
-                    }
-                },
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "workspace baseline manifest unavailable for configured Postgres mode"
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    tracing::warn!("failed to resolve workspace baseline snapshot: {error}");
+                    return None;
+                }
+            };
+
+            tracing::info!(
+                manifest_files = manifest.files.len(),
+                "workspace overlay-only baseline initialized; baseline search served from Postgres"
             );
 
-            // Build overlay from workspace files compared against the manifest.
-            if let Some(ref manifest) = manifest_result {
-                tracing::info!(
-                    manifest_files = manifest.files.len(),
-                    "workspace overlay-only baseline initialized; baseline search served from Postgres"
-                );
-            } else {
-                tracing::info!(
-                    "workspace baseline manifest unavailable; overlay will treat all files as new"
-                );
-            }
-
-            let semantic_warmup = semantic_config.and_then(|config| {
-                manifest_result.as_ref().map(|_| WorkspaceSemanticWarmup {
-                    db_path,
-                    workspace_source_root: source_path,
-                    external_baseline: Arc::clone(external_baseline),
-                    config,
-                })
+            return Some(WorkspaceSearchInit {
+                engine,
+                mode: WorkspaceSearchMode::PostgresRemoteOverlay,
             });
-
-            return Some(WorkspaceSearchInit { engine, semantic_warmup });
         }
 
         let mut engine = Self::open_search_engine(&db_path)?;
@@ -664,109 +711,7 @@ impl SharedState {
             }
         }
 
-        Some(WorkspaceSearchInit { engine, semantic_warmup: None })
-    }
-
-    fn run_workspace_semantic_warmup(
-        engine_arc: Arc<Mutex<Option<SearchEngine>>>,
-        progress: Arc<IndexProgress>,
-        watcher_ready: Arc<AtomicBool>,
-        semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-        warmup: WorkspaceSemanticWarmup,
-    ) {
-        tracing::info!("workspace semantic warmup started");
-
-        let mut engine = match Self::open_semantic_search_engine(&warmup.db_path, warmup.config) {
-            Some(engine) => engine,
-            None => {
-                progress.reset();
-                Self::set_semantic_runtime_status(
-                    &semantic_runtime,
-                    SemanticRuntimeStatus::Failed(
-                        "failed to open semantic search engine".to_owned(),
-                    ),
-                );
-                return;
-            }
-        };
-
-        Self::configure_workspace_engine(
-            &mut engine,
-            &warmup.workspace_source_root,
-            &watcher_ready,
-            BaselineHashMode::NormalizedChunks,
-        );
-
-        let cleared = engine.clear_file_hashes_without_embeddings("code").unwrap_or(0);
-        if cleared > 0 {
-            tracing::info!(cleared, "cleared hashes for workspace baseline files without embeddings before semantic warmup");
-        }
-
-        let model_id = engine.embedding_model().map(ToOwned::to_owned);
-        let dimension = engine.embedding_dimension();
-        let snapshot = match warmup
-            .external_baseline
-            .load_workspace_snapshot_documents(model_id.as_deref(), dimension)
-        {
-            Ok(Some(snapshot)) => snapshot,
-            Ok(None) => {
-                progress.reset();
-                Self::set_semantic_runtime_status(
-                    &semantic_runtime,
-                    SemanticRuntimeStatus::Failed(
-                        "workspace semantic warmup could not resolve a shared snapshot".to_owned(),
-                    ),
-                );
-                return;
-            }
-            Err(error) => {
-                progress.reset();
-                Self::set_semantic_runtime_status(
-                    &semantic_runtime,
-                    SemanticRuntimeStatus::Failed(format!(
-                        "workspace semantic warmup failed to load shared snapshot: {error}"
-                    )),
-                );
-                return;
-            }
-        };
-
-        match engine.sync_indexed_documents_in_collection_with_embeddings(
-            "code",
-            &snapshot.documents,
-            Some(&snapshot.shared_embeddings),
-            Some(&progress),
-        ) {
-            Ok(indexed_files) => {
-                if indexed_files > 0 {
-                    tracing::info!(indexed_files, "workspace semantic warmup updated local cache");
-                } else {
-                    tracing::info!("workspace semantic warmup found cache up to date");
-                }
-                if watcher_ready.load(Ordering::SeqCst) {
-                    if let Err(error) = engine.workspace_overlay_stats() {
-                        tracing::warn!(
-                            "failed to prime workspace overlay after semantic warmup: {error}"
-                        );
-                    }
-                }
-                if let Ok(mut guard) = engine_arc.lock() {
-                    *guard = Some(engine);
-                }
-                Self::set_semantic_runtime_status(&semantic_runtime, SemanticRuntimeStatus::Ready);
-                tracing::info!("workspace semantic warmup complete");
-            }
-            Err(error) => {
-                progress.reset();
-                Self::set_semantic_runtime_status(
-                    &semantic_runtime,
-                    SemanticRuntimeStatus::Failed(format!(
-                        "workspace semantic warmup failed: {error}"
-                    )),
-                );
-                tracing::warn!("workspace semantic warmup failed: {error}");
-            }
-        }
+        Some(WorkspaceSearchInit { engine, mode: WorkspaceSearchMode::SqliteLocal })
     }
 
     fn init_reference_search_engine(
@@ -840,7 +785,7 @@ impl SharedState {
     fn index_external_reference_docs(
         engine: &mut SearchEngine,
         progress: &Arc<IndexProgress>,
-        snapshot: BaselineSnapshotDocuments,
+        snapshot: crate::baseline::BaselineSnapshotDocuments,
     ) {
         let version = snapshot.fingerprint.unwrap_or(snapshot.snapshot_id);
 
@@ -1118,7 +1063,7 @@ mod tests {
     };
     use std::env;
     use std::fs;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::tempdir;
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1153,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_external_failure_rebuilds_local_fts_cache_from_workspace() {
+    fn workspace_external_failure_clears_local_baseline_rows_before_failing_closed() {
         let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
         let dir = tempdir().unwrap();
@@ -1206,30 +1151,43 @@ mod tests {
             &progress,
             &watcher_ready,
             Some(external),
-        )
-        .unwrap();
-
-        assert_eq!(init.engine.file_count().unwrap(), 0);
-        assert_eq!(init.engine.workspace_overlay_stats().unwrap().unwrap().overlay_files, 1);
-        assert_eq!(
-            init.engine.text_search("ЛокальнаяПроцедура", 10, Some("code")).unwrap().len(),
-            1
         );
-        assert!(init
-            .engine
-            .text_search("ПризрачнаяПроцедура", 10, Some("code"))
-            .unwrap()
-            .is_empty());
+
+        assert!(init.is_none());
+        let reopened = SearchEngine::fts_only(&db_path).unwrap();
+        assert_eq!(reopened.file_count().unwrap(), 0);
+        assert!(reopened.text_search("ПризрачнаяПроцедура", 10, Some("code")).unwrap().is_empty());
+        assert!(reopened.store().load_baseline_manifest().unwrap().is_none());
+        assert_eq!(progress.done_batches.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn workspace_external_failure_with_embeddings_falls_back_to_local_semantic_indexing() {
+    fn workspace_external_failure_with_embeddings_fails_closed_without_hybrid_warmup() {
         let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let _embedding_url = EnvVarGuard::set("EMBEDDING_URL", "http://127.0.0.1:9/v1");
 
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         fs::create_dir_all(workspace.join(".build")).unwrap();
+        let db_path = workspace.join(".build").join("bsl-search.db");
+        let mut stale_engine = SearchEngine::fts_only(&db_path).unwrap();
+        stale_engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "GhostModule.bsl".to_owned(),
+                    symbol_name: "ПризрачнаяПроцедура".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 1,
+                    text: "Процедура ПризрачнаяПроцедура()\nКонецПроцедуры".to_owned(),
+                    content_hash: "ghost".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+        drop(stale_engine);
 
         let progress = Arc::new(IndexProgress::default());
         let watcher_ready = Arc::new(AtomicBool::new(false));
@@ -1251,10 +1209,13 @@ mod tests {
             &progress,
             &watcher_ready,
             Some(external),
-        )
-        .unwrap();
+        );
 
-        assert!(init.semantic_warmup.is_none());
+        assert!(init.is_none());
+        let reopened = SearchEngine::fts_only(&db_path).unwrap();
+        assert_eq!(reopened.file_count().unwrap(), 0);
+        assert!(reopened.store().load_baseline_manifest().unwrap().is_none());
+        assert_eq!(progress.done_batches.load(Ordering::Relaxed), 0);
     }
 
     #[test]

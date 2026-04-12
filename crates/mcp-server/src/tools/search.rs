@@ -1,7 +1,7 @@
 //! Search tools: full-text and semantic search across code and documentation.
 
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService, ExternalBaselineState};
-use crate::state::SemanticRuntimeStatus;
+use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{
     lexical_hits_for_resolved_view, merge_context_for_collection, merge_lexical, merge_semantic,
     IndexProgress, LexicalHit, SearchEngine, SearchError, SearchHit, SemanticHit,
@@ -25,18 +25,47 @@ const DIRECT_SEARCH_MAX_REFILL_ROUNDS: usize = 4;
 /// Resolution order when an external baseline is available:
 /// 1. Direct lexical search via the serving table + local overlay merge.
 /// 2. Fallback to loading all documents from the snapshot (old snapshots without serving tables).
-/// 3. Fallback to the local SQLite FTS index.
 pub fn find_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
-    ensure_workspace_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
-    let guard =
-        engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
+    ensure_workspace_baseline_runtime_ready(
+        workspace_search_mode,
+        configured_baseline,
+        external_baseline.as_ref(),
+    )?;
+    let guard = match engine.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            // Engine is locked by overlay warmup — serve from Postgres baseline directly.
+            if let Some(source) = external_baseline {
+                match try_direct_lexical_code_no_overlay(&source, query, limit) {
+                    DirectResult::Found(hits) => {
+                        if hits.is_empty() {
+                            return Ok(CallToolResult::success(vec![Content::text(
+                                "No results found (overlay is warming up, only baseline search available).",
+                            )]));
+                        }
+                        return Ok(CallToolResult::success(vec![Content::text(format_code_hits(
+                            &hits,
+                        ))]));
+                    }
+                    DirectResult::Terminal(error) => {
+                        return Err(external_baseline_mcp_error(&error));
+                    }
+                    DirectResult::Unavailable => {}
+                }
+            }
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Search index overlay is warming up, please try again in a moment.",
+            )]));
+        }
+    };
 
     let hits = if let Some(source) = external_baseline {
         match guard.as_ref() {
@@ -108,23 +137,34 @@ pub fn find_code(
 ///
 /// Resolution order when an external baseline is available:
 /// 1. Direct semantic search via the serving table + local overlay merge.
-/// 2. Fallback to the local SQLite semantic index.
 pub fn search_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
     ensure_workspace_search_allowed(configured_baseline)?;
-    ensure_workspace_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
+    ensure_workspace_baseline_runtime_ready(
+        workspace_search_mode.clone(),
+        configured_baseline,
+        external_baseline.as_ref(),
+    )?;
     let semantic_runtime = semantic_runtime
         .lock()
         .map_err(|e| McpError::internal_error(format!("semantic runtime lock error: {e}"), None))?
         .clone();
-    let guard =
-        engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
+    let guard = match engine.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            // Engine is locked by overlay warmup — semantic search requires the engine.
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Semantic search overlay is warming up. Use find_code for lexical search while overlay is being prepared.",
+            )]));
+        }
+    };
     if guard.is_none() {
         return Ok(CallToolResult::success(vec![Content::text(
             "Search index is being built, please try again in a moment.",
@@ -132,17 +172,11 @@ pub fn search_code(
     }
     let engine = guard.as_ref().expect("checked above");
 
-    if matches!(semantic_runtime, SemanticRuntimeStatus::WarmingUp) {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "Semantic search is warming up from the shared baseline. Use find_code for lexical search and check search(action=status) for progress.",
-        )]));
-    }
-
     if let SemanticRuntimeStatus::Failed(error) = semantic_runtime {
         return Err(McpError::invalid_params(
-            "Semantic search is temporarily unavailable because semantic warmup failed. Use find_code for lexical search and inspect search(action=status).",
+            "Semantic search is temporarily unavailable because semantic runtime initialization failed. Inspect search(action=status).",
             Some(json!({
-                "reasonCode": "semantic_warmup_failed",
+                "reasonCode": "semantic_runtime_failed",
                 "details": error,
             })),
         ));
@@ -168,8 +202,26 @@ pub fn search_code(
             DirectResult::Terminal(error) => {
                 return Err(external_baseline_mcp_error(&error));
             }
-            DirectResult::Unavailable => {}
+            DirectResult::Unavailable => {
+                if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+                    return Err(McpError::invalid_params(
+                        "Semantic search is unavailable because PostgreSQL baseline semantic serving is not ready. Restart MCP after fixing baseline serving and retry.",
+                        Some(json!({
+                            "reasonCode": "baseline_semantic_unavailable",
+                        })),
+                    ));
+                }
+            }
         }
+    }
+
+    if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+        return Err(McpError::invalid_params(
+            "Semantic search requires PostgreSQL baseline semantic serving in postgres mode.",
+            Some(json!({
+                "reasonCode": "baseline_semantic_required",
+            })),
+        ));
     }
 
     // Fallback: local SQLite semantic index.
@@ -625,6 +677,7 @@ pub fn search_status(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
 ) -> Result<CallToolResult, McpError> {
@@ -671,8 +724,7 @@ pub fn search_status(
         let platform_vectors = engine.embedding_count_by_collection("platform").unwrap_or(0);
 
         let search_state = match &semantic_runtime {
-            SemanticRuntimeStatus::WarmingUp => "ready (lexical only; semantic warmup in progress)",
-            SemanticRuntimeStatus::Failed(_) => "ready (lexical only; semantic warmup failed)",
+            SemanticRuntimeStatus::Failed(_) => "ready (semantic runtime failed)",
             _ => "ready",
         };
         let _ = writeln!(out, "Search index: {search_state}");
@@ -690,17 +742,29 @@ pub fn search_status(
                     "not configured (set EMBEDDING_URL)".to_owned()
                 }
             }
-            SemanticRuntimeStatus::WarmingUp => {
-                "warming up (remote shared baseline semantic + local overlay)".to_owned()
-            }
-            SemanticRuntimeStatus::Ready => {
-                if semantic {
-                    "available (remote shared baseline semantic + local overlay)".to_owned()
-                } else {
-                    "warming up".to_owned()
+            SemanticRuntimeStatus::OverlaySyncing => match workspace_search_mode {
+                WorkspaceSearchMode::PostgresRemoteOverlay => {
+                    "syncing local overlay embeddings against remote baseline".to_owned()
                 }
-            }
-            SemanticRuntimeStatus::Failed(_) => "failed (use find_code; inspect status)".to_owned(),
+                WorkspaceSearchMode::SqliteLocal => "syncing local semantic index".to_owned(),
+            },
+            SemanticRuntimeStatus::Ready => match workspace_search_mode {
+                WorkspaceSearchMode::PostgresRemoteOverlay => {
+                    if semantic {
+                        "available (remote baseline semantic + local overlay only)".to_owned()
+                    } else {
+                        "not configured (set EMBEDDING_URL)".to_owned()
+                    }
+                }
+                WorkspaceSearchMode::SqliteLocal => {
+                    if semantic {
+                        "available (local sqlite + local overlay)".to_owned()
+                    } else {
+                        "not configured (set EMBEDDING_URL)".to_owned()
+                    }
+                }
+            },
+            SemanticRuntimeStatus::Failed(_) => "failed (inspect status)".to_owned(),
         };
         let _ = writeln!(out, "  Semantic: {semantic_status}");
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
@@ -717,22 +781,33 @@ pub fn search_status(
                         Err(_) => "local sqlite + local overlay",
                     };
                     let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
-                    let code_semantic_source = match &semantic_runtime {
-                        SemanticRuntimeStatus::WarmingUp => {
-                            "warming up (remote shared baseline semantic + local overlay)"
-                        }
-                        SemanticRuntimeStatus::Failed(_) => {
-                            "warmup failed (lexical search remains available)"
-                        }
-                        SemanticRuntimeStatus::Disabled => "not configured (set EMBEDDING_URL)",
-                        SemanticRuntimeStatus::Ready => {
-                            if semantic {
-                                "remote shared baseline semantic + local overlay"
-                            } else {
-                                "warming up"
+                    let code_semantic_source =
+                        match (&semantic_runtime, workspace_search_mode.clone()) {
+                            (SemanticRuntimeStatus::Disabled, _) => {
+                                "not configured (set EMBEDDING_URL)".to_owned()
                             }
-                        }
-                    };
+                            (
+                                SemanticRuntimeStatus::OverlaySyncing,
+                                WorkspaceSearchMode::PostgresRemoteOverlay,
+                            ) => "remote baseline semantic + local overlay sync in progress"
+                                .to_owned(),
+                            (
+                                SemanticRuntimeStatus::OverlaySyncing,
+                                WorkspaceSearchMode::SqliteLocal,
+                            ) => "local sqlite + local overlay sync in progress".to_owned(),
+                            (
+                                SemanticRuntimeStatus::Ready,
+                                WorkspaceSearchMode::PostgresRemoteOverlay,
+                            ) => "remote baseline semantic + local overlay only".to_owned(),
+                            (SemanticRuntimeStatus::Ready, WorkspaceSearchMode::SqliteLocal) => {
+                                if semantic {
+                                    "local sqlite + local overlay".to_owned()
+                                } else {
+                                    "not configured (set EMBEDDING_URL)".to_owned()
+                                }
+                            }
+                            (SemanticRuntimeStatus::Failed(_), _) => "failed".to_owned(),
+                        };
                     let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
                 }
                 bsl_search::CorpusId::Reference => {
@@ -902,12 +977,7 @@ pub fn search_status(
         let total_b = progress.total_batches.load(Ordering::Relaxed);
         let done_b = progress.done_batches.load(Ordering::Relaxed);
         let pct = progress.percent();
-        let heading =
-            if guard.is_some() && matches!(semantic_runtime, SemanticRuntimeStatus::WarmingUp) {
-                "Semantic warmup in progress"
-            } else {
-                "Indexing in progress"
-            };
+        let heading = "Indexing in progress";
 
         let _ = writeln!(out);
         let _ = writeln!(out, "{heading}: {pct}%");
@@ -1021,11 +1091,21 @@ fn ensure_workspace_search_allowed(
 }
 
 fn ensure_workspace_baseline_runtime_ready(
+    workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<&Arc<ExternalBaselineService>>,
 ) -> Result<(), McpError> {
-    let Some(configured_baseline) = configured_baseline else {
+    if matches!(workspace_search_mode, WorkspaceSearchMode::SqliteLocal) {
         return Ok(());
+    }
+    let Some(configured_baseline) = configured_baseline else {
+        return Err(McpError::invalid_params(
+            "Postgres workspace mode requires a configured PostgreSQL baseline. Restart MCP in sqlite mode if PostgreSQL is not intended."
+                .to_owned(),
+            Some(json!({
+                "reasonCode": "baseline_required",
+            })),
+        ));
     };
     if configured_baseline.backend != "postgres" {
         return Ok(());
@@ -1218,6 +1298,7 @@ mod tests {
         ExternalBaselineService, SemanticRuntimeStatus,
     };
     use crate::baseline::RefreshableExternalBaselineSource;
+    use crate::state::WorkspaceSearchMode;
     use bsl_search::{
         lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
         IndexedDocument, LexicalHit, ResolvedView, SearchEngine, SearchError, SemanticHit,
@@ -1396,6 +1477,7 @@ mod tests {
             &Arc::new(Mutex::new(Some(engine))),
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
             Some(ConfiguredBaselineStatus {
                 backend: "sqlite",
                 selection: "local workspace index".to_owned(),
@@ -1434,6 +1516,7 @@ mod tests {
             &Arc::new(Mutex::new(None)),
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "branch main".to_owned(),
@@ -1475,6 +1558,7 @@ mod tests {
             &Arc::new(Mutex::new(Some(engine))),
             &Arc::new(IndexProgress::default()),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
             Some(ConfiguredBaselineStatus {
                 backend: "sqlite",
                 selection: "local reference index".to_owned(),
@@ -1673,27 +1757,34 @@ mod tests {
     }
 
     #[test]
-    fn search_code_returns_warmup_message_while_semantic_runtime_is_warming_up() {
+    fn search_code_returns_runtime_failure_error_when_semantic_runtime_failed() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("workspace-search.db");
         let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
-        let result = search_code(
+        let error = search_code(
             &engine,
-            &Arc::new(Mutex::new(SemanticRuntimeStatus::WarmingUp)),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("overlay sync failed".to_owned()))),
+            WorkspaceSearchMode::SqliteLocal,
             None,
             None,
             "обработка проведения документа",
             10,
         )
-        .unwrap();
+        .unwrap_err();
 
-        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
-        assert!(text.contains("warming up"));
-        assert!(text.contains("find_code"));
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reasonCode"))
+                .and_then(|value| value.as_str()),
+            Some("semantic_runtime_failed")
+        );
     }
 
     #[test]
-    fn search_status_reports_semantic_warmup_for_ready_lexical_engine() {
+    fn search_status_reports_overlay_sync_for_postgres_mode() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let file = workspace.join("CommonModule.bsl");
@@ -1719,7 +1810,8 @@ mod tests {
         let result = search_status(
             &Arc::new(Mutex::new(Some(engine))),
             &progress,
-            &Arc::new(Mutex::new(SemanticRuntimeStatus::WarmingUp)),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::OverlaySyncing)),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "branch develop".to_owned(),
@@ -1731,11 +1823,9 @@ mod tests {
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
-        assert!(text.contains("Search index: ready (lexical only; semantic warmup in progress)"));
-        assert!(
-            text.contains("Semantic: warming up (remote shared baseline semantic + local overlay)")
-        );
-        assert!(text.contains("Semantic warmup in progress: 25%"));
+        assert!(text.contains("Search index: ready"));
+        assert!(text.contains("Semantic: syncing local overlay embeddings against remote baseline"));
+        assert!(text.contains("Indexing in progress: 25%"));
     }
 
     #[test]
@@ -1758,7 +1848,15 @@ mod tests {
             }),
         };
 
-        let error = find_code(&engine, Some(&configured), None, "Процедура", 10).unwrap_err();
+        let error = find_code(
+            &engine,
+            WorkspaceSearchMode::PostgresRemoteOverlay,
+            Some(&configured),
+            None,
+            "Процедура",
+            10,
+        )
+        .unwrap_err();
 
         assert!(error.message.contains("expired"));
         assert!(error.message.contains("Update the branch from develop"));
@@ -1778,6 +1876,7 @@ mod tests {
 
         let error = find_code(
             &Arc::new(Mutex::new(Some(engine))),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "branch main".to_owned(),
@@ -1816,6 +1915,7 @@ mod tests {
 
         let error = find_code(
             &Arc::new(Mutex::new(Some(engine))),
+            WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "branch main".to_owned(),
@@ -1848,6 +1948,7 @@ mod tests {
 
         let error = find_code(
             &engine,
+            WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(&ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "branch main".to_owned(),
