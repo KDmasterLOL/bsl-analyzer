@@ -85,6 +85,7 @@ impl WorkspaceOverlayCache {
         workspace_root: &Path,
         embedder: Option<&Embedder>,
         batch_size: usize,
+        store: &Store,
     ) -> Result<(), SearchError> {
         if !self.initialized || !self.watcher_mode {
             self.full_refresh_from_manifest(
@@ -92,6 +93,7 @@ impl WorkspaceOverlayCache {
                 workspace_root,
                 embedder,
                 batch_size,
+                store,
             )?;
         } else if !self.dirty_paths.is_empty() {
             self.refresh_dirty_paths_from_manifest(
@@ -313,12 +315,46 @@ impl WorkspaceOverlayCache {
         workspace_root: &Path,
         embedder: Option<&Embedder>,
         batch_size: usize,
+        store: &Store,
     ) -> Result<(), SearchError> {
+        // Load persisted fingerprint cache from a previous scan.
+        let manifest_snapshot_id = store
+            .load_baseline_manifest()
+            .ok()
+            .flatten()
+            .map(|r| r.snapshot_id)
+            .unwrap_or_default();
+        let persisted = store
+            .load_overlay_fingerprint_cache(&manifest_snapshot_id)
+            .unwrap_or(None)
+            .unwrap_or_default();
+
+        // Load persisted embedding cache from a previous scan.
+        if self.embedding_cache.is_empty() {
+            if let Some(embedder) = embedder {
+                let model_id = embedder.model();
+                let dim = embedder.dim();
+                match store.load_overlay_embedding_cache(model_id, dim) {
+                    Ok(cached) if !cached.is_empty() => {
+                        tracing::info!(
+                            model_id,
+                            dim,
+                            cached_embeddings = cached.len(),
+                            "loaded persisted overlay embedding cache"
+                        );
+                        self.embedding_cache = cached;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let workspace_files = scan_workspace_files(workspace_root);
         let mut seen_paths = HashSet::new();
         let mut hidden_paths = HashSet::new();
+        let mut updated_persisted = HashMap::new();
 
-        for file in workspace_files {
+        for file in &workspace_files {
             seen_paths.insert(file.rel_path.clone());
             let baseline_fingerprint = manifest_fingerprints.get(&file.rel_path);
 
@@ -353,12 +389,47 @@ impl WorkspaceOverlayCache {
                 continue;
             }
 
+            // Fast path: if file metadata (size + mtime) matches the persisted
+            // cache, reuse the stored content_fingerprint without reading the
+            // file.  This skips I/O + parsing + hashing for unchanged files.
+            if let Some(cached) = persisted.get(&file.rel_path) {
+                if cached.file_size == file.fingerprint.len
+                    && fingerprint_mtime_matches(file.fingerprint.modified, cached)
+                {
+                    // Persist for next restart.
+                    updated_persisted.insert(file.rel_path.clone(), cached.clone());
+
+                    if baseline_fingerprint
+                        .is_some_and(|stored| stored == &cached.content_fingerprint)
+                    {
+                        self.entries.remove(&file.rel_path);
+                        continue;
+                    }
+                    // File changed from baseline but we still need content for
+                    // building overlay documents — fall through to read.
+                }
+            }
+
             let content = match std::fs::read_to_string(&file.abs_path) {
                 Ok(content) => content,
                 Err(_) => continue,
             };
             let file_hash = normalized_file_hash_for_content(&content);
             let local_fp = fingerprint_content(&content, &file.rel_path);
+
+            // Persist this file's fingerprint for next restart.
+            if let Some((secs, nanos)) = mtime_to_secs_nanos(file.fingerprint.modified) {
+                updated_persisted.insert(
+                    file.rel_path.clone(),
+                    crate::store::PersistedFingerprint {
+                        file_size: file.fingerprint.len,
+                        file_mtime_secs: secs,
+                        file_mtime_nanos: nanos,
+                        content_fingerprint: local_fp.clone(),
+                    },
+                );
+            }
+
             if baseline_fingerprint.is_some_and(|stored| stored == &local_fp) {
                 self.entries.remove(&file.rel_path);
                 continue;
@@ -367,7 +438,7 @@ impl WorkspaceOverlayCache {
             let entry = build_overlay_entry(
                 &file.rel_path,
                 &content,
-                file.fingerprint,
+                file.fingerprint.clone(),
                 file_hash,
                 embedder,
                 batch_size,
@@ -376,7 +447,7 @@ impl WorkspaceOverlayCache {
             if baseline_fingerprint.is_some() {
                 hidden_paths.insert(file.rel_path.clone());
             }
-            self.entries.insert(file.rel_path, entry);
+            self.entries.insert(file.rel_path.clone(), entry);
         }
 
         self.entries.retain(|path, _| seen_paths.contains(path));
@@ -389,6 +460,29 @@ impl WorkspaceOverlayCache {
 
         self.hidden_paths = hidden_paths;
         self.dirty_paths.clear();
+
+        // Persist updated fingerprint cache for next restart.
+        if !updated_persisted.is_empty() {
+            if let Err(error) =
+                store.save_overlay_fingerprint_cache(&manifest_snapshot_id, &updated_persisted)
+            {
+                tracing::warn!("failed to persist overlay fingerprint cache: {error}");
+            }
+        }
+
+        // Persist embedding cache for next restart.
+        if let Some(embedder) = embedder {
+            if !self.embedding_cache.is_empty() {
+                if let Err(error) = store.save_overlay_embedding_cache(
+                    embedder.model(),
+                    embedder.dim(),
+                    &self.embedding_cache,
+                ) {
+                    tracing::warn!("failed to persist overlay embedding cache: {error}");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -545,6 +639,21 @@ impl WorkspaceOverlayCache {
 struct FileFingerprint {
     len: u64,
     modified: Option<SystemTime>,
+}
+
+fn fingerprint_mtime_matches(
+    mtime: Option<SystemTime>,
+    cached: &crate::store::PersistedFingerprint,
+) -> bool {
+    let Some((secs, nanos)) = mtime_to_secs_nanos(mtime) else {
+        return false;
+    };
+    secs == cached.file_mtime_secs && nanos == cached.file_mtime_nanos
+}
+
+fn mtime_to_secs_nanos(mtime: Option<SystemTime>) -> Option<(i64, u32)> {
+    let duration = mtime?.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some((duration.as_secs() as i64, duration.subsec_nanos()))
 }
 
 #[derive(Debug, Clone)]
@@ -1013,10 +1122,11 @@ mod tests {
         let file = workspace.join("A.bsl");
         fs::write(&file, "Процедура Новая()\nКонецПроцедуры").unwrap();
 
+        let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
         // Empty manifest means no baseline — all files are new.
         let manifest: HashMap<String, String> = HashMap::new();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 1);
@@ -1037,8 +1147,9 @@ mod tests {
         let mut manifest = HashMap::new();
         manifest.insert("A.bsl".to_owned(), fp);
 
+        let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
 
         let overlay = cache.snapshot();
         // File matches manifest — no overlay entry or hidden path needed.
@@ -1057,8 +1168,9 @@ mod tests {
         let mut manifest = HashMap::new();
         manifest.insert("A.bsl".to_owned(), "different-fingerprint".to_owned());
 
+        let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 1);
@@ -1076,8 +1188,9 @@ mod tests {
         manifest.insert("A.bsl".to_owned(), "some-fp".to_owned());
         manifest.insert("B.bsl".to_owned(), "other-fp".to_owned());
 
+        let store = Store::open(&workspace.join("search.db")).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh_with_manifest(&manifest, workspace, None, 32).unwrap();
+        cache.refresh_with_manifest(&manifest, workspace, None, 32, &store).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 0);

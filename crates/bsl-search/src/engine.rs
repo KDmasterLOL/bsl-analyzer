@@ -771,6 +771,7 @@ impl SearchEngine {
                 workspace_root,
                 None,
                 self.batch_size,
+                &self.store,
             )?;
         } else {
             cache.refresh(
@@ -1074,6 +1075,7 @@ impl SearchEngine {
                 workspace_root,
                 embedder,
                 self.batch_size,
+                &self.store,
             )?;
         } else {
             cache.refresh(

@@ -145,6 +145,27 @@ impl Store {
                 text,
                 tokenize='unicode61'
             );
+
+            -- Persisted overlay fingerprint cache: avoids re-reading and
+            -- re-hashing unchanged files on MCP server restart.
+            CREATE TABLE IF NOT EXISTS overlay_fingerprint_cache (
+                path                TEXT NOT NULL PRIMARY KEY,
+                collection          TEXT NOT NULL DEFAULT 'code',
+                file_size           INTEGER NOT NULL,
+                file_mtime_secs     INTEGER NOT NULL,
+                file_mtime_nanos    INTEGER NOT NULL,
+                content_fingerprint TEXT NOT NULL,
+                manifest_snapshot_id TEXT NOT NULL
+            );
+
+            -- Persisted overlay embedding cache: avoids re-embedding
+            -- unchanged overlay chunks on MCP server restart.
+            CREATE TABLE IF NOT EXISTS overlay_embedding_cache (
+                content_hash TEXT NOT NULL PRIMARY KEY,
+                model_id     TEXT NOT NULL,
+                dimension    INTEGER NOT NULL,
+                embedding    BLOB NOT NULL
+            );
             ",
         )?;
 
@@ -1135,6 +1156,144 @@ impl Store {
         Ok(count as usize)
     }
 
+    // -- Overlay fingerprint cache ------------------------------------------
+
+    /// Load persisted overlay fingerprint cache for the given manifest snapshot.
+    /// Returns `None` if the cache belongs to a different snapshot (stale).
+    pub fn load_overlay_fingerprint_cache(
+        &self,
+        manifest_snapshot_id: &str,
+    ) -> Result<Option<HashMap<String, PersistedFingerprint>>, SearchError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint
+             FROM overlay_fingerprint_cache
+             WHERE manifest_snapshot_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![manifest_snapshot_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PersistedFingerprint {
+                    file_size: row.get::<_, i64>(1)? as u64,
+                    file_mtime_secs: row.get::<_, i64>(2)?,
+                    file_mtime_nanos: row.get::<_, u32>(3)?,
+                    content_fingerprint: row.get::<_, String>(4)?,
+                },
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (path, entry) = row?;
+            map.insert(path, entry);
+        }
+        if map.is_empty() {
+            // Check if there are rows for a different snapshot → stale cache.
+            let any_rows: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM overlay_fingerprint_cache LIMIT 1)",
+                [],
+                |row| row.get(0),
+            )?;
+            if any_rows {
+                // Stale cache — different manifest snapshot. Clear it.
+                self.clear_overlay_fingerprint_cache()?;
+            }
+            return Ok(None);
+        }
+        Ok(Some(map))
+    }
+
+    /// Persist overlay fingerprint cache entries in a single transaction.
+    pub fn save_overlay_fingerprint_cache(
+        &self,
+        manifest_snapshot_id: &str,
+        entries: &HashMap<String, PersistedFingerprint>,
+    ) -> Result<(), SearchError> {
+        // Clear old entries and insert new ones atomically.
+        self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO overlay_fingerprint_cache
+             (path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint, manifest_snapshot_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for (path, entry) in entries {
+            stmt.execute(params![
+                path,
+                entry.file_size as i64,
+                entry.file_mtime_secs,
+                entry.file_mtime_nanos,
+                entry.content_fingerprint,
+                manifest_snapshot_id,
+            ])?;
+        }
+        Ok(())
+    }
+
+    /// Clear the overlay fingerprint cache.
+    pub fn clear_overlay_fingerprint_cache(&self) -> Result<(), SearchError> {
+        self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
+        Ok(())
+    }
+
+    // -- Overlay embedding cache ----------------------------------------------
+
+    /// Load persisted overlay embeddings for the given model and dimension.
+    /// Returns an empty map if no matching embeddings exist.
+    pub fn load_overlay_embedding_cache(
+        &self,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+        let dimension = dimension as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT content_hash, embedding
+             FROM overlay_embedding_cache
+             WHERE model_id = ?1 AND dimension = ?2",
+        )?;
+        let rows = stmt.query_map(params![model_id, dimension], |row| {
+            let hash: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((hash, blob))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (hash, blob) = row?;
+            // Decode f32 values from little-endian byte blob.
+            if blob.len() % 4 == 0 {
+                let embedding: Vec<f32> = blob
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                map.insert(hash, embedding);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Persist overlay embeddings. Merges with existing entries.
+    pub fn save_overlay_embedding_cache(
+        &self,
+        model_id: &str,
+        dimension: usize,
+        entries: &HashMap<String, Vec<f32>>,
+    ) -> Result<(), SearchError> {
+        let dimension = dimension as i64;
+        let mut stmt = self.conn.prepare(
+            "INSERT OR REPLACE INTO overlay_embedding_cache
+             (content_hash, model_id, dimension, embedding)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (hash, embedding) in entries {
+            let blob: Vec<u8> = embedding.iter().flat_map(|v| v.to_le_bytes()).collect();
+            stmt.execute(params![hash, model_id, dimension, blob])?;
+        }
+        Ok(())
+    }
+
+    /// Clear the overlay embedding cache.
+    pub fn clear_overlay_embedding_cache(&self) -> Result<(), SearchError> {
+        self.conn.execute("DELETE FROM overlay_embedding_cache", [])?;
+        Ok(())
+    }
+
     /// Clear all overlay state (files, chunks, tombstones) for a collection.
     pub fn clear_overlay_state(&self, collection: &str) -> Result<(), SearchError> {
         self.conn.execute(
@@ -1188,6 +1347,15 @@ pub struct BaselineManifestRecord {
     pub fingerprint: Option<String>,
     pub manifest_files: usize,
     pub fetched_at: String,
+}
+
+/// Cached file fingerprint from a previous overlay scan.
+#[derive(Debug, Clone)]
+pub struct PersistedFingerprint {
+    pub file_size: u64,
+    pub file_mtime_secs: i64,
+    pub file_mtime_nanos: u32,
+    pub content_fingerprint: String,
 }
 
 #[cfg(test)]
