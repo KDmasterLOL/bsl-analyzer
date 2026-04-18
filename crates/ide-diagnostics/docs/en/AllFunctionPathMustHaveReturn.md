@@ -57,3 +57,9 @@ Function ResolveDeliveryMode(Val Order)
     EndIf;
 EndFunction
 ```
+
+## Sources
+
+Language reference: [v8std.ru: Return from a function](https://v8std.ru/lang/)
+
+Secondary source: [v8std.ru: AllFunctionPathMustHaveReturn](https://v8std.ru/diagnostics/bslls/AllFunctionPathMustHaveReturn/)

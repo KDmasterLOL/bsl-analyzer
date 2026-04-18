@@ -44,4 +44,8 @@
 
 ## Источники
 
-Источник: [Оформление текстов запросов](https://its.1c.ru/db/v8std#content:437:hdoc)
+Основной источник: [Оформление текстов запросов](https://its.1c.ru/db/v8std#content:437:hdoc)
+
+Дополнительный источник: [v8std.ru: #std437 Оформление текстов запросов](https://v8std.ru/std/437/)
+
+Справочная страница: [v8std.ru: AssignAliasFieldsInQuery](https://v8std.ru/diagnostics/bslls/AssignAliasFieldsInQuery/)

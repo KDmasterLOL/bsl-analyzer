@@ -43,4 +43,8 @@ Query1.Text =
 ```
 
 ## Sources
-Source: [Making query text](https://its.1c.ru/db/v8std#content:437:hdoc)
+Primary source: [Making query text](https://its.1c.ru/db/v8std#content:437:hdoc)
+
+Secondary source: [v8std.ru: #std437 Query text formatting](https://v8std.ru/std/437/)
+
+Additional reference: [v8std.ru: AssignAliasFieldsInQuery](https://v8std.ru/diagnostics/bslls/AssignAliasFieldsInQuery/)
