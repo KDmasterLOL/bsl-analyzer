@@ -33,9 +33,7 @@
 //!
 //! ## Implementation
 //!
-//! Ported from:
-//!
-//! Now uses SDBL HIR with diagnostics collected during lowering.
+//! Uses SDBL HIR diagnostics collected during lowering and maps them back to BSL ranges.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -282,10 +280,10 @@ mod tests {
     #[test]
     fn test_sdbl_russian_query() {
         // Test that SDBL parser handles Russian queries
-        let query = "ВЫБРАТЬ Ссылка, Код КАК К ИЗ Справочник.Валюты";
+        let query = "ВЫБРАТЬ Артикул, Наименование КАК ИмяТовара ИЗ Справочник.Номенклатура";
 
         let diagnostics = check_standalone_query(query);
-        // Should have 1 error: Ссылка without alias
+        // Should have 1 error: Артикул without alias
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -293,26 +291,26 @@ mod tests {
     fn test_query_with_comments() {
         // Test query with inline comments - comments should not affect diagnostics
         let query = r#"ВЫБРАТЬ
-	Валюты.Ссылка, // Неправильно
-	Валюты.Ссылка КАК ПсевдонимПоляСсылка, // Правильно
-	Валюты.Код Код // Неправильно
+	Товары.Артикул, // Неправильно
+	Товары.Артикул КАК АртикулТовара, // Правильно
+	Товары.Цена ЦенаПродажи // Неправильно
 ИЗ
-	Справочник.Валюты КАК Валюты // Игнорируется
+	Справочник.Номенклатура КАК Товары // Игнорируется
 
 ОБЪЕДИНИТЬ ВСЕ
 
 ВЫБРАТЬ
-	Валюты.Ссылка, // Игнорируется
-	Валюты.Ссылка, // Игнорируется
-	Валюты.Код // Игнорируется
+	Услуги.Артикул, // Игнорируется
+	Услуги.Артикул, // Игнорируется
+	Услуги.Тариф // Игнорируется
 ИЗ
-	Справочник.Валюты КАК Валюты"#;
+	Справочник.Услуги КАК Услуги"#;
 
         let diagnostics = check_standalone_query(query);
 
         // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
-        // - Валюты.Ссылка without alias
-        // - Валюты.Код Код without AS keyword
+        // - Товары.Артикул without alias
+        // - Товары.Цена ЦенаПродажи without AS keyword
         // UNION queries are skipped
         assert_eq!(
             diagnostics.len(),
@@ -330,7 +328,7 @@ mod tests {
 
         // Test simple query without comments using HIR
         let code = r#"Процедура Тест()
-Запрос = "ВЫБРАТЬ Валюты.Ссылка, Валюты.Код Код ИЗ Справочник.Валюты КАК Валюты";
+Запрос = "ВЫБРАТЬ Товары.Артикул, Товары.Цена ЦенаПродажи ИЗ Справочник.Номенклатура КАК Товары";
 КонецПроцедуры"#;
 
         let fixture_text = format!("//- /test.bsl\n{}", code);
@@ -366,7 +364,7 @@ mod tests {
 
         // Test 1: Code wrapped in procedure
         let code_wrapped = r#"Процедура Тест()
-    Запрос = "ВЫБРАТЬ Валюты.Ссылка, Валюты.Код Код ИЗ Справочник.Валюты КАК Валюты";
+    Запрос = "ВЫБРАТЬ Товары.Артикул, Товары.Цена ЦенаПродажи ИЗ Справочник.Номенклатура КАК Товары";
 КонецПроцедуры"#;
 
         let fixture_text = format!("//- /test.bsl\n{}", code_wrapped);
@@ -386,8 +384,7 @@ mod tests {
         let sdbl_hirs_wrapped = db.sdbl_hir_in_file(file_id);
 
         // Test 2: Code at module level (no procedure)
-        let code_unwrapped =
-            r#"Запрос = "ВЫБРАТЬ Валюты.Ссылка, Валюты.Код Код ИЗ Справочник.Валюты КАК Валюты";"#;
+        let code_unwrapped = r#"Запрос = "ВЫБРАТЬ Товары.Артикул, Товары.Цена ЦенаПродажи ИЗ Справочник.Номенклатура КАК Товары";"#;
 
         let fixture_text = format!("//- /test.bsl\n{}", code_unwrapped);
         let fixture = Fixture::parse(&fixture_text);
@@ -413,26 +410,26 @@ mod tests {
     fn test_union_with_diagnostics() {
         // Test UNION query - only first SELECT is checked, UNION queries are skipped
         let query = r#"ВЫБРАТЬ
-	Валюты.Ссылка,
-	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
-	Валюты.Код Код
+	Товары.Артикул,
+	Товары.Артикул КАК АртикулТовара,
+	Товары.Цена ЦенаПродажи
 ИЗ
-	Справочник.Валюты КАК Валюты
+	Справочник.Номенклатура КАК Товары
 
 ОБЪЕДИНИТЬ ВСЕ
 
 ВЫБРАТЬ
-	Валюты.Ссылка,
-	Валюты.Ссылка,
-	Валюты.Код
+	Услуги.Артикул,
+	Услуги.Артикул,
+	Услуги.Тариф
 ИЗ
-	Справочник.Валюты КАК Валюты"#;
+	Справочник.Услуги КАК Услуги"#;
 
         let diagnostics = check_standalone_query(query);
 
         // Should have 2 diagnostics from first SELECT (before UNION):
-        // - Валюты.Ссылка without alias
-        // - Валюты.Код Код without AS keyword
+        // - Товары.Артикул without alias
+        // - Товары.Цена ЦенаПродажи without AS keyword
         // UNION queries are skipped
         assert_eq!(
             diagnostics.len(),

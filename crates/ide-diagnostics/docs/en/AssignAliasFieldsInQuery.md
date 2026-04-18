@@ -2,83 +2,45 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+This diagnostic checks fields inside subqueries and requires aliases to be written explicitly with the `AS` keyword.
 
-It is recommended to specify optional query constructs, first, to explicitly assign aliases to fields in order to increase the clarity of the query text and the "steadiness" of the code that uses it.  
-For example, if the algorithm uses a query with a field declared as
+Explicit aliases make query results more stable and easier to read. If a field is selected without an alias, the platform derives the result column name automatically. That derived name may change after a metadata rename, or it may simply be less obvious than the name expected by the code that reads the query result.
 
-```bsl
-CashBox.Currency
-```
-when changing the name of the attribute, you will also need to change the code that calls the selection from the query result by the name of the Currency property. If the field is declared as
+This is especially important for composite expressions such as `Items.Supplier.Name`, where the generated name may not match the developer's intention.
 
-```bsl
-CashBox.Currency As Currency
-```
-then changing the attribute name will only change the request text.
-
-You should be especially careful about automatically assigned aliases for fields - attributes of other fields, such as "... CashBox.Currency.Name...". In the above example, the field will be automatically getting aliased CurrencyName, but not Name.
-
-Be sure to include the AS keyword before the alias of the source field.
-
-The aliases of tables and fields from secondary queries from "UNION" are not checked by the diagnostics.
+The diagnostic also reports implicit aliases without `AS`, for example `Items.Price SalePrice`. Asterisk fields (`*`, `Table.*`) are ignored. Fields from secondary `UNION` parts are not checked.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
 ```bsl   
-    Query = New Query;
+Query = New Query;
 Query.Text =
 "SELECT
-|   Currencies.Ref, // Incorrectly
-|   Currencies.Ref AS AliasFieldsRef, // Correctly
-|   Currencies.Code Code // Incorrectly
+|   Items.Article, // Incorrect
+|   Items.Article AS ItemArticle, // Correct
+|   Items.Price SalePrice // Incorrect: alias without AS
 |FROM
-|   Catalog.Currencies AS Currencies // Ignored
+|   Catalog.Products AS Items // Source alias is ignored
 |
 |UNION ALL
 |
 |SELECT
-|   Currencies.Ref, // Ignored
-|   Currencies.Ref, // Ignored
-|   Currencies.Code // Ignored
+|   Services.Article, // Ignored
+|   Services.Article, // Ignored
+|   Services.Price // Ignored
 |FROM
-|   Catalog.Currencies AS Currencies // Ignored
-|;
-|
-|////////////////////////////////////////////////////////////////////////////////
-|SELECT
-|   Currencies.Ref, // Incorrectly
-|   Currencies.Ref AS AliasFieldsRef, // Correctly
-|   Currencies.Code Code // Incorrectly
-|FROM
-|   Catalog.Currencies AS Currencies // Ignored
-|
-|UNION ALL
-|
-|SELECT
-|   Currencies.Ref, // Ignored
-|   Currencies.Ref, // Ignored
-|   Currencies.Code // Ignored
-|FROM
-|   Catalog.Currencies AS Currencies"; // Ignored
+|   Catalog.Services AS Services";
 
 Query1 = New Query;
 Query1.Text =
 "SELECT
-|   NestedRequest.Ref AS Ref // Correctly
+|   Data.ItemName AS ItemName
 |FROM
 |   (SELECT
-|       Currencies.Ref // Incorrectly
+|       Items.Description ItemName // Incorrect: missing AS
 |   FROM
-|       Catalog.Currencies AS Currencies) AS NestedRequest"; // Ignored 
+|       Catalog.Products AS Items) AS Data";
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 Source: [Making query text](https://its.1c.ru/db/v8std#content:437:hdoc)
-<!-- Примеры источников
-
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
