@@ -16,11 +16,11 @@ impl LoweringContext {
         // Process only outer JOINs (LEFT/RIGHT/FULL)
         for join in hir.joins.iter().filter(|j| j.join_type.is_outer()) {
             match join.join_type {
-                crate::hir::JoinType::Left => {
+                crate::hir::JoinType::Left
+                    if !protected_tables.contains(join.table.effective_name()) =>
+                {
                     // Check joined table (right side)
-                    if !protected_tables.contains(join.table.effective_name()) {
-                        self.check_table_in_join(join, &join.table, hir);
-                    }
+                    self.check_table_in_join(join, &join.table, hir);
                 }
                 crate::hir::JoinType::Right => {
                     // Check FROM table (left side)
