@@ -306,13 +306,11 @@ fn read_element_text(data: &[u8], target: &str) -> Option<String> {
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                if local_name(e.name().as_ref()) == target_bytes {
-                    if let Ok(Event::Text(t)) = reader.read_event() {
-                        return Some(String::from_utf8_lossy(t.as_ref()).to_string());
-                    }
-                    return Some(String::new());
+            Ok(Event::Start(ref e)) if local_name(e.name().as_ref()) == target_bytes => {
+                if let Ok(Event::Text(t)) = reader.read_event() {
+                    return Some(String::from_utf8_lossy(t.as_ref()).to_string());
                 }
+                return Some(String::new());
             }
             Ok(Event::Eof) => return None,
             Err(_) => return None,

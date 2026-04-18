@@ -74,10 +74,8 @@ fn detect_violations(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             SyntaxKind::EXECUTE_STMT => {
                 diagnostics.push(create_diagnostic(code, node.text_range(), ctx));
             }
-            SyntaxKind::CALL_EXPR => {
-                if is_global_eval_call(&node) {
-                    diagnostics.push(create_diagnostic(code, node.text_range(), ctx));
-                }
+            SyntaxKind::CALL_EXPR if is_global_eval_call(&node) => {
+                diagnostics.push(create_diagnostic(code, node.text_range(), ctx));
             }
             _ => {}
         }
