@@ -42,11 +42,13 @@ pub use domain::{
 pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{IndexProgress, SearchConfig, SearchEngine, SearchHit};
 pub use error::SearchError;
+pub use error::SCHEMA_VERSION_CURRENT;
 pub use external_baseline::ExternalBaselineAdapter;
 pub use external_baseline::{
     BaselineCollectionRecord, BaselineEmbeddingCoverageRecord, BaselineEmbeddingModelRecord,
     BaselineFileObjectDetails, BaselineFileObjectRecord, BaselineFileObjectReference,
-    BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord,
+    BaselineGcReport, BaselineSnapshotDetails, BaselineSnapshotRecord, SemanticPublishPhase,
+    SemanticPublishProgress,
 };
 pub use fingerprint::{fingerprint_documents, fingerprint_indexed_documents};
 pub use index::{SearchResult, VectorIndex};
@@ -56,15 +58,16 @@ pub use merge::{
     MergeContext, MergedHit,
 };
 pub use ports::{
-    BaselineLexicalSearch, BaselineSemanticSearch, EmbeddingGenerator, EmbeddingStore,
-    LexicalSearchIndex, OverlayBuilder, ResolvedViewService, SnapshotCatalog, SnapshotContentStore,
-    SnapshotPublisher, VectorSearchIndex,
+    BaselineLexicalSearch, BaselineManifestFile, BaselineSemanticSearch, EmbeddingGenerator,
+    EmbeddingStore, LexicalSearchIndex, OverlayBuilder, ResolvedViewService, SnapshotCatalog,
+    SnapshotContentStore, SnapshotPublisher, VectorSearchIndex, WorkspaceBaselineManifest,
+    WorkspaceBaselineManifestStore,
 };
 pub use publish::{
-    BaselinePublishReport, BaselinePublisher, EmbeddingExecutionPolicy,
+    BaselinePublishReport, BaselinePublisher, EmbeddingExecutionPolicy, EmbeddingProgress,
     SharedEmbeddingPublishStats, SharedEmbeddingPublisher,
 };
 pub use resolved_view_search::lexical_hits as lexical_hits_for_resolved_view;
 pub use resolver::{InMemoryResolvedViewResolver, ResolvedView};
-pub use store::{ChunkInfo, Store, TextSearchResult};
+pub use store::{BaselineManifestRecord, ChunkInfo, Store, TextSearchResult};
 pub use workspace_overlay::{BaselineHashMode, WorkspaceOverlayStats};

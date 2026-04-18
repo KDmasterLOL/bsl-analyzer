@@ -72,6 +72,7 @@ fn main() {
             model: model.clone(),
             dim: Some(dim),
             api_key: api_key.clone(),
+            provider: std::env::var("EMBEDDING_PROVIDER").ok(),
         },
         execution: bsl_search::EmbeddingExecutionPolicy {
             batch_size,
@@ -99,6 +100,7 @@ fn main() {
         model: config.embedder.model.clone(),
         dim: config.embedder.dim,
         api_key: api_key.clone(),
+        provider: config.embedder.provider.clone(),
     });
     if let Err(e) = embedder.health_check() {
         eprintln!("Error: embedding service not available: {e}");

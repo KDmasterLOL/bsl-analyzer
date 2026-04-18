@@ -13,6 +13,7 @@ pub use baseline::{
     resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
 };
 pub use state::SharedState;
+use state::WorkspaceSearchMode;
 
 /// Start MCP server on stdio (stdin/stdout).
 ///
@@ -208,6 +209,10 @@ impl McpServer {
         Self { profile, state, tool_router }
     }
 
+    pub fn shutdown(&self) {
+        self.state.shutdown();
+    }
+
     /// Метаданные конфигурации 1С: общая информация, дерево объектов по категориям,
     /// структура объекта (реквизиты, ТЧ, измерения, ресурсы), структура формы.
     /// action: info | tree | object | form
@@ -274,6 +279,7 @@ impl McpServer {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
                 let semantic_runtime = self.state.semantic_runtime();
+                let workspace_search_mode = self.state.workspace_search_mode();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
@@ -281,6 +287,7 @@ impl McpServer {
                         &engine,
                         &progress,
                         &semantic_runtime,
+                        workspace_search_mode,
                         configured_baseline,
                         external_baseline,
                     )
@@ -293,12 +300,14 @@ impl McpServer {
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
                 let semantic_runtime = self.state.semantic_runtime();
+                let workspace_search_mode = self.state.workspace_search_mode();
                 let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 let action = p.action.clone();
                 tokio::task::spawn_blocking(move || match action.as_str() {
                     "find_code" => tools::search::find_code(
                         &engine,
+                        workspace_search_mode,
                         configured_baseline.as_ref(),
                         external_baseline,
                         &query,
@@ -307,6 +316,7 @@ impl McpServer {
                     "search_code" => tools::search::search_code(
                         &engine,
                         &semantic_runtime,
+                        workspace_search_mode,
                         configured_baseline.as_ref(),
                         external_baseline,
                         &query,
@@ -496,6 +506,7 @@ impl McpServer {
                         &engine,
                         &progress,
                         &semantic_runtime,
+                        WorkspaceSearchMode::SqliteLocal,
                         configured_baseline,
                         external_baseline,
                     )
@@ -507,15 +518,24 @@ impl McpServer {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
+                let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 let action = p.action.clone();
                 tokio::task::spawn_blocking(move || match action.as_str() {
-                    "find_docs" => {
-                        tools::search::find_docs(&engine, external_baseline.clone(), &query, limit)
-                    }
-                    "search_docs" => {
-                        tools::search::search_docs(&engine, external_baseline, &query, limit)
-                    }
+                    "find_docs" => tools::search::find_docs(
+                        &engine,
+                        configured_baseline.as_ref(),
+                        external_baseline.clone(),
+                        &query,
+                        limit,
+                    ),
+                    "search_docs" => tools::search::search_docs(
+                        &engine,
+                        configured_baseline.as_ref(),
+                        external_baseline,
+                        &query,
+                        limit,
+                    ),
                     _ => unreachable!(),
                 })
                 .await

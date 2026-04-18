@@ -18,6 +18,8 @@ pub struct EmbedderConfig {
     pub dim: Option<usize>,
     /// API key for authenticated providers (OpenRouter, OpenAI, etc.)
     pub api_key: Option<String>,
+    /// Provider routing for OpenRouter (e.g. "nebius" to force a specific provider).
+    pub provider: Option<String>,
 }
 
 impl Default for EmbedderConfig {
@@ -27,6 +29,7 @@ impl Default for EmbedderConfig {
             model: "qwen3-embedding".to_owned(),
             dim: Some(1024),
             api_key: None,
+            provider: None,
         }
     }
 }
@@ -103,10 +106,14 @@ impl Embedder {
 
         let url = format!("{}/v1/embeddings", self.config.base_url);
 
+        let provider_only = self.config.provider.as_deref().map(|s| vec![s]);
+        let provider_routing =
+            provider_only.as_deref().map(|only| ProviderRouting { only, allow_fallbacks: false });
         let request = EmbeddingRequest {
             model: &self.config.model,
             input: texts,
             dimensions: self.config.dim,
+            provider: provider_routing,
         };
 
         let mut req = self.agent.post(&url);
@@ -131,10 +138,14 @@ impl Embedder {
             }
         };
 
-        let response: EmbeddingResponse = resp
+        let body = resp
             .body_mut()
-            .read_json()
-            .map_err(|e| SearchError::Embedder(format!("failed to parse response: {e}")))?;
+            .read_to_string()
+            .map_err(|e| SearchError::Embedder(format!("failed to read response body: {e}")))?;
+        let response: EmbeddingResponse = serde_json::from_str(&body).map_err(|e| {
+            let preview = if body.len() > 200 { &body[..200] } else { &body };
+            SearchError::Embedder(format!("failed to parse response: {e}\n  body: {preview}"))
+        })?;
 
         // Sort by index to ensure correct ordering.
         let mut data = response.data;
@@ -198,6 +209,14 @@ struct EmbeddingRequest<'a> {
     input: &'a [&'a str],
     #[serde(skip_serializing_if = "Option::is_none")]
     dimensions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<ProviderRouting<'a>>,
+}
+
+#[derive(Serialize)]
+struct ProviderRouting<'a> {
+    only: &'a [&'a str],
+    allow_fallbacks: bool,
 }
 
 #[derive(Deserialize)]

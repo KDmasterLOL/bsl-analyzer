@@ -7,7 +7,13 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::{
-    collections::BTreeMap, env, error::Error, fmt::Write as _, fs, io, path::PathBuf, sync::Arc,
+    collections::BTreeMap,
+    env,
+    error::Error,
+    fmt::Write as _,
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -206,41 +212,53 @@ enum SearchCommand {
 
 #[derive(Subcommand)]
 enum SearchBaselineCommand {
-    /// Build a local code snapshot and publish it into PostgreSQL
-    #[command(name = "sync-pg")]
-    Sync(SearchBaselineSyncPgArgs),
+    /// Build a local code snapshot and publish it into centralized PostgreSQL storage
+    Publish(SearchBaselinePublishArgs),
 
+    /// Inspect centralized PostgreSQL baseline storage
+    Inspect {
+        #[command(subcommand)]
+        command: SearchBaselineInspectCommand,
+    },
+
+    /// Run administrative PostgreSQL baseline storage operations
+    Admin {
+        #[command(subcommand)]
+        command: SearchBaselineAdminCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SearchBaselineInspectCommand {
     /// List published snapshots from centralized PostgreSQL storage
-    #[command(name = "list-pg")]
-    List(SearchBaselineListPgArgs),
+    ListSnapshots(SearchBaselineListSnapshotsArgs),
 
     /// Show one published snapshot from centralized PostgreSQL storage
-    #[command(name = "show-pg")]
-    Show(SearchBaselineShowPgArgs),
+    ShowSnapshot(SearchBaselineShowSnapshotArgs),
 
     /// List shared file objects stored in centralized PostgreSQL storage
-    #[command(name = "list-file-objects-pg")]
-    ListFileObjects(SearchBaselineListFileObjectsPgArgs),
+    ListFileObjects(SearchBaselineListFileObjectsArgs),
 
     /// Show one shared file object from centralized PostgreSQL storage
-    #[command(name = "show-file-object-pg")]
-    ShowFileObject(SearchBaselineShowFileObjectPgArgs),
+    ShowFileObject(SearchBaselineShowFileObjectArgs),
 
     /// List embedding inventories stored in centralized PostgreSQL storage
-    #[command(name = "list-embeddings-pg")]
-    ListEmbeddings(SearchBaselineListEmbeddingsPgArgs),
+    ListEmbeddings(SearchBaselineListEmbeddingsArgs),
 
     /// Show active embedding coverage for centralized PostgreSQL storage
-    #[command(name = "show-embedding-coverage-pg")]
-    ShowEmbeddingCoverage(SearchBaselineShowEmbeddingCoveragePgArgs),
-
-    /// Garbage-collect unreferenced shared baseline objects in PostgreSQL storage
-    #[command(name = "gc-pg")]
-    GarbageCollect(SearchBaselineGcPgArgs),
+    ShowEmbeddingCoverage(SearchBaselineShowEmbeddingCoverageArgs),
 
     /// Analyze snapshot retention policy for centralized PostgreSQL storage
-    #[command(name = "retention-pg")]
-    Retention(SearchBaselineRetentionPgArgs),
+    Retention(SearchBaselineRetentionArgs),
+}
+
+#[derive(Subcommand)]
+enum SearchBaselineAdminCommand {
+    /// Initialize or migrate PostgreSQL baseline storage schema
+    Migrate(SearchBaselineAdminMigrateArgs),
+
+    /// Garbage-collect unreferenced shared baseline objects in PostgreSQL storage
+    Gc(SearchBaselineAdminGcArgs),
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -250,24 +268,14 @@ enum SearchBaselineCorpusCli {
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineSyncPgArgs {
+struct SearchBaselinePublishArgs {
     /// Corpus to publish into centralized baseline storage
     #[arg(long, value_enum, default_value_t = SearchBaselineCorpusCli::WorkspaceCode)]
     corpus: SearchBaselineCorpusCli,
 
-    /// Source directory containing 1C configuration (with Configuration.xml)
+    /// Project root containing bsl-analyzer.toml
     #[arg(short = 's', long = "source-dir", default_value = ".")]
     source_dir: PathBuf,
-
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
 
     /// Immutable snapshot identifier. Optional when --branch/--commit are provided.
     #[arg(long = "snapshot-id")]
@@ -295,7 +303,11 @@ struct SearchBaselineSyncPgArgs {
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineListPgArgs {
+struct SearchBaselineListSnapshotsArgs {
+    /// Project root containing bsl-analyzer.toml
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
     /// Optional corpus filter
     #[arg(long, value_enum)]
     corpus: Option<SearchBaselineCorpusCli>,
@@ -308,53 +320,31 @@ struct SearchBaselineListPgArgs {
     #[arg(long)]
     commit: Option<String>,
 
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
-
     /// Maximum number of snapshots to return
     #[arg(long, default_value_t = 20)]
     limit: usize,
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineShowPgArgs {
+struct SearchBaselineShowSnapshotArgs {
+    /// Project root containing bsl-analyzer.toml
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
     /// Snapshot identifier to inspect
     #[arg(long = "snapshot-id")]
     snapshot_id: String,
-
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineListFileObjectsPgArgs {
+struct SearchBaselineListFileObjectsArgs {
+    /// Project root containing bsl-analyzer.toml
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
     /// Optional collection filter
     #[arg(long)]
     collection: Option<String>,
-
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
 
     /// Maximum number of file objects to return
     #[arg(long, default_value_t = 20)]
@@ -362,24 +352,22 @@ struct SearchBaselineListFileObjectsPgArgs {
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineShowFileObjectPgArgs {
+struct SearchBaselineShowFileObjectArgs {
+    /// Project root containing bsl-analyzer.toml
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
     /// File object identifier to inspect
     #[arg(long = "file-object-id")]
     file_object_id: String,
-
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineListEmbeddingsPgArgs {
+struct SearchBaselineListEmbeddingsArgs {
+    /// Project root containing bsl-analyzer.toml
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
     /// Optional embedding model filter
     #[arg(long = "model")]
     model_id: Option<String>,
@@ -387,20 +375,14 @@ struct SearchBaselineListEmbeddingsPgArgs {
     /// Optional embedding dimension filter
     #[arg(long)]
     dimension: Option<usize>,
-
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineShowEmbeddingCoveragePgArgs {
+struct SearchBaselineShowEmbeddingCoverageArgs {
+    /// Project root containing bsl-analyzer.toml
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
     /// Optional embedding model filter
     #[arg(long = "model")]
     model_id: Option<String>,
@@ -408,29 +390,13 @@ struct SearchBaselineShowEmbeddingCoveragePgArgs {
     /// Optional embedding dimension filter
     #[arg(long)]
     dimension: Option<usize>,
-
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineGcPgArgs {
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
+struct SearchBaselineAdminGcArgs {
+    /// Project root containing bsl-analyzer.toml
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
 
     /// Apply deletions. Without this flag the command reports a dry-run summary.
     #[arg(long)]
@@ -438,8 +404,8 @@ struct SearchBaselineGcPgArgs {
 }
 
 #[derive(Args, Clone)]
-struct SearchBaselineRetentionPgArgs {
-    /// Project root containing .bsl-analyzer.json with workspace baseline policy
+struct SearchBaselineRetentionArgs {
+    /// Project root containing bsl-analyzer.toml
     #[arg(short = 's', long = "source-dir", default_value = ".")]
     source_dir: PathBuf,
 
@@ -447,19 +413,16 @@ struct SearchBaselineRetentionPgArgs {
     #[arg(long)]
     branch: Option<String>,
 
-    /// PostgreSQL connection string for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
-    #[arg(long = "pg-url")]
-    pg_url: Option<String>,
-
-    /// PostgreSQL schema for centralized baseline storage.
-    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
-    #[arg(long = "pg-schema")]
-    pg_schema: Option<String>,
-
     /// Maximum number of snapshots to inspect
     #[arg(long, default_value_t = 200)]
     limit: usize,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineAdminMigrateArgs {
+    /// Project root containing bsl-analyzer.toml
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
 }
 
 #[derive(Args, Clone)]
@@ -691,23 +654,36 @@ fn run_mcp_command(command: McpCommand) -> Result<(), Box<dyn Error + Send + Syn
 fn run_search_command(command: SearchCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
     match command {
         SearchCommand::Baseline { command } => match command {
-            SearchBaselineCommand::Sync(args) => run_search_baseline_sync_pg(args),
-            SearchBaselineCommand::List(args) => run_search_baseline_list_pg(args),
-            SearchBaselineCommand::Show(args) => run_search_baseline_show_pg(args),
-            SearchBaselineCommand::ListFileObjects(args) => {
-                run_search_baseline_list_file_objects_pg(args)
-            }
-            SearchBaselineCommand::ShowFileObject(args) => {
-                run_search_baseline_show_file_object_pg(args)
-            }
-            SearchBaselineCommand::ListEmbeddings(args) => {
-                run_search_baseline_list_embeddings_pg(args)
-            }
-            SearchBaselineCommand::ShowEmbeddingCoverage(args) => {
-                run_search_baseline_show_embedding_coverage_pg(args)
-            }
-            SearchBaselineCommand::GarbageCollect(args) => run_search_baseline_gc_pg(args),
-            SearchBaselineCommand::Retention(args) => run_search_baseline_retention_pg(args),
+            SearchBaselineCommand::Publish(args) => run_search_baseline_publish(args),
+            SearchBaselineCommand::Inspect { command } => match command {
+                SearchBaselineInspectCommand::ListSnapshots(args) => {
+                    run_search_baseline_list_snapshots(args)
+                }
+                SearchBaselineInspectCommand::ShowSnapshot(args) => {
+                    run_search_baseline_show_snapshot(args)
+                }
+                SearchBaselineInspectCommand::ListFileObjects(args) => {
+                    run_search_baseline_list_file_objects(args)
+                }
+                SearchBaselineInspectCommand::ShowFileObject(args) => {
+                    run_search_baseline_show_file_object(args)
+                }
+                SearchBaselineInspectCommand::ListEmbeddings(args) => {
+                    run_search_baseline_list_embeddings(args)
+                }
+                SearchBaselineInspectCommand::ShowEmbeddingCoverage(args) => {
+                    run_search_baseline_show_embedding_coverage(args)
+                }
+                SearchBaselineInspectCommand::Retention(args) => {
+                    run_search_baseline_retention(args)
+                }
+            },
+            SearchBaselineCommand::Admin { command } => match command {
+                SearchBaselineAdminCommand::Migrate(args) => {
+                    run_search_baseline_admin_migrate(args)
+                }
+                SearchBaselineAdminCommand::Gc(args) => run_search_baseline_admin_gc(args),
+            },
         },
     }
 }
@@ -849,23 +825,19 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
     Ok(())
 }
 
-fn run_search_baseline_sync_pg(
-    args: SearchBaselineSyncPgArgs,
+fn run_search_baseline_publish(
+    args: SearchBaselinePublishArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
         fingerprint_documents, fingerprint_indexed_documents, BaselinePublisher, CorpusId,
-        Embedder, ExternalBaselineAdapter, ExternalBaselineConfig, Snapshot,
-        SnapshotPublishMetadata, SnapshotPublisher,
+        Embedder, EmbeddingProgress, SemanticPublishPhase, SemanticPublishProgress, Snapshot,
+        SnapshotPublishMetadata,
     };
 
     let project = project_model::Project::new(&args.source_dir);
     let source_path = project.source_path().to_path_buf();
     let branch = resolve_publish_branch(args.branch.as_deref(), &project.root);
-    let commit = pick_first_non_empty([
-        args.commit.as_deref(),
-        env::var("CI_COMMIT_SHA").ok().as_deref(),
-        env::var("GITHUB_SHA").ok().as_deref(),
-    ]);
+    let commit = resolve_publish_commit(args.commit.as_deref(), &project.root);
     let corpus = match args.corpus {
         SearchBaselineCorpusCli::WorkspaceCode => CorpusId::WorkspaceCode,
         SearchBaselineCorpusCli::Reference => CorpusId::Reference,
@@ -883,17 +855,24 @@ fn run_search_baseline_sync_pg(
         branch.as_deref(),
         commit.as_deref(),
     )?;
-    let (pg_url, pg_schema) = resolve_pg_connection(
-        args.pg_url.as_deref(),
-        args.pg_schema.as_deref(),
-        project.config.postgres_credentials.as_ref(),
-    )?;
+    let resolved_pg = resolve_project_postgres_url(
+        &project.config.search.baseline.postgres,
+        project_model::PostgresAccessMode::Writer,
+    )
+    .map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("failed to resolve PostgreSQL writer credentials: {error}"),
+        )
+    })?;
 
+    eprintln!("[1/5] Indexing source files...");
     let (indexed_files, documents) = match corpus {
         CorpusId::WorkspaceCode => build_workspace_code_baseline_documents(&source_path)?,
         CorpusId::Reference => build_reference_baseline_documents()?,
         CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
     };
+    eprintln!("      {} files -> {} chunks", indexed_files, documents.len());
 
     if documents.is_empty() {
         return Err(io::Error::new(
@@ -903,14 +882,20 @@ fn run_search_baseline_sync_pg(
         .into());
     }
 
-    let mut config = ExternalBaselineConfig::postgres(pg_url);
-    if let Some(schema) = pg_schema {
-        config = config.with_schema(schema);
-    }
-    let schema_label = config.schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
+    let adapter = build_postgres_baseline_adapter(
+        &resolved_pg.url,
+        project.config.search.baseline.postgres.schema.as_deref(),
+    )?;
+    let schema_label = project
+        .config
+        .search
+        .baseline
+        .postgres
+        .schema
+        .clone()
+        .unwrap_or_else(|| "bsl_search".to_owned());
 
-    let adapter = ExternalBaselineAdapter::new(config)?;
-    adapter.ensure_storage()?;
+    eprintln!("[2/5] Connecting to PostgreSQL (schema: {})...", schema_label);
     let fingerprint = match corpus {
         CorpusId::WorkspaceCode => fingerprint_indexed_documents(&documents),
         CorpusId::Reference => {
@@ -932,14 +917,119 @@ fn run_search_baseline_sync_pg(
     }
     let publish_metadata =
         SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
+
+    eprintln!("[3/5] Publishing snapshot ({} chunks)...", documents.len());
     let embedder = embedding_config_from_env().map(Embedder::new);
+    let has_embedder = embedder.is_some();
+    let embedding_progress = |event: EmbeddingProgress| match event {
+        EmbeddingProgress::Plan { total_unique, cached, to_compute } => {
+            eprintln!(
+                "[4/5] Computing embeddings ({} unique, {} cached, {} to compute)...",
+                total_unique, cached, to_compute
+            );
+        }
+        EmbeddingProgress::Batch { processed, total, batches_done, total_batches } => {
+            let pct = if total > 0 { processed * 100 / total } else { 100 };
+            eprintln!(
+                "      {}/{} ({}%) — batch {}/{}",
+                processed, total, pct, batches_done, total_batches
+            );
+        }
+    };
     let publish_report = BaselinePublisher::new(embedding_execution_policy_from_env()).publish(
         &adapter,
         &snapshot,
         &publish_metadata,
         &documents,
         embedder.as_ref(),
+        if has_embedder { Some(&embedding_progress) } else { None },
     )?;
+    eprintln!(
+        "      Reused {} files, wrote {}, deleted {}",
+        publish_report.snapshot.reused_files,
+        publish_report.snapshot.written_files,
+        publish_report.snapshot.deleted_files,
+    );
+
+    if let Some(ref embedding_stats) = publish_report.embeddings {
+        let format_duration = |duration: std::time::Duration| {
+            if duration.as_secs() >= 1 {
+                format!("{:.1}s", duration.as_secs_f64())
+            } else {
+                format!("{}ms", duration.as_millis())
+            }
+        };
+        let semantic_phase_label = |phase: &SemanticPublishPhase| match phase {
+            SemanticPublishPhase::PrepareRows => "Prepare semantic rows",
+            SemanticPublishPhase::CopyParentRows => "Copy unchanged rows from parent",
+            SemanticPublishPhase::WriteServingRows => "Write serving rows",
+        };
+        let semantic_progress = |event: SemanticPublishProgress| match event {
+            SemanticPublishProgress::Plan {
+                strategy,
+                changed_files,
+                deleted_paths,
+                parent_snapshot_id,
+                phase_count,
+            } => {
+                let parent_label = parent_snapshot_id.as_deref().unwrap_or("-");
+                eprintln!(
+                    "[5/5] Populating serving semantic index ({strategy}; {changed_files} changed files; {deleted_paths} deletions; {phase_count} phases; parent: {parent_label})..."
+                );
+            }
+            SemanticPublishProgress::PhaseStarted { phase, phase_index, phase_count, detail } => {
+                eprintln!(
+                    "      [{}/{}] {} — {}",
+                    phase_index,
+                    phase_count,
+                    semantic_phase_label(&phase),
+                    detail
+                );
+            }
+            SemanticPublishProgress::PhaseCompleted {
+                phase,
+                phase_index,
+                phase_count,
+                elapsed,
+                output_rows,
+            } => {
+                eprintln!(
+                    "      [{}/{}] {} done in {} ({} rows)",
+                    phase_index,
+                    phase_count,
+                    semantic_phase_label(&phase),
+                    format_duration(elapsed),
+                    output_rows
+                );
+            }
+            SemanticPublishProgress::Completed {
+                total_rows,
+                copied_rows,
+                inserted_rows,
+                missing_embeddings,
+                total_elapsed,
+            } => {
+                eprintln!(
+                    "      Done in {} — total {} rows (copied {}, inserted {}, missing embeddings {})",
+                    format_duration(total_elapsed),
+                    total_rows,
+                    copied_rows,
+                    inserted_rows,
+                    missing_embeddings
+                );
+            }
+        };
+        let serving_count = adapter.populate_serving_semantic_with_progress(
+            &snapshot.id.0,
+            &embedding_stats.model_id,
+            embedding_stats.dimension,
+            Some(&semantic_progress),
+        )?;
+        eprintln!("      {} rows", serving_count);
+    } else {
+        eprintln!("[4/5] Skipped (no embedding config)");
+        eprintln!("[5/5] Skipped (no embeddings)");
+    }
 
     let published_files = documents
         .iter()
@@ -949,6 +1039,7 @@ fn run_search_baseline_sync_pg(
     let branch_label = branch.as_deref().unwrap_or("-");
     let commit_label = commit.as_deref().unwrap_or("-");
 
+    println!();
     println!("Published search baseline to PostgreSQL.");
     println!("  Corpus:        {}", corpus.as_str());
     println!("  Mode:          {}", if snapshot.parent_id.is_some() { "delta" } else { "root" });
@@ -972,24 +1063,18 @@ fn run_search_baseline_sync_pg(
         println!("  Embedding model: {}", embedding_stats.model_id);
         println!("  Reused embeddings: {}", embedding_stats.reused);
         println!("  Stored embeddings: {}", embedding_stats.stored);
-
-        let serving_count = adapter.populate_serving_semantic(
-            &snapshot.id.0,
-            &embedding_stats.model_id,
-            embedding_stats.dimension,
-        )?;
-        println!("  Serving semantic: {}", serving_count);
     }
 
     Ok(())
 }
 
-fn run_search_baseline_list_pg(
-    args: SearchBaselineListPgArgs,
+fn run_search_baseline_list_snapshots(
+    args: SearchBaselineListSnapshotsArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
-    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let adapter = build_project_postgres_adapter(
+        &args.source_dir,
+        project_model::PostgresAccessMode::Reader,
+    )?;
     let corpus = args.corpus.map(search_baseline_corpus_cli_to_domain);
     let snapshots = adapter.list_snapshots(
         corpus.as_ref().map(|corpus| corpus.as_str()),
@@ -1023,12 +1108,13 @@ fn run_search_baseline_list_pg(
     Ok(())
 }
 
-fn run_search_baseline_show_pg(
-    args: SearchBaselineShowPgArgs,
+fn run_search_baseline_show_snapshot(
+    args: SearchBaselineShowSnapshotArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
-    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let adapter = build_project_postgres_adapter(
+        &args.source_dir,
+        project_model::PostgresAccessMode::Reader,
+    )?;
     let Some(details) = adapter.snapshot_details(&args.snapshot_id)? else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -1066,12 +1152,13 @@ fn run_search_baseline_show_pg(
     Ok(())
 }
 
-fn run_search_baseline_list_file_objects_pg(
-    args: SearchBaselineListFileObjectsPgArgs,
+fn run_search_baseline_list_file_objects(
+    args: SearchBaselineListFileObjectsArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
-    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let adapter = build_project_postgres_adapter(
+        &args.source_dir,
+        project_model::PostgresAccessMode::Reader,
+    )?;
     let file_objects = adapter.list_file_objects(args.collection.as_deref(), args.limit)?;
 
     if file_objects.is_empty() {
@@ -1092,12 +1179,13 @@ fn run_search_baseline_list_file_objects_pg(
     Ok(())
 }
 
-fn run_search_baseline_show_file_object_pg(
-    args: SearchBaselineShowFileObjectPgArgs,
+fn run_search_baseline_show_file_object(
+    args: SearchBaselineShowFileObjectArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
-    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let adapter = build_project_postgres_adapter(
+        &args.source_dir,
+        project_model::PostgresAccessMode::Reader,
+    )?;
     let Some(details) = adapter.file_object_details(&args.file_object_id)? else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -1124,12 +1212,13 @@ fn run_search_baseline_show_file_object_pg(
     Ok(())
 }
 
-fn run_search_baseline_list_embeddings_pg(
-    args: SearchBaselineListEmbeddingsPgArgs,
+fn run_search_baseline_list_embeddings(
+    args: SearchBaselineListEmbeddingsArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
-    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let adapter = build_project_postgres_adapter(
+        &args.source_dir,
+        project_model::PostgresAccessMode::Reader,
+    )?;
     let models = adapter.list_embedding_models(args.model_id.as_deref(), args.dimension)?;
 
     if models.is_empty() {
@@ -1148,12 +1237,13 @@ fn run_search_baseline_list_embeddings_pg(
     Ok(())
 }
 
-fn run_search_baseline_show_embedding_coverage_pg(
-    args: SearchBaselineShowEmbeddingCoveragePgArgs,
+fn run_search_baseline_show_embedding_coverage(
+    args: SearchBaselineShowEmbeddingCoverageArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
-    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let adapter = build_project_postgres_adapter(
+        &args.source_dir,
+        project_model::PostgresAccessMode::Reader,
+    )?;
     let coverage = adapter.embedding_coverage(args.model_id.as_deref(), args.dimension)?;
 
     if coverage.is_empty() {
@@ -1178,12 +1268,13 @@ fn run_search_baseline_show_embedding_coverage_pg(
     Ok(())
 }
 
-fn run_search_baseline_gc_pg(
-    args: SearchBaselineGcPgArgs,
+fn run_search_baseline_admin_gc(
+    args: SearchBaselineAdminGcArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
-    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let adapter = build_project_postgres_adapter(
+        &args.source_dir,
+        project_model::PostgresAccessMode::Migrator,
+    )?;
     let report = adapter.garbage_collect(args.execute)?;
 
     if args.execute {
@@ -1199,6 +1290,41 @@ fn run_search_baseline_gc_pg(
     println!("  Orphan file object items:   {}", report.orphan_file_object_items);
     println!("  Orphan semantic rows:       {}", report.orphan_semantic_embeddings);
 
+    Ok(())
+}
+
+fn run_search_baseline_admin_migrate(
+    args: SearchBaselineAdminMigrateArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let project = project_model::Project::new(&args.source_dir);
+    let resolved_pg = resolve_project_postgres_url(
+        &project.config.search.baseline.postgres,
+        project_model::PostgresAccessMode::Migrator,
+    )
+    .map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("failed to resolve PostgreSQL migrator credentials: {error}"),
+        )
+    })?;
+    let adapter = build_postgres_baseline_adapter(
+        &resolved_pg.url,
+        project.config.search.baseline.postgres.schema.as_deref(),
+    )?;
+    let schema_label = project
+        .config
+        .search
+        .baseline
+        .postgres
+        .schema
+        .clone()
+        .unwrap_or_else(|| "bsl_search".to_owned());
+
+    adapter.migrate_storage()?;
+
+    println!("PostgreSQL baseline storage is ready.");
+    println!("  Schema: {}", schema_label);
+    println!("  Role:   migrator");
     Ok(())
 }
 
@@ -1232,8 +1358,8 @@ struct SnapshotRetentionAssessment {
     reason: String,
 }
 
-fn run_search_baseline_retention_pg(
-    args: SearchBaselineRetentionPgArgs,
+fn run_search_baseline_retention(
+    args: SearchBaselineRetentionArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let project = project_model::Project::new(&args.source_dir);
     let policy = &project.config.search.baseline.workspace_code.policy;
@@ -1245,9 +1371,10 @@ fn run_search_baseline_retention_pg(
         .into());
     }
 
-    let (pg_url, pg_schema) =
-        resolve_pg_connection(args.pg_url.as_deref(), args.pg_schema.as_deref(), None)?;
-    let adapter = build_postgres_baseline_adapter(&pg_url, pg_schema.as_deref())?;
+    let adapter = build_project_postgres_adapter(
+        &args.source_dir,
+        project_model::PostgresAccessMode::Reader,
+    )?;
     let snapshots = adapter.list_snapshots(
         Some(bsl_search::CorpusId::WorkspaceCode.as_str()),
         args.branch.as_deref(),
@@ -1434,13 +1561,14 @@ fn resolve_snapshot_id(
         commit.filter(|value| !value.trim().is_empty()),
     ) {
         (Some(branch), Some(commit)) => Ok(format!("{prefix}:{branch}@{commit}")),
+        (Some(branch), None) => Ok(format!("{prefix}:{branch}")),
         (None, Some(commit)) => Ok(format!("{prefix}:{commit}")),
         _ if matches!(corpus, bsl_search::CorpusId::Reference) => {
             Ok(format!("reference:{}", env!("CARGO_PKG_VERSION")))
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--snapshot-id is required unless --commit is provided",
+            "--snapshot-id is required unless --branch or --commit is provided",
         )),
     }
 }
@@ -1514,44 +1642,29 @@ fn select_parent_snapshot_id(
         .map(|snapshot| snapshot.snapshot_id.clone())
 }
 
-fn resolve_pg_connection(
-    pg_url: Option<&str>,
-    pg_schema: Option<&str>,
-    credentials: Option<&project_model::PostgresCredentialConfig>,
-) -> Result<(String, Option<String>), io::Error> {
-    // Explicit --pg-url flag takes highest priority
-    if let Some(url) = pg_url.filter(|u| !u.trim().is_empty()) {
-        let pg_schema = pick_first_non_empty([
-            pg_schema,
-            env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
-        ]);
-        return Ok((url.to_owned(), pg_schema));
-    }
-    // Config-level credential resolver (from bsl-analyzer.toml)
-    if let Some(creds) = credentials {
-        if let Some(url) = project_model::resolve_postgres_url(creds) {
-            let pg_schema = pick_first_non_empty([
-                pg_schema,
-                env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
-            ]);
-            return Ok((url, pg_schema));
-        }
-    }
-    // Hardcoded env var fallback
-    let pg_url = env::var("BSL_SEARCH_BASELINE_PG_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| {
+fn resolve_project_postgres_url(
+    postgres: &project_model::SearchPostgresConfig,
+    mode: project_model::PostgresAccessMode,
+) -> Result<project_model::ResolvedPostgresUrl, project_model::ResolvePostgresUrlError> {
+    project_model::resolve_postgres_url(postgres, mode)
+}
+
+fn build_project_postgres_adapter(
+    source_dir: &Path,
+    mode: project_model::PostgresAccessMode,
+) -> Result<bsl_search::ExternalBaselineAdapter, Box<dyn Error + Send + Sync>> {
+    let project = project_model::Project::new(source_dir);
+    let resolved = resolve_project_postgres_url(&project.config.search.baseline.postgres, mode)
+        .map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "--pg-url, config credential resolver, or BSL_SEARCH_BASELINE_PG_URL is required",
+                format!("failed to resolve PostgreSQL {} credentials: {error}", mode.as_str()),
             )
         })?;
-    let pg_schema = pick_first_non_empty([
-        pg_schema,
-        env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
-    ]);
-    Ok((pg_url, pg_schema))
+    build_postgres_baseline_adapter(
+        &resolved.url,
+        project.config.search.baseline.postgres.schema.as_deref(),
+    )
 }
 
 fn build_postgres_baseline_adapter(
@@ -1576,6 +1689,7 @@ fn embedding_config_from_env() -> Option<bsl_search::EmbedderConfig> {
         model,
         dim,
         api_key: env::var("EMBEDDING_API_KEY").ok(),
+        provider: env::var("EMBEDDING_PROVIDER").ok(),
     })
 }
 
@@ -1637,6 +1751,19 @@ fn resolve_publish_branch(
         env::var("CI_COMMIT_BRANCH").ok().as_deref(),
         env::var("CI_COMMIT_REF_NAME").ok().as_deref(),
         git_branch.as_deref(),
+    ])
+}
+
+fn resolve_publish_commit(
+    explicit_commit: Option<&str>,
+    project_root: &std::path::Path,
+) -> Option<String> {
+    let git_commit = project_model::current_git_commit(project_root);
+    pick_first_non_empty([
+        explicit_commit,
+        env::var("CI_COMMIT_SHA").ok().as_deref(),
+        env::var("GITHUB_SHA").ok().as_deref(),
+        git_commit.as_deref(),
     ])
 }
 
@@ -2213,10 +2340,20 @@ fn run_mcp_server(
     };
 
     let server = mcp_server::McpServer::new(profile, state);
+    let shutdown_guard = server.clone();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(mcp_server::serve_stdio(server))?;
+    let serve_result = rt.block_on(mcp_server::serve_stdio(server));
 
+    // Keep one clone alive until after the Tokio runtime is dropped.
+    // This ensures sync PostgreSQL baseline clients/pools are destroyed
+    // outside the active runtime context and avoids nested-runtime panics
+    // during MCP stdio shutdown.
+    drop(rt);
+    shutdown_guard.shutdown();
+    drop(shutdown_guard);
+
+    serve_result?;
     Ok(())
 }
 
@@ -3107,11 +3244,18 @@ fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send +
     let diagnostics_config = diagnostics_config_from_project(&project_config)?;
     let diagnostics =
         mcp_server::resolve_project_baseline_diagnostics(config.parent(), &project_config);
+    let report =
+        build_check_config_report(&config, &project_config, &diagnostics_config, &diagnostics);
 
-    print!(
-        "{}",
-        build_check_config_report(&config, &project_config, &diagnostics_config, &diagnostics)
-    );
+    print!("{report}");
+
+    if baseline_diagnostics_have_issues(&diagnostics) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration is invalid: search baseline diagnostics reported errors",
+        )
+        .into());
+    }
 
     Ok(())
 }
@@ -3132,6 +3276,12 @@ fn diagnostics_config_from_project(
     })
 }
 
+fn baseline_diagnostics_have_issues(
+    baseline_diagnostics: &mcp_server::BaselineConfigDiagnostics,
+) -> bool {
+    baseline_diagnostics.workspace.issue.is_some() || baseline_diagnostics.reference.issue.is_some()
+}
+
 fn build_check_config_report(
     config_path: &std::path::Path,
     project_config: &project_model::ProjectConfig,
@@ -3139,7 +3289,11 @@ fn build_check_config_report(
     baseline_diagnostics: &mcp_server::BaselineConfigDiagnostics,
 ) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "Configuration is valid.");
+    let _ = writeln!(
+        out,
+        "Configuration is {}.",
+        if baseline_diagnostics_have_issues(baseline_diagnostics) { "invalid" } else { "valid" }
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Config file: {}", config_path.display());
     let _ = writeln!(
@@ -3286,8 +3440,9 @@ mod tests {
     use super::{
         analyze_snapshot_retention, build_check_config_report, check_config,
         diagnostics_config_from_project, pick_first_non_empty, resolve_publish_branch,
-        resolve_snapshot_id, select_parent_snapshot_id, select_parent_snapshot_id_from_groups,
-        validate_workspace_publish_policy, SnapshotRetentionStatus,
+        resolve_publish_commit, resolve_snapshot_id, select_parent_snapshot_id,
+        select_parent_snapshot_id_from_groups, validate_workspace_publish_policy,
+        SnapshotRetentionStatus,
     };
     use bsl_search::{BaselineSnapshotRecord, CorpusId};
     use chrono::{TimeZone, Utc};
@@ -3325,13 +3480,20 @@ mod tests {
     }
 
     #[test]
-    fn commit_or_snapshot_id_is_required() {
-        let error =
-            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, Some("main"), None).unwrap_err();
+    fn snapshot_id_from_branch_alone() {
+        let snapshot_id =
+            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, Some("main"), None).unwrap();
+
+        assert_eq!(snapshot_id, "workspace-code:main");
+    }
+
+    #[test]
+    fn snapshot_id_requires_branch_or_commit() {
+        let error = resolve_snapshot_id(&CorpusId::WorkspaceCode, None, None, None).unwrap_err();
 
         assert!(error
             .to_string()
-            .contains("--snapshot-id is required unless --commit is provided"));
+            .contains("--snapshot-id is required unless --branch or --commit is provided"));
     }
 
     #[test]
@@ -3372,6 +3534,32 @@ mod tests {
         }
 
         assert_eq!(branch.as_deref(), Some("feature/demo"));
+    }
+
+    #[test]
+    fn resolve_publish_commit_uses_git_when_cli_and_ci_are_missing() {
+        let saved_ci = env::var("CI_COMMIT_SHA").ok();
+        let saved_gha = env::var("GITHUB_SHA").ok();
+        env::remove_var("CI_COMMIT_SHA");
+        env::remove_var("GITHUB_SHA");
+
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        let ref_file = git_dir.join("refs/heads/feature/demo");
+        fs::create_dir_all(ref_file.parent().unwrap()).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/demo\n").unwrap();
+        fs::write(&ref_file, "0123456789abcdef\n").unwrap();
+
+        let commit = resolve_publish_commit(None, dir.path());
+
+        if let Some(v) = saved_ci {
+            env::set_var("CI_COMMIT_SHA", v);
+        }
+        if let Some(v) = saved_gha {
+            env::set_var("GITHUB_SHA", v);
+        }
+
+        assert_eq!(commit.as_deref(), Some("0123456789abcdef"));
     }
 
     #[test]
@@ -3419,8 +3607,19 @@ root = "src/cf"
 backend = "postgres"
 
 [search.baseline.postgres]
-url = "postgres://shared-search"
+host = "localhost"
+port = 5432
+dbname = "bsl_search"
 schema = "bsl_search"
+vault_role_base = "prod/search/bsl-analyzer"
+
+[search.baseline.postgres.credential_helper]
+program = "python3"
+args = [
+  "-c",
+  "import sys; sys.stdin.readline(); sys.stdout.write(sys.argv[1])",
+  '{"protocol":"bsl-analyzer.postgres-helper.v1","ok":true,"url":"postgres://user:pass@localhost:5432/bsl_search"}'
+]
 
 [search.baseline.workspace_code.policy]
 publish_branches = ["develop"]
@@ -3436,7 +3635,7 @@ select_branch = "develop"
     }
 
     #[test]
-    fn check_config_accepts_legacy_json_project_config() {
+    fn check_config_accepts_helper_based_json_project_config() {
         let dir = tempdir().unwrap();
         let config = dir.path().join(".bsl-analyzer.json");
         fs::write(
@@ -3446,8 +3645,19 @@ select_branch = "develop"
                     "baseline": {
                         "backend": "postgres",
                         "postgres": {
-                            "url": "postgres://shared-search",
-                            "schema": "bsl_search"
+                            "host": "localhost",
+                            "port": 5432,
+                            "dbname": "bsl_search",
+                            "schema": "bsl_search",
+                            "vaultRoleBase": "prod/search/bsl-analyzer",
+                            "credentialHelper": {
+                                "program": "python3",
+                                "args": [
+                                    "-c",
+                                    "import sys; sys.stdin.readline(); sys.stdout.write(sys.argv[1])",
+                                    "{\"protocol\":\"bsl-analyzer.postgres-helper.v1\",\"ok\":true,\"url\":\"postgres://user:pass@localhost:5432/bsl_search\"}"
+                                ]
+                            }
                         },
                         "workspaceCode": {
                             "policy": {
@@ -3475,6 +3685,24 @@ select_branch = "develop"
         let error = check_config(config).unwrap_err();
 
         assert!(error.to_string().contains("failed to parse configuration file"));
+    }
+
+    #[test]
+    fn check_config_rejects_invalid_postgres_baseline_config() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("bsl-analyzer.toml");
+        fs::write(
+            &config,
+            r#"
+[search.baseline]
+backend = "postgres"
+"#,
+        )
+        .unwrap();
+
+        let error = check_config(config).unwrap_err();
+
+        assert!(error.to_string().contains("search baseline diagnostics reported errors"));
     }
 
     #[test]
@@ -3540,6 +3768,7 @@ select_branch = "develop"
             &baseline,
         );
 
+        assert!(report.contains("Configuration is invalid."));
         assert!(report.contains("Project:"));
         assert!(report.contains("Source root: src/cf"));
         assert!(report.contains("Extensions:  src/cfe/ExtA"));

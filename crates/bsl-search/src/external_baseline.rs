@@ -5,9 +5,11 @@ use crate::domain::{
 use crate::error::SearchError;
 use crate::ports::{
     BaselineLexicalSearch, BaselineSemanticSearch, EmbeddingStore, SnapshotCatalog,
-    SnapshotContentStore, SnapshotPublisher,
+    SnapshotContentStore, SnapshotPublisher, WorkspaceBaselineManifest,
+    WorkspaceBaselineManifestStore,
 };
 use std::collections::HashMap;
+use std::time::Duration;
 
 mod postgres;
 
@@ -88,6 +90,44 @@ pub struct BaselineGcReport {
     pub deleted_file_objects: usize,
     pub deleted_file_object_items: usize,
     pub deleted_semantic_embeddings: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticPublishPhase {
+    PrepareRows,
+    CopyParentRows,
+    WriteServingRows,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SemanticPublishProgress {
+    Plan {
+        strategy: String,
+        changed_files: usize,
+        deleted_paths: usize,
+        parent_snapshot_id: Option<String>,
+        phase_count: usize,
+    },
+    PhaseStarted {
+        phase: SemanticPublishPhase,
+        phase_index: usize,
+        phase_count: usize,
+        detail: String,
+    },
+    PhaseCompleted {
+        phase: SemanticPublishPhase,
+        phase_index: usize,
+        phase_count: usize,
+        elapsed: Duration,
+        output_rows: usize,
+    },
+    Completed {
+        total_rows: usize,
+        copied_rows: usize,
+        inserted_rows: usize,
+        missing_embeddings: usize,
+        total_elapsed: Duration,
+    },
 }
 
 /// Infrastructure adapter for centralized baseline storage.
@@ -203,6 +243,30 @@ impl ExternalBaselineAdapter {
         }
     }
 
+    pub fn migrate_storage(&self) -> Result<(), SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.migrate_storage(),
+        }
+    }
+
+    /// Checks if the external baseline storage is fully initialized and
+    /// the schema version is compatible with the current analyzer.
+    ///
+    /// Returns typed errors for unverified/mismatched storage instead
+    /// of letting downstream operations fail with raw database errors.
+    pub fn check_storage_readiness(&self) -> Result<(), SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.check_storage_readiness(),
+        }
+    }
+
+    /// Returns the schema version stored in the database, if any.
+    pub fn get_schema_version(&self) -> Result<Option<i32>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.get_schema_version(),
+        }
+    }
+
     pub fn lexical_search_baseline(
         &self,
         snapshot_id: &str,
@@ -223,10 +287,23 @@ impl ExternalBaselineAdapter {
         model_id: &str,
         dimension: usize,
     ) -> Result<usize, SearchError> {
+        self.populate_serving_semantic_with_progress(snapshot_id, model_id, dimension, None)
+    }
+
+    pub fn populate_serving_semantic_with_progress(
+        &self,
+        snapshot_id: &str,
+        model_id: &str,
+        dimension: usize,
+        progress: Option<&dyn Fn(SemanticPublishProgress)>,
+    ) -> Result<usize, SearchError> {
         match self {
-            Self::Postgres(adapter) => {
-                adapter.populate_serving_semantic(snapshot_id, model_id, dimension)
-            }
+            Self::Postgres(adapter) => adapter.populate_serving_semantic_with_progress(
+                snapshot_id,
+                model_id,
+                dimension,
+                progress,
+            ),
         }
     }
 
@@ -248,6 +325,15 @@ impl ExternalBaselineAdapter {
                 collection,
                 limit,
             ),
+        }
+    }
+
+    pub fn load_baseline_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<WorkspaceBaselineManifest, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_baseline_manifest(snapshot_id),
         }
     }
 }
@@ -292,12 +378,6 @@ impl SnapshotContentStore for ExternalBaselineAdapter {
 }
 
 impl SnapshotPublisher for ExternalBaselineAdapter {
-    fn ensure_storage(&self) -> Result<(), SearchError> {
-        match self {
-            Self::Postgres(adapter) => adapter.ensure_storage(),
-        }
-    }
-
     fn publish_snapshot(
         &self,
         snapshot: &Snapshot,

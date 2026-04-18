@@ -1,6 +1,6 @@
 //! CommonModuleMissingAPI diagnostic
 //!
-//! CommonModule should contain export methods AND API regions.
+//! CommonModule / ManagerModule should contain export methods AND API regions.
 //!
 
 use crate::define_metadata;
@@ -12,7 +12,10 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
-    modules: &[bsl_metadata::ModuleType::CommonModule],
+    modules: &[
+        bsl_metadata::ModuleType::CommonModule,
+        bsl_metadata::ModuleType::ManagerModule,
+    ],
     minutes_to_fix: 1,
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
@@ -26,6 +29,23 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CommonModuleMissingAPI;
 
     if ctx.is_disabled_with_metadata(code) {
+        return Vec::new();
+    }
+
+    let metadata = ctx.module_metadata();
+    check_for_module_type(ctx, metadata.module_type)
+}
+
+fn check_for_module_type(
+    ctx: &DiagnosticsContext,
+    module_type: bsl_metadata::ModuleType,
+) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::CommonModuleMissingAPI;
+
+    if !matches!(
+        module_type,
+        bsl_metadata::ModuleType::CommonModule | bsl_metadata::ModuleType::ManagerModule
+    ) {
         return Vec::new();
     }
 
@@ -83,8 +103,16 @@ fn has_api_regions(root: &syntax::SyntaxNode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::check_for_module_type;
     use crate::test_utils::check_ast_diagnostic;
+    use bsl_metadata::ModuleType;
+
+    fn check_as(
+        module_type: ModuleType,
+    ) -> impl Fn(&crate::DiagnosticsContext) -> Vec<crate::Diagnostic> {
+        move |ctx| check_for_module_type(ctx, module_type)
+    }
+
     #[test]
     fn test_with_export_and_api() {
         let code = r#"
@@ -93,7 +121,7 @@ mod tests {
 КонецПроцедуры
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_ast_diagnostic(code, check_as(ModuleType::CommonModule));
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -105,7 +133,7 @@ mod tests {
 КонецПроцедуры
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_ast_diagnostic(code, check_as(ModuleType::CommonModule));
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -117,7 +145,7 @@ mod tests {
 КонецПроцедуры
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_ast_diagnostic(code, check_as(ModuleType::CommonModule));
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -127,7 +155,55 @@ mod tests {
 #Область ПрограммныйИнтерфейс
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_ast_diagnostic(code, check_as(ModuleType::CommonModule));
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_manager_module_without_api_region() {
+        let code = r#"
+#Область Служебный
+Процедура Тест() Экспорт
+КонецПроцедуры
+#КонецОбласти
+"#;
+        let diagnostics = check_ast_diagnostic(code, check_as(ModuleType::ManagerModule));
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_form_module_is_ignored() {
+        let code = r#"
+#Область Служебный
+Процедура Тест()
+КонецПроцедуры
+#КонецОбласти
+"#;
+        let diagnostics = check_ast_diagnostic(code, check_as(ModuleType::FormModule));
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_object_module_is_ignored() {
+        let code = r#"
+#Область Служебный
+Процедура Тест()
+КонецПроцедуры
+#КонецОбласти
+"#;
+        let diagnostics = check_ast_diagnostic(code, check_as(ModuleType::ObjectModule));
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_unknown_module_is_ignored() {
+        let code = r#"
+#Область Служебный
+Процедура Тест()
+КонецПроцедуры
+#КонецОбласти
+"#;
+        let diagnostics = check_ast_diagnostic(code, check_as(ModuleType::Unknown));
         assert_eq!(diagnostics.len(), 0);
     }
 }
