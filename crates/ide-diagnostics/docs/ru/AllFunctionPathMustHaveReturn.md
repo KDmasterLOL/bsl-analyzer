@@ -52,3 +52,9 @@
     КонецЕсли;
 КонецФункции
 ```
+
+## Источники
+
+Ссылка на поведение языка: [v8std.ru: Возврат из функции](https://v8std.ru/lang/)
+
+Дополнительный источник: [v8std.ru: AllFunctionPathMustHaveReturn](https://v8std.ru/diagnostics/bslls/AllFunctionPathMustHaveReturn/)

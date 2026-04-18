@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.120"
+version = "0.1.121"
 edition = "2021"
 license = "LGPL-3.0-or-later"
 authors = ["BSL Analyzer Contributors"]
@@ -138,7 +138,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 strip = true
 lto = true
 codegen-units = 1
-panic = "abort"
 
 # Profile for development with debug info
 [profile.release-with-debug]

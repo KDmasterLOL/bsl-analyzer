@@ -2,12 +2,26 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-Software modules should not contain prohibited words.
-The list of forbidden words is set by a regular expression.
-The search is case-insensitive.
+This diagnostic searches module text for words and phrases that are forbidden by
+project policy.
 
-**For example:**
+The rule is configured with a regular expression. Matching is case-insensitive.
+Depending on configuration, the diagnostic may also inspect comments.
 
-"singularity|avada kedavra|Donald"
+Typical uses:
 
-"transcenden(tal|ce)"
+- exclude slang or offensive vocabulary from code and comments;
+- ban temporary markers such as `legacy`, `draft`, `temporary`;
+- enforce customer- or domain-specific terminology.
+
+**Example configuration:**
+
+`"legacy|draft|temporary"`
+
+`"deprecated_|tmp_|unsafe"`
+
+## Sources
+
+Primary source: project policy and repository-specific naming/content rules
+
+Secondary source: [v8std.ru: BadWords](https://v8std.ru/diagnostics/bslls/BadWords/)

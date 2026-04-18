@@ -22,6 +22,7 @@ EXCLUDE_PATTERNS=(
     ".gitlab-ci.yml"
     ".cargo/config.toml"
     "scripts/ci-status.sh"
+    "docs/legal/"
     ".omc/"
     ".claude/"
     "crates/bsl-launcher/release-source.github.json"

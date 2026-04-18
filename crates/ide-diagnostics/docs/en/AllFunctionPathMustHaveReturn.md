@@ -2,26 +2,25 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-Functions should not have an implicit return. If control reaches the EndFunction line function returns an Undefined value.
+In BSL, if execution reaches `EndFunction` without an explicit `Return`, the function returns `Undefined`.
 
-As a rule, this is not a normal operation; the programmer must explicitly describe all return values of the function. However, it is quite easy to overlook a situation in which control reaches the EndFunction line and returns an unexpected Undefined value.
+This behavior is part of the language, but in practice an implicit `Undefined` is usually not intended. A missing `Return` often appears after adding a new branch, editing an `ElsIf` chain, or handling only the "main" scenario and forgetting the fallback case.
 
-This diagnostics checks that all possible paths of the function execution have an explicit Return statement and the function does not return unexpected values.
+This diagnostic reports functions where at least one execution path reaches the end of the function without an explicit `Return`. If returning `Undefined` is intentional, write it explicitly as `Return Undefined;`.
 
 ## Examples
 
 ### Incorrect
 
 ```bsl
-// if the rate is full, but not Tax10 not Tax10 - returns Undefined
-// this could be error or planned behavior.
-Function DefineTaxRate(Val Rate)
-    If Rate = Enums.TaxRates.Tax20 Then
-        Return 20;
-    ElsIf Rate = Enums.TaxRates.Tax10 Then
-        Return 10;
-    ElsIf Not ValueIsFilled(Rate) Then
-        Return Constants.DefaultTaxRate.Get();
+// If the category is not handled, the function implicitly returns Undefined.
+Function CalculateDiscountRate(Val CustomerCategory)
+    If CustomerCategory = "VIP" Then
+        Return 0.15;
+    ElsIf CustomerCategory = "Regular" Then
+        Return 0.10;
+    ElsIf CustomerCategory = "New" Then
+        Return 0.05;
     EndIf;
 
     // implicit return Undefined
@@ -31,32 +30,36 @@ EndFunction
 ### Correct
 
 ```
-// explicitly specify the intention to return the result in the end of the function.
-Function DefineTaxRate(Val Rate)
-    If Rate = Enums.TaxRates.Tax20 Then
-        Return 20;
-    ElsIf Rate = Enums.TaxRates.Tax10 Then
-        Return 10;
-    ElsIf Not ValueIsFilled(Rate) Then
-        Return Constants.DefaultTaxRate.Get();
+// An explicit fallback makes the behavior clear.
+Function CalculateDiscountRate(Val CustomerCategory)
+    If CustomerCategory = "VIP" Then
+        Return 0.15;
+    ElsIf CustomerCategory = "Regular" Then
+        Return 0.10;
+    ElsIf CustomerCategory = "New" Then
+        Return 0.05;
     EndIf;
 
-    // explicit return
-    Return Undefined;
+    Return 0;
 EndFunction
 ```
 
 ### Another example of incorrect code:
 
 ```bsl
-Function DiscountAmount(Val OrderBasket)
-    If OrderBasket.Rows.Count() > 10 Then
-        Return Discounts.DiscountOnBigBasket(OrderBasket);
-    ElsIf OrderBasket.IsCustomerCard Then
-        // function returns an unintended value is Undefined
-        Discounts.DiscountByCustomerCard(OrderBasket);
-    Else 
-        Return 0;
+Function ResolveDeliveryMode(Val Order)
+    If Order.IsExpress Then
+        Return "Express";
+    ElsIf Order.HasPickupPoint Then
+        LogPickupChoice(Order);
+    Else
+        Return "Courier";
     EndIf;
 EndFunction
 ```
+
+## Sources
+
+Language reference: [v8std.ru: Return from a function](https://v8std.ru/lang/)
+
+Secondary source: [v8std.ru: AllFunctionPathMustHaveReturn](https://v8std.ru/diagnostics/bslls/AllFunctionPathMustHaveReturn/)

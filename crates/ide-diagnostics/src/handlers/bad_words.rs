@@ -307,95 +307,93 @@ mod tests {
         assert_eq!(diagnostics.len(), 0);
     }
 
-    /// Inline version of BadWordsDiagnostic.bsl fixture - with comments enabled.
+    /// Fresh local fixture with comment scanning enabled.
     ///
-    /// Pattern "лотус|шмотус", findInComments=true:
-    /// - Line 0, cols 42-47: лотус (in comment)
-    /// - Line 0, cols 48-54: шмотус (in comment)
-    /// - Line 4, cols 4-9: Лотус (SDBL query identifier)
-    /// - Line 6, cols 24-29: Лотус (in ДиспетчерЛотус)
-    /// - Line 6, cols 34-39: Лотус (alias)
-    /// - Line 8, cols 4-10: Шмотус (in УзелШмотуса)
+    /// Pattern "legacy|draft", findInComments=true:
+    /// - Line 0, cols 3-9: legacy (in comment)
+    /// - Line 0, cols 10-15: draft (in comment)
+    /// - Line 4, cols 4-10: Legacy (query identifier)
+    /// - Line 6, cols 12-17: Draft (metadata name)
+    /// - Line 6, cols 26-31: Draft (alias)
+    /// - Line 8, cols 0-5: Draft (variable name)
     #[test]
     fn test_bad_words_with_comments() {
-        // Inline equivalent of BadWordsDiagnostic.bsl
-        let code = "// при наличии в списке запрещенных слов \"лотус/шмотус\" // тут должно сработать дважды\n\nЗапрос = Новый Запрос;\nЗапрос.Текст = \"ВЫБРАТЬ ПЕРВЫЕ 1\n|   Лотус.Ссылка КАК Узел                               //тут должно сработать\n|ИЗ\n|   ПланОбмена.ДиспетчерЛотус КАК Лотус\";               //тут должно сработать дважды\n\nУзелШмотуса = Запрос.Выполнить().Выгрузить()[0].Ссылка;  //тут должно сработать\n";
+        let code = "// legacy draft markers in comment\n\nQuery = New Query;\nQuery.Text = \"SELECT FIRST 1\n|   LegacyTable.Ref AS Ref\n|FROM\n|   Catalog.DraftItems AS DraftItems\";\n\nDraftResult = Query.Execute().Unload()[0].Ref;\n";
 
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::BadWords,
             serde_json::json!({
-                "badWords": "лотус|шмотус",
+                "badWords": "legacy|draft",
                 "findInComments": true
             }),
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expected 6 diagnostics with badWords="лотус|шмотус", findInComments=true
+        // Expected 6 diagnostics with badWords="legacy|draft", findInComments=true
         assert_eq!(diagnostics.len(), 6, "Should find 6 diagnostics");
 
         // Verify exact positions
-        // Line 0, cols 42-47: лотус (in comment)
-        assert_diagnostic_range(code, &diagnostics[0], 0, 42, 47);
-        assert!(diagnostics[0].message.contains("лотус"));
+        // Line 0, cols 3-9: legacy (in comment)
+        assert_diagnostic_range(code, &diagnostics[0], 0, 3, 9);
+        assert!(diagnostics[0].message.contains("legacy"));
 
-        // Line 0, cols 48-54: шмотус (in comment)
-        assert_diagnostic_range(code, &diagnostics[1], 0, 48, 54);
-        assert!(diagnostics[1].message.contains("шмотус"));
+        // Line 0, cols 10-15: draft (in comment)
+        assert_diagnostic_range(code, &diagnostics[1], 0, 10, 15);
+        assert!(diagnostics[1].message.contains("draft"));
 
-        // Line 4, cols 4-9: Лотус (SDBL query)
-        assert_diagnostic_range(code, &diagnostics[2], 4, 4, 9);
-        assert!(diagnostics[2].message.contains("Лотус"));
+        // Line 4, cols 4-10: Legacy (query identifier)
+        assert_diagnostic_range(code, &diagnostics[2], 4, 4, 10);
+        assert!(diagnostics[2].message.contains("Legacy"));
 
-        // Line 6, cols 24-29: Лотус (SDBL identifier)
-        assert_diagnostic_range(code, &diagnostics[3], 6, 24, 29);
-        assert!(diagnostics[3].message.contains("Лотус"));
+        // Line 6, cols 12-17: Draft (metadata name)
+        assert_diagnostic_range(code, &diagnostics[3], 6, 12, 17);
+        assert!(diagnostics[3].message.contains("Draft"));
 
-        // Line 6, cols 34-39: Лотус (SDBL alias)
-        assert_diagnostic_range(code, &diagnostics[4], 6, 34, 39);
-        assert!(diagnostics[4].message.contains("Лотус"));
+        // Line 6, cols 26-31: Draft (alias)
+        assert_diagnostic_range(code, &diagnostics[4], 6, 26, 31);
+        assert!(diagnostics[4].message.contains("Draft"));
 
-        // Line 8, cols 4-10: Шмотуса (variable name)
-        assert_diagnostic_range(code, &diagnostics[5], 8, 4, 10);
-        assert!(diagnostics[5].message.contains("Шмотус"));
+        // Line 8, cols 0-5: Draft (variable name)
+        assert_diagnostic_range(code, &diagnostics[5], 8, 0, 5);
+        assert!(diagnostics[5].message.contains("Draft"));
     }
 
-    /// Inline version of BadWordsDiagnostic.bsl fixture - with comments disabled.
+    /// Fresh local fixture with comment scanning disabled.
     ///
-    /// Pattern "лотус|шмотус", findInComments=false:
+    /// Pattern "legacy|draft", findInComments=false:
     /// Skips line 0 (comment line), finds 4 remaining matches.
     #[test]
     fn test_bad_words_without_comments() {
-        // Inline equivalent of BadWordsDiagnostic.bsl
-        let code = "// при наличии в списке запрещенных слов \"лотус/шмотус\" // тут должно сработать дважды\n\nЗапрос = Новый Запрос;\nЗапрос.Текст = \"ВЫБРАТЬ ПЕРВЫЕ 1\n|   Лотус.Ссылка КАК Узел                               //тут должно сработать\n|ИЗ\n|   ПланОбмена.ДиспетчерЛотус КАК Лотус\";               //тут должно сработать дважды\n\nУзелШмотуса = Запрос.Выполнить().Выгрузить()[0].Ссылка;  //тут должно сработать\n";
+        let code = "// legacy draft markers in comment\n\nQuery = New Query;\nQuery.Text = \"SELECT FIRST 1\n|   LegacyTable.Ref AS Ref\n|FROM\n|   Catalog.DraftItems AS DraftItems\";\n\nDraftResult = Query.Execute().Unload()[0].Ref;\n";
 
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::BadWords,
             serde_json::json!({
-                "badWords": "лотус|шмотус",
+                "badWords": "legacy|draft",
                 "findInComments": false
             }),
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expected 4 diagnostics with badWords="лотус|шмотус", findInComments=false
+        // Expected 4 diagnostics with badWords="legacy|draft", findInComments=false
         // (excludes first two from comment line)
         assert_eq!(diagnostics.len(), 4, "Expected 4 diagnostics without comments");
 
         // Verify exact positions (same as above, but without first two)
-        // Line 4, cols 4-9: Лотус (SDBL query)
-        assert_diagnostic_range(code, &diagnostics[0], 4, 4, 9);
+        // Line 4, cols 4-10: Legacy (query identifier)
+        assert_diagnostic_range(code, &diagnostics[0], 4, 4, 10);
 
-        // Line 6, cols 24-29: Лотус (SDBL identifier)
-        assert_diagnostic_range(code, &diagnostics[1], 6, 24, 29);
+        // Line 6, cols 12-17: Draft (metadata name)
+        assert_diagnostic_range(code, &diagnostics[1], 6, 12, 17);
 
-        // Line 6, cols 34-39: Лотус (SDBL alias)
-        assert_diagnostic_range(code, &diagnostics[2], 6, 34, 39);
+        // Line 6, cols 26-31: Draft (alias)
+        assert_diagnostic_range(code, &diagnostics[2], 6, 26, 31);
 
-        // Line 8, cols 4-10: Шмотуса (variable name)
-        assert_diagnostic_range(code, &diagnostics[3], 8, 4, 10);
+        // Line 8, cols 0-5: Draft (variable name)
+        assert_diagnostic_range(code, &diagnostics[3], 8, 0, 5);
     }
 }

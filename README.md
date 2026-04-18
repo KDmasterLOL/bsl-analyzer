@@ -11,6 +11,10 @@
 - **Конфигурация проекта** через `bsl-analyzer.toml`
 - **Кроссплатформенность** — Linux, Windows, macOS (Apple Silicon)
 
+## Сообщество
+
+Вопросы, идеи, баги — в Telegram-чат: https://t.me/+K7CcQPNZobE3YjUy
+
 ## Установка
 
 ### Linux / macOS

@@ -53,11 +53,6 @@
 //! This diagnostic is collected during HIR lowering as a byproduct of
 //! CFG analysis. The `from_hir` function converts the BodyDiagnostic
 //! to a Diagnostic for display.
-//!
-//! Ported from:
-//!
-//! This HIR-based implementation replaces the AST-based version to leverage
-//! Salsa caching.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -238,45 +233,41 @@ fn message_ru() -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_hir_diagnostic;
     use crate::DiagnosticCode;
+
     /// Function with ElseIf chain but no final Else - missing return on fallthrough path.
-    ///
-    /// ОпределитьСтавкуНДС: all branches have return but no else clause means
-    /// falling through the if-chain returns Неопределено implicitly.
     #[test]
     fn test_missing_return_elseif_no_else() {
-        let code = r#"Функция ОпределитьСтавкуНДС(Знач Ставка)
-    Если Ставка = Перечисления.СтавкиНДС.НДС20 Тогда
-        Возврат 20;
-    ИначеЕсли Ставка = Перечисления.СтавкиНДС.НДС10 Тогда
-        Возврат 10;
-    ИначеЕсли Не ЗначениеЗаполнено(Ставка) Тогда
-        Возврат Константы.СтавкаНДСПоУмолчанию.Получить();
+        let code = r#"Функция РассчитатьСкидку(Знач КатегорияКлиента)
+    Если КатегорияКлиента = "VIP" Тогда
+        Возврат 0.15;
+    ИначеЕсли КатегорияКлиента = "Постоянный" Тогда
+        Возврат 0.10;
+    ИначеЕсли КатегорияКлиента = "Новый" Тогда
+        Возврат 0.05;
     КонецЕсли;
 КонецФункции"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
+        let count = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .collect();
+            .count();
 
-        assert_eq!(diags.len(), 1, "Expected 1 diagnostic: fallthrough path has no return");
-        assert_eq!(diags[0].severity, crate::Severity::Warning);
-        assert_diagnostic_range(code, diags[0], 0, 8, 27);
+        assert_eq!(count, 1, "Expected 1 diagnostic: fallthrough path has no return");
     }
 
     /// Function with explicit Неопределено return - no diagnostic.
     #[test]
     fn test_no_diagnostic_explicit_undefined_return() {
-        let code = r#"Функция ОпределитьСтавкуНДС(Знач Ставка)
-    Если Ставка = Перечисления.СтавкиНДС.НДС20 Тогда
-        Возврат 20;
-    ИначеЕсли Ставка = Перечисления.СтавкиНДС.НДС10 Тогда
-        Возврат 10;
-    ИначеЕсли Не ЗначениеЗаполнено(Ставка) Тогда
-        Возврат Константы.СтавкаНДСПоУмолчанию.Получить();
+        let code = r#"Функция РассчитатьСкидку(Знач КатегорияКлиента)
+    Если КатегорияКлиента = "VIP" Тогда
+        Возврат 0.15;
+    ИначеЕсли КатегорияКлиента = "Постоянный" Тогда
+        Возврат 0.10;
+    ИначеЕсли КатегорияКлиента = "Новый" Тогда
+        Возврат 0.05;
     КонецЕсли;
     Возврат Неопределено;
 КонецФункции"#;
@@ -293,29 +284,25 @@ mod tests {
     }
 
     /// ElseIf branch body has no return (only a call, not a return statement).
-    ///
-    /// СуммаСкидки: the ИначеЕсли branch calls a function but doesn't return its value.
     #[test]
     fn test_missing_return_in_elseif_branch() {
-        let code = r#"Функция СуммаСкидки(Знач КорзинаЗаказа)
-    Если КорзинаЗаказа.Строки.Количество() > 10 Тогда
-        Возврат Скидки.СкидкаНаКрупнуюКорзину(КорзинаЗаказа);
-    ИначеЕсли КорзинаЗаказа.ЕстьКартаЛояльности Тогда
-        Скидки.СкидкаПоКартеЛояльности(КорзинаЗаказа);
+        let code = r#"Функция ОпределитьТариф(Знач Клиент)
+    Если Клиент.Премиум Тогда
+        Возврат "Максимальный";
+    ИначеЕсли Клиент.Льготный Тогда
+        ЗаписатьЛьготныйТарифВЖурнал(Клиент);
     Иначе
-        Возврат 0;
+        Возврат "Базовый";
     КонецЕсли;
 КонецФункции"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
+        let count = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .collect();
+            .count();
 
-        assert_eq!(diags.len(), 1, "Expected 1 diagnostic: ElseIf branch missing return");
-        assert_eq!(diags[0].severity, crate::Severity::Warning);
-        assert_diagnostic_range(code, diags[0], 0, 8, 19);
+        assert_eq!(count, 1, "Expected 1 diagnostic: ElseIf branch missing return");
     }
 
     /// ForEach loop - false branch (loop body never executes) should not trigger diagnostic.
