@@ -86,14 +86,12 @@ impl ControlFlowGraph {
         edge_type: CfgEdgeType,
     ) -> Result<(), String> {
         match source_vertex {
-            CfgVertex::Conditional(_) => {
+            CfgVertex::Conditional(_) if !edge_type.is_conditional_branch() => {
                 // Conditional vertices can only have TRUE_BRANCH or FALSE_BRANCH edges
-                if !edge_type.is_conditional_branch() {
-                    return Err(format!(
-                        "Conditional vertex can only have TRUE_BRANCH or FALSE_BRANCH edges, got {:?}",
-                        edge_type
-                    ));
-                }
+                return Err(format!(
+                    "Conditional vertex can only have TRUE_BRANCH or FALSE_BRANCH edges, got {:?}",
+                    edge_type
+                ));
             }
             _ => {
                 // Other vertices can have any edge type
