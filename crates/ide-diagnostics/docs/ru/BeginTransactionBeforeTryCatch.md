@@ -34,4 +34,8 @@
 
 ## Источники
 
-* [Транзакции: правила использования](https://its.1c.ru/db/v8std/content/783/hdoc/_top/)
+Основной источник: [Транзакции: правила использования](https://its.1c.ru/db/v8std/content/783/hdoc/_top/)
+
+Дополнительный источник: [v8std.ru: #std783 Транзакции: правила использования](https://v8std.ru/std/783/)
+
+Справочная страница: [v8std.ru: begin-transaction](https://v8std.ru/diagnostics/v8-code-style/begin-transaction/)

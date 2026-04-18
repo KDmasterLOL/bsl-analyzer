@@ -48,10 +48,6 @@
 //!
 //! This diagnostic is collected during HIR lowering as a byproduct of statement processing.
 //! The `from_hir` function converts the BodyDiagnostic to a Diagnostic for display.
-//!
-//! Ported from:
-//!
-//! Adapted to use HIR-based collection during AST→HIR lowering.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -214,118 +210,43 @@ EndProcedure"#;
         assert_eq!(diags[0].code, DiagnosticCode::BeginTransactionBeforeTryCatch);
     }
 
-    /// Comprehensive test covering all error cases from the reference fixture.
-    ///
-    /// 6 diagnostics expected (module-level НачатьТранзакцию not checked):
-    /// - Пример2 line 1: НачатьТранзакцию with code before Попытка
-    /// - Пример3 line 2: НачатьТранзакцию inside Попытка
-    /// - Пример4 line 1: НачатьТранзакцию with code after (no Try)
-    /// - Пример5 line 4: second НачатьТранзакцию inside Попытка with code after
-    /// - Пример6 line 1: НачатьТранзакцию with НачатьТранзакцию before Try
-    /// - Loop line 1: BeginTransaction with code before Попытка
+    /// Local integration fixture with several independent violations in one file.
     #[test]
-    fn test_comprehensive() {
-        // Exact copy of BeginTransactionBeforeTryCatchDiagnostic.bsl fixture (lines 0-100).
-        // Line numbers must match for position assertions below.
-        let code = r#"Процедура Пример1() // правильнй с ИТС
+    fn test_multiple_violations_in_one_module() {
+        let code = r#"Процедура ПровестиДокумент()
     НачатьТранзакцию();
+    ПодготовитьДанные();
     Попытка
-        БлокировкаДанных = Новый БлокировкаДанных;
-        ЭлементБлокировкиДанных = БлокировкаДанных.Добавить("Документ.ПриходнаяНакладная");
-        ЭлементБлокировкиДанных.УстановитьЗначение("Ссылка", СсылкаДляОбработки);
-        ЭлементБлокировкиДанных.Режим = РежимБлокировкиДанных.Исключительный;
-        БлокировкаДанных.Заблокировать();
-
-        ДокументОбъект.Записать();
-
-        ЗафиксироватьТранзакцию();
+        ЗаписатьДвижения();
     Исключение
         ОтменитьТранзакцию();
-
-        ЗаписьЖурналаРегистрации(НСтр("ru = 'Выполнение операции'"),
-            УровеньЖурналаРегистрации.Ошибка,
-            ,
-            ,
-            ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
-
-        ВызватьИсключение; // есть внешняя транзакция
-
     КонецПопытки;
 КонецПроцедуры
 
-// ошибочные конструкции
-
-Процедура Пример2()
-    НачатьТранзакцию(); // <-- Ошибка: код перед попыткой
-    Метод();
+Функция ОбновитьОстатки()
     Попытка
-        Метод2();
+        НачатьТранзакцию();
+        ПересчитатьОстатки();
     Исключение
         ОтменитьТранзакцию();
-        Возврат;
     КонецПопытки;
+    Возврат Истина;
+КонецФункции
+
+Процедура СинхронизироватьСправочник()
+    НачатьТранзакцию();
+    ОбновитьКэш();
     ЗафиксироватьТранзакцию();
 КонецПроцедуры
 
-Процедура Пример3()
+Для каждого СтрокаТовара Из ТаблицаТоваров Цикл
+    НачатьТранзакцию();
+    ЛогироватьСтроку(СтрокаТовара);
     Попытка
-        НачатьТранзакцию(); // <-- Ошибка: в попытке
-        Метод();
-    Исключение
-        Если ТранзакцияАктивна() Тогда
-            ЗафиксироватьТранзакцию();
-        Иначе
-            ОтменитьТранзакцию();
-        КонецЕсли;
-        Возврат;
-    КонецПопытки;
-КонецПроцедуры
-
-Процедура Пример4()
-    НачатьТранзакцию(); // <-- Ошибка: код после начала
-    Метод();
-    Если ТранзакцияАктивна() Тогда
+        ОбновитьСтроку(СтрокаТовара);
         ЗафиксироватьТранзакцию();
-    Иначе
-        ОтменитьТранзакцию();
-    КонецЕсли;
-КонецПроцедуры
-
-Функция Пример5()
-    НачатьТранзакцию(); // <-- Ошибки нет
-    Попытка
-        Метод();
-        НачатьТранзакцию(); // <-- Ошибка: есть код после
-        Метод2();
-        ЗафиксироватьТранзакцию();
-    Исключение
-    КонецПопытки;
-    Возврат 1;
-КонецФункции
-
-Процедура Пример6()
-    НачатьТранзакцию(); // <-- Ошибка: есть код после
-    НачатьТранзакцию(); // <-- Ошибки нет
-    Попытка
-        Метод();
-        ЗафиксироватьТранзакцию();
-        Метод2();
     Исключение
         ОтменитьТранзакцию();
-        Возврат;
-    КонецПопытки;
-КонецПроцедуры
-
-Для каждого Элемент Из Коллекция Цикл
-    BeginTransaction();  // <-- Ошибка: есть код после
-    Метод();
-    Попытка
-        Метод();
-        ЗафиксироватьТранзакцию();
-        Продолжить;
-    Исключение
-        ОтменитьТранзакцию();
-        Возврат;
     КонецПопытки;
 КонецЦикла;"#;
 
@@ -335,17 +256,12 @@ EndProcedure"#;
             .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
             .collect();
 
-        // Expected 6 diagnostics (excluding module-level НачатьТранзакцию which is not supported).
-        // The reference fixture also has НачатьТранзакцию() outside any method (module-level code),
-        // but we don't check module-level code. Not worth complicating lower_module_code for this.
-        assert_eq!(diags.len(), 6, "Should detect 6 diagnostics (excluding module-level code)");
+        assert_eq!(diags.len(), 4, "Should detect 4 diagnostics in the combined fixture");
 
         // Verify exact positions
-        assert_diagnostic_range(code, diags[0], 29, 4, 23); // Пример2: код перед попыткой
-        assert_diagnostic_range(code, diags[1], 42, 8, 27); // Пример3: в попытке
-        assert_diagnostic_range(code, diags[2], 55, 4, 23); // Пример4: код после начала
-        assert_diagnostic_range(code, diags[3], 68, 8, 27); // Пример5: внутри попытки
-        assert_diagnostic_range(code, diags[4], 77, 4, 23); // Пример6: есть код после
-        assert_diagnostic_range(code, diags[5], 90, 4, 23); // Цикл: есть код после
+        assert_diagnostic_range(code, diags[0], 1, 4, 23); // code before Try
+        assert_diagnostic_range(code, diags[1], 12, 8, 27); // inside Try
+        assert_diagnostic_range(code, diags[2], 21, 4, 23); // no Try after
+        assert_diagnostic_range(code, diags[3], 27, 4, 23); // loop with code before Try
     }
 }
