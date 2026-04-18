@@ -138,7 +138,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 strip = true
 lto = true
 codegen-units = 1
-panic = "abort"
 
 # Profile for development with debug info
 [profile.release-with-debug]
