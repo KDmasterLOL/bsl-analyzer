@@ -70,12 +70,10 @@ impl Ctx {
                         self.lower_function(&func);
                     }
                 }
-                SyntaxKind::VAR_DEF => {
+                SyntaxKind::VAR_DEF if !is_inside_method(&node) => {
                     // Only collect module-level variables, not local variables inside procedures
-                    if !is_inside_method(&node) {
-                        if let Some(var) = ast::VarDef::cast(node.clone()) {
-                            self.lower_variable(&var);
-                        }
+                    if let Some(var) = ast::VarDef::cast(node.clone()) {
+                        self.lower_variable(&var);
                     }
                 }
                 _ => {

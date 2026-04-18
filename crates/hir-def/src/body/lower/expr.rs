@@ -2445,14 +2445,13 @@ fn is_unsafe_safe_mode_context(call_node: &SyntaxNode) -> bool {
 
     while let Some(node) = current {
         match node.kind() {
-            SyntaxKind::UNARY_EXPR => {
+            SyntaxKind::UNARY_EXPR
                 if node
                     .children_with_tokens()
                     .filter_map(|el| el.into_token())
-                    .any(|tok| tok.kind() == SyntaxKind::KW_NOT)
-                {
-                    return true;
-                }
+                    .any(|tok| tok.kind() == SyntaxKind::KW_NOT) =>
+            {
+                return true;
             }
             SyntaxKind::BINARY_EXPR => {
                 let has_comparison =
