@@ -1,0 +1,15 @@
+BSL Analyzer provenance note
+
+This repository is distributed under LGPL-3.0-or-later as a conservative
+default.
+
+Reason: the project intentionally maintains compatibility with and contains
+materials adapted from the 1c-syntax bsl-language-server project, which is
+distributed under LGPL-3.0. The repository history also contains explicit work
+to remove or rewrite LGPL-derived diagnostic documentation.
+
+Until a file-by-file provenance audit is completed, do not assume that the
+entire repository can be redistributed under MIT or Apache-2.0.
+
+Upstream reference:
+- https://github.com/1c-syntax/bsl-language-server
