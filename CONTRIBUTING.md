@@ -108,4 +108,5 @@ git push -u origin feature/my-change
 - Pull Requests: https://github.com/itrous/bsl-analyzer/pulls
 
 Отправляя изменения в репозиторий, вы соглашаетесь, что вклад будет
-распространяться на условиях `MIT OR Apache-2.0`.
+распространяться на условиях `LGPL-3.0-or-later`, если явно не согласовано
+иное.

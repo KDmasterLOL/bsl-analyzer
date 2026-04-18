@@ -166,4 +166,10 @@ bsl-analyzer (LSP/CLI/MCP)
 
 ## Лицензия
 
-MIT или Apache-2.0, на выбор. См. `LICENSE-MIT` и `LICENSE-APACHE`.
+LGPL-3.0-or-later. См. `LICENSE-LGPL`, `LICENSE-GPL` и `NOTICE`.
+
+Репозиторий содержит материалы, адаптированные по мотивам
+`bsl-language-server` (`LGPL-3.0`), поэтому permissive-модель `MIT/Apache-2.0`
+для всего workspace больше не заявляется. Если позже будет проведён
+файловый provenance-аудит, отдельные части проекта можно будет лицензировать
+отдельно.
