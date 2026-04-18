@@ -310,20 +310,14 @@ fn highlight_ident_semantic<DB: RootDatabase>(
     // Collect external file IDs for preloading
     // This enables warming up caches before user navigates via goto_definition
     match &definition {
-        hir::Definition::MdoManagerModule { file_id, .. } => {
-            if *file_id != ctx.file_id {
-                ctx.resolved_external_files.insert(*file_id);
-            }
+        hir::Definition::MdoManagerModule { file_id, .. } if *file_id != ctx.file_id => {
+            ctx.resolved_external_files.insert(*file_id);
         }
-        hir::Definition::Module(module_id) => {
-            if module_id.file_id != ctx.file_id {
-                ctx.resolved_external_files.insert(module_id.file_id);
-            }
+        hir::Definition::Module(module_id) if module_id.file_id != ctx.file_id => {
+            ctx.resolved_external_files.insert(module_id.file_id);
         }
-        hir::Definition::Method(method_id) => {
-            if method_id.module.file_id != ctx.file_id {
-                ctx.resolved_external_files.insert(method_id.module.file_id);
-            }
+        hir::Definition::Method(method_id) if method_id.module.file_id != ctx.file_id => {
+            ctx.resolved_external_files.insert(method_id.module.file_id);
         }
         _ => {}
     }

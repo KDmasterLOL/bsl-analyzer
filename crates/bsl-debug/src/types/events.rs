@@ -168,10 +168,8 @@ pub fn parse_ping_events(data: &[u8]) -> Vec<DebugEvent> {
                 } else {
                     match current_element.as_slice() {
                         b"cmdID" => cmd_id = text,
-                        b"id" => {
-                            if target_id.is_empty() {
-                                target_id = text;
-                            }
+                        b"id" if target_id.is_empty() => {
+                            target_id = text;
                         }
                         b"targetType" => target_type = text,
                         b"stopByBP" => stop_by_bp = text == "true",
@@ -224,19 +222,17 @@ pub fn parse_ping_events(data: &[u8]) -> Vec<DebugEvent> {
                             events.push(ev);
                         }
                     }
-                    b"callStack" => {
-                        if in_call_stack {
-                            let pres = base64_decode_utf8(&cs_pres);
-                            call_stack_frames.push(EventStackFrame {
-                                object_id: cs_obj.clone(),
-                                property_id: cs_prop.clone(),
-                                extension: cs_ext.clone(),
-                                line_no: cs_line,
-                                presentation: pres,
-                            });
-                            in_call_stack = false;
-                            in_cs_module_id = false;
-                        }
+                    b"callStack" if in_call_stack => {
+                        let pres = base64_decode_utf8(&cs_pres);
+                        call_stack_frames.push(EventStackFrame {
+                            object_id: cs_obj.clone(),
+                            property_id: cs_prop.clone(),
+                            extension: cs_ext.clone(),
+                            line_no: cs_line,
+                            presentation: pres,
+                        });
+                        in_call_stack = false;
+                        in_cs_module_id = false;
                     }
                     b"moduleID" => {
                         if in_cs_module_id {

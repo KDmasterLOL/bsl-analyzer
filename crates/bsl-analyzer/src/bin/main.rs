@@ -929,7 +929,7 @@ fn run_search_baseline_publish(
             );
         }
         EmbeddingProgress::Batch { processed, total, batches_done, total_batches } => {
-            let pct = if total > 0 { processed * 100 / total } else { 100 };
+            let pct = (processed * 100).checked_div(total).unwrap_or(100);
             eprintln!(
                 "      {}/{} ({}%) — batch {}/{}",
                 processed, total, pct, batches_done, total_batches
