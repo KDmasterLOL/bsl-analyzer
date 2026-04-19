@@ -32,8 +32,6 @@
 //!
 //! ## Implementation
 //!
-//! Ported from:
-//!
 //! Tier 3 diagnostic: Requires metadata (Register, Dimension).
 //! Applies to all 4 register types:
 //! - InformationRegister (Регистр сведений)
