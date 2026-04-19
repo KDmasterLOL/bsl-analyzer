@@ -3,7 +3,17 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-A built-in language constructs, keywords must be written canonically.
+BSL is case-insensitive, but keywords are expected to be written in the
+canonical form used by the platform documentation and syntax help.
+
+This diagnostic checks:
+
+- built-in language keywords;
+- preprocessor directives and preprocessor symbols;
+- compilation directives.
+
+Using canonical spelling keeps code visually consistent and makes mixed Russian
+and English syntax easier to read.
 
 ### Keywords
 
@@ -44,7 +54,7 @@ A built-in language constructs, keywords must be written canonically.
 | Функция            | Function      |
 | Экспорт            | Export        |
 
-### Preprocessor instrutions
+### Preprocessor instructions
 
 | RU                                 | EN                             |
 |------------------------------------|--------------------------------|
@@ -83,4 +93,8 @@ A built-in language constructs, keywords must be written canonically.
 
 ## Sources
 
-+ [Standard: General requirements (RU)](https://its.1c.ru/db/v8std#content:441:hdoc)
+Primary source: [Standard: General requirements for built-in language constructs (RU)](https://its.1c.ru/db/v8std#content:441:hdoc)
+
+Secondary source: [v8std.ru: #std441 General requirements for built-in language constructs](https://v8std.ru/std/441/)
+
+Additional reference: [v8std.ru: ACC 1248](https://v8std.ru/diagnostics/acc/1248/)
