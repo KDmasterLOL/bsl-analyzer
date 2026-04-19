@@ -30,15 +30,27 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
     let parse = db.parse(position.file_id);
     let root = parse.syntax_node();
 
-    // Find token at position
-    let token = root.token_at_offset(position.offset).right_biased();
-
-    if token.is_none() {
-        tracing::info!("No token at position - returning None");
-        return None;
-    }
-
-    let token = token.unwrap();
+    // Find token at position.
+    //
+    // When the cursor is on the boundary between IDENT and trivia (whitespace,
+    // newline, punctuation) — e.g. right after typing "Foo" — `right_biased`
+    // returns the trivia token. That would skip the typing branch and dump
+    // every symbol in the project into the completion list. Prefer the
+    // left-biased IDENT/keyword in that case so the prefix filter kicks in.
+    let token = match root.token_at_offset(position.offset) {
+        syntax::TokenAtOffset::None => {
+            tracing::info!("No token at position - returning None");
+            return None;
+        }
+        syntax::TokenAtOffset::Single(t) => t,
+        syntax::TokenAtOffset::Between(left, right) => {
+            if left.kind() == SyntaxKind::IDENT || left.kind().is_keyword() {
+                left
+            } else {
+                right
+            }
+        }
+    };
 
     tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "BSL completion token");
 
@@ -463,6 +475,27 @@ fn complete_mdo_symbols<DB: RootDatabase>(
                     name,
                     mdo.mdo_type.russian_name()
                 )),
+                sort_text: None,
+                filter_text: None,
+                source: ext_name.clone(),
+            });
+        }
+
+        // Common modules live in a separate collection from metadata_objects
+        use bsl_metadata::traits::MdObject;
+        for module in config.common_modules() {
+            let name = module.name();
+
+            if !name.to_lowercase().starts_with(&prefix_lower) {
+                continue;
+            }
+
+            completions.push(CompletionItem {
+                label: name.to_string(),
+                detail: Some("Общий модуль".to_string()),
+                kind: CompletionItemKind::MdoObject,
+                insert_text: name.to_string(),
+                documentation: Some(format!("{name}\n\nОбщий модуль конфигурации.")),
                 sort_text: None,
                 filter_text: None,
                 source: ext_name.clone(),
