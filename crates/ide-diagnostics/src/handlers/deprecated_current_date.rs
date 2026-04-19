@@ -36,8 +36,6 @@
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! Ported from:
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -167,8 +165,8 @@ EndProcedure
 
     #[test]
     fn test_two_procs_one_each_language() {
-        // Fixture scenario: ТекущаяДата() in one proc, CurrentDate() in another,
-        // ТекущаяДатаСеанса() and Модуль.ТекущаяДата() in between (no trigger)
+        // One deprecated call in Russian and one in English;
+        // session date and object method calls should not trigger.
         let code = r#"
 Процедура А()
     ДатаПроверки = ТекущаяДата();
