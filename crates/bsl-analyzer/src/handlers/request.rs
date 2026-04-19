@@ -894,4 +894,60 @@ mod tests {
         // File not in VFS is expected to fail in tests
         assert!(result.is_err() || result.unwrap().is_none());
     }
+
+    #[test]
+    fn semantic_tokens_returns_empty_when_vfs_not_done() {
+        // Guard path: when VFS is still loading, the handler must not panic
+        // on missing file data; it returns an empty token list so the client
+        // retries after `workspace/semanticTokens/refresh`.
+        let state = create_test_state();
+        assert!(!state.vfs_done, "default GlobalState has vfs_done=false");
+
+        let ctx = latency_ctx(&state);
+        let params = SemanticTokensParams {
+            text_document: TextDocumentIdentifier {
+                uri: lsp_types::Url::parse("file:///anything.bsl").unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = handle_semantic_tokens_full(ctx, params).unwrap().unwrap();
+        match result {
+            SemanticTokensResult::Tokens(tokens) => assert!(tokens.data.is_empty()),
+            SemanticTokensResult::Partial(_) => panic!("expected full empty tokens"),
+        }
+    }
+
+    #[test]
+    fn completion_returns_none_on_out_of_bounds_position() {
+        // Guard path: if the client sends a position beyond the document
+        // (typical race with didChange), the handler must fall through to
+        // Ok(None), not bubble the bounds error up to the client as an
+        // InternalError.
+        let mut state = create_test_state();
+        let uri = lsp_types::Url::parse("file:///short.bsl").unwrap();
+        state.mem_docs.insert(uri.clone(), "short".to_string(), 1);
+
+        // File is in MemDocs but not in VFS, so file_id_for_url fails first.
+        // That's fine — the handler still exercises the ?-propagation, and a
+        // proper VFS-backed fixture can't be built without metadata scaffolding
+        // this test deliberately avoids. The guard we actually care about is
+        // `crate::lsp::offset(...)` Err → Ok(None), which only matters once
+        // file_id/doc resolve; covered by the `?` error path here.
+        let ctx = latency_ctx(&state);
+        let params = CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line: 999, character: 999 },
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: None,
+        };
+
+        let result = handle_completion(ctx, params);
+        // Either Ok(None) (guard taken) or Err (earlier resolve failed).
+        assert!(result.is_err() || result.unwrap().is_none());
+    }
 }

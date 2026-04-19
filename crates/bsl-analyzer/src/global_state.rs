@@ -300,6 +300,10 @@ pub struct GlobalStateSnapshot {
 
 impl GlobalStateSnapshot {
     /// Gets the FileId for a URL.
+    ///
+    /// Used by the synchronous formatting handlers that still dispatch via
+    /// `on_sync`; async read handlers use `LatencyRequestContext::file_id_for_url`
+    /// against a frozen VFS snapshot instead.
     pub fn file_id_for_url(&self, url: &Url) -> anyhow::Result<vfs::FileId> {
         let path = url.to_file_path().map_err(|_| anyhow::anyhow!("Invalid file URL: {}", url))?;
 
@@ -307,17 +311,6 @@ impl GlobalStateSnapshot {
 
         let vfs = self.vfs.read();
         vfs.file_id(&vfs_path).ok_or_else(|| anyhow::anyhow!("File not in VFS: {}", url))
-    }
-
-    /// Gets the URL for a FileId.
-    pub fn url_for_file_id(&self, file_id: vfs::FileId) -> anyhow::Result<Url> {
-        let vfs = self.vfs.read();
-        let path = vfs.file_path(file_id);
-
-        let std_path = path.as_path();
-
-        Url::from_file_path(std_path)
-            .map_err(|_| anyhow::anyhow!("Failed to convert path to URL: {:?}", std_path))
     }
 }
 
