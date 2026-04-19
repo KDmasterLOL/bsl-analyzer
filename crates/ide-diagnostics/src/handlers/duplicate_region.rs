@@ -56,10 +56,6 @@
 //! 4. No code simplification from HIR migration - same complexity remains
 //! 5. AST approach is optimal: single parse query, minimal dependencies, direct access to needed data
 //!
-//! Ported from:
-//!
-//! Adapted to use Rowan SyntaxNode and PreRegionDir AST helper.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
