@@ -17,6 +17,7 @@ ide.workspace = true
 parser.workspace = true
 ide-db.workspace = true
 base-db.workspace = true
+salsa.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
 project-model.workspace = true

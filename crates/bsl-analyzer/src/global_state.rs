@@ -9,6 +9,7 @@
 //! - **`workspace`** — VFS, source roots, file loading, metadata warming
 //! - **`diagnostics_state`** — Diagnostics config management
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -105,6 +106,11 @@ pub struct GlobalState {
     /// URI of the most recently changed file pending diagnostics scheduling.
     pub pending_diagnostics_uri: Option<Url>,
 
+    /// Cancellation tokens for in-flight diagnostics computations, keyed by URI.
+    /// Cancelling a token lets the associated background worker unwind cooperatively
+    /// at the next Salsa query boundary, even when no write bumps the global revision.
+    pub diagnostics_tokens: HashMap<Url, salsa::CancellationToken>,
+
     /// Last time progress was reported to the client.
     pub last_progress_report: std::time::Instant,
 
@@ -136,6 +142,7 @@ impl GlobalState {
             diagnostics_config: DiagnosticsConfigInput::new(),
             diagnostics_generation: 0,
             pending_diagnostics_uri: None,
+            diagnostics_tokens: HashMap::new(),
             last_progress_report: std::time::Instant::now(),
             pending_vfs_files: Vec::new(),
         }

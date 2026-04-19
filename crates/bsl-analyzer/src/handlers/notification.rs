@@ -14,21 +14,27 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, PublishDiagnosticsParams, Url,
 };
+use salsa::Database; // brings cancellation_token() into scope
 
 use crate::global_state::{GlobalState, Task};
 
 /// Schedules diagnostics computation in a background thread.
 ///
-/// The background thread clones the Salsa database and runs `file_diagnostics_query`.
-/// If a new `set_file_text()` is called before the query finishes, Salsa cancels
-/// the in-flight query via `zalsa_mut()` → `cancel_others()`, the background thread
-/// panics, `catch_unwind` catches it, and the stale result is discarded by generation check.
+/// Before spawning, any previous in-flight worker for this URI is cancelled via its
+/// Salsa `CancellationToken`, letting it unwind cooperatively at the next query
+/// boundary (no write to the global revision required). A concurrent `set_file_text()`
+/// still triggers `Cancelled::PendingWrite`; both flavors are caught by `Cancelled::catch`,
+/// while bug panics propagate out and are logged by the task pool.
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     // Don't schedule diagnostics until VFS is ready.
     // They will be scheduled again after VFS loading completes.
     if !state.vfs_done {
         tracing::debug!("VFS not ready, skipping diagnostics scheduling");
         return;
+    }
+
+    if let Some(prev) = state.diagnostics_tokens.remove(uri) {
+        prev.cancel();
     }
 
     state.diagnostics_generation += 1;
@@ -44,11 +50,12 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     };
 
     let db = state.analysis_host.raw_database().clone();
+    state.diagnostics_tokens.insert(uri.clone(), db.cancellation_token());
     let config = state.diagnostics_config().clone();
     let uri = uri.clone();
 
     state.task_pool.pool.spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
             let file_id_input = FileIdInput::new(&db, file_id);
             let config_id = base_db::DiagnosticsConfigId::new(&db, config);
             let ide_diagnostics = file_diagnostics_query(&db, file_id_input, config_id);
@@ -199,6 +206,10 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
     let uri = params.text_document.uri;
 
     tracing::debug!("Document closed: {}", uri);
+
+    if let Some(token) = state.diagnostics_tokens.remove(&uri) {
+        token.cancel();
+    }
 
     // Remove from MemDocs
     state.mem_docs.remove(&uri);
