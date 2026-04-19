@@ -42,7 +42,6 @@
 //! - **Minutes to fix:** 1
 //!
 //! ## Implementation
-//! Ported from:
 //!
 //! Migrated from token-based to HIR-based approach.
 
