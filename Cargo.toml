@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.122"
+version = "0.1.125"
 edition = "2021"
 license = "LGPL-3.0-or-later"
 authors = ["BSL Analyzer Contributors"]
@@ -51,8 +51,8 @@ bsl-search = { path = "crates/bsl-search" }
 naparnik = { path = "crates/naparnik" }
 
 # Salsa for incremental computation
-salsa = { version = "0.25.2", features = ["rayon", "macros"] }
-salsa-macros = "0.25.2"
+salsa = { version = "0.26", features = ["rayon", "macros"] }
+salsa-macros = "0.26"
 
 # LSP protocol
 lsp-types = "0.95"

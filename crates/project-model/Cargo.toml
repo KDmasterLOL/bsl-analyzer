@@ -12,7 +12,7 @@ anyhow.workspace = true
 tracing.workspace = true
 chrono.workspace = true
 url.workspace = true
-toml = "0.8"
+toml = "1"
 bsl-metadata = { path = "../bsl-metadata" }
 
 [dev-dependencies]

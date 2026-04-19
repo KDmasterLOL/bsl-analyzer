@@ -9,6 +9,7 @@
 //! - **`workspace`** — VFS, source roots, file loading, metadata warming
 //! - **`diagnostics_state`** — Diagnostics config management
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -39,6 +40,9 @@ pub enum Task {
     DiagnosticsCancelled { generation: u64 },
     /// Request to preload external files discovered during semantic highlighting.
     PreloadExternalFiles { files: Vec<vfs::FileId> },
+    /// Response from an async `on_latency` request handler, ready for the main
+    /// loop to forward to the client and clean up any cancellation token.
+    RequestResult { response: Response },
 }
 
 /// The main state of the LSP server (mutable, main thread only).
@@ -105,6 +109,29 @@ pub struct GlobalState {
     /// URI of the most recently changed file pending diagnostics scheduling.
     pub pending_diagnostics_uri: Option<Url>,
 
+    /// Cancellation tokens for in-flight diagnostics computations, keyed by URI.
+    /// Cancelling a token lets the associated background worker unwind cooperatively
+    /// at the next Salsa query boundary, even when no write bumps the global revision.
+    pub diagnostics_tokens: HashMap<Url, salsa::CancellationToken>,
+
+    /// Cancellation tokens for `didOpen`-triggered dependency preload tasks,
+    /// keyed by the opened file's `FileId`. Cleaned up on `didClose` and when
+    /// the task completes.
+    pub preload_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
+
+    /// Cancellation tokens for external-file preload tasks triggered by semantic
+    /// highlighting, keyed by the first file in the batch. External files are
+    /// never closed by the client, so these entries are cleared only when the
+    /// task completes (see `handle_task` for `DependenciesPreloaded`).
+    pub preload_external_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
+
+    /// Cancellation tokens for in-flight async LSP requests dispatched via
+    /// `on_latency`, keyed by the LSP request id. Cleared when the request
+    /// produces a `Task::RequestResult` or when the client sends
+    /// `$/cancelRequest`. If the client submits a duplicate id, the existing
+    /// token is cancelled so the superseded worker unwinds cooperatively.
+    pub request_tokens: HashMap<lsp_server::RequestId, salsa::CancellationToken>,
+
     /// Last time progress was reported to the client.
     pub last_progress_report: std::time::Instant,
 
@@ -136,6 +163,10 @@ impl GlobalState {
             diagnostics_config: DiagnosticsConfigInput::new(),
             diagnostics_generation: 0,
             pending_diagnostics_uri: None,
+            diagnostics_tokens: HashMap::new(),
+            preload_tokens: HashMap::new(),
+            preload_external_tokens: HashMap::new(),
+            request_tokens: HashMap::new(),
             last_progress_report: std::time::Instant::now(),
             pending_vfs_files: Vec::new(),
         }
@@ -269,6 +300,10 @@ pub struct GlobalStateSnapshot {
 
 impl GlobalStateSnapshot {
     /// Gets the FileId for a URL.
+    ///
+    /// Used by the synchronous formatting handlers that still dispatch via
+    /// `on_sync`; async read handlers use `LatencyRequestContext::file_id_for_url`
+    /// against a frozen VFS snapshot instead.
     pub fn file_id_for_url(&self, url: &Url) -> anyhow::Result<vfs::FileId> {
         let path = url.to_file_path().map_err(|_| anyhow::anyhow!("Invalid file URL: {}", url))?;
 
@@ -276,17 +311,6 @@ impl GlobalStateSnapshot {
 
         let vfs = self.vfs.read();
         vfs.file_id(&vfs_path).ok_or_else(|| anyhow::anyhow!("File not in VFS: {}", url))
-    }
-
-    /// Gets the URL for a FileId.
-    pub fn url_for_file_id(&self, file_id: vfs::FileId) -> anyhow::Result<Url> {
-        let vfs = self.vfs.read();
-        let path = vfs.file_path(file_id);
-
-        let std_path = path.as_path();
-
-        Url::from_file_path(std_path)
-            .map_err(|_| anyhow::anyhow!("Failed to convert path to URL: {:?}", std_path))
     }
 }
 

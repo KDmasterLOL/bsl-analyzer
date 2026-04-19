@@ -36,6 +36,56 @@ struct DocumentData {
     line_index: LineIndex,
 }
 
+/// Immutable snapshot of a single document at request-dispatch time.
+///
+/// Created by `MemDocs::freeze()` and exposed via accessor methods so the
+/// internal `DocumentData` layout stays private.
+#[derive(Debug, Clone)]
+pub struct FrozenDocument {
+    text: String,
+    version: i32,
+    line_index: LineIndex,
+}
+
+impl FrozenDocument {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn version(&self) -> i32 {
+        self.version
+    }
+
+    pub fn line_index(&self) -> &LineIndex {
+        &self.line_index
+    }
+}
+
+/// Frozen view of `MemDocs` at request-dispatch time.
+///
+/// Built on the main thread by `MemDocs::freeze()` and shared to background
+/// workers by value (Arc clone is cheap). Workers never observe edits that
+/// arrive after the freeze, so their source view is consistent with whatever
+/// Salsa snapshot was captured alongside.
+#[derive(Debug, Clone, Default)]
+pub struct FrozenMemDocs {
+    docs: Arc<FxHashMap<Url, FrozenDocument>>,
+}
+
+impl FrozenMemDocs {
+    pub fn get(&self, uri: &Url) -> Option<&FrozenDocument> {
+        self.docs.get(uri)
+    }
+
+    pub fn len(&self) -> usize {
+        self.docs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.docs.is_empty()
+    }
+}
+
 impl MemDocs {
     /// Creates a new empty MemDocs.
     pub fn new() -> Self {
@@ -158,6 +208,29 @@ impl MemDocs {
     /// Returns URIs of all tracked documents.
     pub fn uris(&self) -> Vec<Url> {
         self.docs.read().keys().cloned().collect()
+    }
+
+    /// Deep-clone the current document state into an immutable snapshot.
+    ///
+    /// Paid on the main thread per request that needs a background snapshot.
+    /// Cost is O(open_documents * text_size); acceptable for typical LSP
+    /// workloads (tens of open files).
+    pub fn freeze(&self) -> FrozenMemDocs {
+        let live = self.docs.read();
+        let frozen: FxHashMap<Url, FrozenDocument> = live
+            .iter()
+            .map(|(uri, data)| {
+                (
+                    uri.clone(),
+                    FrozenDocument {
+                        text: data.text.clone(),
+                        version: data.version,
+                        line_index: data.line_index.clone(),
+                    },
+                )
+            })
+            .collect();
+        FrozenMemDocs { docs: Arc::new(frozen) }
     }
 }
 
@@ -303,6 +376,30 @@ mod tests {
         mem_docs.update(&uri, changes);
 
         assert_eq!(mem_docs.get(&uri), Some("Функция Новый()\nКонецФункции".to_string()));
+    }
+
+    #[test]
+    fn freeze_is_independent_of_mutation() {
+        let mut mem_docs = MemDocs::new();
+        let uri = Url::parse("file:///test.bsl").unwrap();
+        mem_docs.insert(uri.clone(), "original".to_string(), 1);
+
+        let frozen = mem_docs.freeze();
+
+        let changes = vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: "mutated".to_string(),
+        }];
+        mem_docs.update(&uri, changes);
+
+        assert_eq!(frozen.get(&uri).map(|d| d.text()), Some("original"));
+        assert_eq!(frozen.get(&uri).map(|d| d.version()), Some(1));
+        assert_eq!(mem_docs.get(&uri), Some("mutated".to_string()));
+        assert_eq!(mem_docs.get_version(&uri), Some(2));
+
+        mem_docs.remove(&uri);
+        assert!(frozen.get(&uri).is_some(), "frozen view must survive removal");
     }
 
     #[test]

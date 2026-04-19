@@ -17,6 +17,7 @@ ide.workspace = true
 parser.workspace = true
 ide-db.workspace = true
 base-db.workspace = true
+salsa.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
 project-model.workspace = true
@@ -51,7 +52,7 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-toml_edit = "0.22"
+toml_edit = "0.25"
 
 # Logging
 tracing.workspace = true
@@ -66,14 +67,14 @@ thiserror.workspace = true
 # Utilities
 walkdir.workspace = true
 tempfile.workspace = true
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Allocator (Unix only — reduces memory fragmentation in multithreaded workloads)
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator.workspace = true
 
 [build-dependencies]
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 walkdir = "2.4"
 
 [dev-dependencies]

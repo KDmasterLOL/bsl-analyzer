@@ -14,21 +14,27 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, PublishDiagnosticsParams, Url,
 };
+use salsa::Database; // brings cancellation_token() into scope
 
 use crate::global_state::{GlobalState, Task};
 
 /// Schedules diagnostics computation in a background thread.
 ///
-/// The background thread clones the Salsa database and runs `file_diagnostics_query`.
-/// If a new `set_file_text()` is called before the query finishes, Salsa cancels
-/// the in-flight query via `zalsa_mut()` → `cancel_others()`, the background thread
-/// panics, `catch_unwind` catches it, and the stale result is discarded by generation check.
+/// Before spawning, any previous in-flight worker for this URI is cancelled via its
+/// Salsa `CancellationToken`, letting it unwind cooperatively at the next query
+/// boundary (no write to the global revision required). A concurrent `set_file_text()`
+/// still triggers `Cancelled::PendingWrite`; both flavors are caught by `Cancelled::catch`,
+/// while bug panics propagate out and are logged by the task pool.
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     // Don't schedule diagnostics until VFS is ready.
     // They will be scheduled again after VFS loading completes.
     if !state.vfs_done {
         tracing::debug!("VFS not ready, skipping diagnostics scheduling");
         return;
+    }
+
+    if let Some(prev) = state.diagnostics_tokens.remove(uri) {
+        prev.cancel();
     }
 
     state.diagnostics_generation += 1;
@@ -44,11 +50,12 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     };
 
     let db = state.analysis_host.raw_database().clone();
+    state.diagnostics_tokens.insert(uri.clone(), db.cancellation_token());
     let config = state.diagnostics_config().clone();
     let uri = uri.clone();
 
     state.task_pool.pool.spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
             let file_id_input = FileIdInput::new(&db, file_id);
             let config_id = base_db::DiagnosticsConfigId::new(&db, config);
             let ide_diagnostics = file_diagnostics_query(&db, file_id_input, config_id);
@@ -114,7 +121,11 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 /// - symbol_tree (for fast GoToDefinition)
 /// - module_bodies (for hover info)
 /// - diagnostics (for fast diagnostics on dependency navigation)
-fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
+///
+/// Any previous preload for the same head `file_id` is cancelled cooperatively
+/// via its Salsa `CancellationToken`, so repeated `didOpen` does not pile up
+/// stale warming tasks. Cancellation is also triggered from `handle_did_close`.
+fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     let analysis = state.analysis_host.analysis();
     let deps = analysis.file_dependencies(file_id);
 
@@ -127,12 +138,25 @@ fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
     let dep_ids: Vec<u32> = deps.iter().map(|f| f.0).collect();
     tracing::debug!(file_id = file_id.0, dep_count, ?dep_ids, "preload: starting background task");
 
+    if let Some(prev) = state.preload_tokens.remove(&file_id) {
+        prev.cancel();
+    }
+
     let task = analysis.warm_caches_task(&deps, state.diagnostics_config().clone());
+    state.preload_tokens.insert(file_id, task.cancellation_token());
 
     state.task_pool.pool.spawn(move || {
         tracing::debug!(dep_count, "preload: background task started");
-        let count = task.run();
-        tracing::debug!(dep_count = count, "preload: background task completed");
+        let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| task.run())) {
+            Ok(count) => {
+                tracing::debug!(dep_count = count, "preload: background task completed");
+                count
+            }
+            Err(_) => {
+                tracing::debug!(file_id = file_id.0, "preload: background task cancelled");
+                0
+            }
+        };
         Task::DependenciesPreloaded { file_id, count }
     });
 }
@@ -200,6 +224,20 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
 
     tracing::debug!("Document closed: {}", uri);
 
+    if let Some(token) = state.diagnostics_tokens.remove(&uri) {
+        token.cancel();
+    }
+    match crate::lsp::file_id(state, &uri) {
+        Ok(file_id) => {
+            if let Some(token) = state.preload_tokens.remove(&file_id) {
+                token.cancel();
+            }
+        }
+        Err(e) => {
+            tracing::warn!(%uri, error = %e, "didClose: could not resolve file_id for preload cleanup")
+        }
+    }
+
     // Remove from MemDocs
     state.mem_docs.remove(&uri);
 
@@ -243,6 +281,30 @@ pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParam
         }
     }
 
+    Ok(())
+}
+
+/// Handles `$/cancelRequest` notification.
+///
+/// Looks up the `salsa::CancellationToken` tracked by `on_latency` for the
+/// given request id and cancels it. The background worker unwinds
+/// cooperatively at the next Salsa query boundary, producing a
+/// `RequestCanceled` response via the normal `Task::RequestResult` path.
+///
+/// Missing ids are a normal race (worker beat the cancel to the finish line);
+/// just log at debug level.
+pub fn handle_cancel(state: &mut GlobalState, params: lsp_types::CancelParams) -> Result<()> {
+    let id = match params.id {
+        lsp_types::NumberOrString::Number(n) => lsp_server::RequestId::from(n),
+        lsp_types::NumberOrString::String(s) => lsp_server::RequestId::from(s),
+    };
+
+    if let Some(token) = state.request_tokens.remove(&id) {
+        tracing::debug!(request_id = ?id, "cancelling in-flight async request");
+        token.cancel();
+    } else {
+        tracing::debug!(request_id = ?id, "cancel arrived after response (no-op)");
+    }
     Ok(())
 }
 
@@ -325,6 +387,50 @@ mod tests {
 
         // Check MemDocs has updated text
         assert_eq!(state.mem_docs.get(&uri), Some("new text".to_string()));
+    }
+
+    #[test]
+    fn handle_cancel_cancels_and_evicts_token() {
+        let (mut state, _receiver) = create_test_state();
+
+        let db = state.analysis_host.raw_database().clone();
+        let token = db.cancellation_token();
+        let id = lsp_server::RequestId::from(123);
+        state.request_tokens.insert(id.clone(), token.clone());
+
+        let params = lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(123) };
+        handle_cancel(&mut state, params).unwrap();
+
+        assert!(token.is_cancelled(), "token must be cancelled after $/cancelRequest");
+        assert!(!state.request_tokens.contains_key(&id), "token must be evicted from map");
+    }
+
+    #[test]
+    fn handle_cancel_is_noop_for_unknown_id() {
+        let (mut state, _receiver) = create_test_state();
+
+        // No token registered for id 999.
+        let params = lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(999) };
+        let result = handle_cancel(&mut state, params);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_cancel_supports_string_ids() {
+        let (mut state, _receiver) = create_test_state();
+
+        let db = state.analysis_host.raw_database().clone();
+        let token = db.cancellation_token();
+        let id = lsp_server::RequestId::from("req-abc".to_string());
+        state.request_tokens.insert(id.clone(), token.clone());
+
+        let params = lsp_types::CancelParams {
+            id: lsp_types::NumberOrString::String("req-abc".to_string()),
+        };
+        handle_cancel(&mut state, params).unwrap();
+
+        assert!(token.is_cancelled());
+        assert!(!state.request_tokens.contains_key(&id));
     }
 
     #[test]

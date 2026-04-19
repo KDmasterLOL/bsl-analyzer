@@ -3,24 +3,34 @@
 //! This module provides the dispatcher pattern for LSP requests and notifications.
 
 use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use anyhow::Result;
-use lsp_server::{ErrorCode, Notification, Request, Response};
+use lsp_server::{ErrorCode, Notification, Request, RequestId, Response};
+use salsa::Database as _;
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::global_state::GlobalState;
+use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
+use crate::global_state::{GlobalState, Task};
 
 /// Dispatcher for LSP requests.
 ///
 /// Provides a chain-based API for handling different request types:
-/// - `on_sync_mut`: Handlers that need mutable access to GlobalState (main thread)
-/// - `on_sync`: Handlers that only need immutable snapshot (main thread)
+/// - `on_sync_mut`: Handlers that need mutable access to GlobalState (main thread).
+///   Use for writes (shutdown, reload).
+/// - `on_sync`: Read-only handlers that run on the main thread. Reserved for
+///   requests the client expects to be synchronous (formatting).
+/// - `on_latency`: Read-only handlers dispatched to the task pool. The handler
+///   receives an immutable `LatencyRequestContext` (frozen `MemDocs` / VFS
+///   paths + owned Salsa snapshot), so it cannot race with `didChange`. The
+///   main loop stays free to handle `$/cancelRequest` and further edits.
 ///
 /// # Example
 /// ```ignore
 /// RequestDispatcher { req: Some(req), global_state: &mut state }
 ///     .on_sync_mut::<Shutdown>(|state, ()| { state.shutdown_requested = true; Ok(()) })
-///     .on_sync::<GotoDefinition>(handlers::handle_goto_definition)
+///     .on_latency::<GotoDefinition>(handlers::handle_goto_definition)
+///     .on_sync::<Formatting>(handlers::handle_formatting)
 ///     .finish();
 /// ```
 pub struct RequestDispatcher<'a> {
@@ -79,6 +89,68 @@ impl RequestDispatcher<'_> {
         let response = result_to_response::<R>(req.id, result);
 
         self.global_state.respond(response);
+        self
+    }
+
+    /// Handles a read-only request on the background task pool.
+    ///
+    /// Builds an immutable `LatencyRequestContext` on the main thread
+    /// (freezes `MemDocs` and VFS paths, clones the Salsa DB), tracks a
+    /// `salsa::CancellationToken` in `GlobalState.request_tokens`, and
+    /// spawns the handler on the task pool. The response is delivered to
+    /// the main loop via `Task::RequestResult`; cancellation unwinds the
+    /// worker cooperatively and produces a `RequestCanceled` response.
+    ///
+    /// Guarantees exactly one `Task::RequestResult` per dispatch, even if
+    /// the handler panics — panics are caught and reported as
+    /// `InternalError` with the payload logged.
+    pub fn on_latency<R>(
+        &mut self,
+        f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
+    ) -> &mut Self
+    where
+        R: lsp_types::request::Request,
+        R::Params: DeserializeOwned + fmt::Debug + Send + 'static,
+        R::Result: Serialize + Send + 'static,
+    {
+        let (req, params) = match self.parse_request::<R>() {
+            Some(it) => it,
+            None => return self,
+        };
+
+        tracing::debug!("Handling {} on task pool (id: {})", R::METHOD, req.id);
+
+        // Clone the Salsa DB for this request — the clone is owned and Send,
+        // so it can travel to a worker thread. The cancellation token is tied
+        // to this specific snapshot.
+        let db = self.global_state.analysis_host.raw_database().clone();
+        let token = db.cancellation_token();
+        let analysis = ide::Analysis::from_database(db);
+
+        // Overwrite policy: if the client recycled a request id (unusual but
+        // not forbidden by LSP), cancel the superseded worker so its token
+        // doesn't leak.
+        if let Some(prev) = self.global_state.request_tokens.insert(req.id.clone(), token) {
+            tracing::warn!(request_id = ?req.id, "duplicate LSP request id; cancelling previous");
+            prev.cancel();
+        }
+
+        let ctx = LatencyRequestContext {
+            analysis,
+            workspace_root: self.global_state.workspace_root.clone(),
+            project: self.global_state.project.clone(),
+            diagnostics_config: self.global_state.diagnostics_config().clone(),
+            vfs_done: self.global_state.vfs_done,
+            task_sender: self.global_state.task_pool.pool.sender.clone(),
+            mem_docs: self.global_state.mem_docs.freeze(),
+            file_paths: FrozenFilePaths::freeze(&self.global_state.vfs.read()),
+        };
+
+        let id = req.id;
+        self.global_state.task_pool.pool.spawn(move || {
+            let response = run_latency_handler::<R>(id, ctx, params, f);
+            Task::RequestResult { response }
+        });
         self
     }
 
@@ -217,11 +289,80 @@ where
     }
 }
 
+/// Runs a read-only LSP handler on the task pool, producing exactly one
+/// `Response` regardless of handler outcome (success, error, Salsa
+/// cancellation, or panic).
+///
+/// Two layers of protection:
+/// 1. `salsa::Cancelled::catch` unwinds cooperative cancellation into a
+///    `RequestCanceled` response.
+/// 2. `std::panic::catch_unwind` turns any residual panic (including those
+///    outside Salsa's purview) into an `InternalError` response with the
+///    payload and a backtrace logged via `tracing::error!`.
+fn run_latency_handler<R>(
+    id: RequestId,
+    ctx: LatencyRequestContext,
+    params: R::Params,
+    f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
+) -> Response
+where
+    R: lsp_types::request::Request,
+    R::Result: Serialize,
+{
+    let inner_id = id.clone();
+    let inner = move || -> Response {
+        match salsa::Cancelled::catch(AssertUnwindSafe(|| f(ctx, params))) {
+            Ok(result) => result_to_response::<R>(inner_id, result),
+            Err(_cancelled) => Response::new_err(
+                inner_id,
+                ErrorCode::RequestCanceled as i32,
+                "request cancelled".to_string(),
+            ),
+        }
+    };
+
+    match catch_unwind(AssertUnwindSafe(inner)) {
+        Ok(response) => response,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+            tracing::error!(
+                request_id = ?id,
+                method = R::METHOD,
+                panic = %msg,
+                backtrace = %std::backtrace::Backtrace::force_capture(),
+                "async LSP handler panicked"
+            );
+            Response::new_err(
+                id,
+                ErrorCode::InternalError as i32,
+                "internal handler panic".to_string(),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
-    use lsp_types::request::{Request as _, Shutdown};
+    use lsp_types::request::{HoverRequest, Request as _, Shutdown};
+    use std::time::Duration;
+
+    fn hover_params() -> lsp_types::HoverParams {
+        lsp_types::HoverParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier {
+                    uri: lsp_types::Url::parse("file:///test.bsl").unwrap(),
+                },
+                position: lsp_types::Position { line: 0, character: 0 },
+            },
+            work_done_progress_params: Default::default(),
+        }
+    }
 
     #[test]
     fn test_request_dispatcher_shutdown() {
@@ -242,5 +383,104 @@ mod tests {
             .finish();
 
         assert!(state.shutdown_requested);
+    }
+
+    #[test]
+    fn on_latency_happy_path() {
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+
+        let req = Request::new(
+            lsp_server::RequestId::from(42),
+            HoverRequest::METHOD.to_string(),
+            serde_json::to_value(hover_params()).unwrap(),
+        );
+
+        let receiver = state.task_pool.receiver.clone();
+        RequestDispatcher { req: Some(req), global_state: &mut state }
+            .on_latency::<HoverRequest>(|_ctx, _p| Ok(None))
+            .finish();
+
+        let task = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("task pool did not produce RequestResult");
+        let Task::RequestResult { response } = task else {
+            panic!("expected RequestResult, got {task:?}");
+        };
+        assert_eq!(response.id, lsp_server::RequestId::from(42));
+        assert!(response.error.is_none(), "happy path must not set error");
+        assert_eq!(response.result, Some(serde_json::Value::Null));
+    }
+
+    #[test]
+    fn on_latency_panic_becomes_internal_error() {
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+
+        let req = Request::new(
+            lsp_server::RequestId::from(7),
+            HoverRequest::METHOD.to_string(),
+            serde_json::to_value(hover_params()).unwrap(),
+        );
+
+        let receiver = state.task_pool.receiver.clone();
+        RequestDispatcher { req: Some(req), global_state: &mut state }
+            .on_latency::<HoverRequest>(|_ctx, _p| panic!("handler boom"))
+            .finish();
+
+        let task = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("task pool did not produce RequestResult");
+        let Task::RequestResult { response } = task else {
+            panic!("expected RequestResult, got {task:?}");
+        };
+        assert_eq!(response.id, lsp_server::RequestId::from(7));
+        let err = response.error.expect("panic must produce error");
+        assert_eq!(err.code, ErrorCode::InternalError as i32);
+        // Token cleanup is the main loop's responsibility (see
+        // `server::handle_task::RequestResult`); the worker itself never
+        // touches `request_tokens`. We just sanity-check the entry still
+        // exists at this point so a cancel sent before main-loop pickup
+        // can still unwind the worker.
+        assert!(state.request_tokens.contains_key(&lsp_server::RequestId::from(7)));
+    }
+
+    #[test]
+    fn on_latency_duplicate_id_cancels_previous() {
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+
+        // Dispatch two requests with the same id. The second one must cancel
+        // the first's token before storing its own.
+        let id = lsp_server::RequestId::from(99);
+
+        let req1 = Request::new(
+            id.clone(),
+            HoverRequest::METHOD.to_string(),
+            serde_json::to_value(hover_params()).unwrap(),
+        );
+        RequestDispatcher { req: Some(req1), global_state: &mut state }
+            .on_latency::<HoverRequest>(|_ctx, _p| Ok(None))
+            .finish();
+
+        let first_token =
+            state.request_tokens.get(&id).expect("first dispatch must register token").clone();
+
+        let req2 = Request::new(
+            id.clone(),
+            HoverRequest::METHOD.to_string(),
+            serde_json::to_value(hover_params()).unwrap(),
+        );
+        RequestDispatcher { req: Some(req2), global_state: &mut state }
+            .on_latency::<HoverRequest>(|_ctx, _p| Ok(None))
+            .finish();
+
+        assert!(
+            first_token.is_cancelled(),
+            "dispatching a duplicate id must cancel the previous token"
+        );
+        let current =
+            state.request_tokens.get(&id).expect("second dispatch must register a new token");
+        assert!(!current.is_cancelled(), "new token must still be live");
     }
 }

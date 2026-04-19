@@ -352,6 +352,8 @@ pub fn module_reaching_definitions_query<'db>(
     let mut results = rustc_hash::FxHashMap::default();
 
     for (local_id, body) in module_bodies.iter_bodies() {
+        db.unwind_if_revision_cancelled();
+
         let cfg = match module_cfgs.get(local_id) {
             Some(cfg) => cfg.clone(), // Clone Arc (cheap)
             None => continue,
@@ -461,6 +463,8 @@ pub fn module_liveness_analysis_query<'db>(
     let mut results = rustc_hash::FxHashMap::default();
 
     for (local_id, body) in module_bodies.iter_bodies() {
+        db.unwind_if_revision_cancelled();
+
         let cfg = match module_cfgs.get(local_id) {
             Some(cfg) => cfg,
             None => continue,

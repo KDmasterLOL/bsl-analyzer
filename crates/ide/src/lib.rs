@@ -33,23 +33,22 @@ use syntax::TextSize;
 use vfs::FileId;
 
 /// The main analysis API.
+///
+/// `Analysis` owns a `RootDatabaseImpl` directly (not `Arc<RootDatabaseImpl>`)
+/// so it can be sent to background worker threads. Each `Analysis` represents
+/// an independent Salsa snapshot; clones are produced via `AnalysisHost::analysis()`.
 pub struct Analysis {
-    db: Arc<RootDatabaseImpl>,
+    db: RootDatabaseImpl,
 }
 
 impl Analysis {
-    // RootDatabaseImpl is not Send/Sync by design - it's a single-threaded Salsa database.
-    // Arc is used for cheap cloning and interior mutability, not for thread-safety.
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
-        Self { db: Arc::new(RootDatabaseImpl::default()) }
+        Self { db: RootDatabaseImpl::default() }
     }
 
     /// Create Analysis with a specific database (for testing).
-    // RootDatabaseImpl is not Send/Sync by design - it's a single-threaded Salsa database.
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn from_database(db: RootDatabaseImpl) -> Self {
-        Self { db: Arc::new(db) }
+        Self { db }
     }
 
     /// Get a reference to the database (for testing).
@@ -59,8 +58,8 @@ impl Analysis {
 
     /// Returns diagnostics for a file.
     pub fn diagnostics(&self, file_id: FileId, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
-        let config_path_input = ide_db::configuration_path_for_file(self.db.as_ref(), file_id);
-        let provider = ide_db::SalsaProvider::new(self.db.as_ref(), config_path_input);
+        let config_path_input = ide_db::configuration_path_for_file(&self.db, file_id);
+        let provider = ide_db::SalsaProvider::new(&self.db, config_path_input);
         let ctx = ide_diagnostics::DiagnosticsContext::new(config, file_id, &provider);
         ide_diagnostics::diagnostics(&ctx)
     }
@@ -68,13 +67,13 @@ impl Analysis {
     /// Goes to the definition of the symbol at the position.
     pub fn goto_definition(&self, file_id: FileId, offset: u32) -> Option<NavigationTarget> {
         let offset = TextSize::from(offset);
-        goto_definition::goto_definition(self.db.as_ref(), file_id, offset)
+        goto_definition::goto_definition(&self.db, file_id, offset)
     }
 
     /// Finds all references to the symbol at the position.
     pub fn find_references(&self, file_id: FileId, offset: u32) -> Vec<Location> {
         let offset = TextSize::from(offset);
-        references::find_references(self.db.as_ref(), file_id, offset)
+        references::find_references(&self.db, file_id, offset)
     }
 
     /// Returns code completions at the position.
@@ -97,7 +96,7 @@ impl Analysis {
     ) -> Vec<CompletionItem> {
         let offset = TextSize::from(offset);
         let position = completion::CompletionPosition { file_id, offset, workspace_root };
-        completion::completions(self.db.as_ref(), position)
+        completion::completions(&self.db, position)
     }
 
     /// Returns hover information at the position.
@@ -113,12 +112,12 @@ impl Analysis {
     /// * `offset` - Byte offset in the file (0-based)
     pub fn hover(&self, file_id: FileId, offset: u32) -> Option<HoverResult> {
         let offset = TextSize::from(offset);
-        hover::hover(self.db.as_ref(), file_id, offset)
+        hover::hover(&self.db, file_id, offset)
     }
 
     /// Returns document symbols (procedures, functions, variables, regions).
     pub fn document_symbols(&self, file_id: FileId) -> Vec<DocumentSymbol> {
-        document_symbols::document_symbols(self.db.as_ref(), file_id)
+        document_symbols::document_symbols(&self.db, file_id)
     }
 
     /// Returns code actions at the position.
@@ -138,7 +137,7 @@ impl Analysis {
     pub fn file_text(&self, file_id: FileId) -> String {
         use ide_db::base_db::SourceDatabase;
         let input = self.db.file_text_input(file_id);
-        input.text(self.db.as_ref()).clone()
+        input.text(&self.db).clone()
     }
 
     /// Run diagnostics query via Salsa (cached).
@@ -148,9 +147,9 @@ impl Analysis {
         config: DiagnosticsConfigInput,
     ) -> Arc<Vec<Diagnostic>> {
         use ide_db::base_db::{DiagnosticsConfigId, FileIdInput};
-        let file_id_input = FileIdInput::new(self.db.as_ref(), file_id);
-        let config_id = DiagnosticsConfigId::new(self.db.as_ref(), config);
-        ide_diagnostics::file_diagnostics_query(self.db.as_ref(), file_id_input, config_id)
+        let file_id_input = FileIdInput::new(&self.db, file_id);
+        let config_id = DiagnosticsConfigId::new(&self.db, config);
+        ide_diagnostics::file_diagnostics_query(&self.db, file_id_input, config_id)
     }
 
     /// Create a cache-warming task for background execution.
@@ -162,7 +161,7 @@ impl Analysis {
         file_ids: &[FileId],
         config: DiagnosticsConfigInput,
     ) -> WarmCachesTask {
-        WarmCachesTask { db: (*self.db).clone(), file_ids: file_ids.to_vec(), config }
+        WarmCachesTask { db: self.db.clone(), file_ids: file_ids.to_vec(), config }
     }
 
     /// Returns semantic highlighting for a file.
@@ -170,7 +169,7 @@ impl Analysis {
     /// Returns `HighlightResult` containing both highlights and resolved external files.
     /// External files can be preloaded in background for faster goto_definition.
     pub fn highlight(&self, file_id: FileId) -> HighlightResult {
-        syntax_highlighting::highlight(self.db.as_ref(), file_id)
+        syntax_highlighting::highlight(&self.db, file_id)
     }
 
     /// Returns signature help at the position.
@@ -186,7 +185,7 @@ impl Analysis {
     /// * `offset` - Byte offset in the file (0-based)
     pub fn signature_help(&self, file_id: FileId, offset: u32) -> Option<SignatureHelp> {
         let offset = TextSize::from(offset);
-        signature_help::signature_help(self.db.as_ref(), file_id, offset)
+        signature_help::signature_help(&self.db, file_id, offset)
     }
 
     /// Formats an entire file.
@@ -194,7 +193,7 @@ impl Analysis {
     /// Returns formatting result with the formatted text and text edits.
     pub fn format_file(&self, file_id: FileId, config: &FormattingConfig) -> FormattingResult {
         use ide_db::base_db::RootQueryDb;
-        let parse = self.db.as_ref().parse(file_id);
+        let parse = self.db.parse(file_id);
         let root = parse.syntax_node();
         formatting::format_file(&root, config)
     }
@@ -209,7 +208,7 @@ impl Analysis {
         config: &FormattingConfig,
     ) -> FormattingResult {
         use ide_db::base_db::RootQueryDb;
-        let parse = self.db.as_ref().parse(file_id);
+        let parse = self.db.parse(file_id);
         let root = parse.syntax_node();
         formatting::format_range(&root, range, config)
     }
@@ -225,7 +224,7 @@ impl Analysis {
         config: &FormattingConfig,
     ) -> Option<Vec<formatting::TextEdit>> {
         use ide_db::base_db::RootQueryDb;
-        let parse = self.db.as_ref().parse(file_id);
+        let parse = self.db.parse(file_id);
         let root = parse.syntax_node();
         let offset = TextSize::from(offset);
         formatting::on_char_typed(&root, offset, char_typed, config).map(|r| r.edits)
@@ -249,6 +248,15 @@ pub struct WarmCachesTask {
 }
 
 impl WarmCachesTask {
+    /// Returns a cancellation token for this task's Salsa snapshot.
+    ///
+    /// Calling `cancel()` on the returned token makes the next query boundary
+    /// inside `run()` unwind with `salsa::Cancelled::Local`, so callers can
+    /// abort long-running cache warming when the work is no longer needed.
+    pub fn cancellation_token(&self) -> salsa::CancellationToken {
+        salsa::Database::cancellation_token(&self.db)
+    }
+
     /// Run the cache-warming task. Returns the number of files processed.
     pub fn run(self) -> usize {
         use hir::{DefDatabase, ModuleId};
@@ -300,3 +308,11 @@ pub struct DocumentSymbol {
     pub selection_range: TextRange,
     pub children: Vec<DocumentSymbol>,
 }
+
+// Compile-time guard: `Analysis` must be `Send` so it can be moved into
+// background worker threads by `on_latency` dispatch.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<Analysis>();
+    assert_send::<WarmCachesTask>();
+};

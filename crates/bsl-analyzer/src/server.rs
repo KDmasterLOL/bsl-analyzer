@@ -278,6 +278,19 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
         }
         Task::DependenciesPreloaded { file_id, count } => {
             tracing::debug!(file_id = file_id.0, count, "dependencies preloaded");
+            // Best-effort cleanup. If a rapid re-spawn replaced our token
+            // between worker completion and this handler, the newer entry
+            // is evicted and its worker becomes uncancellable — worst case
+            // is wasted CPU on a redundant cache warmer.
+            state.preload_tokens.remove(&file_id);
+            state.preload_external_tokens.remove(&file_id);
+        }
+        Task::RequestResult { response } => {
+            // Best-effort cleanup: a concurrent `$/cancelRequest` may have
+            // already removed the entry. Missing is fine — the worker
+            // beat the cancel to the finish line.
+            state.request_tokens.remove(&response.id);
+            state.respond(response);
         }
         Task::PreloadExternalFiles { files } => {
             if files.is_empty() {
@@ -291,9 +304,24 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             let task = analysis.warm_caches_task(&files, state.diagnostics_config().clone());
             let first_file = files[0];
 
+            if let Some(prev) = state.preload_external_tokens.remove(&first_file) {
+                prev.cancel();
+            }
+            state.preload_external_tokens.insert(first_file, task.cancellation_token());
+
             state.task_pool.pool.spawn(move || {
-                let count = task.run();
-                tracing::debug!(count = file_count, "external files preloaded");
+                let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                    task.run()
+                })) {
+                    Ok(count) => {
+                        tracing::debug!(count = file_count, "external files preloaded");
+                        count
+                    }
+                    Err(_) => {
+                        tracing::debug!(file_id = first_file.0, "external file preload cancelled");
+                        0
+                    }
+                };
                 Task::DependenciesPreloaded { file_id: first_file, count }
             });
         }
@@ -383,14 +411,19 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
             state.shutdown_requested = true;
             Ok(())
         })
-        .on_sync::<GotoDefinition>(crate::handlers::handle_goto_definition)
-        .on_sync::<References>(crate::handlers::handle_find_references)
-        .on_sync::<HoverRequest>(crate::handlers::handle_hover)
-        .on_sync::<Completion>(crate::handlers::handle_completion)
-        .on_sync::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
-        .on_sync::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
-        .on_sync::<CodeActionRequest>(crate::handlers::handle_code_action)
-        .on_sync::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
+        // Read-only latency-sensitive requests run on the task pool so the
+        // main loop stays responsive to $/cancelRequest and subsequent edits.
+        .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
+        .on_latency::<References>(crate::handlers::handle_find_references)
+        .on_latency::<HoverRequest>(crate::handlers::handle_hover)
+        .on_latency::<Completion>(crate::handlers::handle_completion)
+        .on_latency::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
+        .on_latency::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
+        .on_latency::<CodeActionRequest>(crate::handlers::handle_code_action)
+        .on_latency::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
+        // Formatting stays synchronous: clients (VS Code, Helix, Neovim)
+        // run save-and-format synchronously, and our formatter is fast
+        // enough that task-pool dispatch would add latency, not hide it.
         .on_sync::<Formatting>(crate::handlers::handle_formatting)
         .on_sync::<RangeFormatting>(crate::handlers::handle_range_formatting)
         .on_sync::<OnTypeFormatting>(crate::handlers::handle_on_type_formatting)
@@ -402,7 +435,8 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
 /// Handles an LSP notification.
 fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<()> {
     use lsp_types::notification::{
-        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+        Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
+        DidSaveTextDocument,
     };
 
     // Check for exit notification (special case - ends the loop)
@@ -417,6 +451,7 @@ fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<()>
         .on_sync_mut::<DidChangeTextDocument>(crate::handlers::handle_did_change)?
         .on_sync_mut::<DidCloseTextDocument>(crate::handlers::handle_did_close)?
         .on_sync_mut::<DidSaveTextDocument>(crate::handlers::handle_did_save)?
+        .on_sync_mut::<Cancel>(crate::handlers::handle_cancel)?
         .finish();
 
     Ok(())
