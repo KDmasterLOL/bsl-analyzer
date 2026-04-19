@@ -25,4 +25,7 @@
 
 ## Источники
 
-* Полезная информация: [Разработка интерфейса прикладных решений на платформе "1С:Предприятие 8"](https://its.1c.ru/db/pubv8devui#content:189:1)
+- [Полезная информация: Разработка интерфейса прикладных решений на платформе "1С:Предприятие 8"](https://its.1c.ru/db/pubv8devui#content:189:1)
+- [v8std: #std439 Использование директив компиляции и инструкций препроцессора](https://v8std.ru/std/439/)
+- [v8std: form-module-pragma](https://v8std.ru/diagnostics/v8-code-style/form-module-pragma/)
+- [v8std: form-module-missing-pragma](https://v8std.ru/diagnostics/v8-code-style/form-module-missing-pragma/)

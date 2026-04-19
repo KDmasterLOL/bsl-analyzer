@@ -32,8 +32,6 @@
 //! ## Implementation
 //!
 //! Uses HIR ItemTree for efficient cached access to method annotations.
-//! Ported from:
-//!
 //! Only applies to FormModule and CommandModule (not CommonModule).
 
 use crate::define_metadata;
@@ -174,14 +172,14 @@ mod tests {
     fn test_comprehensive() {
         let code = r#"
 &НаСервере
-Процедура А()
+Процедура ЗагрузитьДанные()
 Конецпроцедуры
 
 &НаКлиенте
-Функция Б()
+Функция ПолучитьЗаголовок()
 КонецФункции
 
-Функция СОшибкой() // Тут
+Функция НужнаДиректива()
 КонецФункции
 "#;
         let diagnostics = check_as_form_module(code);
@@ -189,8 +187,8 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "Should find exactly 1 diagnostic");
 
         // Line 10 (1-indexed) = line 9 (0-indexed)
-        // "Функция СОшибкой()" - name "СОшибкой" at columns 8-16
-        assert_diagnostic_range(code, &diagnostics[0], 9, 8, 16);
+        // "Функция НужнаДиректива()" - name "НужнаДиректива" at columns 8-22
+        assert_diagnostic_range(code, &diagnostics[0], 9, 8, 22);
     }
 
     #[test]
@@ -211,14 +209,14 @@ mod tests {
     fn test_mixed() {
         let code = r#"
 &НаСервере
-Процедура А()
+Процедура ОбновитьДанные()
 КонецПроцедуры
 
 &НаКлиенте
-Функция Б()
+Функция ПолучитьПредставление()
 КонецФункции
 
-Функция СОшибкой()
+Функция БезДирективы()
 КонецФункции
 "#;
         let diagnostics = check_as_form_module(code);
