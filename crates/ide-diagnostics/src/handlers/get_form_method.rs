@@ -1,14 +1,12 @@
 //! GetFormMethod diagnostic.
 //!
-//! Detects usage of deprecated `ПолучитьФорму()` / `GetForm()` methods.
+//! Detects usage of `ПолучитьФорму()` / `GetForm()` methods.
 //!
 //! ## Why?
-//! Using `ПолучитьФорму()` / `GetForm()`:
-//! - Is an error-prone approach for working with forms
-//! - Returns managed form object which is deprecated
-//! - Should be replaced with `ОткрытьФорму()` / `OpenForm()`
-//! - Can cause memory leaks if form is not properly closed
-//! - Violates modern 1C development practices
+//! Current 1C recommendations prefer opening forms through
+//! `ОткрытьФорму()` / `OpenForm()` instead of obtaining a form object first.
+//! This diagnostic flags direct `ПолучитьФорму()` / `GetForm()` calls as a
+//! conservative project rule built on top of that guidance.
 //!
 //! ## Bad practice
 //! ```bsl
@@ -28,12 +26,6 @@
 //! Процедура ОткрытьСправочник()
 //!     ОткрытьФорму("Справочник.Номенклатура.ФормаСписка");  // Correct!
 //! КонецПроцедуры
-//!
-//! Процедура ОткрытьДокумент()
-//!     Док = Документы.ЗаявкаНаОперацию.СоздатьДокумент();
-//!     Форма = Док.ПолучитьФорму();  // No better alternative for object method
-//!     // Or better - use ОткрытьФорму with proper parameters
-//! КонецПроцедуры
 //! ```
 //!
 //! ## Configuration
@@ -42,13 +34,8 @@
 //! - **Tags:** ERROR
 //! - **Minutes to fix:** 15
 //!
-//! ## Implementation
-//! Ported from:
-//!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter or ANTLR visitor.
-//!
 //! ## References
-//! Uses AbstractFindMethodDiagnostic pattern - checks both global and object method calls.
+//! Checks both global and object method calls emitted from local HIR lowering.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -204,7 +191,7 @@ EndProcedure
     }
 
     #[test]
-    fn test_from_java_fixture() {
+    fn test_detects_mixed_get_form_calls() {
         let code = r#"Процедура Тест()
     Док=Документы.ЗаявкаНаОперацию.СоздатьДокумент();
     Форма=Док.ПолучитьФорму("ФормаДокумента"); // Срабатывание здесь

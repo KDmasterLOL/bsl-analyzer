@@ -2,27 +2,37 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-To open forms, use the OpenForm global context method (when using the 1C: Enterprise 8.2 platform version and earlier versions, also use OpenFormModal). An alternative method, using the GetForm method, is not recommended.
+1C recommendations prefer opening forms through the global context method
+`OpenForm()` (`OpenFormModal()` for older `8.2`-era projects) instead of first
+obtaining a form object with `GetForm()`.
+
+The current implementation is intentionally conservative: it reports any direct
+`GetForm()` / `ПолучитьФорму()` call, including object method calls, not only
+the exact “get form and then call `Open()`” pattern described in the standard.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-
 ```bsl
-Procedure Test()
-    Doc = Documents.PlanOperation.CreateDocument();
-    Form = Doc.GetForm("DocumentForm"); // here
+Procedure OpenCatalog()
+    Form = GetForm("Catalog.Products.FormList");
+    Form.Open();
 EndProcedure
 ```
 
 ```bsl
-Procedure Test2()
-    Form = GetForm("CommonForms.MyForm");
+Procedure OpenDocument()
+    DocumentObject = Documents.SalesInvoice.CreateDocument();
+    Form = DocumentObject.GetForm("DocumentForm");
+EndProcedure
+```
+
+```bsl
+Procedure OpenCatalog()
+    OpenForm("Catalog.Products.FormList");
 EndProcedure
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-
-Source: [Development standards (RU)](https://its.1c.ru/db/v8std/content/404/hdoc)
+* Primary source: [ITS / v8std #std404: Opening forms (RU)](https://its.1c.ru/db/v8std#content:404:hdoc)
+* Secondary source: [v8std.ru: #std404](https://v8std.ru/std/404/)
+* Secondary source: [v8std.ru: GetFormMethod](https://v8std.ru/diagnostics/bslls/GetFormMethod/)
