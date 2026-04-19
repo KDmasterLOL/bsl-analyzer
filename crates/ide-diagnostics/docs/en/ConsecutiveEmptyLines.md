@@ -1,9 +1,35 @@
-# Consecutive empty lines (ConsecutiveEmptyLines)
+# Consecutive Empty Lines (ConsecutiveEmptyLines)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-To separate blocks of code among themselves, insert an empty line.
+A single empty line is usually enough to separate neighboring blocks of code.
+When two or more empty lines appear in a row, they rarely add structure and
+instead make the module visually longer and less dense.
 
-Inserting 2 or more empty lines does not carry this value and leads to a meaningless increase in the length of the method or module.
+This diagnostic reports groups of consecutive empty lines that exceed the
+configured limit. By default, one empty line is allowed.
+
+## Examples
+
+Incorrect:
+
+```bsl
+Procedure Run()
+
+
+    PrepareData();
+EndProcedure
+```
+
+Correct:
+
+```bsl
+Procedure Run()
+
+    PrepareData();
+EndProcedure
+```
+
+## Sources
+
+- [v8std: module-consecutive-blank-lines](https://v8std.ru/diagnostics/v8-code-style/module-consecutive-blank-lines/)
