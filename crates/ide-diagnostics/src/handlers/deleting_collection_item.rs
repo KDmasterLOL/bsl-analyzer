@@ -43,9 +43,9 @@
 //! - **Minutes to fix:** 5
 //!
 //! ## Implementation
-//! Ported from:
 //!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter.
+//! Integrated through local HIR body diagnostics and adapted to the local
+//! syntax and semantic model.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -400,9 +400,8 @@ EndProcedure
 
     #[test]
     fn test_break_after_delete_nested_loops() {
-        // Реальный паттерн из doc3: вложенные циклы с Delete + Break
-        // Real pattern from doc3: nested loops with Delete + Break
-        // Catalogs/ГруппыКонтактовПользователей/Ext/ObjectModule.bsl
+        // Вложенные циклы с Delete + Break — безопасный паттерн
+        // Nested loops with Delete + Break — safe pattern
         let code = r#"
 Процедура ПередЗаписью()
     // Внешний цикл по элементам для удаления

@@ -820,6 +820,7 @@ fn discover_git_dir(start_dir: &Path) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlConfig {
     #[serde(default)]
     source: TomlSourceConfig,
@@ -829,8 +830,6 @@ struct TomlConfig {
     code_lens: CodeLensConfig,
     #[serde(default)]
     formatting: FormattingConfig,
-    #[serde(default)]
-    extensions: Vec<String>,
     #[serde(default)]
     search: TomlSearchConfig,
 }
@@ -842,16 +841,18 @@ impl Default for TomlConfig {
             diagnostics: default_toml_table(),
             code_lens: CodeLensConfig::default(),
             formatting: FormattingConfig::default(),
-            extensions: Vec::new(),
             search: TomlSearchConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlSourceConfig {
     #[serde(default)]
     root: Option<String>,
+    #[serde(default)]
+    extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -910,7 +911,7 @@ impl From<TomlConfig> for ProjectConfig {
             formatting: toml.formatting,
             configuration_root: toml.source.root,
             language: None,
-            extensions: toml.extensions,
+            extensions: toml.source.extensions,
             search: SearchConfig {
                 baseline: SearchBaselineConfig {
                     backend: toml.search.baseline.backend,
@@ -1663,6 +1664,34 @@ mod tests {
         assert_eq!(project.search.baseline.backend, SearchBaselineBackend::Sqlite);
         assert!(project.configuration_root.is_none());
         assert!(!project.search.baseline.postgres.is_configured());
+    }
+
+    #[test]
+    fn toml_config_reads_extensions_from_source_section() {
+        let toml_str = r#"
+[source]
+root = "src/cf"
+extensions = ["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]
+"#;
+        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
+        let project = ProjectConfig::from(config);
+        assert_eq!(project.configuration_root.as_deref(), Some("src/cf"));
+        assert_eq!(project.extensions, vec!["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"]);
+    }
+
+    #[test]
+    fn toml_config_rejects_top_level_extensions() {
+        let toml_str = r#"
+extensions = ["src/cfe/BMS_RU_UT"]
+
+[source]
+root = "src/cf"
+"#;
+        let result: Result<super::TomlConfig, _> = toml::from_str(toml_str);
+        assert!(
+            result.is_err(),
+            "top-level extensions must be rejected; use [source].extensions instead"
+        );
     }
 
     #[test]

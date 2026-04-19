@@ -1,13 +1,18 @@
-# There are identical sub-expressions to the left and to the right of the "foo" operator (IdenticalExpressions)
+# Identical expressions on both sides of an operator (IdenticalExpressions)
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-The diagnostic detects two types of issues:
+This diagnostic detects two suspicious patterns:
 
-1. **Identical expressions on both sides of an operator** — if there is an operator (<, >, <=, >=, =, <>, AND, OR, -, /) in the program text with identical subexpressions on both sides, this is most likely a logic error.
+1. **The same expression appears on both sides of an operator**. For operators
+   such as `<`, `>`, `<=`, `>=`, `=`, `<>`, `AND`, `OR`, `-`, or `/`, this
+   usually points to a copy-paste or attention error.
 
-2. **Repeated expressions in code split by preprocessor directives** — if an expression is split by preprocessor instructions (#If/#Else/#EndIf) and contains identical code in different branches, this may indicate a copy-paste error.
+2. **The same expression is repeated in a preprocessor-split logical chain**.
+   If an expression is broken by `#If/#Else/#EndIf` or similar directives and
+   ends up repeating the same condition or operand, the conditional split is
+   likely meaningless or incorrect.
 
 ## Examples
 
@@ -64,3 +69,8 @@ SchemaAvailableForEditing =
 #EndIf
     AND AccessRight("Edit", Metadata.Catalogs.Products);
 ```
+
+## Sources
+
+No direct 1C standard is used as the normative basis for this diagnostic.
+It is a generic suspicious-pattern rule implemented locally in `bsl-analyzer`.

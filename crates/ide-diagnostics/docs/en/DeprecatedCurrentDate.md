@@ -1,48 +1,50 @@
-# Using of the deprecated method "CurrentDate" (DeprecatedCurrentDate)
+# Using the Deprecated Method `CurrentDate` (DeprecatedCurrentDate)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-The configurations must be designed to work in conditions where the time zone on the server computer does not match the real time zone of the infobase users. For example, employees of a company from Vladivostok work with a server located in Moscow, and all operations in the system must be performed in local time (Vladivostok).
+`CurrentDate()` / `ТекущаяДата()` returns the date and time of the machine where
+the code is currently executed. In client-server systems and service
+deployments, that can lead to incorrect results when the server timezone does
+not match the user session timezone.
 
-Such a work scenario is often in demand in client-server infobases and in applied solutions in the service model (SaaS).
+On the server, use `CurrentSessionDate()` / `ТекущаяДатаСеанса()` instead. In
+client code, `CurrentDate()` should also be avoided so that client and server
+time calculations stay consistent.
 
-In all server procedures and functions, instead of the CurrentDate function, which returns the server computer's date and time, you should use the CurrentSessionDate function, which converts the server's time to the user's session time zone.
-
-In client code, using the CurrentDate function is also not allowed. This requirement is due to the fact that the current time calculated in the client and server code must not differ.
-
-When using the Library of Standard Subsystems, it is recommended to use the DateSession function of the general module GeneralPurposeClient.
+When the Standard Library is available, client code can use
+`GeneralPurposeClient.SessionDate()` / `ОбщегоНазначенияКлиент.ДатаСеанса()`.
 
 ## Examples
 
-### On the client
-Wrong:
+Server-side:
+
+Incorrect:
 
 ```bsl
 OperationDate = CurrentDate();
 ```
 
-Right:
-
-```bsl
-OperationDate = GeneralPurposeClient.SessionDate();
-```
-
-### On server
-
-```bsl
-OperationDate = CurrentDate();
-```
-
-Right:
+Correct:
 
 ```bsl
 OperationDate = CurrentSessionDate();
 ```
 
+Client-side:
+
+Incorrect:
+
+```bsl
+OperationDate = CurrentDate();
+```
+
+Correct:
+
+```bsl
+OperationDate = GeneralPurposeClient.SessionDate();
+```
+
 ## Sources
-<!-- It is necessary to provide links to all sources from which information was obtained to create diagnostics -->
 
-
-
-* Reference: [Metadata creation and change. Work in different timezones (RU)](https://its.1c.ru/db/v8std/content/643/hdoc)
+- [ITS: Work in different time zones (RU)](https://its.1c.ru/db/v8std/content/643/hdoc)
+- [v8std: #std643 Work in different time zones](https://v8std.ru/std/643/)

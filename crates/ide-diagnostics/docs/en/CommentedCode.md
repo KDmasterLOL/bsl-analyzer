@@ -3,31 +3,53 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Software modules should not have commented out code fragments, as well as fragments, which are in any way connected with the development process (debugging code, service marks, i.e. !!! _, MRG, etc.) and with specific developers of this code.
+Modules should not keep commented-out code or temporary development markers.
+Such fragments usually appear during debugging, experiments, or refactoring and
+then stay in the file long after they stop being useful.
 
-For example, it is unacceptable to leave such fragments in the code after debugging or refactoring is completed:
+Commented code makes the module harder to read because the reader has to decide
+whether the fragment is still relevant, accidentally disabled, or simply
+forgotten. If the code may be needed later, version control should preserve it
+instead of leaving it inline.
+
+The diagnostic also treats developer-specific service marks as a smell when they
+describe unfinished local work rather than business meaning.
+
+## Examples
+
+### Wrong
 
 ```bsl
 Procedure BeforeDelete(Failure)
-    //If True Then
-    //  Message("For debugging");
+    //If Failure Then
+    //    Message("Temporary check");
     //EndIf;
 EndProcedure
 ```
-also wrong:
+
+Also wrong:
+
 ```bsl
 Procedure BeforeDelete(Failure)
     If True Then
-        // Ivanov: need fix
+        // Ivanov: revisit after merge
     EndIf;
 EndProcedure
 ```
 
-Correct: after debugging or refactoring is completed, remove the handler BeforeDelete from the code.
+### Correct
 
-**ATTENTION**:  
-A code block is considered commented, if at least one line inside the block is defined as code.
+Remove dead fragments and temporary notes before committing the module.
+
+## Note
+
+A comment block is treated as commented-out code when at least one line inside
+the block is recognized as executable or declaration-like code.
 
 ## Sources
 
-* [Standard: Modules texts(RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
+Primary source: [Standard: module texts (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
+
+Secondary source: [v8std.ru: #std456](https://v8std.ru/std/456/)
+
+Additional reference: [v8std.ru: CommentedCode](https://v8std.ru/diagnostics/bslls/CommentedCode/)

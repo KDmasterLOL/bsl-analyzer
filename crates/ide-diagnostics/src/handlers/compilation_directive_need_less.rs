@@ -110,17 +110,17 @@ mod tests {
     }
 
     #[test]
-    fn test_from_java_fixture() {
-        let code = r#"Процедура А()
+    fn test_reports_redundant_directives_in_object_module() {
+        let code = r#"Процедура ПодготовитьДанные()
 КонецПроцедуры
 
 &НаСервере
 &НаСервере
-Процедура Б()
+Процедура СохранитьИзменения()
 КонецПроцедуры
 
 &НаСервере
-Процедура В()
+Процедура ПересчитатьИтоги()
 КонецПроцедуры
 "#;
         let diagnostics =

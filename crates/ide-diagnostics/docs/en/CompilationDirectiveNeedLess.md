@@ -1,19 +1,36 @@
-# Needless compilation directive (CompilationDirectiveNeedLess)
+# Redundant Compilation Directive (CompilationDirectiveNeedLess)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Compilation directives:
+Compilation directives such as `&AtClient`, `&AtServer`, and
+`&AtServerNoContext` are intended for managed form modules and command
+modules.
+
+In other module types, the execution context is usually defined by the module
+kind or by metadata flags. Adding compilation directives there is redundant and
+makes the code harder to understand. In mixed client-server common modules,
+directives can also obscure which methods are actually available in the final
+context.
+
+## Examples
+
+Incorrect:
 
 ```bsl
-&AtClient (&НаКлиенте)
-&AtServer (&НаСервере)
-&AtServerNoContext (&НаСервереБезКонтекста)
+&AtServer
+Procedure RecalculateTotals()
+EndProcedure
 ```
 
-Must be used only in the code of managed form modules and in the code of command modules. In other modules, we recommend use instructions to the preprocessor.
+Correct:
 
-In server or client common modules, the execution context is obvious, so there is no sense in compilation directives. In common modules with client and server attributes, using compilation directives makes it difficult to understand which ones are procedures (functions) are available eventually.
+```bsl
+Procedure RecalculateTotals()
+EndProcedure
+```
 
 ## Sources
-* [Standard: Use of compilation and preprocessor directives (RU)](https://its.1c.ru/db/v8std#content:439:hdoc)
+
+- [ITS: Use of compilation directives and preprocessor instructions (RU)](https://its.1c.ru/db/v8std#content:439:hdoc)
+- [v8std: #std439 Compilation directives and preprocessor instructions](https://v8std.ru/std/439/)
+- [v8std: form-module-pragma](https://v8std.ru/diagnostics/v8-code-style/form-module-pragma/)

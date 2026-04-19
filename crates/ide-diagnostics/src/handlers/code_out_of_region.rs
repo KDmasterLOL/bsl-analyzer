@@ -33,9 +33,6 @@
 //! ```
 //!
 //! ## Implementation
-//!
-//! Ported from:
-//!
 //! Uses RegionTree from HIR for efficient region lookup.
 
 use crate::define_metadata;
@@ -253,74 +250,73 @@ mod tests {
     };
     #[test]
     fn test_comprehensive() {
-        // Mirror of CodeOutOfRegionDiagnostic.bsl: mixed regions/no-regions with #Если blocks
         let code = "//////////////////////////////////////////////\n\
-// Название модуля\n\
+// Служебный модуль\n\
 //////////////////////////////////////////////\n\
 #Если Сервер тогда\n\
-Перем А;                // <- Ошибка\n\
-#Область Переменные\n\
-Перем Б;\n\
-Перем Дд;\n\
+Перем Кэш;              // <- Ошибка\n\
+#Область ОписаниеПеременных\n\
+Перем Настройки;\n\
+Перем Параметры;\n\
 #КонецОбласти\n\
-Перем Ии;               // <- Ошибка\n\
+Перем Контекст;         // <- Ошибка\n\
 \n\
-#Область Методы\n\
-Функция Аа() Экспорт\n\
-    Возврат 7;\n\
+#Область ПрограммныйИнтерфейс\n\
+Функция ПолучитьИмя() Экспорт\n\
+    Возврат \"Имя\";\n\
 КонецФункции\n\
 #КонецОбласти\n\
 #Иначе\n\
-Процедура ССС()          // <- Ошибка\n\
-    #Область Методы21\n\
-    Сообщаить(4245);\n\
+Процедура Временная()    // <- Ошибка\n\
+    #Область ЛокальнаяЛогика\n\
+    Сообщить(100);\n\
     #КонецОбласти\n\
 КонецПроцедуры\n\
 #КонецЕсли\n\
 \n\
-Процедура Бб()          // <- Ошибка\n\
-    #Область Методы2\n\
-    Сообщаить(42);\n\
+Процедура Подготовить()  // <- Ошибка\n\
+    #Область Вложенная\n\
+    Сообщить(\"Подготовка\");\n\
     #КонецОбласти\n\
 КонецПроцедуры\n\
 \n\
 ///////////////////////////////////////////\n\
-// инициализация\n\
+// раздел инициализации\n\
 ///////////////////////////////////////////\n\
 \n\
 #Если Сервер Тогда\n\
-#Область Методы3\n\
-Функция Пример3\n\
+#Область СлужебныеПроцедурыИФункции\n\
+Функция ПолучитьЧисло()\n\
  Сообщить(42);\n\
 КонецФункции\n\
 #КонецОбласти\n\
 #КонецЕсли\n\
 \n\
-#Область Иниц\n\
-А = 78;\n\
+#Область Инициализация\n\
+Кэш = 78;\n\
 #КонецОбласти\n\
 \n\
-Б = Аа() + А;           // <- Ошибка\n\
+Настройки = ПолучитьИмя() + Кэш; // <- Ошибка\n\
 \n\
-#Область Иниц\n\
+#Область Инициализация\n\
 Если Условие Тогда\n\
-    Ии = 79;\n\
+    Контекст = 79;\n\
 КонецЕсли;\n\
 #КонецОбласти\n\
 \n\
-#Область в\n\
-    Ин = 5;\n\
+#Область ЛокальныеДанные\n\
+    Значение = 5;\n\
 #КонецОбласти\n\
-Ин = в;                         // <- Ошибка\n\
+Значение = Контекст;            // <- Ошибка\n\
 \n\
 Если Условие Тогда              // <- Ошибка\n\
 #Если Сервер Тогда\n\
-Сообщить(\"Так нельзя жить\");\n\
+Сообщить(\"Так оформлять нельзя\");\n\
 #ИначеЕсли Клиент Тогда\n\
-Сообщить(\"И так нельзя жить\");\n\
+Сообщить(\"И так тоже нельзя\");\n\
 #Иначе\n\
-#Область Областишка\n\
-Сообщить(\"Так тоже нелзя, хоть и хочется\");\n\
+#Область Обработчики\n\
+Сообщить(\"Область внутри ветки не спасает\");\n\
 #КонецОбласти\n\
 #КонецЕсли\n\
 КонецЕсли";
@@ -328,23 +324,23 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 7, "Expected 7 diagnostics");
 
-        // Diagnostic 0: Перем А; (line 5, whole declaration)
-        assert_diagnostic_range(code, &diagnostics[0], 4, 0, 8);
+        // Diagnostic 0: Перем Кэш; (line 5, whole declaration)
+        assert_diagnostic_range(code, &diagnostics[0], 4, 0, 10);
 
-        // Diagnostic 1: Перем Ии; (line 10, whole declaration)
-        assert_diagnostic_range(code, &diagnostics[1], 9, 0, 9);
+        // Diagnostic 1: Перем Контекст; (line 10, whole declaration)
+        assert_diagnostic_range(code, &diagnostics[1], 9, 0, 15);
 
-        // Diagnostic 2: Процедура ССС() (line 18, procedure name only)
-        assert_diagnostic_range(code, &diagnostics[2], 17, 10, 13);
+        // Diagnostic 2: Процедура Временная() (line 18, procedure name only)
+        assert_diagnostic_range(code, &diagnostics[2], 17, 10, 19);
 
-        // Diagnostic 3: Процедура Бб() (line 25, procedure name only)
-        assert_diagnostic_range(code, &diagnostics[3], 24, 10, 12);
+        // Diagnostic 3: Процедура Подготовить() (line 25, procedure name only)
+        assert_diagnostic_range(code, &diagnostics[3], 24, 10, 21);
 
-        // Diagnostic 4: Б = Аа() + А; (line 47, statement including semicolon)
-        assert_diagnostic_range(code, &diagnostics[4], 46, 0, 13);
+        // Diagnostic 4: Настройки = ПолучитьИмя() + Кэш; (line 47, statement including semicolon)
+        assert_diagnostic_range(code, &diagnostics[4], 46, 0, 32);
 
-        // Diagnostic 5: Ин = в; (line 58, statement including semicolon)
-        assert_diagnostic_range(code, &diagnostics[5], 57, 0, 7);
+        // Diagnostic 5: Значение = Контекст; (line 58, statement including semicolon)
+        assert_diagnostic_range(code, &diagnostics[5], 57, 0, 20);
 
         // Diagnostic 6: Если Условие Тогда (lines 60-70, if block)
         assert_diagnostic_range_multiline(code, &diagnostics[6], 59, 0, 69, 9);
@@ -352,7 +348,6 @@ mod tests {
 
     #[test]
     fn test_empty_file() {
-        // Mirror of CodeOutOfRegionDiagnosticEmptyFile.bsl: single empty line
         let code = "\n";
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
@@ -360,62 +355,59 @@ mod tests {
 
     #[test]
     fn test_no_regions() {
-        // Mirror of CodeOutOfRegionDiagnosticNoRegions.bsl: no regions at all
         let code = "//////////////////////////////////////////////\n\
-// Название модуля\n\
+// Модуль без областей\n\
 //////////////////////////////////////////////\n\
 \n\
-Перем А;\n\
-Перем Б;\n\
+Перем Кэш;\n\
+Перем Контекст;\n\
 \n\
-Функция Аа() Экспорт\n\
-    Возврат 7;\n\
+Функция ПолучитьИмя() Экспорт\n\
+    Возврат \"Имя\";\n\
 КонецФункции\n\
 \n\
-Процедура Бб()\n\
-    Сообщаить(42);\n\
+Процедура Подготовить()\n\
+    Сообщить(\"Подготовка\");\n\
 КонецПроцедуры\n\
 \n\
 ///////////////////////////////////////////\n\
 // инициализация\n\
 ///////////////////////////////////////////\n\
 \n\
-А = 78;\n\
+Кэш = 78;\n\
 \n\
-Б = Аа() + А;";
+Контекст = ПолучитьИмя() + Кэш;";
         let diagnostics = check_ast_diagnostic(code, check);
 
         // Returns individual diagnostics for each element when no regions exist
         assert_eq!(diagnostics.len(), 6);
 
-        // Diagnostic 0: Перем А; (line 5)
-        assert_diagnostic_range(code, &diagnostics[0], 4, 0, 8);
+        // Diagnostic 0: Перем Кэш; (line 5)
+        assert_diagnostic_range(code, &diagnostics[0], 4, 0, 10);
 
-        // Diagnostic 1: Перем Б; (line 6)
-        assert_diagnostic_range(code, &diagnostics[1], 5, 0, 8);
+        // Diagnostic 1: Перем Контекст; (line 6)
+        assert_diagnostic_range(code, &diagnostics[1], 5, 0, 15);
 
-        // Diagnostic 2: Функция Аа() (line 8, function name)
-        assert_diagnostic_range(code, &diagnostics[2], 7, 8, 10);
+        // Diagnostic 2: Функция ПолучитьИмя() (line 8, function name)
+        assert_diagnostic_range(code, &diagnostics[2], 7, 8, 19);
 
-        // Diagnostic 3: Процедура Бб() (line 12, procedure name)
-        assert_diagnostic_range(code, &diagnostics[3], 11, 10, 12);
+        // Diagnostic 3: Процедура Подготовить() (line 12, procedure name)
+        assert_diagnostic_range(code, &diagnostics[3], 11, 10, 21);
 
-        // Diagnostic 4: А = 78; (line 20, including semicolon)
-        assert_diagnostic_range(code, &diagnostics[4], 19, 0, 7);
+        // Diagnostic 4: Кэш = 78; (line 20, including semicolon)
+        assert_diagnostic_range(code, &diagnostics[4], 19, 0, 9);
 
-        // Diagnostic 5: Б = Аа() + А; (line 22, including semicolon)
-        assert_diagnostic_range(code, &diagnostics[5], 21, 0, 13);
+        // Diagnostic 5: Контекст = ПолучитьИмя() + Кэш; (line 22, including semicolon)
+        assert_diagnostic_range(code, &diagnostics[5], 21, 0, 31);
     }
 
     #[test]
     fn test_standard_preproc() {
-        // Mirror of CodeOutOfRegionDiagnosticStandartPreproc.bsl:
-        // raise inside #Иначе is not significant — 0 diagnostics
         let code = "#Если Сервер Или ТолстыйКлиентОбычноеПриложение Или ВнешнееСоединение Тогда\n\
 #Область СлужебныйПрограммныйИнтерфейс\n\
 #КонецОбласти\n\
 #Иначе\n\
-  ВызватьИсключение НСтр(\"ru = 'Недопустимый вызов объекта на клиенте.'\");\n\
+  ВызватьИсключение НСтр(\"ru = 'Недопустимый вызов на клиенте.'\");\n\
 #КонецЕсли";
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
@@ -423,30 +415,24 @@ mod tests {
 
     #[test]
     fn test_execute() {
-        // Mirror of CodeOutOfRegionDiagnosticExecute.bsl:
-        // Procedure named "Выполнить" outside region — 1 diagnostic (procedure name range)
-        let code = "\nПроцедура Выполнить()\n\nКонецПроцедуры\n";
+        let code = "\nПроцедура Запустить()\n\nКонецПроцедуры\n";
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1);
 
-        // Diagnostic 0: Процедура Выполнить() (lines 2-4)
-        // NOTE: Rust returns full procedure body range (lines 1-3, 0-14)
-        // This is acceptable since we still identify the correct element
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 1, 0, 3, 14);
+        // Diagnostic 0: Процедура Запустить() (line 2, procedure name only)
+        assert_diagnostic_range(code, &diagnostics[0], 1, 10, 19);
     }
 
     #[test]
     fn test_code_block() {
-        // Mirror of CodeOutOfRegionDiagnosticCodeBlock.bsl:
-        // Single call statement НСтр("..."); at top level outside any region
-        let code = "НСтр(\"ru = 'Сегодня'\");";
+        let code = "Сообщить(\"Сегодня\");";
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1);
 
-        // Diagnostic 0: НСтр("..."); (line 1, including semicolon)
-        assert_diagnostic_range(code, &diagnostics[0], 0, 0, 23);
+        // Diagnostic 0: Сообщить("Сегодня"); (line 1, including semicolon)
+        assert_diagnostic_range(code, &diagnostics[0], 0, 0, 20);
     }
 
     #[test]

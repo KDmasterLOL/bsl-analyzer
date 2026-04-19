@@ -20,18 +20,16 @@
 //! КонецЦикла;
 //! ```
 //!
-//! ## Good practice
+//! ## Better practice
 //! ```bsl
 //! Запрос = Новый Запрос;
-//! Запрос.Текст = "SELECT ...";
-//!
-//! Для Каждого ИД Из МассивИД Цикл
-//!     Запрос.УстановитьПараметр("ID", ИД);
-//!     Результат = Запрос.Выполнить(); // OK: Set parameters, execute once
-//! КонецЦикла;
+//! Запрос.Текст = "SELECT ... WHERE Field IN (&Values)";
+//! Запрос.УстановитьПараметр("Values", МассивЗначений);
+//! Результат = Запрос.Выполнить();
 //! ```
 //!
-//! Better: Use array parameters and execute query only once.
+//! Better still: use temporary tables, batch queries, or list parameters
+//! depending on the data shape.
 //!
 //! ## Configuration
 //! - **Enabled by default:** Yes
@@ -103,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_outside_loop() {
+    fn test_query_created_outside_loop_but_executed_inside_loop() {
         let code = r#"
 Процедура Тест(МассивИД)
     Запрос = Новый Запрос;

@@ -27,4 +27,6 @@
 
 ## Источники
 
-* Источник: [Использование директив компиляции и инструкций препроцессора](https://its.1c.ru/db/v8std#content:439:hdoc)
+- [Стандарт: Использование директив компиляции и инструкций препроцессора](https://its.1c.ru/db/v8std#content:439:hdoc)
+- [v8std: #std439 Использование директив компиляции и инструкций препроцессора](https://v8std.ru/std/439/)
+- [v8std: form-module-pragma](https://v8std.ru/diagnostics/v8-code-style/form-module-pragma/)

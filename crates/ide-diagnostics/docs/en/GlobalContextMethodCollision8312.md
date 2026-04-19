@@ -2,9 +2,13 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-The platform version `8.3.12` implements new methods of the global context, which may coincide with the configuration functions of the application solution.
+Starting with platform version `8.3.12`, 1C added built-in global context
+methods for bitwise operations. If the configuration already contains custom
+functions with the same names, these names collide with the platform API.
+
+Such functions should be renamed or removed, and their call sites should be
+migrated to the built-in platform methods.
 
 Russian variant|English variant
 :-: | :-:
@@ -19,17 +23,21 @@ Russian variant|English variant
 ПобитовыйСдвигВлево|BitwiseShiftLeft
 ПобитовыйСдвигВправо|BitwiseShiftRight
 
-The configuration functions must either be renamed or deleted, replacing the call to them with the methods of the global context.
+The diagnostic checks both Russian and English variants because both are part of
+the public platform API.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+```bsl
+Функция ПобитовоеИ(Значение1, Значение2)
+    Возврат Значение1 И Значение2;
+КонецФункции
+```
+
+```bsl
+// Use the built-in platform method instead
+Результат = ПобитовоеИ(255, 15);
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
-
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-
-* [Transfer of configurations to the 1C: Enterprise 8.3 platform without compatibility mode with version 8.2 (RU)](https://its.1c.ru/db/metod8dev#content:5293:hdoc:pereimenovaniya_metodov_i_svojstv)
+* Primary source: [Migrating configurations to 1C:Enterprise 8.3 without 8.2 compatibility mode (RU)](https://its.1c.ru/db/metod8dev#content:5293:hdoc:pereimenovaniya_metodov_i_svojstv)
+* Secondary source: [v8std.ru: GlobalContextMethodCollision8312](https://v8std.ru/diagnostics/bslls/GlobalContextMethodCollision8312/)

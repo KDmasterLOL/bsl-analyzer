@@ -44,11 +44,6 @@
 //! - **Tags:** BADPRACTICE
 //! - **Minutes to fix:** 5
 //!
-//! ## Implementation
-//! Ported from:
-//!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter.
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

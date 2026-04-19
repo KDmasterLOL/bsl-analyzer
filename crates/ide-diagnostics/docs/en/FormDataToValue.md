@@ -3,18 +3,28 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 <!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-In most cases, you should use the FormAttributeToValue method, instead of the FormDataToValue.
+In most form-module scenarios, `FormAttributeToValue()` should be preferred over `FormDataToValue()`.
 
-The recommendation is due to considerations of unification of the application code and the fact that the syntax of the FormAttributeToValue is simpler than FormDataToValue.
+`FormAttributeToValue()` has simpler syntax because it does not require an explicit type argument. This makes the code shorter and reduces the chance of mistakes.
+
+The current implementation reports `FormDataToValue()` calls only in methods that have form context. Methods marked `&AtServerNoContext` and `&AtClientAtServerNoContext` are not reported.
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 ```bsl
-Procedure Test()
-    Form=Doc.GetForm("DocumentForm");
-    FD = Form.FormDataToValue(Object, Type("ValueTable"));
+&AtServer
+Procedure ProcessObject()
+    DocumentObject = FormDataToValue(Object, Type("DocumentObject.SalesInvoice"));
+EndProcedure
+```
+
+```bsl
+&AtServer
+Procedure ProcessObject()
+    DocumentObject = FormAttributeToValue("Object");
 EndProcedure
 ```
 ## Sources
 <!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-Source: [Using of FormAttributeToValue and FormDataToValue methods (RU)](https://its.1c.ru/db/v8std#content:409:hdoc)
+* [Using FormAttributeToValue() and FormDataToValue() (RU)](https://its.1c.ru/db/v8std/content/409/hdoc)
+* [v8std.ru: #std409](https://v8std.ru/std/409/)

@@ -24,4 +24,6 @@ UserAccessServerCall
 
 ## Источники
 
-[Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:469:hdoc:2.2)
+- [Стандарт: Правила создания общих модулей, раздел 2.2](https://its.1c.ru/db/v8std#content:469:hdoc:2.2)
+- [v8std: #std469 Правила создания общих модулей](https://v8std.ru/std/469/)
+- [v8std: common-module-name-server-call](https://v8std.ru/diagnostics/v8-code-style/common-module-name-server-call/)

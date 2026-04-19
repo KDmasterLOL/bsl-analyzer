@@ -18,7 +18,7 @@ RUNS="${RUNS:-3}"
 BSL_LS="${BSL_LS:-/home/itrous/bsl-language-server/bsl-language-server/bin/bsl-language-server}"
 BSL_ANALYZER="${BSL_ANALYZER:-/home/itrous/src/tools_migration/lsp/bsl-analyzer/target/release/bsl-analyzer-app}"
 
-OUTPUT_DIR="/tmp/bsl-benchmark-honest"
+OUTPUT_DIR="/tmp/bsl-benchmark-console"
 RESULTS_DIR="$OUTPUT_DIR/results"
 
 # --- Проверки ---
@@ -130,7 +130,7 @@ for i in $(seq 1 "$RUNS"); do
         -c="$BSL_LS_CONFIG" \
         -s="$SOURCE_DIR" \
         -o="$OUTPUT_DIR/bsl-ls-output" \
-        -r=json \
+        -r=console \
         -q
 done
 
@@ -145,7 +145,7 @@ for i in $(seq 1 "$RUNS"); do
         -c "$BSL_ANALYZER_CONFIG" \
         -s "$SOURCE_DIR" \
         -o "$OUTPUT_DIR/bsl-analyzer-output" \
-        -r json \
+        -r console \
         -q
 done
 

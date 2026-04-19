@@ -36,8 +36,6 @@
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! Ported from:
 
 use crate::define_metadata;
 use crate::metadata::*;

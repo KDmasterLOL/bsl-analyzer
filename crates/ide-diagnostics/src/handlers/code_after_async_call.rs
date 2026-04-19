@@ -65,8 +65,6 @@
 //! This diagnostic is collected during HIR lowering as a byproduct of
 //! statement processing. The `from_hir` function converts the BodyDiagnostic
 //! to a Diagnostic for display.
-//!
-//! Ported from:
 
 use crate::define_metadata;
 use crate::metadata::*;

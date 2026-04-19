@@ -48,8 +48,6 @@
 //!
 //! ## Implementation
 //!
-//! Ported from:
-//!
 
 use crate::define_metadata;
 use crate::metadata::*;

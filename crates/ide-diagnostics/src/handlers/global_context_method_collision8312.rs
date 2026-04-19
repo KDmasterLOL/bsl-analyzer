@@ -34,18 +34,6 @@
 //! КонецФункции
 //! ```
 //!
-//! ## Implementation
-//!
-//! Ported from:
-//!
-//! ### Algorithm:
-//! - O(n) complexity: single pass through function definitions
-//! - Case-insensitive matching (BSL is case-insensitive)
-//! - Checks both Russian and English method names
-//!
-//! ### Diagnostic range:
-//! - Rust: First IDENT token before PARAM_LIST (function name)
-//!
 //! ## References
 //! - Source: https://its.1c.ru/db/metod8dev#content:5293:hdoc:pereimenovaniya_metodov_i_svojstv
 
@@ -99,13 +87,7 @@ pub fn from_hir(
 mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, Severity};
-    /// Integration test matching reference test structure.
-    ///
-    /// Based on reference test
-    /// Uses the same test file: GlobalContextMethodCollision8312Diagnostic.bsl
-    ///
-    /// Expected: 20 diagnostics (all conflicting method names)
-    /// Lines 0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57
+    /// Detects all names that collide with the 8.3.12 global bitwise API.
     #[test]
     fn test_8312() {
         let code = r#"Функция ПроверитьБит()

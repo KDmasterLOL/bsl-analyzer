@@ -35,7 +35,9 @@
 //! - **Minutes to fix:** 5
 //!
 //! ## Implementation
-//! Ported from:
+//!
+//! Uses local HIR bodies and item metadata to verify that monitored event
+//! handlers contain a `DataExchange.Load` / `ОбменДанными.Загрузка` guard.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -364,7 +366,7 @@ EndProcedure
     fn test_complex_condition() {
         let code = r#"
 Процедура ПередЗаписью(Отказ)
-    Если ОбменДанными.Загрузка Или ДополнительныеСвойства.Свойство("НеПроверятьУникальность") Тогда
+    Если ОбменДанными.Загрузка Или ПропуститьПроверки Тогда
         Возврат;
     КонецЕсли;
 КонецПроцедуры
@@ -475,7 +477,7 @@ EndProcedure"#;
         // НЕ ОбменДанными.Загрузка И ... — valid (Return in then-branch)
         let code = r#"Процедура ПередЗаписью(Отказ, РежимЗаписи, РежимПроведения)
 
-    Если НЕ ОбменДанными.Загрузка И РольДоступна("ПолныеПрава") Тогда
+    Если НЕ ОбменДанными.Загрузка И ТребуетсяКонтрольЗаписи Тогда
         Отказ = Истина;
         Возврат;
     КонецЕсли;

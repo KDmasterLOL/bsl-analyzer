@@ -1,23 +1,32 @@
-# Global module with postfix "Client" (CommonModuleNameGlobalClient)
+# Global Module with "Client" Postfix (CommonModuleNameGlobalClient)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-For global modules, the "Global" (rus. "Глобальный") postfix is added , "Client" postfix should not be added.
+Global common modules already express their execution role through the
+`Глобальный` or `Global` postfix. Adding the `Клиент` or `Client` postfix to
+the same module name is redundant and does not match the 1C naming rules.
+
+If a common module is global, its name should end with `Глобальный` or
+`Global` without an additional client postfix.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
 Incorrect:
-InfobaseUpdateGlobalClient
 
-Correct: 
-InfobaseUpdateGlobal
+```bsl
+ОбновлениеИнформационнойБазыГлобальныйКлиент
+ConfigurationUpdateGlobalClient
+```
+
+Correct:
+
+```bsl
+ОбновлениеИнформационнойБазыГлобальный
+ConfigurationUpdateGlobal
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-
-
-[Standard: Modules (RU)](https://its.1c.ru/db/v8std#content:469:hdoc:3.2.1)
+- [ITS: Common module naming rules, section 3.2.1 (RU)](https://its.1c.ru/db/v8std#content:469:hdoc:3.2.1)
+- [v8std: #std469 Common module naming rules](https://v8std.ru/std/469/)
+- [v8std: common-module-name-global-client](https://v8std.ru/diagnostics/v8-code-style/common-module-name-global-client/)

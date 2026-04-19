@@ -23,21 +23,6 @@
 //!     ВыполнитьДействие();
 //! КонецЕсли;
 //! ```
-//!
-//! ## Implementation
-//!
-//! Migrated to HIR-based collection.
-//!
-//! Ported from:
-//!
-//! Adapted to use Rowan SyntaxNode during HIR lowering.
-//!
-//! ### Key algorithm:
-//! - Rust: Count all BINARY_EXPR nodes with AND/OR operators + 1
-//! - Default max complexity: 3
-//!
-//! ### Diagnostic range:
-//! - Rust: Same - entire expression range
 
 use crate::define_metadata;
 use crate::metadata::*;

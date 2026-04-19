@@ -25,5 +25,5 @@
 
 ## Источники
 
-* Источник: [Стандарт: Описание процедур и функций](https://its.1c.ru/db/v8std/content/453/hdoc), раздел 5.7
+* [Стандарт: Описание процедур и функций](https://its.1c.ru/db/v8std/content/453/hdoc), раздел 5.7
 * [CWE-477 Use of Obsolete Function](http://cwe.mitre.org/data/definitions/477.html)

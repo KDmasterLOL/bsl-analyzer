@@ -2,12 +2,34 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-Setting a value to a common module throws exception. Such situation is possible when a common module is added to the configuration with a name that has already been used for the variable.
+This diagnostic reports assignments whose left-hand side resolves to the name of
+a common module from metadata.
+
+In 1C, a common module name is not a writable variable. If local code tries to
+assign a value to such an identifier, the platform treats the target as a
+reference to the common module and the statement fails at runtime.
+
+The most common cause is a naming conflict: a local variable name accidentally
+matches an existing common module name.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+
+### Wrong
+
+```bsl
+// Metadata contains common module CommonUtilities
+CommonUtilities = 42;
+```
+
+### Correct
+
+```bsl
+LocalUtilities = 42;
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
+
+Secondary source: [v8std.ru: CommonModuleAssign](https://v8std.ru/diagnostics/bslls/CommonModuleAssign/)
+
+Additional reference: [bsl-language-server: CommonModuleAssign](https://1c-syntax.github.io/bsl-language-server/diagnostics/CommonModuleAssign/)

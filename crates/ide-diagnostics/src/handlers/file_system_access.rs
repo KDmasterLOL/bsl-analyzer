@@ -62,8 +62,6 @@
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - detects file system access during HIR lowering.
-//!
-//! Ported from:
 
 use crate::define_metadata;
 use crate::metadata::*;

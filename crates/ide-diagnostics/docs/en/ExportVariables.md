@@ -3,7 +3,9 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-In most scenarios, we recommend that you do not use global variables and use other 1C:Enterprise script tools instead. Since monitoring the visibility (usage) areas of such variables is tricky, they often might cause issues that cannot be easily located.
+Exported module variables expose mutable state outside the module and make it hard to understand who reads or changes that state.
+
+Because of that, such variables often lead to fragile code and hard-to-reproduce bugs. In most cases it is better to use method parameters, dedicated API methods, form attributes, or `AdditionalProperties`.
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
@@ -19,7 +21,7 @@ EndProcedure
 
 ```
 
-We recommend that you use the AdditionalProperties object property for passing parameters between event subscription handlers and for passing parameters from external script to object module event handlers
+For object modules, the standard recommendation is to pass external parameters through `AdditionalProperties`.
 
 ```bsl
 Procedure BeforeWrite(Cancel)
@@ -38,4 +40,5 @@ FileObject.Write();
 <!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 <!-- Примеры источников -->
 
-[Standard: Using global variables in modules (RU)](https://its.1c.ru/db/v8std#content:639:hdoc)
+* [Standard: Using variables in modules (RU)](https://its.1c.ru/db/v8std/content/639/hdoc)
+* [v8std.ru: #std639](https://v8std.ru/std/639/)

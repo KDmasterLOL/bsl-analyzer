@@ -35,8 +35,6 @@
 //! - **Minutes to fix:** 1
 //!
 //! ## Implementation
-//! Ported from:
-//!
 //! Migrated to text-based API using Rowan tokens instead of text processing.
 
 use crate::define_metadata;
@@ -604,10 +602,9 @@ mod tests {
     #[test]
     fn test_multiline_commented_block() {
         // Multi-line commented code block at start — should be 1 diagnostic
-        let code = r#"//ПервоеПроведение = Ложь;
-//Если Источник.ДополнительныеСвойства.Свойство("ПервоеПроведение")
-//    И Событие = "ОбработкаПроведения" Тогда
-//    ПервоеПроведение = Источник.ДополнительныеСвойства.ПервоеПроведение;
+        let code = r#"//НужноПересчитать = Ложь;
+//Если Документ.Проведен Тогда
+//    НужноПересчитать = Истина;
 //КонецЕсли;"#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Multi-line commented code block should be 1 diagnostic");
@@ -616,9 +613,9 @@ mod tests {
     #[test]
     fn test_commented_out_procedure() {
         // Commented-out procedure definition
-        let code = r#"//// Процедура ОбработкаПроведения()
+        let code = r#"//// Процедура ВыполнитьСервис()
 ////
-////    Метод();
+////    ПодготовитьДанные();
 ////
 ////КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
@@ -628,8 +625,8 @@ mod tests {
     #[test]
     fn test_two_consecutive_commented_lines() {
         // Two consecutive commented code lines — single group, single diagnostic
-        let code = r#"//ДкОбъект.ДатаЗакрытия = ТекущаяДатаСеанса();
-//ДкОбъект.Дата = ТекущаяДатаСеанса();"#;
+        let code = r#"//Параметры.Вставить("ДатаНачала", ТекущаяДата());
+//Параметры.Вставить("ДатаОкончания", ТекущаяДата());"#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
@@ -643,21 +640,21 @@ mod tests {
         use crate::test_utils::assert_diagnostic_range_multiline;
         // Descriptive comments wrapping commented-out code should not be included in range
         let code = r#"Процедура Тест()
-    // ++ Должны быть одинаковые статьи в Документе
-    //ТЗТовары = Товары;
-    //ТЗТовары.Свернуть("СтатьяДвиженияДенежныхСредств");
-    //Если ТЗТовары.Количество() > 1 Тогда
+    // ++ Проверяем одинаковые значения
+    //Таблица = Источник;
+    //Таблица.Свернуть("Код");
+    //Если Таблица.Количество() > 1 Тогда
     //    Возврат Ложь;
     //КонецЕсли;
     //Возврат Истина;
-    // -- Должны быть одинаковые статьи в документе
+    // -- Конец проверки
 КонецПроцедуры"#;
 
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect commented code block");
 
         // Range should cover only lines 2-7 (code), not line 1 (// ++) or line 8 (// --)
-        // Line 2: "    //ТЗТовары = Товары;" starts at col 4
+        // Line 2: "    //Таблица = Источник;" starts at col 4
         // Line 7: "    //Возврат Истина;" ends at end of that line
         assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 4, 7, 21);
     }
