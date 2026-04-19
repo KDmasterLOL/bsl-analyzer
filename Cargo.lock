@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "base-db"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "dashmap",
  "expect-test",
@@ -245,7 +245,7 @@ checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
 name = "bsl-analyzer"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "anyhow",
  "base-db",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-debug"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "dap",
  "quick-xml",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-launcher"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "anyhow",
  "dirs",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-metadata"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "rayon",
  "roxmltree",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-search"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "blake3",
  "crossbeam-channel",
@@ -436,7 +436,7 @@ checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
 name = "cfg"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "cfg-types",
  "expect-test",
@@ -458,7 +458,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cfg-types"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "la-arena",
 ]
@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "dataflow"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "base-db",
  "cfg",
@@ -1496,7 +1496,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hir"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "hir-def"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -1788,7 +1788,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "ide"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "bsl-metadata",
  "bsl-platform",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "ide-assists"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "expect-test",
  "hir",
@@ -1835,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "ide-db"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "ide-diagnostics"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "intern"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "dashmap",
  "once_cell",
@@ -2177,7 +2177,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lexer"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "expect-test",
  "logos",
@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "line-index"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "text-size",
 ]
@@ -2329,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-server"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "anyhow",
  "bsl-debug",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "naparnik"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2517,7 +2517,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onec-client"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "reqwest",
  "serde",
@@ -2579,7 +2579,7 @@ dependencies = [
 
 [[package]]
 name = "parser"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "expect-test",
  "lexer",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "profile"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "cfg-if",
  "libc",
@@ -2827,7 +2827,7 @@ dependencies = [
 
 [[package]]
 name = "project-model"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "anyhow",
  "bsl-metadata",
@@ -3464,7 +3464,7 @@ checksum = "d68f2ec51b097e4c1a75b681a8bec621909b5e91f15bb7b840c4f2f7b01148b2"
 
 [[package]]
 name = "sdbl-hir"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "bsl-metadata",
  "expect-test",
@@ -3730,7 +3730,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stdx"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
@@ -3818,7 +3818,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "expect-test",
  "parser",
@@ -3860,7 +3860,7 @@ dependencies = [
 
 [[package]]
 name = "test-fixture"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "base-db",
  "ide-db",
@@ -3871,7 +3871,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "expect-test",
 ]
@@ -4451,7 +4451,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vfs"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "crossbeam-channel",
  "indexmap",
@@ -5167,7 +5167,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.1.122"
+version = "0.1.123"
 dependencies = [
  "anyhow",
  "clap",
