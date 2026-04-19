@@ -1,18 +1,34 @@
-# Missed postfix "Global" (CommonModuleNameGlobal)
+# Missing "Global" Postfix (CommonModuleNameGlobal)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-For global modules, the "Global" (rus. "Глобальный") postfix is added, "Client" postfix should not be added.
+Global common modules should make that role explicit in the module name.
+According to the 1C naming rules, a common module with the `Global` flag must
+end with the `Глобальный` or `Global` postfix. The `Client` postfix is not
+used for this module type.
+
+This naming convention makes global modules easy to recognize in metadata and
+reduces confusion with ordinary client, server, or client-server common
+modules.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
-FilesGlobal, InfobaseUpdateGlobal
+Incorrect:
+
+```bsl
+ОбновлениеИнформационнойБазы
+StandardSubsystems
+```
+
+Correct:
+
+```bsl
+ОбновлениеИнформационнойБазыГлобальный
+StandardSubsystemsGlobal
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-
-[Standard: Modules (RU)](https://its.1c.ru/db/v8std#content:469:hdoc:3.2.1)
+- [ITS: Common module naming rules, section 3.2.1 (RU)](https://its.1c.ru/db/v8std#content:469:hdoc:3.2.1)
+- [v8std: #std469 Common module naming rules](https://v8std.ru/std/469/)
+- [v8std: common-module-name-global](https://v8std.ru/diagnostics/v8-code-style/common-module-name-global/)

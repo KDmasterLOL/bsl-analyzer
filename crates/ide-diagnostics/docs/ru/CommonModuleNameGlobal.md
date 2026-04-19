@@ -22,4 +22,6 @@ StandardSubsystemsGlobal
 
 ## Источники
 
-[Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:469:hdoc:3.2.1)
+- [Стандарт: Правила создания общих модулей, раздел 3.2.1](https://its.1c.ru/db/v8std#content:469:hdoc:3.2.1)
+- [v8std: #std469 Правила создания общих модулей](https://v8std.ru/std/469/)
+- [v8std: common-module-name-global](https://v8std.ru/diagnostics/v8-code-style/common-module-name-global/)
