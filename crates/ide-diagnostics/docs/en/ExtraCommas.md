@@ -3,21 +3,23 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Do not include a comma at the end of a method call without specifying a parameter. It is difficult to understand and does not carry important information.  
-Not required parameters under the principle of Occam's Razor "Do not multiply entities without need", since the "hanging" comma is not very informative.
+Do not leave trailing commas at the end of a method call when no parameter follows them.
+
+Such commas do not make the call clearer, can be confused with intentionally skipped optional parameters, and in practice only add syntax noise.
 
 Bad:
 
 ```bsl
-Result = Action (P1, P2 ,,);
+Result = Action(P1, P2,,);
 ```
 
 Good:
 
 ```bsl
-Result = Action (P1, P2);
+Result = Action(P1, P2);
 ```
 
 ## Sources
 
-* [Code-writing conventions. Parameters of procedures and functions. Item 7](https://its.1c.ru/db/v8std#content:640:hdoc).
+* [Code-writing conventions. Parameters of procedures and functions (RU)](https://its.1c.ru/db/v8std/content/640/hdoc)
+* [v8std.ru: #std640](https://v8std.ru/std/640/)
