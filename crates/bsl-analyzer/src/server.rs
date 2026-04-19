@@ -278,6 +278,12 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
         }
         Task::DependenciesPreloaded { file_id, count } => {
             tracing::debug!(file_id = file_id.0, count, "dependencies preloaded");
+            // Best-effort cleanup. If a rapid re-spawn replaced our token
+            // between worker completion and this handler, the newer entry
+            // is evicted and its worker becomes uncancellable — worst case
+            // is wasted CPU on a redundant cache warmer.
+            state.preload_tokens.remove(&file_id);
+            state.preload_external_tokens.remove(&file_id);
         }
         Task::PreloadExternalFiles { files } => {
             if files.is_empty() {
@@ -291,13 +297,10 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             let task = analysis.warm_caches_task(&files, state.diagnostics_config().clone());
             let first_file = files[0];
 
-            // TODO: shares `preload_tokens` with `preload_dependencies` keyed on the same
-            // FileId. If an opened file later appears as an external dep head, its warmer
-            // would be cancelled here. Unlikely in practice; split the map if it bites.
-            if let Some(prev) = state.preload_tokens.remove(&first_file) {
+            if let Some(prev) = state.preload_external_tokens.remove(&first_file) {
                 prev.cancel();
             }
-            state.preload_tokens.insert(first_file, task.cancellation_token());
+            state.preload_external_tokens.insert(first_file, task.cancellation_token());
 
             state.task_pool.pool.spawn(move || {
                 let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
