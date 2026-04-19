@@ -284,6 +284,30 @@ pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParam
     Ok(())
 }
 
+/// Handles `$/cancelRequest` notification.
+///
+/// Looks up the `salsa::CancellationToken` tracked by `on_latency` for the
+/// given request id and cancels it. The background worker unwinds
+/// cooperatively at the next Salsa query boundary, producing a
+/// `RequestCanceled` response via the normal `Task::RequestResult` path.
+///
+/// Missing ids are a normal race (worker beat the cancel to the finish line);
+/// just log at debug level.
+pub fn handle_cancel(state: &mut GlobalState, params: lsp_types::CancelParams) -> Result<()> {
+    let id = match params.id {
+        lsp_types::NumberOrString::Number(n) => lsp_server::RequestId::from(n),
+        lsp_types::NumberOrString::String(s) => lsp_server::RequestId::from(s),
+    };
+
+    if let Some(token) = state.request_tokens.remove(&id) {
+        tracing::debug!(request_id = ?id, "cancelling in-flight async request");
+        token.cancel();
+    } else {
+        tracing::debug!(request_id = ?id, "cancel arrived after response (no-op)");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +387,50 @@ mod tests {
 
         // Check MemDocs has updated text
         assert_eq!(state.mem_docs.get(&uri), Some("new text".to_string()));
+    }
+
+    #[test]
+    fn handle_cancel_cancels_and_evicts_token() {
+        let (mut state, _receiver) = create_test_state();
+
+        let db = state.analysis_host.raw_database().clone();
+        let token = db.cancellation_token();
+        let id = lsp_server::RequestId::from(123);
+        state.request_tokens.insert(id.clone(), token.clone());
+
+        let params = lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(123) };
+        handle_cancel(&mut state, params).unwrap();
+
+        assert!(token.is_cancelled(), "token must be cancelled after $/cancelRequest");
+        assert!(!state.request_tokens.contains_key(&id), "token must be evicted from map");
+    }
+
+    #[test]
+    fn handle_cancel_is_noop_for_unknown_id() {
+        let (mut state, _receiver) = create_test_state();
+
+        // No token registered for id 999.
+        let params = lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(999) };
+        let result = handle_cancel(&mut state, params);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_cancel_supports_string_ids() {
+        let (mut state, _receiver) = create_test_state();
+
+        let db = state.analysis_host.raw_database().clone();
+        let token = db.cancellation_token();
+        let id = lsp_server::RequestId::from("req-abc".to_string());
+        state.request_tokens.insert(id.clone(), token.clone());
+
+        let params = lsp_types::CancelParams {
+            id: lsp_types::NumberOrString::String("req-abc".to_string()),
+        };
+        handle_cancel(&mut state, params).unwrap();
+
+        assert!(token.is_cancelled());
+        assert!(!state.request_tokens.contains_key(&id));
     }
 
     #[test]

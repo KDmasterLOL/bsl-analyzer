@@ -430,7 +430,8 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
 /// Handles an LSP notification.
 fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<()> {
     use lsp_types::notification::{
-        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+        Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
+        DidSaveTextDocument,
     };
 
     // Check for exit notification (special case - ends the loop)
@@ -445,6 +446,7 @@ fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<()>
         .on_sync_mut::<DidChangeTextDocument>(crate::handlers::handle_did_change)?
         .on_sync_mut::<DidCloseTextDocument>(crate::handlers::handle_did_close)?
         .on_sync_mut::<DidSaveTextDocument>(crate::handlers::handle_did_save)?
+        .on_sync_mut::<Cancel>(crate::handlers::handle_cancel)?
         .finish();
 
     Ok(())
