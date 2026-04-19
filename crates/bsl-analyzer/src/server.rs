@@ -411,14 +411,19 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
             state.shutdown_requested = true;
             Ok(())
         })
+        // Read-only latency-sensitive requests run on the task pool so the
+        // main loop stays responsive to $/cancelRequest and subsequent edits.
         .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
-        .on_sync::<References>(crate::handlers::handle_find_references)
-        .on_sync::<HoverRequest>(crate::handlers::handle_hover)
-        .on_sync::<Completion>(crate::handlers::handle_completion)
-        .on_sync::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
-        .on_sync::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
-        .on_sync::<CodeActionRequest>(crate::handlers::handle_code_action)
-        .on_sync::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
+        .on_latency::<References>(crate::handlers::handle_find_references)
+        .on_latency::<HoverRequest>(crate::handlers::handle_hover)
+        .on_latency::<Completion>(crate::handlers::handle_completion)
+        .on_latency::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
+        .on_latency::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
+        .on_latency::<CodeActionRequest>(crate::handlers::handle_code_action)
+        .on_latency::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
+        // Formatting stays synchronous: clients (VS Code, Helix, Neovim)
+        // run save-and-format synchronously, and our formatter is fast
+        // enough that task-pool dispatch would add latency, not hide it.
         .on_sync::<Formatting>(crate::handlers::handle_formatting)
         .on_sync::<RangeFormatting>(crate::handlers::handle_range_formatting)
         .on_sync::<OnTypeFormatting>(crate::handlers::handle_on_type_formatting)

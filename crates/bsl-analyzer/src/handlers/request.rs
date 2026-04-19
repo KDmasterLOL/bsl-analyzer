@@ -91,7 +91,7 @@ pub fn handle_goto_definition(
 ///
 /// Finds all references to the symbol at the cursor position.
 pub fn handle_find_references(
-    snap: GlobalStateSnapshot,
+    ctx: LatencyRequestContext,
     params: ReferenceParams,
 ) -> Result<Option<Vec<Location>>> {
     let _p = tracing::info_span!(
@@ -103,31 +103,26 @@ pub fn handle_find_references(
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
 
-    // Get FileId
-    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    let file_id = ctx.file_id_for_url(&uri)?;
 
-    // Get text for line index
-    let text = snap
+    let doc = ctx
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
 
-    let line_index = LineIndex::new(&text);
+    let offset = crate::lsp::offset(line_index, text, position)?;
 
-    // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, &text, position)?;
+    let locations = ctx.analysis.find_references(file_id, offset.into());
 
-    // Call IDE API
-    let locations = snap.analysis.find_references(file_id, offset.into());
-
-    // Convert results
     if locations.is_empty() {
         return Ok(None);
     }
 
     let lsp_locations: Vec<Location> = locations
         .into_iter()
-        .filter_map(|loc| convert_location(&line_index, &text, &uri, loc))
+        .filter_map(|loc| convert_location(line_index, text, &uri, loc))
         .collect();
 
     if lsp_locations.is_empty() {
@@ -140,7 +135,7 @@ pub fn handle_find_references(
 /// Handles textDocument/hover request.
 ///
 /// Returns hover information for the symbol at the cursor position.
-pub fn handle_hover(snap: GlobalStateSnapshot, params: HoverParams) -> Result<Option<Hover>> {
+pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<Option<Hover>> {
     let _p = tracing::info_span!(
         "handle_hover",
         uri = %params.text_document_position_params.text_document.uri
@@ -150,27 +145,22 @@ pub fn handle_hover(snap: GlobalStateSnapshot, params: HoverParams) -> Result<Op
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    // Get FileId
-    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    let file_id = ctx.file_id_for_url(&uri)?;
 
-    // Get text for line index
-    let text = snap
+    let doc = ctx
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
 
-    let line_index = LineIndex::new(&text);
+    let offset = crate::lsp::offset(line_index, text, position)?;
 
-    // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, &text, position)?;
+    let hover_result = ctx.analysis.hover(file_id, offset.into());
 
-    // Call IDE API
-    let hover_result = snap.analysis.hover(file_id, offset.into());
-
-    // Convert result
     match hover_result {
         Some(result) => {
-            let range = result.range.and_then(|r| crate::lsp::range(&line_index, &text, r));
+            let range = result.range.and_then(|r| crate::lsp::range(line_index, text, r));
 
             let contents = HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -187,7 +177,7 @@ pub fn handle_hover(snap: GlobalStateSnapshot, params: HoverParams) -> Result<Op
 ///
 /// Returns code completion suggestions at the cursor position.
 pub fn handle_completion(
-    snap: GlobalStateSnapshot,
+    ctx: LatencyRequestContext,
     params: CompletionParams,
 ) -> Result<Option<CompletionResponse>> {
     let _p = tracing::info_span!(
@@ -205,16 +195,14 @@ pub fn handle_completion(
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
 
-    // Get FileId
-    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    let file_id = ctx.file_id_for_url(&uri)?;
 
-    // Get text for line index
-    let text = snap
+    let doc = ctx
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
-
-    let line_index = LineIndex::new(&text);
+    let text = doc.text();
+    let line_index = doc.line_index();
 
     // Log the actual line content for debugging
     let line_num = position.line as usize;
@@ -233,7 +221,7 @@ pub fn handle_completion(
     }
 
     // Convert position to offset (handle race condition with didChange)
-    let offset = match crate::lsp::offset(&line_index, &text, position) {
+    let offset = match crate::lsp::offset(line_index, text, position) {
         Ok(o) => o,
         Err(_) => {
             tracing::warn!("Position out of bounds, likely race with didChange - returning empty");
@@ -242,8 +230,7 @@ pub fn handle_completion(
     };
     tracing::info!("Converted position to offset: {:?}", offset);
 
-    // Call IDE API with workspace root
-    let items = snap.analysis.completions(file_id, offset.into(), snap.workspace_root.clone());
+    let items = ctx.analysis.completions(file_id, offset.into(), ctx.workspace_root.clone());
     tracing::info!("IDE API returned {} completion items", items.len());
 
     // Convert results
@@ -262,7 +249,7 @@ pub fn handle_completion(
 ///
 /// Returns semantic highlighting for the entire document.
 pub fn handle_semantic_tokens_full(
-    snap: GlobalStateSnapshot,
+    ctx: LatencyRequestContext,
     params: SemanticTokensParams,
 ) -> Result<Option<SemanticTokensResult>> {
     let start = std::time::Instant::now();
@@ -274,7 +261,7 @@ pub fn handle_semantic_tokens_full(
 
     // Don't block on metadata loading if VFS isn't done yet.
     // Client will re-request when ready.
-    if !snap.vfs_done {
+    if !ctx.vfs_done {
         tracing::debug!("VFS not ready, returning empty semantic tokens");
         return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
@@ -284,20 +271,17 @@ pub fn handle_semantic_tokens_full(
 
     let uri = params.text_document.uri;
 
-    // Get FileId
-    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    let file_id = ctx.file_id_for_url(&uri)?;
 
-    // Get text for line index
-    let text = snap
+    let doc = ctx
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
 
-    let line_index = LineIndex::new(&text);
-
-    // Get highlights from IDE
     let highlight_start = std::time::Instant::now();
-    let highlight_result = snap.analysis.highlight(file_id);
+    let highlight_result = ctx.analysis.highlight(file_id);
     let highlight_elapsed = highlight_start.elapsed();
     tracing::warn!(
         file_id = file_id.0,
@@ -307,8 +291,7 @@ pub fn handle_semantic_tokens_full(
         "semantic_tokens: analysis.highlight() completed"
     );
 
-    // Convert to LSP semantic tokens (pass text for UTF-16 length calculation)
-    let tokens = crate::lsp::semantic_tokens(&line_index, &text, &highlight_result.highlights);
+    let tokens = crate::lsp::semantic_tokens(line_index, text, &highlight_result.highlights);
     let total_elapsed = start.elapsed();
     tracing::warn!(
         file_id = file_id.0,
@@ -318,10 +301,9 @@ pub fn handle_semantic_tokens_full(
         "semantic_tokens: completed"
     );
 
-    // Request preloading of external files for faster goto_definition
     if !highlight_result.resolved_external_files.is_empty() {
         use crate::global_state::Task;
-        let _ = snap
+        let _ = ctx
             .task_sender
             .send(Task::PreloadExternalFiles { files: highlight_result.resolved_external_files });
     }
@@ -331,7 +313,7 @@ pub fn handle_semantic_tokens_full(
 
 /// Handles textDocument/documentSymbol request.
 pub fn handle_document_symbol(
-    snap: GlobalStateSnapshot,
+    ctx: LatencyRequestContext,
     params: DocumentSymbolParams,
 ) -> Result<Option<DocumentSymbolResponse>> {
     let _p = tracing::info_span!(
@@ -342,25 +324,23 @@ pub fn handle_document_symbol(
 
     let uri = params.text_document.uri;
 
-    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    let file_id = ctx.file_id_for_url(&uri)?;
 
-    let text = snap
+    let doc = ctx
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
 
-    let line_index = LineIndex::new(&text);
-
-    let symbols = snap.analysis.document_symbols(file_id);
+    let symbols = ctx.analysis.document_symbols(file_id);
 
     if symbols.is_empty() {
         return Ok(None);
     }
 
-    let lsp_symbols: Vec<lsp_types::DocumentSymbol> = symbols
-        .into_iter()
-        .filter_map(|s| convert_document_symbol(&line_index, &text, s))
-        .collect();
+    let lsp_symbols: Vec<lsp_types::DocumentSymbol> =
+        symbols.into_iter().filter_map(|s| convert_document_symbol(line_index, text, s)).collect();
 
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
 }
@@ -369,7 +349,7 @@ pub fn handle_document_symbol(
 ///
 /// Returns signature help (parameter hints) at the cursor position.
 pub fn handle_signature_help(
-    snap: GlobalStateSnapshot,
+    ctx: LatencyRequestContext,
     params: SignatureHelpParams,
 ) -> Result<Option<lsp_types::SignatureHelp>> {
     let _p = tracing::info_span!(
@@ -381,19 +361,16 @@ pub fn handle_signature_help(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    // Get FileId
-    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    let file_id = ctx.file_id_for_url(&uri)?;
 
-    // Get text for line index
-    let text = snap
+    let doc = ctx
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
 
-    let line_index = LineIndex::new(&text);
-
-    // Convert position to offset (handle race condition with didChange)
-    let offset = match crate::lsp::offset(&line_index, &text, position) {
+    let offset = match crate::lsp::offset(line_index, text, position) {
         Ok(o) => o,
         Err(_) => {
             tracing::warn!("Position out of bounds, likely race with didChange - returning empty");
@@ -401,10 +378,8 @@ pub fn handle_signature_help(
         }
     };
 
-    // Call IDE API
-    let sig_help = snap.analysis.signature_help(file_id, offset.into());
+    let sig_help = ctx.analysis.signature_help(file_id, offset.into());
 
-    // Convert result
     Ok(sig_help.map(to_lsp_signature_help))
 }
 
@@ -445,7 +420,7 @@ fn to_lsp_signature_help(sh: ide::SignatureHelp) -> lsp_types::SignatureHelp {
 ///
 /// Returns quick-fix code actions for diagnostics in the requested range.
 pub fn handle_code_action(
-    snap: GlobalStateSnapshot,
+    ctx: LatencyRequestContext,
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
     let _p = tracing::info_span!(
@@ -455,16 +430,16 @@ pub fn handle_code_action(
     .entered();
 
     let uri = params.text_document.uri;
-    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
-    let text = snap
+    let file_id = ctx.file_id_for_url(&uri)?;
+    let doc = ctx
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
-    let line_index = LineIndex::new(&text);
-    let range = crate::lsp::text_range(&line_index, &text, params.range)?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+    let range = crate::lsp::text_range(line_index, text, params.range)?;
 
-    let diagnostics =
-        snap.analysis.file_diagnostics_cached(file_id, snap.diagnostics_config.clone());
+    let diagnostics = ctx.analysis.file_diagnostics_cached(file_id, ctx.diagnostics_config.clone());
 
     let mut actions = Vec::new();
     for diag in diagnostics.iter() {
@@ -476,7 +451,7 @@ pub fn handle_code_action(
         }
         for fix in &diag.fixes {
             if let Some(action) =
-                crate::lsp::to_proto::code_action(&line_index, &text, &uri, diag, fix)
+                crate::lsp::to_proto::code_action(line_index, text, &uri, diag, fix)
             {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
@@ -900,10 +875,9 @@ mod tests {
 
         let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
 
-        // Insert document
         state.mem_docs.insert(uri.clone(), "Процедура Тест() КонецПроцедуры".to_string(), 1);
 
-        let snap = state.snapshot();
+        let ctx = latency_ctx(&state);
 
         let params = ReferenceParams {
             text_document_position: TextDocumentPositionParams {
@@ -916,7 +890,7 @@ mod tests {
         };
 
         // Should handle gracefully even if file is not in VFS
-        let result = handle_find_references(snap, params);
+        let result = handle_find_references(ctx, params);
         // File not in VFS is expected to fail in tests
         assert!(result.is_err() || result.unwrap().is_none());
     }
