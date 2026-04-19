@@ -3,10 +3,8 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-An empty statement is an operator consisting only of a semicolon (";"). Usually appears when:
+An empty statement is a standalone semicolon (`;`) that does not belong to a meaningful instruction.
 
-- refactoring, when the developer deleted a part of the code, but forgot to delete the last ";"
-- "copy paste", when the developer pasted the copied code containing the final character ";"
-- inattentive, when the developer twice (or even more) times clicked the symbol ";"
+It usually appears after partial refactoring, copy-paste, or an accidental extra keystroke.
 
-An empty statement does not lead to code errors, but clutters it, reducing perception.
+An empty statement usually does not change program behavior, but it makes the code noisier and can confuse the reader.
