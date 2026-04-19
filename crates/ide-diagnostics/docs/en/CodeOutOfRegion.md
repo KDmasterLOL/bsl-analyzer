@@ -2,21 +2,18 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+Module code should be organized into regions (`#Region` / `#EndRegion` or
+`#Область` / `#КонецОбласти`) according to the standard module structure.
 
-The code of module should be structured and divided into regions.  
-The requirement to structure code by regions is to improve code readability and maintainability and development by group of authors (developers) and in finalizing application solutions on specific implementations.
+This diagnostic reports module-level declarations and executable statements that
+are placed outside any region. The goal is not to validate every nested region
+name, but to enforce that the top-level module structure is explicitly grouped.
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
-```bsl
-#Region <RegionName>
-```
+### Correct
 
-The standard describes only 10 region names, the names of nested regions are not checked.
-
-Correct:
 ```bsl
 #Region Private
 #Region Print
@@ -28,7 +25,7 @@ Correct:
 #EndRegion
 ```
 
-Name matching table (full in [source code](https://github.com/1c-syntax/bsl-language-server/blob/develop/src/main/java/com/github/_1c_syntax/bsl/languageserver/utils/Keywords.java#L255)):
+### Standard top-level region names
 
 | RU  | EN |
 | ------------- | ------------- |
@@ -44,7 +41,9 @@ Name matching table (full in [source code](https://github.com/1c-syntax/bsl-lang
 | ОбработчикиСобытийЭлементовТаблицыФормы  | FormTableItemsEventHandlers  |
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
+Primary source: [Standard: Module structure (RU)](https://its.1c.ru/db/v8std#content:455:hdoc)
 
-* Source: [Standard: Module structure (RU)](https://its.1c.ru/db/v8std#content:455:hdoc)
+Secondary source: [v8std.ru: #std455 Module structure](https://v8std.ru/std/455/)
+
+Additional reference: [v8std.ru: CodeOutOfRegion](https://v8std.ru/diagnostics/bslls/CodeOutOfRegion/)
