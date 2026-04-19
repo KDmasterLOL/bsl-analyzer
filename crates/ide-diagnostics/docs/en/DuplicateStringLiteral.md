@@ -5,20 +5,20 @@
 
 <!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-It is bad form to use the same string literals multiple times in the same module or method:
-- it can lead to problems with further maintenance, if necessary, change the value - there is a high probability of missing one of the repetitions
-- it can be a consequence of "copy-paste" - the developer may have forgotten to change the code after copying a similar block of code.
+Using the same string literal many times in one method or module makes the code harder to maintain.
+
+When the text changes, one of the occurrences can be missed. Repeated literals also often appear after copy-paste and hide the fact that the code depends on one shared value.
+
+The duplicated text can usually be moved into a local variable, a named constant, or a helper function.
 
 ### Features of the implementation of diagnostic
 
-- Diagnostics with default settings does not respect the case of literal characters - the strings ` AAAA ` and ` AaaA ` are considered the same.
-- You cannot specify a minimum parsed literal value less than the default. Short service literals are often used, which will generate unnecessary comments. For example: empty string "", selector numbers "1", "0", etc.
-- You cannot reduce the allowed number of repetitions to less than 1, because it makes no practical sense.
+- By default the diagnostic compares literals case-insensitively, so `"AAAA"` and `"AaaA"` are treated as the same text.
+- The minimum analyzed literal length cannot be set below the default threshold. Short service strings such as `""`, `"0"` or `"1"` would otherwise create too many false positives.
+- The repetition threshold cannot be lower than `1`.
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-
-Bad code
 
 ```bsl
 Procedure Test(Param)
@@ -31,20 +31,16 @@ Procedure Test(Param)
 EndProcedure
 ```
 
-Сorrected:
-
 ```bsl
 Procedure Test(Param)
-    Result = "Value";
+    StringValue = "Value";
     If Param = "One" Then
-        Result = Result + One(Result);
+        Result = Result + One(StringValue);
     Else
-        Result = Result + Two(Result);
+        Result = Result + Two(StringValue);
     EndIf; 
 EndProcedure
 ```
-
-Bad code
 
 ```bsl
 Procedure Test2(Param)
@@ -63,11 +59,8 @@ Procedure Test3(Param)
 EndProcedure
 ```
 
-Сorrected
-
 ```bsl
 Procedure Test2(Param)
-    Result = "Value";
     If Param = "One" Then
         Result = Result + One(StringValue());
     Else
@@ -88,8 +81,4 @@ EndFunction
 
 ## Sources
 <!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
-
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
+No direct standard source.
