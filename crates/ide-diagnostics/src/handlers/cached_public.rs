@@ -36,8 +36,6 @@
 //!
 //! ## Implementation
 //!
-//! Ported from:
-//!
 //! Tier 3 diagnostic: Requires metadata (CommonModule, ReturnValueReuse).
 //! Uses HIR RegionTree and ItemTree for clean, cached access to regions and methods.
 
@@ -288,33 +286,23 @@ mod tests {
 
     // ========== Tests for check_with_reuse (ReturnValueReuse variants) ==========
 
-    /// DuringRequest cached module with two public regions (ПрограммныйИнтерфейс and public),
-    /// one non-public region (СлужебныйПрограммныйИнтерфейс). Expects 2 diagnostics.
+    /// DuringRequest cached module with two public regions and one internal region.
     #[test]
     fn test_during_request_finds_public_regions() {
-        // Inline equivalent of CachedPublicDiagnostic.bsl
         let code = r#"#Область ПрограммныйИнтерфейс
-
-Процедура Метод1()
-
+Процедура ПолучитьНастройки()
 КонецПроцедуры
-
 #КонецОбласти
 
-#Область СлужебныйПрограммныйИнтерфейс
-
-Процедура Метод1()
-
+#Область ВнутренниеПроцедуры
+Процедура ПодготовитьКэш()
 КонецПроцедуры
-
 #КонецОбласти
 
-#Область public
-
-Процедура Метод1()
-
-КонецПроцедуры
-
+#Область Public
+Функция ПолучитьВерсию()
+    Возврат "1.0";
+КонецФункции
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
@@ -323,7 +311,7 @@ mod tests {
 
         let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
 
-        // Expected: 2 diagnostics (ПрограммныйИнтерфейс at line 0, public at line 16)
+        // Expected: 2 diagnostics (ПрограммныйИнтерфейс at line 0, Public at line 10)
         assert_eq!(diagnostics.len(), 2, "Should find 2 public regions with methods");
 
         let (first_line, _, _, _) =
@@ -332,34 +320,26 @@ mod tests {
 
         let (second_line, _, _, _) =
             crate::test_utils::range_to_line_col(code, diagnostics[1].range);
-        assert_eq!(second_line, 16, "Second diagnostic at line 16");
+        assert_eq!(second_line, 10, "Second diagnostic at line 10");
     }
 
     /// DuringSession is also a cached mode - same 2 diagnostics expected.
     #[test]
     fn test_during_session_finds_public_regions() {
         let code = r#"#Область ПрограммныйИнтерфейс
-
-Процедура Метод1()
-
+Процедура ПолучитьНастройки()
 КонецПроцедуры
-
 #КонецОбласти
 
-#Область СлужебныйПрограммныйИнтерфейс
-
-Процедура Метод1()
-
+#Область ВнутренниеПроцедуры
+Процедура ПодготовитьКэш()
 КонецПроцедуры
-
 #КонецОбласти
 
-#Область public
-
-Процедура Метод1()
-
-КонецПроцедуры
-
+#Область Public
+Функция ПолучитьВерсию()
+    Возврат "1.0";
+КонецФункции
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
@@ -374,27 +354,19 @@ mod tests {
     #[test]
     fn test_dont_use_skips_check() {
         let code = r#"#Область ПрограммныйИнтерфейс
-
-Процедура Метод1()
-
+Процедура ПолучитьНастройки()
 КонецПроцедуры
-
 #КонецОбласти
 
-#Область СлужебныйПрограммныйИнтерфейс
-
-Процедура Метод1()
-
+#Область ВнутренниеПроцедуры
+Процедура ПодготовитьКэш()
 КонецПроцедуры
-
 #КонецОбласти
 
-#Область public
-
-Процедура Метод1()
-
-КонецПроцедуры
-
+#Область Public
+Функция ПолучитьВерсию()
+    Возврат "1.0";
+КонецФункции
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
