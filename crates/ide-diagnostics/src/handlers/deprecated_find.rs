@@ -35,8 +35,6 @@
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! Ported from:
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -159,7 +157,7 @@ EndProcedure
 
     #[test]
     fn test_in_proc_and_toplevel() {
-        // Fixture scenario: НайтИ() inside procedure and FinD() at module top-level
+        // One deprecated call inside a procedure and one at module top-level.
         let code = r#"
 Процедура А()
 
