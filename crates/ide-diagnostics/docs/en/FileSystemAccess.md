@@ -3,27 +3,23 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 <!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-It is important to review your code. Be sure to pay attention to accessing the file system and using “external code”
+This diagnostic is a security review tool for code that accesses the file system.
 
-The found sections of the code must be analyzed, a manual audit of the code must be performed for its correctness and safety.
+Reading, writing, copying, moving, or deleting files can affect confidentiality, integrity, and availability of data. For that reason, every such code path should be reviewed manually for authorization, path validation, lifecycle of temporary files, and safe interaction between client and server.
+
+The current implementation reports a conservative set of file-system-related constructors and methods.
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 ```bsl
-    Текст = Новый ЧтениеТекста(ПутьФайла, КодировкаТекста.ANSI); // есть замечание
-    Текст = Новый ЗаписьТекста(ПутьФайла, КодировкаТекста.ANSI); // есть замечание
+Text = New TextReader(FilePath, TextEncoding.UTF8);     // review required
+Text = New TextWriter(FilePath, TextEncoding.UTF8);     // review required
 
-    ЗначениеВФайл(ПутьФайла, ЛичныеДанные); // есть замечание
-    КопироватьФайл(ПутьФайла, ДругойПутьФайла); // есть замечание
-
-    МассивИмен = Новый Массив();
-    МассивИмен.Добавить(ПутьФайла);
-    ОбъединитьФайлы(МассивИмен, ДругойПутьФайла); // есть замечание
-
-    ПереместитьФайл(ПутьФайла, ДругойПутьФайла); // есть замечание
-    РазделитьФайл(ПутьФайла, 1024 * 1024 ); // есть замечание
-    СоздатьКаталог(ИмяКаталога); // есть замечание
-    УдалитьФайлы(ПутьФайла); // есть замечание
+ValueToFile(FilePath, PersonalData);                    // review required
+FileCopy(FilePath, OtherFilePath);                      // review required
+MoveFile(FilePath, OtherFilePath);                      // review required
+DeleteFiles(FilePath);                                  // review required
+CreateDirectory(DirectoryName);                         // review required
 ```
 
 ## Sources
@@ -33,6 +29,7 @@ The found sections of the code must be analyzed, a manual audit of the code must
 * Source: [Standard: Modules (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
 * Useful information: [Refusal to use modal windows (RU)](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
 * Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-* [File system access from application code (RU)](https://its.1c.ru/db/v8std#content:542:hdoc)
-* [Standard: Application launch security (RU)](https://its.1c.ru/db/v8std#content:774:hdoc)
-* [Safe operation - Developer's Guide (RU](https://its.1c.ru/db/v8323doc#bookmark:dev:TI000000186)
+* [File system access from configuration code (RU)](https://its.1c.ru/db/v8std/content/542/hdoc)
+* [Application launch security (RU)](https://its.1c.ru/db/v8std/content/774/hdoc)
+* [Safe mode - Developer's Guide (RU)](https://its.1c.ru/db/v8323doc#bookmark:dev:TI000000186)
+* [v8std.ru: #std542](https://v8std.ru/std/542/)
