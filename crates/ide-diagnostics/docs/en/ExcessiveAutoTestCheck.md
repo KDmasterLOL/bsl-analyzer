@@ -2,23 +2,26 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-Standard 772, Interaction with Automated Testing Tools, has been canceled. In this regard, verification of the "АвтоТест" parameter in the form code is no longer necessary.
+
+Legacy checks for the `"АвтоТест"` / `"AutoTest"` parameter are no longer needed.
+
+This pattern used to appear in form-opening and fill handlers as an early `Return`, but today it only leaves dead compatibility code in the module.
 
 ## Examples
 ```bsl
-If Parameters.Property("АвтоТест") Then
+If Parameters.Property("AutoTest") Then
     Return;
 EndIf;
 ```
-
-and in handler Filling in object module:
 
 ```bsl
-// Skip processing to get the form when sending the "АвтоТест" program.
-If FillData = "АвтоТест" Then
+If FillData = "AutoTest" Then
     Return;
 EndIf;
 ```
 
+These branches should be removed when they do nothing except return immediately.
+
 ## Sources
-* Источник: [Standard: Modules. Part 3 (RU)](https://its.1c.ru/db/v8std#content:456:hdoc:3)
+* [Standard: Module texts (RU)](https://its.1c.ru/db/v8std/content/456/hdoc)
+* [v8std.ru: #std456](https://v8std.ru/std/456/)
