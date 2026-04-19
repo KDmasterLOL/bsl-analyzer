@@ -14,13 +14,17 @@ use lsp_types::{
     SemanticTokensResult, SignatureHelpParams,
 };
 
+use crate::frozen_context::LatencyRequestContext;
 use crate::global_state::GlobalStateSnapshot;
 
 /// Handles textDocument/definition request.
 ///
-/// Goes to the definition of the symbol at the cursor position.
+/// Goes to the definition of the symbol at the cursor position. Runs on the
+/// task pool via `on_latency` — it reads exclusively from the immutable
+/// `LatencyRequestContext`, so concurrent `didChange` edits cannot alias
+/// the Salsa snapshot used for resolution.
 pub fn handle_goto_definition(
-    snap: GlobalStateSnapshot,
+    ctx: LatencyRequestContext,
     params: GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
     let _p = tracing::info_span!(
@@ -32,24 +36,19 @@ pub fn handle_goto_definition(
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    // Get FileId
-    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    let file_id = ctx.file_id_for_url(&uri)?;
 
-    // Get text for line index
-    let text = snap
+    let source_doc = ctx
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = source_doc.text();
+    let line_index = source_doc.line_index();
 
-    let line_index = LineIndex::new(&text);
+    let offset = crate::lsp::offset(line_index, text, position)?;
 
-    // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, &text, position)?;
+    let target = ctx.analysis.goto_definition(file_id, offset.into());
 
-    // Call IDE API
-    let target = snap.analysis.goto_definition(file_id, offset.into());
-
-    // Convert result
     match target {
         Some(nav_target) => {
             tracing::debug!(
@@ -57,23 +56,18 @@ pub fn handle_goto_definition(
                 ?nav_target.range,
                 "goto_definition: found target"
             );
-            // Get URL for target file (may be different from source file)
-            let target_url = snap.url_for_file_id(nav_target.file_id)?;
+            let target_url = ctx.url_for_file_id(nav_target.file_id)?;
 
-            // Get text and line index for target file
-            let target_text = if nav_target.file_id == file_id {
-                // Same file - reuse current text
-                text.clone()
+            let target_text: String = if nav_target.file_id == file_id {
+                text.to_string()
+            } else if let Some(doc) = ctx.mem_docs.get(&target_url) {
+                doc.text().to_string()
             } else {
-                // Different file - read from MemDocs or database
-                snap.mem_docs
-                    .get(&target_url)
-                    .unwrap_or_else(|| snap.analysis.file_text(nav_target.file_id))
+                ctx.analysis.file_text(nav_target.file_id)
             };
 
             let target_line_index = LineIndex::new(&target_text);
 
-            // Convert range
             let target_range =
                 crate::lsp::range(&target_line_index, &target_text, nav_target.range)
                     .ok_or_else(|| anyhow::anyhow!("Failed to convert range"))?;
@@ -820,11 +814,25 @@ mod tests {
     use crossbeam_channel::unbounded;
     use lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams};
 
+    use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
     use crate::global_state::GlobalState;
 
     fn create_test_state() -> GlobalState {
         let (sender, _receiver) = unbounded();
         GlobalState::new(sender)
+    }
+
+    fn latency_ctx(state: &GlobalState) -> LatencyRequestContext {
+        LatencyRequestContext {
+            analysis: state.analysis_host.analysis(),
+            workspace_root: state.workspace_root.clone(),
+            project: state.project.clone(),
+            diagnostics_config: state.diagnostics_config.clone(),
+            vfs_done: state.vfs_done,
+            task_sender: state.task_pool.pool.sender.clone(),
+            mem_docs: state.mem_docs.freeze(),
+            file_paths: FrozenFilePaths::freeze(&state.vfs.read()),
+        }
     }
 
     #[test]
@@ -836,7 +844,7 @@ mod tests {
         // Insert document
         state.mem_docs.insert(uri.clone(), "Процедура Тест() КонецПроцедуры".to_string(), 1);
 
-        let snap = state.snapshot();
+        let ctx = latency_ctx(&state);
 
         let params = GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
@@ -848,9 +856,42 @@ mod tests {
         };
 
         // Should handle gracefully even if file is not in VFS
-        let result = handle_goto_definition(snap, params);
+        let result = handle_goto_definition(ctx, params);
         // File not in VFS is expected to fail in tests
         assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    #[test]
+    fn goto_definition_context_frozen_against_main_thread_mutation() {
+        // Regression for the async dispatch race: the worker must read the
+        // same text that existed at dispatch time, even if the main thread
+        // applies didChange edits before the handler runs.
+        let mut state = create_test_state();
+
+        let uri = lsp_types::Url::parse("file:///frozen.bsl").unwrap();
+        state.mem_docs.insert(uri.clone(), "original".to_string(), 1);
+
+        // Freeze ctx BEFORE mutation. This is what on_latency does on the
+        // main thread right before spawning the worker.
+        let ctx = latency_ctx(&state);
+
+        // Main thread mutates MemDocs while the "worker" still holds ctx.
+        state.mem_docs.update(
+            &uri,
+            vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "rewritten".to_string(),
+            }],
+        );
+
+        // Worker reads ctx — must see "original", not "rewritten".
+        let doc = ctx.mem_docs.get(&uri).expect("document must be in frozen view");
+        assert_eq!(doc.text(), "original");
+        assert_eq!(doc.version(), 1);
+
+        // Main thread's live view reflects the mutation.
+        assert_eq!(state.mem_docs.get(&uri).as_deref(), Some("rewritten"));
     }
 
     #[test]

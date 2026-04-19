@@ -411,7 +411,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
             state.shutdown_requested = true;
             Ok(())
         })
-        .on_sync::<GotoDefinition>(crate::handlers::handle_goto_definition)
+        .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
         .on_sync::<References>(crate::handlers::handle_find_references)
         .on_sync::<HoverRequest>(crate::handlers::handle_hover)
         .on_sync::<Completion>(crate::handlers::handle_completion)
