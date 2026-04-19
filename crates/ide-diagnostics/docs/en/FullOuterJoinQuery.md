@@ -3,10 +3,13 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 <!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-You should not use FULL OUTER JOIN in queries, especially in PostgreSQL database. It is better to rewrite query without FULL OUTER JOIN.
+Avoid `FULL OUTER JOIN` in queries when the same result can be expressed in a simpler form.
+
+According to the 1C standard, this construct can significantly degrade performance in client-server deployments with PostgreSQL, especially when it appears multiple times in one query.
+
+In many cases the query can be rewritten with `UNION ALL` and `LEFT JOIN`. The standard also allows exceptions when the query cannot reasonably be rewritten without `FULL OUTER JOIN`.
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-Query below will lead to high load on PostgreSQL database.
 ```bsl
 Procedure Test1()
 
@@ -27,5 +30,6 @@ EndProcedure
 ## Sources
 <!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-* [Restricting the use of the "FULL OUTER JOINT" construct in queries (RU)](https://its.1c.ru/db/v8std#content:435:hdoc)
-* [Administrator's Guide: Peculiarities of Using PostgreSQL (RU)](https://its.1c.ru/db/metod8dev#content:1556:hdoc)
+* [Restricting the use of FULL OUTER JOIN in queries (RU)](https://its.1c.ru/db/v8std/content/435/hdoc)
+* [Administrator's Guide: PostgreSQL specifics (RU)](https://its.1c.ru/db/metod8dev/content/1556/hdoc)
+* [v8std.ru: #std435](https://v8std.ru/std/435/)
