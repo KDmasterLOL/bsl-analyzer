@@ -17,8 +17,6 @@
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - detects FormDataToValue calls during HIR lowering.
-//!
-//! Ported from:
 
 use crate::define_metadata;
 use crate::metadata::*;
