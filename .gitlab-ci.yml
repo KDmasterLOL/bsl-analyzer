@@ -8,7 +8,7 @@ variables:
   CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
   RUSTFLAGS: "-D warnings"
   GIT_DEPTH: 1
-  CI_IMAGE: gitlab.runsystems.ru:5050/proit/ci:rust-1.93
+  CI_IMAGE: gitlab.runsystems.ru:5050/proit/ci:rust-1.95
 
 .cargo-cache:
   cache:
