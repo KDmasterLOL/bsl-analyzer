@@ -36,8 +36,6 @@
 //!
 //! Preprocessor regions ARE processed by HIR lowering for control flow analysis.
 //! The diagnostic is emitted in `hir-def/body/lower/preproc.rs` during region processing.
-//!
-//! Ported from:
 
 use crate::define_metadata;
 use crate::metadata::*;
