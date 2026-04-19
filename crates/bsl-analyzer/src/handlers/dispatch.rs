@@ -16,14 +16,21 @@ use crate::global_state::{GlobalState, Task};
 /// Dispatcher for LSP requests.
 ///
 /// Provides a chain-based API for handling different request types:
-/// - `on_sync_mut`: Handlers that need mutable access to GlobalState (main thread)
-/// - `on_sync`: Handlers that only need immutable snapshot (main thread)
+/// - `on_sync_mut`: Handlers that need mutable access to GlobalState (main thread).
+///   Use for writes (shutdown, reload).
+/// - `on_sync`: Read-only handlers that run on the main thread. Reserved for
+///   requests the client expects to be synchronous (formatting).
+/// - `on_latency`: Read-only handlers dispatched to the task pool. The handler
+///   receives an immutable `LatencyRequestContext` (frozen `MemDocs` / VFS
+///   paths + owned Salsa snapshot), so it cannot race with `didChange`. The
+///   main loop stays free to handle `$/cancelRequest` and further edits.
 ///
 /// # Example
 /// ```ignore
 /// RequestDispatcher { req: Some(req), global_state: &mut state }
 ///     .on_sync_mut::<Shutdown>(|state, ()| { state.shutdown_requested = true; Ok(()) })
-///     .on_sync::<GotoDefinition>(handlers::handle_goto_definition)
+///     .on_latency::<GotoDefinition>(handlers::handle_goto_definition)
+///     .on_sync::<Formatting>(handlers::handle_formatting)
 ///     .finish();
 /// ```
 pub struct RequestDispatcher<'a> {

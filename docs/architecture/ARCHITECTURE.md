@@ -154,6 +154,45 @@ Flow-sensitive анализ вынесен в отдельную подсист�
 
 Подробности — в `docs/architecture/DATAFLOW.md`.
 
+### LSP-диспетчинг запросов
+
+`RequestDispatcher` (`crates/bsl-analyzer/src/handlers/dispatch.rs`)
+раздаёт LSP-запросы по трём каналам:
+
+- `on_sync_mut` — mutable-хендлеры на main thread (shutdown, reload).
+- `on_sync` — read-хендлеры на main thread. Сейчас здесь живут только
+  `Formatting` / `RangeFormatting` / `OnTypeFormatting`: клиенты делают
+  save-and-format синхронно, а форматтер быстрый.
+- `on_latency` — read-хендлеры на task pool. Все latency-чувствительные
+  запросы (`textDocument/definition`, `hover`, `completion`, `references`,
+  `documentSymbol`, `semanticTokens/full`, `codeAction`, `signatureHelp`)
+  уходят сюда и не блокируют main loop.
+
+`on_latency` на main thread:
+
+1. Клонирует owned Salsa DB (snapshot) и берёт у него
+   `salsa::CancellationToken`.
+2. Регистрирует токен в `GlobalState.request_tokens` по `RequestId`;
+   при повторе id предыдущий токен отменяется.
+3. Замораживает `MemDocs` и пути VFS в `LatencyRequestContext` (см.
+   `crates/bsl-analyzer/src/frozen_context.rs`). Worker читает только
+   этот снимок и не видит последующих `didChange`.
+
+На task-pool потоке worker обернут в два слоя защиты —
+`salsa::Cancelled::catch` конвертирует кооперативную отмену в
+`ErrorCode::RequestCanceled`, а внешний `std::panic::catch_unwind`
+логирует любой панический payload + backtrace и возвращает
+`ErrorCode::InternalError`. Инвариант: **на каждый dispatch ровно один
+`Task::RequestResult`**.
+
+`$/cancelRequest` на main thread удаляет токен из `request_tokens` и
+вызывает `cancel()`. Worker унывает на следующей границе salsa-запроса
+— так же, как диагностика после `didChange`.
+
+Cancellation-карты (`diagnostics_tokens`, `preload_tokens`,
+`preload_external_tokens`, `request_tokens`) живут на `GlobalState`;
+каждая описывает свой owner и lifecycle в doc-комментариях.
+
 ## Конфигурация проекта
 
 Основной формат конфигурации — `bsl-analyzer.toml`. Его загружает
