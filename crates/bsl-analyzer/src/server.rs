@@ -291,9 +291,27 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             let task = analysis.warm_caches_task(&files, state.diagnostics_config().clone());
             let first_file = files[0];
 
+            // TODO: shares `preload_tokens` with `preload_dependencies` keyed on the same
+            // FileId. If an opened file later appears as an external dep head, its warmer
+            // would be cancelled here. Unlikely in practice; split the map if it bites.
+            if let Some(prev) = state.preload_tokens.remove(&first_file) {
+                prev.cancel();
+            }
+            state.preload_tokens.insert(first_file, task.cancellation_token());
+
             state.task_pool.pool.spawn(move || {
-                let count = task.run();
-                tracing::debug!(count = file_count, "external files preloaded");
+                let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                    task.run()
+                })) {
+                    Ok(count) => {
+                        tracing::debug!(count = file_count, "external files preloaded");
+                        count
+                    }
+                    Err(_) => {
+                        tracing::debug!(file_id = first_file.0, "external file preload cancelled");
+                        0
+                    }
+                };
                 Task::DependenciesPreloaded { file_id: first_file, count }
             });
         }

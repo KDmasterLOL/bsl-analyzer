@@ -121,7 +121,11 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 /// - symbol_tree (for fast GoToDefinition)
 /// - module_bodies (for hover info)
 /// - diagnostics (for fast diagnostics on dependency navigation)
-fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
+///
+/// Any previous preload for the same head `file_id` is cancelled cooperatively
+/// via its Salsa `CancellationToken`, so repeated `didOpen` does not pile up
+/// stale warming tasks. Cancellation is also triggered from `handle_did_close`.
+fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
     let analysis = state.analysis_host.analysis();
     let deps = analysis.file_dependencies(file_id);
 
@@ -134,12 +138,25 @@ fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
     let dep_ids: Vec<u32> = deps.iter().map(|f| f.0).collect();
     tracing::debug!(file_id = file_id.0, dep_count, ?dep_ids, "preload: starting background task");
 
+    if let Some(prev) = state.preload_tokens.remove(&file_id) {
+        prev.cancel();
+    }
+
     let task = analysis.warm_caches_task(&deps, state.diagnostics_config().clone());
+    state.preload_tokens.insert(file_id, task.cancellation_token());
 
     state.task_pool.pool.spawn(move || {
         tracing::debug!(dep_count, "preload: background task started");
-        let count = task.run();
-        tracing::debug!(dep_count = count, "preload: background task completed");
+        let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| task.run())) {
+            Ok(count) => {
+                tracing::debug!(dep_count = count, "preload: background task completed");
+                count
+            }
+            Err(_) => {
+                tracing::debug!(file_id = file_id.0, "preload: background task cancelled");
+                0
+            }
+        };
         Task::DependenciesPreloaded { file_id, count }
     });
 }
@@ -209,6 +226,16 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
 
     if let Some(token) = state.diagnostics_tokens.remove(&uri) {
         token.cancel();
+    }
+    match crate::lsp::file_id(state, &uri) {
+        Ok(file_id) => {
+            if let Some(token) = state.preload_tokens.remove(&file_id) {
+                token.cancel();
+            }
+        }
+        Err(e) => {
+            tracing::warn!(%uri, error = %e, "didClose: could not resolve file_id for preload cleanup")
+        }
     }
 
     // Remove from MemDocs

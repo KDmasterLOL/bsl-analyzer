@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 ide-db.workspace = true
+salsa.workspace = true
 ide-diagnostics.workspace = true
 ide-assists.workspace = true
 hir.workspace = true

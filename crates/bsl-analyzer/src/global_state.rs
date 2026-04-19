@@ -111,6 +111,11 @@ pub struct GlobalState {
     /// at the next Salsa query boundary, even when no write bumps the global revision.
     pub diagnostics_tokens: HashMap<Url, salsa::CancellationToken>,
 
+    /// Cancellation tokens for in-flight cache-warming (preload) tasks, keyed by
+    /// the head `FileId` that triggered the preload. Used to abort stale warming
+    /// when the user closes a file or re-triggers preload for the same head.
+    pub preload_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
+
     /// Last time progress was reported to the client.
     pub last_progress_report: std::time::Instant,
 
@@ -143,6 +148,7 @@ impl GlobalState {
             diagnostics_generation: 0,
             pending_diagnostics_uri: None,
             diagnostics_tokens: HashMap::new(),
+            preload_tokens: HashMap::new(),
             last_progress_report: std::time::Instant::now(),
             pending_vfs_files: Vec::new(),
         }

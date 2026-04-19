@@ -249,6 +249,15 @@ pub struct WarmCachesTask {
 }
 
 impl WarmCachesTask {
+    /// Returns a cancellation token for this task's Salsa snapshot.
+    ///
+    /// Calling `cancel()` on the returned token makes the next query boundary
+    /// inside `run()` unwind with `salsa::Cancelled::Local`, so callers can
+    /// abort long-running cache warming when the work is no longer needed.
+    pub fn cancellation_token(&self) -> salsa::CancellationToken {
+        salsa::Database::cancellation_token(&self.db)
+    }
+
     /// Run the cache-warming task. Returns the number of files processed.
     pub fn run(self) -> usize {
         use hir::{DefDatabase, ModuleId};
