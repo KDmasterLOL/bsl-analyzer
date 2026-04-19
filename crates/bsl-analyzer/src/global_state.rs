@@ -40,6 +40,9 @@ pub enum Task {
     DiagnosticsCancelled { generation: u64 },
     /// Request to preload external files discovered during semantic highlighting.
     PreloadExternalFiles { files: Vec<vfs::FileId> },
+    /// Response from an async `on_latency` request handler, ready for the main
+    /// loop to forward to the client and clean up any cancellation token.
+    RequestResult { response: Response },
 }
 
 /// The main state of the LSP server (mutable, main thread only).
@@ -122,6 +125,13 @@ pub struct GlobalState {
     /// task completes (see `handle_task` for `DependenciesPreloaded`).
     pub preload_external_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
 
+    /// Cancellation tokens for in-flight async LSP requests dispatched via
+    /// `on_latency`, keyed by the LSP request id. Cleared when the request
+    /// produces a `Task::RequestResult` or when the client sends
+    /// `$/cancelRequest`. If the client submits a duplicate id, the existing
+    /// token is cancelled so the superseded worker unwinds cooperatively.
+    pub request_tokens: HashMap<lsp_server::RequestId, salsa::CancellationToken>,
+
     /// Last time progress was reported to the client.
     pub last_progress_report: std::time::Instant,
 
@@ -156,6 +166,7 @@ impl GlobalState {
             diagnostics_tokens: HashMap::new(),
             preload_tokens: HashMap::new(),
             preload_external_tokens: HashMap::new(),
+            request_tokens: HashMap::new(),
             last_progress_report: std::time::Instant::now(),
             pending_vfs_files: Vec::new(),
         }

@@ -285,6 +285,13 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             state.preload_tokens.remove(&file_id);
             state.preload_external_tokens.remove(&file_id);
         }
+        Task::RequestResult { response } => {
+            // Best-effort cleanup: a concurrent `$/cancelRequest` may have
+            // already removed the entry. Missing is fine — the worker
+            // beat the cancel to the finish line.
+            state.request_tokens.remove(&response.id);
+            state.respond(response);
+        }
         Task::PreloadExternalFiles { files } => {
             if files.is_empty() {
                 return Ok(());
