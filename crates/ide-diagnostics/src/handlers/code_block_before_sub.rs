@@ -35,9 +35,6 @@
 //! ```
 //!
 //! ## Implementation
-//!
-//! Ported from:
-//!
 //! Adapted to use Rowan SyntaxNode traversal.
 
 use crate::define_metadata;
@@ -233,8 +230,7 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
     #[test]
     fn test_code_inside_region_before_sub() {
-        // Code block inside a region before procedures — should trigger
-        // The .bsl fixture: region "КодДоМетодов" contains Метод() + Сообщить() calls before Процедура Метод()
+        // Executable code inside a top region before procedures should trigger.
         let code = r#"Перем П;
 
 #Область КодДоМетодов
