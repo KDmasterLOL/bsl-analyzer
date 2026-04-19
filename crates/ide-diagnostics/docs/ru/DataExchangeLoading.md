@@ -36,7 +36,9 @@
 
 ## Источники
 
-* [Стандарт: Использование признака ОбменДанными.Загрузка в обработчиках событий объекта](https://its.1c.ru/db/v8std#content:773)
-* [Обработчик события ПриЗаписи](https://its.1c.ru/db/v8std#content:465)
-* [Обработчик события ПередЗаписью](https://its.1c.ru/db/v8std#content:464)
-* [Обработчик события ПередУдалением](https://its.1c.ru/db/v8std#content:752)
+- [Стандарт: Использование признака ОбменДанными.Загрузка в обработчиках событий объекта](https://its.1c.ru/db/v8std#content:773)
+- [Обработчик события ПриЗаписи](https://its.1c.ru/db/v8std#content:465)
+- [Обработчик события ПередЗаписью](https://its.1c.ru/db/v8std#content:464)
+- [Обработчик события ПередУдалением](https://its.1c.ru/db/v8std#content:752)
+- [v8std: #std773 Использование признака ОбменДанными.Загрузка в обработчиках событий объекта](https://v8std.ru/std/773/)
+- [v8std: data-exchange-load](https://v8std.ru/diagnostics/v8-code-style/data-exchange-load/)
