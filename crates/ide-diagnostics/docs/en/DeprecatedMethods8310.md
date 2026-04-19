@@ -1,21 +1,25 @@
-# Deprecated client application method. (DeprecatedMethods8310)
+# Deprecated Client Application Methods (DeprecatedMethods8310)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-The following global context methods are deprecated and are not recommended since platform version 8.3.10:
+Starting with platform version `8.3.10`, several global context methods related
+to the client application were deprecated.
 
-```bsl
-SetShortApplicationCaption();
-GetShortApplicationCaption();
-SetClientApplicationCaption();
-GetClientApplicationCaption();
-ClientApplicationBaseFontCurrentVariant();
-ClientApplicationInterfaceCurrentVariant().
-```
+Instead of those global methods, use the `ClientApplication` /
+`КлиентскоеПриложение` object and its properties or methods. This makes the API
+more explicit and groups client-application behavior under a dedicated object.
+
+Deprecated methods covered by this diagnostic include:
+
+- `SetShortApplicationCaption()` / `УстановитьКраткийЗаголовокПриложения()`
+- `GetShortApplicationCaption()` / `ПолучитьКраткийЗаголовокПриложения()`
+- `SetClientApplicationCaption()` / `УстановитьЗаголовокКлиентскогоПриложения()`
+- `GetClientApplicationCaption()` / `ПолучитьЗаголовокКлиентскогоПриложения()`
+- `ClientApplicationBaseFontCurrentVariant()` /
+  `ТекущийВариантОсновногоШрифтаКлиентскогоПриложения()`
+- `ClientApplicationInterfaceCurrentVariant()` /
+  `ТекущийВариантИнтерфейсаКлиентскогоПриложения()`
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-Source: [Version 8.3.10 changelog (RU)](https://dl03.1c.ru/content/Platform/8_3_10_2699/1cv8upd.htm)
+- [1C:Enterprise 8.3.10 platform changelog (RU)](https://dl03.1c.ru/content/Platform/8_3_10_2699/1cv8upd.htm)

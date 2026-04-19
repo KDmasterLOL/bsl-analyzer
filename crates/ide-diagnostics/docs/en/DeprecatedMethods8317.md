@@ -1,19 +1,23 @@
-# Using of deprecated platform 8.3.17 global methods (DeprecatedMethods8317)
+# Deprecated Platform 8.3.17 Global Methods (DeprecatedMethods8317)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-In the global context of the `8.3.17` platform, created `ErrorProcessing` properties and `error management text parameters` that allow you to customize error texts.
 
-Global context methods are deprecated:
+Starting with platform version `8.3.17`, several global error-handling methods
+were deprecated in favor of the dedicated `ErrorProcessingManager` /
+`МенеджерОбработкиОшибок` object.
 
-* `BriefErrorDescription()`
-* `DetailErrorDescription()`
-* `ShowErrorInfo()`
+Deprecated methods covered by this diagnostic include:
 
-You should use the same methods of the `ErrorProcessing` object instead.
+- `BriefErrorRepresentation()` / `КраткоеПредставлениеОшибки()`
+- `DetailedErrorRepresentation()` / `ПодробноеПредставлениеОшибки()`
+- `ShowErrorInformation()` / `ПоказатьИнформациюОбОшибке()`
+
+In the current implementation, this diagnostic family also reports
+`GetForm()` / `ПолучитьФорму()` and suggests `OpenForm()` / `ОткрытьФорму()`.
+That part overlaps with the separate `GetFormMethod` rule and should be kept in
+mind during broader cleanup.
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-* Source: [Platform 8.3.17 changelog (RU)](https://dl03.1c.ru/content/Platform/8_3_17_1386/1cv8upd_8_3_17_1386.htm#27f2dc70-f0cf-11e9-8371-0050569f678a)
+- [1C:Enterprise 8.3.17 platform changelog (RU)](https://dl03.1c.ru/content/Platform/8_3_17_1386/1cv8upd_8_3_17_1386.htm#27f2dc70-f0cf-11e9-8371-0050569f678a)
+- [v8std: #std404 Opening forms](https://v8std.ru/std/404/)
