@@ -14,6 +14,7 @@
 mod cache;
 mod entities;
 mod messages;
+mod parent_death;
 mod provider;
 mod use_cases;
 
@@ -61,13 +62,34 @@ fn main() -> Result<()> {
         None => use_cases::ensure_analyzer(&*provider, is_analyze_mode)?,
     };
 
-    let status = Command::new(&analyzer_path)
-        .args(&remaining_args)
+    let mut cmd = Command::new(&analyzer_path);
+    cmd.args(&remaining_args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .stderr(Stdio::inherit());
+
+    // Before spawn: install Linux PR_SET_PDEATHSIG via pre_exec.
+    parent_death::configure_parent_death(&mut cmd);
+
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("Failed to execute bsl-analyzer at {:?}", analyzer_path))?;
+
+    // After spawn: bind to a Windows Job Object. If binding fails we own a
+    // live detached child — the very failure mode this module exists to
+    // prevent — so kill it explicitly before returning the error.
+    let _lifecycle = match parent_death::adopt_child(&child) {
+        Ok(guard) => guard,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err).context("Failed to bind child analyzer to launcher lifetime");
+        }
+    };
+
+    let status = child
+        .wait()
+        .with_context(|| format!("Failed to wait for bsl-analyzer at {:?}", analyzer_path))?;
 
     std::process::exit(status.code().unwrap_or(1));
 }

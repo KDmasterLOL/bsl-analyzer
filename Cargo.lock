@@ -314,12 +314,14 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "hex",
+ "libc",
  "reqwest",
  "self-replace",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sys-locale",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
