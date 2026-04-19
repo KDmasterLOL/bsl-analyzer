@@ -2,24 +2,30 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-To avoid code duplication, it is recommended to create client-server common modules with methods whose contents are the same on the server and on the client. These modules have signs:
+Client-server common modules should make their mixed execution context explicit
+in the module name.
 
-* Client (Managed application)
-* Server (ServerCall is disabled)
-* Client (Ordinary application)
-* External connection
+These modules are intended for code that is available both on the client and on
+the server without using the `ServerCall` pattern. According to the common
+module naming rules, such modules should include the
+`ClientServer` / `КлиентСервер` postfix in the name.
 
-Common modules of this type are named with the "ClientServer" (rus. "КлиентСервер").
+That postfix helps distinguish client-server modules from purely client,
+server-side, or server-call modules.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
-FilesClientServer, CommonClientServer, UsersClientServer
+Valid names: `FilesClientServer`, `CommonClientServer`, `UsersClientServer`
+
+Invalid names for client-server modules: `Files`, `Common`
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
+Primary source: [Standard: rules for creating common modules (RU)](https://its.1c.ru/db/v8std#content:469:hdoc:2.4)
 
-[Standard: Rules for creating common modules (RU)](https://its.1c.ru/db/v8std#content:469:hdoc:2.4)
+Secondary source: [v8std.ru: #std469](https://v8std.ru/std/469/)
+
+Additional references:
+- [v8std.ru: CommonModuleNameClientServer](https://v8std.ru/diagnostics/bslls/CommonModuleNameClientServer/)
+- [v8std.ru: common-module-name-client-server](https://v8std.ru/diagnostics/v8-code-style/common-module-name-client-server/)
