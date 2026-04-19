@@ -3,7 +3,13 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Complex expressions (with more than 3 boolean constructs) must be extracted to separated method or variable.
+This diagnostic reports `If` and `ElseIf` conditions that contain too many
+boolean operations.
+
+The default threshold in `bsl-analyzer` is `3`. When a condition becomes more
+complex than that, it is usually easier to read and maintain if you extract
+part of the logic into a helper function or an intermediate variable with a
+meaningful name.
 
 ## Examples
 
@@ -46,3 +52,8 @@ Function IsCorrectId(Id)
 
 EndFunction
 ```
+
+## Sources
+
+No direct 1C standard is used as the normative basis for this diagnostic.
+It is a local maintainability rule with a configurable threshold.
