@@ -3,68 +3,27 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 <!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-To improve the quality and security of 1C solutions, it is necessary to control the launch of external applications from 1C code.
+This diagnostic reports calls that start external programs or execute OS commands directly from 1C code.
 
-This rule applies to all methods of launching external programs, including:
+Such calls are security-sensitive because they can execute arbitrary commands, depend on untrusted input, or bypass the normal application flow.
+
+The current implementation checks these methods:
 - System
 - RunSystem
 - RunApp
 - BeginRunningApplication
 - RunAppAsync
-- GotoURL or FileSystems.OpenURL
-- FileSystemsClient.RunApp (for client side) and FileSystems.RunApp (for server side)
+- FileSystemsClient.RunApp and FileSystems.RunApp
 - FileSystemClient.OpenExplorer
 - FileSystemClient.OpenFile
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 ```bsl
-Процедура Метод()
-    СтрокаКоманды = "";
-    ТекущийКаталог = "";
-    ДождатьсяЗавершения = Истина;
-    ОписаниеОповещения = Неопределено;
-    ПараметрыКоманды = Новый Структура;
-
-    КомандаСистемы(СтрокаКоманды, ТекущийКаталог); // есть замечание
-    ЗапуститьПриложение(СтрокаКоманды, ТекущийКаталог); // есть замечание
-    ЗапуститьПриложение(СтрокаКоманды, ТекущийКаталог, Истина); // есть замечание
-
-    НачатьЗапускПриложения(ОписаниеОповещения, СтрокаКоманды, ТекущийКаталог, ДождатьсяЗавершения); // есть замечание
-
-    ПерейтиПоНавигационнойСсылке(СтрокаКоманды); // есть замечание
-    ФайловаяСистемаКлиент.ОткрытьНавигационнуюСсылку(СтрокаКоманды); // есть замечание
-    ФайловаяСистемаКлиент.ОткрытьНавигационнуюСсылку(СтрокаКоманды, ОписаниеОповещения); // есть замечание
-
-    ФайловаяСистемаКлиент.ЗапуститьПрограмму("ping 127.0.0.1 -n 5", ПараметрыКоманды); // есть замечание
-    ФайловаяСистемаКлиент.ЗапуститьПрограмму(СтрокаКоманды, ПараметрыКоманды); // есть замечание
-    ФайловаяСистема.ЗапуститьПрограмму(СтрокаКоманды); // есть замечание
-    ФайловаяСистема.ЗапуститьПрограмму(СтрокаКоманды, ПараметрыКоманды); // есть замечание
-
-    ФайловаяСистемаКлиент.ОткрытьПроводник("C:\Users"); // есть замечание
-    ФайловаяСистемаКлиент.ОткрытьФайл(СтрокаКоманды); // есть замечание
-    ФайловаяСистемаКлиент.ОткрытьФайл(СтрокаКоманды, ОписаниеОповещения); // есть замечание
-
-КонецПроцедуры
-
-&НаКлиенте
-Асинх Процедура Подключить()
-    СтрокаКоманды = "";
-    ТекущийКаталог = "";
-    ДождатьсяЗавершения = Истина;
-
-    Ждать ЗапуститьПриложениеАсинх(СтрокаКоманды, ТекущийКаталог, ДождатьсяЗавершения); // есть замечание
-КонецПроцедуры
-
-&НаКлиенте
-Процедура ПроверкаЗапуститьСистему(ДополнительныеПараметрыКоманднойСтроки, КодВозврата)
-    ДождатьсяЗавершения = Истина;
-
-    ЗапуститьСистему(); // есть замечание
-    ЗапуститьСистему(ДополнительныеПараметрыКоманднойСтроки); // есть замечание
-    ЗапуститьСистему(ДополнительныеПараметрыКоманднойСтроки, ДождатьсяЗавершения); // есть замечание
-    ЗапуститьСистему(ДополнительныеПараметрыКоманднойСтроки, ДождатьсяЗавершения, КодВозврата); // есть замечание
-КонецПроцедуры
+Procedure RunExternalTool()
+    System("cmd.exe /c dir");
+    RunApp("calc.exe");
+EndProcedure
 ```
 
 ## Sources
@@ -74,5 +33,6 @@ This rule applies to all methods of launching external programs, including:
 * Source: [Standard: Modules (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
 * Useful information: [Refusal to use modal windows (RU)](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
 * Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-- [Standard: Application launch security (RU)](https://its.1c.ru/db/v8std#content:774:hdoc)
-- Standard: [Restriction on the execution of "external" code (RU)](https://its.1c.ru/db/v8std/content/669/hdoc)
+* [Standard: Application launch security (RU)](https://its.1c.ru/db/v8std/content/774/hdoc)
+* [Standard: Restriction on execution of external code (RU)](https://its.1c.ru/db/v8std/content/669/hdoc)
+* [v8std.ru: #std774](https://v8std.ru/std/774/)
