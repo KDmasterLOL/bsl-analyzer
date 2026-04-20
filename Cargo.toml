@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.130"
+version = "0.1.131"
 edition = "2021"
 license = "LGPL-3.0-or-later"
 authors = ["BSL Analyzer Contributors"]
