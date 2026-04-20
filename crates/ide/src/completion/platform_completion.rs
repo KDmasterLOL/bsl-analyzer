@@ -39,8 +39,22 @@ pub(super) fn platform_completions(
         return None;
     }
 
-    // Resolve the type of the expression before the DOT
     let receiver_expr = find_receiver_expr(&token)?;
+
+    // Fast path: bare-IDENT receiver (`ОбщегоНазначения.`) is almost always a
+    // CommonModule call. Resolve via `module_index` (path-only, cheap) before
+    // paying for `db.infer()` — which transitively warms `workspace_symbols`
+    // across the whole source root (~50 s for a 12k-file workspace on cold
+    // start, because every qualified call in the file triggers it).
+    if let Some(receiver_name) = extract_receiver_ident(&receiver_expr) {
+        tracing::debug!(receiver_name = %receiver_name, "Trying CommonModule fast path");
+        if let Some(items) = complete_common_module_methods(db, &position, &receiver_name) {
+            return Some(items);
+        }
+    }
+
+    // Slow path: full inference for non-trivial receivers
+    // (`expr.Method().`, `ЭтотОбъект.`, fluent chains).
     let infer_result = db.infer(position.file_id);
 
     let receiver_ty = resolve_syntax_expr_type(&receiver_expr, &infer_result);
@@ -50,16 +64,6 @@ pub(super) fn platform_completions(
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
         return Some(complete_platform_methods(db, type_name));
-    }
-
-    // If receiver type is Unknown, check if it's a CommonModule name
-    if receiver_ty.is_unknown() {
-        if let Some(receiver_name) = extract_receiver_ident(&receiver_expr) {
-            tracing::debug!(receiver_name = %receiver_name, "Checking CommonModule completion");
-            if let Some(items) = complete_common_module_methods(db, &position, &receiver_name) {
-                return Some(items);
-            }
-        }
     }
 
     None
@@ -74,11 +78,17 @@ pub(super) fn platform_completions(
 /// - `ident.` → parent is FIELD_EXPR, receiver is IDENT
 /// - `expr.Method().` → parent is FIELD_EXPR, receiver is CALL_EXPR
 fn find_receiver_expr(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
-    let parent = dot_token.parent()?;
+    let Some(parent) = dot_token.parent() else {
+        tracing::debug!("find_receiver_expr: dot has no parent");
+        return None;
+    };
+    tracing::debug!(parent_kind = ?parent.kind(), "find_receiver_expr: DOT parent kind");
 
     // DOT is inside a FIELD_EXPR: the first child node is the receiver
     if parent.kind() == SyntaxKind::FIELD_EXPR {
-        return parent.children().next();
+        let child = parent.children().next();
+        tracing::debug!(child_found = child.is_some(), child_kind = ?child.as_ref().map(|c| c.kind()), "find_receiver_expr: FIELD_EXPR first child");
+        return child;
     }
 
     // Fallback: look at the previous sibling node of the DOT
@@ -87,14 +97,17 @@ fn find_receiver_expr(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
             continue;
         }
         if let Some(node) = sibling.as_node() {
+            tracing::debug!(sibling_kind = ?node.kind(), "find_receiver_expr: fallback found node sibling");
             return Some(node.clone());
         }
         if let Some(token) = sibling.as_token() {
+            tracing::debug!(token_kind = ?token.kind(), "find_receiver_expr: fallback returning token.parent()");
             return token.parent();
         }
         return None;
     }
 
+    tracing::debug!("find_receiver_expr: fallback exhausted, returning None");
     None
 }
 
@@ -685,10 +698,10 @@ mod tests {
     #[test]
     fn test_end_to_end_platform_completion() {
         use bsl_platform::PlatformDataInner;
-        use ide_db::base_db::SourceDatabase;
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
         use ide_db::RootDatabaseImpl;
         use syntax::TextSize;
-        use vfs::FileId;
+        use vfs::{FileId, FileSet, VfsPath};
 
         // Skip if no platform data available
         let data = PlatformDataInner::instance();
@@ -707,8 +720,15 @@ mod tests {
     Результат = XBase.
 КонецПроцедуры"#;
 
-        // Set file content
+        // Set file content + source root. The CommonModule fast-path in
+        // `platform_completions` queries `module_index` via
+        // `file_source_root_input`, so even tests that hit the "platform
+        // type" path need a source root wired up.
         db.set_file_text(file_id, code);
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
 
         // Position is right after the DOT (end of "XBase.")
         // We want left_biased to catch the DOT token

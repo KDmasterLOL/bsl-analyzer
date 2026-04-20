@@ -5,9 +5,25 @@
 
 use rustc_hash::FxHashMap;
 use tracing::debug;
-use vfs::FileId;
+use vfs::{FileId, FileSet};
 
 use crate::{DefDatabase, MethodSymbol, ModuleId, Name};
+
+/// Returns `true` when the file's VFS path looks like a BSL source module
+/// (extension `.bsl`, case-insensitive). Non-BSL entries in a SourceRoot
+/// (XML configuration, manifests, etc.) are never valid inputs for the BSL
+/// parser, so every workspace-wide scan must filter through this predicate
+/// before reaching `db.parse` / `db.item_tree`.
+pub(crate) fn is_bsl_source(file_set: &FileSet, file_id: FileId) -> bool {
+    let Some(vfs_path) = file_set.path_for_file(&file_id) else {
+        return false;
+    };
+    let path_str = vfs_path.as_path().to_string_lossy();
+    match path_str.rsplit('.').next() {
+        Some(ext) => ext.eq_ignore_ascii_case("bsl"),
+        None => false,
+    }
+}
 
 /// Information about a CommonModule in the workspace.
 ///
@@ -172,6 +188,7 @@ fn extract_module_name_from_file(db: &dyn DefDatabase, file_id: FileId) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vfs::{FileSet, VfsPath};
 
     #[test]
     fn test_common_module_info_creation() {
@@ -184,5 +201,59 @@ mod tests {
         assert_eq!(info.file_id, file_id);
         assert_eq!(info.module_id, module_id);
         assert_eq!(info.methods.len(), 0);
+    }
+
+    fn make_file_set(entries: &[(u32, &str)]) -> FileSet {
+        let mut fs = FileSet::new();
+        for (id, path) in entries {
+            fs.insert(FileId(*id), VfsPath::new(std::path::PathBuf::from(path)));
+        }
+        fs
+    }
+
+    #[test]
+    fn is_bsl_source_accepts_bsl_extension() {
+        let fs = make_file_set(&[
+            (1, "/ws/CommonModules/MyModule/Ext/Module.bsl"),
+            (2, "/ws/Documents/X/Ext/ObjectModule.bsl"),
+        ]);
+        assert!(is_bsl_source(&fs, FileId(1)));
+        assert!(is_bsl_source(&fs, FileId(2)));
+    }
+
+    #[test]
+    fn is_bsl_source_rejects_non_bsl_files() {
+        // Regression: workspace_symbols/_index used to feed these to the BSL
+        // parser, which triggered the iteration guard on large XML.
+        let fs = make_file_set(&[
+            (10, "/ws/Roles/R/Ext/Rights.xml"),
+            (11, "/ws/InformationRegisters/X/Templates/T/Ext/Template.xml"),
+            (12, "/ws/Configuration.xml"),
+            (13, "/ws/README.md"),
+            (14, "/ws/notes.txt"),
+            (15, "/ws/NoExtensionAtAll"),
+        ]);
+        for id in 10..=15 {
+            assert!(!is_bsl_source(&fs, FileId(id)), "FileId({id}) should be filtered out");
+        }
+    }
+
+    #[test]
+    fn is_bsl_source_is_case_insensitive() {
+        // 1C Designer ships files with `.bsl` consistently, but code on
+        // case-insensitive filesystems (Windows, macOS default) can still
+        // surface `.BSL` / `.Bsl`. These must be treated as BSL.
+        let fs = make_file_set(&[
+            (20, "/ws/CommonModules/A/Ext/Module.BSL"),
+            (21, "/ws/CommonModules/B/Ext/Module.Bsl"),
+        ]);
+        assert!(is_bsl_source(&fs, FileId(20)));
+        assert!(is_bsl_source(&fs, FileId(21)));
+    }
+
+    #[test]
+    fn is_bsl_source_rejects_unknown_file_id() {
+        let fs = make_file_set(&[(1, "/ws/a.bsl")]);
+        assert!(!is_bsl_source(&fs, FileId(999)));
     }
 }

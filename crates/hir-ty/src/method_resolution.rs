@@ -14,12 +14,37 @@
 //!        ↓
 //! resolve_qualified_call()
 //!        ↓
-//! 1. Check shadowing (is "CommonModule" a local variable?)
-//! 2. Find CommonModule in workspace_symbols
-//! 3. Find Method in CommonModule's SymbolTree
-//! 4. Check export flag
-//! 5. Return MethodResolution or error kind
+//! 1. Resolve CommonModule name → FileId via module_index (path-based, cheap)
+//! 2. Find Method in CommonModule's SymbolTree
+//! 3. Check export flag
+//! 4. Return MethodResolution or error kind
 //! ```
+//!
+//! ## Shadowing
+//!
+//! Shadowing (a local variable named identically to a CommonModule) is
+//! handled **before** this function is ever called:
+//! `maybe_lower_as_qualified_call` in `crates/hir-def/src/body/lower/expr.rs`
+//! refuses to promote the call into `Expr::QualifiedPath` when the receiver
+//! IDENT is a known local/parameter, so inference keeps it as
+//! `Expr::Call { callee: Expr::Field, .. }` and this function does not run
+//! for the shadowed call. The resolver passed in by
+//! `InferenceContext::get_resolver` is `Resolver::with_workspace_scope`
+//! (no expression scopes), so a defensive `resolver.resolve_local` check
+//! here would silently not fire anyway.
+//!
+//! ## Why module_index, not workspace_symbols
+//!
+//! Both indexes map CommonModule names to FileIds, but `workspace_symbols`
+//! forces `symbol_tree` on every file in the source root to build the
+//! methods list — a ~50 s workspace-wide scan on cold start for a 12k file
+//! project. `module_index` is built purely from VFS paths (no BSL parsing),
+//! so lookup is O(1) and the hit is followed by a single
+//! `symbol_tree(target)` call, which is already prewarmed by
+//! `preload_dependencies` for files that the open file depends on. This
+//! aligns the inference path with the diagnostics path
+//! (`ctx.resolve_qualified_path` in `ide-diagnostics`), which has always
+//! used `module_index`.
 //!
 //! ## Phase 3 Scope
 //!
@@ -36,7 +61,7 @@
 
 use hir_def::resolver::Resolver;
 use hir_def::ty::{FunctionSignature, Ty};
-use hir_def::{DefDatabase, MethodId, Name};
+use hir_def::{DefDatabase, MethodId, ModuleId, Name};
 #[cfg(test)]
 use vfs::FileId;
 
@@ -82,26 +107,18 @@ impl MethodResolution {
 /// - `db`: Database for queries
 /// - `module_name`: Name of the module (e.g., "ОбщегоНазначения")
 /// - `method_name`: Name of the method (e.g., "СтрДлина")
-/// - `resolver`: Current resolver context for shadowing detection
+/// - `_resolver`: unused (see module-level docs on shadowing)
 ///
 /// # Returns
 ///
 /// - `Ok(MethodResolution)`: Method found and resolved
 /// - `Err(UnresolvedMethodKind)`: Method not found, reason specified
 ///
-/// # Shadowing Detection
+/// # Shadowing
 ///
-/// If `module_name` resolves to a local variable or parameter, this function
-/// returns `Err(ReceiverNotResolved)` because the call is not a CommonModule call.
-///
-/// Example:
-/// ```bsl
-/// Процедура Test()
-///     Перем ОбщегоНазначения; // Local variable shadows CommonModule
-///     ОбщегоНазначения = Новый Массив;
-///     ОбщегоНазначения.Добавить(1); // Not a CommonModule call!
-/// КонецПроцедуры
-/// ```
+/// Shadowing of a CommonModule name by a local variable or parameter is
+/// handled during HIR lowering (`maybe_lower_as_qualified_call`), before
+/// this function is invoked. See the module-level docs.
 ///
 /// # Phase 3 Implementation
 ///
@@ -112,40 +129,40 @@ pub fn resolve_qualified_call(
     db: &dyn DefDatabase,
     module_name: &Name,
     method_name: &Name,
-    resolver: &Resolver,
+    _resolver: &Resolver,
     source_root_id: base_db::SourceRootId,
 ) -> Result<MethodResolution, UnresolvedMethodKind> {
-    // 1. Check shadowing: is module_name a local variable?
+    // Shadowing is resolved earlier during HIR lowering (see module-level
+    // docs). The resolver argument is kept for API stability and for future
+    // phases that may need it (e.g. ThisObject / three-level calls where
+    // body-local context matters).
+
+    // 1. Resolve CommonModule name → FileId via module_index
     //
-    // If the name resolves to a local (parameter or local variable),
-    // then this is NOT a CommonModule call.
-    if resolver.resolve_local(module_name).is_some() {
-        return Err(UnresolvedMethodKind::ReceiverNotResolved);
-    }
-
-    // 2. Get workspace symbols (all CommonModules) - Salsa cached
-    let workspace_symbols = db.workspace_symbols(source_root_id);
-
-    // 3. Find CommonModule by name
-    let common_module = workspace_symbols
-        .common_modules
-        .get(module_name)
+    // module_index is built from VFS paths only (no BSL parsing), so the
+    // lookup is O(1) and doesn't trigger a workspace-wide scan. Previously
+    // this went through db.workspace_symbols() which forces symbol_tree on
+    // every file in the source root.
+    let module_index = db.module_index(source_root_id);
+    let target_file_id = module_index
+        .resolve_common_module(module_name)
         .ok_or(UnresolvedMethodKind::MethodNotFound)?;
 
-    // 4. Get SymbolTree for the CommonModule
-    let symbol_tree = db.symbol_tree(common_module.module_id);
+    // 2. Get SymbolTree for the resolved CommonModule (single-file query,
+    //    prewarmed by preload_dependencies for open-file neighbours).
+    let symbol_tree = db.symbol_tree(ModuleId::new(target_file_id));
 
-    // 5. Find method in SymbolTree
+    // 3. Find method in SymbolTree
     let method_symbol =
         symbol_tree.find_method(method_name).ok_or(UnresolvedMethodKind::MethodNotFound)?;
 
-    // 6. Check export flag
+    // 4. Check export flag
     //
     // Phase 3: We still resolve non-exported methods (for type inference)
     // but mark them so caller can emit diagnostic
     let is_export = method_symbol.is_export;
 
-    // 7. Build function signature
+    // 5. Build function signature
     //
     // Phase 3: Use existing return_type from MethodSymbol (Ty::Unknown for most)
     // Phase 4+: Improve with JSDoc parsing and type inference

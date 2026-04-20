@@ -661,3 +661,92 @@ fn test_large_file_performance() {
 
     assert!(!result.has_errors());
 }
+
+// ----------------------------------------------------------------------------
+// Iteration-guard regression tests
+//
+// Reproduces a hang where the parser's iteration guard (see
+// `Parser::check_iteration_limit`) panicked on any sufficiently large input —
+// including non-BSL files fed in by mistake — even when the position was
+// monotonically advancing. The guard must distinguish between a genuinely
+// stuck loop (few unique positions in the recent window) and a large-but-
+// progressing input, and only panic on the former.
+// ----------------------------------------------------------------------------
+
+/// XML payload with ~100k records (~5 MB). Historical behavior: panicked at
+/// token index ≈1.5M with `SLOW (making progress)` status. Now the guard must
+/// let such input run to completion (errors are expected — BSL grammar does
+/// not accept XML — but the parser must return without unwinding).
+#[test]
+fn parser_does_not_panic_on_large_xml_like_input() {
+    let mut input = String::with_capacity(5_000_000);
+    input.push_str("<?xml version=\"1.0\"?>\n<root>\n");
+    for i in 0..100_000 {
+        input.push_str(&format!("  <item id=\"{}\"><name>Value{}</name></item>\n", i, i));
+    }
+    input.push_str("</root>\n");
+    assert!(input.len() > 4_000_000, "regression fixture must exceed 4 MB");
+
+    let t0 = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(&input)));
+    let elapsed = t0.elapsed();
+    assert!(
+        result.is_ok(),
+        "parser panicked on {}-byte XML-like input (elapsed {:?}): {:?}",
+        input.len(),
+        elapsed,
+        result.err().and_then(|p| p.downcast_ref::<String>().cloned())
+    );
+}
+
+/// Large, fully valid BSL input must parse in O(n) without panic and with zero
+/// errors. Catches future regressions where the guard is tuned too aggressively.
+#[test]
+fn parser_handles_million_token_valid_bsl() {
+    let mut input = String::with_capacity(2_000_000);
+    for i in 0..50_000 {
+        input.push_str(&format!("Процедура Proc{i}()\n    Сообщить({i});\nКонецПроцедуры\n"));
+    }
+
+    let t0 = Instant::now();
+    let result = parse(&input);
+    let elapsed = t0.elapsed();
+    assert!(
+        !result.has_errors(),
+        "valid BSL regression fixture produced errors ({:?}, {} bytes): {:?}",
+        elapsed,
+        input.len(),
+        result.errors()
+    );
+}
+
+/// The guard must still abort when the parser is genuinely stuck (no position
+/// progress across the 100-position history window). Drives the guard
+/// directly so the test remains valid even if grammar internals change.
+#[test]
+fn parser_guard_panics_on_stuck_loop() {
+    use lexer::tokenize;
+    use parser::Parser;
+
+    let tokens = tokenize("Процедура Т() КонецПроцедуры");
+    let mut p = Parser::new(&tokens);
+    let hit_guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Never advance `pos`; call the guard until the iteration budget trips.
+        // In release builds this runs ~1M iterations (well under 1 s).
+        loop {
+            p.check_iteration_limit();
+        }
+    }));
+    let panic_msg = match hit_guard {
+        Ok(()) => panic!("stuck parser guard did not panic"),
+        Err(payload) => payload
+            .downcast_ref::<&'static str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default(),
+    };
+    assert!(
+        panic_msg.contains("STUCK"),
+        "expected STUCK diagnostic in guard panic, got: {panic_msg}"
+    );
+}

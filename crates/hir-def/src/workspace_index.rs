@@ -233,16 +233,19 @@ pub fn workspace_index_query(
     source_root_input: base_db::SourceRootInput,
 ) -> Arc<WorkspaceIndex> {
     let source_root = source_root_input.root(db);
-    let _span =
-        tracing::info_span!("workspace_index_query", file_count = source_root.iter().count())
-            .entered();
+    let file_set = source_root.file_set();
 
-    // Collect all files
-    let files: Vec<FileId> = source_root.iter().collect();
+    // Only BSL source files are valid input for item_tree/parse. SourceRoot
+    // also holds XML/MD/TXT for metadata, which would otherwise be parsed
+    // as BSL and burn CPU (or trigger the parser iteration guard).
+    let files: Vec<FileId> = source_root
+        .iter()
+        .filter(|&file_id| crate::workspace::is_bsl_source(file_set, file_id))
+        .collect();
 
+    let _span = tracing::info_span!("workspace_index_query", file_count = files.len()).entered();
     tracing::info!(file_count = files.len(), "Building WorkspaceIndex");
 
-    // Build index
     let index = WorkspaceIndex::build(db, &files);
 
     Arc::new(index)
