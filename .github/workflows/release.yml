@@ -27,6 +27,12 @@ jobs:
             ext: ".exe"
             cxxflags: "/DMAP_FAILED=((void*)-1)"
             rustflags: "-C target-feature=+crt-static"
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            platform: windows-arm64
+            ext: ".exe"
+            cxxflags: "/DMAP_FAILED=((void*)-1)"
+            rustflags: "-C target-feature=+crt-static"
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: darwin-arm64
