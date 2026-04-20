@@ -92,7 +92,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 /// - Local: `Method()` → module=None, mdo_type=None
 /// - Two-level: `CommonModule.Method()` → module=Some, mdo_type=None
 /// - Three-level: `Документы.ПКО.Method()` → module=None, mdo_type=Some, mdo_name=Some
-/// - ThisObject: `ЭтотОбъект.Method()` → module=Some("ЭтотОбъект")
+/// - ThisObject: `ЭтотОбъект.Method()` → module=None (emitted as a local call in
+///   `lower_call_expr` so it resolves against the current module's SymbolTree)
 pub fn from_hir(
     callee: &str,
     module: Option<&str>,
@@ -169,29 +170,42 @@ fn check_qualified_call(
     method_name: &str,
     args: &[bool],
 ) -> Option<Vec<String>> {
-    // Load metadata
-    let configuration = ctx.load_configuration()?;
+    let _span =
+        tracing::debug_span!("check_qualified_call", module = module_name, method = method_name)
+            .entered();
 
-    // Find CommonModule in metadata (case-insensitive)
-    let common_module = configuration.find_common_module(module_name)?;
+    let Some(configuration) = ctx.load_configuration() else {
+        tracing::debug!("bailout: load_configuration returned None");
+        return None;
+    };
 
-    // Resolve CommonModule file
-    let module_file_id = ctx.find_common_module_file(common_module)?;
+    let Some(common_module) = configuration.find_common_module(module_name) else {
+        tracing::debug!("bailout: find_common_module returned None");
+        return None;
+    };
 
-    // Build SymbolTree
+    let Some(module_file_id) = ctx.find_common_module_file(common_module) else {
+        tracing::debug!("bailout: find_common_module_file returned None");
+        return None;
+    };
+
     let module_id = ModuleId::new(module_file_id);
     let symbol_tree = ctx.symbol_tree_for(module_id);
 
-    // Lookup method
     let name = Name::new(method_name);
-    let method = symbol_tree.find_method(&name)?;
+    let Some(method) = symbol_tree.find_method(&name) else {
+        tracing::debug!("bailout: symbol_tree.find_method returned None");
+        return None;
+    };
 
-    // Only check exported methods for qualified calls
     if !method.is_export {
+        tracing::debug!("bailout: method is not exported");
         return None;
     }
 
-    Some(check_missing_params(method, args))
+    let missing = check_missing_params(method, args);
+    tracing::debug!(missing_count = missing.len(), "check_qualified_call success");
+    Some(missing)
 }
 
 /// Check three-level method call (MdoType.MdoName.Method) for missing required parameters.
@@ -464,21 +478,24 @@ mod tests {
         let mut diags = filter(&all);
         diags.sort_by_key(|d| d.range.start());
 
-        // HIR emits MissedRequiredParameter only for local (unqualified) calls.
-        // Qualified calls (CommonModule, ThisObject, ManagerModule) are emitted by
-        // lower_field_expr but analyze_qualified_call requires module name resolution
-        // context that isn't available during lowering in test setup.
+        // Expected diagnostics:
+        //   Line 2:  Сложение(, 2)           → missing 'Левый'     (local call)
+        //   Line 8:  Сложение(5)             → missing 'Правый'    (local call)
+        //   Line 14: Сложение()              → missing 'Левый', 'Правый' (local call)
+        //   Line 17: Сложение(,)             → missing 'Левый', 'Правый' (local call)
+        //   Line 18: Менеджер("Справочник")  → missing 'Вид'       (local call)
+        //   Line 29: ЭтотОбъект.Сложение(,2) → missing 'Левый'     (ThisObject = local-call)
         //
-        // Local call diagnostics:
-        //   Line 2:  Сложение(, 2)           → missing 'Левый'
-        //   Line 8:  Сложение(5)             → missing 'Правый'
-        //   Line 14: Сложение()              → missing 'Левый', 'Правый'
-        //   Line 17: Сложение(,)             → missing 'Левый', 'Правый'
-        //   Line 18: Менеджер("Справочник")  → missing 'Вид'
+        // Qualified calls on a CommonModule (`ПервыйОбщийМодуль.*`) and a metadata
+        // manager (`Документы.ПКО.*`, `Справочники.Справочник1.*`) do produce HIR
+        // `BodyDiagnostic::MissedRequiredParameter`, but `from_hir()` needs
+        // `ctx.load_configuration()` to resolve them — `check_hir_diagnostic` runs
+        // without metadata so those handlers return `None` (see the dedicated
+        // qualified-call test below that uses a fake configuration).
         assert_eq!(
             diags.len(),
-            5,
-            "Expected 5 local-call diagnostics, got {}.\nMessages: {:?}",
+            6,
+            "Expected 6 diagnostics, got {}.\nMessages: {:?}",
             diags.len(),
             diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
@@ -498,6 +515,13 @@ mod tests {
 
         assert_diagnostic_range_multiline(code, diags[4], 18, 13, 18, 35);
         assert!(diags[4].message.contains("Вид"));
+
+        assert_diagnostic_range_multiline(code, diags[5], 29, 16, 29, 40);
+        assert!(
+            diags[5].message.contains("Левый"),
+            "ЭтотОбъект.Сложение(, 2) expected missing 'Левый', got: {}",
+            diags[5].message
+        );
     }
 
     #[test]

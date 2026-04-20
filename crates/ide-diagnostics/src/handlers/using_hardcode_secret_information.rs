@@ -128,7 +128,12 @@ fn check_body(
             }
             Expr::Call { callee, args } => {
                 let callee_expr = body.expr_idx(*callee);
-                if let Expr::Field { base: _, field } = callee_expr {
+                let method_name = match callee_expr {
+                    Expr::Field { field, .. } => Some(field),
+                    Expr::QualifiedPath(path) => Some(path.last()),
+                    _ => None,
+                };
+                if let Some(field) = method_name {
                     if !is_insert_method(field) {
                         continue;
                     }

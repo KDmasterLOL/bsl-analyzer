@@ -977,8 +977,8 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
-    // Emit MissedRequiredParameter diagnostic for local calls (simple IDENT)
-    // Qualified calls (FIELD_EXPR) are handled in lower_field_expr
+    // Emit MissedRequiredParameter diagnostic for local calls (simple IDENT).
+    // Qualified calls are handled by `maybe_lower_as_qualified_call` below.
     if actual_callee.kind() == SyntaxKind::IDENT {
         let callee_name = actual_callee.text().to_string();
 
@@ -1002,7 +1002,136 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
+    // For qualified calls (Module.Method, MdoType.MdoName.Method) promote HIR
+    // to `Expr::Call { callee: QualifiedPath }` and emit qualified-call diagnostics.
+    if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
+        if let Some(replacement) =
+            maybe_lower_as_qualified_call(ctx, node, &actual_callee, arg_list_node.as_ref(), &args)
+        {
+            return replacement;
+        }
+    }
+
     Expr::Call { callee, args: args.into_boxed_slice() }
+}
+
+/// Rewrite `a.b()` / `a.b.c()` into `Expr::Call { callee: QualifiedPath, args }`
+/// and emit the diagnostics that depend on the call shape.
+///
+/// - Returns `Some(Expr::Call{QualifiedPath,args})` for CommonModule calls and
+///   manager-object calls where `analyze_qualified_call` recognises the pattern.
+/// - For `ЭтотОбъект.Method()` the diagnostic is emitted as a *local* call
+///   (`module = None`) and `None` is returned so the caller keeps the original
+///   `Expr::Call { callee: Expr::Field, args }` shape.
+/// - Returns `None` for anything else (e.g. `obj.Method()` on a local variable),
+///   leaving HIR shape untouched.
+fn maybe_lower_as_qualified_call(
+    ctx: &mut LoweringCtx,
+    call_node: &SyntaxNode,
+    field_expr_node: &SyntaxNode,
+    arg_list_node: Option<&SyntaxNode>,
+    args: &[ExprIdx],
+) -> Option<Expr> {
+    let call_info = analyze_qualified_call(field_expr_node, ctx)?;
+
+    // Last IDENT inside the FIELD_EXPR is the method name.
+    let field_token = field_expr_node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+        .last()?;
+    let field_name = Name::new(field_token.text());
+
+    let arg_presence = arg_list_node.map(extract_arg_presence).unwrap_or_default();
+
+    match call_info {
+        QualifiedCallInfo::TwoLevel { module } => {
+            let is_this_object = {
+                let lower = module.to_lowercase();
+                lower == "этотобъект" || lower == "thisobject"
+            };
+
+            if is_this_object {
+                // ThisObject.Method() is semantically a local call:
+                // resolve the method against the current module, not a CommonModule.
+                // RedundantAccessToObject::ThisObject is already emitted in lower_field_expr.
+                ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
+                    callee: field_name.as_str().to_string(),
+                    module: None,
+                    mdo_type: None,
+                    mdo_name: None,
+                    args: arg_presence,
+                    range: call_node.text_range(),
+                });
+                return None;
+            }
+
+            ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
+                kind: RedundantAccessKind::TwoLevel { module: module.clone() },
+                range: call_node.text_range(),
+            });
+
+            ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
+                callee: field_name.as_str().to_string(),
+                module: Some(module.clone()),
+                mdo_type: None,
+                mdo_name: None,
+                args: arg_presence,
+                range: call_node.text_range(),
+            });
+
+            ctx.diagnostics.push(BodyDiagnostic::MissingCommonModuleMethod {
+                module: module.clone(),
+                method: field_name.as_str().to_string(),
+                range: call_node.text_range(),
+            });
+
+            let qualified_path =
+                QualifiedName::from_segments([Name::new(&module), field_name.clone()]);
+            let new_callee = ctx
+                .alloc_expr(Expr::QualifiedPath(Box::new(qualified_path)), call_node.text_range());
+
+            Some(Expr::Call { callee: new_callee, args: args.to_vec().into_boxed_slice() })
+        }
+        QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
+            ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
+                kind: RedundantAccessKind::ThreeLevel {
+                    mdo_type: mdo_type.clone(),
+                    mdo_name: mdo_name.clone(),
+                },
+                range: call_node.text_range(),
+            });
+
+            ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
+                callee: field_name.as_str().to_string(),
+                module: None,
+                mdo_type: Some(mdo_type.clone()),
+                mdo_name: Some(mdo_name.clone()),
+                args: arg_presence,
+                range: call_node.text_range(),
+            });
+
+            // Module dependency graph: record Manager.Object.Method access.
+            if let Some(manager_type) = parse_manager_type(&mdo_type) {
+                ctx.external_refs.push(ExternalRef::ManagerAccess {
+                    manager_type,
+                    object_name: Name::new(&mdo_name),
+                    method: Some(field_name.clone()),
+                    range: call_node.text_range(),
+                });
+            }
+
+            let qualified_path = QualifiedName::from_segments([
+                Name::new(&mdo_type),
+                Name::new(&mdo_name),
+                field_name.clone(),
+            ]);
+            let new_callee = ctx
+                .alloc_expr(Expr::QualifiedPath(Box::new(qualified_path)), call_node.text_range());
+
+            Some(Expr::Call { callee: new_callee, args: args.to_vec().into_boxed_slice() })
+        }
+    }
 }
 
 /// Lower argument list.
@@ -1144,10 +1273,13 @@ fn lower_index_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
 /// Lower field expression.
 ///
-/// Handles:
-/// - Two-level calls: `Module.Method()` - emits MissedRequiredParameter with module
-/// - Three-level calls: `Документы.ПКО.Method()` - emits MissedRequiredParameter with mdo_type/mdo_name
-/// - Field access: `obj.field` - no diagnostics
+/// FIELD_EXPR represents plain property access here (no ARG_LIST — that's a
+/// sibling under CALL_EXPR and is handled by `lower_call_expr` together with
+/// `maybe_lower_as_qualified_call`). This function is therefore responsible
+/// for field-access concerns only:
+/// - `DeprecatedAttribute8312` on field access (`is_method_call = false`)
+/// - `RedundantAccessToObject::ThisObject` for `ЭтотОбъект.Field`
+/// - returning `Expr::Field { base, field }`
 fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     let mut children = node.children();
 
@@ -1190,17 +1322,13 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             .map(|tok| tok.text().to_string())
     });
 
-    // Check if this is actually a method call (has ARG_LIST)
-    let arg_list_node = node.children().find(|n| n.kind() == SyntaxKind::ARG_LIST);
-    let is_method_call = arg_list_node.is_some();
-
-    // Check for deprecated attributes/methods (8.3.12)
+    // FIELD_EXPR as a call callee is handled in `lower_call_expr`, which emits the
+    // method-call variants. Here we only see plain field access, so the
+    // `is_method_call` flag passed to `is_deprecated_attribute_8312` is always `false`.
     if let (Some(field_tok), Some(object_name)) = (&field_token, &object_name_opt) {
         use super::diagnostics::is_deprecated_attribute_8312;
 
-        if let Some(kind) =
-            is_deprecated_attribute_8312(object_name, field_tok.text(), is_method_call)
-        {
+        if let Some(kind) = is_deprecated_attribute_8312(object_name, field_tok.text(), false) {
             ctx.diagnostics.push(BodyDiagnostic::DeprecatedAttribute8312 {
                 name: field_tok.text().to_string(), // Preserve original case
                 kind,
@@ -1239,157 +1367,7 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
-    if arg_list_node.is_some() {
-        let method = field_name.to_string();
-        tracing::warn!(method = %method, "lower_field_expr: has arg_list, analyzing call");
-
-        // Analyze call structure to determine call type (for diagnostics)
-        let call_info = analyze_qualified_call(node, ctx);
-        tracing::warn!(has_call_info = call_info.is_some(), "lower_field_expr: call_info result");
-
-        // Collect ExternalRef for module dependency graph
-        if let Some(ref info) = &call_info {
-            match info {
-                QualifiedCallInfo::TwoLevel { module } => {
-                    ctx.external_refs.push(ExternalRef::QualifiedCall {
-                        receiver: Name::new(module),
-                        method: field_name.clone(),
-                        range: node.text_range(),
-                    });
-                }
-                QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
-                    if let Some(manager_type) = parse_manager_type(mdo_type) {
-                        ctx.external_refs.push(ExternalRef::ManagerAccess {
-                            manager_type,
-                            object_name: Name::new(mdo_name),
-                            method: Some(field_name.clone()),
-                            range: node.text_range(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // === Emit candidates for RedundantAccessToObject (TwoLevel/ThreeLevel) ===
-        // These are method calls like Module.Method() or Справочники.Справочник1.Method()
-        if let Some(ref info) = call_info {
-            match info {
-                QualifiedCallInfo::TwoLevel { module } => {
-                    ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
-                        kind: RedundantAccessKind::TwoLevel { module: module.clone() },
-                        range: node.text_range(),
-                    });
-                }
-                QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
-                    ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
-                        kind: RedundantAccessKind::ThreeLevel {
-                            mdo_type: mdo_type.clone(),
-                            mdo_name: mdo_name.clone(),
-                        },
-                        range: node.text_range(),
-                    });
-                }
-            }
-        }
-
-        if let Some(ref info) = call_info {
-            match info {
-                QualifiedCallInfo::TwoLevel { module } => {
-                    // NOTE: MissingCommonModuleMethod diagnostic is now generated via path resolution
-                    // in ide-diagnostics instead of during lowering. This provides more accurate
-                    // diagnostics using the workspace symbol index from Phase 2.
-
-                    // Emit MissedRequiredParameter diagnostic for qualified calls.
-                    let arg_presence =
-                        arg_list_node.as_ref().map(extract_arg_presence).unwrap_or_default();
-
-                    ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
-                        callee: method,
-                        module: Some(module.clone()),
-                        mdo_type: None,
-                        mdo_name: None,
-                        args: arg_presence,
-                        range: node.text_range(),
-                    });
-                }
-                QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
-                    // Three-level call: Документы.ПКО.Method()
-                    let arg_presence =
-                        arg_list_node.as_ref().map(extract_arg_presence).unwrap_or_default();
-
-                    ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
-                        callee: method,
-                        module: None,
-                        mdo_type: Some(mdo_type.clone()),
-                        mdo_name: Some(mdo_name.clone()),
-                        args: arg_presence,
-                        range: node.text_range(),
-                    });
-                }
-            }
-        }
-
-        // === NEW: Build QualifiedPath for qualified method calls ===
-        // Check if this is a qualified call (Module.Method or A.B.Method)
-        // by examining the base expression type
-        let base_expr = ctx.body.expr_idx(base);
-        let qualified_path_opt = match base_expr {
-            Expr::Path(module_name) => {
-                // Two-level qualified call: Module.Method()
-                // Only create QualifiedPath if analyze_qualified_call detected it
-                // (to avoid treating local variables as modules)
-                if call_info.is_some() {
-                    Some(QualifiedName::from_segments([module_name.clone(), field_name.clone()]))
-                } else {
-                    None
-                }
-            }
-            Expr::QualifiedPath(path) => {
-                // Multi-level qualified call: add another segment
-                // Example: Documents.PKO.Method() where path = [Documents, PKO]
-                let mut segments = path.segments().to_vec();
-                segments.push(field_name.clone());
-                Some(QualifiedName::from_segments(segments))
-            }
-            _ => {
-                // Not a qualified call - regular method call on an expression
-                // Example: GetObject().Method() or variable.Method()
-                None
-            }
-        };
-
-        let args = arg_list_node
-            .as_ref()
-            .map(|arg_list| lower_arg_list(ctx, arg_list))
-            .unwrap_or_default();
-
-        if let Some(qualified_path) = qualified_path_opt {
-            // This is a qualified call - create Call with QualifiedPath as callee
-            // Example: Module.Method(args) → Call { callee: QualifiedPath([Module, Method]), args }
-
-            // Emit MissingCommonModuleMethod diagnostic for two-level calls (Module.Method)
-            // Resolution and export validation will happen in from_hir() handler with ctx.db
-            if qualified_path.len() == 2 {
-                let module = qualified_path.first().as_str().to_string();
-                let method = qualified_path.last().as_str().to_string();
-
-                ctx.diagnostics.push(BodyDiagnostic::MissingCommonModuleMethod {
-                    module,
-                    method,
-                    range: node.text_range(),
-                });
-            }
-
-            let callee =
-                ctx.alloc_expr(Expr::QualifiedPath(Box::new(qualified_path)), node.text_range());
-            Expr::Call { callee, args: args.into_boxed_slice() }
-        } else {
-            // Regular method call on an expression
-            Expr::MethodCall { receiver: base, method: field_name, args: args.into_boxed_slice() }
-        }
-    } else {
-        Expr::Field { base, field: field_name }
-    }
+    Expr::Field { base, field: field_name }
 }
 
 /// Extract receiver variable name from an expression for CreateQueryInCycle diagnostic.
@@ -1433,41 +1411,48 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
         "analyze_qualified_call: entry"
     );
 
-    // Check for three-level call: first child is FIELD_EXPR
-    // Structure: FIELD_EXPR > FIELD_EXPR > [IDENT, DOT, IDENT]
+    // Check for three-level call: first child is FIELD_EXPR.
+    // The inner FIELD_EXPR must be exactly `IDENT.IDENT`, otherwise this is a
+    // chained call such as `func().field.field2` — NOT a manager access, so we
+    // must not classify it as ThreeLevel.
     if first_child.kind() == SyntaxKind::FIELD_EXPR {
-        // Extract mdo_type and mdo_name from nested FIELD_EXPR
-        let idents: Vec<String> = first_child
-            .descendants_with_tokens()
+        // Direct base of the inner FIELD_EXPR must be a plain identifier.
+        let inner_base = first_child.children().next()?;
+        let mdo_type = match inner_base.kind() {
+            SyntaxKind::IDENT => inner_base.text().to_string(),
+            SyntaxKind::EXPR => {
+                let ident_nodes: Vec<_> =
+                    inner_base.children().filter(|n| n.kind() == SyntaxKind::IDENT).collect();
+                if ident_nodes.len() == 1 {
+                    ident_nodes[0].text().to_string()
+                } else {
+                    return None;
+                }
+            }
+            // CALL_EXPR / nested FIELD_EXPR / anything else — not a manager access.
+            _ => return None,
+        };
+
+        // Field name is the last IDENT token at this level.
+        let mdo_name = first_child
+            .children_with_tokens()
             .filter_map(|el| el.into_token())
             .filter(|tok| tok.kind() == SyntaxKind::IDENT)
-            .map(|tok| tok.text().to_string())
-            .collect();
+            .last()
+            .map(|tok| tok.text().to_string())?;
 
-        tracing::trace!(
-            idents = ?idents,
-            first_child_kind = ?first_child.kind(),
-            "Analyzing potential three-level call"
-        );
-
-        if idents.len() == 2 {
-            let mdo_type = idents[0].clone();
-            let mdo_name = idents[1].clone();
-
-            // Check if mdo_type is a local variable
-            let key = mdo_type.to_lowercase();
-            if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
-                return None;
-            }
-
-            tracing::debug!(
-                mdo_type = %mdo_type,
-                mdo_name = %mdo_name,
-                "Detected three-level call"
-            );
-            return Some(QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name });
+        // Check if mdo_type is shadowed by a local variable.
+        let key = mdo_type.to_lowercase();
+        if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
+            return None;
         }
-        return None;
+
+        tracing::debug!(
+            mdo_type = %mdo_type,
+            mdo_name = %mdo_name,
+            "Detected three-level call"
+        );
+        return Some(QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name });
     }
 
     // Check for two-level call: first child is IDENT or EXPR containing IDENT
@@ -1584,6 +1569,13 @@ pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprIdx, rhs: ExprIdx) -> bool {
 
         // Simple variable: A = a (case-insensitive)
         (Expr::Path(name1), Expr::Path(name2)) => name1.eq_ignore_case(name2),
+
+        // Qualified path: Module.Method = module.method (case-insensitive, segment by segment)
+        (Expr::QualifiedPath(p1), Expr::QualifiedPath(p2)) => {
+            let s1 = p1.segments();
+            let s2 = p2.segments();
+            s1.len() == s2.len() && s1.iter().zip(s2.iter()).all(|(a, b)| a.eq_ignore_case(b))
+        }
 
         // Field access: obj.field = obj.field
         (Expr::Field { base: b1, field: f1 }, Expr::Field { base: b2, field: f2 }) => {
