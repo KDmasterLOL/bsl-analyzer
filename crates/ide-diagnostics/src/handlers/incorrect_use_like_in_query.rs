@@ -51,7 +51,7 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
     use crate::DiagnosticCode;
     #[test]
-    fn test_incorrect_use_like_in_query_from_fixture() {
+    fn test_detects_invalid_like_patterns() {
         let code = r#"Процедура Тест()
     ТекстЗапроса =
     "ВЫБРАТЬ

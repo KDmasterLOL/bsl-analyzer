@@ -32,10 +32,6 @@
 //!     КонецЕсли;
 //! КонецПроцедуры
 //! ```
-//!
-//! ## Implementation
-//!
-//! Migrated to HIR-based collection.
 
 use crate::define_metadata;
 use crate::metadata::*;

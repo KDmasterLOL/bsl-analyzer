@@ -2,72 +2,66 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-When using the operator `LIKE` in the query text, it is allowed to use only
-- constant string literals
-- query parameters
+According to `#std726`, the query operator `LIKE` / `ПОДОБНО` should use only:
 
-It is forbidden to form a template string using calculations, use string concatenation using the query language.
+- a constant string literal as a pattern;
+- a query parameter as a pattern.
 
-Queries in which the control characters of the operator template `LIKE` are in query fields or in calculated expressions are interpreted differently on different DBMSs.
+Do not build the pattern by calculations or concatenation inside the query
+text. Using a field reference or another calculated expression on the pattern
+side can lead to different behavior on different DBMSs.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-
-### String concatenation by language features
-
 Allowed:
 
-```
+```sdbl
 Field LIKE "123%"
+```
+
+```sdbl
+Field LIKE &Pattern
 ```
 
 Not allowed:
 
-```
+```sdbl
 Field LIKE "123" + "%"
+Field LIKE &Pattern + "%"
 Field LIKE Table.Template
 ```
 
-### Operator template control characters LIKE are found in query fields or in calculated expressions
+Instead of building the wildcard inside the query:
 
-For example, instead of:
-
-```
+```bsl
 Query = New Query("
 |SELECT
 |    Goods.Ref
 |FROM
 |    Catalog.Goods AS Goods
 |WHERE
-|    Goods.Country.Description LOKE &NameTemplate + "_"
+|    Goods.Country.Description LIKE &NameTemplate + "_"
 |");
 
 Query.SetParameter("NameTemplate", "FU");
 ```
 
-Nessesary to use:
+prepare the value before passing the parameter:
 
-```
+```bsl
 Query = New Query("
 |SELECT
 |    Goods.Ref
 |FROM
 |    Catalog.Goods AS Goods
 |WHERE
-|    Goods.Country.Description LOKE &NameTemplate
+|    Goods.Country.Description LIKE &NameTemplate
 |");
 
 Query.SetParameter("NameTemplate", "FU_");
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
 
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-
-- [Standard. Features of use in operator requests LIKE (RU)](https://its.1c.ru/db/v8std/content/726/hdoc?ysclid=l3g3fkmxsx)
+* Primary source: [ITS / v8std #std726: Features of using LIKE in queries (RU)](https://its.1c.ru/db/v8std#content:726:hdoc)
+* Secondary source: [v8std.ru: #std726](https://v8std.ru/std/726/)

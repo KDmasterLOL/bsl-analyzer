@@ -1,14 +1,15 @@
-# Else...The...ElseIf... statement should end with Else branch (IfElseIfEndsWithElse)
+# If...Then...ElseIf... chains should end with Else (IfElseIfEndsWithElse)
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-The rule is applied whenever the conditional operator **If Then ElseIf** contains one or more blocks **ElseIf **. After block **ElseIf** must be followed by block **Else**.
+This diagnostic reports `If` chains that contain one or more `ElseIf` branches
+but do not end with `Else`.
 
-The requirement to the final block**Else** - it protective programming. Such constructions are resistant to possible changes and do not mask possible errors.
-
-The construct **Else** must either take appropriate action or contain a suitable comment as to why no action is being taken.
-
+The rule is based on a defensive-programming style: when a chain already has
+multiple explicit alternatives, an `Else` branch makes the handling of the
+remaining cases explicit. In practice it can either process unexpected values or
+document why no action is required.
 
 ## Examples
 
@@ -33,3 +34,8 @@ Else
     Raise "Parameter of invalid type passed";
 EndIf;
 ```
+
+## Sources
+
+No direct normative 1C standard is used as the basis for this diagnostic.
+It is a local defensive-programming rule implemented in `bsl-analyzer`.

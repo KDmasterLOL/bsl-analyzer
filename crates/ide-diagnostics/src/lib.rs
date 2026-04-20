@@ -130,7 +130,17 @@ fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnost
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(diags) => diags,
         Err(e) => {
-            tracing::warn!("Panic in collector '{name}': {e:?}");
+            if e.is::<salsa::Cancelled>() {
+                std::panic::resume_unwind(e);
+            }
+            let msg = if let Some(s) = e.downcast_ref::<&'static str>() {
+                (*s).to_owned()
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                format!("<non-string panic payload: {e:?}>")
+            };
+            tracing::warn!(collector = name, panic = %msg, "collector panicked");
             Vec::new()
         }
     };

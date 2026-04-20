@@ -2,33 +2,21 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-Long arithmetic expressions are carried as follows: one entry can contain more than one operand; when wrapping, operation characters are written at the beginning of the line (and not at the end of the previous line); operands on a new line are preceded by standard indentation, or they are aligned to the beginning of the first operand, regardless of the operation signs.
+This diagnostic reports several line-break patterns that conflict with the
+expression-wrapping style used in 1C standards and in the current formatter
+policy of `bsl-analyzer`.
 
-If necessary, parameters of procedures, functions and methods should be transferred as follows:
+The current implementation checks:
 
-* parameters are either aligned to the beginning of the first parameter, or preceded by standard indentation;
-* closing parenthesis and operator separator ";" are written on the same line as the last parameter;
-* the formatting method that offers the auto-formatting function in the configurator is also acceptable
+- arithmetic operators and logical operators `AND` / `OR` at the end of a line;
+- closing parenthesis `)` or semicolon `;` at the start of a line;
+- a comma at the start of a line when it is followed by meaningful content.
 
-Complex logical conditions in If ... ElseIf ... EndIf should be carried as follows:
-
-* The basis for the newline if the line length is limited to 120 characters;
-* logical operators AND, OR are placed at the beginning of a line, and not at the end of the previous line;
-* all conditions are preceded by the standard first indent, or they are aligned at the start of work without taking into account the logical operator (it is recommended to use spaces to align expressions relative to the first line).
-
-**Examples of configuring exclusions:**
-
-- If your design standard requires a closing brace and statement separator ";" were written *after* the line containing the last parameter, then you need to change the `listOfIncorrectFirstSymbol` parameter
-  - instead of the substring `|\);` (at the end of the setting) you need to write the substring `|\)\s*;\s*\S+`
-  - final version `\)|;|,\s*\S+|\)s*;\s*\S+`
-  - code example is listed in the examples section
-
-Without the specified setting, the rule will issue notes on the closing bracket and the operator separator ";", located on a separate line
+For multiline string continuation, the rule deliberately does **not** report
+`+` at line end when the next line starts with a string literal or `|`.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
 Incorrect:
 
@@ -46,34 +34,34 @@ AmountDocument = AmountWithoutDiscount
     + AmountAutomaticDiscount;
 ```
 
-or
+Logical operators should also move to the start of the next line:
 
 ```bsl
-AmountDocument = AmountWithoutDiscount 
-                 + AmountManualDiscounts 
-                 + AmountAutomaticDiscount;
+If Condition1
+    Or Condition2 Then
+EndIf;
 ```
 
-An example of a possible arrangement of parameters and a closing bracket with the operator separator ";"
-
 ```bsl
-Names = New ValueList;
-Names.Add(Name, 
-                         Synonym);
+If Condition1 Or
+    Condition2 Then
+EndIf;
 ```
 
-An example of a possible location of the closing bracket with the operator separator ";" on a separate line:
-- without changing the `listOfIncorrectFirstSymbol` parameter (see above), the diagnostics will generate a issue for such expression wrapping.
-
 ```bsl
-Names = New ValueList;
 Names.Add(
-    Name, 
+    Name,
+    Synonym);
+```
+
+```bsl
+Names.Add(
+    Name,
     Synonym
 );
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-* Standard: [Wrap expressions (RU)](https://its.1c.ru/db/v8std#content:444:hdoc)
+* Primary source: [ITS / v8std #std444: Wrap expressions (RU)](https://its.1c.ru/db/v8std#content:444:hdoc)
+* Secondary source: [v8std.ru: #std444](https://v8std.ru/std/444/)
