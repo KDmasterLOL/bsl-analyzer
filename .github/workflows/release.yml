@@ -27,12 +27,6 @@ jobs:
             ext: ".exe"
             cxxflags: "/DMAP_FAILED=((void*)-1)"
             rustflags: "-C target-feature=+crt-static"
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            platform: windows-arm64
-            ext: ".exe"
-            cxxflags: "/DMAP_FAILED=((void*)-1)"
-            rustflags: "-C target-feature=+crt-static"
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: darwin-arm64
@@ -51,13 +45,6 @@ jobs:
         env:
           CXXFLAGS: ${{ matrix.cxxflags || '' }}
           RUSTFLAGS: ${{ matrix.rustflags || '' }}
-          # Use clang-cl for aarch64-pc-windows-msvc: MSVC ARM64 cl.exe lacks
-          # some NEON BF16/FP16 intrinsic types required by numkong's probes.
-          # Target-specific vars are ignored by cc when building for other targets.
-          CC_aarch64_pc_windows_msvc: clang-cl
-          CXX_aarch64_pc_windows_msvc: clang-cl
-          CFLAGS_aarch64_pc_windows_msvc: --target=aarch64-pc-windows-msvc
-          CXXFLAGS_aarch64_pc_windows_msvc: --target=aarch64-pc-windows-msvc /DMAP_FAILED=((void*)-1)
 
       - name: Package (unix)
         if: runner.os != 'Windows'
