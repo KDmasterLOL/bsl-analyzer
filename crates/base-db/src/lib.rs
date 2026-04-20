@@ -174,6 +174,28 @@ pub trait RootQueryDb: SourceDatabase {
 ///
 /// Uses DashMap for lock-free concurrent access to Salsa input structs.
 /// Note: Files is a DashMap-based helper kept outside Salsa.
+///
+/// # Locking invariant (ABBA deadlock prevention)
+///
+/// Setters in this struct MUST NOT hold a DashMap shard guard across a Salsa
+/// setter call. The generated `input.set_<field>(db)` acquires `zalsa_mut()`
+/// internally, which blocks until every live database handle has been
+/// dropped. If a worker thread is blocked acquiring a read-guard on the same
+/// shard (via `file_text()` / `file_source_root()` / `source_root()`) while
+/// the main thread holds the write-guard, the worker cannot release its
+/// database handle and the main thread cannot finish the setter — classic
+/// ABBA.
+///
+/// The fix pattern: look up the existing handle under a short `get()` guard,
+/// copy the Salsa input handle (it is `Copy`), drop the guard, and only then
+/// invoke the Salsa setter. Single-mutator invariant (only the LSP main loop
+/// writes) makes the Vacant/Insert race harmless — `debug_assert!` in the
+/// None branches acts as a tripwire if that invariant is ever violated.
+///
+/// Paired with an early `trigger_cancellation()` at the LSP `process_changes`
+/// entry point (see `AnalysisHost::request_cancellation`) which forces any
+/// long-lived database clones held by background workers to be dropped
+/// before setters run.
 #[derive(Debug, Default, Clone)]
 pub struct Files {
     file_texts: Arc<DashMap<FileId, FileTextInput, BuildHasherDefault<FxHasher>>>,
@@ -212,21 +234,24 @@ impl Files {
     /// This creates or updates a Salsa input. Salsa automatically invalidates
     /// dependent queries when the text changes.
     pub fn set_file_text(&self, db: &mut dyn SourceDatabase, file_id: FileId, text: &str) {
-        use dashmap::mapref::entry::Entry;
         use salsa::Setter;
 
-        match self.file_texts.entry(file_id) {
-            Entry::Occupied(mut occupied) => {
-                // Update existing Salsa input
-                occupied.get_mut().set_text(db).to(text.to_string());
+        // Short-lock pattern: look up existing handle under a brief guard,
+        // drop the guard, and only then invoke the Salsa setter. See the
+        // `Files` doc-comment for why this is required.
+        let existing = self.file_texts.get(&file_id).map(|e| *e.value());
+        match existing {
+            Some(input) => {
+                input.set_text(db).to(text.to_string());
             }
-            Entry::Vacant(vacant) => {
-                // Create new Salsa input
+            None => {
                 let input = FileTextInput::new(db, text.to_string());
-                vacant.insert(input);
+                debug_assert!(
+                    self.file_texts.insert(file_id, input).is_none(),
+                    "concurrent set_file_text violates single-mutator invariant"
+                );
             }
         }
-        // No manual cache invalidation - Salsa handles it automatically!
     }
 
     /// Set the text for a file with explicit durability.
@@ -239,16 +264,19 @@ impl Files {
         text: &str,
         durability: salsa::Durability,
     ) {
-        use dashmap::mapref::entry::Entry;
         use salsa::Setter;
 
-        match self.file_texts.entry(file_id) {
-            Entry::Occupied(mut occupied) => {
-                occupied.get_mut().set_text(db).with_durability(durability).to(text.to_string());
+        let existing = self.file_texts.get(&file_id).map(|e| *e.value());
+        match existing {
+            Some(input) => {
+                input.set_text(db).with_durability(durability).to(text.to_string());
             }
-            Entry::Vacant(vacant) => {
+            None => {
                 let input = FileTextInput::builder(text.to_string()).durability(durability).new(db);
-                vacant.insert(input);
+                debug_assert!(
+                    self.file_texts.insert(file_id, input).is_none(),
+                    "concurrent set_file_text_with_durability violates single-mutator invariant"
+                );
             }
         }
     }
@@ -261,29 +289,34 @@ impl Files {
     ///
     /// This is the recommended method for setting file text in production.
     pub fn set_file_text_smart(&self, db: &mut dyn SourceDatabase, file_id: FileId, text: &str) {
-        // Try to determine durability from source root
-        if let Some(mapping) = self.file_source_roots.get(&file_id) {
+        // Resolve durability without holding any DashMap guards across the
+        // Salsa setter call below. Salsa input handles are `Copy`, so we
+        // release the shard guards before reading via `source_root_id(db)` /
+        // `root(db)` (those are independent Salsa getters).
+        let mapping = self.file_source_roots.get(&file_id).map(|e| *e.value());
+        let durability = mapping.and_then(|mapping| {
             let source_root_id = mapping.source_root_id(db);
-            if let Some(root_input) = self.source_roots.get(&source_root_id) {
-                let root = root_input.root(db);
-                let durability = root.durability();
+            let root_input = self.source_roots.get(&source_root_id).map(|e| *e.value())?;
+            Some(root_input.root(db).durability())
+        });
+
+        match durability {
+            Some(d) => {
                 tracing::debug!(
                     ?file_id,
-                    ?durability,
-                    is_library = root.is_library,
+                    durability = ?d,
                     "set_file_text_smart: determined durability from source root"
                 );
-                self.set_file_text_with_durability(db, file_id, text, durability);
-                return;
+                self.set_file_text_with_durability(db, file_id, text, d);
+            }
+            None => {
+                tracing::debug!(
+                    ?file_id,
+                    "set_file_text_smart: fallback to LOW durability (source root not set)"
+                );
+                self.set_file_text_with_durability(db, file_id, text, salsa::Durability::LOW);
             }
         }
-
-        // Fallback to LOW durability if source root not set yet
-        tracing::debug!(
-            ?file_id,
-            "set_file_text_smart: fallback to LOW durability (source root not set)"
-        );
-        self.set_file_text_with_durability(db, file_id, text, salsa::Durability::LOW);
     }
 
     /// Get the Salsa input for source root.
@@ -301,16 +334,19 @@ impl Files {
         source_root_id: SourceRootId,
         source_root: SourceRoot,
     ) {
-        use dashmap::mapref::entry::Entry;
         use salsa::Setter;
 
-        match self.source_roots.entry(source_root_id) {
-            Entry::Occupied(mut occupied) => {
-                occupied.get_mut().set_root(db).to(source_root);
+        let existing = self.source_roots.get(&source_root_id).map(|e| *e.value());
+        match existing {
+            Some(input) => {
+                input.set_root(db).to(source_root);
             }
-            Entry::Vacant(vacant) => {
+            None => {
                 let input = SourceRootInput::new(db, source_root);
-                vacant.insert(input);
+                debug_assert!(
+                    self.source_roots.insert(source_root_id, input).is_none(),
+                    "concurrent set_source_root violates single-mutator invariant"
+                );
             }
         }
     }
@@ -330,16 +366,19 @@ impl Files {
         file_id: FileId,
         source_root_id: SourceRootId,
     ) {
-        use dashmap::mapref::entry::Entry;
         use salsa::Setter;
 
-        match self.file_source_roots.entry(file_id) {
-            Entry::Occupied(mut occupied) => {
-                occupied.get_mut().set_source_root_id(db).to(source_root_id);
+        let existing = self.file_source_roots.get(&file_id).map(|e| *e.value());
+        match existing {
+            Some(input) => {
+                input.set_source_root_id(db).to(source_root_id);
             }
-            Entry::Vacant(vacant) => {
+            None => {
                 let input = FileSourceRootInput::new(db, source_root_id);
-                vacant.insert(input);
+                debug_assert!(
+                    self.file_source_roots.insert(file_id, input).is_none(),
+                    "concurrent set_file_source_root violates single-mutator invariant"
+                );
             }
         }
     }

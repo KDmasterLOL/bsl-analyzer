@@ -127,6 +127,11 @@ impl GlobalState {
 
         tracing::info!(file_count = changed_files.len(), "processing VFS changes");
 
+        // Wake outstanding Salsa snapshots before invoking any setter. Pairs
+        // with the short-lock pattern in `base_db::Files::set_*` to prevent
+        // the DashMap/Salsa ABBA described in `Files`'s doc-comment.
+        self.analysis_host.request_cancellation();
+
         let db = self.analysis_host.raw_database_mut();
         let source_root_id = base_db::SourceRootId(0);
 
