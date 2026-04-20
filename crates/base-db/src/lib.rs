@@ -246,8 +246,9 @@ impl Files {
             }
             None => {
                 let input = FileTextInput::new(db, text.to_string());
+                let previous = self.file_texts.insert(file_id, input);
                 debug_assert!(
-                    self.file_texts.insert(file_id, input).is_none(),
+                    previous.is_none(),
                     "concurrent set_file_text violates single-mutator invariant"
                 );
             }
@@ -273,8 +274,9 @@ impl Files {
             }
             None => {
                 let input = FileTextInput::builder(text.to_string()).durability(durability).new(db);
+                let previous = self.file_texts.insert(file_id, input);
                 debug_assert!(
-                    self.file_texts.insert(file_id, input).is_none(),
+                    previous.is_none(),
                     "concurrent set_file_text_with_durability violates single-mutator invariant"
                 );
             }
@@ -343,8 +345,9 @@ impl Files {
             }
             None => {
                 let input = SourceRootInput::new(db, source_root);
+                let previous = self.source_roots.insert(source_root_id, input);
                 debug_assert!(
-                    self.source_roots.insert(source_root_id, input).is_none(),
+                    previous.is_none(),
                     "concurrent set_source_root violates single-mutator invariant"
                 );
             }
@@ -375,8 +378,9 @@ impl Files {
             }
             None => {
                 let input = FileSourceRootInput::new(db, source_root_id);
+                let previous = self.file_source_roots.insert(file_id, input);
                 debug_assert!(
-                    self.file_source_roots.insert(file_id, input).is_none(),
+                    previous.is_none(),
                     "concurrent set_file_source_root violates single-mutator invariant"
                 );
             }
