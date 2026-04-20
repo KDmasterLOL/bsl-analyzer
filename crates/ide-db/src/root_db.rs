@@ -38,6 +38,13 @@ pub trait RootDatabase:
         file_id: FileId,
     ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)>;
 
+    /// Get all registered configuration roots: main + extensions.
+    ///
+    /// Returns pairs of (extension_name, root_path). Main configuration has
+    /// `None` as name; extensions have `Some(name)`. Each root is the
+    /// directory containing `Configuration.xml`.
+    fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)>;
+
     /// Get all SDBL queries in a file with their SdblExprId.
     ///
     /// Reuses BSL HIR lowering - no separate AST traversal!

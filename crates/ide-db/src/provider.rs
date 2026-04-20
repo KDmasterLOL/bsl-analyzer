@@ -5,6 +5,7 @@
 //! - [`SalsaProvider`](crate::SalsaProvider): Full caching via RootDatabase (LSP mode)
 //! - `StreamingProvider`: On-the-fly computation (analyze mode, future)
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use base_db::SourceRootId;
@@ -16,6 +17,22 @@ use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
 
 use crate::SdblHirEntries;
+
+/// Visible configuration for a file: main config or extension.
+///
+/// Carries both the loaded `Configuration` and its root directory so that
+/// callers can resolve configuration-local URIs (e.g.
+/// `CommonModules/X/Ext/Module.bsl`) against the correct config root. Used
+/// for cross-configuration resolution under 1C extension semantics.
+#[derive(Clone)]
+pub struct VisibleConfig {
+    /// Extension name; `None` for the main configuration.
+    pub name: Option<String>,
+    /// Configuration root directory (absolute path).
+    pub root: PathBuf,
+    /// Loaded configuration metadata.
+    pub configuration: Arc<Configuration>,
+}
 
 /// Abstraction over analysis data sources.
 ///
@@ -39,6 +56,23 @@ pub trait AnalysisProvider {
     /// Contains CommonModules, MetadataObjects, Registers, etc.
     /// Loaded once and reused for all files.
     fn configuration(&self) -> Option<Arc<Configuration>>;
+
+    /// Get all visible 1C Configurations for a file: main + extensions.
+    ///
+    /// Returns the full set of configurations a file can reference, each
+    /// paired with its root directory so callers can resolve
+    /// configuration-local URIs (`CommonModules/X/Ext/Module.bsl`) against
+    /// the correct root. Under 1C extension semantics, CommonModules with
+    /// the same name across main+extensions are treated as one logical
+    /// module whose methods are unioned across all defining files.
+    ///
+    /// Default implementation falls back to the single active configuration
+    /// without a meaningful root path (streaming/test providers).
+    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfig> {
+        self.configuration()
+            .map(|cfg| vec![VisibleConfig { name: None, root: PathBuf::new(), configuration: cfg }])
+            .unwrap_or_default()
+    }
 
     /// Get workspace symbols index for cross-module resolution.
     ///

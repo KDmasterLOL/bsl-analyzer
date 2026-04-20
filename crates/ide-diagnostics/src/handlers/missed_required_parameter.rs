@@ -174,38 +174,34 @@ fn check_qualified_call(
         tracing::debug_span!("check_qualified_call", module = module_name, method = method_name)
             .entered();
 
-    let Some(configuration) = ctx.load_configuration() else {
-        tracing::debug!("bailout: load_configuration returned None");
-        return None;
-    };
-
-    let Some(common_module) = configuration.find_common_module(module_name) else {
-        tracing::debug!("bailout: find_common_module returned None");
-        return None;
-    };
-
-    let Some(module_file_id) = ctx.find_common_module_file(common_module) else {
-        tracing::debug!("bailout: find_common_module_file returned None");
-        return None;
-    };
-
-    let module_id = ModuleId::new(module_file_id);
-    let symbol_tree = ctx.symbol_tree_for(module_id);
-
     let name = Name::new(method_name);
-    let Some(method) = symbol_tree.find_method(&name) else {
-        tracing::debug!("bailout: symbol_tree.find_method returned None");
-        return None;
-    };
-
-    if !method.is_export {
-        tracing::debug!("bailout: method is not exported");
+    let module_files = ctx.find_common_module_files_anywhere(module_name);
+    if module_files.is_empty() {
+        tracing::debug!("bailout: no CommonModule found in any visible configuration");
         return None;
     }
 
-    let missing = check_missing_params(method, args);
-    tracing::debug!(missing_count = missing.len(), "check_qualified_call success");
-    Some(missing)
+    // Files are ordered main-first, then extensions: the first exported match
+    // becomes the authoritative signature for this diagnostic. Under 1C
+    // extension semantics method names should not collide across
+    // configurations, so either definition is correct; when they do collide,
+    // main-first ordering makes resolution deterministic.
+    for module_file_id in module_files {
+        let module_id = ModuleId::new(module_file_id);
+        let symbol_tree = ctx.symbol_tree_for(module_id);
+        let Some(method) = symbol_tree.find_method(&name) else {
+            continue;
+        };
+        if !method.is_export {
+            continue;
+        }
+        let missing = check_missing_params(method, args);
+        tracing::debug!(missing_count = missing.len(), "check_qualified_call success");
+        return Some(missing);
+    }
+
+    tracing::debug!("bailout: method not found (or not exported) in any defining module");
+    None
 }
 
 /// Check three-level method call (MdoType.MdoName.Method) for missing required parameters.
@@ -223,20 +219,6 @@ fn check_manager_module_call(
     let _span =
         tracing::debug_span!("check_manager_module_call", mdo_type_keyword, mdo_name, method_name)
             .entered();
-
-    // Load metadata
-    let configuration = match ctx.load_configuration() {
-        Some(c) => c,
-        None => {
-            tracing::debug!(
-                mdo_type_keyword,
-                mdo_name,
-                method_name,
-                "No configuration available for manager module call check"
-            );
-            return None;
-        }
-    };
 
     // Parse MDO type from plural form (Документы → Document, Справочники → Catalog)
     let mdo_type = match bsl_metadata::MdoType::from_plural(mdo_type_keyword) {
@@ -259,8 +241,8 @@ fn check_manager_module_call(
         "Checking manager module method call"
     );
 
-    // Find Manager Module file
-    let manager_file_id = find_manager_module_file(ctx, &configuration, mdo_type, mdo_name)?;
+    // Find Manager Module file across all visible configurations
+    let manager_file_id = find_manager_module_file(ctx, mdo_type, mdo_name)?;
 
     // Build SymbolTree for Manager Module
     let module_id = ModuleId::new(manager_file_id);
@@ -303,20 +285,9 @@ fn check_manager_module_call(
 /// - O(1) HashMap lookup in FileSet
 fn find_manager_module_file(
     ctx: &DiagnosticsContext,
-    configuration: &bsl_metadata::Configuration,
     mdo_type: bsl_metadata::MdoType,
     mdo_name: &str,
 ) -> Option<FileId> {
-    // Verify metadata object exists
-    if !configuration.has_metadata_object(mdo_type, mdo_name) {
-        tracing::debug!(
-            mdo_type = ?mdo_type,
-            mdo_name,
-            "Metadata object not found in configuration"
-        );
-        return None;
-    }
-
     // Build Manager Module path using English plural form
     let english_plural = match mdo_type {
         bsl_metadata::MdoType::Document => "Documents",
@@ -341,18 +312,35 @@ fn find_manager_module_file(
 
     let manager_module_path = format!("{}/{}/Ext/ManagerModule.bsl", english_plural, mdo_name);
 
-    let file_id = ctx.resolve_module_file(&manager_module_path);
-
-    if file_id.is_none() {
+    // Iterate visible configurations (main + extensions): the metadata
+    // object may live in any of them, and the ManagerModule.bsl is resolved
+    // relative to its defining configuration's root. Unlike CommonModules,
+    // manager modules are not merged across configurations — the metadata
+    // object lives in exactly one configuration — so the first hit wins
+    // unambiguously.
+    for visible in ctx.visible_configurations() {
+        if !visible.configuration.has_metadata_object(mdo_type, mdo_name) {
+            continue;
+        }
+        let full_path = visible.root.join(&manager_module_path);
+        let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
+        if let Some(file_id) = ctx.resolve_vfs_path(base_db::SourceRootId(0), &vfs_path) {
+            return Some(file_id);
+        }
         tracing::warn!(
             mdo_type = ?mdo_type,
             mdo_name,
-            manager_module_path,
+            path = %full_path.display(),
             "Manager Module file not found in VFS - ensure file is loaded"
         );
     }
 
-    file_id
+    tracing::debug!(
+        mdo_type = ?mdo_type,
+        mdo_name,
+        "Metadata object not found in any visible configuration"
+    );
+    None
 }
 
 /// Check which required parameters are missing from a method call.
