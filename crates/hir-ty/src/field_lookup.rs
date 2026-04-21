@@ -144,14 +144,19 @@ fn lookup_on_mdo(
     mdo_name: &Name,
     field_name: &Name,
 ) -> Option<FieldInfo> {
+    // Lowercase the needle once: the haystack strings (attr names, TS
+    // names) must still be lowercased per iteration because they live in
+    // the metadata, but the needle is fixed for this whole lookup.
+    let needle = field_name.as_str().to_lowercase();
+
     for attr in &mdo.attributes {
-        if matches_bilingual(&attr.name, attr.name_en.as_deref(), field_name) {
+        if matches_bilingual(&attr.name, attr.name_en.as_deref(), &needle) {
             return Some(FieldInfo { ty: attribute_type_to_ty(&attr.attr_type) });
         }
     }
 
     for ts in &mdo.tabular_sections {
-        if matches_bilingual(ts.name(), ts.name_en(), field_name) {
+        if matches_bilingual(ts.name(), ts.name_en(), &needle) {
             let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
             return Some(FieldInfo {
                 ty: Ty::MetadataRef {
@@ -183,8 +188,9 @@ fn lookup_on_tabular_row(
 ) -> Option<FieldInfo> {
     let mdo = find_mdo(configs, parent, parent_name)?;
     let ts = mdo.find_tabular_section(section_name)?;
+    let needle = field_name.as_str().to_lowercase();
     for attr in ts.attributes() {
-        if matches_bilingual(attr.name(), attr.name_en(), field_name) {
+        if matches_bilingual(attr.name(), attr.name_en(), &needle) {
             return Some(FieldInfo { ty: attribute_type_to_ty(attr.attr_type()) });
         }
     }
@@ -240,12 +246,14 @@ fn attribute_type_to_ty(attr_type: &AttributeType) -> Ty {
 /// Case-insensitive match against a Russian name and optional English
 /// alias.
 ///
-/// `to_lowercase` is used intentionally instead of `eq_ignore_ascii_case`:
-/// BSL identifiers are Cyrillic, and ASCII-case-folding would leave
-/// `"Цена"` and `"цена"` distinct.
-fn matches_bilingual(russian: &str, english: Option<&str>, target: &Name) -> bool {
-    let want = target.as_str().to_lowercase();
-    russian.to_lowercase() == want || english.map(|en| en.to_lowercase() == want).unwrap_or(false)
+/// `target_lowercase` is the pre-lowercased needle — callers lowercase
+/// the field name once before the loop so this function only allocates
+/// for the haystack side. `to_lowercase` is used intentionally instead
+/// of `eq_ignore_ascii_case`: BSL identifiers are Cyrillic, and
+/// ASCII-case-folding would leave `"Цена"` and `"цена"` distinct.
+fn matches_bilingual(russian: &str, english: Option<&str>, target_lowercase: &str) -> bool {
+    russian.to_lowercase() == target_lowercase
+        || english.map(|en| en.to_lowercase() == target_lowercase).unwrap_or(false)
 }
 
 /// Split a `"Parent.Section"` identifier. Returns `None` if either half
@@ -315,10 +323,12 @@ mod tests {
 
     #[test]
     fn field_lookup_standard_attribute_code() {
-        // `Ссылка.Код` — the XML loader pushes `StandardAttributeKind::Code`
-        // into `mdo.attributes` with `AttributeType::String { length }`.
-        // FieldLookup must therefore resolve `Код` with the same codepath
-        // it uses for custom attributes — no special-case branch.
+        // Proves FieldLookup treats a standard attribute uniformly with
+        // custom ones — no special-case branch — once the XML loader has
+        // pushed `StandardAttributeKind::Code` into `mdo.attributes`. The
+        // loader itself is covered by `xml_parser::mod::tests::
+        // test_catalog_hierarchical_standard_attributes` and friends, so
+        // this test only owns the "FieldLookup path" half of the pipeline.
         let mut config = Configuration::new("Test");
         config.add_metadata_object(catalog(
             "Номенклатура",
