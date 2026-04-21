@@ -375,8 +375,17 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
-                // Resolve method return type via platform data
-                self.resolve_method_return_type(&receiver_ty, method)
+                // `MethodLookup` is the single adapter that turns
+                // `(receiver_ty, method_name)` into a return type. Covers
+                // platform-value types, object managers, and metadata refs;
+                // returns `None` for unions / collectives / unknown
+                // receivers. When lookup fails, inference keeps the
+                // previous "best effort" semantics by emitting
+                // `Ty::Unknown` — chain continuation still typechecks
+                // structurally, it just doesn't carry a concrete type.
+                crate::method_lookup::lookup_method(&receiver_ty, method)
+                    .map(|info| info.return_ty)
+                    .unwrap_or(Ty::Unknown)
             }
 
             Expr::Index { base, index } => {
@@ -521,28 +530,6 @@ impl<'db> InferenceContext<'db> {
             Literal::Undefined => Ty::Undefined,
             Literal::Null => Ty::Null,
         }
-    }
-
-    /// Resolve return type of a platform method call.
-    ///
-    /// Given a receiver type and method name, looks up the method in platform data
-    /// and returns its return type. Enables fluent chains like `Запрос.Выполнить().Выбрать()`.
-    fn resolve_method_return_type(&self, receiver_ty: &Ty, method_name: &Name) -> Ty {
-        if let Some(type_name) = receiver_ty.platform_type_name() {
-            let data = bsl_platform::PlatformData::instance();
-            if let Some(platform_method) = data.get_method(type_name, method_name.as_str()) {
-                if let Some(ret_type_name) = &platform_method.return_type {
-                    let ty = Ty::from_type_name(ret_type_name);
-                    if ty.is_unknown() {
-                        return Ty::PlatformObject(Name::new(ret_type_name));
-                    }
-                    return ty;
-                }
-                // Method exists but returns void (procedure)
-                return Ty::Undefined;
-            }
-        }
-        Ty::Unknown
     }
 
     /// Infer type from a binary operation.
