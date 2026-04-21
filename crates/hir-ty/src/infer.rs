@@ -397,12 +397,23 @@ impl<'db> InferenceContext<'db> {
                 Ty::Unknown
             }
 
-            Expr::Field { base, field: _ } => {
-                self.infer_expr(ExprId::from_idx(*base));
+            Expr::Field { base, field } => {
+                let base_ty = self.infer_expr(ExprId::from_idx(*base));
 
-                // Phase 1: Return Unknown
-                // Phase 2+: Resolve field type from base type
-                Ty::Unknown
+                // `FieldLookup` is the single adapter that turns
+                // `(base_ty, field_name)` into a resolved attribute or
+                // tabular-section type. Covers MDO attributes (custom +
+                // standard), tabular-section promotion, and tabular-row
+                // attributes; returns `None` for unions / primitives /
+                // managers / registers (deferred to M4). Pulling
+                // `configurations(file_id)` inside this branch keeps the
+                // Salsa dependency fine-grained — invalidating one
+                // configuration XML re-runs inference exactly for the
+                // bodies that observed it.
+                let configs = self.db.configurations(self.file_id);
+                crate::field_lookup::lookup_field(&configs, &base_ty, field)
+                    .map(|info| info.ty)
+                    .unwrap_or(Ty::Unknown)
             }
 
             Expr::New { type_name, args } => {
