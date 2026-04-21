@@ -135,26 +135,46 @@ impl TyLoweringContext {
 /// modelled by [`Ty::MetadataRef`]. Both Russian and English variants are
 /// accepted to keep the resolver case-insensitive and bilingual end-to-end.
 ///
-/// # Narrower than `type_ref::mdo_ref_prefix`
+/// # Coverage
 ///
-/// `hir-def::type_ref::from_attribute_type` round-trips every XML prefix
-/// in `REF_TYPE_MAP` (`InformationRegisterRef`, `EnumRef`, `TaskRef`,
-/// `ExchangePlanRef`, `ConstantValueManager`, …). `MetadataKind` only has
-/// six variants today, so prefixes outside that subset intentionally land
-/// on `Ty::Unknown` here. Extending `Ty::MetadataKind` (and the surrounding
-/// lookups in `infer` / `bsl-platform`) unlocks them in one go — track this
-/// in `docs/architecture/TYPE_SYSTEM.md` when M3 adds more kinds.
+/// Mirrors the XML tokens emitted by `type_ref::mdo_ref_prefix` — every
+/// prefix there except `ExchangePlanRef`, `ChartOf*Ref`, and
+/// `ConstantValueManager` has a matching `MetadataKind` variant as of M3.
+/// The Russian side uses the canonical 1C platform names
+/// (`РегистрСведенийКлючЗаписи`, `ПеречислениеСсылка`, …) as recorded in
+/// `bsl-platform`'s `platform_data.json`.
+///
+/// Tabular-section kinds (`TabularSection` / `TabularSectionRow`) are not
+/// here because they are never named by a single-prefix path in source or
+/// XML — `FieldLookup` (M3 Task 8) constructs them directly.
 fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
     match prefix.to_lowercase().as_str() {
         "catalogref" | "справочникссылка" => Some(MetadataKind::CatalogRef),
         "catalogobject" | "справочникобъект" => Some(MetadataKind::CatalogObject),
         "documentref" | "документссылка" => Some(MetadataKind::DocumentRef),
         "documentobject" | "документобъект" => Some(MetadataKind::DocumentObject),
+        "enumref" | "перечислениессылка" => Some(MetadataKind::EnumRef),
+        "taskref" | "задачассылка" => Some(MetadataKind::TaskRef),
+        "businessprocessref" | "бизнеспроцессссылка" => {
+            Some(MetadataKind::BusinessProcessRef)
+        }
         "informationregisterrecordmanager" | "регистрсведенийменеджерзаписи" => {
             Some(MetadataKind::InformationRegisterRecordManager)
         }
+        "informationregisterref" | "регистрсведенийключзаписи" => {
+            Some(MetadataKind::InformationRegisterRef)
+        }
         "accumulationregisterrecordset" | "регистрнакоплениянаборзаписей" => {
             Some(MetadataKind::AccumulationRegisterRecordSet)
+        }
+        "accumulationregisterref" | "регистрнакопленияключзаписи" => {
+            Some(MetadataKind::AccumulationRegisterRef)
+        }
+        "accountingregisterref" | "регистрбухгалтерииключзаписи" => {
+            Some(MetadataKind::AccountingRegisterRef)
+        }
+        "calculationregisterref" | "регистррасчетаключзаписи" => {
+            Some(MetadataKind::CalculationRegisterRef)
         }
         _ => None,
     }
@@ -250,18 +270,16 @@ mod tests {
 
     #[test]
     fn ty_lowering_qualified_unmodelled_prefix_is_unknown() {
-        // Narrow by design: `MetadataKind` has six variants, but the bridge
-        // emits many more XML-valid prefixes (`EnumRef`, `TaskRef`,
-        // `InformationRegisterRef`, `ConstantValueManager`, …). Until M3
-        // widens `MetadataKind`, these must land on `Ty::Unknown` instead of
-        // producing a misleading `MetadataRef` with a wrong kind.
+        // Still narrow by design: M3 widened `MetadataKind` to cover the
+        // commonly-used XML prefixes but left `ExchangePlanRef`,
+        // `ChartOf*Ref`, and `ConstantValueManager` outside the model —
+        // these must land on `Ty::Unknown` rather than producing a
+        // misleading `MetadataRef` with a wrong kind.
         for prefix in [
-            "EnumRef",
-            "TaskRef",
-            "BusinessProcessRef",
             "ExchangePlanRef",
-            "InformationRegisterRef",
-            "AccumulationRegisterRef",
+            "ChartOfCharacteristicTypesRef",
+            "ChartOfAccountsRef",
+            "ChartOfCalculationTypesRef",
             "ConstantValueManager",
         ] {
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
@@ -269,6 +287,53 @@ mod tests {
                 ctx().lower_qualified(&qname),
                 Ty::Unknown,
                 "expected Unknown for `{prefix}.Х`"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_kind_enum_and_task_and_bp_lower_bilingual() {
+        // M3 added EnumRef / TaskRef / BusinessProcessRef — the XML tokens and
+        // 1C-canonical Russian names from `bsl-platform/data/platform_data.json`
+        // must both lower to the correct MetadataKind.
+        for (prefix, expected) in [
+            ("EnumRef", MetadataKind::EnumRef),
+            ("ПеречислениеСсылка", MetadataKind::EnumRef),
+            ("TaskRef", MetadataKind::TaskRef),
+            ("ЗадачаСсылка", MetadataKind::TaskRef),
+            ("BusinessProcessRef", MetadataKind::BusinessProcessRef),
+            ("БизнесПроцессСсылка", MetadataKind::BusinessProcessRef),
+        ] {
+            let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
+            assert_eq!(
+                ctx().lower_qualified(&qname),
+                Ty::MetadataRef { kind: expected, name: Name::new("Х") },
+                "expected MetadataRef({expected:?}) for `{prefix}.Х`"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_kind_register_refs_lower_bilingual() {
+        // Record-key forms for all four register families land on the
+        // matching `*RegisterRef` kind. Keeps the `КлючЗаписи` form distinct
+        // from the runtime `МенеджерЗаписи` / `НаборЗаписей` forms that
+        // already exist in `MetadataKind`.
+        for (prefix, expected) in [
+            ("InformationRegisterRef", MetadataKind::InformationRegisterRef),
+            ("РегистрСведенийКлючЗаписи", MetadataKind::InformationRegisterRef),
+            ("AccumulationRegisterRef", MetadataKind::AccumulationRegisterRef),
+            ("РегистрНакопленияКлючЗаписи", MetadataKind::AccumulationRegisterRef),
+            ("AccountingRegisterRef", MetadataKind::AccountingRegisterRef),
+            ("РегистрБухгалтерииКлючЗаписи", MetadataKind::AccountingRegisterRef),
+            ("CalculationRegisterRef", MetadataKind::CalculationRegisterRef),
+            ("РегистрРасчетаКлючЗаписи", MetadataKind::CalculationRegisterRef),
+        ] {
+            let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
+            assert_eq!(
+                ctx().lower_qualified(&qname),
+                Ty::MetadataRef { kind: expected, name: Name::new("Х") },
+                "expected MetadataRef({expected:?}) for `{prefix}.Х`"
             );
         }
     }
