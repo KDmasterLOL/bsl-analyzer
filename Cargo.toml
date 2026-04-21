@@ -49,6 +49,7 @@ mcp-server = { path = "crates/mcp-server" }
 onec-client = { path = "crates/onec-client" }
 bsl-search = { path = "crates/bsl-search" }
 naparnik = { path = "crates/naparnik" }
+symbol-info = { path = "crates/symbol-info" }
 
 # Salsa for incremental computation
 salsa = { version = "0.26", features = ["rayon", "macros"] }

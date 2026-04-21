@@ -6,7 +6,7 @@
 //! - User-defined symbols (module functions, variables)
 //! - Local symbols (parameters, local variables)
 
-use bsl_platform::{GlobalFunction, PlatformData, PlatformDataInner};
+use bsl_platform::{GlobalFunction, PlatformDataInner};
 use either::Either;
 use hir::{ExprScopes, ScopeDef};
 use ide_db::{RootDatabase, TextRange};
@@ -647,205 +647,12 @@ fn complete_global_functions(prefix: &str) -> Vec<CompletionItem> {
     matching.iter().map(|f| render_global_function(f)).collect()
 }
 
-/// Renders a global function as a completion item.
-///
-/// Generates a completion item with:
-/// - Label: Russian function name (e.g., "НачатьТранзакцию")
-/// - Detail: Signature with return type
-/// - Insert text: Snippet with parameter placeholders
-/// - Documentation: Bilingual signature + parameters
+/// Renders a global function as a completion item via the unified
+/// `symbol_info` pipeline.
 fn render_global_function(function: &GlobalFunction) -> CompletionItem {
-    // Label: Russian name
-    let label = function.name.to_string();
-
-    // Detail: Signature with return type
-    let detail = format_function_signature(function);
-
-    // Insert text: Snippet with placeholders
-    let insert_text = generate_function_snippet(function);
-
-    // Documentation: Bilingual signature + parameters
-    let documentation = Some(format_function_documentation(function));
-
-    CompletionItem {
-        label,
-        detail: Some(detail),
-        kind: CompletionItemKind::Function,
-        insert_text,
-        documentation,
-        sort_text: None,
-        filter_text: None,
-        source: None,
-    }
-}
-
-/// Formats function signature for the detail field.
-///
-/// Example: `НачатьТранзакцию([РежимБлокировок])`
-fn format_function_signature(function: &GlobalFunction) -> String {
-    let params: Vec<_> = function
-        .parameters
-        .iter()
-        .map(|p| {
-            let ty = p.param_type.as_deref().unwrap_or("Произвольный");
-            if p.is_optional {
-                format!("[{}]", ty)
-            } else {
-                format!("<{}>", ty)
-            }
-        })
-        .collect();
-
-    let ret_part = function.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
-
-    format!("{}({}){}", function.name, params.join(", "), ret_part)
-}
-
-/// Generates function snippet with cursor inside parentheses.
-///
-/// Inserts `FunctionName($0)` so cursor lands between parens and
-/// signatureHelp shows expected parameters.
-fn generate_function_snippet(function: &GlobalFunction) -> String {
-    format!("{}($0)", function.name)
-}
-
-/// Formats function documentation for the completion item.
-///
-/// Example output:
-/// ```text
-/// НачатьТранзакцию / BeginTransaction
-///
-/// Параметры:
-/// - РежимБлокировок: РежимУправленияБлокировкойДанных (необязательный)
-///
-/// Доступность: Сервер, Толстый клиент, Внешнее соединение
-/// ```
-fn format_function_documentation(function: &GlobalFunction) -> String {
-    // Try to get full documentation
-    if let Some(full_docs) = PlatformData::instance().get_global_function_docs(function.id) {
-        return format_function_documentation_full(function, &full_docs);
-    }
-
-    // Fallback to basic documentation
-    format_function_documentation_basic(function)
-}
-
-/// Formats global function with full documentation from platform data.
-fn format_function_documentation_full(
-    function: &GlobalFunction,
-    docs: &bsl_platform::MethodDocs,
-) -> String {
-    let mut doc = format!("{} / {}\n\n", function.name, function.english_name);
-
-    // Description
-    if !docs.description.is_empty() {
-        doc.push_str(&docs.description);
-        doc.push_str("\n\n");
-    }
-
-    // Parameters with detailed descriptions
-    if !docs.params.is_empty() {
-        doc.push_str("Параметры:\n");
-        for param in &docs.params {
-            doc.push_str(&format!("- {}", param.name));
-            if !param.description.is_empty() {
-                doc.push_str(&format!(": {}", param.description));
-            }
-            doc.push('\n');
-        }
-        doc.push('\n');
-    }
-
-    // Return type
-    if let Some(ret_type) = &function.return_type {
-        doc.push_str(&format!("Возвращает: {}\n\n", ret_type));
-    }
-
-    // Examples (first example only for completion)
-    if !docs.examples.is_empty() {
-        if let Some(example) = docs.examples.first() {
-            doc.push_str("Пример:\n");
-            doc.push_str(&example.code);
-            doc.push_str("\n\n");
-        }
-    }
-
-    // Context availability
-    if let Some(ctx) = &function.context {
-        let mut parts = Vec::new();
-        if ctx.thick_client {
-            parts.push("Толстый клиент");
-        }
-        if ctx.thin_client {
-            parts.push("Тонкий клиент");
-        }
-        if ctx.web_client {
-            parts.push("Веб-клиент");
-        }
-        if ctx.server {
-            parts.push("Сервер");
-        }
-        if ctx.mobile_client {
-            parts.push("Мобильный клиент");
-        }
-        if ctx.external_connection {
-            parts.push("Внешнее соединение");
-        }
-
-        if !parts.is_empty() {
-            doc.push_str(&format!("Доступность: {}", parts.join(", ")));
-        }
-    }
-
-    doc
-}
-
-/// Formats global function with basic documentation (fallback).
-fn format_function_documentation_basic(function: &GlobalFunction) -> String {
-    let mut doc = format!("{} / {}\n\n", function.name, function.english_name);
-
-    if !function.parameters.is_empty() {
-        doc.push_str("Параметры:\n");
-        for param in &function.parameters {
-            let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
-            let optional = if param.is_optional { " (необязательный)" } else { "" };
-            doc.push_str(&format!("- {}: {}{}\n", param.name, param_type, optional));
-        }
-        doc.push('\n');
-    }
-
-    if let Some(ret_type) = &function.return_type {
-        doc.push_str(&format!("Возвращает: {}\n\n", ret_type));
-    }
-
-    // Context availability
-    if let Some(ctx) = &function.context {
-        let mut parts = Vec::new();
-        if ctx.thick_client {
-            parts.push("Толстый клиент");
-        }
-        if ctx.thin_client {
-            parts.push("Тонкий клиент");
-        }
-        if ctx.web_client {
-            parts.push("Веб-клиент");
-        }
-        if ctx.server {
-            parts.push("Сервер");
-        }
-        if ctx.mobile_client {
-            parts.push("Мобильный клиент");
-        }
-        if ctx.external_connection {
-            parts.push("Внешнее соединение");
-        }
-
-        if !parts.is_empty() {
-            doc.push_str(&format!("Доступность: {}", parts.join(", ")));
-        }
-    }
-
-    doc
+    let docs = PlatformDataInner::instance().get_global_function_docs(function.id);
+    let sig = symbol_info::from_global_function(function, docs.as_ref());
+    super::platform_completion::item_from_signature(&sig)
 }
 
 /// Returns detail and documentation for a BSL keyword.
@@ -891,48 +698,6 @@ fn get_keyword_info(keyword: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_format_function_signature() {
-        use bsl_platform::PlatformDataInner;
-
-        // Skip if no platform data available
-        let data = PlatformDataInner::instance();
-        if data.all_global_functions().is_empty() {
-            println!("Skipping test: no global functions available");
-            return;
-        }
-
-        // Get НачатьТранзакцию function
-        let function = data.get_global_function("НачатьТранзакцию");
-        assert!(function.is_some(), "Should find НачатьТранзакцию");
-
-        let function = function.unwrap();
-        let sig = format_function_signature(function);
-
-        println!("Signature: {}", sig);
-        assert!(sig.contains("НачатьТранзакцию"));
-        assert!(sig.contains('('));
-        assert!(sig.contains(')'));
-    }
-
-    #[test]
-    fn test_generate_function_snippet() {
-        use bsl_platform::PlatformDataInner;
-
-        let data = PlatformDataInner::instance();
-        if data.all_global_functions().is_empty() {
-            println!("Skipping test: no global functions available");
-            return;
-        }
-
-        let function = data.get_global_function("НачатьТранзакцию").unwrap();
-        let snippet = generate_function_snippet(function);
-
-        println!("Snippet: {}", snippet);
-        assert!(snippet.starts_with("НачатьТранзакцию("));
-        assert!(snippet.ends_with("$0)"));
-    }
 
     #[test]
     fn test_complete_global_functions_with_prefix() {

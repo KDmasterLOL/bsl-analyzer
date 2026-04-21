@@ -1812,6 +1812,7 @@ dependencies = [
  "serde_json",
  "smol_str",
  "stdx",
+ "symbol-info",
  "syntax",
  "tempfile",
  "test-fixture",
@@ -3786,6 +3787,22 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "symbol-info"
+version = "0.1.132"
+dependencies = [
+ "bsl-metadata",
+ "bsl-platform",
+ "expect-test",
+ "hir",
+ "hir-def",
+ "ide-db",
+ "smol_str",
+ "syntax",
+ "tracing",
+ "vfs",
+]
 
 [[package]]
 name = "syn"
