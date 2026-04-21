@@ -7,7 +7,7 @@ use bsl_platform::{
     global_function_query, platform_method_query, GlobalFunction, MethodDocs, MethodLookupInput,
     PlatformDataInner, PlatformMethod, TypeNameInput,
 };
-use hir::{Function, ModItem, Param, Procedure};
+use hir::{Function, MethodDocs as UserMethodDocs, ModItem, Param, ParameterDoc, Procedure};
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
 use vfs::FileId;
@@ -312,15 +312,17 @@ fn build_for_user_method<DB: RootDatabase>(
     let tree = db.item_tree(method_id.module.file_id);
 
     let item = tree.top_level_items().get(method_id.local_id as usize)?;
+    let docs = db.method_docs(method_id);
+    let docs_ref = docs.as_deref();
 
     match item {
         ModItem::Procedure(idx) => {
             let proc = tree.procedure(*idx);
-            Some(build_signature_from_procedure(proc, active_param))
+            Some(build_signature_from_procedure(proc, docs_ref, active_param))
         }
         ModItem::Function(idx) => {
             let func = tree.function(*idx);
-            Some(build_signature_from_function(func, active_param))
+            Some(build_signature_from_function(func, docs_ref, active_param))
         }
         ModItem::Variable(_) => None,
     }
@@ -410,44 +412,120 @@ fn build_signature_from_global_function(
 }
 
 /// Build SignatureHelp from a user-defined Procedure.
-fn build_signature_from_procedure(proc: &Procedure, active_param: usize) -> SignatureHelp {
-    let params: Vec<ParameterInfo> = build_params_from_item_tree_params(&proc.params);
+fn build_signature_from_procedure(
+    proc: &Procedure,
+    docs: Option<&UserMethodDocs>,
+    active_param: usize,
+) -> SignatureHelp {
+    let params = build_params_from_item_tree_params(&proc.params, docs);
 
     let param_labels: Vec<_> = params.iter().map(|p| p.label.clone()).collect();
     let signature = format!("Процедура {}({})", proc.name.as_str(), param_labels.join(", "));
 
     let active_parameter = if active_param < params.len() { Some(active_param) } else { None };
 
-    SignatureHelp { signature, doc: None, active_parameter, parameters: params }
+    SignatureHelp {
+        signature,
+        doc: docs.and_then(|d| d.purpose.clone()),
+        active_parameter,
+        parameters: params,
+    }
 }
 
 /// Build SignatureHelp from a user-defined Function.
-fn build_signature_from_function(func: &Function, active_param: usize) -> SignatureHelp {
-    let params: Vec<ParameterInfo> = build_params_from_item_tree_params(&func.params);
+fn build_signature_from_function(
+    func: &Function,
+    docs: Option<&UserMethodDocs>,
+    active_param: usize,
+) -> SignatureHelp {
+    let params = build_params_from_item_tree_params(&func.params, docs);
 
     let param_labels: Vec<_> = params.iter().map(|p| p.label.clone()).collect();
-    let signature = format!("Функция {}({})", func.name.as_str(), param_labels.join(", "));
+    let mut signature = format!("Функция {}({})", func.name.as_str(), param_labels.join(", "));
+    if let Some(ret) = docs.and_then(format_return_types) {
+        signature.push_str(": ");
+        signature.push_str(&ret);
+    }
 
     let active_parameter = if active_param < params.len() { Some(active_param) } else { None };
 
-    SignatureHelp { signature, doc: None, active_parameter, parameters: params }
+    SignatureHelp {
+        signature,
+        doc: docs.and_then(|d| d.purpose.clone()),
+        active_parameter,
+        parameters: params,
+    }
 }
 
-/// Build ParameterInfo list from ItemTree Params.
-fn build_params_from_item_tree_params(params: &[Param]) -> Vec<ParameterInfo> {
+/// Build ParameterInfo list from ItemTree Params, enriched with type/description
+/// info from parsed method docs when available.
+fn build_params_from_item_tree_params(
+    params: &[Param],
+    docs: Option<&UserMethodDocs>,
+) -> Vec<ParameterInfo> {
     params
         .iter()
         .map(|p| {
-            let label = if p.is_val {
-                format!("Знач {}", p.name.as_str())
-            } else if p.has_default {
-                format!("[{}]", p.name.as_str())
-            } else {
-                p.name.as_str().to_string()
+            let name = p.name.as_str();
+            let param_doc = find_param_doc(name, docs);
+            let type_label = param_doc.and_then(format_param_types);
+
+            let inner = match &type_label {
+                Some(types) => format!("{}: {}", name, types),
+                None => name.to_string(),
             };
-            ParameterInfo { label, documentation: None }
+
+            // `Знач` is a server-side calling-convention modifier (suppresses the
+            // server→client copy-back). It has no observable effect for the caller,
+            // so we deliberately omit it from signature help labels.
+            let label = if p.has_default { format!("[{}]", inner) } else { inner };
+
+            let documentation = param_doc.and_then(format_param_doc);
+
+            ParameterInfo { label, documentation }
         })
         .collect()
+}
+
+/// Find parameter documentation by name (case-insensitive, BSL is case-insensitive).
+fn find_param_doc<'a>(name: &str, docs: Option<&'a UserMethodDocs>) -> Option<&'a ParameterDoc> {
+    let target = name.to_lowercase();
+    docs?.parameters.iter().find(|pd| pd.name.to_lowercase() == target)
+}
+
+/// Format the type list for a parameter as "Тип1 | Тип2".
+///
+/// Uses " | " (union) instead of ", " so that a multi-typed parameter does not
+/// visually merge with adjacent parameters in the rendered signature.
+fn format_param_types(doc: &ParameterDoc) -> Option<String> {
+    if doc.types.is_empty() {
+        return None;
+    }
+    Some(doc.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(" | "))
+}
+
+/// Format parameter documentation as markdown.
+///
+/// We deliberately do NOT prefix descriptions with `**Тип** —` — the type list is
+/// already visible in the parameter label (e.g. `Ссылка: ЛюбаяСсылка | Строка`),
+/// so adding it again would only duplicate information. For union types the
+/// descriptions are joined in declaration order, separated by a blank line.
+fn format_param_doc(doc: &ParameterDoc) -> Option<String> {
+    let descriptions: Vec<&str> =
+        doc.types.iter().filter_map(|t| t.description.as_deref()).collect();
+    if descriptions.is_empty() {
+        None
+    } else {
+        Some(descriptions.join("\n\n"))
+    }
+}
+
+/// Format the return value type list for a function as "Тип1 | Тип2".
+fn format_return_types(docs: &UserMethodDocs) -> Option<String> {
+    if docs.returned_value.is_empty() {
+        return None;
+    }
+    Some(docs.returned_value.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(" | "))
 }
 
 /// Build SignatureHelp for a CommonModule method.
@@ -481,23 +559,20 @@ fn build_for_common_module_method<DB: RootDatabase>(
     // Get method from ItemTree for full parameter info
     let tree = db.item_tree(module_file_id);
     let item = tree.top_level_items().get(method.id.local_id as usize)?;
+    let docs = db.method_docs(method.id);
+    let docs_ref = docs.as_deref();
 
-    let mut sig = match item {
+    let sig = match item {
         ModItem::Procedure(idx) => {
             let proc = tree.procedure(*idx);
-            build_signature_from_procedure(proc, active_param)
+            build_signature_from_procedure(proc, docs_ref, active_param)
         }
         ModItem::Function(idx) => {
             let func = tree.function(*idx);
-            build_signature_from_function(func, active_param)
+            build_signature_from_function(func, docs_ref, active_param)
         }
         ModItem::Variable(_) => return None,
     };
-
-    // Add documentation from method docs
-    if let Some(docs) = db.method_docs(method.id) {
-        sig.doc = docs.purpose.clone();
-    }
 
     Some(sig)
 }
@@ -578,7 +653,14 @@ mod tests {
         if let Some(sig) = result {
             assert!(sig.signature.contains("МояФункция"));
             assert!(sig.signature.contains("Параметр1"));
-            assert!(sig.signature.contains("Знач Параметр2"));
+            // `Знач` modifier is intentionally omitted from signature help labels
+            // (callers don't observe the calling convention).
+            assert!(sig.signature.contains("Параметр2"));
+            assert!(
+                !sig.signature.contains("Знач"),
+                "Signature help must not surface the `Знач` modifier, got: {}",
+                sig.signature
+            );
             assert_eq!(sig.active_parameter, Some(0));
         }
     }
@@ -694,6 +776,118 @@ mod tests {
             "Signature should contain first param, got: {}",
             sig.signature
         );
+        assert!(
+            sig.signature.contains("КодСимвола: Число"),
+            "Param should be enriched with its type from docs, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("Булево"),
+            "Function signature should include return type from docs, got: {}",
+            sig.signature
+        );
         assert_eq!(sig.active_parameter, Some(0));
+
+        // Description from docs should appear in parameter documentation
+        let first = &sig.parameters[0];
+        let doc = first.documentation.as_deref().unwrap_or("");
+        assert!(
+            doc.contains("код проверяемого символа"),
+            "Param documentation should contain the description from docs, got: {:?}",
+            first.documentation
+        );
+    }
+
+    #[test]
+    fn test_common_module_method_signature_union_types() {
+        // Real-world pattern from 1C standard libraries:
+        // a parameter accepts several alternative types listed on consecutive lines.
+        let mut db = RootDatabaseImpl::new();
+
+        let module_file_id = FileId(1);
+        let module_code = "// Возвращает значения реквизита.
+//
+// Параметры:
+//  Ссылка       - ЛюбаяСсылка - объект, значения реквизитов которого получить.
+//               - Строка      - полное имя предопределенного элемента.
+//  ИмяРеквизита - Строка      - имя получаемого реквизита.
+//
+// Возвращаемое значение:
+//  Произвольный - значение реквизита.
+//
+Функция ЗначениеРеквизитаОбъекта(Ссылка, ИмяРеквизита) Экспорт
+    Возврат Неопределено;
+КонецФункции";
+
+        let caller_file_id = FileId(0);
+        let caller_code = "Процедура Тест()
+    ОбщегоНазначения.ЗначениеРеквизитаОбъекта($0)
+КонецПроцедуры";
+
+        let (caller_code, offset) = find_cursor(caller_code);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(
+            module_file_id,
+            VfsPath::new("/cf/CommonModules/ОбщегоНазначения/Ext/Module.bsl"),
+        );
+        file_set.insert(caller_file_id, VfsPath::new("/cf/HTTPServices/lk/Ext/Module.bsl"));
+
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(module_file_id, SourceRootId(0));
+        db.set_file_source_root(caller_file_id, SourceRootId(0));
+        db.set_file_text(module_file_id, module_code);
+        db.set_file_text(caller_file_id, &caller_code);
+
+        let result = signature_help(&db, caller_file_id, offset);
+
+        let sig = result.expect("Expected signature help for the common-module method");
+        assert!(
+            sig.signature.contains("Ссылка: ЛюбаяСсылка | Строка"),
+            "Both alternative types must appear next to the parameter name, joined with ' | ', got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("ИмяРеквизита: Строка"),
+            "Single-typed parameter should still get its type, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("Произвольный"),
+            "Function return type from docs should appear, got: {}",
+            sig.signature
+        );
+        assert_eq!(sig.parameters.len(), 2, "Expected exactly 2 declared parameters");
+
+        // Union-typed parameter: descriptions must NOT carry a `**Тип** —` prefix
+        // (the type list is already in the label), but BOTH descriptions must be
+        // present, in declaration order.
+        let ssylka_doc = sig.parameters[0].documentation.as_deref().unwrap_or("");
+        assert!(
+            !ssylka_doc.contains("**"),
+            "Union-typed parameter doc must not duplicate types in bold, got: {:?}",
+            sig.parameters[0].documentation
+        );
+        let pos_any = ssylka_doc.find("объект, значения").expect("ЛюбаяСсылка description");
+        let pos_str = ssylka_doc.find("полное имя").expect("Строка description");
+        assert!(
+            pos_any < pos_str,
+            "Union descriptions must keep declaration order, got: {:?}",
+            sig.parameters[0].documentation
+        );
+
+        // Single-typed parameter: just the description, no type prefix.
+        let name_doc = sig.parameters[1].documentation.as_deref().unwrap_or("");
+        assert!(
+            !name_doc.contains("**"),
+            "Single-typed parameter doc must not duplicate the type, got: {:?}",
+            sig.parameters[1].documentation
+        );
+        assert!(
+            name_doc.contains("имя получаемого реквизита"),
+            "Single-typed parameter doc should still carry the description, got: {:?}",
+            sig.parameters[1].documentation
+        );
     }
 }
