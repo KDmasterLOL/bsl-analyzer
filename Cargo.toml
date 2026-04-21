@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.130"
+version = "0.1.133"
 edition = "2021"
 license = "LGPL-3.0-or-later"
 authors = ["BSL Analyzer Contributors"]
@@ -49,6 +49,7 @@ mcp-server = { path = "crates/mcp-server" }
 onec-client = { path = "crates/onec-client" }
 bsl-search = { path = "crates/bsl-search" }
 naparnik = { path = "crates/naparnik" }
+symbol-info = { path = "crates/symbol-info" }
 
 # Salsa for incremental computation
 salsa = { version = "0.26", features = ["rayon", "macros"] }

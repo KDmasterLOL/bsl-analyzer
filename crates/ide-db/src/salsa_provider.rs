@@ -13,7 +13,7 @@ use vfs::FileId;
 
 use crate::{
     metadata::{load_configuration, ConfigurationPathInput},
-    provider::AnalysisProvider,
+    provider::{AnalysisProvider, VisibleConfig},
     RootDatabase,
 };
 
@@ -55,6 +55,34 @@ impl AnalysisProvider for SalsaProvider<'_> {
     fn configuration(&self) -> Option<Arc<Configuration>> {
         let path_input = self.configuration_path_input?;
         Some(load_configuration(self.db, path_input))
+    }
+
+    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfig> {
+        let paths = self.db.all_config_paths();
+        if paths.is_empty() {
+            return match self.configuration_path_input {
+                Some(path_input) => {
+                    let root = std::path::PathBuf::from(path_input.path(self.db));
+                    vec![VisibleConfig {
+                        name: None,
+                        root,
+                        configuration: load_configuration(self.db, path_input),
+                    }]
+                }
+                None => Vec::new(),
+            };
+        }
+
+        let version = self.db.metadata_version();
+        paths
+            .into_iter()
+            .map(|(name, path)| {
+                let path_str = path.to_string_lossy().into_owned();
+                let path_input = ConfigurationPathInput::new(self.db, path_str, version);
+                let configuration = load_configuration(self.db, path_input);
+                VisibleConfig { name, root: path, configuration }
+            })
+            .collect()
     }
 
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols> {

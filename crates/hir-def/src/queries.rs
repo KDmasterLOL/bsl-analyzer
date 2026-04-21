@@ -148,7 +148,11 @@ pub fn workspace_symbols_query(
     source_root_input: base_db::SourceRootInput,
 ) -> Arc<WorkspaceSymbols> {
     let source_root = source_root_input.root(db);
-    let files: Vec<_> = source_root.iter().collect();
+    let file_set = source_root.file_set();
+    let files: Vec<_> = source_root
+        .iter()
+        .filter(|&file_id| crate::workspace::is_bsl_source(file_set, file_id))
+        .collect();
     let _span = tracing::info_span!("workspace_symbols", file_count = files.len()).entered();
     Arc::new(crate::workspace::workspace_symbols(db, &files))
 }

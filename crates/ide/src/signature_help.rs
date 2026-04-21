@@ -1,38 +1,33 @@
 //! Signature help for function/method calls.
 //!
-//! Provides parameter hints when the cursor is inside a function call,
-//! showing the function signature and highlighting the current parameter.
+//! Thin LSP-facing wrapper over the [`symbol_info`] crate's resolve →
+//! build → present pipeline. All formatting and resolution logic lives in
+//! `symbol_info`; this module only provides the public IDE-facing entry
+//! point and converts the view-model into the IDE's `SignatureHelp` shape.
 
-use bsl_platform::{
-    global_function_query, platform_method_query, GlobalFunction, MethodDocs, MethodLookupInput,
-    PlatformDataInner, PlatformMethod, TypeNameInput,
-};
-use hir::{Function, ModItem, Param, Procedure};
 use ide_db::RootDatabase;
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
+use symbol_info::{
+    build_signature, render_signature_help, resolve_callee_at, ParameterInfoView, SignatureHelpView,
+};
+use syntax::TextSize;
 use vfs::FileId;
-
-use bsl_platform::PlatformData;
 
 /// Result of signature help.
 #[derive(Debug, Clone)]
 pub struct SignatureHelp {
-    /// Full signature: "НачатьТранзакцию([РежимБлокировок])"
+    /// Full signature, e.g. `"Функция МояФункция(Параметр1, Параметр2): Строка"`.
     pub signature: String,
-    /// Documentation (markdown).
+    /// Top-level documentation (markdown).
     pub doc: Option<String>,
     /// Index of the active parameter (0-based).
     pub active_parameter: Option<usize>,
-    /// Information about parameters.
     pub parameters: Vec<ParameterInfo>,
 }
 
 /// Information about a single parameter.
 #[derive(Debug, Clone)]
 pub struct ParameterInfo {
-    /// Parameter text for display.
     pub label: String,
-    /// Parameter documentation.
     pub documentation: Option<String>,
 }
 
@@ -44,462 +39,22 @@ pub fn signature_help<DB: RootDatabase>(
 ) -> Option<SignatureHelp> {
     let _span = tracing::info_span!("signature_help", ?file_id, ?offset).entered();
 
-    let parse = db.parse(file_id);
-    let root = parse.syntax_node();
-
-    // Find token at position (prefer left-biased for cases like "func(|)")
-    let token = root.token_at_offset(offset).left_biased()?;
-
-    tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "Signature help token");
-
-    // Find ARG_LIST in ancestors
-    let arg_list = find_arg_list(&token)?;
-
-    // Skip if cursor is on closing paren
-    if is_on_closing_paren(&token, &arg_list) {
-        tracing::debug!("Cursor on closing paren, skipping");
-        return None;
-    }
-
-    // Find parent CALL_EXPR
-    let call_expr = find_call_expr(&arg_list)?;
-
-    // Extract callee info (receiver type for methods, function name)
-    let (receiver_type, callee_name) = extract_callee_info(&call_expr)?;
-
-    tracing::debug!(?receiver_type, ?callee_name, "Extracted callee info");
-
-    // Count commas before cursor to determine active parameter
-    let active_param = count_commas_before(&arg_list, offset);
-
-    // Resolve and build signature help
-    if receiver_type.is_some() {
-        // Method call: receiver.method()
-        // First try MDO chain detection (Справочники.Партнеры.Method() → CatalogManager)
-        if let Some(sig) = resolve_mdo_chain(&call_expr, &callee_name, active_param) {
-            return Some(sig);
-        }
-
-        let type_name = receiver_type.as_deref().unwrap();
-
-        // Fallback: use extracted receiver name directly
-        if let Some(sig) = build_for_platform_method(db, type_name, &callee_name, active_param) {
-            return Some(sig);
-        }
-
-        // Try CommonModule method
-        if let Some(sig) =
-            build_for_common_module_method(db, file_id, type_name, &callee_name, active_param)
-        {
-            return Some(sig);
-        }
-    }
-
-    // Try global function
-    if let Some(sig) = build_for_global_function(db, &callee_name, active_param) {
-        return Some(sig);
-    }
-
-    // Try user-defined method
-    if let Some(sig) = build_for_user_method(db, file_id, &callee_name, active_param) {
-        return Some(sig);
-    }
-
-    None
+    let (callee, active) = resolve_callee_at(db, file_id, offset)?;
+    let sig = build_signature(db, file_id, &callee)?;
+    Some(from_view(render_signature_help(&sig, active.index)))
 }
 
-/// Find ARG_LIST node in token's ancestors.
-fn find_arg_list(token: &SyntaxToken) -> Option<SyntaxNode> {
-    token.parent_ancestors().find(|node| node.kind() == SyntaxKind::ARG_LIST)
-}
-
-/// Check if cursor is positioned on the closing parenthesis.
-fn is_on_closing_paren(token: &SyntaxToken, arg_list: &SyntaxNode) -> bool {
-    if token.kind() == SyntaxKind::R_PAREN {
-        // Check if this R_PAREN is the closing one of our ARG_LIST
-        if let Some(parent) = token.parent() {
-            return parent == *arg_list || parent.parent().as_ref() == Some(arg_list);
-        }
-    }
-    false
-}
-
-/// Find CALL_EXPR parent of ARG_LIST.
-fn find_call_expr(arg_list: &SyntaxNode) -> Option<SyntaxNode> {
-    arg_list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)
-}
-
-/// Extract callee information from CALL_EXPR.
-///
-/// Returns (receiver_type, method_name):
-/// - For `Строка.Найти()`: (Some("Строка"), "Найти")
-/// - For `НачатьТранзакцию()`: (None, "НачатьТранзакцию")
-/// - For `Справочники.Партнеры.ПолучитьМакет()`: (Some("Партнеры"), "ПолучитьМакет")
-fn extract_callee_info(call_expr: &SyntaxNode) -> Option<(Option<String>, String)> {
-    // CALL_EXPR structure: callee (IDENT or FIELD_EXPR) followed by ARG_LIST
-    let first_child = call_expr.first_child()?;
-
-    match first_child.kind() {
-        SyntaxKind::FIELD_EXPR => {
-            // Method call: receiver.method (possibly nested: a.b.method)
-            // Collect all IDENT tokens from descendants to handle nested FIELD_EXPR
-            let mut idents: Vec<String> = Vec::new();
-
-            for token in first_child.descendants_with_tokens().filter_map(|it| it.into_token()) {
-                if token.kind() == SyntaxKind::IDENT {
-                    idents.push(token.text().to_string());
-                }
-            }
-
-            tracing::debug!(?idents, "extract_callee_info: collected idents from FIELD_EXPR");
-
-            match idents.len() {
-                0 => None,
-                1 => Some((None, idents.pop().unwrap())),
-                _ => {
-                    let method = idents.pop().unwrap();
-                    let receiver = idents.pop().unwrap();
-                    Some((Some(receiver), method))
-                }
-            }
-        }
-        SyntaxKind::IDENT => {
-            // IDENT node (not token) - need to find IDENT token inside
-            // AST structure: CALL_EXPR -> IDENT (node) -> IDENT (token)
-            for child in first_child.children_with_tokens() {
-                if child.kind() == SyntaxKind::IDENT {
-                    if let Some(token) = child.as_token() {
-                        return Some((None, token.text().to_string()));
-                    }
-                }
-            }
-            None
-        }
-        _ => {
-            // Try to find IDENT in children
-            for child in first_child.children_with_tokens() {
-                if child.kind() == SyntaxKind::IDENT {
-                    let name = child.as_token()?.text().to_string();
-                    return Some((None, name));
-                }
-            }
-            None
-        }
+fn from_view(view: SignatureHelpView) -> SignatureHelp {
+    SignatureHelp {
+        signature: view.signature,
+        doc: view.doc,
+        active_parameter: view.active_parameter,
+        parameters: view.parameters.into_iter().map(from_param_view).collect(),
     }
 }
 
-/// Count commas before the cursor position in ARG_LIST.
-fn count_commas_before(arg_list: &SyntaxNode, offset: TextSize) -> usize {
-    let mut count = 0;
-    for child in arg_list.children_with_tokens() {
-        if child.text_range().start() >= offset {
-            break;
-        }
-        if child.kind() == SyntaxKind::COMMA {
-            count += 1;
-        }
-    }
-    count
-}
-
-/// Resolve MDO chain pattern and build signature help.
-///
-/// Handles patterns like `Справочники.Партнеры.ПолучитьМакет()` by recognizing
-/// "Справочники" as an MDO collection, mapping to "CatalogManager", and
-/// looking up "ПолучитьМакет" in the manager methods.
-fn resolve_mdo_chain(
-    call_expr: &SyntaxNode,
-    method_name: &str,
-    active_param: usize,
-) -> Option<SignatureHelp> {
-    let callee = call_expr.first_child()?;
-    if callee.kind() != SyntaxKind::FIELD_EXPR {
-        return None;
-    }
-
-    // Collect all idents from the callee chain
-    let idents: Vec<String> = callee
-        .descendants_with_tokens()
-        .filter_map(|it| it.into_token())
-        .filter(|t| t.kind() == SyntaxKind::IDENT)
-        .map(|t| t.text().to_string())
-        .collect();
-
-    // Need at least 3: Collection.Object.Method (e.g. Справочники.Партнеры.ПолучитьМакет)
-    if idents.len() < 3 {
-        return None;
-    }
-
-    // Check if first ident is an MDO collection
-    let mdo_type = bsl_metadata::MdoType::from_plural(&idents[0])?;
-    let manager_prefix = mdo_type.manager_type_prefix()?;
-
-    tracing::debug!(?manager_prefix, ?method_name, "MDO chain detected for signature help");
-
-    // Find the method in manager methods.
-    // Manager methods have name="<Имя" for all entries. The actual Russian name
-    // is in MethodDocs.syntax (e.g. "ПолучитьМакет(...)") and the English name
-    // in english_name after the dot (e.g. "<Catalog name>.GetTemplate" → "GetTemplate").
-    let data = PlatformData::instance();
-    let method_lower = method_name.to_lowercase();
-    let method = data.get_manager_methods(manager_prefix).into_iter().find(|m| {
-        // Match by Russian name from docs syntax
-        let docs = PlatformDataInner::instance().get_method_docs(m.id);
-        let ru_match = docs
-            .as_ref()
-            .and_then(|d| d.syntax.split('(').next())
-            .is_some_and(|ru| ru.to_lowercase() == method_lower);
-        if ru_match {
-            return true;
-        }
-        // Match by English name (part after dot)
-        let en_name = m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
-        en_name.to_lowercase() == method_lower
-    })?;
-
-    let docs = PlatformDataInner::instance().get_method_docs(method.id);
-    Some(build_signature_from_platform_method(method, docs.as_ref(), active_param))
-}
-
-/// Build SignatureHelp for a platform method.
-fn build_for_platform_method<DB: RootDatabase>(
-    db: &DB,
-    type_name: &str,
-    method_name: &str,
-    active_param: usize,
-) -> Option<SignatureHelp> {
-    let input = MethodLookupInput::new(db, type_name.to_string(), method_name.to_string());
-    let method = platform_method_query(db, input)?;
-
-    // Get documentation with default_value
-    let docs = PlatformDataInner::instance().get_method_docs(method.id);
-
-    Some(build_signature_from_platform_method(&method, docs.as_ref(), active_param))
-}
-
-/// Build SignatureHelp for a global function.
-fn build_for_global_function<DB: RootDatabase>(
-    db: &DB,
-    function_name: &str,
-    active_param: usize,
-) -> Option<SignatureHelp> {
-    let input = TypeNameInput::new(db, function_name.to_string());
-    let function = global_function_query(db, input)?;
-
-    // Get documentation with default_value
-    let docs = PlatformDataInner::instance().get_global_function_docs(function.id);
-
-    Some(build_signature_from_global_function(&function, docs.as_ref(), active_param))
-}
-
-/// Build SignatureHelp for a user-defined method.
-fn build_for_user_method<DB: RootDatabase>(
-    db: &DB,
-    file_id: FileId,
-    method_name: &str,
-    active_param: usize,
-) -> Option<SignatureHelp> {
-    use hir::Name;
-
-    let name = Name::new(method_name);
-    let module_id = hir::ModuleId::new(file_id);
-    let resolver = hir::Resolver::for_module(module_id);
-
-    // Try to resolve as a module method
-    let method_id = resolver.resolve_module_method(db, &name)?;
-
-    // Get ItemTree to access method signature
-    let tree = db.item_tree(method_id.module.file_id);
-
-    let item = tree.top_level_items().get(method_id.local_id as usize)?;
-
-    match item {
-        ModItem::Procedure(idx) => {
-            let proc = tree.procedure(*idx);
-            Some(build_signature_from_procedure(proc, active_param))
-        }
-        ModItem::Function(idx) => {
-            let func = tree.function(*idx);
-            Some(build_signature_from_function(func, active_param))
-        }
-        ModItem::Variable(_) => None,
-    }
-}
-
-/// Build SignatureHelp from a PlatformMethod.
-fn build_signature_from_platform_method(
-    method: &PlatformMethod,
-    docs: Option<&MethodDocs>,
-    active_param: usize,
-) -> SignatureHelp {
-    let params: Vec<ParameterInfo> = method
-        .parameters
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let type_hint = p.param_type.as_deref().unwrap_or("Произвольный");
-
-            // Get default_value from docs if available
-            let default_value =
-                docs.and_then(|d| d.params.get(i)).and_then(|pd| pd.default_value.as_deref());
-
-            let label = if p.is_optional {
-                match default_value {
-                    Some(val) => format!("[{}: {} = {}]", p.name, type_hint, val),
-                    None => format!("[{}: {}]", p.name, type_hint),
-                }
-            } else {
-                format!("{}: {}", p.name, type_hint)
-            };
-            ParameterInfo { label, documentation: None }
-        })
-        .collect();
-
-    let param_labels: Vec<_> = params.iter().map(|p| p.label.clone()).collect();
-    // For manager methods, method.name is "<Имя" — use Russian name from docs.syntax
-    let display_name = docs
-        .and_then(|d| d.syntax.split('(').next())
-        .filter(|n| !n.starts_with('<'))
-        .unwrap_or(&method.name);
-    let signature = format!("{}({})", display_name, param_labels.join(", "));
-
-    let active_parameter = if active_param < params.len() { Some(active_param) } else { None };
-
-    SignatureHelp { signature, doc: None, active_parameter, parameters: params }
-}
-
-/// Build SignatureHelp from a GlobalFunction.
-fn build_signature_from_global_function(
-    function: &GlobalFunction,
-    docs: Option<&MethodDocs>,
-    active_param: usize,
-) -> SignatureHelp {
-    let params: Vec<ParameterInfo> = function
-        .parameters
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let type_hint = p.param_type.as_deref().unwrap_or("Произвольный");
-
-            // Get default_value from docs if available
-            let default_value =
-                docs.and_then(|d| d.params.get(i)).and_then(|pd| pd.default_value.as_deref());
-
-            let label = if p.is_optional {
-                match default_value {
-                    Some(val) => format!("[{}: {} = {}]", p.name, type_hint, val),
-                    None => format!("[{}: {}]", p.name, type_hint),
-                }
-            } else {
-                format!("{}: {}", p.name, type_hint)
-            };
-            ParameterInfo { label, documentation: None }
-        })
-        .collect();
-
-    let param_labels: Vec<_> = params.iter().map(|p| p.label.clone()).collect();
-    let signature = format!("{}({})", function.name, param_labels.join(", "));
-
-    let return_info =
-        function.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
-    let signature = format!("{}{}", signature, return_info);
-
-    let active_parameter = if active_param < params.len() { Some(active_param) } else { None };
-
-    SignatureHelp { signature, doc: None, active_parameter, parameters: params }
-}
-
-/// Build SignatureHelp from a user-defined Procedure.
-fn build_signature_from_procedure(proc: &Procedure, active_param: usize) -> SignatureHelp {
-    let params: Vec<ParameterInfo> = build_params_from_item_tree_params(&proc.params);
-
-    let param_labels: Vec<_> = params.iter().map(|p| p.label.clone()).collect();
-    let signature = format!("Процедура {}({})", proc.name.as_str(), param_labels.join(", "));
-
-    let active_parameter = if active_param < params.len() { Some(active_param) } else { None };
-
-    SignatureHelp { signature, doc: None, active_parameter, parameters: params }
-}
-
-/// Build SignatureHelp from a user-defined Function.
-fn build_signature_from_function(func: &Function, active_param: usize) -> SignatureHelp {
-    let params: Vec<ParameterInfo> = build_params_from_item_tree_params(&func.params);
-
-    let param_labels: Vec<_> = params.iter().map(|p| p.label.clone()).collect();
-    let signature = format!("Функция {}({})", func.name.as_str(), param_labels.join(", "));
-
-    let active_parameter = if active_param < params.len() { Some(active_param) } else { None };
-
-    SignatureHelp { signature, doc: None, active_parameter, parameters: params }
-}
-
-/// Build ParameterInfo list from ItemTree Params.
-fn build_params_from_item_tree_params(params: &[Param]) -> Vec<ParameterInfo> {
-    params
-        .iter()
-        .map(|p| {
-            let label = if p.is_val {
-                format!("Знач {}", p.name.as_str())
-            } else if p.has_default {
-                format!("[{}]", p.name.as_str())
-            } else {
-                p.name.as_str().to_string()
-            };
-            ParameterInfo { label, documentation: None }
-        })
-        .collect()
-}
-
-/// Build SignatureHelp for a CommonModule method.
-///
-/// Resolves module via module_index, then looks up method in ItemTree.
-fn build_for_common_module_method<DB: RootDatabase>(
-    db: &DB,
-    file_id: FileId,
-    module_name: &str,
-    method_name: &str,
-    active_param: usize,
-) -> Option<SignatureHelp> {
-    use hir::Name;
-
-    let source_root_input = db.file_source_root_input(file_id);
-    let source_root_id = source_root_input.source_root_id(db);
-    let module_index = db.module_index(source_root_id);
-
-    let name = Name::new(module_name);
-    let module_file_id = module_index.resolve_common_module(&name)?;
-
-    let method_name = Name::new(method_name);
-    let module_id = hir::ModuleId::new(module_file_id);
-    let symbol_tree = db.symbol_tree(module_id);
-    let method = symbol_tree.find_method(&method_name)?;
-
-    if !method.is_export {
-        return None;
-    }
-
-    // Get method from ItemTree for full parameter info
-    let tree = db.item_tree(module_file_id);
-    let item = tree.top_level_items().get(method.id.local_id as usize)?;
-
-    let mut sig = match item {
-        ModItem::Procedure(idx) => {
-            let proc = tree.procedure(*idx);
-            build_signature_from_procedure(proc, active_param)
-        }
-        ModItem::Function(idx) => {
-            let func = tree.function(*idx);
-            build_signature_from_function(func, active_param)
-        }
-        ModItem::Variable(_) => return None,
-    };
-
-    // Add documentation from method docs
-    if let Some(docs) = db.method_docs(method.id) {
-        sig.doc = docs.purpose.clone();
-    }
-
-    Some(sig)
+fn from_param_view(p: ParameterInfoView) -> ParameterInfo {
+    ParameterInfo { label: p.label, documentation: p.documentation }
 }
 
 #[cfg(test)]
@@ -537,7 +92,6 @@ mod tests {
 
         let result = signature_help(&db, file_id, offset);
 
-        // If platform data is available, we should get a result
         if let Some(sig) = result {
             assert!(sig.signature.contains("НачатьТранзакцию"));
         }
@@ -545,7 +99,6 @@ mod tests {
 
     #[test]
     fn test_type_conversion_function() {
-        // Строка() is a type conversion function
         let code = "Процедура Тест()
     Строка($0)
 КонецПроцедуры";
@@ -554,7 +107,6 @@ mod tests {
 
         let result = signature_help(&db, file_id, offset);
 
-        // Platform data should have Строка function
         if let Some(sig) = result {
             assert!(sig.signature.contains("Строка"));
             assert_eq!(sig.active_parameter, Some(0));
@@ -578,7 +130,12 @@ mod tests {
         if let Some(sig) = result {
             assert!(sig.signature.contains("МояФункция"));
             assert!(sig.signature.contains("Параметр1"));
-            assert!(sig.signature.contains("Знач Параметр2"));
+            assert!(sig.signature.contains("Параметр2"));
+            assert!(
+                !sig.signature.contains("Знач"),
+                "Signature help must not surface the `Знач` modifier, got: {}",
+                sig.signature
+            );
             assert_eq!(sig.active_parameter, Some(0));
         }
     }
@@ -633,7 +190,6 @@ mod tests {
         let result = signature_help(&db, file_id, offset);
 
         if let Some(sig) = result {
-            // Should show signature for Внутренняя, not Внешняя
             assert!(sig.signature.contains("Внутренняя"));
         }
     }
@@ -642,7 +198,6 @@ mod tests {
     fn test_common_module_method_signature() {
         let mut db = RootDatabaseImpl::new();
 
-        // CommonModule file
         let module_file_id = FileId(1);
         let module_code = "// Проверяет, является ли символ разделителем слов.
 //
@@ -657,7 +212,6 @@ mod tests {
     Возврат Истина;
 КонецФункции";
 
-        // Calling file
         let caller_file_id = FileId(0);
         let caller_code = "Процедура Тест()
     СтроковыеФункцииКлиентСервер.ЭтоРазделительСлов($0)
@@ -665,7 +219,6 @@ mod tests {
 
         let (caller_code, offset) = find_cursor(caller_code);
 
-        // Setup FileSet with CommonModule path
         let mut file_set = FileSet::new();
         file_set.insert(
             module_file_id,
@@ -694,6 +247,168 @@ mod tests {
             "Signature should contain first param, got: {}",
             sig.signature
         );
+        assert!(
+            sig.signature.contains("КодСимвола: Число"),
+            "Param should be enriched with its type from docs, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("Булево"),
+            "Function signature should include return type from docs, got: {}",
+            sig.signature
+        );
         assert_eq!(sig.active_parameter, Some(0));
+
+        let first = &sig.parameters[0];
+        let doc = first.documentation.as_deref().unwrap_or("");
+        assert!(
+            doc.contains("код проверяемого символа"),
+            "Param documentation should contain the description from docs, got: {:?}",
+            first.documentation
+        );
+    }
+
+    #[test]
+    fn test_common_module_method_signature_union_types() {
+        let mut db = RootDatabaseImpl::new();
+
+        let module_file_id = FileId(1);
+        let module_code = "// Возвращает значения реквизита.
+//
+// Параметры:
+//  Ссылка       - ЛюбаяСсылка - объект, значения реквизитов которого получить.
+//               - Строка      - полное имя предопределенного элемента.
+//  ИмяРеквизита - Строка      - имя получаемого реквизита.
+//
+// Возвращаемое значение:
+//  Произвольный - значение реквизита.
+//
+Функция ЗначениеРеквизитаОбъекта(Ссылка, ИмяРеквизита) Экспорт
+    Возврат Неопределено;
+КонецФункции";
+
+        let caller_file_id = FileId(0);
+        let caller_code = "Процедура Тест()
+    ОбщегоНазначения.ЗначениеРеквизитаОбъекта($0)
+КонецПроцедуры";
+
+        let (caller_code, offset) = find_cursor(caller_code);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(
+            module_file_id,
+            VfsPath::new("/cf/CommonModules/ОбщегоНазначения/Ext/Module.bsl"),
+        );
+        file_set.insert(caller_file_id, VfsPath::new("/cf/HTTPServices/lk/Ext/Module.bsl"));
+
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(module_file_id, SourceRootId(0));
+        db.set_file_source_root(caller_file_id, SourceRootId(0));
+        db.set_file_text(module_file_id, module_code);
+        db.set_file_text(caller_file_id, &caller_code);
+
+        let result = signature_help(&db, caller_file_id, offset);
+
+        let sig = result.expect("Expected signature help for the common-module method");
+        assert!(
+            sig.signature.contains("Ссылка: ЛюбаяСсылка | Строка"),
+            "Both alternative types must appear next to the parameter name, joined with ' | ', got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("ИмяРеквизита: Строка"),
+            "Single-typed parameter should still get its type, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("Произвольный"),
+            "Function return type from docs should appear, got: {}",
+            sig.signature
+        );
+        assert_eq!(sig.parameters.len(), 2, "Expected exactly 2 declared parameters");
+
+        let ssylka_doc = sig.parameters[0].documentation.as_deref().unwrap_or("");
+        assert!(
+            !ssylka_doc.contains("**"),
+            "Union-typed parameter doc must not duplicate types in bold, got: {:?}",
+            sig.parameters[0].documentation
+        );
+        let pos_any = ssylka_doc.find("объект, значения").expect("ЛюбаяСсылка description");
+        let pos_str = ssylka_doc.find("полное имя").expect("Строка description");
+        assert!(
+            pos_any < pos_str,
+            "Union descriptions must keep declaration order, got: {:?}",
+            sig.parameters[0].documentation
+        );
+
+        let name_doc = sig.parameters[1].documentation.as_deref().unwrap_or("");
+        assert!(
+            !name_doc.contains("**"),
+            "Single-typed parameter doc must not duplicate the type, got: {:?}",
+            sig.parameters[1].documentation
+        );
+        assert!(
+            name_doc.contains("имя получаемого реквизита"),
+            "Single-typed parameter doc should still carry the description, got: {:?}",
+            sig.parameters[1].documentation
+        );
+    }
+
+    #[test]
+    fn test_manager_module_method_signature() {
+        // Bug-fix coverage: signature_help previously skipped user methods on
+        // `Catalogs/<Object>/Ext/ManagerModule.bsl`. The new resolver consults
+        // module_index.resolve_manager and surfaces the user method.
+        let mut db = RootDatabaseImpl::new();
+
+        let module_file_id = FileId(1);
+        let module_code = "// Возвращает варианты выбора группы складов.
+//
+// Параметры:
+//  Параметры - Структура - параметры выбора.
+//
+// Возвращаемое значение:
+//  Массив - варианты выбора.
+//
+Функция ВариантыВыбораГруппыСкладов(Параметры) Экспорт
+    Возврат Новый Массив;
+КонецФункции";
+
+        let caller_file_id = FileId(0);
+        let caller_code = "Процедура Тест()
+    Справочники.Склады.ВариантыВыбораГруппыСкладов($0)
+КонецПроцедуры";
+
+        let (caller_code, offset) = find_cursor(caller_code);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(module_file_id, VfsPath::new("/cf/Catalogs/Склады/Ext/ManagerModule.bsl"));
+        file_set.insert(caller_file_id, VfsPath::new("/cf/HTTPServices/lk/Ext/Module.bsl"));
+
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(module_file_id, SourceRootId(0));
+        db.set_file_source_root(caller_file_id, SourceRootId(0));
+        db.set_file_text(module_file_id, module_code);
+        db.set_file_text(caller_file_id, &caller_code);
+
+        let sig = signature_help(&db, caller_file_id, offset)
+            .expect("Manager-module method should resolve via module_index.resolve_manager");
+        assert!(
+            sig.signature.contains("ВариантыВыбораГруппыСкладов"),
+            "Signature must include the method name, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("Параметры: Структура"),
+            "Parameter must be enriched with its declared type, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("Массив"),
+            "Function return type from docs should appear, got: {}",
+            sig.signature
+        );
     }
 }

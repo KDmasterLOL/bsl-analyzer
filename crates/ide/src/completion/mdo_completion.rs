@@ -280,7 +280,8 @@ fn complete_manager_methods(manager_prefix: &str) -> Vec<CompletionItem> {
     methods.iter().map(|method| super::platform_completion::render_manager_method(method)).collect()
 }
 
-/// Complete exported methods from ManagerModule.bsl.
+/// Complete exported methods from ManagerModule.bsl, rendered through the
+/// unified `symbol_info` pipeline.
 ///
 /// Example: `Справочники.Партнеры.` → [МояЭкспортнаяФункция, ...]
 fn complete_manager_module_methods<DB: RootDatabase>(
@@ -298,8 +299,8 @@ fn complete_manager_module_methods<DB: RootDatabase>(
     let source_root_id = source_root_input.source_root_id(db);
     let module_index = db.module_index(source_root_id);
 
-    let name = Name::new(object_name);
-    let module_file_id = match module_index.resolve_manager(manager_type, &name) {
+    let object = Name::new(object_name);
+    let module_file_id = match module_index.resolve_manager(manager_type, &object) {
         Some(id) => id,
         None => {
             tracing::debug!(
@@ -317,52 +318,14 @@ fn complete_manager_module_methods<DB: RootDatabase>(
     let items: Vec<CompletionItem> = symbol_tree
         .methods()
         .filter(|m| m.is_export)
-        .map(|method| {
-            let label = method.name.to_string();
-            let kind = if method.is_function {
-                CompletionItemKind::Function
-            } else {
-                CompletionItemKind::Method
+        .filter_map(|method| {
+            let callee = symbol_info::CalleeKind::ManagerModuleMethod {
+                mdo_type,
+                object: object.clone(),
+                method: method.name.clone(),
             };
-
-            let params_str: String = method
-                .params
-                .iter()
-                .enumerate()
-                .map(|(i, p)| if i > 0 { format!(", {}", p.name) } else { p.name.to_string() })
-                .collect();
-            let detail = if method.is_function {
-                format!("Функция {}({}) Экспорт", label, params_str)
-            } else {
-                format!("Процедура {}({}) Экспорт", label, params_str)
-            };
-
-            let insert_text = if method.params.is_empty() {
-                format!("{}()$0", label)
-            } else {
-                format!("{}($0)", label)
-            };
-
-            let documentation = db.method_docs(method.id).map(|docs| {
-                let mut doc = String::new();
-                if let Some(purpose) = &docs.purpose {
-                    doc.push_str(purpose);
-                } else if !docs.raw.is_empty() {
-                    doc.push_str(&docs.raw);
-                }
-                doc
-            });
-
-            CompletionItem {
-                label,
-                detail: Some(detail),
-                kind,
-                insert_text,
-                documentation,
-                sort_text: None,
-                filter_text: None,
-                source: None,
-            }
+            let sig = symbol_info::build_signature(db, file_id, &callee)?;
+            Some(super::platform_completion::item_from_signature(&sig))
         })
         .collect();
 

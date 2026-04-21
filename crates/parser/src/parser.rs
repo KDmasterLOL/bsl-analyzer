@@ -178,8 +178,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Checks iteration limit to prevent infinite loops.
-    /// Call this at the start of every loop in grammar functions.
+    /// Checks whether the parser appears stuck in the recent token window.
+    /// The guard panics only when the position barely moves; large-but-progressing
+    /// inputs (e.g. a multi-megabyte file fed by mistake) merely reset the counter.
     pub fn check_iteration_limit(&mut self) {
         self.iteration_count += 1;
 
@@ -189,31 +190,41 @@ impl<'a> Parser<'a> {
         }
         self.recent_positions.push(self.pos);
 
-        if self.iteration_count >= MAX_ITERATIONS {
-            // Analyze position history to determine if truly stuck
-            let unique_positions: std::collections::HashSet<_> =
-                self.recent_positions.iter().collect();
-            let stuck = unique_positions.len() < 5; // Less than 5 unique positions = stuck
-
-            let last_10: Vec<_> =
-                self.recent_positions.iter().rev().take(10).rev().copied().collect();
-
-            panic!(
-                "Parser exceeded maximum iteration limit ({} iterations).\n\
-                Position: {}, Token: {:?}\n\
-                Status: {}\n\
-                Last 10 positions: {:?}\n\
-                Unique positions in last {}: {}\n\
-                This is a bug - the parser should always make progress.",
-                MAX_ITERATIONS,
-                self.pos,
-                self.current(),
-                if stuck { "STUCK (infinite loop)" } else { "SLOW (making progress)" },
-                last_10,
-                POSITION_HISTORY_SIZE,
-                unique_positions.len()
-            );
+        if self.iteration_count < MAX_ITERATIONS {
+            return;
         }
+
+        let unique_positions: std::collections::HashSet<_> = self.recent_positions.iter().collect();
+        let stuck = unique_positions.len() < 5; // Less than 5 unique positions = real loop
+
+        if !stuck {
+            // Large input that makes genuine progress: reset the counter and keep parsing.
+            // `recent_positions` keeps sliding so a later stall is still caught.
+            tracing::debug!(
+                position = self.pos,
+                unique_in_window = unique_positions.len(),
+                "parser guard: large input, resetting iteration counter"
+            );
+            self.iteration_count = 0;
+            return;
+        }
+
+        let last_10: Vec<_> = self.recent_positions.iter().rev().take(10).rev().copied().collect();
+
+        panic!(
+            "Parser exceeded maximum iteration limit ({} iterations).\n\
+            Position: {}, Token: {:?}\n\
+            Status: STUCK (infinite loop)\n\
+            Last 10 positions: {:?}\n\
+            Unique positions in last {}: {}\n\
+            This is a bug - the parser should always make progress.",
+            MAX_ITERATIONS,
+            self.pos,
+            self.current(),
+            last_10,
+            POSITION_HISTORY_SIZE,
+            unique_positions.len()
+        );
     }
 }
 

@@ -511,6 +511,25 @@ fn parse_parameters(lines: &[String]) -> Vec<ParameterDoc> {
             continue;
         }
 
+        // Continuation line for a union-typed parameter:
+        //   ParamName - TypeA - description A
+        //             - TypeB - description B
+        // After trim the second line is "- TypeB - description B" and must extend
+        // the current parameter instead of starting a new one.
+        // Only accept it as a type continuation when the would-be type name actually
+        // looks like a type — otherwise a description bullet like "- примечание"
+        // would be silently absorbed as a phantom union member.
+        if current_param.is_some() && trimmed.starts_with('-') {
+            if let Some((type_name, description)) = parse_type_line(trimmed) {
+                if is_likely_type_name(&type_name) {
+                    if let Some((_, types)) = &mut current_param {
+                        types.push(TypeDoc::simple(type_name, description));
+                    }
+                    continue;
+                }
+            }
+        }
+
         // Try to parse as parameter line: "ParamName - Type - description"
         if let Some((param_name, types)) = parse_parameter_line(trimmed) {
             // Save previous parameter if exists
@@ -684,18 +703,27 @@ fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
 }
 
 /// Check if a string is likely a type name.
+///
+/// A BSL type name is a single identifier, optionally dotted (e.g.
+/// `Справочники.Партнеры`). Multi-word strings, prose with punctuation,
+/// or anything containing spaces is NOT a type — this matters because
+/// `parse_type_line`'s last-resort branch otherwise treats a description
+/// continuation line like `Если передано имя ...` as a phantom type.
 fn is_likely_type_name(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
 
-    // Check if starts with uppercase
+    if !s.chars().all(is_type_name_char) {
+        return false;
+    }
+
     let first_char = s.chars().next().unwrap();
     if first_char.is_uppercase() {
         return true;
     }
 
-    // Check against known BSL types (case-insensitive)
+    // Lower-case fallback for known BSL primitives written in lowercase.
     let lower = s.to_lowercase();
     matches!(
         lower.as_str(),
@@ -719,6 +747,13 @@ fn is_likely_type_name(s: &str) -> bool {
             | "соответствие"
             | "map"
     )
+}
+
+/// Characters that may appear inside a BSL type name token.
+///
+/// Identifiers + `.` for qualified names like `Справочники.Партнеры`.
+fn is_type_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '.'
 }
 
 /// Parse a simple section (examples, call options, etc.) as list of strings.
@@ -886,6 +921,32 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_returns_does_not_swallow_description_continuation() {
+        // The description after the type can span multiple lines. Continuation lines
+        // must NOT be promoted to phantom union members of the return type.
+        // Real-world example: ОбщегоНазначения.ЗначениеРеквизитаОбъекта.
+        let comments = vec![
+            "Возвращает значения реквизита.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Произвольный - если передана пустая ссылка, возвращается Неопределено.".to_string(),
+            "                 Если передана ссылка несуществующего объекта (битая ссылка),"
+                .to_string(),
+            "                 то возвращается Неопределено.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(
+            docs.returned_value.len(),
+            1,
+            "Description continuation must not be parsed as additional return types, got: {:?}",
+            docs.returned_value
+        );
+        assert_eq!(docs.returned_value[0].name, "Произвольный");
+    }
+
+    #[test]
     fn test_parse_hyperlink() {
         let comments = vec!["См. ДругойМетод()".to_string()];
 
@@ -1018,6 +1079,70 @@ mod tests {
         assert!(purpose.contains("Первая строка"));
         assert!(purpose.contains("Вторая строка"));
         assert!(purpose.contains("Третья строка"));
+    }
+
+    #[test]
+    fn test_parse_parameters_with_multiline_union_types() {
+        // Format used in 1C standard libraries (e.g. ОбщегоНазначения.ЗначениеРеквизитаОбъекта):
+        // a parameter has several alternative types listed on consecutive lines
+        // aligned with the first dash.
+        let comments = vec![
+            "Возвращает значения реквизита.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Ссылка       - ЛюбаяСсылка - объект, значения реквизитов которого получить."
+                .to_string(),
+            "               - Строка      - полное имя предопределенного элемента.".to_string(),
+            "  ИмяРеквизита - Строка      - имя получаемого реквизита.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2, "Expected exactly 2 parameters, no phantom '-'");
+
+        assert_eq!(docs.parameters[0].name, "Ссылка");
+        assert_eq!(docs.parameters[0].types.len(), 2);
+        assert_eq!(docs.parameters[0].types[0].name, "ЛюбаяСсылка");
+        assert_eq!(
+            docs.parameters[0].types[0].description.as_deref(),
+            Some("объект, значения реквизитов которого получить.")
+        );
+        assert_eq!(docs.parameters[0].types[1].name, "Строка");
+        assert_eq!(
+            docs.parameters[0].types[1].description.as_deref(),
+            Some("полное имя предопределенного элемента.")
+        );
+
+        assert_eq!(docs.parameters[1].name, "ИмяРеквизита");
+        assert_eq!(docs.parameters[1].types.len(), 1);
+        assert_eq!(docs.parameters[1].types[0].name, "Строка");
+    }
+
+    #[test]
+    fn test_parse_parameters_continuation_does_not_swallow_bullet_descriptions() {
+        // A bullet in a description that happens to start with "-" must not be
+        // interpreted as an extra union type for the previous parameter.
+        let comments = vec![
+            "Описание.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Параметр - Число - значение, особенности:".to_string(),
+            "             - дополнительное примечание ниже описания".to_string(),
+            "  Другой - Строка - имя".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2);
+        assert_eq!(docs.parameters[0].name, "Параметр");
+        assert_eq!(
+            docs.parameters[0].types.len(),
+            1,
+            "Bullet line must NOT be absorbed as an extra type, got: {:?}",
+            docs.parameters[0].types
+        );
+        assert_eq!(docs.parameters[0].types[0].name, "Число");
+        assert_eq!(docs.parameters[1].name, "Другой");
     }
 
     #[test]

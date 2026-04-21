@@ -42,6 +42,72 @@ impl<'a> DiagnosticsContext<'a> {
         self.provider.configuration()
     }
 
+    /// Get all visible configurations for the current file: main + extensions.
+    ///
+    /// Under 1C extension semantics, CommonModules with the same name across
+    /// main+extensions are treated as one logical module whose methods are
+    /// unioned across all defining files. Callers that need to resolve
+    /// cross-configuration references (e.g. a file in an extension calling a
+    /// CommonModule defined in the main configuration) should iterate the
+    /// returned list rather than relying on [`load_configuration`].
+    pub fn visible_configurations(&self) -> Vec<ide_db::provider::VisibleConfig> {
+        self.provider.visible_configurations(self.file_id)
+    }
+
+    /// Find all source files that define a CommonModule with the given name
+    /// across every visible configuration (main + extensions).
+    ///
+    /// ## Ordering
+    ///
+    /// Returns files in the provider's registration order: main configuration
+    /// first, then extensions in the order they appear in `all_config_paths`.
+    /// Callers that pick the first match effectively prefer the main config
+    /// definition over extension definitions. Under 1C extension semantics
+    /// method names should not collide across configurations; if they do,
+    /// main-first ordering provides deterministic (if arbitrary) resolution.
+    ///
+    /// ## Resolution
+    ///
+    /// Each `CommonModule.uri()` is resolved against the root of the
+    /// configuration that defined it, so cross-config references resolve
+    /// correctly. If a provider reports a configuration without a meaningful
+    /// root (streaming/test providers that don't track multi-config topology),
+    /// this method falls back to the provider's `resolve_module_file` so the
+    /// helper degrades to single-config behaviour instead of silently failing.
+    pub fn find_common_module_files_anywhere(&self, name: &str) -> Vec<vfs::FileId> {
+        use bsl_metadata::traits::Module;
+
+        let mut out = Vec::new();
+        for visible in self.visible_configurations() {
+            let Some(common_module) = visible.configuration.find_common_module(name) else {
+                continue;
+            };
+            let Some(uri) = common_module.uri() else { continue };
+
+            let resolved = if visible.root.as_os_str().is_empty() {
+                // Provider did not supply a meaningful root — fall back to
+                // the provider-owned single-config resolver.
+                self.resolve_module_file(uri)
+            } else {
+                let full_path = visible.root.join(uri);
+                let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
+                self.resolve_vfs_path(base_db::SourceRootId(0), &vfs_path)
+            };
+
+            if let Some(file_id) = resolved {
+                out.push(file_id);
+            } else {
+                tracing::debug!(
+                    module = %name,
+                    ext = ?visible.name,
+                    root = %visible.root.display(),
+                    "CommonModule file not found in VFS",
+                );
+            }
+        }
+        out
+    }
+
     /// Get the file path for the current file via provider.
     ///
     /// Returns `None` if file path cannot be resolved.

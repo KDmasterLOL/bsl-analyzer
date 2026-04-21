@@ -313,7 +313,7 @@ impl RootDatabase for RootDatabaseImpl {
         file_id: FileId,
     ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)> {
         let version = self.metadata_version();
-        let all_paths = self.all_config_paths();
+        let all_paths = RootDatabaseImpl::all_config_paths(self);
 
         if all_paths.is_empty() {
             return self.get_configuration(file_id).into_iter().map(|c| (None, c)).collect();
@@ -328,6 +328,10 @@ impl RootDatabase for RootDatabaseImpl {
                 (name, config)
             })
             .collect()
+    }
+
+    fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
+        RootDatabaseImpl::all_config_paths(self)
     }
 
     fn all_sdbl_in_file(
