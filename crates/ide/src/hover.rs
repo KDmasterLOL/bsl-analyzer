@@ -517,7 +517,11 @@ fn hover_keyword(token: &SyntaxToken) -> Option<HoverResult> {
 
     let keyword_text = token.text();
 
-    // Try to get keyword documentation
+    // Try to get keyword documentation.
+    // allow: keyword docs (M3 exception) — keywords aren't part of the
+    // type system, so they fall outside Invariant #3. Documented in
+    // `docs/architecture/TYPE_SYSTEM.md`; `scripts/check-invariants.sh`
+    // uses this comment as the white-list marker.
     let keyword_docs = bsl_platform::PlatformData::instance().get_keyword_docs(keyword_text)?;
 
     let mut markup = String::new();

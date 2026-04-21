@@ -375,6 +375,36 @@ pub fn type_methods_query<'db>(
     Arc::new(data.get_type_methods(&type_name).into_iter().cloned().collect())
 }
 
+/// Get all manager methods for a manager-type prefix (e.g.
+/// `"CatalogManager"`, `"DocumentManager"`).
+///
+/// Mirrors [`type_methods_query`] for manager-collective receivers:
+/// completion on `Справочники.Валюты.` needs `НайтиПоКоду`,
+/// `СоздатьЭлемент`, etc., which live under
+/// `CatalogManager.<Name>` in the platform index. Wrapping the
+/// [`PlatformDataInner::get_manager_methods`] lookup in a Salsa query
+/// keeps `ide::completion::mdo_completion` off of
+/// `PlatformData::instance()` and matches the facade-boundary
+/// Invariant #3 in M3.
+///
+/// # Example
+/// ```ignore
+/// let input = TypeNameInput::new(db, "CatalogManager".to_string());
+/// let methods = manager_methods_query(db, input);
+/// for method in methods.iter() {
+///     // НайтиПоКоду, СоздатьЭлемент, ...
+/// }
+/// ```
+#[salsa::tracked(lru = 128)]
+pub fn manager_methods_query<'db>(
+    db: &'db dyn salsa::Database,
+    input: TypeNameInput<'db>,
+) -> Arc<Vec<PlatformMethod>> {
+    let prefix = input.name(db);
+    let data = PlatformDataInner::instance();
+    Arc::new(data.get_manager_methods(&prefix).into_iter().cloned().collect())
+}
+
 /// Lookup global function by name (case-insensitive, bilingual).
 ///
 /// This Salsa query provides cached access to global platform functions.

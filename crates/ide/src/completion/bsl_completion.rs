@@ -637,7 +637,11 @@ fn render_global_function(function: &GlobalFunction) -> CompletionItem {
 
 /// Returns detail and documentation for a BSL keyword.
 fn get_keyword_info(keyword: &str) -> (String, String) {
-    // Try to get full keyword documentation from platform data
+    // Try to get full keyword documentation from platform data.
+    // allow: keyword docs (M3 exception) — keywords aren't part of the
+    // type system, so they fall outside Invariant #3. Documented in
+    // `docs/architecture/TYPE_SYSTEM.md`; `scripts/check-invariants.sh`
+    // uses this comment as the white-list marker.
     if let Some(keyword_docs) = bsl_platform::PlatformData::instance().get_keyword_docs(keyword) {
         let mut doc = format!("{} / {}\n\n", keyword_docs.keyword_ru, keyword_docs.keyword_en);
 
