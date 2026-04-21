@@ -29,12 +29,14 @@
 
 pub mod builtin;
 pub mod db;
+pub mod field_lookup;
 pub mod infer;
 pub mod lower;
 pub mod method_lookup;
 pub mod method_resolution;
 
 // Re-export main types for convenience
+pub use field_lookup::{lookup_field, FieldInfo};
 pub use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::{ConfigsDatabase, VisibleConfig};

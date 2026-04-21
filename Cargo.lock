@@ -1559,6 +1559,7 @@ dependencies = [
  "stdx",
  "syntax",
  "tracing",
+ "uuid",
  "vfs",
 ]
 
