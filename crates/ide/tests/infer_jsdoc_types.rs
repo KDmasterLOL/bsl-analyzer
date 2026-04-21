@@ -143,6 +143,38 @@ fn missing_jsdoc_keeps_unknown_no_regression() {
 }
 
 #[test]
+fn jsdoc_union_return_lowers_to_ty_union() {
+    // End-to-end: JSDoc `// Возвращаемое значение: Число, Строка` lowers
+    // through `parse_method_doc_types` → `MethodSymbol.return_type_ref` →
+    // `materialise_signature` → `TyLoweringContext::lower_type_ref(Union)`
+    // → `Ty::union(...)`, producing a canonicalised union at the call site.
+    let fixture = r#"
+//- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
+// Возвращаемое значение:
+//   Число, Строка - результат
+Функция Результат() Экспорт
+    Возврат "";
+КонецФункции
+
+//- /test.bsl
+Функция Тест()
+    Р = ОбщегоНазначения.Результат();
+    Возврат Р;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let ty = var_ty(&db, file_id, "р").expect("var_types must track union return");
+    match ty {
+        Ty::Union(ref parts) => {
+            assert_eq!(parts.len(), 2, "Union should have exactly 2 members");
+            assert!(parts.contains(&Ty::Number));
+            assert!(parts.contains(&Ty::String));
+        }
+        other => panic!("expected Ty::Union, got {other:?}"),
+    }
+}
+
+#[test]
 fn jsdoc_three_level_return_lowers_through_manager_chain() {
     // Same wiring must hold for three-segment calls:
     // `Документы.ПКО.ПолучитьСсылку()` should see the manager-module's

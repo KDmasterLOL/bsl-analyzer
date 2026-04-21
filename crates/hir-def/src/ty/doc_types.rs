@@ -183,14 +183,20 @@ fn parse_return_line(line: &str) -> Option<TypeRef> {
 /// Parse a type-name token into a [`TypeRef`].
 ///
 /// Resolution order:
-/// 1. [`TypeRef::from_bare_name`] (primitives + Array/Map collections).
-/// 2. `Произвольный` / `Any` / `Arbitrary` → [`TypeRef::Unknown`]
+/// 1. **Union** — a comma-separated list (`"Число, Строка"`) becomes
+///    [`TypeRef::Union`] with each member recursively parsed. This lets
+///    authors declare `// Возвращаемое значение: Число, Строка` and have
+///    downstream lowering hand back a `Ty::Union([Number, String])`. Empty
+///    commas (trailing, double) are dropped; a single surviving member
+///    collapses back to a bare `TypeRef`.
+/// 2. [`TypeRef::from_bare_name`] (primitives + Array/Map collections).
+/// 3. `Произвольный` / `Any` / `Arbitrary` → [`TypeRef::Unknown`]
 ///    (authors write this when they don't want to commit to a type).
-/// 3. Dotted form like `СправочникСсылка.Номенклатура` →
+/// 4. Dotted form like `СправочникСсылка.Номенклатура` →
 ///    [`TypeRef::Name`] with all segments preserved. Lowering
 ///    (`TyLoweringContext::lower_qualified`) then decides whether it
 ///    becomes `Ty::MetadataRef`, `Ty::Unknown`, or something else.
-/// 4. Any other single token → [`TypeRef::Name`] of one segment. Lowering
+/// 5. Any other single token → [`TypeRef::Name`] of one segment. Lowering
 ///    takes this through the manager/platform-object cascade.
 fn parse_type_name(name: &str) -> TypeRef {
     let trimmed = name.trim();
@@ -198,18 +204,33 @@ fn parse_type_name(name: &str) -> TypeRef {
         return TypeRef::Unknown;
     }
 
-    // 1. Primitive / collection builtins.
+    // 1. Union — comma-separated alternatives.
+    if trimmed.contains(',') {
+        let members: Vec<TypeRef> = trimmed
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(parse_type_name)
+            .collect();
+        return match members.len() {
+            0 => TypeRef::Unknown,
+            1 => members.into_iter().next().unwrap(),
+            _ => TypeRef::Union(members),
+        };
+    }
+
+    // 2. Primitive / collection builtins.
     if let Some(tref) = TypeRef::from_bare_name(trimmed) {
         return tref;
     }
 
-    // 2. Explicit "any" fallbacks.
+    // 3. Explicit "any" fallbacks.
     match trimmed.to_lowercase().as_str() {
         "произвольный" | "any" | "arbitrary" => return TypeRef::Unknown,
         _ => {}
     }
 
-    // 3. Qualified names (`СправочникСсылка.Номенклатура`, `ОпределяемыйТип.Х`).
+    // 4. Qualified names (`СправочникСсылка.Номенклатура`, `ОпределяемыйТип.Х`).
     if trimmed.contains('.') {
         let segments: Vec<Name> = trimmed
             .split('.')
@@ -221,7 +242,7 @@ fn parse_type_name(name: &str) -> TypeRef {
         }
     }
 
-    // 4. Any other token — keep as a single-segment Name so the lowering
+    // 5. Any other token — keep as a single-segment Name so the lowering
     //    cascade can decide (manager collective, platform object, …).
     TypeRef::Name(QualifiedName::from_segments([Name::new(trimmed)]))
 }
@@ -359,6 +380,76 @@ mod tests {
         }
         // "Произвольный" remains the opt-out marker — still `Unknown`.
         assert_eq!(hints.ret, TypeRef::Unknown);
+    }
+
+    #[test]
+    fn jsdoc_union_return_type_parses() {
+        // Authors writing a polymorphic return type get a `TypeRef::Union`
+        // preserved all the way into signature materialisation. The final
+        // canonicalisation (sort / dedup) is the smart constructor's job at
+        // lowering time — here we just check the syntactic shape.
+        let doc = r#"
+// Возвращаемое значение:
+//   Число, Строка - результат сравнения
+"#;
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(
+            hints.ret,
+            TypeRef::Union(vec![builtin(BuiltinTypeRef::Number), builtin(BuiltinTypeRef::String),])
+        );
+    }
+
+    #[test]
+    fn jsdoc_union_param_type_parses() {
+        // Union works on parameter position too — matches BSL idiom for
+        // `ОписаниеТипов`-shaped parameters.
+        let doc = r#"
+// Параметры:
+//   Значение - Число, Дата, Строка - проверяемое значение
+"#;
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.params.len(), 1);
+        match &hints.params[0].1 {
+            TypeRef::Union(members) => {
+                assert_eq!(members.len(), 3);
+                assert!(members.contains(&builtin(BuiltinTypeRef::Number)));
+                assert!(members.contains(&builtin(BuiltinTypeRef::Date)));
+                assert!(members.contains(&builtin(BuiltinTypeRef::String)));
+            }
+            other => panic!("expected TypeRef::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jsdoc_union_collapses_singleton_and_handles_empty_commas() {
+        // A single survivor collapses back to the bare TypeRef — avoids
+        // spurious `Union([x])`. Trailing / double commas are dropped.
+        let doc = r#"
+// Возвращаемое значение:
+//   Число,, - трейлинг
+"#;
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.ret, builtin(BuiltinTypeRef::Number));
+    }
+
+    #[test]
+    fn jsdoc_union_with_qualified_metadata_ref_preserved() {
+        // Mixing a qualified ref with a primitive reaches lowering as a
+        // `TypeRef::Union` — `TyLoweringContext` will then turn each branch
+        // into its own `Ty` (MetadataRef, Builtin).
+        let doc = r#"
+// Возвращаемое значение:
+//   СправочникСсылка.Номенклатура, Строка - результат
+"#;
+        let hints = parse_method_doc_types(doc).unwrap();
+        match hints.ret {
+            TypeRef::Union(ref members) => {
+                assert_eq!(members.len(), 2);
+                assert!(matches!(members[0], TypeRef::Name(_) | TypeRef::Builtin(_)));
+                assert!(matches!(members[1], TypeRef::Name(_) | TypeRef::Builtin(_)));
+            }
+            other => panic!("expected TypeRef::Union, got {other:?}"),
+        }
     }
 
     #[test]
