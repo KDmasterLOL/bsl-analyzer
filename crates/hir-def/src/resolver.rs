@@ -472,39 +472,52 @@ impl Resolver {
         }
     }
 
-    /// Resolve three-level path: Documents.PKO.Create
+    /// Resolve a three-level qualified method call
+    /// (`Документы.ПКО.СоздатьДокумент`) to a [`QualifiedMethodResolution`].
     ///
-    /// Requires metadata integration (Configuration.Documents.PKO).
-    ///
-    /// # TODO
-    ///
-    /// This is a placeholder for manager module resolution.
-    /// Resolve three-level path: Documents.PKO.Create
-    ///
-    /// Resolves manager module methods via ModuleIndex.
+    /// Public counterpart of [`Self::resolve_qualified_method`] for the
+    /// 3-segment manager chain. Returns both the `MethodId` and the
+    /// `is_export` flag so the type-inference layer can emit a precise
+    /// `MethodNotExport` diagnostic without running a second lookup.
     ///
     /// # Algorithm
     ///
-    /// 1. Parse plural form → MdoType (e.g., "Документы" → Document)
-    /// 2. Convert MdoType → ManagerType
-    /// 3. Resolve manager module via ModuleIndex
-    /// 4. Load symbol_tree for manager module
-    /// 5. Search for exported method
+    /// 1. `MdoType::from_plural(mdo_type_plural)` — unknown plural collapses
+    ///    to [`QualifiedMethodError::NotFound`].
+    /// 2. `ManagerType::from_mdo_type` — kinds without a manager module
+    ///    (`Cube`, `DimensionTable`, `CommonModule`) return `NotFound`.
+    /// 3. Require module scope (caller needs to be inside a module).
+    /// 4. Consult `db.configurations(file_id)` — when at least one
+    ///    configuration is registered, the MDO must be declared (main + CFE
+    ///    union). Empty config lists skip the gate so fixture-only tests
+    ///    keep resolving through path-based lookup.
+    /// 5. Resolve the manager-module `FileId` via `module_index`.
+    /// 6. Look up the method in the target `symbol_tree` by name.
+    ///
+    /// Non-exported methods are still returned (`is_export: false`) so
+    /// callers can surface a dedicated `MethodNotExport` diagnostic.
+    ///
+    /// # Salsa invalidation
+    ///
+    /// Reads `db.configurations(...)` (CFE gate) and `db.symbol_tree(...)`
+    /// through Salsa — every consumer's `infer` / `resolve_path` transitively
+    /// depends on both, so changes to the workspace config set or the target
+    /// symbol tree invalidate correctly.
     ///
     /// # Performance
     ///
-    /// - Module lookup: O(1) via hash map
-    /// - Method lookup: O(1) via symbol_tree
-    /// - Total: ~1-5ms for first call, <10μs cached
-    fn resolve_three_level(
+    /// - Module lookup: O(1) via `module_index`.
+    /// - Method lookup: O(1) via `symbol_tree`.
+    /// - Total: ~1-5ms first call, <10μs cached.
+    pub fn resolve_three_level_method(
         &self,
         db: &dyn ConfigsDatabase,
         mdo_type_plural: &Name,
         mdo_name: &Name,
         method_name: &Name,
-    ) -> PathResolution {
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
         let _span = tracing::info_span!(
-            "resolve_three_level",
+            "resolve_three_level_method",
             mdo_type = %mdo_type_plural,
             mdo_name = %mdo_name,
             method = %method_name
@@ -512,44 +525,24 @@ impl Resolver {
         .entered();
 
         // Step 1: Parse plural form → MdoType
-        let mdo_type = match bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str()) {
-            Some(t) => t,
-            None => {
+        let mdo_type =
+            bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str()).ok_or_else(|| {
                 tracing::debug!("Unknown MDO type plural: {}", mdo_type_plural);
-                return PathResolution::Unresolved(QualifiedName::from_segments([
-                    mdo_type_plural.clone(),
-                    mdo_name.clone(),
-                    method_name.clone(),
-                ]));
-            }
-        };
+                QualifiedMethodError::NotFound
+            })?;
 
         // Step 2: Convert MdoType → ManagerType
-        let manager_type = match crate::body::ManagerType::from_mdo_type(mdo_type) {
-            Some(mt) => mt,
-            None => {
-                // Types without manager modules (Cube, DimensionTable, CommonModule)
-                tracing::debug!("MdoType {:?} does not have manager module", mdo_type);
-                return PathResolution::Unresolved(QualifiedName::from_segments([
-                    mdo_type_plural.clone(),
-                    mdo_name.clone(),
-                    method_name.clone(),
-                ]));
-            }
-        };
+        let manager_type = crate::body::ManagerType::from_mdo_type(mdo_type).ok_or_else(|| {
+            // Types without manager modules (Cube, DimensionTable, CommonModule).
+            tracing::debug!("MdoType {:?} does not have manager module", mdo_type);
+            QualifiedMethodError::NotFound
+        })?;
 
         // Step 3: Get current module to determine source root
-        let current_module_id = match self.module_id() {
-            Some(id) => id,
-            None => {
-                tracing::warn!("resolve_three_level called without module scope");
-                return PathResolution::Unresolved(QualifiedName::from_segments([
-                    mdo_type_plural.clone(),
-                    mdo_name.clone(),
-                    method_name.clone(),
-                ]));
-            }
-        };
+        let current_module_id = self.module_id().ok_or_else(|| {
+            tracing::warn!("resolve_three_level_method called without module scope");
+            QualifiedMethodError::NotFound
+        })?;
 
         // Step 4: Verify the metadata object is declared in at least one
         // visible configuration (main + CFE extensions, extension wins).
@@ -561,32 +554,22 @@ impl Resolver {
             && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
         {
             tracing::debug!(
-                "resolve_three_level: {:?} '{}' not declared in any visible configuration",
+                "resolve_three_level_method: {:?} '{}' not declared in any visible configuration",
                 mdo_type,
                 mdo_name
             );
-            return PathResolution::Unresolved(QualifiedName::from_segments([
-                mdo_type_plural.clone(),
-                mdo_name.clone(),
-                method_name.clone(),
-            ]));
+            return Err(QualifiedMethodError::NotVisibleInConfigs);
         }
 
         // Step 5: Resolve manager module via ModuleIndex
         let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
         let module_index = db.module_index(source_root_id);
 
-        let target_file_id = match module_index.resolve_manager(manager_type, mdo_name) {
-            Some(file_id) => file_id,
-            None => {
+        let target_file_id =
+            module_index.resolve_manager(manager_type, mdo_name).ok_or_else(|| {
                 tracing::debug!("Manager module not found: {:?} / {}", manager_type, mdo_name);
-                return PathResolution::Unresolved(QualifiedName::from_segments([
-                    mdo_type_plural.clone(),
-                    mdo_name.clone(),
-                    method_name.clone(),
-                ]));
-            }
-        };
+                QualifiedMethodError::NotFound
+            })?;
 
         tracing::debug!(
             "Manager module '{:?}/{}' resolved to FileId({})",
@@ -595,46 +578,59 @@ impl Resolver {
             target_file_id.index()
         );
 
-        // Step 5: Load symbol_tree for manager module
+        // Step 6: Load symbol_tree for manager module
         let target_module_id = crate::ModuleId::new(target_file_id);
         let symbol_tree = db.symbol_tree(target_module_id);
 
-        // Step 6: Search for exported method
-        if let Some(method_symbol) = symbol_tree.find_method(method_name) {
-            if !method_symbol.is_export {
-                tracing::debug!(
-                    "Method '{}' found in manager module but NOT exported",
-                    method_name
-                );
-                return PathResolution::Unresolved(QualifiedName::from_segments([
-                    mdo_type_plural.clone(),
-                    mdo_name.clone(),
-                    method_name.clone(),
-                ]));
-            }
-
-            tracing::info!(
-                "SUCCESS - found exported method '{}' in manager module '{:?}/{}'",
-                method_name,
+        // Step 7: Look up method by name. Returned even when non-exported —
+        // the `is_export` flag lets the caller pick the right diagnostic.
+        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
+            tracing::debug!(
+                "Manager module '{:?}/{}' found but method '{}' NOT found",
                 manager_type,
-                mdo_name
+                mdo_name,
+                method_name
             );
-            return PathResolution::Method(method_symbol.id);
-        }
+            QualifiedMethodError::NotFound
+        })?;
 
-        tracing::debug!(
-            "Manager module '{:?}/{}' found but method '{}' NOT found",
+        tracing::info!(
+            "SUCCESS - found method '{}' in manager module '{:?}/{}' (is_export={})",
+            method_name,
             manager_type,
             mdo_name,
-            method_name
+            method_symbol.is_export
         );
 
-        // Method not found
-        PathResolution::Unresolved(QualifiedName::from_segments([
-            mdo_type_plural.clone(),
-            mdo_name.clone(),
-            method_name.clone(),
-        ]))
+        Ok(QualifiedMethodResolution {
+            method_id: method_symbol.id,
+            is_export: method_symbol.is_export,
+        })
+    }
+
+    /// Legacy [`PathResolution`] adapter over [`Self::resolve_three_level_method`].
+    ///
+    /// Used by [`Self::resolve_path`] (Definition layer). Non-exported
+    /// methods collapse to `Unresolved` here — the Ty-layer gets the full
+    /// outcome via [`Self::resolve_three_level_method`] instead.
+    fn resolve_three_level(
+        &self,
+        db: &dyn ConfigsDatabase,
+        mdo_type_plural: &Name,
+        mdo_name: &Name,
+        method_name: &Name,
+    ) -> PathResolution {
+        let unresolved = || {
+            PathResolution::Unresolved(QualifiedName::from_segments([
+                mdo_type_plural.clone(),
+                mdo_name.clone(),
+                method_name.clone(),
+            ]))
+        };
+        match self.resolve_three_level_method(db, mdo_type_plural, mdo_name, method_name) {
+            Ok(r) if r.is_export => PathResolution::Method(r.method_id),
+            Ok(_) | Err(_) => unresolved(),
+        }
     }
 }
 
