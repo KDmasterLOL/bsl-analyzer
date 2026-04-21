@@ -309,11 +309,11 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     ///
     /// # Resolution Priority (matches BSL semantics)
     ///
-    /// 1. Local symbols (parameters, local variables) — highest priority (shadowing)
-    /// 2. Builtin platform functions/methods
-    /// 3. MDO plural forms (Справочники, Документы)
-    /// 4. Module-level methods and variables
-    /// 5. Cross-module qualified names (Module.Method)
+    /// 1. Qualified names (`X.Y`, `X.Y.Z`) — resolved as a unit before unqualified lookup
+    /// 2. Builtin platform functions — **never shadowed** by user code
+    /// 3. Local symbols (parameters, local variables)
+    /// 4. MDO plural forms (Справочники, Документы)
+    /// 5. Module-level methods and variables
     ///
     /// # Examples
     ///
@@ -424,10 +424,17 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
                 tracing::debug!(?resolution, "resolved path");
 
-                // Convert PathResolution to Definition
+                // Convert PathResolution to Definition.
+                // The `Builtin` arm is unreachable with the current
+                // `with_workspace_scope` resolver (no `Scope::Builtins`).
+                // Task 1.7 migrates this caller to
+                // `with_builtins_and_workspace`, at which point the arm
+                // becomes live — kept now so the migration is a single
+                // constructor swap.
                 return match resolution {
                     PathResolution::Method(method_id) => Some(Definition::Method(method_id)),
                     PathResolution::Variable(var_id) => Some(Definition::Variable(var_id)),
+                    PathResolution::Builtin(name) => Some(Definition::BuiltinFunction(name)),
                     PathResolution::Unresolved(_) => None,
                 };
             }

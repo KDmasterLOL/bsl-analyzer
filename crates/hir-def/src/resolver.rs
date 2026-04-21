@@ -1,15 +1,22 @@
 //! Name resolution for BSL.
 //!
 //! The Resolver provides a unified API for resolving names at different levels:
+//! - Builtins: platform global functions (never shadowed by user code)
 //! - Module-level: procedures, functions, module variables
 //! - Expression-level: parameters, local variables
 //!
 //! ## Resolution Order
 //!
-//! When resolving a name, the Resolver walks the scope stack in reverse order:
-//! 1. ExprScope (parameters, local variables) - innermost
-//! 2. ModuleScope (methods, module variables)
-//! 3. WorkspaceScope (exported methods from other modules) - outermost
+//! BSL platform globals take precedence over local variables — declaring
+//! `Перем Сообщить` does not shadow the platform `Сообщить()` call. The
+//! Resolver reflects this by checking `Scope::Builtins` **first**,
+//! regardless of its position in the scope stack. For the remaining
+//! scopes the usual lexical order applies:
+//!
+//! 1. `Scope::Builtins` (platform globals) — highest priority
+//! 2. `Scope::ExprScope` (parameters, local variables) — innermost user scope
+//! 3. `Scope::ModuleScope` (methods, module variables)
+//! 4. `Scope::WorkspaceScope` (exported methods from other modules) — outermost
 
 use std::sync::Arc;
 
@@ -38,6 +45,13 @@ pub enum Scope {
     /// Note: Full cross-module resolution requires ModuleGraph (Iteration 9.5).
     /// For now, this provides the infrastructure.
     WorkspaceScope,
+
+    /// Platform built-in scope (global functions from `bsl-platform`).
+    ///
+    /// Consulted before any user scope because BSL platform globals are not
+    /// shadowed by local or module-level names (e.g. a local `Сообщить`
+    /// variable does not hide the platform `Сообщить()` function).
+    Builtins,
 }
 
 impl Resolver {
@@ -52,6 +66,41 @@ impl Resolver {
     /// Note: Full cross-module resolution requires ModuleGraph (Iteration 9.5).
     pub fn with_workspace_scope(module_id: ModuleId) -> Self {
         Resolver { scopes: vec![Scope::WorkspaceScope, Scope::ModuleScope(module_id)] }
+    }
+
+    /// Create a resolver with builtins, workspace and module scopes.
+    ///
+    /// Preferred constructor for callers that perform unqualified name
+    /// resolution (hover, completion, type inference), because it makes
+    /// platform globals visible ahead of user scopes.
+    pub fn with_builtins_and_workspace(module_id: ModuleId) -> Self {
+        Resolver {
+            scopes: vec![Scope::Builtins, Scope::WorkspaceScope, Scope::ModuleScope(module_id)],
+        }
+    }
+
+    /// Returns `true` if this resolver includes the builtins scope.
+    fn has_builtins(&self) -> bool {
+        self.scopes.iter().any(|s| matches!(s, Scope::Builtins))
+    }
+
+    /// Resolve a name against the platform builtin table.
+    ///
+    /// Returns `Some(name)` when the identifier matches a platform global
+    /// function (e.g. `Сообщить`, `НачатьТранзакцию`). The check is
+    /// case-insensitive and goes through the static `bsl-platform` index,
+    /// matching the behaviour of existing hover/completion call sites.
+    fn resolve_builtin(&self, name: &Name) -> Option<Name> {
+        if !self.has_builtins() {
+            return None;
+        }
+
+        if bsl_platform::PlatformDataInner::instance().get_global_function(name.as_str()).is_some()
+        {
+            Some(name.clone())
+        } else {
+            None
+        }
     }
 
     /// Add an expression scope to the resolver.
@@ -109,14 +158,21 @@ impl Resolver {
         Some(variable.id)
     }
 
-    /// Resolve a name at any level (local, module, workspace).
+    /// Resolve a name at any level (builtin, local, module, workspace).
     ///
-    /// Resolution order:
-    /// 1. Local scope (parameters, local variables)
-    /// 2. Module scope (methods, module variables)
-    /// 3. Workspace scope (cross-module, not yet implemented)
+    /// Resolution order (first match wins):
+    /// 1. Builtins (platform globals — highest priority, not shadowed)
+    /// 2. Local scope (parameters, local variables)
+    /// 3. Module scope (methods, module variables)
+    /// 4. Workspace scope (cross-module, not yet implemented here)
     pub fn resolve_name(&self, db: &dyn DefDatabase, name: &Name) -> Option<Resolution> {
-        // Try local scope first
+        // Builtins take precedence over everything (BSL semantics: platform
+        // globals are not shadowed by local/module names).
+        if let Some(builtin_name) = self.resolve_builtin(name) {
+            return Some(Resolution::Builtin(builtin_name));
+        }
+
+        // Try local scope
         if let Some(local) = self.resolve_local(name) {
             return Some(Resolution::Local(local));
         }
@@ -180,9 +236,10 @@ impl Resolver {
             }
 
             1 => {
-                // Single segment - try local resolution first
+                // Single segment - try unified resolution (builtin > local > module)
                 if let Some(resolution) = self.resolve_name(db, &segments[0]) {
                     return match resolution {
+                        Resolution::Builtin(name) => PathResolution::Builtin(name),
                         Resolution::Method(id) => PathResolution::Method(id),
                         Resolution::Variable(id) => PathResolution::Variable(id),
                         Resolution::Local(_) => {
@@ -496,8 +553,11 @@ pub struct ResolvedLocal {
 }
 
 /// Result of name resolution at any level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
+    /// Platform builtin (global function). Never shadowed by user code.
+    Builtin(Name),
+
     /// Local name (parameter or local variable).
     Local(ResolvedLocal),
 
@@ -612,6 +672,51 @@ mod tests {
 
         // Manager module resolution - placeholder for now
         // Will be implemented with metadata integration
+    }
+
+    #[test]
+    fn test_builtins_scope_guard_is_opt_in() {
+        // Without Scope::Builtins the resolver must not call into the
+        // platform singleton, so builtin resolution returns None even when
+        // the name matches a known platform global.
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        let plain = Resolver::for_module(module_id);
+        assert!(plain.resolve_builtin(&Name::new("Сообщить")).is_none());
+
+        let with_workspace = Resolver::with_workspace_scope(module_id);
+        assert!(with_workspace.resolve_builtin(&Name::new("Сообщить")).is_none());
+
+        let with_all = Resolver::with_builtins_and_workspace(module_id);
+        assert!(with_all.has_builtins());
+    }
+
+    #[test]
+    fn test_builtins_scope_resolves_platform_global() {
+        // `Сообщить` ships with the bundled platform data. If the loader
+        // silently produced an empty index, this test must fail — otherwise
+        // a regression in platform-data initialisation would go unnoticed.
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        let resolver = Resolver::with_builtins_and_workspace(module_id);
+
+        assert!(
+            bsl_platform::PlatformDataInner::instance().get_global_function("Сообщить").is_some(),
+            "bundled platform data must include `Сообщить`; missing data would mean the \
+             loader regressed — guard this assumption loudly"
+        );
+
+        let resolved = resolver.resolve_builtin(&Name::new("сообщить"));
+        assert_eq!(
+            resolved.as_ref().map(|n| n.as_str()),
+            Some("сообщить"),
+            "case-insensitive platform global lookup must succeed"
+        );
+
+        // Nonsense names never resolve as builtins.
+        assert!(resolver.resolve_builtin(&Name::new("НетТакогоBuiltin")).is_none());
     }
 
     // Integration tests with RootDatabaseImpl are in ide-db crate
