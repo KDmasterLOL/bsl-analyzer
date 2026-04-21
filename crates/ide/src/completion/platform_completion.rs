@@ -5,16 +5,13 @@
 //! - CommonModule method completion (e.g., `ОбщегоНазначения.` shows exported methods)
 //! - Snippets with parameter placeholders
 
-use bsl_platform::{
-    type_methods_query, PlatformData, PlatformDataInner, PlatformMethod, TypeNameInput,
-};
-use hir::{InferenceResult, MethodSymbol, Name, Ty};
+use bsl_platform::{type_methods_query, PlatformDataInner, PlatformMethod, TypeNameInput};
+use hir::{MethodSymbol, Name, Semantics, Ty};
 use ide_db::RootDatabase;
 use symbol_info::{
     build_signature, from_platform_method, render_completion_detail, CalleeKind, CompletionDetail,
     MethodKind, SignatureSource, SymbolSignature,
 };
-use syntax::ast::{self, AstNode};
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use vfs::FileId;
 
@@ -29,8 +26,8 @@ use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 /// - Simple variable: `МойМассив.` → methods of Массив
 /// - Direct type: `Строка.` → methods of Строка
 /// - Fluent chains: `Запрос.Выполнить().Выбрать().` → methods of return type
-pub(super) fn platform_completions(
-    db: &dyn RootDatabase,
+pub(super) fn platform_completions<DB: RootDatabase>(
+    db: &DB,
     position: CompletionPosition,
 ) -> Option<Vec<CompletionItem>> {
     let _span = tracing::info_span!("platform_completions").entered();
@@ -60,14 +57,33 @@ pub(super) fn platform_completions(
         }
     }
 
-    // Slow path: full inference for non-trivial receivers
-    // (`expr.Method().`, `ЭтотОбъект.`, fluent chains).
-    let infer_result = db.infer(position.file_id);
+    // Primary: `Semantics::type_of_expr` (M3 Task 9) walks the file's
+    // `BodySourceMap` and looks up the inferred `Ty` for this exact
+    // syntax node — same pipeline that `Expr::Field` / `Expr::MethodCall`
+    // inference uses. Closes the Task 11 piece of Invariant #3: IDE
+    // completion no longer dips into `PlatformData::instance()` for
+    // receiver resolution.
+    let sema = Semantics::new(db);
+    let mut receiver_ty = sema.type_of_expr(position.file_id, &receiver_expr);
 
-    let receiver_ty = resolve_syntax_expr_type(&receiver_expr, &infer_result);
+    // Fallback: a bare identifier that HIR couldn't resolve — typically
+    // a literal type name (`Строка.`) or a platform constructor name
+    // (`Запрос.`) without a variable binding. `Ty::from_type_name`
+    // catches primitives / collections; anything else becomes a
+    // `PlatformObject(name)` so `platform_type_name()` below can ask
+    // `type_methods_query` for matching methods (empty result is safe
+    // — completion just shows nothing).
+    if receiver_ty.is_unknown() {
+        if let Some(name) = extract_receiver_ident(&receiver_expr) {
+            receiver_ty = Ty::from_type_name(&name);
+            if receiver_ty.is_unknown() {
+                receiver_ty = Ty::PlatformObject(Name::new(&name));
+            }
+        }
+    }
+
     tracing::debug!(receiver_ty = ?receiver_ty, "Resolved receiver type");
 
-    // Try platform type completion first
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
         return Some(complete_platform_methods(db, type_name));
@@ -118,146 +134,12 @@ fn find_receiver_expr(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
     None
 }
 
-/// Recursively resolve the type of a syntax expression node.
-///
-/// This is a lightweight syntax-level type resolver for completion.
-/// It uses inference results (var_types) for variables and platform data
-/// for method return types to support fluent chains.
-fn resolve_syntax_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
-    match node.kind() {
-        // Simple identifier — look up in var_types or treat as type name
-        SyntaxKind::IDENT | SyntaxKind::EXPR => {
-            if let Some(ident_token) = node.first_token() {
-                if ident_token.kind() == SyntaxKind::IDENT {
-                    return resolve_ident_type(ident_token.text(), infer_result);
-                }
-            }
-            Ty::Unknown
-        }
-
-        // Call expression: callee(args) — resolve callee type
-        // For method calls like `obj.Method()`, this is a CALL_EXPR wrapping a FIELD_EXPR
-        SyntaxKind::CALL_EXPR => resolve_call_expr_type(node, infer_result),
-
-        // Field expression: base.field — resolve for intermediate chains
-        SyntaxKind::FIELD_EXPR => resolve_field_expr_type(node, infer_result),
-
-        // New expression: Новый Type(...)
-        SyntaxKind::NEW_EXPR => {
-            if let Some(new_expr) = ast::NewExpr::cast(node.clone()) {
-                Ty::from_new_expr(&new_expr)
-            } else {
-                Ty::Unknown
-            }
-        }
-
-        // Parenthesized expression
-        SyntaxKind::PAREN_EXPR => node
-            .children()
-            .next()
-            .map(|child| resolve_syntax_expr_type(&child, infer_result))
-            .unwrap_or(Ty::Unknown),
-
-        _ => {
-            // Try to find an IDENT token in this node (fallback)
-            if let Some(ident) = node.first_token().filter(|t| t.kind() == SyntaxKind::IDENT) {
-                return resolve_ident_type(ident.text(), infer_result);
-            }
-            Ty::Unknown
-        }
-    }
-}
-
-/// Resolve type of an identifier (variable name or type name).
-fn resolve_ident_type(name: &str, infer_result: &InferenceResult) -> Ty {
-    let key = name.to_lowercase();
-
-    // Check var_types from inference
-    if let Some(ty) = infer_result.var_types.get(&key) {
-        if !ty.is_unknown() {
-            return ty.clone();
-        }
-    }
-
-    // Check if it's a known platform type name directly (e.g., `Строка.`)
-    let ty = Ty::from_type_name(name);
-    if !ty.is_unknown() {
-        return ty;
-    }
-
-    // Check if it's a known platform type (e.g., `Запрос.`)
-    let data = PlatformData::instance();
-    if !data.get_type_methods(name).is_empty() {
-        return Ty::PlatformObject(Name::new(name));
-    }
-
-    Ty::Unknown
-}
-
-/// Resolve type of a CALL_EXPR node.
-///
-/// Structure: CALL_EXPR → [callee_expr, ARG_LIST]
-/// If callee is a FIELD_EXPR (method call), resolve receiver type + method return type.
-fn resolve_call_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
-    let callee = node.children().next();
-    let callee = match callee {
-        Some(c) => c,
-        None => return Ty::Unknown,
-    };
-
-    // Method call: callee is FIELD_EXPR (base.method)
-    if callee.kind() == SyntaxKind::FIELD_EXPR {
-        let mut children = callee.children();
-        let base = children.next();
-        // Skip to find method name (IDENT after DOT)
-        let method_name = callee
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .filter(|t| t.kind() == SyntaxKind::IDENT)
-            .last();
-
-        if let (Some(base_node), Some(method_token)) = (base, method_name) {
-            let base_ty = resolve_syntax_expr_type(&base_node, infer_result);
-            if let Some(type_name) = base_ty.platform_type_name() {
-                let data = PlatformData::instance();
-                if let Some(method) = data.get_method(type_name, method_token.text()) {
-                    if let Some(ret_type) = &method.return_type {
-                        let ty = Ty::from_type_name(ret_type);
-                        if !ty.is_unknown() {
-                            return ty;
-                        }
-                        return Ty::PlatformObject(Name::new(ret_type));
-                    }
-                    return Ty::Undefined;
-                }
-            }
-        }
-    }
-
-    // Simple function call — could check global function return types
-    // For now, return Unknown
-    Ty::Unknown
-}
-
-/// Resolve type of a FIELD_EXPR node (base.field).
-///
-/// Used for intermediate chain resolution.
-fn resolve_field_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
-    // FIELD_EXPR has: base_expr, DOT, IDENT(field_name)
-    let base = node.children().next();
-    let field_name = node
-        .children_with_tokens()
-        .filter_map(|it| it.into_token())
-        .filter(|t| t.kind() == SyntaxKind::IDENT)
-        .last();
-
-    if let (Some(base_node), Some(_field_token)) = (base, field_name) {
-        // For now, resolve base type (field access on platform types returns Unknown)
-        resolve_syntax_expr_type(&base_node, infer_result)
-    } else {
-        Ty::Unknown
-    }
-}
+// Former helpers `resolve_syntax_expr_type` / `resolve_call_expr_type` /
+// `resolve_field_expr_type` / `resolve_ident_type` are removed by M3 Task 11.
+// They duplicated the `method_lookup` pipeline via direct
+// `PlatformData::instance()` access, and the entry-point now delegates to
+// `Semantics::type_of_expr` (Task 9 bridge) with a small bare-identifier
+// fallback covering literal type names.
 
 /// Extract identifier text from receiver expression node.
 fn extract_receiver_ident(node: &SyntaxNode) -> Option<String> {
