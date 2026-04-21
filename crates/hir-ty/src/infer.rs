@@ -478,13 +478,29 @@ impl<'db> InferenceContext<'db> {
             return Ty::Unknown;
         }
 
-        // 2. BSL implicit locals shadow module-level names.
+        // 2. BSL implicit locals shadow module-level and manager names.
+        //    A user writing `Документы = 42;` rebinds the identifier in the
+        //    local scope — the manager collective is only visible if no
+        //    local assignment exists.
         if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
             trace!("resolved {} via var_types = {:?}", name, ty);
             return ty.clone();
         }
 
-        // 3. Module-level methods / variables (Unknown today; Task 2.x
+        // 3. MDO plural globals (`Документы`, `Справочники`, …) lower into
+        //    `Ty::ManagerCollection(MdoType)`. This is the single path a
+        //    plural form takes when no local variable shadows it; consumers
+        //    (hover / completion) observe the collective type and can
+        //    eventually chain `.Name` into `Ty::ObjectManager` once HIR
+        //    lifts standalone 2-segment paths into `Expr::QualifiedPath`.
+        if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
+            if let Some(ty) = Ty::manager_collection(mdo_type) {
+                trace!("resolved {} as manager collection {:?}", name, mdo_type);
+                return ty;
+            }
+        }
+
+        // 4. Module-level methods / variables (Unknown today; Task 2.x
         //    will synthesise Ty::Function from MethodId).
         match resolved {
             Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => Ty::Unknown,
