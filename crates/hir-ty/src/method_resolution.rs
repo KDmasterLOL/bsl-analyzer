@@ -131,6 +131,64 @@ pub fn resolve_qualified_call(
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
+/// Resolve a 3-segment manager-chain call like `Документы.ПКО.СоздатьДокумент()`.
+///
+/// Mirrors [`resolve_qualified_call`] for the manager chain: delegates name
+/// resolution to [`Resolver::resolve_three_level_method`] (which owns the
+/// CFE visibility gate and Salsa invalidation) and then materialises the
+/// [`FunctionSignature`] from the target method's `MethodSymbol`.
+///
+/// # Parameters
+///
+/// - `db`: database; must implement [`ConfigsDatabase`] so the resolver
+///   can consult `db.configurations(...)` through Salsa (the caller's
+///   `infer` query transitively depends on the config set).
+/// - `mdo_type_plural`: head segment — the plural collective name
+///   (`Документы`, `Справочники`).
+/// - `mdo_name`: middle segment — the metadata object identifier as it
+///   appears in the configuration (`ПКО`).
+/// - `method_name`: tail segment — the exported manager-module method.
+/// - `resolver`: inference-layer resolver (must include
+///   [`Scope::WorkspaceScope`](hir_def::resolver::Scope)).
+///
+/// # Returns
+///
+/// - `Ok(MethodResolution)` when the method exists, even if non-exported;
+///   the caller inspects `is_export` to pick between `MethodNotExport` and
+///   success.
+/// - `Err(UnresolvedMethodKind::MethodNotFound)` for any resolver failure
+///   — missing MDO declaration, missing manager module, unknown method.
+///   The distinction between `NotVisibleInConfigs` and `NotFound` is
+///   preserved inside `hir-def` for a future config-specific hint.
+pub fn resolve_three_level_call(
+    db: &dyn ConfigsDatabase,
+    mdo_type_plural: &Name,
+    mdo_name: &Name,
+    method_name: &Name,
+    resolver: &Resolver,
+) -> Result<MethodResolution, UnresolvedMethodKind> {
+    let resolution = resolver
+        .resolve_three_level_method(db, mdo_type_plural, mdo_name, method_name)
+        .map_err(|e| match e {
+            QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
+                UnresolvedMethodKind::MethodNotFound
+            }
+        })?;
+
+    // Same invariant as `resolve_qualified_call`: Resolver just read the
+    // target `symbol_tree` via the same Salsa revision, so the MethodId
+    // must be present by id. `.expect` documents the contract loudly.
+    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in symbol_tree — \
+         symbol_tree / Resolver are out of sync",
+    );
+
+    let param_types: Vec<Ty> = method_symbol.params.iter().map(|_| Ty::Unknown).collect();
+    let signature = FunctionSignature::new(param_types, method_symbol.return_type.clone());
+    Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

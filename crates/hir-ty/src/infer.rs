@@ -326,8 +326,20 @@ impl<'db> InferenceContext<'db> {
             Expr::Path(name) => self.infer_path_name(name),
 
             Expr::QualifiedPath(_path) => {
-                // Phase 1: Return Unknown
-                // Phase 3: Resolve CommonModule.Method or Metadata.Manager paths
+                // Standalone qualified paths never reach this branch in
+                // practice: HIR lowering (`body::lower::expr`) only produces
+                // `Expr::QualifiedPath` when rewriting call syntax
+                // `a.b()` / `a.b.c()` — the callee ends up in
+                // `Expr::Call { callee: QualifiedPath, .. }` and the match
+                // in `infer_call` takes over before this arm fires. For
+                // non-call access (`Х = Документы.ПКО`) HIR emits
+                // `Expr::Field { base, field }` instead.
+                //
+                // Leaving the arm as `Unknown` documents the contract: if
+                // a future HIR pass ever lifts standalone 2-segment paths
+                // into `QualifiedPath`, Ty resolution lives in the call
+                // site already (`infer_two_segment_qualified_path`
+                // analogue must be added here, gated on arity == 2).
                 Ty::Unknown
             }
 
@@ -571,16 +583,31 @@ impl<'db> InferenceContext<'db> {
 
     /// Infer type from a function call.
     fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> Ty {
-        // Phase 3: Check if callee is a qualified path (Module.Method)
-        // If yes, try to resolve it
+        // Qualified callees dispatch by segment count:
+        //   2 → `CommonModule.Method()`  → resolve_qualified_call
+        //   3 → `Документы.ПКО.Метод()` → resolve_three_level_call
+        // Everything else falls through to the generic function-type path.
         let callee_expr = self.body.expr(callee);
         if let Expr::QualifiedPath(qualified_path) = callee_expr {
-            // Phase 3: Handle two-level qualified calls (Module.Method)
-            if qualified_path.segments().len() == 2 {
-                // Clone the names to avoid borrow checker issues
-                let module_name = qualified_path.first().clone();
-                let method_name = qualified_path.last().clone();
-                return self.infer_qualified_call(&module_name, &method_name, args, callee);
+            match qualified_path.segments().len() {
+                2 => {
+                    let module_name = qualified_path.first().clone();
+                    let method_name = qualified_path.last().clone();
+                    return self.infer_qualified_call(&module_name, &method_name, args, callee);
+                }
+                3 => {
+                    let mdo_type_plural = qualified_path.segments()[0].clone();
+                    let mdo_name = qualified_path.segments()[1].clone();
+                    let method_name = qualified_path.segments()[2].clone();
+                    return self.infer_three_level_call(
+                        &mdo_type_plural,
+                        &mdo_name,
+                        &method_name,
+                        args,
+                        callee,
+                    );
+                }
+                _ => {}
             }
         }
 
@@ -688,6 +715,72 @@ impl<'db> InferenceContext<'db> {
                     kind,
                 });
 
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// Infer type from a three-segment manager-chain call
+    /// (`Документы.ПКО.СоздатьДокумент()`).
+    ///
+    /// Delegates to [`method_resolution::resolve_three_level_call`], which
+    /// in turn goes through [`Resolver::resolve_three_level_method`] — so
+    /// `db.infer` transitively depends on `db.configurations()` via Salsa
+    /// and the CFE visibility gate is enforced automatically.
+    ///
+    /// Diagnostic shape mirrors `infer_qualified_call`: the receiver name
+    /// glued as `<mdo_type>.<mdo_name>` so callers see the full head when
+    /// the method is missing or non-exported.
+    fn infer_three_level_call(
+        &mut self,
+        mdo_type_plural: &Name,
+        mdo_name: &Name,
+        method_name: &Name,
+        args: &[ExprId],
+        call_expr: ExprId,
+    ) -> Ty {
+        for arg in args {
+            self.infer_expr(*arg);
+        }
+
+        let resolver = self.get_resolver();
+        let receiver_name =
+            Name::new(&format!("{}.{}", mdo_type_plural.as_str(), mdo_name.as_str()));
+
+        match method_resolution::resolve_three_level_call(
+            self.db,
+            mdo_type_plural,
+            mdo_name,
+            method_name,
+            &resolver,
+        ) {
+            Ok(resolution) => {
+                if !resolution.is_export {
+                    self.result.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                        expr: call_expr,
+                        receiver_name: receiver_name.clone(),
+                        method_name: method_name.clone(),
+                        kind: UnresolvedMethodKind::MethodNotExport,
+                    });
+                }
+
+                if args.len() != resolution.signature.params.len() {
+                    self.result.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                        call_expr,
+                        expected: resolution.signature.params.len(),
+                        found: args.len(),
+                    });
+                }
+
+                resolution.return_type
+            }
+            Err(kind) => {
+                self.result.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                    expr: call_expr,
+                    receiver_name,
+                    method_name: method_name.clone(),
+                    kind,
+                });
                 Ty::Unknown
             }
         }
