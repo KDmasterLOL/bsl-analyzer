@@ -28,8 +28,11 @@
 //! shadowed receiver.
 
 use hir_def::resolver::{QualifiedMethodError, Resolver};
+use hir_def::symbol_tree::MethodSymbol;
 use hir_def::ty::{FunctionSignature, Ty};
 use hir_def::{ConfigsDatabase, MethodId, Name};
+
+use crate::lower::TyLoweringContext;
 #[cfg(test)]
 use vfs::FileId;
 
@@ -126,8 +129,7 @@ pub fn resolve_qualified_call(
          symbol_tree / Resolver are out of sync",
     );
 
-    let param_types: Vec<Ty> = method_symbol.params.iter().map(|_| Ty::Unknown).collect();
-    let signature = FunctionSignature::new(param_types, method_symbol.return_type.clone());
+    let signature = materialise_signature(method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -184,9 +186,40 @@ pub fn resolve_three_level_call(
          symbol_tree / Resolver are out of sync",
     );
 
-    let param_types: Vec<Ty> = method_symbol.params.iter().map(|_| Ty::Unknown).collect();
-    let signature = FunctionSignature::new(param_types, method_symbol.return_type.clone());
+    let signature = materialise_signature(method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
+}
+
+/// Lower a [`MethodSymbol`] into a semantic [`FunctionSignature`].
+///
+/// Shared by `resolve_qualified_call` (2-segment) and
+/// `resolve_three_level_call` (3-segment): both resolve a method by name
+/// and then need to hand the caller typed parameters / return type. The
+/// cascade walks the JSDoc-derived `TypeRef` first (when present), then
+/// falls back to `Ty::Unknown` for parameters and to the
+/// `MethodSymbol::return_type` default for the return type — `Ty::Undefined`
+/// for procedures and `Ty::Unknown` for functions without a
+/// `// Возвращаемое значение:` block.
+///
+/// Lowering runs through [`TyLoweringContext`] so the JSDoc `TypeRef`
+/// lookups share a single path with `Expr::New` and XML metadata: adding
+/// a new prefix or a future `Ty::Union` is a one-place edit.
+fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignature {
+    let ctx = TyLoweringContext::new();
+
+    let param_types: Vec<Ty> = method_symbol
+        .params
+        .iter()
+        .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref(t)).unwrap_or(Ty::Unknown))
+        .collect();
+
+    let ret = method_symbol
+        .return_type_ref
+        .as_ref()
+        .map(|t| ctx.lower_type_ref(t))
+        .unwrap_or_else(|| method_symbol.return_type.clone());
+
+    FunctionSignature::new(param_types, ret)
 }
 
 #[cfg(test)]

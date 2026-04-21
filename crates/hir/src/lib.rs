@@ -86,7 +86,7 @@ pub use hir_def::{
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
-pub use hir_ty::{InferenceDiagnostic, InferenceResult, Ty, UnresolvedMethodKind};
+pub use hir_ty::{InferenceDiagnostic, InferenceResult, MetadataKind, Ty, UnresolvedMethodKind};
 
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
