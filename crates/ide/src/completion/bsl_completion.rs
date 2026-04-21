@@ -166,7 +166,7 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
             item.sort_text = Some(format!("2_{}", item.label));
             completions.push(item);
         }
-        // MDO types and objects (lowest priority in argument context)
+        // MDO collections and common modules (lowest priority in argument context)
         for mut item in complete_mdo_symbols(db, position.file_id, "") {
             item.sort_text = Some(format!("3_{}", item.label));
             completions.push(item);
@@ -409,11 +409,16 @@ fn mdo_type_plural_en(mdo_type: &bsl_metadata::MdoType) -> &'static str {
     }
 }
 
-/// Completes MDO (Metadata Objects) types and instances.
+/// Completes top-level MDO symbols (directly callable at statement start).
 ///
 /// Returns completion items for:
 /// - MDO plural forms (Справочники, Документы, РегистрыСведений, etc.)
-/// - MDO instances from configuration (Валюты, ПКО, ОчередьЗапросовERP, etc.)
+/// - Common modules (callable directly: `МойМодуль.Функция()`)
+///
+/// Concrete metadata objects (Валюты, Номенклатура, etc.) are intentionally
+/// excluded: in BSL they are only reachable through their collection
+/// (`Справочники.Номенклатура`), and completion after the DOT is handled by
+/// `mdo_completion.rs`.
 ///
 /// Symbols are filtered by prefix (case-insensitive).
 fn complete_mdo_symbols<DB: RootDatabase>(
@@ -453,35 +458,10 @@ fn complete_mdo_symbols<DB: RootDatabase>(
         }
     }
 
-    // 2. Add MDO instances from all configurations (main + extensions)
+    // 2. Add common modules from all configurations (main + extensions).
+    //    Common modules are the only metadata objects callable directly by
+    //    name; other MDO objects must be accessed through their collection.
     for (ext_name, config) in db.get_all_configurations(file_id) {
-        for mdo in config.metadata_objects() {
-            let name = &mdo.name;
-
-            // Filter by prefix
-            if !name.to_lowercase().starts_with(&prefix_lower) {
-                continue;
-            }
-
-            let detail = mdo.mdo_type.russian_name().to_string();
-
-            completions.push(CompletionItem {
-                label: name.clone(),
-                detail: Some(detail),
-                kind: CompletionItemKind::MdoObject,
-                insert_text: name.clone(),
-                documentation: Some(format!(
-                    "{}\n\nОбъект метаданных типа {}.",
-                    name,
-                    mdo.mdo_type.russian_name()
-                )),
-                sort_text: None,
-                filter_text: None,
-                source: ext_name.clone(),
-            });
-        }
-
-        // Common modules live in a separate collection from metadata_objects
         use bsl_metadata::traits::MdObject;
         for module in config.common_modules() {
             let name = module.name();
