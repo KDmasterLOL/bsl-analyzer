@@ -8,23 +8,33 @@
 //! // Возвращаемое значение:
 //! //   Булево - описание возвращаемого значения
 //! ```
+//!
+//! Output is a [`TypeRef`] — the *syntactic* layer. Downstream callers
+//! (e.g. `hir-ty::method_resolution::materialise_signature`) run it through
+//! [`hir_ty::TyLoweringContext::lower_type_ref`] to obtain the semantic
+//! [`crate::ty::Ty`]. Keeping the parser at the TypeRef level means JSDoc
+//! and XML attributes share a single lowering pipeline, and adding a new
+//! primitive or a qualified pattern (`Массив из Число`) only requires one
+//! edit in `TyLoweringContext`.
 
-use crate::ty::Ty;
+use crate::path::QualifiedName;
+use crate::type_ref::TypeRef;
 use crate::Name;
 
 /// Type hints extracted from method documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodTypeHints {
-    /// Parameter type hints: (parameter_name, type)
-    pub params: Vec<(Name, Ty)>,
+    /// Parameter type hints: (parameter_name, syntactic type).
+    pub params: Vec<(Name, TypeRef)>,
 
-    /// Return type hint
-    pub ret: Ty,
+    /// Return type hint. `TypeRef::Unknown` means "no hint" and is how the
+    /// default value indicates a procedure with no return section.
+    pub ret: TypeRef,
 }
 
 impl Default for MethodTypeHints {
     fn default() -> Self {
-        Self { params: Vec::new(), ret: Ty::Undefined }
+        Self { params: Vec::new(), ret: TypeRef::Unknown }
     }
 }
 
@@ -72,22 +82,25 @@ pub fn parse_method_doc_types(doc_comment: &str) -> Option<MethodTypeHints> {
 
         // Parse parameter line
         if in_params_section {
-            if let Some((name, ty)) = parse_param_line(line) {
-                hints.params.push((name, ty));
+            if let Some((name, type_ref)) = parse_param_line(line) {
+                hints.params.push((name, type_ref));
             }
         }
 
         // Parse return type line
         if in_return_section {
-            if let Some(ty) = parse_return_line(line) {
-                hints.ret = ty;
+            if let Some(type_ref) = parse_return_line(line) {
+                hints.ret = type_ref;
                 in_return_section = false; // Only first non-empty line
             }
         }
     }
 
-    // Return None if no hints were found
-    if hints.params.is_empty() && hints.ret == Ty::Undefined {
+    // Return None if no hints were found.
+    // `ret == TypeRef::Unknown` is the "no return section" default; paired
+    // with an empty `params` vector it means the doc comment carried no
+    // type information at all.
+    if hints.params.is_empty() && hints.ret == TypeRef::Unknown {
         tracing::trace!("no type hints found in doc comment");
         return None;
     }
@@ -122,7 +135,7 @@ fn is_return_header(line_lower: &str) -> bool {
 /// - " - " separator
 /// - Type name
 /// - Optional " - " separator and description
-fn parse_param_line(line: &str) -> Option<(Name, Ty)> {
+fn parse_param_line(line: &str) -> Option<(Name, TypeRef)> {
     // Skip empty lines
     if line.is_empty() {
         return None;
@@ -142,10 +155,7 @@ fn parse_param_line(line: &str) -> Option<(Name, Ty)> {
         return None;
     }
 
-    // Parse type
-    let ty = parse_type_name(type_name);
-
-    Some((Name::new(param_name), ty))
+    Some((Name::new(param_name), parse_type_name(type_name)))
 }
 
 /// Parse a return type line: "Булево - описание"
@@ -153,7 +163,7 @@ fn parse_param_line(line: &str) -> Option<(Name, Ty)> {
 /// Expected format:
 /// - Type name
 /// - Optional " - " separator and description
-fn parse_return_line(line: &str) -> Option<Ty> {
+fn parse_return_line(line: &str) -> Option<TypeRef> {
     // Skip empty lines
     if line.is_empty() {
         return None;
@@ -170,44 +180,60 @@ fn parse_return_line(line: &str) -> Option<Ty> {
     Some(parse_type_name(type_name))
 }
 
-/// Parse a type name string into a Ty.
+/// Parse a type-name token into a [`TypeRef`].
 ///
-/// Supports both Russian and English type names, case-insensitive.
-fn parse_type_name(name: &str) -> Ty {
-    let name_lower = name.to_lowercase();
+/// Resolution order:
+/// 1. [`TypeRef::from_bare_name`] (primitives + Array/Map collections).
+/// 2. `Произвольный` / `Any` / `Arbitrary` → [`TypeRef::Unknown`]
+///    (authors write this when they don't want to commit to a type).
+/// 3. Dotted form like `СправочникСсылка.Номенклатура` →
+///    [`TypeRef::Name`] with all segments preserved. Lowering
+///    (`TyLoweringContext::lower_qualified`) then decides whether it
+///    becomes `Ty::MetadataRef`, `Ty::Unknown`, or something else.
+/// 4. Any other single token → [`TypeRef::Name`] of one segment. Lowering
+///    takes this through the manager/platform-object cascade.
+fn parse_type_name(name: &str) -> TypeRef {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return TypeRef::Unknown;
+    }
 
-    match name_lower.as_str() {
-        // Primitive types
-        "число" | "number" => Ty::Number,
-        "строка" | "string" => Ty::String,
-        "булево" | "boolean" => Ty::Boolean,
-        "дата" | "date" => Ty::Date,
-        "неопределено" | "undefined" => Ty::Undefined,
+    // 1. Primitive / collection builtins.
+    if let Some(tref) = TypeRef::from_bare_name(trimmed) {
+        return tref;
+    }
 
-        // Collection types
-        "массив" | "array" => Ty::Array,
-        "структура" | "structure" => Ty::Structure,
-        "соответствие" | "map" => Ty::Map,
+    // 2. Explicit "any" fallbacks.
+    match trimmed.to_lowercase().as_str() {
+        "произвольный" | "any" | "arbitrary" => return TypeRef::Unknown,
+        _ => {}
+    }
 
-        // Platform types
-        "тип" | "type" => Ty::Type,
-        "таблицазначений" | "valuetable" => Ty::ValueTable,
-        "списокзначений" | "valuelist" => Ty::ValueList,
-
-        // Special types
-        "произвольный" | "any" | "arbitrary" => Ty::Unknown,
-
-        // Unknown type name
-        _ => {
-            tracing::trace!("unknown type name in doc comment: {}", name);
-            Ty::Unknown
+    // 3. Qualified names (`СправочникСсылка.Номенклатура`, `ОпределяемыйТип.Х`).
+    if trimmed.contains('.') {
+        let segments: Vec<Name> = trimmed
+            .split('.')
+            .map(|seg| Name::new(seg.trim()))
+            .filter(|n| !n.as_str().is_empty())
+            .collect();
+        if segments.len() >= 2 {
+            return TypeRef::Name(QualifiedName::from_segments(segments));
         }
     }
+
+    // 4. Any other token — keep as a single-segment Name so the lowering
+    //    cascade can decide (manager collective, platform object, …).
+    TypeRef::Name(QualifiedName::from_segments([Name::new(trimmed)]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::type_ref::BuiltinTypeRef;
+
+    fn builtin(b: BuiltinTypeRef) -> TypeRef {
+        TypeRef::Builtin(b)
+    }
 
     #[test]
     fn test_parse_russian_doc() {
@@ -224,10 +250,10 @@ mod tests {
         let hints = parse_method_doc_types(doc).unwrap();
         assert_eq!(hints.params.len(), 2);
         assert_eq!(hints.params[0].0.as_str(), "Левый");
-        assert_eq!(hints.params[0].1, Ty::Number);
+        assert_eq!(hints.params[0].1, builtin(BuiltinTypeRef::Number));
         assert_eq!(hints.params[1].0.as_str(), "Правый");
-        assert_eq!(hints.params[1].1, Ty::Number);
-        assert_eq!(hints.ret, Ty::Number);
+        assert_eq!(hints.params[1].1, builtin(BuiltinTypeRef::Number));
+        assert_eq!(hints.ret, builtin(BuiltinTypeRef::Number));
     }
 
     #[test]
@@ -244,8 +270,8 @@ mod tests {
         let hints = parse_method_doc_types(doc).unwrap();
         assert_eq!(hints.params.len(), 1);
         assert_eq!(hints.params[0].0.as_str(), "Text");
-        assert_eq!(hints.params[0].1, Ty::String);
-        assert_eq!(hints.ret, Ty::Boolean);
+        assert_eq!(hints.params[0].1, builtin(BuiltinTypeRef::String));
+        assert_eq!(hints.ret, builtin(BuiltinTypeRef::Boolean));
     }
 
     #[test]
@@ -262,11 +288,11 @@ mod tests {
 
         let hints = parse_method_doc_types(doc).unwrap();
         assert_eq!(hints.params.len(), 4);
-        assert_eq!(hints.params[0].1, Ty::String);
-        assert_eq!(hints.params[1].1, Ty::Number);
-        assert_eq!(hints.params[2].1, Ty::Boolean);
-        assert_eq!(hints.params[3].1, Ty::Date);
-        assert_eq!(hints.ret, Ty::Array);
+        assert_eq!(hints.params[0].1, builtin(BuiltinTypeRef::String));
+        assert_eq!(hints.params[1].1, builtin(BuiltinTypeRef::Number));
+        assert_eq!(hints.params[2].1, builtin(BuiltinTypeRef::Boolean));
+        assert_eq!(hints.params[3].1, builtin(BuiltinTypeRef::Date));
+        assert_eq!(hints.ret, TypeRef::Array(None));
     }
 
     #[test]
@@ -280,7 +306,7 @@ mod tests {
 
         let hints = parse_method_doc_types(doc).unwrap();
         assert_eq!(hints.params.len(), 0);
-        assert_eq!(hints.ret, Ty::Date);
+        assert_eq!(hints.ret, builtin(BuiltinTypeRef::Date));
     }
 
     #[test]
@@ -294,7 +320,7 @@ mod tests {
 
         let hints = parse_method_doc_types(doc).unwrap();
         assert_eq!(hints.params.len(), 1);
-        assert_eq!(hints.ret, Ty::Undefined);
+        assert_eq!(hints.ret, TypeRef::Unknown);
     }
 
     #[test]
@@ -309,7 +335,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_unknown_type() {
+    fn test_parse_qualified_metadata_type_keeps_segments() {
+        // After the TypeRef migration qualified types no longer collapse
+        // into `Ty::Unknown` — they survive as `TypeRef::Name([...])` so
+        // that `TyLoweringContext::lower_qualified` can decide between
+        // `Ty::MetadataRef`, `Ty::Unknown`, or a future variant.
         let doc = r#"
 // Параметры:
 //   Объект - СправочникСсылка.Номенклатура - объект
@@ -319,8 +349,16 @@ mod tests {
 
         let hints = parse_method_doc_types(doc).unwrap();
         assert_eq!(hints.params.len(), 1);
-        assert_eq!(hints.params[0].1, Ty::Unknown); // Unknown complex type
-        assert_eq!(hints.ret, Ty::Unknown); // Произвольный = Unknown
+        match &hints.params[0].1 {
+            TypeRef::Name(qname) => {
+                assert_eq!(qname.len(), 2);
+                assert_eq!(qname.first().as_str(), "СправочникСсылка");
+                assert_eq!(qname.last().as_str(), "Номенклатура");
+            }
+            other => panic!("expected TypeRef::Name, got {other:?}"),
+        }
+        // "Произвольный" remains the opt-out marker — still `Unknown`.
+        assert_eq!(hints.ret, TypeRef::Unknown);
     }
 
     #[test]
@@ -335,8 +373,8 @@ mod tests {
 
         let hints = parse_method_doc_types(doc).unwrap();
         assert_eq!(hints.params.len(), 2);
-        assert_eq!(hints.params[0].1, Ty::String);
-        assert_eq!(hints.params[1].1, Ty::Number);
-        assert_eq!(hints.ret, Ty::Boolean);
+        assert_eq!(hints.params[0].1, builtin(BuiltinTypeRef::String));
+        assert_eq!(hints.params[1].1, builtin(BuiltinTypeRef::Number));
+        assert_eq!(hints.ret, builtin(BuiltinTypeRef::Boolean));
     }
 }
