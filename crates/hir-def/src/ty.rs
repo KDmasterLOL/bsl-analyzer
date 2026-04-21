@@ -5,6 +5,7 @@
 
 pub mod doc_types;
 
+use bsl_metadata::MdoType;
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;
 
@@ -60,6 +61,27 @@ pub enum Ty {
     /// Represents a reference to a metadata object like Catalog, Document, Register.
     /// Only populated after type inference with metadata integration (Phase 5).
     MetadataRef { kind: MetadataKind, name: crate::Name },
+
+    /// Collective manager global (`Документы`, `Справочники`, …).
+    ///
+    /// `Документы` resolves to `Ty::ManagerCollection(MdoType::Document)`. The
+    /// variant is an intermediate step: chaining a single-segment member
+    /// (`Документы.ПКО`) lowers to [`Ty::ObjectManager`], and a further method
+    /// call (`Документы.ПКО.СоздатьДокумент()`) lowers to [`Ty::MetadataRef`].
+    ///
+    /// `MdoType::from_plural` in `bsl-metadata` is the canonical mapping from
+    /// the surface name to this variant; do not duplicate that table.
+    ManagerCollection(MdoType),
+
+    /// Concrete manager bound to a metadata object name (`Документы.ПКО`).
+    ///
+    /// Produced when a [`Ty::ManagerCollection`] is indexed by a member name
+    /// that resolves against the workspace configuration. `name` is the
+    /// metadata object's identifier as it appears in the configuration (e.g.
+    /// `Name::new("ПКО")`); the head [`MdoType`] disambiguates the manager
+    /// family so downstream method lookup can find the right manager-module
+    /// table.
+    ObjectManager { kind: MdoType, name: crate::Name },
 
     /// Function or procedure type.
     ///
@@ -170,6 +192,16 @@ impl Ty {
         matches!(self, Ty::Function { .. })
     }
 
+    /// Construct a [`Ty::ManagerCollection`] for a metadata kind.
+    ///
+    /// Returns `None` for `MdoType` values that have no manager form
+    /// (`Cube`, `DimensionTable`, `CommonModule`) — lowering should never
+    /// produce a collection for those, and the factory guards the invariant
+    /// so downstream matches don't have to.
+    pub fn manager_collection(kind: MdoType) -> Option<Self> {
+        kind.manager_type_prefix().map(|_| Ty::ManagerCollection(kind))
+    }
+
     /// Get a human-readable display name for this type.
     pub fn display_name(&self) -> &str {
         match self {
@@ -187,6 +219,17 @@ impl Ty {
             Ty::ValueTable => "ValueTable",
             Ty::ValueList => "ValueList",
             Ty::MetadataRef { .. } => "MetadataRef",
+            Ty::ManagerCollection(kind) => {
+                // `manager_type_prefix` is the canonical display
+                // ("DocumentManager", …). The [`Ty::manager_collection`]
+                // factory rejects `MdoType`s without a manager form, so the
+                // `None` branch is only reachable if a caller bypassed the
+                // factory — surface a generic label rather than panic to
+                // keep the type-system layer robust in the face of a
+                // lowering bug.
+                kind.manager_type_prefix().unwrap_or("ManagerCollection")
+            }
+            Ty::ObjectManager { .. } => "ObjectManager",
             Ty::Function { .. } => "Function",
             Ty::PlatformObject(name) => name.as_str(),
         }
@@ -200,6 +243,13 @@ impl Ty {
     pub fn platform_type_name(&self) -> Option<&str> {
         match self {
             Ty::Unknown | Ty::Undefined | Ty::Null | Ty::Function { .. } => None,
+            // Manager globals (`Документы`, `Документы.ПКО`) are not platform
+            // objects — method lookup goes through the MDO-specific tables in
+            // `bsl-platform::get_manager_methods`, not through
+            // `get_type_methods`. Returning `None` keeps the platform fallback
+            // from surfacing spurious methods before M3 wires the dedicated
+            // manager lookup.
+            Ty::ManagerCollection(_) | Ty::ObjectManager { .. } => None,
             Ty::PlatformObject(name) => Some(name.as_str()),
             _ => Some(self.display_name()),
         }
@@ -307,5 +357,66 @@ mod tests {
     #[test]
     fn test_default() {
         assert_eq!(Ty::default(), Ty::Unknown);
+    }
+
+    #[test]
+    fn ty_display_manager_collection() {
+        // Manager-collection display name matches the canonical manager
+        // prefix in `bsl-metadata::MdoType::manager_type_prefix`, so hover
+        // and completion pick up a name consumers already recognise.
+        let doc = Ty::manager_collection(MdoType::Document).expect("Document has a manager");
+        assert_eq!(doc.display_name(), "DocumentManager");
+        let cat = Ty::manager_collection(MdoType::Catalog).expect("Catalog has a manager");
+        assert_eq!(cat.display_name(), "CatalogManager");
+        let enm = Ty::manager_collection(MdoType::Enum).expect("Enum has a manager");
+        assert_eq!(enm.display_name(), "EnumManager");
+    }
+
+    #[test]
+    fn ty_manager_collection_factory_rejects_managerless_kinds() {
+        // Invariant: MdoTypes without a manager form must never become a
+        // `ManagerCollection`. The factory is the single construction site
+        // through which lowering goes; direct enum construction is a smell
+        // and should be rare.
+        assert!(Ty::manager_collection(MdoType::CommonModule).is_none());
+        assert!(Ty::manager_collection(MdoType::Cube).is_none());
+        assert!(Ty::manager_collection(MdoType::DimensionTable).is_none());
+    }
+
+    #[test]
+    fn ty_display_object_manager() {
+        let ty = Ty::ObjectManager { kind: MdoType::Document, name: crate::Name::new("ПКО") };
+        assert_eq!(ty.display_name(), "ObjectManager");
+    }
+
+    #[test]
+    fn ty_manager_and_object_not_platform_objects() {
+        // Manager globals deliberately bypass the platform-type-name fallback
+        // so downstream IDE features route them through MDO-specific tables
+        // once those land in M3.
+        assert_eq!(Ty::ManagerCollection(MdoType::Document).platform_type_name(), None);
+        let om =
+            Ty::ObjectManager { kind: MdoType::Catalog, name: crate::Name::new("Товары") };
+        assert_eq!(om.platform_type_name(), None);
+    }
+
+    #[test]
+    fn ty_equality_object_manager_case_insensitive() {
+        // `Name` equality is case-sensitive by design; two `ObjectManager`s
+        // with differently-cased names must be distinct so the Salsa cache
+        // and `expr_types` map don't fold `Документы.ПКО` with
+        // `Документы.пко`. Case-insensitive lookup happens at resolver time,
+        // not at Ty-level equality.
+        let a = Ty::ObjectManager { kind: MdoType::Document, name: crate::Name::new("ПКО") };
+        let b = Ty::ObjectManager { kind: MdoType::Document, name: crate::Name::new("пко") };
+        assert_ne!(a, b);
+
+        // Same name, different kind — also distinct.
+        let c = Ty::ObjectManager { kind: MdoType::Catalog, name: crate::Name::new("ПКО") };
+        assert_ne!(a, c);
+
+        // Identical → equal.
+        let d = Ty::ObjectManager { kind: MdoType::Document, name: crate::Name::new("ПКО") };
+        assert_eq!(a, d);
     }
 }
