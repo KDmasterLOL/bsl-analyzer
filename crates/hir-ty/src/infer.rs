@@ -174,9 +174,13 @@ impl<'db> InferenceContext<'db> {
     }
 
     /// Get resolver for the current module.
+    ///
+    /// Includes `Scope::Builtins` so that platform globals (`Сообщить`,
+    /// `ТекущаяДата`, ...) are recognised by `Resolver::resolve_name`; this
+    /// lets inference share the same lookup cascade as hover / goto-def.
     fn get_resolver(&self) -> Resolver {
         let module_id = hir_def::ModuleId { file_id: self.file_id };
-        Resolver::with_workspace_scope(module_id)
+        Resolver::with_builtins_and_workspace(module_id)
     }
 
     /// Infer types for all expressions in the body.
@@ -326,21 +330,7 @@ impl<'db> InferenceContext<'db> {
 
             Expr::Literal(lit) => self.infer_literal(lit),
 
-            Expr::Path(name) => {
-                // Try builtin functions first
-                if let Some(sig) = builtin::builtin_functions().get(name.as_str()) {
-                    trace!("resolved {} to builtin function", name);
-                    return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
-                }
-
-                // Look up variable type from tracked assignments
-                if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
-                    trace!("resolved {} to variable type {:?}", name, ty);
-                    return ty.clone();
-                }
-
-                Ty::Unknown
-            }
+            Expr::Path(name) => self.infer_path_name(name),
 
             Expr::QualifiedPath(_path) => {
                 // Phase 1: Return Unknown
@@ -441,6 +431,67 @@ impl<'db> InferenceContext<'db> {
         // Store the inferred type
         self.result.expr_types.insert(expr_id, ty.clone());
         ty
+    }
+
+    /// Resolve a bare `Expr::Path` identifier to a [`Ty`].
+    ///
+    /// Lookup order mirrors BSL visibility:
+    ///
+    /// 1. **Platform builtins** — acknowledged by either
+    ///    [`Resolver::resolve_name`] (via the `Scope::Builtins` port into
+    ///    `bsl_platform`) **or** by the hand-curated `hir-ty::builtin`
+    ///    signature table. Either source is enough: the platform index
+    ///    covers more names, but the `hir-ty::builtin` table carries the
+    ///    only typed signatures today and includes constructor-like
+    ///    globals (`Новый`, `ПустоеЗначение`, `ОписаниеТипов`, `Выполнить`,
+    ///    …) that are absent from the platform global-function index.
+    ///    Builtins are never shadowed by user code.
+    /// 2. **Implicit locals** — BSL has no explicit `Var` declarations;
+    ///    a name springs into existence at its first assignment. The
+    ///    inference context captures those types in [`Self::var_types`]
+    ///    as [`Stmt::Assign`] is walked in [`Self::infer_stmts`].
+    ///    Implicit locals *do* shadow module-level names, so `var_types`
+    ///    is checked before the module/variable Resolver branches.
+    /// 3. **Module-level methods / variables** — returned as `Unknown`
+    ///    today (no signature carrier yet); Task 2.x will synthesise
+    ///    `Ty::Function` from `MethodId`.
+    fn infer_path_name(&mut self, name: &hir_def::Name) -> Ty {
+        use hir_def::resolver::Resolution;
+
+        let resolver = self.get_resolver();
+        let resolved = resolver.resolve_name(self.db, name);
+
+        // 1. Builtins — union of Resolver's platform-global view and the
+        //    narrower hir-ty signature table. Either hit makes the name a
+        //    builtin; only the hir-ty table supplies a typed signature.
+        let resolver_says_builtin = matches!(resolved, Some(Resolution::Builtin(_)));
+        let hir_sig = builtin::builtin_functions().get(name.as_str());
+        if resolver_says_builtin || hir_sig.is_some() {
+            if let Some(sig) = hir_sig {
+                trace!("resolved {} as builtin via hir-ty signature table", name);
+                return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
+            }
+            // Resolver classifies the name as a platform global but the
+            // hir-ty signature table has no typed entry for it. Leave
+            // `Ty::Unknown` until Task 2.x broadens signature coverage.
+            return Ty::Unknown;
+        }
+
+        // 2. BSL implicit locals shadow module-level names.
+        if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
+            trace!("resolved {} via var_types = {:?}", name, ty);
+            return ty.clone();
+        }
+
+        // 3. Module-level methods / variables (Unknown today; Task 2.x
+        //    will synthesise Ty::Function from MethodId).
+        match resolved {
+            Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => Ty::Unknown,
+            // `Local` is unreachable here because `get_resolver` does not
+            // push an ExprScope; any local-looking name already returned
+            // from the `var_types` branch above.
+            Some(Resolution::Builtin(_)) | Some(Resolution::Local(_)) | None => Ty::Unknown,
+        }
     }
 
     /// Infer type from a literal.
