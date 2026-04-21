@@ -124,10 +124,12 @@ pub enum Ty {
 /// Classifies the flavour of MDO (or MDO fragment) that a [`Ty::MetadataRef`]
 /// carries. The `name` of the enclosing `MetadataRef` is the MDO identifier as
 /// it appears in the configuration (`"ПКО"`, `"Номенклатура"`). For
-/// [`Self::TabularSection`] / [`Self::TabularSectionRow`] the name conventionally
-/// encodes `"Parent.Section"` (e.g. `"ПКО.Товары"`) — parent MDO first, tabular
-/// section name second — so a single `MetadataRef` locates the section without
-/// an extra field.
+/// [`Self::TabularSection`] / [`Self::TabularSectionRow`] the name encodes
+/// `"Parent.Section"` (e.g. `"ПКО.Товары"`) — parent MDO first, tabular
+/// section name second — and the variant **also** carries the parent
+/// [`MdoType`], so callers never have to probe several candidates to
+/// disambiguate `Catalog "X"` from `Document "X"` with an identically
+/// named section.
 ///
 /// Adding a variant? Also extend:
 /// - `metadata_kind_from_prefix` in `hir-ty/src/lower/mod.rs` (prefix → kind),
@@ -172,17 +174,26 @@ pub enum MetadataKind {
     CalculationRegisterRef,
     /// Tabular section of a metadata object (`ТабличнаяЧасть`).
     ///
-    /// Name carries `"Parent.Section"` (e.g. `"ПКО.Товары"`) — the parent MDO
-    /// identifier and the section name, dot-joined. This lets field lookup
-    /// (M3 Task 8) resolve `Документ.Товары` without threading a second
-    /// parent identifier.
-    TabularSection,
+    /// `parent` identifies the MDO flavour that owns this section (Catalog,
+    /// Document, BusinessProcess, Task, ChartOf*), and the name of the
+    /// enclosing [`Ty::MetadataRef`] carries `"Parent.Section"` (e.g.
+    /// `"ПКО.Товары"`). Together they pin one specific MDO: `Catalog "X"`
+    /// and `Document "X"` with a shared tabular-section name resolve
+    /// unambiguously because their [`Self::TabularSection`] receivers
+    /// differ in `parent`.
+    TabularSection {
+        /// MDO flavour that owns the section (matches the parent's
+        /// `mdo_type`).
+        parent: MdoType,
+    },
     /// A single row of a tabular section (`СтрокаТабличнойЧасти`).
     ///
-    /// Name follows the same `"Parent.Section"` convention as
-    /// [`Self::TabularSection`] — the enclosing tabular section is implied by
-    /// the name path.
-    TabularSectionRow,
+    /// Uses the same `parent` + `"Parent.Section"` name convention as
+    /// [`Self::TabularSection`].
+    TabularSectionRow {
+        /// MDO flavour that owns the enclosing section.
+        parent: MdoType,
+    },
 }
 
 impl Ty {

@@ -23,10 +23,12 @@
 //!   `Ty::MetadataRef { TabularSection, "Parent.Section" }` so chained
 //!   access (`Д.Товары.Количество`) can continue through
 //!   `TabularSectionRow` fields.
-//! - **`Ty::MetadataRef { kind: TabularSectionRow, "Parent.Section" }`** —
+//! - **`Ty::MetadataRef { kind: TabularSectionRow { parent }, "Parent.Section" }`** —
 //!   attribute lookup on a single row; uses the section's own attribute
-//!   list.
-//! - **`Ty::MetadataRef { kind: TabularSection, "Parent.Section" }`** —
+//!   list. `parent` pins the MDO flavour that owns the section, so
+//!   `Catalog "X".Товары` and `Document "X".Товары` resolve independently
+//!   without probing a candidate list.
+//! - **`Ty::MetadataRef { kind: TabularSection { parent }, "Parent.Section" }`** —
 //!   `None`. The section value is collection-shaped (iteration, `Добавить`,
 //!   `НайтиСтроки`); field access on the collection itself resolves via
 //!   `MethodLookup` once we ship a `PlatformObject("TabularSection")`
@@ -100,8 +102,9 @@ pub fn lookup_field(
 /// Splits into two flavours:
 /// - kinds backed by a plain MDO (Catalog/Document/Enum/Task/BusinessProcess)
 ///   look up the MDO and walk attributes + tabular sections;
-/// - `TabularSectionRow` decodes the `"Parent.Section"` name and walks the
-///   section's own attribute list;
+/// - `TabularSectionRow { parent }` decodes the `"Parent.Section"` name and
+///   walks the section's own attribute list using `parent` to disambiguate
+///   identically named MDOs across categories;
 /// - registers and `TabularSection` fall through to `None` per the
 ///   deferred-gap documentation on the module.
 fn lookup_metadata_ref(
@@ -112,12 +115,12 @@ fn lookup_metadata_ref(
 ) -> Option<FieldInfo> {
     if let Some(mdo_type) = mdo_type_for_kind(kind) {
         let mdo = find_mdo(configs, mdo_type, mdo_name.as_str())?;
-        return lookup_on_mdo(mdo, mdo_name, field_name);
+        return lookup_on_mdo(mdo, mdo_type, mdo_name, field_name);
     }
 
-    if kind == MetadataKind::TabularSectionRow {
-        let (parent, section) = split_parent_section(mdo_name.as_str())?;
-        return lookup_on_tabular_row(configs, parent, section, field_name);
+    if let MetadataKind::TabularSectionRow { parent } = kind {
+        let (parent_name, section) = split_parent_section(mdo_name.as_str())?;
+        return lookup_on_tabular_row(configs, parent, parent_name, section, field_name);
     }
 
     None
@@ -130,7 +133,17 @@ fn lookup_metadata_ref(
 /// `add_*_standard_attributes`, so this lookup handles custom and
 /// standard attributes uniformly without re-deriving
 /// [`bsl_metadata::StandardAttributeKind`] here.
-fn lookup_on_mdo(mdo: &MetadataObject, mdo_name: &Name, field_name: &Name) -> Option<FieldInfo> {
+///
+/// `parent_mdo_type` is threaded through because a tabular-section hit
+/// promotes the receiver to `Ty::MetadataRef { TabularSection { parent }, … }`;
+/// threading `parent` here is what disambiguates `Catalog "X".Товары`
+/// from `Document "X".Товары` at the row-lookup step.
+fn lookup_on_mdo(
+    mdo: &MetadataObject,
+    parent_mdo_type: MdoType,
+    mdo_name: &Name,
+    field_name: &Name,
+) -> Option<FieldInfo> {
     for attr in &mdo.attributes {
         if matches_bilingual(&attr.name, attr.name_en.as_deref(), field_name) {
             return Some(FieldInfo { ty: attribute_type_to_ty(&attr.attr_type) });
@@ -141,7 +154,10 @@ fn lookup_on_mdo(mdo: &MetadataObject, mdo_name: &Name, field_name: &Name) -> Op
         if matches_bilingual(ts.name(), ts.name_en(), field_name) {
             let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
             return Some(FieldInfo {
-                ty: Ty::MetadataRef { kind: MetadataKind::TabularSection, name: qualified },
+                ty: Ty::MetadataRef {
+                    kind: MetadataKind::TabularSection { parent: parent_mdo_type },
+                    name: qualified,
+                },
             });
         }
     }
@@ -150,39 +166,27 @@ fn lookup_on_mdo(mdo: &MetadataObject, mdo_name: &Name, field_name: &Name) -> Op
 }
 
 /// Walk the attributes of a tabular section identified by
-/// `"Parent.Section"`.
+/// `parent` + `"Parent.Section"`.
 ///
-/// The parent MDO type is not encoded in the `Ty::MetadataRef` name, so we
-/// probe each candidate that can legitimately own a tabular section
-/// (Catalog, Document, BusinessProcess, Task, ChartOf*). Iteration stops
-/// on the first match; configurations rarely host the same MDO name across
-/// categories, and per-name collisions still produce a well-defined answer
-/// (the first candidate in list order wins — deterministic, not
-/// configuration-order-dependent).
+/// The parent [`MdoType`] is supplied by the `TabularSectionRow` variant
+/// payload, so no candidate-probing is needed: the lookup targets exactly
+/// one MDO category. Under a config containing `Catalog "X"` **and**
+/// `Document "X"` each with a tabular section `"Товары"`, the two
+/// `TabularSectionRow` types are structurally distinct (they differ in
+/// `parent`) and resolve to their own attribute lists.
 fn lookup_on_tabular_row(
     configs: &[VisibleConfig],
+    parent: MdoType,
     parent_name: &str,
     section_name: &str,
     field_name: &Name,
 ) -> Option<FieldInfo> {
-    const CANDIDATES: &[MdoType] = &[
-        MdoType::Catalog,
-        MdoType::Document,
-        MdoType::BusinessProcess,
-        MdoType::Task,
-        MdoType::ChartOfCharacteristicTypes,
-        MdoType::ChartOfAccounts,
-        MdoType::ChartOfCalculationTypes,
-    ];
-    for &candidate in CANDIDATES {
-        let Some(mdo) = find_mdo(configs, candidate, parent_name) else { continue };
-        let Some(ts) = mdo.find_tabular_section(section_name) else { continue };
-        for attr in ts.attributes() {
-            if matches_bilingual(attr.name(), attr.name_en(), field_name) {
-                return Some(FieldInfo { ty: attribute_type_to_ty(attr.attr_type()) });
-            }
+    let mdo = find_mdo(configs, parent, parent_name)?;
+    let ts = mdo.find_tabular_section(section_name)?;
+    for attr in ts.attributes() {
+        if matches_bilingual(attr.name(), attr.name_en(), field_name) {
+            return Some(FieldInfo { ty: attribute_type_to_ty(attr.attr_type()) });
         }
-        return None;
     }
     None
 }
@@ -207,8 +211,8 @@ fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef
-        | MetadataKind::TabularSection
-        | MetadataKind::TabularSectionRow => None,
+        | MetadataKind::TabularSection { .. }
+        | MetadataKind::TabularSectionRow { .. } => None,
     }
 }
 
@@ -340,9 +344,11 @@ mod tests {
     #[test]
     fn field_lookup_tabular_section() {
         // `Д.Товары` (on `ДокументСсылка.ПКО`) must become
-        // `Ty::MetadataRef { TabularSection, "ПКО.Товары" }` so a chained
-        // `Д.Товары[0].Количество` can continue resolving through
-        // `TabularSectionRow` in the row-attribute test below.
+        // `Ty::MetadataRef { TabularSection { parent: Document }, "ПКО.Товары" }`
+        // so a chained `Д.Товары[0].Количество` can continue resolving
+        // through `TabularSectionRow` in the row-attribute test below.
+        // The `parent` MdoType carried by the variant is what keeps the
+        // row-lookup step free of candidate-probing.
         let mut ts = TabularSection::new(Uuid::new_v4(), "Товары");
         ts.set_attributes(vec![TabularSectionAttribute::new(
             Uuid::new_v4(),
@@ -363,18 +369,20 @@ mod tests {
         assert_eq!(
             info.ty,
             Ty::MetadataRef {
-                kind: MetadataKind::TabularSection, name: Name::new("ПКО.Товары")
+                kind: MetadataKind::TabularSection { parent: MdoType::Document },
+                name: Name::new("ПКО.Товары"),
             }
         );
     }
 
     #[test]
     fn field_lookup_tabular_row_attribute() {
-        // Row attribute: starting from `Ty::MetadataRef { TabularSectionRow,
-        // "ПКО.Товары" }`, the adapter decodes the name, scans candidate
-        // parent MDO types (Document here), finds the section and lowers
-        // its attribute. Closes the chain `Д.Товары[0].Количество → Number`
-        // that M4 narrowing will build on.
+        // Row attribute: starting from `Ty::MetadataRef {
+        // TabularSectionRow { parent: Document }, "ПКО.Товары" }`, the
+        // adapter decodes the name and targets exactly one MDO (Document
+        // ПКО) using the `parent` payload — no candidate-probing. Closes
+        // the chain `Д.Товары[0].Количество → Number` that M4 narrowing
+        // will build on.
         let mut ts = TabularSection::new(Uuid::new_v4(), "Товары");
         ts.set_attributes(vec![TabularSectionAttribute::new(
             Uuid::new_v4(),
@@ -389,12 +397,61 @@ mod tests {
         let configs = wrap(config);
 
         let receiver = Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow,
+            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
             name: Name::new("ПКО.Товары"),
         };
         let info = lookup_field(&configs, &receiver, &Name::new("Количество"))
             .expect("row attribute Количество resolves to Number");
         assert_eq!(info.ty, Ty::Number);
+    }
+
+    #[test]
+    fn field_lookup_same_name_catalog_and_document_disambiguated_by_parent() {
+        // Regression guard for the Codex MAJOR finding: a configuration
+        // with `Catalog "X"` and `Document "X"` both carrying an
+        // identically-named tabular section `"Товары"` (with different
+        // attribute types) must resolve to the right attribute under each
+        // receiver. Before the MdoType-in-kind refactor the previous
+        // candidate-probe silently picked `Catalog` first and returned
+        // wrong types for `Document "X"` rows.
+        let make_ts = |attr_type: AttributeType| {
+            let mut ts = TabularSection::new(Uuid::new_v4(), "Товары");
+            ts.set_attributes(vec![TabularSectionAttribute::new(
+                Uuid::new_v4(),
+                "Количество",
+                attr_type,
+            )]);
+            ts
+        };
+
+        let mut cat = catalog("X", vec![]);
+        cat.add_tabular_section(make_ts(AttributeType::String { length: Some(10) }));
+        let mut doc = document("X", vec![]);
+        doc.add_tabular_section(make_ts(AttributeType::Number { precision: 15, scale: 3 }));
+
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(cat);
+        config.add_metadata_object(doc);
+        let configs = wrap(config);
+
+        let cat_row = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            name: Name::new("X.Товары"),
+        };
+        let doc_row = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
+            name: Name::new("X.Товары"),
+        };
+        assert_eq!(
+            lookup_field(&configs, &cat_row, &Name::new("Количество")).unwrap().ty,
+            Ty::String,
+            "Catalog row must resolve via its own tabular section",
+        );
+        assert_eq!(
+            lookup_field(&configs, &doc_row, &Name::new("Количество")).unwrap().ty,
+            Ty::Number,
+            "Document row must resolve via its own tabular section — not Catalog's",
+        );
     }
 
     #[test]
