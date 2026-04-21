@@ -3,8 +3,10 @@
 //! This crate provides a high-level API for semantic analysis.
 
 mod definition;
+pub mod type_facade;
 
 pub use definition::Definition;
+pub use type_facade::Type;
 
 // Re-export core types
 pub use hir_def::{
