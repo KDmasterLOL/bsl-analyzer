@@ -42,6 +42,7 @@ pub mod resolver;
 pub mod scope;
 pub mod symbol_tree;
 pub mod ty;
+pub mod type_ref;
 pub mod workspace;
 pub mod workspace_index;
 
@@ -70,6 +71,7 @@ pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::{FunctionSignature, Ty};
+pub use type_ref::{BuiltinTypeRef, TypeRef};
 pub use workspace::{CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 
