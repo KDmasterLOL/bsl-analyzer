@@ -10,6 +10,7 @@ repository = "https://github.com/1c-syntax/bsl-analyzer"
 cfg-types = { path = "../cfg-types" }
 hir-def = { path = "../hir-def" }
 base-db = { path = "../base-db" }
+bsl-metadata = { path = "../bsl-metadata" }
 bsl-platform = { path = "../bsl-platform" }
 syntax = { path = "../syntax" }
 intern = { path = "../intern" }

@@ -46,6 +46,26 @@ pub struct ConfigurationPathInput {
     pub version: u32,
 }
 
+/// Salsa input holding the workspace-wide set of visible configurations.
+///
+/// Represents both the list of configuration roots (main + extensions) and a
+/// metadata generation counter. Reading `paths` or `version` from inside a
+/// tracked query registers a Salsa dependency, so mutating either field via
+/// the generated setters invalidates every dependent query.
+///
+/// A single instance per database is used as a singleton — the handle is
+/// lazily created by `RootDatabaseImpl` and stored alongside the storage.
+#[salsa::input(debug)]
+pub struct WorkspaceConfigsInput {
+    /// All registered configuration roots: main + extensions.
+    /// Main configuration has `name == None`; extensions have `Some(name)`.
+    pub paths: Vec<(Option<String>, PathBuf)>,
+    /// Generation counter bumped when VFS detects `.xml` metadata file
+    /// changes. Included in `ConfigurationPathInput::version` so Salsa sees
+    /// each generation as a distinct interned key.
+    pub version: u32,
+}
+
 /// Load configuration from directory.
 ///
 /// This is a Salsa tracked query that loads metadata from Designer format.

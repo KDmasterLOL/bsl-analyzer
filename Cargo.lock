@@ -1546,6 +1546,7 @@ name = "hir-ty"
 version = "0.1.28"
 dependencies = [
  "base-db",
+ "bsl-metadata",
  "bsl-platform",
  "cfg-types",
  "expect-test",

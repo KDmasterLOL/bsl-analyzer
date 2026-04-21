@@ -5,6 +5,7 @@ use std::sync::Arc;
 use vfs::FileId;
 
 use crate::infer::InferenceResult;
+use crate::type_db::TypeDatabase;
 use crate::Ty;
 
 /// Database trait for HIR type inference.
@@ -24,7 +25,7 @@ use crate::Ty;
 /// }
 /// ```
 #[salsa::db]
-pub trait HirDatabase: hir_def::DefDatabase {
+pub trait HirDatabase: TypeDatabase {
     /// Infer types for all expressions in a file.
     ///
     /// This is the main entry point for type inference. It runs type inference

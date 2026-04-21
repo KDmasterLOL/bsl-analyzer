@@ -54,14 +54,18 @@ impl GlobalState {
         self.workspace_root = Some(root.clone());
         self.project = Some(project);
 
-        // Register all configuration paths (main + extensions) in the database
+        // Register all configuration paths (main + extensions) in the database.
+        // Request cancellation before mutating the Salsa input so outstanding
+        // Analysis snapshots are released before `zalsa_mut()` blocks on them
+        // (same ABBA defense as in `process_changes`).
         {
             let mut all_paths: Vec<(Option<String>, std::path::PathBuf)> = Vec::new();
             all_paths.push((None, source_path.clone()));
             for (name, ext_path) in &extensions {
                 all_paths.push((Some(name.clone()), ext_path.clone()));
             }
-            self.analysis_host.raw_database().set_all_config_paths(all_paths);
+            self.analysis_host.request_cancellation();
+            self.analysis_host.raw_database_mut().set_all_config_paths(all_paths);
         }
 
         // Update diagnostics config from project settings
@@ -207,7 +211,7 @@ impl GlobalState {
 
         if metadata_xml_changed {
             tracing::info!("bumping metadata version after XML change");
-            self.analysis_host.raw_database().bump_metadata_version();
+            self.analysis_host.raw_database_mut().bump_metadata_version();
         }
 
         (true, config_file_changed)

@@ -85,6 +85,7 @@ pub use hir_def::{
 // Re-export hir-ty types and queries
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
+pub use hir_ty::type_db::{TypeDatabase, VisibleConfig};
 pub use hir_ty::{InferenceDiagnostic, InferenceResult, Ty, UnresolvedMethodKind};
 
 use syntax::{ast::AstNode, TextRange};

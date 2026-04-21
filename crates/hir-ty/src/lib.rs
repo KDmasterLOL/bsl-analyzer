@@ -31,8 +31,10 @@ pub mod builtin;
 pub mod db;
 pub mod infer;
 pub mod method_resolution;
+pub mod type_db;
 
 // Re-export main types for convenience
 pub use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 pub use infer::{InferenceContext, InferenceDiagnostic, InferenceResult, UnresolvedMethodKind};
 pub use method_resolution::{resolve_qualified_call, MethodResolution};
+pub use type_db::{TypeDatabase, VisibleConfig};
