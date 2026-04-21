@@ -421,6 +421,24 @@ mod tests {
     }
 
     #[test]
+    fn jsdoc_union_duplicate_types_preserve_syntactic_shape() {
+        // The parser stays syntactic — `"Число, Число"` yields
+        // `TypeRef::Union([Number, Number])` and lets the `Ty::union`
+        // smart constructor at lowering time perform the dedup. This pins
+        // that contract: deduplication is NOT the parser's job, so
+        // removing the smart constructor wouldn't silently bypass dedup.
+        let doc = r#"
+// Возвращаемое значение:
+//   Число, Число - дубль
+"#;
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(
+            hints.ret,
+            TypeRef::Union(vec![builtin(BuiltinTypeRef::Number), builtin(BuiltinTypeRef::Number)])
+        );
+    }
+
+    #[test]
     fn jsdoc_union_collapses_singleton_and_handles_empty_commas() {
         // A single survivor collapses back to the bare TypeRef — avoids
         // spurious `Union([x])`. Trailing / double commas are dropped.

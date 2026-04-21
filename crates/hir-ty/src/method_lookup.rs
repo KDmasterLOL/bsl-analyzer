@@ -35,7 +35,7 @@
 //! is the platform-side complement for `Expr::MethodCall { receiver, ... }`.
 
 use bsl_platform::{PlatformData, PlatformMethod};
-use hir_def::ty::{MetadataKind, Ty};
+use hir_def::ty::Ty;
 use hir_def::Name;
 
 /// Result of a successful method lookup.
@@ -63,68 +63,60 @@ pub struct MethodInfo {
 pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo> {
     let type_key = platform_type_key(receiver_ty)?;
     let data = PlatformData::instance();
-    let platform_method = data.get_method(type_key, method_name.as_str())?;
-    Some(to_method_info(platform_method))
+    let method = data.get_method(type_key, method_name.as_str())?;
+    Some(to_method_info(method))
 }
 
-/// Pick a `&str` key the platform's `get_method` can consume. The slice
-/// borrows from either the `Ty` itself (for `PlatformObject`) or from a
-/// table of static prefixes (primitives, managers, metadata-refs).
+/// Pick the `PlatformData::get_method` key for a receiver.
+///
+/// The platform-data index uses **English** type names keyed through a
+/// bilingual map, so passing the English canonical name resolves methods
+/// whose `name` is Russian (and vice versa).
+///
+/// # What is not covered yet
+///
+/// `Ty::ObjectManager { kind, .. }` / `Ty::MetadataRef { kind, .. }`
+/// method lookup is a deferred gap. Platform-data entries for manager and
+/// reference types carry `type_name = "CatalogManager.<Catalog name>"` /
+/// `"CatalogRef.<Catalog name>"`, and their per-method `name` / `english_name`
+/// fields are placeholders (`"<Имя"`, `"<Catalog name>.CreateItem"`) —
+/// no direct method-name index exists. Returning `None` here matches what
+/// the pre-M3 `resolve_method_return_type` effectively did (via
+/// `platform_type_name()` returning `None` for ObjectManager and a
+/// mismatched `"MetadataRef"` key for MetadataRef). Re-enabling these
+/// requires either richer platform-data indexing or parsing
+/// `documentation.syntax`; tracked for a later milestone.
+///
+/// Similarly, primitives (`Ty::Number | String | Boolean | Date`) return
+/// `None` because BSL exposes no instance methods on them — string/date
+/// "methods" are global functions (`СтрДлина`, `ДобавитьМесяц`) reachable
+/// only through free-function syntax, not `receiver.method()`.
 fn platform_type_key(ty: &Ty) -> Option<&str> {
     match ty {
-        // Concrete value types — primitives that have platform methods.
-        Ty::Array => Some("Массив"),
-        Ty::Structure => Some("Структура"),
-        Ty::Map => Some("Соответствие"),
-        Ty::ValueTable => Some("ТаблицаЗначений"),
-        Ty::ValueList => Some("СписокЗначений"),
-        Ty::Type => Some("Тип"),
-        // Platform object name comes from the `Ty` itself.
+        // Value types — English canonical names hit the bilingual index.
+        Ty::Array => Some("Array"),
+        Ty::Structure => Some("Structure"),
+        Ty::Map => Some("Map"),
+        Ty::ValueTable => Some("ValueTable"),
+        Ty::ValueList => Some("ValueList"),
+        Ty::Type => Some("Type"),
+        // Platform object name is stored as-authored in the `Ty` and the
+        // bilingual index translates it.
         Ty::PlatformObject(name) => Some(name.as_str()),
-        // Manager values — the key is the manager type prefix (matches
-        // `MdoType::manager_type_prefix` for `ObjectManager` and a
-        // MetadataKind-keyed table for refs / objects).
-        Ty::ObjectManager { kind, .. } => kind.manager_type_prefix(),
-        Ty::MetadataRef { kind, .. } => Some(metadata_kind_platform_name(*kind)),
-        // Collections / unions / primitives-without-methods / unknown →
-        // no method table.
-        Ty::ManagerCollection(_)
-        | Ty::Union(_)
-        | Ty::Unknown
-        | Ty::Undefined
-        | Ty::Null
+        // Deferred: manager / ref method lookup, primitives, unions,
+        // collectives, opaque types.
+        Ty::ObjectManager { .. }
+        | Ty::MetadataRef { .. }
         | Ty::Number
         | Ty::String
         | Ty::Boolean
         | Ty::Date
+        | Ty::ManagerCollection(_)
+        | Ty::Union(_)
+        | Ty::Unknown
+        | Ty::Undefined
+        | Ty::Null
         | Ty::Function { .. } => None,
-    }
-}
-
-/// Platform-data type name for a `MetadataKind`. Each ref/object kind maps
-/// to the same English token `bsl-platform` uses in
-/// `PlatformMethod::type_name`.
-fn metadata_kind_platform_name(kind: MetadataKind) -> &'static str {
-    match kind {
-        MetadataKind::CatalogRef => "CatalogRef",
-        MetadataKind::CatalogObject => "CatalogObject",
-        MetadataKind::DocumentRef => "DocumentRef",
-        MetadataKind::DocumentObject => "DocumentObject",
-        MetadataKind::EnumRef => "EnumRef",
-        MetadataKind::TaskRef => "TaskRef",
-        MetadataKind::BusinessProcessRef => "BusinessProcessRef",
-        MetadataKind::InformationRegisterRef => "InformationRegisterRef",
-        MetadataKind::InformationRegisterRecordManager => "InformationRegisterRecordManager",
-        MetadataKind::AccumulationRegisterRef => "AccumulationRegisterRef",
-        MetadataKind::AccumulationRegisterRecordSet => "AccumulationRegisterRecordSet",
-        MetadataKind::AccountingRegisterRef => "AccountingRegisterRef",
-        MetadataKind::CalculationRegisterRef => "CalculationRegisterRef",
-        // Tabular sections surface methods through `PlatformData`'s own
-        // collection tables — use the canonical Russian names here, matching
-        // the `platform_data.json` entries for `ТабличнаяЧасть` and
-        // `СтрокаТабличнойЧасти`.
-        MetadataKind::TabularSection => "ТабличнаяЧасть",
-        MetadataKind::TabularSectionRow => "СтрокаТабличнойЧасти",
     }
 }
 
@@ -172,6 +164,7 @@ fn resolve_platform_type_name(name: &str) -> Ty {
 mod tests {
     use super::*;
     use bsl_metadata::MdoType;
+    use hir_def::ty::MetadataKind;
 
     #[test]
     fn method_lookup_platform_type_hit() {
@@ -216,28 +209,40 @@ mod tests {
     }
 
     #[test]
-    fn platform_type_key_for_object_manager_uses_manager_prefix() {
-        // The key path for an ObjectManager receiver must be the manager
-        // prefix from bsl-metadata, matching how platform method tables
-        // store the data.
-        let om = Ty::ObjectManager { kind: MdoType::Document, name: Name::new("ПКО") };
-        assert_eq!(platform_type_key(&om), Some("DocumentManager"));
+    fn method_lookup_value_table_english_key_hits_russian_method_name() {
+        // `ValueTable` entries in platform_data.json use
+        // `type_name = "ValueTable"` (English only); the method-lookup
+        // index is bilingual, so asking for the Russian method name
+        // `Добавить` must still resolve. Pins the fix that replaced the
+        // broken Russian-keyed lookup (pre-M3 would have resolved via a
+        // `display_name()` fallback, and the Task 5 draft used
+        // `"ТаблицаЗначений"` — both miss because platform-data stores
+        // English).
+        let info = lookup_method(&Ty::ValueTable, &Name::new("Добавить"))
+            .expect("ValueTable.Добавить must resolve via bilingual platform index");
+        assert!(!matches!(info.return_ty, Ty::Unknown));
     }
 
     #[test]
-    fn platform_type_key_for_metadata_ref_uses_english_prefix() {
-        // `MetadataRef { CatalogRef, "Номенклатура" }` is looked up under
-        // the canonical English token `CatalogRef` — matches the platform
-        // method table.
+    fn method_lookup_object_manager_returns_none_deferred() {
+        // ObjectManager method lookup is deferred: platform-data's
+        // per-method `name` / `english_name` fields are placeholders
+        // (`"<Имя"`, `"<Catalog name>.CreateItem"`) with no real
+        // method-name index. Until that data-quality gap is bridged we
+        // return None — matching the pre-M3 `resolve_method_return_type`
+        // which also returned None via `platform_type_name()`.
+        let om = Ty::ObjectManager {
+            kind: MdoType::Catalog, name: Name::new("Номенклатура")
+        };
+        assert!(lookup_method(&om, &Name::new("СоздатьЭлемент")).is_none());
+    }
+
+    #[test]
+    fn method_lookup_metadata_ref_returns_none_deferred() {
+        // Same data-quality story as ObjectManager; tracked together.
         let r = Ty::MetadataRef {
             kind: MetadataKind::CatalogRef, name: Name::new("Номенклатура")
         };
-        assert_eq!(platform_type_key(&r), Some("CatalogRef"));
-
-        let tab = Ty::MetadataRef {
-            kind: MetadataKind::TabularSection,
-            name: Name::new("ПКО.Товары"),
-        };
-        assert_eq!(platform_type_key(&tab), Some("ТабличнаяЧасть"));
+        assert!(lookup_method(&r, &Name::new("ПолучитьОбъект")).is_none());
     }
 }
