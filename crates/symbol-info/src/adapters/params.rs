@@ -43,31 +43,66 @@ pub(super) fn build_platform_params(
         .enumerate()
         .map(|(i, p)| {
             let pdoc = docs.and_then(|d| d.params.get(i));
-            let types = match &p.param_type {
-                Some(t) => vec![TypeRef {
-                    russian: t.clone(),
-                    english: None,
-                    description: None,
-                    is_hyperlink: false,
-                }],
-                None => Vec::new(),
+            // Platform descriptions typically start with `Тип: T1, T2 . prose`,
+            // duplicating the type label. Lift the richer type list out of the
+            // description and clean the prose so consumers don't render types
+            // twice.
+            let (types_from_desc, clean_desc) =
+                pdoc.map(|d| split_platform_param_description(&d.description)).unwrap_or_default();
+            let types: Vec<TypeRef> = if !types_from_desc.is_empty() {
+                types_from_desc
+                    .into_iter()
+                    .map(|t| TypeRef {
+                        russian: t.into(),
+                        english: None,
+                        description: None,
+                        is_hyperlink: false,
+                    })
+                    .collect()
+            } else {
+                match &p.param_type {
+                    Some(t) => vec![TypeRef {
+                        russian: t.clone(),
+                        english: None,
+                        description: None,
+                        is_hyperlink: false,
+                    }],
+                    None => Vec::new(),
+                }
             };
             SignatureParam {
                 name: p.name.clone(),
                 types,
                 is_optional: p.is_optional,
                 default_value: pdoc.and_then(|d| d.default_value.as_deref().map(SmolStr::new)),
-                description: pdoc.and_then(|d| {
-                    if d.description.is_empty() {
-                        None
-                    } else {
-                        Some(d.description.clone())
-                    }
-                }),
+                description: if clean_desc.is_empty() { None } else { Some(clean_desc) },
                 is_val: false,
             }
         })
         .collect()
+}
+
+/// Split a platform parameter description like
+/// `"Тип: Строка, ОбъектМетаданных.Форма . Имя формы..."` into a list of
+/// type names and the remaining prose. When the description does not start
+/// with `Тип:`, the type list is empty and the prose is returned unchanged.
+fn split_platform_param_description(s: &str) -> (Vec<String>, String) {
+    let trimmed = s.trim_start();
+    let Some(after_marker) = trimmed.strip_prefix("Тип:") else {
+        return (Vec::new(), s.to_string());
+    };
+    let after_marker = after_marker.trim_start();
+    let Some(dot_pos) = after_marker.find('.') else {
+        return (Vec::new(), s.to_string());
+    };
+    let types_part = after_marker[..dot_pos].trim();
+    let rest = after_marker[dot_pos + 1..].trim_start();
+    let types: Vec<String> = types_part
+        .split([',', ';'])
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    (types, rest.to_string())
 }
 
 fn find_param_doc<'a>(name: &str, docs: Option<&'a UserMethodDocs>) -> Option<&'a ParameterDoc> {
