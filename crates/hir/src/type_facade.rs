@@ -34,25 +34,28 @@ use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 use hir_ty::lower::TyLoweringContext;
 use hir_ty::{lookup_field, lookup_method};
+use std::collections::HashSet;
 use vfs::FileId;
 
 /// Lightweight DTO for a method exposed by a [`Type`].
-///
-/// Carries only the name and return type — parameter lists, docs, etc.
-/// live on [`PlatformMethod`] / `MethodSymbol` and can be fetched
-/// separately when needed (hover vs. completion have different
-/// appetites). Kept as a plain struct rather than a `'db`-bound handle
-/// because the owning data is `Arc<Configuration>` / `PlatformData` —
-/// cloning a `Name` + `Ty` is cheaper than threading lifetimes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Method {
-    /// Method name (in the BSL source language — Russian unless the
-    /// platform data or MDO declares an English-only alias).
+    /// Russian method name.
     pub name: Name,
-    /// Return type after lowering through [`TyLoweringContext`].
-    /// `Ty::Undefined` for procedures; `Ty::Unknown` for
-    /// methods whose return type the platform index doesn't record.
-    pub return_ty: Ty,
+    /// English method name.
+    pub english_name: Name,
+    /// `None` for procedures.
+    pub return_ty: Option<Ty>,
+    /// Method parameters in declaration order.
+    pub params: Vec<MethodParam>,
+}
+
+/// Lightweight DTO for a method parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodParam {
+    pub name: Name,
+    pub ty: Option<Ty>,
+    pub optional: bool,
 }
 
 /// Lightweight DTO for a field (MDO attribute, tabular section, …).
@@ -61,6 +64,9 @@ pub struct Field {
     /// Field name as declared in the metadata (Russian canonical form
     /// from `Attribute::name` / `TabularSection::name`).
     pub name: Name,
+    /// English name from `name_en`, falling back to `name` when the
+    /// metadata does not declare a separate English alias.
+    pub english_name: Name,
     /// Field type after lowering through [`TyLoweringContext`].
     pub ty: Ty,
 }
@@ -128,12 +134,8 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// The corresponding manager type — e.g. `CatalogRef.Товары` →
     /// `CatalogManager.Товары` (`Ty::ObjectManager { Catalog, "Товары" }`).
     ///
-    /// Returns `None` for:
-    /// - non-ref types (primitives, collections, unions);
-    /// - register ref variants (`AccumulationRegisterRef` etc.) — those
-    ///   don't share the `ObjectManager` shape (their managers are
-    ///   `CatalogManager`-style but carry register-specific state).
-    ///   Deferred to M4 alongside register field-lookup.
+    /// Returns `None` for non-ref types (primitives, collections,
+    /// unions).
     pub fn manager(&self) -> Option<Self> {
         let (mdo_type, name) = match &self.ty {
             Ty::MetadataRef { kind, name } => {
@@ -143,10 +145,10 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
                     MetadataKind::EnumRef => MdoType::Enum,
                     MetadataKind::TaskRef => MdoType::Task,
                     MetadataKind::BusinessProcessRef => MdoType::BusinessProcess,
-                    // Register variants have their own manager shape; M3
-                    // doesn't model them. TabularSection kinds carry
-                    // "Parent.Section" names and don't map to a single
-                    // MDO manager.
+                    MetadataKind::InformationRegisterRef => MdoType::InformationRegister,
+                    MetadataKind::AccumulationRegisterRef => MdoType::AccumulationRegister,
+                    MetadataKind::AccountingRegisterRef => MdoType::AccountingRegister,
+                    MetadataKind::CalculationRegisterRef => MdoType::CalculationRegister,
                     _ => return None,
                 };
                 (mdo, name.clone())
@@ -231,21 +233,35 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
                 {
                     let mut out =
                         Vec::with_capacity(mdo.attributes.len() + mdo.tabular_sections.len());
+                    let mut seen_names = HashSet::with_capacity(out.capacity() * 2);
                     for attr in &mdo.attributes {
-                        out.push(Field {
-                            name: Name::new(&attr.name),
-                            ty: lower_attribute_type(&attr.attr_type, &ctx),
-                        });
+                        push_unique_field(
+                            &mut out,
+                            &mut seen_names,
+                            Field {
+                                name: Name::new(&attr.name),
+                                english_name: metadata_english_name(
+                                    attr.name_en.as_deref(),
+                                    attr.name.as_str(),
+                                ),
+                                ty: lower_attribute_type(&attr.attr_type, &ctx),
+                            },
+                        );
                     }
                     for ts in &mdo.tabular_sections {
                         let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
-                        out.push(Field {
-                            name: Name::new(ts.name()),
-                            ty: Ty::MetadataRef {
-                                kind: MetadataKind::TabularSection { parent: mdo_type },
-                                name: qualified,
+                        push_unique_field(
+                            &mut out,
+                            &mut seen_names,
+                            Field {
+                                name: Name::new(ts.name()),
+                                english_name: metadata_english_name(ts.name_en(), ts.name()),
+                                ty: Ty::MetadataRef {
+                                    kind: MetadataKind::TabularSection { parent: mdo_type },
+                                    name: qualified,
+                                },
                             },
-                        });
+                        );
                     }
                     return out;
                 }
@@ -265,6 +281,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
                             .iter()
                             .map(|attr| Field {
                                 name: Name::new(attr.name()),
+                                english_name: metadata_english_name(attr.name_en(), attr.name()),
                                 ty: lower_attribute_type(attr.attr_type(), &ctx),
                             })
                             .collect();
@@ -296,12 +313,21 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
 
 /// Convert a `PlatformMethod` into the facade's `Method` DTO.
 fn method_dto_from_platform(method: &PlatformMethod) -> Method {
-    let return_ty = method
-        .return_type
-        .as_ref()
-        .map(|ret| resolve_platform_type_name(ret))
-        .unwrap_or(Ty::Undefined);
-    Method { name: Name::new(method.name.as_str()), return_ty }
+    let params = method
+        .parameters
+        .iter()
+        .map(|param| MethodParam {
+            name: Name::new(param.name.as_str()),
+            ty: param.param_type.as_ref().map(|ty| resolve_platform_type_name(ty)),
+            optional: param.is_optional,
+        })
+        .collect();
+    Method {
+        name: Name::new(method.name.as_str()),
+        english_name: fallback_name(method.english_name.as_str(), method.name.as_str()),
+        return_ty: method.return_type.as_ref().map(|ret| resolve_platform_type_name(ret)),
+        params,
+    }
 }
 
 /// Same fallback logic `method_lookup::resolve_platform_type_name` uses
@@ -340,11 +366,35 @@ fn split_parent_section(name: &str) -> Option<(&str, &str)> {
     Some((parent, section))
 }
 
+fn metadata_english_name(english_name: Option<&str>, fallback: &str) -> Name {
+    fallback_name(english_name.unwrap_or_default(), fallback)
+}
+
+fn fallback_name(name: &str, fallback: &str) -> Name {
+    if name.is_empty() {
+        Name::new(fallback)
+    } else {
+        Name::new(name)
+    }
+}
+
+fn push_unique_field(out: &mut Vec<Field>, seen_names: &mut HashSet<Name>, field: Field) {
+    if seen_names.contains(&field.name) || seen_names.contains(&field.english_name) {
+        return;
+    }
+    seen_names.insert(field.name.clone());
+    seen_names.insert(field.english_name.clone());
+    out.push(field);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn empty_db() -> (RootDatabaseImpl, FileId) {
         let mut db = RootDatabaseImpl::new();
@@ -355,6 +405,72 @@ mod tests {
         db.set_file_source_root(file_id, SourceRootId(0));
         db.set_file_text(file_id, "");
         (db, file_id)
+    }
+
+    fn designer_fixture_path() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer"))
+    }
+
+    fn db_with_configuration(config_path: PathBuf) -> (RootDatabaseImpl, FileId) {
+        let (mut db, file_id) = empty_db();
+        db.set_all_config_paths(vec![(None, config_path)]);
+        (db, file_id)
+    }
+
+    fn copy_dir_all(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).expect("create temp fixture dir");
+        for entry in fs::read_dir(src).expect("read fixture dir") {
+            let entry = entry.expect("read fixture entry");
+            let ty = entry.file_type().expect("fixture entry type");
+            let dst_path = dst.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_all(&entry.path(), &dst_path);
+            } else {
+                fs::copy(entry.path(), dst_path).expect("copy fixture file");
+            }
+        }
+    }
+
+    /// RAII fixture that clones the designer tree into a per-test temp
+    /// directory, tweaks the XML to create a name collision between a
+    /// custom attribute and a tabular section, and removes the tree on
+    /// drop. Without the `Drop` impl the previous version leaked
+    /// `/tmp/bsl-analyzer-type-facade-*` directories across runs,
+    /// especially under CI where test harnesses don't clear `TMPDIR`.
+    struct TempFixture {
+        path: PathBuf,
+    }
+
+    impl TempFixture {
+        fn duplicated_field() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos();
+            let path = std::env::temp_dir()
+                .join(format!("bsl-analyzer-type-facade-{}-{unique}", std::process::id()));
+            copy_dir_all(&designer_fixture_path(), &path);
+
+            let catalog_path = path.join("Catalogs/Справочник1.xml");
+            let xml = fs::read_to_string(&catalog_path).expect("read copied catalog xml");
+            let xml = xml.replacen("<Name>ТабличнаяЧасть1</Name>", "<Name>Реквизит2</Name>", 1);
+            fs::write(&catalog_path, xml).expect("write copied catalog xml");
+
+            Self { path }
+        }
+
+        fn path(&self) -> PathBuf {
+            self.path.clone()
+        }
+    }
+
+    impl Drop for TempFixture {
+        fn drop(&mut self) {
+            // Best-effort cleanup — an error here only means a leaked
+            // `/tmp` entry, not a test failure, so we intentionally
+            // ignore `remove_dir_all`'s `Result`.
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 
     #[test]
@@ -423,17 +539,30 @@ mod tests {
 
     #[test]
     fn manager_none_for_non_refs() {
-        // Non-ref receivers (primitives, collections, registers) return
-        // None. Pins the fall-through branch.
+        // Non-ref receivers return None. Register refs now map to
+        // register managers, so keep one real non-ref and one
+        // collection receiver to pin the fall-through branch.
         let (db, file_id) = empty_db();
         assert!(Type::new(&db, file_id, Ty::Number).manager().is_none());
         assert!(Type::new(&db, file_id, Ty::Array).manager().is_none());
+    }
+
+    #[test]
+    fn manager_from_register_ref_types() {
+        let (db, file_id) = empty_db();
         let reg = Type::new(
             &db,
             file_id,
             Ty::MetadataRef { kind: MetadataKind::AccumulationRegisterRef, name: Name::new("X") },
         );
-        assert!(reg.manager().is_none(), "register ref does not yet expose manager");
+        let manager = reg.manager().expect("register ref has a manager form");
+        match manager.ty() {
+            Ty::ObjectManager { kind, name } => {
+                assert_eq!(*kind, MdoType::AccumulationRegister);
+                assert_eq!(name.as_str(), "X");
+            }
+            other => panic!("expected ObjectManager, got {other:?}"),
+        }
     }
 
     #[test]
@@ -502,5 +631,70 @@ mod tests {
             Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") },
         );
         assert!(cat.fields().is_empty());
+    }
+
+    #[test]
+    fn fields_include_custom_attributes_from_configuration() {
+        let (db, file_id) = db_with_configuration(designer_fixture_path());
+        let cat = Type::new(
+            &db,
+            file_id,
+            Ty::MetadataRef {
+                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
+            },
+        );
+
+        let fields = cat.fields();
+        let attr = fields
+            .iter()
+            .find(|field| field.name == Name::new("Реквизит2"))
+            .expect("custom attribute must be present");
+        assert_eq!(attr.english_name, Name::new("Реквизит2"));
+        assert_eq!(attr.ty, Ty::Number);
+    }
+
+    #[test]
+    fn fields_include_tabular_sections_from_configuration() {
+        let (db, file_id) = db_with_configuration(designer_fixture_path());
+        let cat = Type::new(
+            &db,
+            file_id,
+            Ty::MetadataRef {
+                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
+            },
+        );
+
+        let fields = cat.fields();
+        let section = fields
+            .iter()
+            .find(|field| field.name == Name::new("ТабличнаяЧасть1"))
+            .expect("tabular section must be present");
+        assert_eq!(section.english_name, Name::new("ТабличнаяЧасть1"));
+        assert_eq!(
+            section.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::TabularSection { parent: MdoType::Catalog },
+                name: Name::new("Справочник1.ТабличнаяЧасть1"),
+            }
+        );
+    }
+
+    #[test]
+    fn fields_deduplicate_duplicate_names_preferring_attributes() {
+        let fixture = TempFixture::duplicated_field();
+        let (db, file_id) = db_with_configuration(fixture.path());
+        let cat = Type::new(
+            &db,
+            file_id,
+            Ty::MetadataRef {
+                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
+            },
+        );
+
+        let fields = cat.fields();
+        let matches: Vec<_> =
+            fields.iter().filter(|field| field.name == Name::new("Реквизит2")).collect();
+        assert_eq!(matches.len(), 1, "duplicate Russian names must be deduplicated");
+        assert_eq!(matches[0].ty, Ty::Number, "attribute must win over tabular section");
     }
 }
