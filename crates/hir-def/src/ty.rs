@@ -99,7 +99,19 @@ pub enum Ty {
 
 /// Metadata object kind.
 ///
-/// Represents the kind of metadata object (Catalog, Document, etc.).
+/// Classifies the flavour of MDO (or MDO fragment) that a [`Ty::MetadataRef`]
+/// carries. The `name` of the enclosing `MetadataRef` is the MDO identifier as
+/// it appears in the configuration (`"ПКО"`, `"Номенклатура"`). For
+/// [`Self::TabularSection`] / [`Self::TabularSectionRow`] the name conventionally
+/// encodes `"Parent.Section"` (e.g. `"ПКО.Товары"`) — parent MDO first, tabular
+/// section name second — so a single `MetadataRef` locates the section without
+/// an extra field.
+///
+/// Adding a variant? Also extend:
+/// - `metadata_kind_from_prefix` in `hir-ty/src/lower/mod.rs` (prefix → kind),
+/// - `mdo_ref_prefix` in `hir-def/src/type_ref.rs` if a new `MdoType` prefix is
+///   needed,
+/// - JSDoc parser in `hir-def/src/ty/doc_types.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MetadataKind {
     /// Catalog reference (СправочникСсылка).
@@ -114,6 +126,41 @@ pub enum MetadataKind {
     InformationRegisterRecordManager,
     /// Accumulation register record set (РегистрНакопленияНаборЗаписей).
     AccumulationRegisterRecordSet,
+    /// Enum reference (ПеречислениеСсылка).
+    EnumRef,
+    /// Task reference (ЗадачаСсылка).
+    TaskRef,
+    /// Business process reference (БизнесПроцессСсылка).
+    BusinessProcessRef,
+    /// Information register reference / record key form
+    /// (РегистрСведенийКлючЗаписи / `InformationRegisterRef`).
+    ///
+    /// Companion to [`Self::InformationRegisterRecordManager`]: the manager
+    /// variant models the runtime record-manager object, this one models the
+    /// XML-emitted reference/key token as a value type.
+    InformationRegisterRef,
+    /// Accumulation register reference / record key form
+    /// (РегистрНакопленияКлючЗаписи / `AccumulationRegisterRef`).
+    AccumulationRegisterRef,
+    /// Accounting register reference / record key form
+    /// (РегистрБухгалтерииКлючЗаписи / `AccountingRegisterRef`).
+    AccountingRegisterRef,
+    /// Calculation register reference / record key form
+    /// (РегистрРасчётаКлючЗаписи / `CalculationRegisterRef`).
+    CalculationRegisterRef,
+    /// Tabular section of a metadata object (`ТабличнаяЧасть`).
+    ///
+    /// Name carries `"Parent.Section"` (e.g. `"ПКО.Товары"`) — the parent MDO
+    /// identifier and the section name, dot-joined. This lets field lookup
+    /// (M3 Task 8) resolve `Документ.Товары` without threading a second
+    /// parent identifier.
+    TabularSection,
+    /// A single row of a tabular section (`СтрокаТабличнойЧасти`).
+    ///
+    /// Name follows the same `"Parent.Section"` convention as
+    /// [`Self::TabularSection`] — the enclosing tabular section is implied by
+    /// the name path.
+    TabularSectionRow,
 }
 
 impl Ty {
