@@ -31,7 +31,7 @@ use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::ty::Ty;
-use hir_def::{ExprId, Name};
+use hir_def::{DefWithBodyId, ExprId, Name};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use tracing::{debug, info, trace};
@@ -46,10 +46,22 @@ use crate::method_resolution;
 ///
 /// Contains inferred types for all expressions and collected diagnostics.
 /// This structure is cached by Salsa.
+///
+/// `ExprId`s are only unique **within a single `Body`**, so the merged
+/// `expr_types_by_body` keys the per-body maps by [`DefWithBodyId`]
+/// (method local-id, or `ModuleCode` for module-level code). This is the
+/// M3 Task 9 bridge that lets `Semantics::type_of_expr` go from a
+/// `SyntaxNode` — resolved through `BodySourceMap::expr_at_range` — to
+/// the inferred `Ty`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceResult {
-    /// Type of each expression, keyed by ExprId.
-    pub expr_types: FxHashMap<ExprId, Ty>,
+    /// Per-body inferred expression types.
+    ///
+    /// Outer key = body owner (`Method(local_id)` or `ModuleCode`), inner
+    /// map = that body's `ExprId -> Ty`. Kept nested rather than flattened
+    /// to `(DefWithBodyId, ExprId)` tuples so a caller that already knows
+    /// the body can grab the whole map with a single hash lookup.
+    pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, Ty>>,
 
     /// Variable types inferred from assignments.
     ///
@@ -65,9 +77,14 @@ pub struct InferenceResult {
 }
 
 impl InferenceResult {
-    /// Get the type of an expression.
-    pub fn type_of_expr(&self, expr: ExprId) -> Option<&Ty> {
-        self.expr_types.get(&expr)
+    /// Get the type of an expression in a specific body.
+    ///
+    /// `owner` identifies the body — `DefWithBodyId::Method(local_id)`
+    /// for a procedure / function, `DefWithBodyId::ModuleCode` for
+    /// module-level code. Returns `None` if inference produced no entry
+    /// for that `(owner, expr)` pair.
+    pub fn type_of_expr_in(&self, owner: DefWithBodyId, expr: ExprId) -> Option<&Ty> {
+        self.expr_types_by_body.get(&owner)?.get(&expr)
     }
 
     /// Check if there are any diagnostics.
@@ -126,7 +143,10 @@ pub enum UnresolvedMethodKind {
 
 /// Context for type inference.
 ///
-/// Performs type inference for a single file/module, building up an InferenceResult.
+/// Performs type inference for a **single body** (one method, or the
+/// module-level code block), building up expr-type and diagnostic
+/// sub-results that `infer_query` merges into the file-level
+/// [`InferenceResult`].
 pub struct InferenceContext<'db> {
     /// Database for queries.
     ///
@@ -138,32 +158,74 @@ pub struct InferenceContext<'db> {
     /// Used for diagnostics reporting and workspace file collection.
     file_id: FileId,
 
+    /// Body owner. Preserved so the per-body `expr_types` map can be
+    /// keyed by `DefWithBodyId` when `finish()` folds into
+    /// [`InferenceResult::expr_types_by_body`].
+    owner: DefWithBodyId,
+
     /// HIR body for the file.
     body: Arc<Body>,
 
     /// Variable types tracked from assignments (lowercase name → Ty).
     var_types: FxHashMap<String, Ty>,
 
-    /// Accumulated inference results.
-    result: InferenceResult,
+    /// Per-body `ExprId -> Ty` cache. Doubles as the memoisation table
+    /// (`infer_expr` short-circuits when the entry already exists) and
+    /// as the payload we hand to the merged result keyed by `owner`.
+    expr_types: FxHashMap<ExprId, Ty>,
+
+    /// Diagnostics collected while inferring this body.
+    diagnostics: Vec<InferenceDiagnostic>,
+}
+
+/// Single-body inference output.
+///
+/// Intermediate record returned from [`InferenceContext::finish`]: keeps
+/// the body's expr-type map and diagnostics separate from the variable
+/// map so `infer_query` can fold them into the file-level
+/// [`InferenceResult`] without re-walking anything.
+pub struct BodyInferenceResult {
+    /// Owner of the body that produced this output.
+    pub owner: DefWithBodyId,
+    /// Variable types discovered during inference (lowercase name → Ty).
+    pub var_types: FxHashMap<String, Ty>,
+    /// Expression types keyed by body-local `ExprId`.
+    pub expr_types: FxHashMap<ExprId, Ty>,
+    /// Diagnostics collected during inference.
+    pub diagnostics: Vec<InferenceDiagnostic>,
 }
 
 impl<'db> InferenceContext<'db> {
-    /// Create a new inference context for a file.
-    pub fn new(db: &'db dyn HirDatabase, file_id: FileId, body: &Arc<Body>) -> Self {
+    /// Create a new inference context for a single body.
+    ///
+    /// `owner` records whether the body is a method (and which
+    /// `local_id`) or module-level code. `infer_query` supplies the
+    /// right value per call.
+    pub fn new(
+        db: &'db dyn HirDatabase,
+        file_id: FileId,
+        owner: DefWithBodyId,
+        body: &Arc<Body>,
+    ) -> Self {
         Self {
             db,
             file_id,
+            owner,
             body: Arc::clone(body),
             var_types: FxHashMap::default(),
-            result: InferenceResult::default(),
+            expr_types: FxHashMap::default(),
+            diagnostics: Vec::new(),
         }
     }
 
-    /// Finish inference and return the result.
-    pub fn finish(mut self) -> InferenceResult {
-        self.result.var_types = self.var_types;
-        self.result
+    /// Finish inference and return the per-body output.
+    pub fn finish(self) -> BodyInferenceResult {
+        BodyInferenceResult {
+            owner: self.owner,
+            var_types: self.var_types,
+            expr_types: self.expr_types,
+            diagnostics: self.diagnostics,
+        }
     }
 
     /// Get resolver for the current module.
@@ -196,9 +258,9 @@ impl<'db> InferenceContext<'db> {
 
         debug!(
             "inferred {} expression types, {} var types, {} diagnostics",
-            self.result.expr_types.len(),
+            self.expr_types.len(),
             self.var_types.len(),
-            self.result.diagnostics.len()
+            self.diagnostics.len()
         );
     }
 
@@ -309,7 +371,7 @@ impl<'db> InferenceContext<'db> {
     /// kind and dispatches to specialized inference functions.
     fn infer_expr(&mut self, expr_id: ExprId) -> Ty {
         // Check if already inferred (avoid re-inference)
-        if let Some(ty) = self.result.expr_types.get(&expr_id) {
+        if let Some(ty) = self.expr_types.get(&expr_id) {
             return ty.clone();
         }
 
@@ -450,7 +512,7 @@ impl<'db> InferenceContext<'db> {
         };
 
         // Store the inferred type
-        self.result.expr_types.insert(expr_id, ty.clone());
+        self.expr_types.insert(expr_id, ty.clone());
         ty
     }
 
@@ -638,7 +700,7 @@ impl<'db> InferenceContext<'db> {
             Ty::Function { ref params, ref ret } => {
                 // Phase 2: Check argument count
                 if args.len() != params.len() {
-                    self.result.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                    self.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
                         call_expr: callee,
                         expected: params.len(),
                         found: args.len(),
@@ -647,9 +709,9 @@ impl<'db> InferenceContext<'db> {
 
                 // TODO Phase 2+: Check argument types
                 // for (arg_id, param_ty) in args.iter().zip(params.iter()) {
-                //     let arg_ty = self.result.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);
+                //     let arg_ty = self.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);
                 //     if !self.is_compatible(&arg_ty, param_ty) {
-                //         self.result.diagnostics.push(InferenceDiagnostic::TypeMismatch { ... });
+                //         self.diagnostics.push(InferenceDiagnostic::TypeMismatch { ... });
                 //     }
                 // }
 
@@ -700,7 +762,7 @@ impl<'db> InferenceContext<'db> {
 
                 // Check export flag
                 if !resolution.is_export {
-                    self.result.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                    self.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
                         expr: call_expr,
                         receiver_name: module_name.clone(),
                         method_name: method_name.clone(),
@@ -710,7 +772,7 @@ impl<'db> InferenceContext<'db> {
 
                 // Check argument count
                 if args.len() != resolution.signature.params.len() {
-                    self.result.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                    self.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
                         call_expr,
                         expected: resolution.signature.params.len(),
                         found: args.len(),
@@ -722,7 +784,7 @@ impl<'db> InferenceContext<'db> {
             }
             Err(kind) => {
                 // Method not found - emit diagnostic
-                self.result.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                self.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,
                     receiver_name: module_name.clone(),
                     method_name: method_name.clone(),
@@ -770,7 +832,7 @@ impl<'db> InferenceContext<'db> {
         ) {
             Ok(resolution) => {
                 if !resolution.is_export {
-                    self.result.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                    self.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
                         expr: call_expr,
                         receiver_name: receiver_name.clone(),
                         method_name: method_name.clone(),
@@ -779,7 +841,7 @@ impl<'db> InferenceContext<'db> {
                 }
 
                 if args.len() != resolution.signature.params.len() {
-                    self.result.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                    self.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
                         call_expr,
                         expected: resolution.signature.params.len(),
                         found: args.len(),
@@ -789,7 +851,7 @@ impl<'db> InferenceContext<'db> {
                 resolution.return_type
             }
             Err(kind) => {
-                self.result.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                self.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,
                     receiver_name,
                     method_name: method_name.clone(),
@@ -823,27 +885,42 @@ pub fn infer_query(db: &dyn HirDatabase, file_id: FileId) -> Arc<InferenceResult
 
     let mut result = InferenceResult::default();
 
+    let fold_body = |result: &mut InferenceResult, body_result: BodyInferenceResult| {
+        // Preserve per-body expr_types so `Semantics::type_of_expr`
+        // (M3 Task 9) can look them up via `BodySourceMap`. Before this,
+        // the merge dropped `expr_types` entirely and every syntax-node
+        // lookup returned `Ty::Unknown`.
+        result.expr_types_by_body.insert(body_result.owner, body_result.expr_types);
+        // `var_types` and `diagnostics` stay file-global: completion
+        // matches variables by name across bodies, and diagnostics are
+        // surfaced file-at-a-time by the IDE layer.
+        result.var_types.extend(body_result.var_types);
+        result.diagnostics.extend(body_result.diagnostics);
+    };
+
     // Infer module-level code (statements outside procedures/functions)
     if let Some(body) = module_bodies.module_code() {
-        let mut ctx = InferenceContext::new(db, file_id, &Arc::new(body.clone()));
+        let mut ctx =
+            InferenceContext::new(db, file_id, DefWithBodyId::ModuleCode, &Arc::new(body.clone()));
         ctx.infer_all();
-        let module_result = ctx.finish();
-        result.var_types.extend(module_result.var_types);
-        result.diagnostics.extend(module_result.diagnostics);
+        fold_body(&mut result, ctx.finish());
     }
 
     // Infer all method bodies (procedures and functions)
-    for (_local_id, body) in module_bodies.iter_bodies() {
-        let mut ctx = InferenceContext::new(db, file_id, &Arc::new(body.clone()));
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let mut ctx = InferenceContext::new(
+            db,
+            file_id,
+            DefWithBodyId::Method(local_id),
+            &Arc::new(body.clone()),
+        );
         ctx.infer_all();
-        let method_result = ctx.finish();
-        // Merge var_types from all methods (completion will match by variable name)
-        result.var_types.extend(method_result.var_types);
-        result.diagnostics.extend(method_result.diagnostics);
+        fold_body(&mut result, ctx.finish());
     }
 
     info!(
-        "type inference complete: {} var types, {} diagnostics",
+        "type inference complete: {} bodies, {} var types, {} diagnostics",
+        result.expr_types_by_body.len(),
         result.var_types.len(),
         result.diagnostics.len()
     );
@@ -851,18 +928,26 @@ pub fn infer_query(db: &dyn HirDatabase, file_id: FileId) -> Arc<InferenceResult
     Arc::new(result)
 }
 
-/// Salsa query: Get type of a specific expression.
+/// Salsa query: Get type of an expression in a specific body.
 ///
-/// This is a convenience query derived from `infer()`. It avoids
-/// exposing the entire InferenceResult when only one type is needed.
+/// `ExprId` is only unique within a single `Body`, so callers must
+/// disambiguate with `DefWithBodyId` — `Method(local_id)` for a
+/// procedure / function, `ModuleCode` for module-level code. The
+/// `Semantics::type_of_expr(SyntaxNode)` helper in `hir` derives the
+/// owner automatically by walking up the syntax tree.
 ///
 /// # Returns
 ///
-/// - The inferred type of the expression
-/// - `Ty::Unknown` if the expression was not found
-pub fn type_of_expr_query(db: &dyn HirDatabase, file_id: FileId, expr: ExprId) -> Ty {
+/// - The inferred type for `(owner, expr)` if present.
+/// - `Ty::Unknown` if inference produced no entry for that pair.
+pub fn type_of_expr_query(
+    db: &dyn HirDatabase,
+    file_id: FileId,
+    owner: DefWithBodyId,
+    expr: ExprId,
+) -> Ty {
     let infer = db.infer(file_id);
-    infer.type_of_expr(expr).cloned().unwrap_or(Ty::Unknown)
+    infer.type_of_expr_in(owner, expr).cloned().unwrap_or(Ty::Unknown)
 }
 
 #[cfg(test)]
@@ -872,7 +957,7 @@ mod tests {
     #[test]
     fn test_inference_result_default() {
         let result = InferenceResult::default();
-        assert_eq!(result.expr_types.len(), 0);
+        assert_eq!(result.expr_types_by_body.len(), 0);
         assert_eq!(result.diagnostics.len(), 0);
         assert!(!result.has_diagnostics());
     }

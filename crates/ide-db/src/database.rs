@@ -327,8 +327,13 @@ impl hir::HirDatabase for RootDatabaseImpl {
         hir::infer_query(self, file_id)
     }
 
-    fn type_of_expr(&self, file_id: FileId, expr: hir::ExprId) -> hir::Ty {
-        hir::type_of_expr_query(self, file_id, expr)
+    fn type_of_expr(
+        &self,
+        file_id: FileId,
+        owner: hir::DefWithBodyId,
+        expr: hir::ExprId,
+    ) -> hir::Ty {
+        hir::type_of_expr_query(self, file_id, owner, expr)
     }
 }
 

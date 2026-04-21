@@ -7,7 +7,9 @@ mod definition;
 pub use definition::Definition;
 
 // Re-export core types
-pub use hir_def::{BindingId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId};
+pub use hir_def::{
+    BindingId, DefWithBodyId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId,
+};
 pub use hir_def::{ExecutionContext, QualifiedName};
 pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
@@ -562,6 +564,54 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         segments.reverse();
 
         Some(QualifiedName::from_segments(segments))
+    }
+}
+
+/// Type inference bridge. Lives in a separate impl block so only
+/// callers that need [`HirDatabase`] pay the trait-bound cost; the main
+/// IDE flows (definition, name resolution) don't.
+impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
+    /// Resolve a syntax node to its inferred [`Ty`].
+    ///
+    /// Uses the `BodySourceMap` of each body in the file to locate the
+    /// containing `Body`; once found, looks up the inferred type in
+    /// `InferenceResult::expr_types_by_body`. This is the Task 9 bridge
+    /// — before M3, `InferenceResult` dropped per-body `expr_types`
+    /// during merge, so this function would always have seen `None`.
+    ///
+    /// Returns [`Ty::Unknown`] when the node isn't an expression (no
+    /// `ExprId` binding) or when inference produced no entry for it.
+    pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> Ty {
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.db.module_bodies(module_id);
+        let infer = self.db.infer(file_id);
+        let range = node.text_range();
+
+        // Module-level code first. Its `DefWithBodyId::ModuleCode`
+        // key is unique per file, so a hit here is unambiguous.
+        if let Some(result) = module_bodies.module_code_result() {
+            if let Some(expr_id) = result.source_map.expr_at_range(range) {
+                return infer
+                    .type_of_expr_in(DefWithBodyId::ModuleCode, expr_id)
+                    .cloned()
+                    .unwrap_or(Ty::Unknown);
+            }
+        }
+
+        // Each method body. `method_bodies()` yields
+        // (local_id, body, source_map); `expr_at_range` returns `Some`
+        // only for ranges that belong to that body, so the loop stops at
+        // the first match.
+        for (local_id, _body, source_map) in module_bodies.method_bodies() {
+            if let Some(expr_id) = source_map.expr_at_range(range) {
+                return infer
+                    .type_of_expr_in(DefWithBodyId::Method(local_id), expr_id)
+                    .cloned()
+                    .unwrap_or(Ty::Unknown);
+            }
+        }
+
+        Ty::Unknown
     }
 }
 

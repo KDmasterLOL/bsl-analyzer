@@ -1,6 +1,6 @@
 //! Salsa database trait for type inference queries.
 
-use hir_def::{ConfigsDatabase, ExprId};
+use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId};
 use std::sync::Arc;
 use vfs::FileId;
 
@@ -43,17 +43,20 @@ pub trait HirDatabase: ConfigsDatabase {
     /// Should delegate to [`crate::infer::infer_query`].
     fn infer(&self, file_id: FileId) -> Arc<InferenceResult>;
 
-    /// Get type of a specific expression.
+    /// Get type of a specific expression in a specific body.
     ///
-    /// This is a convenience query derived from `infer()`. It returns the type
-    /// of a single expression without exposing the entire inference result.
+    /// `ExprId` is only unique within a single `Body`, so callers must
+    /// disambiguate with `DefWithBodyId` — `Method(local_id)` for a
+    /// procedure / function body, `ModuleCode` for module-level code.
+    /// The IDE-facing `Semantics::type_of_expr(SyntaxNode)` derives the
+    /// owner automatically via `BodySourceMap`.
     ///
     /// # Returns
     ///
-    /// - The inferred type of the expression
-    /// - `Ty::Unknown` if the expression was not found in the inference result
+    /// - The inferred type for `(owner, expr)`.
+    /// - `Ty::Unknown` if inference produced no entry for that pair.
     ///
     /// # Implementation
     /// Should delegate to [`crate::infer::type_of_expr_query`].
-    fn type_of_expr(&self, file_id: FileId, expr: ExprId) -> Ty;
+    fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> Ty;
 }
