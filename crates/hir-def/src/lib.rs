@@ -28,6 +28,7 @@ pub mod body;
 pub mod call_graph;
 pub mod cognitive_complexity;
 pub mod conditional_tree;
+pub mod configs;
 pub mod cyclomatic_complexity;
 pub mod docs;
 pub mod hir;
@@ -61,6 +62,7 @@ pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
+pub use configs::{ConfigsDatabase, VisibleConfig};
 pub use item_tree::ItemTree;
 pub use module_index::ModuleIndex;
 pub use name::Name;

@@ -83,9 +83,9 @@ pub use hir_def::{
 };
 
 // Re-export hir-ty types and queries
+pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
-pub use hir_ty::type_db::{TypeDatabase, VisibleConfig};
 pub use hir_ty::{InferenceDiagnostic, InferenceResult, Ty, UnresolvedMethodKind};
 
 use syntax::{ast::AstNode, TextRange};
@@ -281,7 +281,7 @@ pub struct Semantics<'db, DB> {
     db: &'db DB,
 }
 
-impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
+impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     pub fn new(db: &'db DB) -> Self {
         Self { db }
     }

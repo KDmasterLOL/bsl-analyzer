@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use crate::configs::{ConfigsDatabase, VisibleConfig};
 use crate::scope::{ExprScopes, ScopeId};
 use crate::{DefDatabase, MethodId, ModuleId, Name, PathResolution, QualifiedName, VariableId};
 
@@ -101,6 +102,40 @@ impl Resolver {
         } else {
             None
         }
+    }
+
+    /// Is `module_name` declared as a CommonModule in any visible configuration?
+    ///
+    /// Configs are iterated in reverse — extensions (appended to the list
+    /// after main) are consulted first. The `any(...)` short-circuit means
+    /// the reverse order does not change the *bool* result, but it encodes
+    /// the intended union-wins-extension priority for future expansions.
+    ///
+    /// **Known gap:** This helper only answers yes/no. The actual `FileId`
+    /// returned by [`resolve_cross_module`] still comes from the path-based
+    /// `module_index`, which is last-write-wins on same-named collisions
+    /// between main and extensions. Per-config `FileId` tagging is tracked
+    /// separately and is out of scope for Task 1.6.
+    ///
+    /// [`resolve_cross_module`]: Resolver::resolve_cross_module
+    fn module_visible_in_configs(configs: &[VisibleConfig], module_name: &Name) -> bool {
+        let needle = module_name.as_str();
+        configs.iter().rev().any(|cfg| cfg.configuration.find_common_module(needle).is_some())
+    }
+
+    /// Is `mdo_name` a metadata object of `mdo_type` in any visible
+    /// configuration? Same reverse-iteration rule as
+    /// [`Self::module_visible_in_configs`].
+    fn mdo_visible_in_configs(
+        configs: &[VisibleConfig],
+        mdo_type: bsl_metadata::MdoType,
+        mdo_name: &Name,
+    ) -> bool {
+        let needle = mdo_name.as_str();
+        configs
+            .iter()
+            .rev()
+            .any(|cfg| cfg.configuration.find_metadata_object(mdo_type, needle).is_some())
     }
 
     /// Add an expression scope to the resolver.
@@ -226,7 +261,7 @@ impl Resolver {
     ///     _ => {}
     /// }
     /// ```
-    pub fn resolve_path(&self, db: &dyn DefDatabase, path: &QualifiedName) -> PathResolution {
+    pub fn resolve_path(&self, db: &dyn ConfigsDatabase, path: &QualifiedName) -> PathResolution {
         let segments = path.segments();
 
         match segments.len() {
@@ -274,7 +309,7 @@ impl Resolver {
     /// cross-module resolution.
     fn resolve_two_level(
         &self,
-        db: &dyn DefDatabase,
+        db: &dyn ConfigsDatabase,
         module_name: &Name,
         method_name: &Name,
     ) -> PathResolution {
@@ -294,25 +329,31 @@ impl Resolver {
 
     /// Resolve cross-module call: CommonModule.Method
     ///
-    /// Uses module_index for fast module lookup (no parsing), then loads
-    /// symbol_tree only for the target module.
+    /// Uses metadata (visible configurations) to constrain the lookup and
+    /// `module_index` for fast file resolution without parsing.
     ///
     /// # Algorithm
     ///
-    /// 1. Get current module's source root via Salsa queries
-    /// 2. Get module_index (built from file paths, no parsing)
-    /// 3. Resolve module_name → FileId via module_index
-    /// 4. Load symbol_tree for that single file
-    /// 5. Search for method in the symbol_tree
+    /// 1. Query `db.configurations(file_id)` for all visible configs
+    ///    (main + registered CFE extensions)
+    /// 2. Iterate configs **in reverse** (extensions first → main last)
+    ///    — CFE union-wins-extension semantics: extensions override main
+    /// 3. Skip configs that do not declare `module_name`
+    /// 4. Resolve the file via the path-based `module_index`
+    /// 5. Load symbol_tree and check method export flag
+    ///
+    /// Tests and early workspaces have no configurations registered yet;
+    /// in that case (empty `configurations()`), the resolver falls back to
+    /// pure `module_index` path-based lookup to preserve prior behaviour.
     ///
     /// # Performance
     ///
-    /// - **Module lookup:** O(1) via module_index (hash lookup)
-    /// - **Method lookup:** O(1) via symbol_tree (parses only 1 file)
-    /// - **Total:** ~10-50ms for first call, <1ms cached
+    /// - **Metadata check:** O(K·logM) where K = #configs, M = #modules per config
+    /// - **File lookup:** O(1) via `module_index`
+    /// - **Method lookup:** O(1) via `symbol_tree`
     fn resolve_cross_module(
         &self,
-        db: &dyn DefDatabase,
+        db: &dyn ConfigsDatabase,
         module_name: &Name,
         method_name: &Name,
     ) -> PathResolution {
@@ -335,6 +376,26 @@ impl Resolver {
         let file_id = module_id.file_id;
         let file_source_root_input = db.file_source_root_input(file_id);
         let source_root_id = file_source_root_input.source_root_id(db);
+
+        // Enforce visibility against the registered configurations, if any.
+        // Extensions are iterated first (reverse of the registration order)
+        // so a module declared in both main and an extension resolves to
+        // the extension's declaration — the union-wins-extension rule.
+        let configurations = db.configurations(file_id);
+        if !configurations.is_empty()
+            && !Self::module_visible_in_configs(&configurations, module_name)
+        {
+            tracing::debug!(
+                "resolve_cross_module: module '{}' is not declared in any visible \
+                 configuration (main + {} extensions); skipping module_index",
+                module_name,
+                configurations.iter().filter(|c| c.name.is_some()).count()
+            );
+            return PathResolution::Unresolved(QualifiedName::from_segments([
+                module_name.clone(),
+                method_name.clone(),
+            ]));
+        }
 
         // Get module_index (built from file paths, no parsing required)
         let module_index = db.module_index(source_root_id);
@@ -426,7 +487,7 @@ impl Resolver {
     /// - Total: ~1-5ms for first call, <10μs cached
     fn resolve_three_level(
         &self,
-        db: &dyn DefDatabase,
+        db: &dyn ConfigsDatabase,
         mdo_type_plural: &Name,
         mdo_name: &Name,
         method_name: &Name,
@@ -479,8 +540,28 @@ impl Resolver {
             }
         };
 
-        // Step 4: Resolve manager module via ModuleIndex
+        // Step 4: Verify the metadata object is declared in at least one
+        // visible configuration (main + CFE extensions, extension wins).
+        // When no configuration is registered (tests), skip the check so
+        // fixture-only workspaces keep resolving path-based manager modules.
         let current_file_id = current_module_id.file_id;
+        let configurations = db.configurations(current_file_id);
+        if !configurations.is_empty()
+            && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
+        {
+            tracing::debug!(
+                "resolve_three_level: {:?} '{}' not declared in any visible configuration",
+                mdo_type,
+                mdo_name
+            );
+            return PathResolution::Unresolved(QualifiedName::from_segments([
+                mdo_type_plural.clone(),
+                mdo_name.clone(),
+                method_name.clone(),
+            ]));
+        }
+
+        // Step 5: Resolve manager module via ModuleIndex
         let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
         let module_index = db.module_index(source_root_id);
 
@@ -690,6 +771,44 @@ mod tests {
 
         let with_all = Resolver::with_builtins_and_workspace(module_id);
         assert!(with_all.has_builtins());
+    }
+
+    // Build an in-memory `VisibleConfig` with the given common-module names.
+    // No file I/O — only the metadata a `Resolver` needs to check visibility.
+    fn make_visible_config(ext_name: Option<&str>, module_names: &[&str]) -> VisibleConfig {
+        let mut configuration = bsl_metadata::Configuration::new("test");
+        for name in module_names {
+            let module = bsl_metadata::CommonModule::builder().name(*name).build();
+            configuration.add_common_module(module);
+        }
+        VisibleConfig {
+            name: ext_name.map(|s| s.to_string()),
+            configuration: std::sync::Arc::new(configuration),
+        }
+    }
+
+    #[test]
+    fn test_module_visible_in_configs_matches_extension_and_main() {
+        let main = make_visible_config(None, &["ОбщегоНазначения"]);
+        let ext = make_visible_config(Some("BMS_RU_UT"), &["ТестовыйМодуль"]);
+        let configs = vec![main, ext];
+
+        // Declared only in main
+        assert!(Resolver::module_visible_in_configs(&configs, &Name::new("ОбщегоНазначения")));
+        // Declared only in extension
+        assert!(Resolver::module_visible_in_configs(&configs, &Name::new("ТестовыйМодуль")));
+        // Case-insensitive — mirrors `find_common_module` contract
+        assert!(Resolver::module_visible_in_configs(&configs, &Name::new("общегоназначения")));
+        // Unknown anywhere
+        assert!(!Resolver::module_visible_in_configs(&configs, &Name::new("НетТакогоМодуля")));
+    }
+
+    #[test]
+    fn test_module_visible_empty_configs_returns_false() {
+        // With no registered configs the helper must not falsely accept names;
+        // the resolver's fallback to `module_index` gates that distinction.
+        let empty: Vec<VisibleConfig> = Vec::new();
+        assert!(!Resolver::module_visible_in_configs(&empty, &Name::new("Anything")));
     }
 
     #[test]

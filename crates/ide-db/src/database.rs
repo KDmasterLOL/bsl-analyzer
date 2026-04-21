@@ -312,7 +312,7 @@ impl DefDatabase for RootDatabaseImpl {
 }
 
 #[salsa::db]
-impl hir::TypeDatabase for RootDatabaseImpl {
+impl hir::ConfigsDatabase for RootDatabaseImpl {
     fn configurations(&self, file_id: FileId) -> Vec<hir::VisibleConfig> {
         RootDatabase::get_all_configurations(self, file_id)
             .into_iter()
