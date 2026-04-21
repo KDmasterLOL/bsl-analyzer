@@ -5,6 +5,8 @@
 
 pub mod doc_types;
 
+use std::sync::Arc;
+
 use bsl_metadata::MdoType;
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;
@@ -13,7 +15,7 @@ use syntax::SyntaxKind;
 ///
 /// Represents the type of a BSL value or expression.
 /// For Iteration 8, we support basic literal types and Unknown for everything else.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum Ty {
     /// Unknown type (default for complex expressions).
     #[default]
@@ -95,6 +97,26 @@ pub enum Ty {
     /// The name is stored as-is from the constructor (e.g., `Новый Запрос` → "Запрос").
     /// Platform data lookup is case-insensitive and bilingual.
     PlatformObject(crate::Name),
+
+    /// Union of types — `Ty::Union([A, B, …])`.
+    ///
+    /// Sources:
+    /// - XML `AttributeType::Composite { types }` (describing `ОписаниеТипов`
+    ///   attributes that can hold one of several types).
+    /// - JSDoc `// Возвращаемое значение: Число, Строка` (M3 Task 4 parser).
+    /// - Future narrowing results (M4).
+    ///
+    /// **Constructed only via [`Ty::union`]**: the smart constructor flattens
+    /// nested unions, deduplicates by structural equality, and imposes a
+    /// stable order so `Ty::union([A, B])` compares equal to
+    /// `Ty::union([B, A])`. Bypassing it breaks `PartialEq` commutativity and
+    /// Salsa's cache can then store "equal" unions under two different keys.
+    ///
+    /// Narrowing (`Если ТипЗнч(X) = Тип("Массив")`) is M4; today Unions are
+    /// opaque at inference — `platform_type_name()` returns `None`, and
+    /// `Expr::Field` / `Expr::MethodCall` on a union give `Ty::Unknown` until
+    /// a narrowing step selects a concrete component.
+    Union(Arc<[Ty]>),
 }
 
 /// Metadata object kind.
@@ -112,7 +134,7 @@ pub enum Ty {
 /// - `mdo_ref_prefix` in `hir-def/src/type_ref.rs` if a new `MdoType` prefix is
 ///   needed,
 /// - JSDoc parser in `hir-def/src/ty/doc_types.rs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MetadataKind {
     /// Catalog reference (СправочникСсылка).
     CatalogRef,
@@ -249,6 +271,39 @@ impl Ty {
         kind.manager_type_prefix().map(|_| Ty::ManagerCollection(kind))
     }
 
+    /// Smart-constructor for [`Ty::Union`].
+    ///
+    /// Normalises the input to guarantee `PartialEq` commutativity on unions:
+    ///
+    /// 1. **Flatten** nested unions (`Union([Union([A, B]), C])` → `[A, B, C]`).
+    /// 2. **Sort + dedup** by [`Ord`]. `Ty` derives a lexicographic total
+    ///    order over its variants, so the result is a deterministic,
+    ///    order-independent canonical form — `Ty::union([A, B])` and
+    ///    `Ty::union([B, A])` compare equal under `PartialEq`.
+    /// 3. **Collapse** singletons: `[]` → `Ty::Unknown`, `[x]` → `x`.
+    ///
+    /// `Ty::Unknown` inside a union is preserved — a union that mentions an
+    /// unrecognised component is semantically different from one that doesn't.
+    /// Narrowing (M4) may drop it after evaluating the `ТипЗнч` guard.
+    pub fn union(types: Vec<Ty>) -> Ty {
+        let mut flat: Vec<Ty> = Vec::with_capacity(types.len());
+        for t in types {
+            match t {
+                Ty::Union(inner) => flat.extend(inner.iter().cloned()),
+                other => flat.push(other),
+            }
+        }
+
+        flat.sort();
+        flat.dedup();
+
+        match flat.len() {
+            0 => Ty::Unknown,
+            1 => flat.into_iter().next().unwrap(),
+            _ => Ty::Union(flat.into()),
+        }
+    }
+
     /// Get a human-readable display name for this type.
     pub fn display_name(&self) -> &str {
         match self {
@@ -279,6 +334,11 @@ impl Ty {
             Ty::ObjectManager { .. } => "ObjectManager",
             Ty::Function { .. } => "Function",
             Ty::PlatformObject(name) => name.as_str(),
+            // Coarse label mirrors `MetadataRef` / `ObjectManager`: the
+            // member-by-member rendering lives on `impl fmt::Display` so
+            // callers that need "Число | Строка" go through `to_string()`
+            // while APIs that only need a `&str` tag stay cheap.
+            Ty::Union(_) => "Union",
         }
     }
 
@@ -297,8 +357,35 @@ impl Ty {
             // from surfacing spurious methods before M3 wires the dedicated
             // manager lookup.
             Ty::ManagerCollection(_) | Ty::ObjectManager { .. } => None,
+            // Unions have no single platform type by construction — a
+            // caller that wants methods on `Ty::Union([Number, String])`
+            // must narrow first (M4) or intersect method tables explicitly.
+            Ty::Union(_) => None,
             Ty::PlatformObject(name) => Some(name.as_str()),
             _ => Some(self.display_name()),
+        }
+    }
+}
+
+/// Human-readable type rendering.
+///
+/// Simple variants delegate to [`Ty::display_name`]. [`Ty::Union`] is the only
+/// variant whose rendering depends on its payload — the smart constructor
+/// imposes a stable order, so the output is deterministic.
+impl std::fmt::Display for Ty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ty::Union(types) => {
+                let mut it = types.iter();
+                if let Some(first) = it.next() {
+                    write!(f, "{first}")?;
+                    for t in it {
+                        write!(f, " | {t}")?;
+                    }
+                }
+                Ok(())
+            }
+            other => f.write_str(other.display_name()),
         }
     }
 }
@@ -465,5 +552,77 @@ mod tests {
         // Identical → equal.
         let d = Ty::ObjectManager { kind: MdoType::Document, name: crate::Name::new("ПКО") };
         assert_eq!(a, d);
+    }
+
+    #[test]
+    fn ty_union_single_collapses() {
+        // A one-element union is never built: the smart constructor unwraps
+        // `[x]` to `x`. Guarantees `Ty::union(vec![Ty::Number])` compares
+        // equal to `Ty::Number` itself.
+        assert_eq!(Ty::union(vec![Ty::Number]), Ty::Number);
+    }
+
+    #[test]
+    fn ty_union_empty_collapses_to_unknown() {
+        // Empty union has no meaningful type — Unknown is the honest answer.
+        assert_eq!(Ty::union(vec![]), Ty::Unknown);
+    }
+
+    #[test]
+    fn ty_union_flatten_nested() {
+        // Nested unions flatten so downstream consumers never have to recurse.
+        let inner = Ty::union(vec![Ty::Number, Ty::String]);
+        let outer = Ty::union(vec![inner, Ty::Boolean]);
+        match outer {
+            Ty::Union(ref parts) => assert_eq!(parts.len(), 3, "nested unions must flatten"),
+            _ => panic!("expected Ty::Union, got {outer:?}"),
+        }
+    }
+
+    #[test]
+    fn ty_union_dedup() {
+        // Duplicate components collapse so the same syntactic source doesn't
+        // blow up the union size.
+        let u = Ty::union(vec![Ty::Number, Ty::String, Ty::Number]);
+        match u {
+            Ty::Union(ref parts) => assert_eq!(parts.len(), 2, "dedup must collapse Number"),
+            _ => panic!("expected Ty::Union, got {u:?}"),
+        }
+    }
+
+    #[test]
+    fn ty_union_equality_order_independent() {
+        // PartialEq commutativity is the whole point of the smart constructor —
+        // Salsa keys unions by `Eq`, so `[A, B]` and `[B, A]` must fold.
+        let a = Ty::union(vec![Ty::Number, Ty::String]);
+        let b = Ty::union(vec![Ty::String, Ty::Number]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn ty_union_display_sorted() {
+        // `impl Display` renders union members in the smart-constructor
+        // order (deterministic via the `Debug`-keyed BTreeMap). Test pins the
+        // shape so hover / completion output is stable across runs.
+        let u = Ty::union(vec![Ty::String, Ty::Number]);
+        let rendered = u.to_string();
+        assert!(rendered.contains(" | "), "union render must join with ` | `, got {rendered:?}");
+        // Simple variants appear verbatim.
+        assert!(rendered.contains("Number"));
+        assert!(rendered.contains("String"));
+    }
+
+    #[test]
+    fn ty_union_display_name_is_coarse_label() {
+        // `display_name()` stays as a cheap `&str` tag; nuanced rendering is
+        // `Display`'s job. Matches the MetadataRef / ObjectManager pattern.
+        assert_eq!(Ty::union(vec![Ty::Number, Ty::String]).display_name(), "Union");
+    }
+
+    #[test]
+    fn ty_union_not_platform_object() {
+        // No single platform type corresponds to a union — method lookup must
+        // narrow first before consulting `bsl-platform`.
+        assert_eq!(Ty::union(vec![Ty::Number, Ty::String]).platform_type_name(), None);
     }
 }

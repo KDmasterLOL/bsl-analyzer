@@ -57,10 +57,21 @@ pub enum TypeRef {
     /// `ЛюбаяСсылка` — matches XML `cfg:AnyRef` without a concrete name.
     AnyRef,
 
-    /// Source expressed a type that cannot yet be represented syntactically
-    /// (notably XML `Composite` until union types land in M3). Preserved as a
-    /// marker so downstream diagnostics can tell "no type stated" from
-    /// "stated but unsupported".
+    /// Union of types — from XML `AttributeType::Composite` and JSDoc
+    /// `"Число, Строка"` (M3 Task 4 parser).
+    ///
+    /// `TyLoweringContext::lower_type_ref` feeds each component through the
+    /// same lowering pipeline and then hands the results to [`crate::Ty::union`],
+    /// which imposes the flatten/dedup/sort invariant. The caller must not
+    /// pre-normalise — the smart constructor owns the shape.
+    ///
+    /// An empty `Vec` is legal: downstream it collapses to `Ty::Unknown`,
+    /// matching the old "something stated but empty" behaviour.
+    Union(Vec<TypeRef>),
+
+    /// Source expressed a type that cannot yet be represented syntactically.
+    /// Preserved as a marker so downstream diagnostics can tell "no type
+    /// stated" from "stated but unsupported" (e.g. unresolved XML references).
     Unknown,
 }
 
@@ -124,8 +135,10 @@ impl TypeRef {
     /// limits the bridge to synactic rewriting; the `Ty` classification is
     /// `TyLoweringContext`'s responsibility.
     ///
-    /// `Composite` and `Unknown` both map to [`TypeRef::Unknown`] until
-    /// `Ty::Union` lands in M3 — see `docs/architecture/TYPE_SYSTEM.md`.
+    /// `Unknown` maps to [`TypeRef::Unknown`]; `Composite` builds a
+    /// [`TypeRef::Union`] whose members are each recursively lowered by the
+    /// same bridge, so a composite of composites flattens at the `Ty` layer
+    /// when [`crate::Ty::union`] runs.
     pub fn from_attribute_type(attr: &AttributeType) -> Self {
         match attr {
             AttributeType::String { .. } => TypeRef::Builtin(BuiltinTypeRef::String),
@@ -159,7 +172,11 @@ impl TypeRef {
                 Name::new("ОпределяемыйТип"),
                 Name::new(name),
             ])),
-            AttributeType::Composite { .. } | AttributeType::Unknown => TypeRef::Unknown,
+            AttributeType::Composite { types } => {
+                let members: Vec<TypeRef> = types.iter().map(Self::from_attribute_type).collect();
+                TypeRef::Union(members)
+            }
+            AttributeType::Unknown => TypeRef::Unknown,
         }
     }
 }
@@ -321,14 +338,49 @@ mod tests {
     }
 
     #[test]
-    fn typeref_from_attribute_composite_lowers_to_unknown_in_m2() {
+    fn typeref_from_attribute_composite_becomes_union() {
+        // M3 wires `AttributeType::Composite` into `TypeRef::Union` so XML
+        // `ОписаниеТипов` preserves every declared member type through
+        // lowering. The bridge stays syntactic — member order reflects the
+        // XML-parsed order; `TyLoweringContext` + `Ty::union` impose the
+        // final flatten/dedup/sort.
         let attr = AttributeType::Composite {
             types: vec![AttributeType::Boolean, AttributeType::String { length: None }],
         };
-        // M2 scope explicitly defers Ty::Union to M3 — the bridge preserves
-        // "something was stated but we can't model it yet" via Unknown. When
-        // Union lands, flip this test and drop the variant fallback.
-        assert_eq!(TypeRef::from_attribute_type(&attr), TypeRef::Unknown);
+        assert_eq!(
+            TypeRef::from_attribute_type(&attr),
+            TypeRef::Union(vec![
+                TypeRef::Builtin(BuiltinTypeRef::Boolean),
+                TypeRef::Builtin(BuiltinTypeRef::String),
+            ])
+        );
+    }
+
+    #[test]
+    fn typeref_from_attribute_composite_recurses_on_members() {
+        // Every member goes through the same bridge — a composite whose
+        // members are themselves refs must come back with the right prefixes
+        // so downstream lowering can pick a `MetadataKind` per branch.
+        let attr = AttributeType::Composite {
+            types: vec![
+                AttributeType::Ref { mdo_type: MdoType::Catalog, name: "Товары".to_string() },
+                AttributeType::Number { precision: 10, scale: 0 },
+            ],
+        };
+        match TypeRef::from_attribute_type(&attr) {
+            TypeRef::Union(members) => {
+                assert_eq!(members.len(), 2);
+                match &members[0] {
+                    TypeRef::Name(q) => {
+                        assert_eq!(q.first().as_str(), "CatalogRef");
+                        assert_eq!(q.last().as_str(), "Товары");
+                    }
+                    other => panic!("expected TypeRef::Name for catalog ref, got {other:?}"),
+                }
+                assert_eq!(members[1], TypeRef::Builtin(BuiltinTypeRef::Number));
+            }
+            other => panic!("expected TypeRef::Union, got {other:?}"),
+        }
     }
 
     #[test]

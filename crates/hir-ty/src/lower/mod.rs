@@ -55,6 +55,10 @@ impl TyLoweringContext {
     ///   dropped in M2 — `Ty` does not carry them yet).
     /// - `Name(qname)` → [`Self::lower_qualified`] for 2+ segments, else
     ///   [`Self::lower_bare_name`].
+    /// - `Union(parts)` → [`Ty::union`] after recursive lowering of each
+    ///   component. The smart constructor flattens nested unions (including
+    ///   those emerging from XML `Composite of Composite`), deduplicates,
+    ///   and collapses singletons.
     /// - `AnyRef` / `Unknown` → `Ty::Unknown` (deliberately: we have no
     ///   `Ty::AnyRef` variant yet, and narrowing it to a concrete kind would
     ///   lie to callers).
@@ -68,6 +72,10 @@ impl TyLoweringContext {
                 1 => self.lower_bare_name(qname.first()),
                 _ => self.lower_qualified(qname),
             },
+            TypeRef::Union(parts) => {
+                let lowered: Vec<Ty> = parts.iter().map(|t| self.lower_type_ref(t)).collect();
+                Ty::union(lowered)
+            }
             TypeRef::AnyRef | TypeRef::Unknown => Ty::Unknown,
         }
     }
@@ -375,6 +383,47 @@ mod tests {
             Name::new("СоздатьДокумент"),
         ]);
         assert_eq!(ctx().lower_qualified(&three), Ty::Unknown);
+    }
+
+    #[test]
+    fn ty_lowering_union_flows_through_ty_union_constructor() {
+        // Each member lowers through the same `lower_type_ref`, then the
+        // smart constructor normalises the result. Sibling primitives stay
+        // distinct; `Ty::union` imposes a stable order so two syntactically
+        // different composites with the same member set compare equal.
+        let tr = TypeRef::Union(vec![
+            TypeRef::Builtin(BuiltinTypeRef::Number),
+            TypeRef::Builtin(BuiltinTypeRef::String),
+        ]);
+        let ty = ctx().lower_type_ref(&tr);
+        match ty {
+            Ty::Union(ref parts) => assert_eq!(parts.len(), 2),
+            _ => panic!("expected Ty::Union, got {ty:?}"),
+        }
+
+        // Flipping the order reaches the same semantic `Ty`.
+        let flipped = TypeRef::Union(vec![
+            TypeRef::Builtin(BuiltinTypeRef::String),
+            TypeRef::Builtin(BuiltinTypeRef::Number),
+        ]);
+        assert_eq!(ctx().lower_type_ref(&flipped), ty);
+    }
+
+    #[test]
+    fn ty_lowering_union_singleton_collapses() {
+        // `TypeRef::Union([x])` goes through `Ty::union([lowered_x])` which
+        // unwraps to `lowered_x` — callers never have to pattern-match on a
+        // one-element union.
+        let tr = TypeRef::Union(vec![TypeRef::Builtin(BuiltinTypeRef::Number)]);
+        assert_eq!(ctx().lower_type_ref(&tr), Ty::Number);
+    }
+
+    #[test]
+    fn ty_lowering_union_empty_becomes_unknown() {
+        // Empty union has no type information — `Ty::union([])` returns
+        // `Ty::Unknown`, keeping the "stated but empty" case distinguishable
+        // from a truly absent type.
+        assert_eq!(ctx().lower_type_ref(&TypeRef::Union(vec![])), Ty::Unknown);
     }
 
     #[test]

@@ -9,7 +9,12 @@ use std::fmt;
 /// Interned name for efficient storage and comparison.
 ///
 /// Uses SmolStr which stores strings ≤22 bytes inline, longer strings in Arc.
-#[derive(Clone, PartialEq, Eq, Hash)]
+///
+/// `Ord` is lexicographic (case-sensitive). BSL is case-insensitive at
+/// semantic level, but identity-as-a-key inside Salsa and deterministic
+/// sort in `Ty::union` want a stable total order — [`Name::eq_ignore_case`]
+/// is the tool for language-level comparisons.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Name(SmolStr);
 
 impl Name {
