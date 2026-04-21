@@ -39,6 +39,7 @@ use vfs::FileId;
 
 use crate::builtin;
 use crate::db::HirDatabase;
+use crate::lower::TyLoweringContext;
 use crate::method_resolution;
 
 /// Result of type inference for a file/module.
@@ -389,18 +390,14 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
-                // Infer type from constructor
+                // Lower the constructor name through the shared TypeRef →
+                // Ty adapter. The cascade (builtin → MDO plural → platform
+                // object fallback) moved into `lower_bare_name`, so every
+                // syntactic source of type info (`Новый X`, `Тип("…")`,
+                // JSDoc) now takes the same path — editing the fallback
+                // rules in one place is enough.
                 match type_name {
-                    Some(name) => {
-                        let ty = Ty::from_type_name(name.as_str());
-                        if ty.is_unknown() {
-                            // Not a basic type — treat as platform object
-                            // (e.g., Запрос, HTTPЗапрос, ТекстовыйДокумент)
-                            Ty::PlatformObject(name.clone())
-                        } else {
-                            ty
-                        }
-                    }
+                    Some(name) => TyLoweringContext::new().lower_bare_name(name),
                     None => Ty::Unknown,
                 }
             }
