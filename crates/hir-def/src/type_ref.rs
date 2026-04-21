@@ -140,10 +140,15 @@ impl TypeRef {
                 None => TypeRef::Unknown,
             },
             AttributeType::AnyRef => TypeRef::AnyRef,
-            AttributeType::AnyObjectRef { mdo_type } => match mdo_ref_prefix(*mdo_type) {
-                Some(prefix) => TypeRef::Name(QualifiedName::from_segments([Name::new(prefix)])),
-                None => TypeRef::Unknown,
-            },
+            // `AnyObjectRef { mdo_type }` means "any ref of this kind" without
+            // a concrete object name — semantically narrower than `AnyRef`
+            // but M2 has no `Ty::AnyOf(kind)` variant yet, so we collapse it
+            // into `TypeRef::AnyRef`. This deliberately avoids emitting a
+            // 1-segment `TypeRef::Name([prefix])`, which downstream lowering
+            // would misread as a bare platform object and turn into
+            // `Ty::PlatformObject("CatalogRef")`. Promote to a dedicated
+            // kind-scoped variant when `Ty` gains union / any-of support.
+            AttributeType::AnyObjectRef { .. } => TypeRef::AnyRef,
             AttributeType::Uuid => {
                 TypeRef::Name(QualifiedName::from_segments([Name::new("УникальныйИдентификатор")]))
             }
@@ -287,15 +292,18 @@ mod tests {
     fn typeref_from_attribute_any_ref_and_any_object_ref() {
         assert_eq!(TypeRef::from_attribute_type(&AttributeType::AnyRef), TypeRef::AnyRef);
 
-        match TypeRef::from_attribute_type(&AttributeType::AnyObjectRef {
-            mdo_type: MdoType::Document,
-        }) {
-            TypeRef::Name(qname) => {
-                assert_eq!(qname.len(), 1);
-                assert_eq!(qname.first().as_str(), "DocumentRef");
-            }
-            other => panic!("expected single-segment TypeRef::Name, got {other:?}"),
-        }
+        // `AnyObjectRef` loses the `mdo_type` discriminator in M2 because
+        // there is no `Ty::AnyOf(kind)` — we map to `TypeRef::AnyRef` to
+        // avoid producing a bogus 1-segment `TypeRef::Name(["DocumentRef"])`
+        // that the lowering fallback would turn into
+        // `Ty::PlatformObject("DocumentRef")`. When Ty grows union support,
+        // flip this test to expect the kind-scoped variant.
+        assert_eq!(
+            TypeRef::from_attribute_type(&AttributeType::AnyObjectRef {
+                mdo_type: MdoType::Document,
+            }),
+            TypeRef::AnyRef
+        );
     }
 
     #[test]
