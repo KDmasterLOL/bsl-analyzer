@@ -693,6 +693,27 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
+        // Method-call shape: `receiver.method(...)` lowers to
+        // `Expr::Call { callee: Expr::Field { base, field } }` because
+        // HIR never emits the dedicated `Expr::MethodCall` variant today
+        // (dead-code branch, kept for future use). Route through
+        // `method_lookup::lookup_method` with the receiver's inferred
+        // type — otherwise `infer_expr(callee)` would go to the
+        // `Expr::Field` branch, fail `lookup_field` (methods aren't
+        // fields), and hand `infer_call` a `Ty::Unknown` callee, which
+        // kills fluent chains like `Запрос.Выполнить().Выбрать()`.
+        if let Expr::Field { base, field } = callee_expr {
+            let base_id = ExprId::from_idx(*base);
+            let method_name = field.clone();
+            let receiver_ty = self.infer_expr(base_id);
+            for arg in args {
+                self.infer_expr(*arg);
+            }
+            return crate::method_lookup::lookup_method(&receiver_ty, &method_name)
+                .map(|info| info.return_ty)
+                .unwrap_or(Ty::Unknown);
+        }
+
         // Infer callee type for non-qualified calls
         let callee_ty = self.infer_expr(callee);
 
