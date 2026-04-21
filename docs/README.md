@@ -36,6 +36,7 @@
 
 - `architecture/ARCHITECTURE.md` — обзор слоёв, крейтов и основных пайплайнов
 - `architecture/DATAFLOW.md` — устройство dataflow-подсистемы и текущий статус миграции диагностик
+- `architecture/MERGE_AUDIT_ASSISTANT.md` — proposal по умному merge-аудиту обновлений и сравнению объектов 1С
 
 ## Архитектурные заметки
 

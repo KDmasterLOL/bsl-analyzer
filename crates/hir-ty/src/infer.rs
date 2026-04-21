@@ -165,14 +165,6 @@ impl<'db> InferenceContext<'db> {
         self.result
     }
 
-    /// Get source root ID for the current file.
-    ///
-    /// Used for workspace symbol resolution (Salsa-cached).
-    fn get_source_root_id(&self) -> base_db::SourceRootId {
-        let file_source_root_input = self.db.file_source_root_input(self.file_id);
-        file_source_root_input.source_root_id(self.db)
-    }
-
     /// Get resolver for the current module.
     ///
     /// Includes `Scope::Builtins` so that platform globals (`Сообщить`,
@@ -654,17 +646,16 @@ impl<'db> InferenceContext<'db> {
             self.infer_expr(*arg);
         }
 
-        // Get source root and resolver
-        let source_root_id = self.get_source_root_id();
         let resolver = self.get_resolver();
 
-        // Resolve the qualified call
+        // Resolve the qualified call. The Resolver reads `db.configurations()`
+        // so `db.infer` transitively depends on the workspace config set,
+        // and `set_all_config_paths` invalidates inference through Salsa.
         match method_resolution::resolve_qualified_call(
             self.db,
             module_name,
             method_name,
             &resolver,
-            source_root_id,
         ) {
             Ok(resolution) => {
                 // Method found!

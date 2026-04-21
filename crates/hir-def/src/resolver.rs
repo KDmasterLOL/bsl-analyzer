@@ -327,138 +327,149 @@ impl Resolver {
         ]))
     }
 
-    /// Resolve cross-module call: CommonModule.Method
+    /// Method-oriented cross-module resolution: `CommonModule.Method`.
     ///
-    /// Uses metadata (visible configurations) to constrain the lookup and
-    /// `module_index` for fast file resolution without parsing.
+    /// Shared implementation for both the Definition-layer (`resolve_path`,
+    /// which collapses the outcome into [`PathResolution`]) and the
+    /// type-inference layer (which needs the `is_export` flag and the
+    /// failure reason to emit precise diagnostics).
     ///
     /// # Algorithm
     ///
-    /// 1. Query `db.configurations(file_id)` for all visible configs
-    ///    (main + registered CFE extensions)
-    /// 2. Iterate configs **in reverse** (extensions first → main last)
-    ///    — CFE union-wins-extension semantics: extensions override main
-    /// 3. Skip configs that do not declare `module_name`
-    /// 4. Resolve the file via the path-based `module_index`
-    /// 5. Load symbol_tree and check method export flag
+    /// 1. Require workspace scope — without it this resolver is module-local.
+    /// 2. Consult `db.configurations(file_id)`; if any are registered the
+    ///    module name must be declared in at least one (CFE union).
+    /// 3. Resolve the module file via the path-based `module_index`.
+    /// 4. Look up the method in `symbol_tree` and return both id and export
+    ///    flag — non-exported methods are still returned so callers can
+    ///    distinguish "not found" from "found but not exported".
     ///
-    /// Tests and early workspaces have no configurations registered yet;
-    /// in that case (empty `configurations()`), the resolver falls back to
-    /// pure `module_index` path-based lookup to preserve prior behaviour.
+    /// Tests and early workspaces have no configurations registered yet; in
+    /// that case (empty `configurations()`) the resolver falls back to pure
+    /// `module_index` lookup, preserving prior behaviour.
     ///
     /// # Performance
     ///
     /// - **Metadata check:** O(K·logM) where K = #configs, M = #modules per config
     /// - **File lookup:** O(1) via `module_index`
     /// - **Method lookup:** O(1) via `symbol_tree`
+    pub fn resolve_qualified_method(
+        &self,
+        db: &dyn ConfigsDatabase,
+        module_name: &Name,
+        method_name: &Name,
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+        let _span =
+            tracing::info_span!("resolve_qualified_method", %module_name, %method_name).entered();
+
+        // Cross-module resolution requires workspace scope.
+        if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
+            tracing::warn!("resolve_qualified_method called without workspace scope; refusing");
+            return Err(QualifiedMethodError::NotFound);
+        }
+
+        let module_id = self.module_id().ok_or_else(|| {
+            tracing::warn!("resolve_qualified_method called without module scope");
+            QualifiedMethodError::NotFound
+        })?;
+
+        let file_id = module_id.file_id;
+
+        // Visibility gate: any registered configuration must declare
+        // `module_name`. Extensions iterate first (reverse registration order)
+        // so a module declared in both main and an extension resolves to the
+        // extension's declaration — the union-wins-extension rule.
+        let configurations = db.configurations(file_id);
+        if !configurations.is_empty()
+            && !Self::module_visible_in_configs(&configurations, module_name)
+        {
+            tracing::debug!(
+                "resolve_qualified_method: module '{}' is not declared in any visible \
+                 configuration (main + {} extensions); refusing",
+                module_name,
+                configurations.iter().filter(|c| c.name.is_some()).count()
+            );
+            return Err(QualifiedMethodError::NotVisibleInConfigs);
+        }
+
+        // Path-based module lookup (O(1) — no BSL parsing).
+        let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
+        let module_index = db.module_index(source_root_id);
+
+        let target_file_id = module_index.resolve_common_module(module_name).ok_or_else(|| {
+            tracing::debug!(
+                "resolve_qualified_method: module '{}' NOT found in module_index",
+                module_name
+            );
+            QualifiedMethodError::NotFound
+        })?;
+
+        tracing::debug!(
+            "resolve_qualified_method: module '{}' resolved to FileId({})",
+            module_name,
+            target_file_id.index()
+        );
+
+        // Method lookup in the resolved module.
+        let target_module_id = crate::ModuleId::new(target_file_id);
+        let symbol_tree = db.symbol_tree(target_module_id);
+        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
+            tracing::debug!(
+                "resolve_qualified_method: module '{}' found but method '{}' NOT found",
+                module_name,
+                method_name
+            );
+            QualifiedMethodError::NotFound
+        })?;
+
+        tracing::debug!(
+            "resolve_qualified_method: SUCCESS - '{}.{}' (export = {})",
+            module_name,
+            method_name,
+            method_symbol.is_export
+        );
+        Ok(QualifiedMethodResolution {
+            method_id: method_symbol.id,
+            is_export: method_symbol.is_export,
+        })
+    }
+
+    /// Adapter from the method-oriented resolver to [`PathResolution`].
+    ///
+    /// # Navigation vs inference divergence
+    ///
+    /// `PathResolution` is consumed by goto / hover / completion, which
+    /// must not surface callees that are unreachable from the caller's
+    /// module — so non-exported methods collapse to `Unresolved`. Type
+    /// inference calls [`Self::resolve_qualified_method`] directly because
+    /// it *does* need to distinguish "not exported" from "not found" to
+    /// emit the richer `MethodNotExport` diagnostic. This asymmetry is
+    /// intentional and covered by:
+    ///
+    /// - `non_exported_method_reports_method_not_export`
+    ///   (`crates/ide/tests/resolve_qualified_call.rs`) — inference path.
+    /// - Definition-layer goto returns `None` via the
+    ///   `PathResolution::Unresolved` arm in `hir::Semantics`.
+    ///
+    /// If a future consumer of `resolve_path` needs to distinguish the
+    /// two, extend `PathResolution` with a `NotExported(MethodId)` variant
+    /// rather than duplicating resolution logic.
     fn resolve_cross_module(
         &self,
         db: &dyn ConfigsDatabase,
         module_name: &Name,
         method_name: &Name,
     ) -> PathResolution {
-        let _span =
-            tracing::info_span!("resolve_cross_module", %module_name, %method_name).entered();
-
-        // Get current module to determine source root
-        let module_id = match self.module_id() {
-            Some(id) => id,
-            None => {
-                tracing::warn!("resolve_cross_module called without module scope");
-                return PathResolution::Unresolved(QualifiedName::from_segments([
-                    module_name.clone(),
-                    method_name.clone(),
-                ]));
-            }
-        };
-
-        // Get source root for the current file
-        let file_id = module_id.file_id;
-        let file_source_root_input = db.file_source_root_input(file_id);
-        let source_root_id = file_source_root_input.source_root_id(db);
-
-        // Enforce visibility against the registered configurations, if any.
-        // Extensions are iterated first (reverse of the registration order)
-        // so a module declared in both main and an extension resolves to
-        // the extension's declaration — the union-wins-extension rule.
-        let configurations = db.configurations(file_id);
-        if !configurations.is_empty()
-            && !Self::module_visible_in_configs(&configurations, module_name)
-        {
-            tracing::debug!(
-                "resolve_cross_module: module '{}' is not declared in any visible \
-                 configuration (main + {} extensions); skipping module_index",
-                module_name,
-                configurations.iter().filter(|c| c.name.is_some()).count()
-            );
-            return PathResolution::Unresolved(QualifiedName::from_segments([
+        let unresolved = || {
+            PathResolution::Unresolved(QualifiedName::from_segments([
                 module_name.clone(),
                 method_name.clone(),
-            ]));
-        }
-
-        // Get module_index (built from file paths, no parsing required)
-        let module_index = db.module_index(source_root_id);
-
-        // Resolve module name to FileId via module_index
-        let target_file_id = match module_index.resolve_common_module(module_name) {
-            Some(id) => id,
-            None => {
-                tracing::debug!(
-                    "resolve_cross_module: module '{}' NOT found in module_index",
-                    module_name
-                );
-                return PathResolution::Unresolved(QualifiedName::from_segments([
-                    module_name.clone(),
-                    method_name.clone(),
-                ]));
-            }
+            ]))
         };
-
-        tracing::debug!(
-            "resolve_cross_module: module '{}' resolved to FileId({})",
-            module_name,
-            target_file_id.index()
-        );
-
-        // Get symbol_tree for the target module (parses only this one file)
-        let target_module_id = crate::ModuleId::new(target_file_id);
-        let symbol_tree = db.symbol_tree(target_module_id);
-
-        // Search for method in symbol_tree (case-insensitive)
-        if let Some(method_symbol) = symbol_tree.find_method(method_name) {
-            // Check if method is exported
-            if !method_symbol.is_export {
-                tracing::debug!(
-                    "resolve_cross_module: method '{}' found in '{}' but NOT exported",
-                    method_name,
-                    module_name
-                );
-                return PathResolution::Unresolved(QualifiedName::from_segments([
-                    module_name.clone(),
-                    method_name.clone(),
-                ]));
-            }
-
-            tracing::debug!(
-                "resolve_cross_module: SUCCESS - found exported method '{}' in module '{}'",
-                method_name,
-                module_name
-            );
-            return PathResolution::Method(method_symbol.id);
+        match self.resolve_qualified_method(db, module_name, method_name) {
+            Ok(r) if r.is_export => PathResolution::Method(r.method_id),
+            Ok(_) | Err(_) => unresolved(),
         }
-
-        tracing::debug!(
-            "resolve_cross_module: module '{}' found but method '{}' NOT found",
-            module_name,
-            method_name
-        );
-
-        // Method not found
-        PathResolution::Unresolved(QualifiedName::from_segments([
-            module_name.clone(),
-            method_name.clone(),
-        ]))
     }
 
     /// Resolve three-level path: Documents.PKO.Create
@@ -647,6 +658,34 @@ pub enum Resolution {
 
     /// Module-level variable.
     Variable(VariableId),
+}
+
+/// Successful outcome of [`Resolver::resolve_qualified_method`].
+///
+/// The resolver returns this for both exported and non-exported methods —
+/// export visibility is a diagnostic concern (the caller may surface it),
+/// not a resolution concern (the method exists and is reachable through
+/// name resolution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QualifiedMethodResolution {
+    pub method_id: MethodId,
+    /// Whether the resolved method is marked `Экспорт`.
+    pub is_export: bool,
+}
+
+/// Reason [`Resolver::resolve_qualified_method`] could not resolve a call.
+///
+/// Distinct from (and intentionally narrower than) the diagnostic-kind
+/// enums owned by the consumer layers (`hir-ty::UnresolvedMethodKind`,
+/// code-actions): hir-def owns name-resolution reasons only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualifiedMethodError {
+    /// Module name is not declared in any visible configuration (CFE union
+    /// of main + registered extensions).
+    NotVisibleInConfigs,
+    /// Module not indexed, method absent in the resolved module, resolver
+    /// lacks workspace scope, or no module scope was attached.
+    NotFound,
 }
 
 #[cfg(test)]
