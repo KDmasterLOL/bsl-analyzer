@@ -17,16 +17,24 @@
 //! # Coverage
 //!
 //! - **Platform value types** (`Ty::PlatformObject`, `Ty::Array`, `Ty::Map`,
-//!   …) → `PlatformData::get_method(type_name, method)`.
-//! - **`Ty::ObjectManager { kind, name }`** → look up the method on the
-//!   manager type (`DocumentManager`, `CatalogManager`, …) via
-//!   `PlatformData::get_method(prefix, method)`. Supersedes the `None`
-//!   branch the old `resolve_method_return_type` took on manager values.
-//! - **`Ty::MetadataRef { kind, name }`** → look up the method on the
-//!   reference / object type (`CatalogRef`, `DocumentObject`, …).
-//! - **`Ty::ManagerCollection(_)`** / **`Ty::Union(_)`** — `None` today.
-//!   Collections have only iteration semantics; unions wait for M4
-//!   narrowing to pick a concrete branch before method lookup makes sense.
+//!   `Ty::ValueTable`, `Ty::ValueList`, `Ty::Structure`, `Ty::Type`)
+//!   resolve via `PlatformData::get_method(type_name, method)`. Keys are
+//!   the English canonical names; the platform index is bilingual, so a
+//!   Russian method name still matches.
+//! - **`Ty::ObjectManager` / `Ty::MetadataRef`** — **deferred**.
+//!   Platform-data stores manager and ref methods with
+//!   `type_name = "CatalogManager.<Catalog name>"` /
+//!   `"CatalogRef.<Catalog name>"` and mangled per-method
+//!   `name` fields (`"<Имя"`, `"<Catalog name>.CreateItem"`), so no
+//!   direct method-name index exists. Returning `None` matches what the
+//!   pre-M3 `resolve_method_return_type` effectively did; re-enabling
+//!   requires either a richer platform-data shape or parsing
+//!   `documentation.syntax`.
+//! - **`Ty::ManagerCollection(_)`** / **`Ty::Union(_)`** / primitives
+//!   (`Number`, `String`, `Boolean`, `Date`) — `None`. Collections only
+//!   expose iteration, unions wait for M4 narrowing, and primitives have
+//!   no instance methods in BSL (`СтрДлина`, `ДобавитьМесяц` are global
+//!   functions, not receiver methods).
 //!
 //! User-written manager-module methods (`Документы.ПКО.СоздатьДокумент()`)
 //! are **not** in scope here — those land as `Expr::Call` of a
