@@ -58,9 +58,15 @@ pub struct InferenceResult {
     /// Per-body inferred expression types.
     ///
     /// Outer key = body owner (`Method(local_id)` or `ModuleCode`), inner
-    /// map = that body's `ExprId -> Ty`. Kept nested rather than flattened
-    /// to `(DefWithBodyId, ExprId)` tuples so a caller that already knows
-    /// the body can grab the whole map with a single hash lookup.
+    /// map = that body's `ExprId -> Ty`.
+    ///
+    /// Shape note: M3 ships this as a nested map, not a flat
+    /// `FxHashMap<(DefWithBodyId, ExprId), Ty>`. No current caller uses
+    /// the "grab the whole body's map in one lookup" shortcut the nesting
+    /// would enable (`Semantics::type_of_expr` does a single point
+    /// lookup), but the nested shape stays open for Tasks 10-12 hooks
+    /// (body-scoped completion, narrowing) that need per-body iteration.
+    /// If those never materialise, a later cleanup can flatten.
     pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, Ty>>,
 
     /// Variable types inferred from assignments.

@@ -150,7 +150,8 @@ impl<'db, DB: HirDatabase> Type<'db, DB> {
 #[salsa::db]
 pub trait HirDatabase: DefDatabase {
     fn infer(&self, file_id: FileId) -> Arc<InferenceResult>;
-    fn type_of_expr(&self, file_id: FileId, expr: ExprId) -> Ty;
+    // ExprId is body-local; owner disambiguates across the file.
+    fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> Ty;
 
     fn ty_of_method_signature(&self, method: MethodId) -> Arc<FunctionSignature>;
     fn ty_of_mdo_attribute(&self, mdo: MdoRef, attr: Name) -> Ty;

@@ -19,12 +19,16 @@
 //!
 //! ```rust,ignore
 //! use hir_ty::db::HirDatabase;
+//! use hir_def::DefWithBodyId;
 //!
 //! // Get inference result for a file
 //! let inference = db.infer(file_id);
 //!
-//! // Get type of specific expression
-//! let ty = db.type_of_expr(file_id, expr_id);
+//! // Get type of a specific expression. `ExprId` is only unique inside
+//! // a single `Body`, so callers must identify the body with
+//! // `DefWithBodyId::Method(local_id)` or `DefWithBodyId::ModuleCode`.
+//! let owner = DefWithBodyId::Method(local_id);
+//! let ty = db.type_of_expr(file_id, owner, expr_id);
 //! ```
 
 pub mod builtin;

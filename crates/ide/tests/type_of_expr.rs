@@ -168,6 +168,48 @@ fn type_of_call_expr_matches_infer() {
 }
 
 #[test]
+fn type_of_module_level_expr_resolves() {
+    // Module-level code uses `DefWithBodyId::ModuleCode` rather than a
+    // `Method(local_id)` key. Without this test the ModuleCode path
+    // through `infer_query` and `Semantics::type_of_expr` would stay
+    // untested — the rest of the suite lives inside `Функция` /
+    // `Процедура` bodies.
+    let fixture = r#"
+//- /test.bsl
+Х = 42;
+"#;
+    let (db, file_id) = setup(fixture);
+    let sema = Semantics::new(&db);
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let literal =
+        root.descendants().filter_map(ast::Literal::cast).next().expect("fixture has a literal");
+
+    assert_eq!(
+        sema.type_of_expr(file_id, literal.syntax()),
+        Ty::Number,
+        "Semantics::type_of_expr must resolve the module-level `42` literal"
+    );
+
+    // Cross-check: module_code_result's BodySourceMap must own this range,
+    // and `expr_types_by_body` must carry the entry under `ModuleCode`.
+    let module_id = ModuleId::new(file_id);
+    let module_bodies = db.module_bodies(module_id);
+    let expr_id = module_bodies
+        .module_code_result()
+        .expect("module-level body must be lowered")
+        .source_map
+        .expr_at_range(literal.syntax().text_range())
+        .expect("module-level BodySourceMap must locate the literal");
+    let infer = db.infer(file_id);
+    assert_eq!(
+        infer.type_of_expr_in(DefWithBodyId::ModuleCode, expr_id).cloned(),
+        Some(Ty::Number),
+        "direct ModuleCode lookup must agree with Semantics::type_of_expr"
+    );
+}
+
+#[test]
 fn type_of_field_expr_matches_infer() {
     // Field access must resolve through the same bridge. Uses a custom
     // attribute on the designer fixture's `Справочник1` Catalog; the
@@ -198,6 +240,27 @@ fn type_of_field_expr_matches_infer() {
         sema.type_of_expr(file_id, field.syntax()),
         Ty::Number,
         "Semantics::type_of_expr on a field access must agree with inference (Ty::Number)"
+    );
+
+    // Cross-check against the underlying `expr_types_by_body` map —
+    // matching the pattern used by the literal-lookup test above, so
+    // a future bug where `Semantics::type_of_expr` short-circuits
+    // without consulting the merged map is caught here too.
+    let module_id = ModuleId::new(file_id);
+    let module_bodies = db.module_bodies(module_id);
+    let (owner, expr_id) = module_bodies
+        .method_bodies()
+        .find_map(|(local_id, _body, source_map)| {
+            source_map
+                .expr_at_range(field.syntax().text_range())
+                .map(|eid| (DefWithBodyId::Method(local_id), eid))
+        })
+        .expect("BodySourceMap must locate the field-expr ExprId");
+    let infer = db.infer(file_id);
+    assert_eq!(
+        infer.type_of_expr_in(owner, expr_id).cloned(),
+        Some(Ty::Number),
+        "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );
 }
 
