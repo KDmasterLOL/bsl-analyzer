@@ -10,13 +10,16 @@
 //! # Scope (ADR-01 MUST-grammar)
 //!
 //! - `ТипЗнч(X) = Тип("Строка")` — narrows `X` to the string-named
-//!   platform type on the true branch; `Union \ Ty` on the false
-//!   branch (the latter is Task 6.3's concern).
+//!   platform type on the true branch; on the false branch, `Union \
+//!   Ty` via [`ty_difference`] (Task 6.3).
 //! - `X = Неопределено` / `X <> Неопределено` — flips between
-//!   `Ty::Undefined` and its complement over the union.
-//! - `ЗначениеЗаполнено(X)` — strips `Undefined` / `Null` from a union
-//!   on the true branch; keeps only `Undefined` / `Null` on the false
-//!   branch.
+//!   `Ty::Undefined` and its `Union \ Undefined` complement.
+//! - `ЗначениеЗаполнено(X)` — recognised syntactically, but narrowing
+//!   is **not yet implemented**: both branches produce `Ty::Unknown`
+//!   and leave the overlay untouched (see
+//!   [`NarrowingTransfer::apply_guard`]). Precise narrowing needs
+//!   `Union \ {Undefined, Null, "", 0, …}`, which requires value-
+//!   level reasoning — a follow-up after Task 6.3.
 //! - Symmetric orientations — `Тип("…") = ТипЗнч(X)`,
 //!   `Неопределено <> X` — are accepted verbatim (BSL's `=` is not
 //!   orientation-sensitive and authors routinely flip the sides).
@@ -91,9 +94,10 @@ pub enum Guard {
 
     /// `ЗначениеЗаполнено(X)`.
     ///
-    /// True branch: `X` loses `Undefined` / `Null` from its union.
-    /// False branch: `X` is constrained to `Undefined` / `Null` /
-    /// empty-value subset. The caller decides precision (Task 6.3).
+    /// Recognised purely so hover / analyses can see the guard shape,
+    /// but no narrowing is applied: [`NarrowingTransfer::apply_guard`]
+    /// treats this guard as a no-op on both branches (see the module
+    /// header for why). Precise narrowing is a post-Task-6.3 follow-up.
     ValueFilled { var: Name },
 }
 
@@ -257,10 +261,19 @@ fn single_path_arg(args: &[ExprIdx], body: &Body) -> Option<Name> {
 /// Lattice value for narrowing: an overlay of narrowed types keyed by
 /// name, plus a transient "pending guard" slot.
 ///
-/// An absent `Name` means "no narrowing applies at this program point
-/// — consult the base type from [`InferenceContext::var_types`]". A
-/// present `Name → Ty` mapping is *authoritative*: the caller should
-/// show `Ty` instead of the base union.
+/// # Overlay contract
+///
+/// - An **absent** `Name` means "no narrowing applies at this program
+///   point — consult the base type from [`InferenceContext::var_types`]".
+/// - A **present** `Name → Ty` mapping is *authoritative*: the caller
+///   must show `Ty` instead of the base union.
+/// - `Ty::Unknown` is **never** a valid mapped value. The
+///   [`NarrowingTransfer::apply_guard`] insertion gate filters it out
+///   (via [`insert_if_informative`]), because a stored `Ty::Unknown`
+///   would be indistinguishable from "fall through to base" but would
+///   still clobber any prior, more-informative narrowing on merge.
+///   Callers may therefore assume every value read from the overlay
+///   carries strictly more information than the base type.
 ///
 /// `pending_guard` flows from a `Conditional` vertex to its `TrueBranch`
 /// / `FalseBranch` successors. The solver guarantees it is cleared on
@@ -281,8 +294,10 @@ impl NarrowState {
     }
 
     /// Look up the narrowed type for `name`. Returns `None` when the
-    /// analysis has not constrained `name` at this program point —
-    /// callers fall back to the base `var_types` lookup.
+    /// overlay does not constrain `name` at this program point —
+    /// callers fall back to the base `var_types` lookup. A returned
+    /// `Some(ty)` is guaranteed by the overlay contract not to be
+    /// `Ty::Unknown`.
     pub fn get(&self, name: &Name) -> Option<&Ty> {
         self.narrowed.get(name)
     }
@@ -345,18 +360,94 @@ impl Lattice for NarrowState {
 ///
 /// - [`Transfer::transfer_edge`] — consumes `pending_guard` on every
 ///   outgoing edge. On `TrueBranch` / `FalseBranch` of a `Conditional`
-///   vertex, applies the guard via [`apply_guard`]. Every other edge
-///   kind falls through to identity. The slot is unconditionally
-///   cleared regardless of the edge kind to keep the transient guard
-///   from leaking past the branch it belongs to.
+///   vertex, applies the guard via [`NarrowingTransfer::apply_guard`].
+///   Every other edge kind falls through to identity. The slot is
+///   unconditionally cleared regardless of the edge kind to keep the
+///   transient guard from leaking past the branch it belongs to.
+///
+/// **`base_types`** — per-body map from `Name` to its pre-narrow type
+/// (populated by the lowering layer from the body's inferred
+/// `var_types`). Needed by [`NarrowingTransfer::apply_guard`] to
+/// compute the false-branch complement of a type check via
+/// [`ty_difference`]. When a name is absent or maps to a non-union
+/// type, the complement falls back to `Ty::Unknown` (sound).
 ///
 /// **Visibility:** `pub(crate)` — external consumers reach the
 /// narrowing overlay through the (forthcoming Task 6.6) Salsa query,
 /// which returns a `NarrowState` keyed by program point. There is no
 /// reason for a downstream crate to construct its own solver, and
-/// keeping the transfer crate-local lets future refinements
-/// (Task 6.3 / 6.4) evolve its surface freely.
-pub(crate) struct NarrowingTransfer;
+/// keeping the transfer crate-local lets future refinements (Task 6.4)
+/// evolve its surface freely.
+pub(crate) struct NarrowingTransfer {
+    base_types: FxHashMap<Name, Ty>,
+}
+
+impl NarrowingTransfer {
+    pub(crate) fn new(base_types: FxHashMap<Name, Ty>) -> Self {
+        Self { base_types }
+    }
+
+    /// Apply a recognized guard to the overlay on the given branch.
+    ///
+    /// True-branch narrowing is always precise:
+    /// - `Guard::TypeCheck { var, type_name }` → `Ty::from_type_name`.
+    /// - `Guard::IsUndefined { var }` → `Ty::Undefined`.
+    /// - `Guard::IsNotUndefined { var }` → `base \ Undefined`.
+    ///
+    /// False-branch narrowing uses [`ty_difference`] over `base_types`
+    /// to subtract the matched type from the pre-narrow union.
+    ///
+    /// **Overlay invariant.** `Ty::Unknown` is never stored in
+    /// `state.narrowed` — it would be indistinguishable, at every
+    /// consumer site (hover, `Semantics::type_of_expr`, Task 6.6's
+    /// Salsa query), from "I know nothing more than the base type,"
+    /// which is exactly what a *missing* entry already means. Instead,
+    /// a computed `Ty::Unknown` is treated as **no new information**:
+    /// we leave the overlay alone so any prior (still-valid) narrowing
+    /// survives the branch. That preserves information in the common
+    /// nested-guard case where an outer guard narrowed the variable
+    /// precisely and an inner guard lacks base-type context to refine
+    /// further.
+    ///
+    /// `Guard::ValueFilled` has no Task 6.3 refinement: precise
+    /// narrowing requires `Union \ {Undefined, Null, "", 0, …}` which
+    /// needs value-level reasoning. It therefore always produces
+    /// `Ty::Unknown` and so never perturbs the overlay — same no-op
+    /// behaviour as any imprecise result.
+    fn apply_guard(&self, state: &mut NarrowState, guard: &Guard, on_true: bool) {
+        match guard {
+            Guard::TypeCheck { var, type_name } => {
+                let matched = Ty::from_type_name(type_name);
+                let narrowed = if on_true { matched } else { self.complement_of(var, &matched) };
+                insert_if_informative(state, var, narrowed);
+            }
+            Guard::IsUndefined { var } => {
+                let narrowed =
+                    if on_true { Ty::Undefined } else { self.complement_of(var, &Ty::Undefined) };
+                insert_if_informative(state, var, narrowed);
+            }
+            Guard::IsNotUndefined { var } => {
+                let narrowed =
+                    if on_true { self.complement_of(var, &Ty::Undefined) } else { Ty::Undefined };
+                insert_if_informative(state, var, narrowed);
+            }
+            Guard::ValueFilled { var: _ } => {
+                // Task 6.3 computes no refinement for ValueFilled →
+                // `Ty::Unknown` is the only available answer, which by
+                // the overlay invariant means "no change".
+            }
+        }
+    }
+
+    /// Compute `base_types[var] \ matched` via [`ty_difference`].
+    /// Returns `Ty::Unknown` when the variable has no recorded base type.
+    fn complement_of(&self, var: &Name, matched: &Ty) -> Ty {
+        match self.base_types.get(var) {
+            Some(base) => ty_difference(base, matched),
+            None => Ty::Unknown,
+        }
+    }
+}
 
 impl Transfer<NarrowState> for NarrowingTransfer {
     fn transfer_stmt(&self, stmt_id: RawIdx, state: &NarrowState, body: &Body) -> NarrowState {
@@ -380,51 +471,49 @@ impl Transfer<NarrowState> for NarrowingTransfer {
         let mut new_state = state.clone();
         let pending = new_state.pending_guard.take();
         match (edge_kind, pending) {
-            (CfgEdgeType::TrueBranch, Some(g)) => apply_guard(&mut new_state, &g, true),
-            (CfgEdgeType::FalseBranch, Some(g)) => apply_guard(&mut new_state, &g, false),
+            (CfgEdgeType::TrueBranch, Some(g)) => self.apply_guard(&mut new_state, &g, true),
+            (CfgEdgeType::FalseBranch, Some(g)) => self.apply_guard(&mut new_state, &g, false),
             _ => {}
         }
         new_state
     }
 }
 
-/// Apply a recognized guard to the overlay on the given branch.
+/// Insert `ty` into the overlay for `var` iff it carries new
+/// information, i.e. it is not `Ty::Unknown`. See the
+/// [`NarrowingTransfer::apply_guard`] docs for the overlay invariant.
+/// Extracted as a free fn so every guard arm routes through the same
+/// gate — future refinements (Task 6.4) plug in here.
+fn insert_if_informative(state: &mut NarrowState, var: &Name, ty: Ty) {
+    if !matches!(ty, Ty::Unknown) {
+        state.narrowed.insert(var.clone(), ty);
+    }
+}
+
+/// Set-difference on types: `base \ matched`.
 ///
-/// Scope for Task 6.2 — the precise cases that do not require a
-/// `Union \ Ty` set-difference:
+/// Used to compute the false-branch narrowing of a type check. Rules:
 ///
-/// - `Guard::TypeCheck { var, type_name }` on `true`: map `var` to
-///   `Ty::from_type_name(type_name)` (primitive / collection / lowered
-///   builtin — the same resolution used by XML `AttributeType` lowering
-///   in M3).
-/// - `Guard::IsUndefined { var }` on `true`, and `Guard::IsNotUndefined
-///   { var }` on `false`: map `var` to `Ty::Undefined` verbatim.
+/// - `base` is `Ty::Union(members)` → drop every occurrence of
+///   `matched` from `members` (by structural equality) and pass the
+///   result through [`Ty::union`], which deduplicates, sorts, and
+///   collapses singletons (`[x]` → `x`, `[]` → `Ty::Unknown`).
+/// - `base` is any other `Ty` → return `Ty::Unknown`. We cannot refine
+///   a non-union base: either it already equals `matched` (so the
+///   complement is empty / exhausted — caller is on a dead branch) or
+///   it is a single type disjoint from `matched` (so the complement is
+///   `base`, but we cannot prove non-equality cheaply for every `Ty`
+///   variant and falling back to `Ty::Unknown` is sound).
 ///
-/// Every other (branch, guard) combination needs the pre-narrow union
-/// to compute the complement. That is Task 6.3's smart-constructor;
-/// until it lands, we map the variable to `Ty::Unknown` — which
-/// defeats the narrowing for that branch, but keeps the overlay
-/// otherwise sound (a caller reading `Ty::Unknown` falls through to
-/// the base type exactly as if no narrowing had happened).
-fn apply_guard(state: &mut NarrowState, guard: &Guard, on_true: bool) {
-    match guard {
-        Guard::TypeCheck { var, type_name } => {
-            let narrowed = if on_true { Ty::from_type_name(type_name) } else { Ty::Unknown };
-            state.narrowed.insert(var.clone(), narrowed);
+/// A pure function over `Ty` keeps this testable in isolation without
+/// constructing a `NarrowingTransfer`.
+fn ty_difference(base: &Ty, matched: &Ty) -> Ty {
+    match base {
+        Ty::Union(members) => {
+            let remaining: Vec<Ty> = members.iter().filter(|m| *m != matched).cloned().collect();
+            Ty::union(remaining)
         }
-        Guard::IsUndefined { var } => {
-            let narrowed = if on_true { Ty::Undefined } else { Ty::Unknown };
-            state.narrowed.insert(var.clone(), narrowed);
-        }
-        Guard::IsNotUndefined { var } => {
-            let narrowed = if on_true { Ty::Unknown } else { Ty::Undefined };
-            state.narrowed.insert(var.clone(), narrowed);
-        }
-        Guard::ValueFilled { var } => {
-            // Both branches need `Union \ {Undefined, Null}` precision
-            // — Task 6.3. Placeholder until then.
-            state.narrowed.insert(var.clone(), Ty::Unknown);
-        }
+        _ => Ty::Unknown,
     }
 }
 
@@ -434,20 +523,29 @@ fn apply_guard(state: &mut NarrowState, guard: &Guard, on_true: bool) {
 /// This is the single non-test entry point that wires the CFG builder,
 /// the `NarrowingTransfer`, and the `DataflowSolver` together. Task 6.6
 /// will wrap it in a Salsa query keyed by `(file_id, owner)`; until
-/// then it stays `pub(crate)` so the forthcoming query lives behind
-/// the same facade and no downstream crate grows a direct dependency
-/// on the solver internals.
+/// then it stays the facade so the forthcoming query can swap the
+/// implementation without touching call sites.
+///
+/// `base_types` is the body's pre-narrow `Name → Ty` snapshot. It is
+/// consumed by [`NarrowingTransfer::apply_guard`] to compute precise
+/// `Union \ matched` complements on false branches of type checks
+/// (see [`ty_difference`]). An empty map is sound: every false-branch
+/// complement degrades to `Ty::Unknown` and callers fall back to the
+/// base type lookup.
 ///
 /// Returns `None` if the solver fails to converge within the default
 /// iteration cap — an impossible outcome for lowered HIR bodies, kept
 /// in the signature solely to match `DataflowSolver::solve`.
-pub fn narrow_body(body: Body) -> Option<dataflow::DataflowResult<NarrowState>> {
+pub fn narrow_body(
+    body: Body,
+    base_types: FxHashMap<Name, Ty>,
+) -> Option<dataflow::DataflowResult<NarrowState>> {
     let cfg = std::sync::Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(
         body.body_stmts_typed(),
         &body,
         None,
     ));
-    let mut solver = dataflow::DataflowSolver::new(cfg, body, NarrowingTransfer);
+    let mut solver = dataflow::DataflowSolver::new(cfg, body, NarrowingTransfer::new(base_types));
     solver.set_bottom_factory(NarrowState::new);
     solver.solve()
 }
@@ -507,6 +605,24 @@ mod tests {
                 then_branch: Box::from([then_stmt]),
                 elsif_branches: Box::from([]),
                 else_branch: None,
+            };
+            self.body.stmts_mut().alloc(Stmt::If(Box::new(if_stmt)))
+        }
+
+        /// Build an `If` stmt with a single-statement then-branch and a
+        /// single-statement else-branch — the shape Task 6.3 e2e tests
+        /// need to assert on the false-branch IN state.
+        fn if_then_else(
+            &mut self,
+            condition: ExprIdx,
+            then_stmt: StmtIdx,
+            else_stmt: StmtIdx,
+        ) -> StmtIdx {
+            let if_stmt = hir_def::hir::IfStmt {
+                condition,
+                then_branch: Box::from([then_stmt]),
+                elsif_branches: Box::from([]),
+                else_branch: Some(Box::from([else_stmt])),
             };
             self.body.stmts_mut().alloc(Stmt::If(Box::new(if_stmt)))
         }
@@ -957,13 +1073,30 @@ mod tests {
         assert!(b.join(&a).pending_guard.is_none());
     }
 
+    /// Build a `NarrowingTransfer` with no base-type knowledge — forces
+    /// every false-branch complement to degrade to `Ty::Unknown`.
+    fn transfer_no_bases() -> NarrowingTransfer {
+        NarrowingTransfer::new(FxHashMap::default())
+    }
+
+    /// Build a `NarrowingTransfer` with the given `Name → Ty` entries as
+    /// the pre-narrow snapshot feeding false-branch `ty_difference`.
+    fn transfer_with_bases(entries: &[(&str, Ty)]) -> NarrowingTransfer {
+        let mut bases = FxHashMap::default();
+        for (name, ty) in entries {
+            bases.insert(Name::new(name), ty.clone());
+        }
+        NarrowingTransfer::new(bases)
+    }
+
     #[test]
     fn apply_guard_type_check_true_maps_to_named_ty() {
         // `ТипЗнч(Х) = Тип("Строка")` on the true branch maps Х to
         // Ty::String (lowered via `Ty::from_type_name`). This is the
         // path users will actually observe in hover.
+        let tr = transfer_no_bases();
         let mut s = NarrowState::new();
-        apply_guard(
+        tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("Х"), type_name: "Строка".to_string() },
             true,
@@ -972,24 +1105,108 @@ mod tests {
     }
 
     #[test]
-    fn apply_guard_type_check_false_falls_back_to_unknown() {
-        // Task 6.3 will replace Unknown with `Union \ Ty` precision.
-        // For now, pin the Unknown placeholder so the 6.3 changeover
-        // has a baseline to diff against.
+    fn apply_guard_type_check_false_without_base_is_overlay_noop() {
+        // No pre-narrow type known for Х — the false-branch complement
+        // degrades to Ty::Unknown. By the overlay contract, a computed
+        // Ty::Unknown must NOT appear in the map (indistinguishable
+        // from "no narrowing" and could clobber prior precise info).
+        let tr = transfer_no_bases();
         let mut s = NarrowState::new();
-        apply_guard(
+        tr.apply_guard(
             &mut s,
             &Guard::TypeCheck { var: Name::new("Х"), type_name: "Строка".to_string() },
             false,
         );
-        assert_eq!(s.get(&Name::new("Х")), Some(&Ty::Unknown));
+        assert_eq!(s.get(&Name::new("Х")), None);
+    }
+
+    #[test]
+    fn apply_guard_type_check_false_narrows_binary_union_to_singleton() {
+        // Core Task 6.3 invariant: `Union(Number, String) \ String
+        // = Number`. The smart-constructor must collapse the residual
+        // single-element union down to the non-union singleton.
+        let tr = transfer_with_bases(&[("Х", Ty::union(vec![Ty::Number, Ty::String]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("Х"), type_name: "Строка".to_string() },
+            false,
+        );
+        assert_eq!(s.get(&Name::new("Х")), Some(&Ty::Number));
+    }
+
+    #[test]
+    fn apply_guard_type_check_false_narrows_ternary_union_to_union() {
+        // `Union(Number, String, Date) \ String = Union(Number, Date)`
+        // — multi-member residue stays a union, canonicalised by
+        // `Ty::union` (deterministic sort + dedup).
+        let tr = transfer_with_bases(&[("Х", Ty::union(vec![Ty::Number, Ty::String, Ty::Date]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("Х"), type_name: "Строка".to_string() },
+            false,
+        );
+        let expected = Ty::union(vec![Ty::Number, Ty::Date]);
+        assert_eq!(s.get(&Name::new("Х")), Some(&expected));
+    }
+
+    #[test]
+    fn apply_guard_type_check_false_on_exhausted_union_is_overlay_noop() {
+        // Degenerate input: `base == matched` is a dead false-branch.
+        // `ty_difference(String, String)` returns `Ty::Unknown` because
+        // the non-union `String` base falls into the generic fallback.
+        // By the overlay contract, Ty::Unknown is a no-op — overlay
+        // stays absent and readers fall back to the base type.
+        let tr = transfer_with_bases(&[("Х", Ty::String)]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("Х"), type_name: "Строка".to_string() },
+            false,
+        );
+        assert_eq!(s.get(&Name::new("Х")), None);
+    }
+
+    #[test]
+    fn apply_guard_imprecise_refinement_preserves_prior_narrowing() {
+        // Outer guard narrowed Х to String precisely; inner guard
+        // fires on the false branch of an unrelated `ТипЗнч` test
+        // with NO base_types context → computes Ty::Unknown → by the
+        // overlay contract, MUST NOT clobber the still-valid outer
+        // narrowing. This is the load-bearing invariant that gates
+        // the "insert only if informative" change: without it, nested
+        // guards would routinely destroy outer precision.
+        let tr = transfer_no_bases();
+        let mut s = state_with(&[("Х", Ty::String)]);
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("Х"), type_name: "Число".to_string() },
+            false,
+        );
+        assert_eq!(
+            s.get(&Name::new("Х")),
+            Some(&Ty::String),
+            "imprecise refinement must leave prior narrowing intact"
+        );
     }
 
     #[test]
     fn apply_guard_is_undefined_true_maps_to_undefined() {
+        let tr = transfer_no_bases();
         let mut s = NarrowState::new();
-        apply_guard(&mut s, &Guard::IsUndefined { var: Name::new("Х") }, true);
+        tr.apply_guard(&mut s, &Guard::IsUndefined { var: Name::new("Х") }, true);
         assert_eq!(s.get(&Name::new("Х")), Some(&Ty::Undefined));
+    }
+
+    #[test]
+    fn apply_guard_is_undefined_false_narrows_union_minus_undefined() {
+        // `Х = Неопределено` on the false branch knows Х ≠ Undefined.
+        // Over `Union(String, Undefined)` that leaves just `String`.
+        let tr = transfer_with_bases(&[("Х", Ty::union(vec![Ty::String, Ty::Undefined]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(&mut s, &Guard::IsUndefined { var: Name::new("Х") }, false);
+        assert_eq!(s.get(&Name::new("Х")), Some(&Ty::String));
     }
 
     #[test]
@@ -997,9 +1214,68 @@ mod tests {
         // Mirror case — `Х <> Неопределено` false-branch knows Х IS
         // Undefined. This IS precise (no union needed), so it must
         // not fall back to Unknown.
+        let tr = transfer_no_bases();
         let mut s = NarrowState::new();
-        apply_guard(&mut s, &Guard::IsNotUndefined { var: Name::new("Х") }, false);
+        tr.apply_guard(&mut s, &Guard::IsNotUndefined { var: Name::new("Х") }, false);
         assert_eq!(s.get(&Name::new("Х")), Some(&Ty::Undefined));
+    }
+
+    #[test]
+    fn apply_guard_is_not_undefined_true_narrows_union_minus_undefined() {
+        // `Х <> Неопределено` on the true branch is the main "null-
+        // check narrows to the non-null union member" shape. Must
+        // strip Undefined from the pre-narrow union.
+        let tr = transfer_with_bases(&[("Х", Ty::union(vec![Ty::String, Ty::Undefined]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(&mut s, &Guard::IsNotUndefined { var: Name::new("Х") }, true);
+        assert_eq!(s.get(&Name::new("Х")), Some(&Ty::String));
+    }
+
+    // --- ty_difference pure unit tests --------------------------------------
+
+    #[test]
+    fn ty_difference_union_minus_member_collapses_to_singleton() {
+        let base = Ty::union(vec![Ty::Number, Ty::String]);
+        assert_eq!(ty_difference(&base, &Ty::String), Ty::Number);
+    }
+
+    #[test]
+    fn ty_difference_union_minus_missing_member_returns_whole_union() {
+        // `Union(A, B) \ C` when C ∉ {A, B} is the whole union.
+        // The smart-constructor still canonicalises, so equality is
+        // structural.
+        let base = Ty::union(vec![Ty::Number, Ty::String]);
+        assert_eq!(ty_difference(&base, &Ty::Date), base);
+    }
+
+    #[test]
+    fn ty_difference_multi_member_union_keeps_residue_as_union() {
+        let base = Ty::union(vec![Ty::Number, Ty::String, Ty::Date]);
+        let expected = Ty::union(vec![Ty::Number, Ty::Date]);
+        assert_eq!(ty_difference(&base, &Ty::String), expected);
+    }
+
+    #[test]
+    fn ty_difference_non_union_base_returns_unknown() {
+        // We cannot refine a non-union base: either it equals `matched`
+        // (exhausted) or it is disjoint (unchanged), and we choose the
+        // sound conservative answer `Ty::Unknown` so callers read the
+        // base type via fall-through.
+        assert_eq!(ty_difference(&Ty::String, &Ty::String), Ty::Unknown);
+        assert_eq!(ty_difference(&Ty::String, &Ty::Number), Ty::Unknown);
+    }
+
+    #[test]
+    fn ty_difference_chain_to_exhaustion_stays_sound() {
+        // Chained subtraction: strip members one at a time. After the
+        // first step the 2-member union collapses to a singleton, so
+        // the second subtraction hits the non-union fallback and
+        // returns `Ty::Unknown` (sound — caller reads the base type).
+        let base = Ty::union(vec![Ty::Number, Ty::String]);
+        let step1 = ty_difference(&base, &Ty::Number);
+        assert_eq!(step1, Ty::String);
+        let step2 = ty_difference(&step1, &Ty::String);
+        assert_eq!(step2, Ty::Unknown);
     }
 
     #[test]
@@ -1012,7 +1288,7 @@ mod tests {
         let und = b.undefined();
         let condition = b.bin(x, und, BinaryOp::Eq);
 
-        let tr = NarrowingTransfer;
+        let tr = transfer_no_bases();
         let state = tr.transfer_expr(ExprId::from_idx(condition), &NarrowState::new(), &b.body);
         assert_eq!(state.pending_guard, Some(Guard::IsUndefined { var: Name::new("Х") }));
     }
@@ -1029,14 +1305,14 @@ mod tests {
 
         let mut initial = NarrowState::new();
         initial.pending_guard = Some(Guard::IsUndefined { var: Name::new("Stale") });
-        let tr = NarrowingTransfer;
+        let tr = transfer_no_bases();
         let state = tr.transfer_expr(ExprId::from_idx(condition), &initial, &b.body);
         assert!(state.pending_guard.is_none());
     }
 
     #[test]
     fn transfer_edge_true_branch_applies_pending_guard() {
-        let tr = NarrowingTransfer;
+        let tr = transfer_no_bases();
         let mut state = NarrowState::new();
         state.pending_guard =
             Some(Guard::TypeCheck { var: Name::new("Х"), type_name: "Число".to_string() });
@@ -1048,7 +1324,7 @@ mod tests {
     #[test]
     fn transfer_edge_false_branch_applies_pending_guard() {
         // False branch of `Х <> Неопределено` narrows Х to Undefined.
-        let tr = NarrowingTransfer;
+        let tr = transfer_no_bases();
         let mut state = NarrowState::new();
         state.pending_guard = Some(Guard::IsNotUndefined { var: Name::new("Х") });
         let out = tr.transfer_edge(CfgEdgeType::FalseBranch, &state);
@@ -1062,7 +1338,7 @@ mod tests {
         // must not be applied (Direct edges are sequential fall-
         // through, not conditional branches). Clearing without
         // applying is the correct behaviour — the state is identity.
-        let tr = NarrowingTransfer;
+        let tr = transfer_no_bases();
         let mut state = state_with(&[("Х", Ty::String)]);
         state.pending_guard = Some(Guard::IsUndefined { var: Name::new("Х") });
         let out = tr.transfer_edge(CfgEdgeType::Direct, &state);
@@ -1081,7 +1357,7 @@ mod tests {
         let y_val = b.path("Y");
         let assign = b.assign(x_tgt, y_val);
 
-        let tr = NarrowingTransfer;
+        let tr = transfer_no_bases();
         let state_in = state_with(&[("Х", Ty::String)]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
         assert_eq!(state_out.get(&Name::new("Х")), None);
@@ -1099,7 +1375,7 @@ mod tests {
         let one = b.alloc(Expr::Literal(Literal::Number(1.0.try_into().unwrap())));
         let assign = b.assign(target, one);
 
-        let tr = NarrowingTransfer;
+        let tr = transfer_no_bases();
         let state_in = state_with(&[("Х", Ty::String)]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
         assert_eq!(state_out.get(&Name::new("Х")), Some(&Ty::String));
@@ -1149,9 +1425,11 @@ mod tests {
 
         // Go through the crate-level entry point so the test
         // exercises the same wiring that Task 6.6's Salsa query will
-        // eventually wrap.
+        // eventually wrap. No base-types needed — the true-branch
+        // narrowing of a TypeCheck is always precise without them.
         let body = b.body.clone();
-        let result = narrow_body(body).expect("narrowing analysis must converge");
+        let result =
+            narrow_body(body, FxHashMap::default()).expect("narrowing analysis must converge");
         let cfg = result.cfg();
 
         // Find the then-block: the successor of the Conditional
@@ -1177,6 +1455,77 @@ mod tests {
             then_in.get(&Name::new("Х")),
             Some(&Ty::String),
             "IN[then-block] must carry Х → String after TrueBranch narrowing, got {then_in:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_if_type_check_else_branch_narrows_union_complement() {
+        // Hand-build
+        //
+        //   Если ТипЗнч(Х) = Тип("Строка") Тогда
+        //       Х = Х
+        //   Иначе
+        //       Х = Х
+        //   КонецЕсли
+        //
+        // with a pre-narrow base type `Х: Union(Number, String)` fed
+        // into the solver. The false-branch (Иначе) block's IN state
+        // must carry `Х → Number` — the Task 6.3 invariant that
+        // `Union(Number, String) \ String = Number` is observed
+        // end-to-end through the CFG and solver, not just inside
+        // `apply_guard`.
+        let mut b = ExprBuilder::new();
+
+        // Condition: `ТипЗнч(Х) = Тип("Строка")`
+        let x_arg = b.path("Х");
+        let typznc = b.path("ТипЗнч");
+        let lhs = b.call(typznc, vec![x_arg]);
+        let tip = b.path("Тип");
+        let s = b.string_lit("Строка");
+        let rhs = b.call(tip, vec![s]);
+        let condition = b.bin(lhs, rhs, BinaryOp::Eq);
+
+        // Then-branch: `Х = Х`. Needed so the CFG emits a distinct
+        // then-block (an empty branch would collapse into the merge).
+        let x_tgt_then = b.path("Х");
+        let x_val_then = b.path("Х");
+        let assign_then = b.assign(x_tgt_then, x_val_then);
+
+        // Else-branch: `Х = Х` — same reason. IN state of this block
+        // is what we assert on.
+        let x_tgt_else = b.path("Х");
+        let x_val_else = b.path("Х");
+        let assign_else = b.assign(x_tgt_else, x_val_else);
+
+        let if_stmt = b.if_then_else(condition, assign_then, assign_else);
+        b.set_top_level(vec![if_stmt]);
+
+        let body = b.body.clone();
+        let mut bases = FxHashMap::default();
+        bases.insert(Name::new("Х"), Ty::union(vec![Ty::Number, Ty::String]));
+        let result = narrow_body(body, bases).expect("narrowing analysis must converge");
+        let cfg = result.cfg();
+
+        use cfg::CfgVertex;
+        let cond_idx = cfg
+            .vertices()
+            .find(|(_, v)| matches!(v, CfgVertex::Conditional(_)))
+            .map(|(idx, _)| idx)
+            .expect("CFG must contain a Conditional vertex for the Если");
+
+        let else_block_idx = cfg
+            .outgoing_edges(cond_idx)
+            .find(|(_, kind)| **kind == CfgEdgeType::FalseBranch)
+            .map(|(idx, _)| idx)
+            .expect("Conditional vertex must have a FalseBranch successor");
+
+        let else_in = result
+            .block_in(else_block_idx)
+            .expect("else-block must have an IN state after solving");
+        assert_eq!(
+            else_in.get(&Name::new("Х")),
+            Some(&Ty::Number),
+            "IN[else-block] must carry Х → Number (= Union(Number, String) \\ String), got {else_in:?}"
         );
     }
 }
