@@ -16,7 +16,7 @@ Task 3: Predefined items / enum values on ObjectManager ┘
 Task 5: Ty::ThisObject { owner } + coercion            ─┐
 Task 6.0: branch-aware Transfer trait in dataflow      ─┘  week 3
 Task 6: Narrowing (ADR-01 Option A)                    ──  weeks 4–6
-Task 7: hir::Type::is_assignable_to                    ──  week 7
+Task 7: hir::Type::is_assignable_to                 ✅  week 7
 ```
 
 Total: ~7 weeks.

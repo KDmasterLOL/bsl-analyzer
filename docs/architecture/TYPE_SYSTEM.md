@@ -311,7 +311,6 @@ Narrowing проектируется отдельным ADR и реализуе�
 - **Полная миграция `bsl_metadata::AttributeType` консьюмеров** → `TypeRef` (40+ производственных ссылок).
 - **Полноценный FieldLookup для регистров/планов/задач**: `MetadataKind::{AccumulationRegisterRef, AccountingRegisterRef, …}` узнаются как типы, но `.Измерения.X` / `.Движения.ДобавитьРасход()` — пока `Ty::Unknown` (register storage в отдельном `Configuration.registers`).
 - **Предопределённые элементы / значения перечислений** на `Ty::ObjectManager` (`Перечисления.Состояния.Активен`, `Справочники.Валюты.Доллар`). Требует manager-side adapter.
-- **`hir::Type::is_assignable_to`** — Codex Q4 MEDIUM: без narrowing / union-subtyping лжёт callers'ам. Ждёт M4 ADR.
 - **`UnresolvedField`-диагностика** в `InferenceDiagnostic` (сейчас FieldLookup просто молча отдаёт `Ty::Unknown`).
 
 ## Связанные документы

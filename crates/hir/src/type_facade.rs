@@ -19,10 +19,6 @@
 //!
 //! ## Not in scope
 //!
-//! - `is_assignable_to` — deferred to M4. Without narrowing or
-//!   union-subtyping semantics a naïve implementation would lie
-//!   (Codex Q4, M3 plan). Callers that need a compatibility check
-//!   should wait for the M4 ADR.
 //! - `is_nullable` — `Null` / `Undefined` are separate `Ty` variants,
 //!   not a modifier on other types. No dedicated method needed.
 
@@ -114,23 +110,43 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// or `TabularSection`/`TabularSectionRow`; those are manager-side
     /// or container-side abstractions, not first-class references.
     pub fn is_ref_type(&self) -> bool {
-        matches!(
-            self.ty,
-            Ty::MetadataRef {
-                kind: MetadataKind::CatalogRef
-                    | MetadataKind::DocumentRef
-                    | MetadataKind::EnumRef
-                    | MetadataKind::TaskRef
-                    | MetadataKind::BusinessProcessRef
-                    | MetadataKind::ExchangePlanRef
-                    | MetadataKind::ChartOfAccountsRef
-                    | MetadataKind::InformationRegisterRef
-                    | MetadataKind::AccumulationRegisterRef
-                    | MetadataKind::AccountingRegisterRef
-                    | MetadataKind::CalculationRegisterRef,
-                ..
-            }
-        )
+        is_ref_ty(&self.ty)
+    }
+
+    /// Structural assignability: is `self` usable where `other` is expected?
+    ///
+    /// Task 7 rules (M4_PLAN.md):
+    ///
+    /// - Reflexivity: `A ≤ A`.
+    /// - Gradual top/bottom: `A ≤ Unknown` and `Unknown ≤ A` — neither
+    ///   side constraints the check when we don't know one of the types.
+    ///   This keeps `TypeMismatch` silent on code paths we can't type.
+    /// - `Null ≤ ref-type` (any `MetadataRef { kind: *Ref, .. }`).
+    /// - `A ≤ Union(…, X, …)` iff `A ≤ X` for some `X` in the union.
+    /// - `Union(A, B) ≤ T` iff `A ≤ T ∧ B ≤ T` (distributes on the left).
+    /// - `ThisObject{(k, n)} ≤ MetadataRef{*Object matching k, n}`: a
+    ///   **one-way** coercion — `ЭтотОбъект` passes where
+    ///   `CatalogObject.Товары` is expected, but the reverse is
+    ///   rejected so the `ThisObject` variant's "explicitly
+    ///   self-referential" provenance signal (used by
+    ///   `BodyDiagnostic::RedundantAccessToObject` and future rename /
+    ///   refactor features) stays meaningful.
+    ///
+    /// ## Narrowing
+    ///
+    /// The method takes a plain [`Type`] — not a syntax node — so it
+    /// compares whatever [`Ty`] the caller already narrowed. Callers
+    /// that want the narrowed type at a specific expression should
+    /// build the [`Type`] from [`Semantics::type_of_expr`], which
+    /// already overlays the [`NarrowState`] produced by
+    /// [`HirDatabase::narrow`] (Task 6.6). Calling `is_assignable_to`
+    /// on the base (pre-narrow) [`Ty`] is legal but less precise.
+    ///
+    /// [`Semantics::type_of_expr`]: crate::Semantics::type_of_expr
+    /// [`NarrowState`]: hir_ty::narrow::NarrowState
+    /// [`HirDatabase::narrow`]: hir_ty::HirDatabase::narrow
+    pub fn is_assignable_to(&self, other: &Self) -> bool {
+        is_assignable(&self.ty, &other.ty)
     }
 
     /// The corresponding manager type — e.g. `CatalogRef.Товары` →
@@ -386,6 +402,107 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
 
         Vec::new()
     }
+}
+
+/// Structural assignability check on raw [`Ty`]. See
+/// [`Type::is_assignable_to`] for the rule list — this free function
+/// holds the algorithm so it can be unit-tested without wrapping every
+/// pair of types in the facade.
+fn is_assignable(from: &Ty, to: &Ty) -> bool {
+    // GRADUAL TYPING: `Unknown` on either side short-circuits. The
+    // M4_PLAN spec only guarantees `A ≤ Unknown` (Unknown as top); we
+    // also accept `Unknown ≤ A` so a failed / partial inference on
+    // the from-side does not fire a `TypeMismatch`. This is
+    // deliberately permissive because `Ty::Unknown` bubbles out of
+    // `hir-ty::infer` for any expression the inferrer bailed on — the
+    // common case today is "unresolved param type" in user procedures,
+    // not "unreachable code."
+    //
+    // [FIXME] Re-evaluate when `InferenceDiagnostic::TypeMismatch`
+    // gains a live emitter (stubbed at `hir-ty/src/infer.rs` near
+    // `// Argument type check`). Once that emission lands, audit
+    // whether the `Unknown` bottom-rule swallows diagnostics that
+    // users would want to see — if so, either restrict to spec-strict
+    // (`A ≤ Unknown` only) or gate the bottom direction behind a
+    // "strict_type_check" feature flag (parallel to `type_narrowing`).
+    if matches!(from, Ty::Unknown) || matches!(to, Ty::Unknown) {
+        return true;
+    }
+
+    // Union left: distributes — `A | B ≤ T` iff every component is
+    // assignable to `T`. Evaluated before union-right so a union-to-
+    // union check unfolds left first, which matches the rule in
+    // M4_PLAN.md ("Union(A, B) ≤ T ↔ A ≤ T ∧ B ≤ T").
+    if let Ty::Union(parts) = from {
+        return parts.iter().all(|p| is_assignable(p, to));
+    }
+    // Union right: `A ≤ Union(…, X, …)` iff `A ≤ X` for some `X`.
+    if let Ty::Union(parts) = to {
+        return parts.iter().any(|p| is_assignable(from, p));
+    }
+
+    // `Null ≤ ref-type` — assigning `Null` to a catalog / document
+    // reference (etc.) is how BSL clears a ref. No corresponding
+    // `Undefined ≤ ref` rule at M4: the plan only mentions `Null`;
+    // raise `Undefined` in a follow-up if real diagnostic traffic
+    // shows false positives.
+    if matches!(from, Ty::Null) && is_ref_ty(to) {
+        return true;
+    }
+
+    // ThisObject → MetadataRef{*Object} coercion (one direction only):
+    // `ЭтотОбъект` is accepted where the explicit
+    // `CatalogObject.Товары` is expected. Delegates to the M3 coercion
+    // helper so the mapping stays single-source (`hir_ty::this_object`).
+    //
+    // The **reverse** direction (`MetadataRef{*Object} → ThisObject`) is
+    // deliberately not accepted: [`Ty::ThisObject`] exists to preserve
+    // the "explicitly self-referential" provenance signal used by
+    // `BodyDiagnostic::RedundantAccessToObject` and future rename /
+    // refactor features. Letting an arbitrary `CatalogObject.X` satisfy
+    // a `ThisObject{(Catalog, X)}` slot would erase that signal.
+    if let Some(coerced) = coerce_this_object_to_metadata_ref(from) {
+        if &coerced == to {
+            return true;
+        }
+    }
+
+    // Reflexivity — covers every structurally-equal pair: primitives,
+    // `MetadataRef` (same kind + name), `ObjectManager`,
+    // `ManagerCollection`, `Function`, `PlatformObject`, `ThisObject`
+    // with equal owner.
+    //
+    // [TODO] Task-7-followup: `Ty::Function { params, ret }` falls
+    // through to structural equality here. Variance (contravariant
+    // params, covariant return) will matter once first-class function
+    // values feed `TypeMismatch` emission in `hir-ty::infer`; today
+    // function values are rare enough in real BSL that strict equality
+    // is adequate for the first-pass predicate.
+    from == to
+}
+
+/// Free-function counterpart of [`Type::is_ref_type`]. Extracted so
+/// [`is_assignable`]'s `Null ≤ ref-type` branch and the method both go
+/// through one predicate — a new MDO ref variant only needs to be
+/// added here.
+fn is_ref_ty(ty: &Ty) -> bool {
+    matches!(
+        ty,
+        Ty::MetadataRef {
+            kind: MetadataKind::CatalogRef
+                | MetadataKind::DocumentRef
+                | MetadataKind::EnumRef
+                | MetadataKind::TaskRef
+                | MetadataKind::BusinessProcessRef
+                | MetadataKind::ExchangePlanRef
+                | MetadataKind::ChartOfAccountsRef
+                | MetadataKind::InformationRegisterRef
+                | MetadataKind::AccumulationRegisterRef
+                | MetadataKind::AccountingRegisterRef
+                | MetadataKind::CalculationRegisterRef,
+            ..
+        }
+    )
 }
 
 /// Pick the `PlatformData` key for a receiver, matching
@@ -858,6 +975,257 @@ mod tests {
             },
             "typed dimension must lower through TyLoweringContext, not fall back to symbolic",
         );
+    }
+
+    // --- is_assignable_to (Task 7) --------------------------------
+
+    fn t(db: &RootDatabaseImpl, file_id: FileId, ty: Ty) -> Type<'_, RootDatabaseImpl> {
+        Type::new(db, file_id, ty)
+    }
+
+    #[test]
+    fn is_assignable_reflexive_on_primitives() {
+        // `A ≤ A` — the most basic rule. Pins that reflexivity works
+        // for primitives where `Ty` implements `PartialEq` trivially.
+        let (db, file_id) = empty_db();
+        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::Number)));
+        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(&db, file_id, Ty::String)));
+        assert!(t(&db, file_id, Ty::Boolean).is_assignable_to(&t(&db, file_id, Ty::Boolean)));
+        assert!(!t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::String)));
+    }
+
+    #[test]
+    fn is_assignable_reflexive_on_metadata_ref() {
+        // `MetadataRef{kind, name} ≤ MetadataRef{kind, name}` — guards
+        // the Name-equality path of the structural comparison. A ref
+        // to a different catalog must *not* be assignable.
+        let (db, file_id) = empty_db();
+        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
+        let cat_y = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Y") };
+        assert!(t(&db, file_id, cat_x.clone()).is_assignable_to(&t(&db, file_id, cat_x.clone())));
+        assert!(!t(&db, file_id, cat_x).is_assignable_to(&t(&db, file_id, cat_y)));
+    }
+
+    #[test]
+    fn is_assignable_unknown_is_top_and_bottom() {
+        // `A ≤ Unknown` (spec) *and* `Unknown ≤ A` (gradual-typing
+        // extension — prevents false `TypeMismatch`es on inferences
+        // that bailed out to `Unknown`).
+        let (db, file_id) = empty_db();
+        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(&db, file_id, Ty::Unknown)));
+        assert!(t(&db, file_id, Ty::Unknown).is_assignable_to(&t(&db, file_id, Ty::Number)));
+        assert!(t(&db, file_id, Ty::Unknown).is_assignable_to(&t(&db, file_id, Ty::Unknown)));
+    }
+
+    #[test]
+    fn is_assignable_null_to_ref_types_only() {
+        // `Null ≤ ref-type` for every MDO ref variant. Must **not**
+        // hold for `CatalogObject` (object, not ref) or for non-MDO
+        // primitives.
+        let (db, file_id) = empty_db();
+        let null = t(&db, file_id, Ty::Null);
+        for kind in [
+            MetadataKind::CatalogRef,
+            MetadataKind::DocumentRef,
+            MetadataKind::EnumRef,
+            MetadataKind::TaskRef,
+            MetadataKind::BusinessProcessRef,
+            MetadataKind::ExchangePlanRef,
+            MetadataKind::ChartOfAccountsRef,
+            MetadataKind::InformationRegisterRef,
+            MetadataKind::AccumulationRegisterRef,
+            MetadataKind::AccountingRegisterRef,
+            MetadataKind::CalculationRegisterRef,
+        ] {
+            let target = t(&db, file_id, Ty::MetadataRef { kind, name: Name::new("X") });
+            assert!(null.is_assignable_to(&target), "Null should be assignable to {kind:?}");
+        }
+        // Objects are not refs — must reject.
+        let cat_obj = t(
+            &db,
+            file_id,
+            Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("X") },
+        );
+        assert!(!null.is_assignable_to(&cat_obj));
+        assert!(!null.is_assignable_to(&t(&db, file_id, Ty::Number)));
+    }
+
+    #[test]
+    fn is_assignable_element_to_union_right() {
+        // `A ≤ Union(…, A, …)` — the union-right rule. Element lives
+        // in the union → assignable; element does not → rejected.
+        let (db, file_id) = empty_db();
+        let number_or_string = Ty::union(vec![Ty::Number, Ty::String]);
+        assert!(t(&db, file_id, Ty::Number).is_assignable_to(&t(
+            &db,
+            file_id,
+            number_or_string.clone()
+        )));
+        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(
+            &db,
+            file_id,
+            number_or_string.clone()
+        )));
+        assert!(!t(&db, file_id, Ty::Boolean).is_assignable_to(&t(&db, file_id, number_or_string)));
+    }
+
+    #[test]
+    fn is_assignable_union_left_distributes() {
+        // `Union(A, B) ≤ T ↔ A ≤ T ∧ B ≤ T`. `Union(Number, String) ≤
+        // Number` must fail because String is not a Number; but
+        // `Union(Number, Number)` collapses to `Number` (smart
+        // constructor), so test with two genuinely distinct types.
+        let (db, file_id) = empty_db();
+        let ns = Ty::union(vec![Ty::Number, Ty::String]);
+        // Neither `Number` nor `String` alone covers the whole union.
+        assert!(!t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, Ty::Number)));
+        assert!(!t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, Ty::String)));
+
+        // `Union(A, B) ≤ Union(A, B)` (reflexivity after `Ty::union`
+        // normalisation) — and `Union(Number, String) ≤
+        // Union(Number, String, Boolean)` via every component matching
+        // some component of the target.
+        let nsb = Ty::union(vec![Ty::Number, Ty::String, Ty::Boolean]);
+        assert!(t(&db, file_id, ns.clone()).is_assignable_to(&t(&db, file_id, ns.clone())));
+        assert!(t(&db, file_id, ns).is_assignable_to(&t(&db, file_id, nsb)));
+    }
+
+    #[test]
+    fn is_assignable_this_object_coerces_to_metadata_ref() {
+        // `ЭтотОбъект` in a catalog module must pass where
+        // `CatalogObject.Товары` is expected. The **reverse** direction
+        // is deliberately rejected — `Ty::ThisObject` is a provenance-
+        // preserving variant (used by `BodyDiagnostic::RedundantAccessToObject`
+        // etc.), so an arbitrary `CatalogObject.X` must not satisfy a
+        // `ЭтотОбъект` slot.
+        let (db, file_id) = empty_db();
+        let this_cat = Ty::ThisObject { owner: (MdoType::Catalog, Name::new("Товары")) };
+        let cat_object =
+            Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("Товары") };
+        assert!(t(&db, file_id, this_cat.clone()).is_assignable_to(&t(
+            &db,
+            file_id,
+            cat_object.clone()
+        )));
+        assert!(
+            !t(&db, file_id, cat_object).is_assignable_to(&t(&db, file_id, this_cat.clone())),
+            "reverse *Object → ThisObject direction must be rejected — preserves provenance"
+        );
+
+        // Mismatched owner must still fail even in the accepted direction.
+        let cat_other = Ty::MetadataRef {
+            kind: MetadataKind::CatalogObject,
+            name: Name::new("Номенклатура"),
+        };
+        assert!(!t(&db, file_id, this_cat).is_assignable_to(&t(&db, file_id, cat_other)));
+    }
+
+    #[test]
+    fn is_assignable_concrete_ref_to_union_of_refs() {
+        // Composition: union-right on two distinct concrete refs.
+        // `CatalogRef.Товары ≤ Union(CatalogRef.Товары, DocumentRef.Заказ)`
+        // must hold; a third ref absent from the union must fail.
+        let (db, file_id) = empty_db();
+        let cat_t =
+            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Товары") };
+        let doc_z =
+            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("Заказ") };
+        let cat_o = Ty::MetadataRef {
+            kind: MetadataKind::CatalogRef,
+            name: Name::new("Номенклатура"),
+        };
+        let target = Ty::union(vec![cat_t.clone(), doc_z.clone()]);
+
+        assert!(t(&db, file_id, cat_t).is_assignable_to(&t(&db, file_id, target.clone())));
+        assert!(t(&db, file_id, doc_z).is_assignable_to(&t(&db, file_id, target.clone())));
+        assert!(
+            !t(&db, file_id, cat_o).is_assignable_to(&t(&db, file_id, target)),
+            "concrete ref not present in union must be rejected"
+        );
+    }
+
+    #[test]
+    fn is_assignable_null_to_union_containing_ref() {
+        // Composition: `Null` + union-right. `Null ≤ CatalogRef.X` and
+        // union-right accepts the `Null`-compatible member.
+        let (db, file_id) = empty_db();
+        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
+        let doc_y = Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("Y") };
+        let target = Ty::union(vec![cat_x, doc_y]);
+        assert!(t(&db, file_id, Ty::Null).is_assignable_to(&t(&db, file_id, target)));
+
+        // Null into a union with no ref members must fail.
+        let ns = Ty::union(vec![Ty::Number, Ty::String]);
+        assert!(!t(&db, file_id, Ty::Null).is_assignable_to(&t(&db, file_id, ns)));
+    }
+
+    #[test]
+    fn is_assignable_union_with_null_left_distributes() {
+        // Composition: `Union(Null, CatalogRef.X) ≤ CatalogRef.X` —
+        // every component must fit individually. `Null ≤ ref` passes,
+        // reflexivity passes → true.
+        let (db, file_id) = empty_db();
+        let cat_x = Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("X") };
+        let nullable_cat = Ty::union(vec![Ty::Null, cat_x.clone()]);
+        assert!(t(&db, file_id, nullable_cat).is_assignable_to(&t(&db, file_id, cat_x.clone())));
+
+        // And the key negative composition case Codex flagged:
+        // `Union(Null, String) ≤ CatalogRef.X` — `Null ≤ ref` true,
+        // `String ≤ CatalogRef.X` false → whole union rejected.
+        let null_or_string = Ty::union(vec![Ty::Null, Ty::String]);
+        assert!(
+            !t(&db, file_id, null_or_string).is_assignable_to(&t(&db, file_id, cat_x)),
+            "union-left must reject when any component fails"
+        );
+    }
+
+    #[test]
+    fn is_assignable_unknown_inside_union_is_permissive() {
+        // Documents the **gradual-typing** composition: `Ty::union`
+        // preserves `Unknown` members (`hir-def/src/ty.rs` smart
+        // constructor does not absorb `Unknown`), so any union that
+        // acquired an `Unknown` through failed inference will pass all
+        // assignment checks. Intentional at M4 Task 7 — revisit when
+        // `TypeMismatch` gets a live emitter (see FIXME in
+        // `is_assignable`).
+        let (db, file_id) = empty_db();
+        let unknown_or_string = Ty::union(vec![Ty::Unknown, Ty::String]);
+        // Union-left: `Unknown ≤ String` (gradual bottom) + `String ≤
+        // String` (reflex) → true.
+        assert!(t(&db, file_id, unknown_or_string).is_assignable_to(&t(&db, file_id, Ty::String)));
+        // Union-right: `String ≤ Unknown` (gradual top) short-circuits
+        // inside the `any`.
+        let number_or_unknown = Ty::union(vec![Ty::Number, Ty::Unknown]);
+        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(&db, file_id, number_or_unknown)));
+    }
+
+    #[test]
+    fn is_assignable_function_structural_equality() {
+        // Function types fall through to structural `==` today (no
+        // variance). Identical signatures → true; differing param or
+        // return → false. Pins the conservative first-pass so a
+        // variance upgrade is a measurable behavioural delta.
+        let (db, file_id) = empty_db();
+        let f_num_to_str =
+            Ty::Function { params: vec![Ty::Number].into(), ret: Box::new(Ty::String) };
+        let f_num_to_str_2 =
+            Ty::Function { params: vec![Ty::Number].into(), ret: Box::new(Ty::String) };
+        let f_str_to_str =
+            Ty::Function { params: vec![Ty::String].into(), ret: Box::new(Ty::String) };
+        let f_num_to_num =
+            Ty::Function { params: vec![Ty::Number].into(), ret: Box::new(Ty::Number) };
+
+        assert!(t(&db, file_id, f_num_to_str.clone()).is_assignable_to(&t(
+            &db,
+            file_id,
+            f_num_to_str_2
+        )));
+        assert!(!t(&db, file_id, f_num_to_str.clone()).is_assignable_to(&t(
+            &db,
+            file_id,
+            f_str_to_str
+        )));
+        assert!(!t(&db, file_id, f_num_to_str).is_assignable_to(&t(&db, file_id, f_num_to_num)));
     }
 
     #[test]

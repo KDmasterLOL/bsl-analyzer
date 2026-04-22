@@ -121,9 +121,11 @@ justifies the refactor.
    roughly a factor of the average block count per body. Do we need
    a new Salsa query key (per-body flow fact) or can we fold into
    `infer_query`?
-6. **`is_assignable_to`.** Once narrowing lands, `hir::Type::is_assignable_to`
-   becomes implementable without lying — the M3 facade intentionally
-   omits it.
+6. **`is_assignable_to`.** ✅ Resolved in M4 Task 7: shipped in
+   `hir::Type::is_assignable_to` with reflexive / `Unknown` / `Null ≤ ref` /
+   union-left / union-right / `ThisObject` coercion rules. Narrowing
+   awareness enters via callers that build the [`Type`] from
+   `Semantics::type_of_expr` — the method itself is pure on [`Ty`].
 
 ## Acceptance criteria for M4
 
@@ -133,7 +135,7 @@ justifies the refactor.
   the narrowed block, `Ty::Unknown` outside.
 - No regression on any M2 / M3 behavioural test when narrowing is
   disabled (feature flag or empty guard set).
-- `hir::Type::is_assignable_to` lands with narrowing-aware semantics.
+- `hir::Type::is_assignable_to` lands with narrowing-aware semantics. ✅ (Task 7)
 
 ## Non-goals
 

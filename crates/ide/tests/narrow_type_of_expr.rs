@@ -26,7 +26,7 @@
 
 use hir::{
     narrow_query, narrowed_type_at, DefDatabase, DefWithBodyId, ExprId, IdConversion, ModuleId,
-    Name, Semantics, Ty,
+    Name, Semantics, Ty, Type,
 };
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -594,5 +594,63 @@ fn type_narrowing_disabled_skips_overlay() {
         sema.type_of_expr(file_id, &then_rhs),
         Ty::String,
         "re-enabling the flag restores the narrowed `Ty::String` without DB rebuild"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Task 7 — `hir::Type::is_assignable_to` narrowing-aware end-to-end.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn is_assignable_to_sees_narrowed_ty_from_semantics() {
+    // End-to-end: Task 7's "narrowing-aware" contract (M4_PLAN.md) is
+    // that callers build `hir::Type` from `Semantics::type_of_expr`
+    // rather than a declared / base type. The method itself stays
+    // pure on `Ty` — the narrowing enters via the `type_of_expr`
+    // overlay.
+    //
+    // Fixture seeds `Х = 42` (base `Ty::Number`) then narrows on the
+    // `Ty::String` branch. Inside the narrowed block:
+    //
+    // - `Type::from(Х) ≤ Type::from(Ty::String)` must hold (the
+    //   narrowed type is String).
+    // - `Type::from(Х) ≤ Type::from(Ty::Number)` must **not** hold —
+    //   if this were true, we'd be reading the base (pre-narrow)
+    //   type, not the narrowed one, i.e. `is_assignable_to` would not
+    //   be narrowing-aware after all.
+    let fixture = r#"
+//- /test.bsl
+Процедура П()
+    Х = 42;
+    Если ТипЗнч(Х) = Тип("Строка") Тогда
+        А = Х;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let then_rhs = nth_ident_expr_at_distinct_position(&root, "Х", 1);
+
+    let sema = Semantics::new(&db);
+    let narrowed_ty = sema.type_of_expr(file_id, &then_rhs);
+    assert_eq!(
+        narrowed_ty,
+        Ty::String,
+        "precondition: narrowing overlay must reach the then-body `Х` before we start the assignability probe",
+    );
+
+    let narrowed = Type::new(&db, file_id, narrowed_ty);
+    let expect_string = Type::new(&db, file_id, Ty::String);
+    let expect_number = Type::new(&db, file_id, Ty::Number);
+
+    assert!(
+        narrowed.is_assignable_to(&expect_string),
+        "narrowed `Х: String` must be assignable to a `String` slot"
+    );
+    assert!(
+        !narrowed.is_assignable_to(&expect_number),
+        "narrowed `Х: String` must NOT be assignable to a `Number` slot — confirms the \
+         predicate consumes the narrowed overlay, not the base `Ty::Number` from `Х = 42`"
     );
 }
