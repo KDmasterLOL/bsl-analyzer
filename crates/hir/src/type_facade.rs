@@ -1101,11 +1101,16 @@ mod tests {
     }
 
     #[test]
-    fn is_assignable_function_structural_equality() {
-        // Function types fall through to structural `==` today (no
-        // variance). Identical signatures → true; differing param or
-        // return → false. Pins the conservative first-pass so a
-        // variance upgrade is a measurable behavioural delta.
+    fn is_assignable_function_reflexive_and_disjoint_primitives_fail() {
+        // Facade-level pin for the subtype algorithm's function branch.
+        // Reflexive identity → true (covers the common "same signature
+        // on both sides" case that a variance implementation must not
+        // regress); disjoint primitive params / returns → false because
+        // neither variance axis (`String ≤ Number`) holds. Variance
+        // itself (contravariant params, covariant return against
+        // unions) is unit-tested in `hir_ty::subtype::tests`; this
+        // stays narrow so the facade catches any accidental
+        // short-circuit before the branch runs.
         let (db, file_id) = empty_db();
         let f_num_to_str =
             Ty::Function { params: vec![Ty::Number].into(), ret: Box::new(Ty::String) };
@@ -1127,6 +1132,28 @@ mod tests {
             f_str_to_str
         )));
         assert!(!t(&db, file_id, f_num_to_str).is_assignable_to(&t(&db, file_id, f_num_to_num)));
+    }
+
+    #[test]
+    fn is_assignable_function_variance_surfaces_through_facade() {
+        // One high-level pin that the variance branch is reachable
+        // through `hir::Type::is_assignable_to` (not just the raw
+        // `hir_ty::subtype::is_assignable`). Covers the minimum diff a
+        // future refactor of `Type::is_assignable_to`'s plumbing could
+        // break: contravariant param widening + covariant return
+        // narrowing, both in a single function signature. Detailed
+        // axis-by-axis assertions live in `hir_ty::subtype::tests`.
+        let (db, file_id) = empty_db();
+        let from = Ty::Function {
+            params: vec![Ty::union(vec![Ty::Number, Ty::String])].into(),
+            ret: Box::new(Ty::Number),
+        };
+        let to = Ty::Function {
+            params: vec![Ty::Number].into(),
+            ret: Box::new(Ty::union(vec![Ty::Number, Ty::String])),
+        };
+        assert!(t(&db, file_id, from.clone()).is_assignable_to(&t(&db, file_id, to.clone())));
+        assert!(!t(&db, file_id, to).is_assignable_to(&t(&db, file_id, from)));
     }
 
     #[test]
