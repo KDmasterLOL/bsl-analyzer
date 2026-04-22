@@ -250,13 +250,13 @@ fn single_path_arg(args: &[ExprIdx], body: &Body) -> Option<Name> {
 // The lattice is `Name → Ty` (a narrowing *overlay* over each body's base
 // `var_types`) plus a "pending guard" slot. Task 6.0's branch-aware
 // `transfer_edge` hook consumes the slot to refine state per outgoing
-// `TrueBranch` / `FalseBranch` edge. Task 6.3 will replace the current
-// `Ty::Unknown` placeholders in the false / `Union \ Ty` cases with a
-// proper smart-constructor; Task 6.4 will strengthen `transfer_stmt` to
-// record the rhs's type after a reassignment. The plumbing here is the
-// load-bearing part — those follow-ups swap the implementations of
-// `apply_guard` and the `Assign` branch without touching the lattice or
-// the solver wiring.
+// `TrueBranch` / `FalseBranch` edge. Task 6.3 added the `Union \ Ty`
+// smart-constructor so false branches refine over union bases. Task 6.4
+// records the rhs's inferred type on a reassignment, replacing the
+// earlier kill-only behaviour for every rhs shape we can type without
+// leaving this module. The plumbing remains load-bearing: future
+// refinements swap implementations of `apply_guard`, `infer_rhs_type`,
+// or the `Assign` branch without touching the lattice or solver wiring.
 
 /// Lattice value for narrowing: an overlay of narrowed types keyed by
 /// name, plus a transient "pending guard" slot.
@@ -314,10 +314,22 @@ impl NarrowState {
 }
 
 impl Lattice for NarrowState {
-    /// Point-wise join of `narrowed`: for each `Name` present on both
-    /// sides, combine via [`Ty::union`] (the M3 smart constructor —
-    /// deduplicates and canonicalises). Names present on only one side
-    /// propagate unchanged.
+    /// Point-wise join of `narrowed`, taking **only** keys present on
+    /// *both* sides (intersection), each combined via [`Ty::union`].
+    ///
+    /// **Why intersection, not union, of keys.** An absent entry means
+    /// "no narrowing — consult the base type". If `Х` is narrowed on
+    /// one incoming path but not on the other, the merged program
+    /// point cannot commit to the narrowing: on the other path `Х`
+    /// could be the full base type. Keeping the one-sided entry would
+    /// be unsound — e.g. `Если <unrecognized_cond> Тогда Х = 42
+    /// КонецЕсли` would falsely report `Х: Number` after the merge
+    /// even though the fall-through path never touched `Х`. Dropping
+    /// the entry degrades back to the base type, which is sound.
+    ///
+    /// **Keys on both sides.** Equal values stay unchanged; different
+    /// values combine via [`Ty::union`] (the smart constructor — it
+    /// deduplicates, sorts, and collapses singletons).
     ///
     /// **Pending guards do not survive a join.** A guard is only
     /// meaningful on the single edge that carries it; if it reached a
@@ -328,17 +340,15 @@ impl Lattice for NarrowState {
     /// joining further forces the slot to `None` as a belt-and-braces
     /// second line of defence.
     fn join(&self, other: &Self) -> Self {
-        let mut narrowed = self.narrowed.clone();
-        for (k, v_other) in &other.narrowed {
-            match narrowed.get(k) {
-                Some(v_self) if v_self == v_other => {}
-                Some(v_self) => {
-                    let merged = Ty::union(vec![v_self.clone(), v_other.clone()]);
-                    narrowed.insert(k.clone(), merged);
-                }
-                None => {
-                    narrowed.insert(k.clone(), v_other.clone());
-                }
+        let mut narrowed = FxHashMap::default();
+        for (k, v_self) in &self.narrowed {
+            if let Some(v_other) = other.narrowed.get(k) {
+                let merged = if v_self == v_other {
+                    v_self.clone()
+                } else {
+                    Ty::union(vec![v_self.clone(), v_other.clone()])
+                };
+                narrowed.insert(k.clone(), merged);
             }
         }
         NarrowState { narrowed, pending_guard: None }
@@ -347,11 +357,14 @@ impl Lattice for NarrowState {
 
 /// Forward-direction dataflow transfer for narrowing.
 ///
-/// - [`Transfer::transfer_stmt`] — on an `Assign { target: Path(x), .. }`
-///   statement, drops `x` from the overlay so reassignment dissolves
-///   any upstream narrowing (ADR-01 Q3 locality). Task 6.4 will extend
-///   this to *record* the rhs's inferred type so the downstream block
-///   still sees a narrowed `x`; for now "kill" is sufficient.
+/// - [`Transfer::transfer_stmt`] — on an `Assign { target: Path(x), ..
+///   value }` statement, infers `value`'s type via
+///   [`NarrowingTransfer::infer_rhs_type`] and records it as the new
+///   narrowing for `x` (ADR-01 Q3 locality). If inference cannot
+///   produce anything more precise than `Ty::Unknown`, the entry is
+///   dropped instead, since the assignment definitively overwrites
+///   any prior narrowing of `x` and leaving the stale entry would
+///   break the overlay contract.
 ///
 /// - [`Transfer::transfer_expr`] — called by the solver on each
 ///   `Conditional` vertex's condition (see
@@ -447,15 +460,66 @@ impl NarrowingTransfer {
             None => Ty::Unknown,
         }
     }
+
+    /// Minimal, pure inference for the rhs of a `Stmt::Assign` — enough
+    /// for Task 6.4's reassignment-locality invariant.
+    ///
+    /// Returns a precise `Ty` for shapes where it is knowable without
+    /// leaving this module:
+    /// - `Expr::Literal` — canonical per-variant lowering (matches
+    ///   [`infer_literal`](crate::InferenceContext::infer_literal)
+    ///   verbatim so hover, Task 6.6, and this transfer never diverge).
+    /// - `Expr::Path(name)` — overlay wins over `base_types`. That is,
+    ///   if the rhs is a variable currently narrowed in this program
+    ///   point, the assignee inherits the *narrowed* type, not the
+    ///   base. This is what makes `Если Т(Y) = Тип("Строка") Тогда Х =
+    ///   Y` see `Х: String` in the then-branch.
+    ///
+    /// Anything else — calls, binary ops, new, field access, ternary —
+    /// returns `Ty::Unknown`. The caller (`transfer_stmt`) then DROPs
+    /// the overlay entry for the assignee rather than storing
+    /// `Unknown` (overlay contract: no Unknown ever stored). This
+    /// matches Task 6.2's kill-on-reassignment behaviour for the
+    /// shapes we still cannot handle here, so the upgrade is
+    /// strictly-more-informative.
+    fn infer_rhs_type(&self, value: ExprIdx, state: &NarrowState, body: &Body) -> Ty {
+        match body.expr_idx(value) {
+            Expr::Literal(lit) => match lit {
+                Literal::Number(_) => Ty::Number,
+                Literal::String(_) => Ty::String,
+                Literal::Date(_) => Ty::Date,
+                Literal::Bool(_) => Ty::Boolean,
+                Literal::Undefined => Ty::Undefined,
+                Literal::Null => Ty::Null,
+            },
+            Expr::Path(name) => state
+                .narrowed
+                .get(name)
+                .cloned()
+                .or_else(|| self.base_types.get(name).cloned())
+                .unwrap_or(Ty::Unknown),
+            _ => Ty::Unknown,
+        }
+    }
 }
 
 impl Transfer<NarrowState> for NarrowingTransfer {
     fn transfer_stmt(&self, stmt_id: RawIdx, state: &NarrowState, body: &Body) -> NarrowState {
         let mut new_state = state.clone();
         let stmt_idx: StmtIdx = Idx::from_raw(stmt_id);
-        if let Stmt::Assign { target, value: _ } = body.stmt_idx(stmt_idx) {
+        if let Stmt::Assign { target, value } = body.stmt_idx(stmt_idx) {
             if let Expr::Path(name) = body.expr_idx(*target) {
-                new_state.narrowed.remove(name);
+                // Task 6.4: an assignment definitively overwrites the
+                // target — any prior narrowing is stale. Try to infer
+                // the rhs's type and record it; if inference is out of
+                // scope (returns `Ty::Unknown`), drop the entry so the
+                // overlay cannot keep showing the outdated narrowing.
+                let new_ty = self.infer_rhs_type(*value, &new_state, body);
+                if matches!(new_ty, Ty::Unknown) {
+                    new_state.narrowed.remove(name);
+                } else {
+                    new_state.narrowed.insert(name.clone(), new_ty);
+                }
             }
         }
         new_state
@@ -1026,14 +1090,24 @@ mod tests {
     }
 
     #[test]
-    fn lattice_join_propagates_one_sided_entry() {
-        // {X → String} ⊔ {} = {X → String}. Absence on one side must
-        // not erase a known fact on the other (otherwise narrowing in
-        // one branch of an If would be invisible after the merge).
+    fn lattice_join_drops_one_sided_entry() {
+        // {X → String} ⊔ {} = {} — dropped. An absent entry on the
+        // other side means the other path made no commitment narrower
+        // than the base type, so keeping `X → String` would misreport
+        // a branch-local fact as merge-global. This is the soundness
+        // fix that makes Task 6.4's reassignment-locality work:
+        // `Если <cond> Тогда Х = 42 КонецЕсли` must not leak `Х →
+        // Number` past КонецЕсли. Dropping the entry degrades to the
+        // base type, which is sound.
         let a = state_with(&[("Х", Ty::String)]);
         let b = NarrowState::new();
         let joined = a.join(&b);
-        assert_eq!(joined.get(&Name::new("Х")), Some(&Ty::String));
+        assert_eq!(joined.get(&Name::new("Х")), None);
+
+        // Commutativity sanity: swapping arguments must not change the
+        // outcome (join is defined as a lattice operation).
+        let joined_rev = b.join(&a);
+        assert_eq!(joined_rev.get(&Name::new("Х")), None);
     }
 
     #[test]
@@ -1347,11 +1421,12 @@ mod tests {
     }
 
     #[test]
-    fn transfer_stmt_assign_to_path_kills_narrowed_entry() {
-        // After `Х = Y`, any prior narrowing of Х from an outer guard
-        // is gone — the reassignment dissolves it. Task 6.4 will
-        // *replace* the entry with the new rhs's type; until then,
-        // "kill" is the sound choice.
+    fn transfer_stmt_assign_from_untyped_rhs_drops_narrowed_entry() {
+        // `Х = Y` where Y has no known type (no overlay entry, no
+        // base_types entry): `infer_rhs_type` yields Ty::Unknown, so
+        // the assignment drops the prior narrowing of Х rather than
+        // keeping stale information. Overlay contract: no Unknown
+        // stored, no stale narrowing left behind.
         let mut b = ExprBuilder::new();
         let x_tgt = b.path("Х");
         let y_val = b.path("Y");
@@ -1379,6 +1454,151 @@ mod tests {
         let state_in = state_with(&[("Х", Ty::String)]);
         let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
         assert_eq!(state_out.get(&Name::new("Х")), Some(&Ty::String));
+    }
+
+    // --- Task 6.4: reassignment-locality (rhs inference) --------------------
+
+    #[test]
+    fn transfer_stmt_assign_number_literal_records_number() {
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let num = b.alloc(Expr::Literal(Literal::Number(42.0.try_into().unwrap())));
+        let assign = b.assign(x_tgt, num);
+
+        let tr = transfer_no_bases();
+        // Outer narrowing (Х: String) must be OVERWRITTEN by the
+        // reassignment, not joined with it — assignment is
+        // destructive.
+        let state_in = state_with(&[("Х", Ty::String)]);
+        let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
+        assert_eq!(state_out.get(&Name::new("Х")), Some(&Ty::Number));
+    }
+
+    #[test]
+    fn transfer_stmt_assign_string_literal_records_string() {
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let s = b.string_lit("hello");
+        let assign = b.assign(x_tgt, s);
+
+        let tr = transfer_no_bases();
+        let state_out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
+        assert_eq!(state_out.get(&Name::new("Х")), Some(&Ty::String));
+    }
+
+    #[test]
+    fn transfer_stmt_assign_undefined_literal_records_undefined() {
+        // `Х = Неопределено` — the reassignment-to-Undefined case is
+        // the shape users write most often and narrowing must catch it
+        // (otherwise an immediately-following `Если Х <> Неопределено`
+        // guard cannot see the correct pre-narrow type).
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let und = b.undefined();
+        let assign = b.assign(x_tgt, und);
+
+        let tr = transfer_no_bases();
+        let state_out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
+        assert_eq!(state_out.get(&Name::new("Х")), Some(&Ty::Undefined));
+    }
+
+    #[test]
+    fn transfer_stmt_assign_bool_literal_records_boolean() {
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let v = b.alloc(Expr::Literal(Literal::Bool(true)));
+        let assign = b.assign(x_tgt, v);
+        let tr = transfer_no_bases();
+        let out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
+        assert_eq!(out.get(&Name::new("Х")), Some(&Ty::Boolean));
+    }
+
+    #[test]
+    fn transfer_stmt_assign_date_literal_records_date() {
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let v = b.alloc(Expr::Literal(Literal::Date("20260101".into())));
+        let assign = b.assign(x_tgt, v);
+        let tr = transfer_no_bases();
+        let out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
+        assert_eq!(out.get(&Name::new("Х")), Some(&Ty::Date));
+    }
+
+    #[test]
+    fn transfer_stmt_assign_null_literal_records_null() {
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let v = b.alloc(Expr::Literal(Literal::Null));
+        let assign = b.assign(x_tgt, v);
+        let tr = transfer_no_bases();
+        let out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
+        assert_eq!(out.get(&Name::new("Х")), Some(&Ty::Null));
+    }
+
+    #[test]
+    fn transfer_stmt_assign_from_base_typed_rhs_records_base_type() {
+        // `Х = Y` with `Y: Ty::Number` known in base_types but no
+        // overlay entry for Y: the rhs type comes from base_types and
+        // Х inherits it.
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let y_val = b.path("Y");
+        let assign = b.assign(x_tgt, y_val);
+
+        let tr = transfer_with_bases(&[("Y", Ty::Number)]);
+        let state_out = tr.transfer_stmt(assign.into_raw(), &NarrowState::new(), &b.body);
+        assert_eq!(state_out.get(&Name::new("Х")), Some(&Ty::Number));
+    }
+
+    #[test]
+    fn transfer_stmt_assign_from_narrowed_rhs_prefers_overlay_over_base() {
+        // `Х = Y` where Y: base Union(Number, String) but Y is
+        // *narrowed* to String in the current overlay (e.g. inside an
+        // `Если ТипЗнч(Y) = Тип("Строка")` branch): the assignment
+        // must propagate the narrowed String, not the base Union.
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let y_val = b.path("Y");
+        let assign = b.assign(x_tgt, y_val);
+
+        let tr = transfer_with_bases(&[("Y", Ty::union(vec![Ty::Number, Ty::String]))]);
+        let state_in = state_with(&[("Y", Ty::String)]);
+        let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
+        assert_eq!(state_out.get(&Name::new("Х")), Some(&Ty::String));
+    }
+
+    #[test]
+    fn transfer_stmt_assign_from_complex_rhs_drops_entry() {
+        // `Х = Y + 1` — `Expr::BinaryOp` is out of Task 6.4's
+        // inference scope → infer_rhs_type returns Ty::Unknown → the
+        // overlay drops any prior narrowing of Х (cannot keep stale
+        // info across a destructive assignment).
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let y = b.path("Y");
+        let one = b.alloc(Expr::Literal(Literal::Number(1.0.try_into().unwrap())));
+        let sum = b.bin(y, one, BinaryOp::Add);
+        let assign = b.assign(x_tgt, sum);
+
+        let tr = transfer_no_bases();
+        let state_in = state_with(&[("Х", Ty::String)]);
+        let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
+        assert_eq!(state_out.get(&Name::new("Х")), None);
+    }
+
+    #[test]
+    fn transfer_stmt_assign_literal_does_not_touch_unrelated_entries() {
+        // Reassignment of Х must not perturb the narrowing of Y.
+        let mut b = ExprBuilder::new();
+        let x_tgt = b.path("Х");
+        let num = b.alloc(Expr::Literal(Literal::Number(7.0.try_into().unwrap())));
+        let assign = b.assign(x_tgt, num);
+
+        let tr = transfer_no_bases();
+        let state_in = state_with(&[("Х", Ty::String), ("Y", Ty::Boolean)]);
+        let state_out = tr.transfer_stmt(assign.into_raw(), &state_in, &b.body);
+        assert_eq!(state_out.get(&Name::new("Y")), Some(&Ty::Boolean));
+        assert_eq!(state_out.get(&Name::new("Х")), Some(&Ty::Number));
     }
 
     #[test]
@@ -1526,6 +1746,131 @@ mod tests {
             else_in.get(&Name::new("Х")),
             Some(&Ty::Number),
             "IN[else-block] must carry Х → Number (= Union(Number, String) \\ String), got {else_in:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_reassignment_in_then_block_records_new_type_in_out_state() {
+        // Task 6.4 e2e:
+        //
+        //   Если ТипЗнч(Х) = Тип("Строка") Тогда
+        //       Х = 42        // reassign to Number
+        //   КонецЕсли
+        //
+        // Then-block's IN state has Х → String (from the guard).
+        // After `transfer_stmt` fires on the assign, the OUT state
+        // must have Х → Number — the guard's narrowing is overwritten
+        // by the reassignment (destructive semantics). Without Task
+        // 6.4's rhs-type inference, OUT would have Х absent from the
+        // overlay ("kill" semantics), which loses the Number
+        // information that downstream narrowing should be able to
+        // exploit.
+        let mut b = ExprBuilder::new();
+
+        let x_arg = b.path("Х");
+        let typznc = b.path("ТипЗнч");
+        let lhs = b.call(typznc, vec![x_arg]);
+        let tip = b.path("Тип");
+        let s = b.string_lit("Строка");
+        let rhs = b.call(tip, vec![s]);
+        let condition = b.bin(lhs, rhs, BinaryOp::Eq);
+
+        let x_tgt = b.path("Х");
+        let num = b.alloc(Expr::Literal(Literal::Number(42.0.try_into().unwrap())));
+        let assign = b.assign(x_tgt, num);
+
+        let if_stmt = b.if_then(condition, assign);
+        b.set_top_level(vec![if_stmt]);
+
+        let body = b.body.clone();
+        let result =
+            narrow_body(body, FxHashMap::default()).expect("narrowing analysis must converge");
+        let cfg = result.cfg();
+
+        use cfg::CfgVertex;
+        let cond_idx = cfg
+            .vertices()
+            .find(|(_, v)| matches!(v, CfgVertex::Conditional(_)))
+            .map(|(idx, _)| idx)
+            .expect("CFG must contain a Conditional vertex for the Если");
+
+        let then_block_idx = cfg
+            .outgoing_edges(cond_idx)
+            .find(|(_, kind)| **kind == CfgEdgeType::TrueBranch)
+            .map(|(idx, _)| idx)
+            .expect("Conditional vertex must have a TrueBranch successor");
+
+        let then_in = result
+            .block_in(then_block_idx)
+            .expect("then-block must have an IN state after solving");
+        assert_eq!(
+            then_in.get(&Name::new("Х")),
+            Some(&Ty::String),
+            "IN[then-block] carries guard narrowing, got {then_in:?}"
+        );
+
+        let then_out = result
+            .block_out(then_block_idx)
+            .expect("then-block must have an OUT state after solving");
+        assert_eq!(
+            then_out.get(&Name::new("Х")),
+            Some(&Ty::Number),
+            "OUT[then-block] must reflect the Х = 42 reassignment, got {then_out:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_one_sided_reassignment_does_not_leak_past_merge() {
+        // Soundness regression for the Task 6.4 join fix:
+        //
+        //   Если ТипЗнч(Х) = Тип("Строка") Тогда
+        //       Х = 42
+        //   КонецЕсли
+        //
+        // In the then-block: Х → Number (reassignment). The else
+        // path (implicit fall-through) does not touch Х — after the
+        // merge, no single value can be committed for Х, so the
+        // overlay MUST drop the entry. If `join` propagated the
+        // one-sided `Х → Number`, readers past КонецЕсли would
+        // falsely believe Х is always Number.
+        //
+        // We assert via the Exit vertex's IN state, which is where
+        // the post-merge join lands.
+        let mut b = ExprBuilder::new();
+
+        let x_arg = b.path("Х");
+        let typznc = b.path("ТипЗнч");
+        let lhs = b.call(typznc, vec![x_arg]);
+        let tip = b.path("Тип");
+        let s = b.string_lit("Строка");
+        let rhs = b.call(tip, vec![s]);
+        let condition = b.bin(lhs, rhs, BinaryOp::Eq);
+
+        let x_tgt = b.path("Х");
+        let num = b.alloc(Expr::Literal(Literal::Number(42.0.try_into().unwrap())));
+        let assign = b.assign(x_tgt, num);
+
+        let if_stmt = b.if_then(condition, assign);
+        b.set_top_level(vec![if_stmt]);
+
+        let body = b.body.clone();
+        let result =
+            narrow_body(body, FxHashMap::default()).expect("narrowing analysis must converge");
+        let cfg = result.cfg();
+
+        use cfg::CfgVertex;
+        let exit_idx = cfg
+            .vertices()
+            .find(|(_, v)| matches!(v, CfgVertex::Exit))
+            .map(|(idx, _)| idx)
+            .expect("CFG must contain an Exit vertex");
+
+        let exit_in =
+            result.block_in(exit_idx).expect("Exit vertex must have an IN state after solving");
+        assert_eq!(
+            exit_in.get(&Name::new("Х")),
+            None,
+            "one-sided `Х → Number` must NOT survive the post-КонецЕсли merge, got {exit_in:?}"
         );
     }
 }
