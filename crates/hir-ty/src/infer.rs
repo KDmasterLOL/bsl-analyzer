@@ -795,9 +795,18 @@ impl<'db> InferenceContext<'db> {
             for arg in args {
                 self.infer_expr(*arg);
             }
-            return crate::method_lookup::lookup_method(&receiver_ty, &method_name)
-                .map(|info| info.return_ty)
-                .unwrap_or(Ty::Unknown);
+            return match crate::method_lookup::lookup_method(&receiver_ty, &method_name) {
+                Some(info) => {
+                    // Argument type check (M4 Task 7 follow-up): the
+                    // fluent-chain path historically skipped both arg-
+                    // count and arg-type diagnostics. Emit the type
+                    // check here — count-check stays deferred so this
+                    // patch stays scoped to the TypeMismatch emitter.
+                    self.emit_arg_type_mismatches(args, &info.params);
+                    info.return_ty
+                }
+                None => Ty::Unknown,
+            };
         }
 
         // Infer callee type for non-qualified calls
@@ -820,13 +829,15 @@ impl<'db> InferenceContext<'db> {
                     });
                 }
 
-                // TODO Phase 2+: Check argument types
-                // for (arg_id, param_ty) in args.iter().zip(params.iter()) {
-                //     let arg_ty = self.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);
-                //     if !self.is_compatible(&arg_ty, param_ty) {
-                //         self.diagnostics.push(InferenceDiagnostic::TypeMismatch { ... });
-                //     }
-                // }
+                // M4 Task 7 follow-up: argument type check. Pairs zip
+                // to `min(args, params)` so a prior `MismatchedArgCount`
+                // does not double-fire as a `TypeMismatch` on the
+                // unpaired tail. The per-pair predicate is
+                // [`crate::subtype::is_assignable`], which treats
+                // `Ty::Unknown` on either side as permissive — typical
+                // for BSL where param declarations are often absent or
+                // only partially typed via JSDoc.
+                self.emit_arg_type_mismatches(args, params);
 
                 // Return function's return type
                 (**ret).clone()
@@ -891,6 +902,10 @@ impl<'db> InferenceContext<'db> {
                         found: args.len(),
                     });
                 }
+
+                // Argument type check — same rationale as the
+                // plain-function branch in `infer_call`.
+                self.emit_arg_type_mismatches(args, &resolution.signature.params);
 
                 // Return method's return type
                 resolution.return_type
@@ -961,6 +976,9 @@ impl<'db> InferenceContext<'db> {
                     });
                 }
 
+                // Argument type check — mirrors `infer_qualified_call`.
+                self.emit_arg_type_mismatches(args, &resolution.signature.params);
+
                 resolution.return_type
             }
             Err(kind) => {
@@ -971,6 +989,32 @@ impl<'db> InferenceContext<'db> {
                     kind,
                 });
                 Ty::Unknown
+            }
+        }
+    }
+
+    /// Emit a [`InferenceDiagnostic::TypeMismatch`] per argument whose
+    /// inferred type is not assignable to the corresponding parameter
+    /// type.
+    ///
+    /// Walks `args.iter().zip(params.iter())`, so an extra unpaired
+    /// argument (caught separately by
+    /// [`InferenceDiagnostic::MismatchedArgCount`]) does not also fire
+    /// a pair-wise mismatch. The per-pair predicate is
+    /// [`crate::subtype::is_assignable`] — `Ty::Unknown` on either
+    /// side is permissive (see the `GRADUAL TYPING` note in
+    /// [`crate::subtype`]), so expressions the inferrer could not type
+    /// and parameters without declared types produce no false
+    /// positives.
+    fn emit_arg_type_mismatches(&mut self, args: &[ExprId], params: &[Ty]) {
+        for (arg_id, param_ty) in args.iter().zip(params.iter()) {
+            let arg_ty = self.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);
+            if !crate::subtype::is_assignable(&arg_ty, param_ty) {
+                self.diagnostics.push(InferenceDiagnostic::TypeMismatch {
+                    expr: *arg_id,
+                    expected: param_ty.clone(),
+                    actual: arg_ty,
+                });
             }
         }
     }

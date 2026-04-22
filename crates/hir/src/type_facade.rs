@@ -29,7 +29,9 @@ use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 use hir_ty::lower::TyLoweringContext;
-use hir_ty::{coerce_this_object_to_metadata_ref, lookup_field, lookup_method};
+use hir_ty::{
+    coerce_this_object_to_metadata_ref, is_assignable, is_ref_ty, lookup_field, lookup_method,
+};
 use std::collections::HashSet;
 use vfs::FileId;
 
@@ -402,107 +404,6 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
 
         Vec::new()
     }
-}
-
-/// Structural assignability check on raw [`Ty`]. See
-/// [`Type::is_assignable_to`] for the rule list — this free function
-/// holds the algorithm so it can be unit-tested without wrapping every
-/// pair of types in the facade.
-fn is_assignable(from: &Ty, to: &Ty) -> bool {
-    // GRADUAL TYPING: `Unknown` on either side short-circuits. The
-    // M4_PLAN spec only guarantees `A ≤ Unknown` (Unknown as top); we
-    // also accept `Unknown ≤ A` so a failed / partial inference on
-    // the from-side does not fire a `TypeMismatch`. This is
-    // deliberately permissive because `Ty::Unknown` bubbles out of
-    // `hir-ty::infer` for any expression the inferrer bailed on — the
-    // common case today is "unresolved param type" in user procedures,
-    // not "unreachable code."
-    //
-    // [FIXME] Re-evaluate when `InferenceDiagnostic::TypeMismatch`
-    // gains a live emitter (stubbed at `hir-ty/src/infer.rs` near
-    // `// Argument type check`). Once that emission lands, audit
-    // whether the `Unknown` bottom-rule swallows diagnostics that
-    // users would want to see — if so, either restrict to spec-strict
-    // (`A ≤ Unknown` only) or gate the bottom direction behind a
-    // "strict_type_check" feature flag (parallel to `type_narrowing`).
-    if matches!(from, Ty::Unknown) || matches!(to, Ty::Unknown) {
-        return true;
-    }
-
-    // Union left: distributes — `A | B ≤ T` iff every component is
-    // assignable to `T`. Evaluated before union-right so a union-to-
-    // union check unfolds left first, which matches the rule in
-    // M4_PLAN.md ("Union(A, B) ≤ T ↔ A ≤ T ∧ B ≤ T").
-    if let Ty::Union(parts) = from {
-        return parts.iter().all(|p| is_assignable(p, to));
-    }
-    // Union right: `A ≤ Union(…, X, …)` iff `A ≤ X` for some `X`.
-    if let Ty::Union(parts) = to {
-        return parts.iter().any(|p| is_assignable(from, p));
-    }
-
-    // `Null ≤ ref-type` — assigning `Null` to a catalog / document
-    // reference (etc.) is how BSL clears a ref. No corresponding
-    // `Undefined ≤ ref` rule at M4: the plan only mentions `Null`;
-    // raise `Undefined` in a follow-up if real diagnostic traffic
-    // shows false positives.
-    if matches!(from, Ty::Null) && is_ref_ty(to) {
-        return true;
-    }
-
-    // ThisObject → MetadataRef{*Object} coercion (one direction only):
-    // `ЭтотОбъект` is accepted where the explicit
-    // `CatalogObject.Товары` is expected. Delegates to the M3 coercion
-    // helper so the mapping stays single-source (`hir_ty::this_object`).
-    //
-    // The **reverse** direction (`MetadataRef{*Object} → ThisObject`) is
-    // deliberately not accepted: [`Ty::ThisObject`] exists to preserve
-    // the "explicitly self-referential" provenance signal used by
-    // `BodyDiagnostic::RedundantAccessToObject` and future rename /
-    // refactor features. Letting an arbitrary `CatalogObject.X` satisfy
-    // a `ThisObject{(Catalog, X)}` slot would erase that signal.
-    if let Some(coerced) = coerce_this_object_to_metadata_ref(from) {
-        if &coerced == to {
-            return true;
-        }
-    }
-
-    // Reflexivity — covers every structurally-equal pair: primitives,
-    // `MetadataRef` (same kind + name), `ObjectManager`,
-    // `ManagerCollection`, `Function`, `PlatformObject`, `ThisObject`
-    // with equal owner.
-    //
-    // [TODO] Task-7-followup: `Ty::Function { params, ret }` falls
-    // through to structural equality here. Variance (contravariant
-    // params, covariant return) will matter once first-class function
-    // values feed `TypeMismatch` emission in `hir-ty::infer`; today
-    // function values are rare enough in real BSL that strict equality
-    // is adequate for the first-pass predicate.
-    from == to
-}
-
-/// Free-function counterpart of [`Type::is_ref_type`]. Extracted so
-/// [`is_assignable`]'s `Null ≤ ref-type` branch and the method both go
-/// through one predicate — a new MDO ref variant only needs to be
-/// added here.
-fn is_ref_ty(ty: &Ty) -> bool {
-    matches!(
-        ty,
-        Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef
-                | MetadataKind::DocumentRef
-                | MetadataKind::EnumRef
-                | MetadataKind::TaskRef
-                | MetadataKind::BusinessProcessRef
-                | MetadataKind::ExchangePlanRef
-                | MetadataKind::ChartOfAccountsRef
-                | MetadataKind::InformationRegisterRef
-                | MetadataKind::AccumulationRegisterRef
-                | MetadataKind::AccountingRegisterRef
-                | MetadataKind::CalculationRegisterRef,
-            ..
-        }
-    )
 }
 
 /// Pick the `PlatformData` key for a receiver, matching
