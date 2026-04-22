@@ -568,6 +568,7 @@ pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stm
 
             return None;
         }
+        SyntaxKind::ERROR => try_lower_recovered_expr_stmt(ctx, node),
         _ => return None,
     }?;
 
@@ -759,6 +760,53 @@ fn lower_call_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let expr_node = node.children().next()?;
     let expr = lower_expr_node(ctx, &expr_node);
     Some(Stmt::Expr(expr))
+}
+
+/// Best-effort recovery for top-level `ERROR` nodes.
+///
+/// BSL parser emits a well-formed expression subtree inside `NodeKind::Error`
+/// when the user typed something that's syntactically an expression but not a
+/// valid BSL statement (e.g. bare `Сп.В`, `obj.field` without `()`). Without
+/// this recovery, `lower_stmt` would drop the subtree entirely, preventing
+/// `Semantics::type_of_expr` from ever seeing the expression — which breaks
+/// completion/hover while the user is still typing.
+///
+/// Policy:
+/// * Only recover when the `ERROR` sits directly inside a `STMT_LIST` — i.e.
+///   statement position. Anything else (expression-level ERROR in `Если Сп. Тогда`,
+///   arg lists, etc.) is out of scope.
+/// * Pick the first well-formed expression child. If none is found, return
+///   `None` and preserve the previous "drop on ERROR" behaviour.
+/// * Mark every allocated `ExprIdx` as recovered via `mark_recovered_rec`, so
+///   inference diagnostics (`hir-ty/src/infer.rs`) and CFG construction
+///   (`crates/cfg`) can opt out of emitting noise on unfinished typing.
+fn try_lower_recovered_expr_stmt(ctx: &mut LoweringCtx, error_node: &SyntaxNode) -> Option<Stmt> {
+    if error_node.parent().map(|p| p.kind()) != Some(SyntaxKind::STMT_LIST) {
+        return None;
+    }
+    let expr_node = error_node.children().find(|c| is_recoverable_expr(c.kind()))?;
+    let expr = lower_expr_node(ctx, &expr_node);
+    ctx.mark_recovered_rec(expr);
+    Some(Stmt::Expr(expr))
+}
+
+/// Well-formed expression shapes that can be salvaged from a recovery
+/// `NodeKind::Error`. Keep in lock-step with `primary_expr` / `postfix_expr`
+/// in `crates/parser/src/grammar/expressions.rs`.
+fn is_recoverable_expr(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::FIELD_EXPR
+            | SyntaxKind::CALL_EXPR
+            | SyntaxKind::INDEX_EXPR
+            | SyntaxKind::NEW_EXPR
+            | SyntaxKind::BINARY_EXPR
+            | SyntaxKind::UNARY_EXPR
+            | SyntaxKind::PAREN_EXPR
+            | SyntaxKind::IDENT
+            | SyntaxKind::LITERAL
+            | SyntaxKind::EXPR
+    )
 }
 
 /// Lower return statement.

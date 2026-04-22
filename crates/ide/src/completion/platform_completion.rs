@@ -39,11 +39,15 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 
     tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "Completion token");
 
-    if token.kind() != SyntaxKind::DOT {
-        return None;
-    }
+    // Accept two cursor positions after a dot:
+    //   1. cursor directly on `.` (`Сп.|`)          → anchor = DOT, no prefix.
+    //   2. cursor inside/after an IDENT whose previous non-trivia token is `.`
+    //      (`Сп.В|`)                                → anchor = that DOT,
+    //      prefix = IDENT text up to the cursor.
+    // Any other shape is not our context.
+    let (dot_token, prefix) = resolve_dot_anchor(&token, position.offset)?;
 
-    let receiver_expr = find_receiver_expr(&token)?;
+    let receiver_expr = find_receiver_expr(&dot_token)?;
 
     // Fast path: bare-IDENT receiver (`ОбщегоНазначения.`) is almost always a
     // CommonModule call. Resolve via `module_index` (path-only, cheap) before
@@ -86,10 +90,82 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
-        return Some(complete_platform_methods(db, type_name));
+        let items = complete_platform_methods(db, type_name);
+        return Some(apply_prefix_filter(items, &prefix, db));
     }
 
     None
+}
+
+/// Decide whether we are in `X.| ` / `X.Yyy|` position and, if so, return
+/// the anchor DOT token plus the partial identifier typed after it.
+///
+/// The cursor-on-DOT case is trivial. The cursor-on-IDENT case walks
+/// leftward over trivia (whitespace/newlines/comments) looking for a DOT
+/// sibling — the same approach `new_expr_completion::is_after_new_keyword`
+/// uses for the `Новый <type>` context.
+///
+/// Returns `None` when the cursor isn't in a member-access context;
+/// callers short-circuit and let the next completion provider run.
+fn resolve_dot_anchor(
+    token: &SyntaxToken,
+    offset: syntax::TextSize,
+) -> Option<(SyntaxToken, String)> {
+    match token.kind() {
+        SyntaxKind::DOT => Some((token.clone(), String::new())),
+        SyntaxKind::IDENT => {
+            let mut cur = token.prev_token();
+            while let Some(t) = cur.clone() {
+                if t.kind().is_trivia() {
+                    cur = t.prev_token();
+                } else {
+                    break;
+                }
+            }
+            let dot = cur.filter(|t| t.kind() == SyntaxKind::DOT)?;
+            // Prefix = text from the IDENT start up to the cursor. For
+            // `Сп.В|` this is `"В"`; for `Сп.Вста|вить` it's `"Вста"`.
+            let token_start = token.text_range().start();
+            let cursor_in_token: usize = offset.checked_sub(token_start)?.into();
+            let text = token.text();
+            let prefix = text[..cursor_in_token.min(text.len())].to_string();
+            Some((dot, prefix))
+        }
+        _ => None,
+    }
+}
+
+/// Case-insensitive starts-with match against the method's Russian *or*
+/// English name, mirroring the filter in
+/// `bsl_completion::complete_global_functions`. Pulls the English name off
+/// the existing `PlatformData` index — the only lookup keyed by Russian
+/// name that survives the M3 Task 11 facade migration.
+fn apply_prefix_filter(
+    items: Vec<CompletionItem>,
+    prefix: &str,
+    _db: &dyn RootDatabase,
+) -> Vec<CompletionItem> {
+    if prefix.is_empty() {
+        return items;
+    }
+    let prefix_lower = prefix.to_lowercase();
+    items
+        .into_iter()
+        .filter(|item| {
+            let label_lc = item.label.to_lowercase();
+            if label_lc.starts_with(&prefix_lower) {
+                return true;
+            }
+            // `filter_text` carries the bilingual label (`"Массив Array"`) built
+            // by `presenters::completion::render_completion_detail`; split on
+            // whitespace to compare against each name individually.
+            if let Some(ft) = &item.filter_text {
+                ft.split_whitespace().any(|tok| tok.to_lowercase().starts_with(&prefix_lower))
+            } else {
+                false
+            }
+        })
+        .collect()
 }
 
 /// Find the receiver expression node before the DOT token.
@@ -226,6 +302,7 @@ pub(super) fn item_from_signature(sig: &SymbolSignature) -> CompletionItem {
     let detail = render_completion_detail(sig);
     let kind = match sig.source {
         SignatureSource::Platform | SignatureSource::PlatformManager => CompletionItemKind::Method,
+        SignatureSource::PlatformConstructor => CompletionItemKind::Constructor,
         SignatureSource::GlobalFunction => CompletionItemKind::Function,
         SignatureSource::CommonModule | SignatureSource::ManagerModule | SignatureSource::Local => {
             match sig.kind {

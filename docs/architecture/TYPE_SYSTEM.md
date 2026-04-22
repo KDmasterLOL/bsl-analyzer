@@ -235,6 +235,26 @@ pub trait HirDatabase: DefDatabase {
    копипастится в `Semantics` и `infer`. Локальная переменная с
    именем встроенной функции не затеняет её вызов.
 
+6. **Best-effort recovery для ERROR-узлов парсера.** Голое
+   `Сп.В` на отдельной строке — не валидный BSL-statement, парсер
+   обёртывает FIELD_EXPR в `NodeKind::Error`. HIR lowering
+   (`hir-def::body::lower::stmt::try_lower_recovered_expr_stmt`)
+   разворачивает well-formed expression-child ERROR-узла в
+   `Stmt::Expr`, помечая получившиеся `ExprId` как recovered
+   (`Body::is_recovered`). Это даёт `Semantics::type_of_expr`
+   единую точку разрешения — он работает поверх `BodySourceMap`
+   и корректно резолвит тип receiver'а, пока пользователь ещё
+   печатает. Чтобы избежать «diagnostic flicker»:
+   * `hir-ty::infer::push_inference_diagnostic` глотает
+     `UnresolvedField/UnresolvedMethodCall/MismatchedArgCount/TypeMismatch`
+     на recovered `ExprId`;
+   * `cfg::builder::walk_statement_hir` пропускает recovered
+     `Stmt::Expr`, чтобы dataflow/reachability не видели код,
+     который пользователь ещё набирает.
+   Инвариант: **единственный канал «syntax node → Ty» для IDE остаётся
+   `Semantics::type_of_expr`**; recovered marker меняет только
+   behaviour соседних консьюмеров, не контракт фасада.
+
 ## Path-sensitive анализ (narrowing)
 
 Narrowing типов через `Если ТипЗнч(Х) = Тип("…")` или

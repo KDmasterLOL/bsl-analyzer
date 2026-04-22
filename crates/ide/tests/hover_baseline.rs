@@ -232,6 +232,111 @@ fn hover_keyword_процедура() {
     }
 }
 
+// ---------- inferred type on bindings ----------
+
+#[test]
+fn hover_implicit_module_var_after_new_constructor() {
+    // Root case from the type-system bring-up: BSL allows implicit variable
+    // declaration at first assignment, so `КомпоновщикНастроек` has no
+    // `Перем` entry in the item tree. Before the fix, hover returned None
+    // (definition miss → platform type lookup by the variable's name also
+    // misses). The fallback in `hover_user_defined` now surfaces the
+    // inferred platform object type carried by `Expr::New`.
+    let fixture = r#"//- /test.bsl
+КомпоновщикНас$0троек = Новый КомпоновщикНастроекКомпоновкиДанных;
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover =
+        analysis.hover(file_id, offset).expect("hover on implicit var must produce a result");
+    assert!(
+        hover.markup.contains("КомпоновщикНастроекКомпоновкиДанных"),
+        "hover must surface inferred type name, got: {:?}",
+        hover.markup
+    );
+}
+
+#[test]
+fn hover_local_var_carries_inferred_primitive_type() {
+    // Local variable path — `definition_to_hover` wires `Semantics::type_of_expr`
+    // into the `Definition::Local` branch so the primitive is rendered as
+    // "Массив / Array" alongside the existing `**Локальная переменная X**`
+    // header. `ExprScopes` only collects explicit `Перем` decls, so the
+    // fixture declares the variable up-front and hovers over the later use.
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    Перем Результат;
+    Результат = Новый Массив;
+    Резу$0льтат.Добавить(1);
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover = analysis.hover(file_id, offset).expect("hover on local var must produce a result");
+    assert!(
+        hover.markup.contains("Локальная переменная Результат"),
+        "hover must keep the local-variable header, got: {:?}",
+        hover.markup
+    );
+    assert!(
+        hover.markup.contains("Массив"),
+        "hover must render Ty::Array as Массив, got: {:?}",
+        hover.markup
+    );
+}
+
+#[test]
+fn hover_on_unknown_platform_type_in_new_falls_back_to_name_only() {
+    // `КонвейерДанныхЗаказов` is not a real platform object — the
+    // `TyLoweringContext::lower_bare_name` fallback produces
+    // `Ty::PlatformObject("КонвейерДанныхЗаказов")`. Hover surfaces a
+    // bare `**Тип:** name` block when `platform_type_query` has no data
+    // for it, so output is informative even if the platform index is
+    // incomplete.
+    let fixture = r#"//- /test.bsl
+Резу$0льтат = Новый КонвейерДанныхЗаказов;
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover = analysis
+        .hover(file_id, offset)
+        .expect("hover on implicit var with unknown platform object must still produce a result");
+    assert!(
+        hover.markup.contains("КонвейерДанныхЗаказов"),
+        "hover must include the constructor type name even without platform data, got: {:?}",
+        hover.markup
+    );
+}
+
+#[test]
+fn hover_on_constructor_name_does_not_leak_enclosing_new_type() {
+    // Regression guard for the `type_of_token` scope rule: the token
+    // `Массив` sits under a wider `NEW_EXPR` whose inferred `Ty::Array`
+    // is the *result* of `Новый Массив`, not the type of the token
+    // itself. Picking that up would short-circuit `hover_platform` and
+    // miss the platform-type block (context / version / methods preview).
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    Х = Новый Мас$0сив;
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover = analysis.hover(file_id, offset);
+    // Platform data may or may not be loaded in minimal test runs; the
+    // negative guard (no unresolved-ident fallback header) runs always,
+    // the positive check (right path fired) only when hover produced a
+    // result — without it, we'd only prove the wrong path did not fire.
+    if let Some(result) = hover {
+        assert!(
+            !result.markup.starts_with("**Массив**"),
+            "constructor-name hover must not use the unresolved-ident fallback header, got: {:?}",
+            result.markup
+        );
+        assert!(
+            result.markup.contains("**Тип:** Массив"),
+            "constructor-name hover must emit the platform-type header, got: {:?}",
+            result.markup
+        );
+    }
+}
+
 // ---------- negative cases ----------
 
 #[test]

@@ -91,6 +91,7 @@ fn header_line(sig: &SymbolSignature) -> String {
     let label = match sig.source {
         SignatureSource::Platform | SignatureSource::PlatformManager => "Метод",
         SignatureSource::GlobalFunction => "Глобальная функция",
+        SignatureSource::PlatformConstructor => "Конструктор",
         SignatureSource::CommonModule | SignatureSource::ManagerModule | SignatureSource::Local => {
             match sig.kind {
                 MethodKind::Function => "Функция",

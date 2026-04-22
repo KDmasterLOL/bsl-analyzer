@@ -244,6 +244,34 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    /// Suppress inference diagnostics whose key expression was lowered
+    /// from a parser ERROR node.
+    ///
+    /// Rust-analyzer-style recovery (`hir-def/src/body/lower/stmt.rs`) lets
+    /// us type-check expressions the user is still typing (`Сп.В`, bare
+    /// field access, etc.). Those expressions intentionally lack full
+    /// syntactic context, so firing `UnresolvedField` /
+    /// `UnresolvedMethodCall` / `MismatchedArgCount` / `TypeMismatch` on
+    /// them would flicker in the editor as the user types. The recovery
+    /// marker (`Body::is_recovered`) is the single source of truth for
+    /// "this expression came from an ERROR node, don't complain".
+    ///
+    /// Call this instead of `self.diagnostics.push(...)` whenever the
+    /// diagnostic is anchored to an expression the user could still be
+    /// editing.
+    fn push_inference_diagnostic(&mut self, diag: InferenceDiagnostic) {
+        let key = match &diag {
+            InferenceDiagnostic::UnresolvedMethodCall { expr, .. } => *expr,
+            InferenceDiagnostic::MismatchedArgCount { call_expr, .. } => *call_expr,
+            InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
+            InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
+        };
+        if self.body.is_recovered(key) {
+            return;
+        }
+        self.diagnostics.push(diag);
+    }
+
     /// Finish inference and return the per-body output.
     pub fn finish(self) -> BodyInferenceResult {
         BodyInferenceResult {
@@ -540,7 +568,7 @@ impl<'db> InferenceContext<'db> {
                     // them authoritative once the method surface on
                     // `ObjectManager` lands too.
                     if matches!(base_ty, Ty::MetadataRef { .. } | Ty::ThisObject { .. }) {
-                        self.diagnostics.push(InferenceDiagnostic::UnresolvedField {
+                        self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
                             expr: expr_id,
                             receiver_ty: base_ty,
                             field_name: field.clone(),
@@ -822,7 +850,7 @@ impl<'db> InferenceContext<'db> {
             Ty::Function { ref params, ref ret } => {
                 // Phase 2: Check argument count
                 if args.len() != params.len() {
-                    self.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr: callee,
                         expected: params.len(),
                         found: args.len(),
@@ -886,7 +914,7 @@ impl<'db> InferenceContext<'db> {
 
                 // Check export flag
                 if !resolution.is_export {
-                    self.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                    self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                         expr: call_expr,
                         receiver_name: module_name.clone(),
                         method_name: method_name.clone(),
@@ -896,7 +924,7 @@ impl<'db> InferenceContext<'db> {
 
                 // Check argument count
                 if args.len() != resolution.signature.params.len() {
-                    self.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr,
                         expected: resolution.signature.params.len(),
                         found: args.len(),
@@ -912,7 +940,7 @@ impl<'db> InferenceContext<'db> {
             }
             Err(kind) => {
                 // Method not found - emit diagnostic
-                self.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,
                     receiver_name: module_name.clone(),
                     method_name: method_name.clone(),
@@ -960,7 +988,7 @@ impl<'db> InferenceContext<'db> {
         ) {
             Ok(resolution) => {
                 if !resolution.is_export {
-                    self.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                    self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                         expr: call_expr,
                         receiver_name: receiver_name.clone(),
                         method_name: method_name.clone(),
@@ -969,7 +997,7 @@ impl<'db> InferenceContext<'db> {
                 }
 
                 if args.len() != resolution.signature.params.len() {
-                    self.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr,
                         expected: resolution.signature.params.len(),
                         found: args.len(),
@@ -982,7 +1010,7 @@ impl<'db> InferenceContext<'db> {
                 resolution.return_type
             }
             Err(kind) => {
-                self.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,
                     receiver_name,
                     method_name: method_name.clone(),
@@ -1010,7 +1038,7 @@ impl<'db> InferenceContext<'db> {
         for (arg_id, param_ty) in args.iter().zip(params.iter()) {
             let arg_ty = self.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);
             if !crate::subtype::is_assignable(&arg_ty, param_ty) {
-                self.diagnostics.push(InferenceDiagnostic::TypeMismatch {
+                self.push_inference_diagnostic(InferenceDiagnostic::TypeMismatch {
                     expr: *arg_id,
                     expected: param_ty.clone(),
                     actual: arg_ty,

@@ -147,10 +147,12 @@ fn completion_in_procedure_body_without_qualifier_is_empty_today() {
 
 #[test]
 fn completion_after_dot_on_new_array_type() {
-    // `Новый Массив` gives the expression type `Массив`. Completion after the
-    // dot should offer platform methods. If platform data is unavailable in
-    // the test environment we accept an empty list — the assertion is only
-    // that the pipeline reaches platform completion without panicking.
+    // `Новый Массив` gives the expression type `Массив`. Completion after
+    // the dot exercises the full pipeline: parser wraps the bare `А.` in
+    // an ERROR node (not a valid statement), HIR lowering's recovery
+    // path (see `hir-def::body::lower::stmt::try_lower_recovered_expr_stmt`)
+    // salvages the FIELD_EXPR so `Semantics::type_of_expr` can return
+    // `Ty::Array`, and platform completion surfaces the methods.
     let items = complete(
         r#"//- /test.bsl
 Процедура Тест()
@@ -160,6 +162,16 @@ fn completion_after_dot_on_new_array_type() {
 "#,
     );
 
+    assert!(
+        !items.is_empty(),
+        "platform methods must be offered after `А.` where `А` is `Новый Массив`"
+    );
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        has_label(&items, "Добавить"),
+        "Массив method `Добавить` must be offered; got: {:?}",
+        labels
+    );
     for item in &items {
         assert!(
             !item.label.is_empty(),
@@ -167,6 +179,107 @@ fn completion_after_dot_on_new_array_type() {
             item
         );
     }
+}
+
+#[test]
+fn completion_after_dot_on_array_variable_with_prefix() {
+    // `Сп.Доб|` — cursor on IDENT whose previous non-trivia token is DOT.
+    // `platform_completions` must walk back to the anchor DOT, use the
+    // receiver's type, and filter methods by the partial-typed IDENT.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сп = Новый Массив;
+    Сп.Доб$0
+КонецПроцедуры
+"#,
+    );
+
+    assert!(!items.is_empty(), "prefix-filtered completion must not be empty; got empty");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.iter().all(|l| l.to_lowercase().starts_with("доб")),
+        "every label must start with `Доб`; got: {:?}",
+        labels
+    );
+    assert!(has_label(&items, "Добавить"), "`Добавить` must match prefix `Доб`; got: {:?}", labels);
+}
+
+#[test]
+fn completion_after_dot_on_array_variable_typed_prefix_full_ident() {
+    // `Сп.В|` — user has typed just the first letter. Recovery kicks in;
+    // prefix filter narrows by `В`.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сп = Новый Массив;
+    Сп.В$0
+КонецПроцедуры
+"#,
+    );
+
+    assert!(!items.is_empty(), "methods starting with `В` must be offered after `Сп.В`");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.iter().all(|l| l.to_lowercase().starts_with('в')),
+        "every label must start with `В`; got: {:?}",
+        labels
+    );
+    assert!(
+        has_label(&items, "Вставить"),
+        "`Вставить` must be offered after `Сп.В`; got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn completion_after_chained_dot_on_array_variable() {
+    // Chain with a valid call in between: the first `Сп.Добавить(1)` is
+    // a normal CALL_STMT, the trailing `Сп.` goes through recovery.
+    // Completion must still surface methods for the second `Сп.` — the
+    // recovery marker is per-expression, not per-body.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сп = Новый Массив;
+    Сп.Добавить(1);
+    Сп.$0
+КонецПроцедуры
+"#,
+    );
+
+    assert!(
+        !items.is_empty(),
+        "trailing `Сп.` must still produce method completions after a successful call"
+    );
+    assert!(
+        has_label(&items, "Добавить"),
+        "methods must still be available on the second `Сп.`; labels: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn completion_after_dot_on_number_variable_does_not_offer_array_methods() {
+    // Negative: `Сп = 42` makes `Сп` a Number. A trailing `Сп.` must not
+    // surface Массив methods — recovery doesn't hallucinate types.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Сп = 42;
+    Сп.$0
+КонецПроцедуры
+"#,
+    );
+
+    // We don't assert emptiness (Number has a handful of methods in
+    // platform data); we assert the Array-specific ones aren't there.
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        !has_label(&items, "Добавить"),
+        "Number receiver must not surface Массив.Добавить; got: {:?}",
+        labels
+    );
 }
 
 // ---------- no-crash canary for unresolved receiver ----------

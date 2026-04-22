@@ -132,6 +132,54 @@ impl From<&RawGlobalFunction> for GlobalFunction {
     }
 }
 
+/// Platform constructor overload (`Новый X(...)`).
+///
+/// A single BSL platform type can expose several constructor forms (`Массив`,
+/// `Структура`, `СписокЗначений` — all have multiple variants). Each variant is
+/// a distinct `PlatformConstructor`. `id` mirrors the source HBK's
+/// `ctor{N}.html` filename so the numeric identity stays stable across
+/// regenerations of the same help book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformConstructor {
+    /// Stable numeric id (from `ctor{N}.html`).
+    pub id: u32,
+    /// English name of the enclosing platform type (e.g. "Array"). Matches
+    /// `PlatformMethod::type_name` so both tables key on the same string.
+    pub type_name: SmolStr,
+    /// Human-readable variant label (e.g. "По количеству элементов"). `None`
+    /// only for malformed HBK pages; normal pages always have it.
+    pub variant_name: Option<SmolStr>,
+    /// Declared parameters of this overload.
+    pub parameters: Vec<MethodParam>,
+    pub min_version: Option<SmolStr>,
+    pub context: Option<ContextAvailability>,
+}
+
+/// Raw platform constructor for const initialization (internal use only).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawPlatformConstructor {
+    pub id: u32,
+    pub type_name: &'static str,
+    pub variant_name: Option<&'static str>,
+    pub parameters: &'static [RawMethodParam],
+    pub min_version: Option<&'static str>,
+    pub context: Option<RawContextAvailability>,
+}
+
+impl From<&RawPlatformConstructor> for PlatformConstructor {
+    fn from(raw: &RawPlatformConstructor) -> Self {
+        Self {
+            id: raw.id,
+            type_name: raw.type_name.into(),
+            variant_name: raw.variant_name.map(SmolStr::from),
+            parameters: raw.parameters.iter().map(MethodParam::from).collect(),
+            min_version: raw.min_version.map(SmolStr::from),
+            context: raw.context.as_ref().map(ContextAvailability::from),
+        }
+    }
+}
+
 /// Method parameter
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodParam {
@@ -297,6 +345,49 @@ impl From<&RawParamDocs> for ParamDocs {
 impl From<&RawCodeExample> for CodeExample {
     fn from(raw: &RawCodeExample) -> Self {
         Self { code: raw.code.to_string(), description: raw.description.map(|d| d.to_string()) }
+    }
+}
+
+/// Full constructor documentation (by constructor id).
+///
+/// Mirrors [`MethodDocs`] but carries `constructor_id` instead of `method_id`
+/// so the lookup index in `PlatformDataInner` cannot be accidentally confused
+/// with the method index.
+#[derive(Debug, Clone)]
+pub struct ConstructorDocs {
+    pub constructor_id: u32,
+    pub syntax: String,
+    pub description: String,
+    pub params: Vec<ParamDocs>,
+    pub examples: Vec<CodeExample>,
+    pub notes: Option<String>,
+    pub see_also: Vec<String>,
+}
+
+/// Raw constructor documentation for const initialization.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct RawConstructorDocs {
+    pub constructor_id: u32,
+    pub syntax: &'static str,
+    pub description: &'static str,
+    pub params: &'static [RawParamDocs],
+    pub examples: &'static [RawCodeExample],
+    pub notes: Option<&'static str>,
+    pub see_also: &'static [&'static str],
+}
+
+impl From<&RawConstructorDocs> for ConstructorDocs {
+    fn from(raw: &RawConstructorDocs) -> Self {
+        Self {
+            constructor_id: raw.constructor_id,
+            syntax: raw.syntax.to_string(),
+            description: raw.description.to_string(),
+            params: raw.params.iter().map(ParamDocs::from).collect(),
+            examples: raw.examples.iter().map(CodeExample::from).collect(),
+            notes: raw.notes.map(|n| n.to_string()),
+            see_also: raw.see_also.iter().map(|s| s.to_string()).collect(),
+        }
     }
 }
 

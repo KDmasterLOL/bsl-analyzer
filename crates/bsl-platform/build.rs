@@ -903,6 +903,237 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[];\n\n");
     }
 
+    // ---- Platform constructors --------------------------------------------
+    // Constructor param arrays, context blocks, the PLATFORM_CONSTRUCTORS
+    // table, and CONSTRUCTOR_DOCS. Missing `constructors` key in the JSON is
+    // treated as "no constructors" — the fallback emits empty const arrays so
+    // the crate still compiles while the JSON is being regenerated.
+    if let Some(constructors) = data.get("constructors").and_then(|v| v.as_array()) {
+        // Pass 1: per-constructor supporting arrays (params, context,
+        // param-docs, examples). Kept as locally-scoped `CTOR_*_{N}` consts —
+        // same shape as the method/global-function section above.
+        let mut ctor_param_names: Vec<Option<String>> = Vec::with_capacity(constructors.len());
+        let mut ctor_context_names: Vec<Option<String>> = Vec::with_capacity(constructors.len());
+        let mut ctor_param_docs_names: Vec<Option<String>> = Vec::with_capacity(constructors.len());
+        let mut ctor_examples_names: Vec<Option<String>> = Vec::with_capacity(constructors.len());
+
+        let mut ctor_param_counter = 0usize;
+        let mut ctor_context_counter = 0usize;
+        let mut ctor_param_docs_counter = 0usize;
+        let mut ctor_examples_counter = 0usize;
+
+        for ctor in constructors {
+            // parameters
+            if let Some(params) = ctor.get("parameters").and_then(|v| v.as_array()) {
+                if !params.is_empty() {
+                    let arr = format!("CTOR_PARAMS_{}", ctor_param_counter);
+                    ctor_param_counter += 1;
+                    code.push_str(&format!("const {}: &[RawMethodParam] = &[\n", arr));
+                    for param in params {
+                        code.push_str("    RawMethodParam {\n");
+                        code.push_str(&format!(
+                            "        name: {:?},\n",
+                            param.get("name").and_then(|v| v.as_str()).unwrap_or("")
+                        ));
+                        if let Some(t) = param.get("param_type").and_then(|v| v.as_str()) {
+                            code.push_str(&format!("        param_type: Some({:?}),\n", t));
+                        } else {
+                            code.push_str("        param_type: None,\n");
+                        }
+                        code.push_str(&format!(
+                            "        is_optional: {},\n",
+                            param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
+                        ));
+                        code.push_str("    },\n");
+                    }
+                    code.push_str("];\n\n");
+                    ctor_param_names.push(Some(arr));
+                } else {
+                    ctor_param_names.push(None);
+                }
+            } else {
+                ctor_param_names.push(None);
+            }
+
+            // context
+            if let Some(ctx) = ctor.get("context").and_then(|v| v.as_object()) {
+                let name = format!("CTOR_CONTEXT_{}", ctor_context_counter);
+                ctor_context_counter += 1;
+                code.push_str(&format!(
+                    "const {}: RawContextAvailability = RawContextAvailability {{\n",
+                    name
+                ));
+                for field in &[
+                    "thick_client",
+                    "thin_client",
+                    "web_client",
+                    "server",
+                    "mobile_client",
+                    "external_connection",
+                ] {
+                    code.push_str(&format!(
+                        "    {}: {},\n",
+                        field,
+                        ctx.get(*field).and_then(|v| v.as_bool()).unwrap_or(false)
+                    ));
+                }
+                code.push_str("};\n\n");
+                ctor_context_names.push(Some(name));
+            } else {
+                ctor_context_names.push(None);
+            }
+
+            // documentation.param_descriptions + documentation.examples
+            if let Some(docs) = ctor.get("documentation").and_then(|v| v.as_object()) {
+                if let Some(params) = docs.get("param_descriptions").and_then(|v| v.as_array()) {
+                    if !params.is_empty() {
+                        let arr = format!("CTOR_PARAM_DOCS_{}", ctor_param_docs_counter);
+                        ctor_param_docs_counter += 1;
+                        code.push_str(&format!("const {}: &[RawParamDocs] = &[\n", arr));
+                        for p in params {
+                            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let description =
+                                p.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            let default_value = p.get("default_value").and_then(|v| v.as_str());
+                            code.push_str("    RawParamDocs {\n");
+                            code.push_str(&format!("        name: {:?},\n", name));
+                            code.push_str(&format!("        description: {:?},\n", description));
+                            if let Some(dv) = default_value {
+                                code.push_str(&format!("        default_value: Some({:?}),\n", dv));
+                            } else {
+                                code.push_str("        default_value: None,\n");
+                            }
+                            code.push_str("    },\n");
+                        }
+                        code.push_str("];\n\n");
+                        ctor_param_docs_names.push(Some(arr));
+                    } else {
+                        ctor_param_docs_names.push(None);
+                    }
+                } else {
+                    ctor_param_docs_names.push(None);
+                }
+
+                if let Some(examples) = docs.get("examples").and_then(|v| v.as_array()) {
+                    if !examples.is_empty() {
+                        let arr = format!("CTOR_EXAMPLES_{}", ctor_examples_counter);
+                        ctor_examples_counter += 1;
+                        code.push_str(&format!("const {}: &[RawCodeExample] = &[\n", arr));
+                        for e in examples {
+                            let code_text = e.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                            let description = e.get("description").and_then(|v| v.as_str());
+                            code.push_str("    RawCodeExample {\n");
+                            code.push_str(&format!("        code: {:?},\n", code_text));
+                            if let Some(d) = description {
+                                code.push_str(&format!("        description: Some({:?}),\n", d));
+                            } else {
+                                code.push_str("        description: None,\n");
+                            }
+                            code.push_str("    },\n");
+                        }
+                        code.push_str("];\n\n");
+                        ctor_examples_names.push(Some(arr));
+                    } else {
+                        ctor_examples_names.push(None);
+                    }
+                } else {
+                    ctor_examples_names.push(None);
+                }
+            } else {
+                ctor_param_docs_names.push(None);
+                ctor_examples_names.push(None);
+            }
+        }
+
+        // Pass 2: PLATFORM_CONSTRUCTORS table.
+        code.push_str("pub const PLATFORM_CONSTRUCTORS: &[RawPlatformConstructor] = &[\n");
+        for (idx, ctor) in constructors.iter().enumerate() {
+            let id = ctor.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let type_name = ctor.get("type_name").and_then(|v| v.as_str()).unwrap_or("");
+            let variant_name = ctor.get("variant_name").and_then(|v| v.as_str());
+
+            code.push_str("    RawPlatformConstructor {\n");
+            code.push_str(&format!("        id: {},\n", id));
+            code.push_str(&format!("        type_name: {:?},\n", type_name));
+            if let Some(v) = variant_name {
+                code.push_str(&format!("        variant_name: Some({:?}),\n", v));
+            } else {
+                code.push_str("        variant_name: None,\n");
+            }
+            if let Some(arr) = &ctor_param_names[idx] {
+                code.push_str(&format!("        parameters: {},\n", arr));
+            } else {
+                code.push_str("        parameters: &[],\n");
+            }
+            if let Some(v) = ctor.get("min_version").and_then(|v| v.as_str()) {
+                code.push_str(&format!("        min_version: Some({:?}),\n", v));
+            } else {
+                code.push_str("        min_version: None,\n");
+            }
+            if let Some(name) = &ctor_context_names[idx] {
+                code.push_str(&format!("        context: Some({}),\n", name));
+            } else {
+                code.push_str("        context: None,\n");
+            }
+            code.push_str("    },\n");
+        }
+        code.push_str("];\n\n");
+
+        // Pass 3: CONSTRUCTOR_DOCS table — one entry per constructor with
+        // documentation; skipped when the HBK page had no doc block.
+        code.push_str("pub const CONSTRUCTOR_DOCS: &[RawConstructorDocs] = &[\n");
+        for (idx, ctor) in constructors.iter().enumerate() {
+            let Some(docs) = ctor.get("documentation").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            let constructor_id = ctor.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let syntax = docs.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+            let description = docs.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let notes = docs.get("notes").and_then(|v| v.as_str());
+
+            code.push_str("    RawConstructorDocs {\n");
+            code.push_str(&format!("        constructor_id: {},\n", constructor_id));
+            code.push_str(&format!("        syntax: {:?},\n", syntax));
+            code.push_str(&format!("        description: {:?},\n", description));
+            if let Some(arr) = &ctor_param_docs_names[idx] {
+                code.push_str(&format!("        params: {},\n", arr));
+            } else {
+                code.push_str("        params: &[],\n");
+            }
+            if let Some(arr) = &ctor_examples_names[idx] {
+                code.push_str(&format!("        examples: {},\n", arr));
+            } else {
+                code.push_str("        examples: &[],\n");
+            }
+            if let Some(n) = notes {
+                code.push_str(&format!("        notes: Some({:?}),\n", n));
+            } else {
+                code.push_str("        notes: None,\n");
+            }
+            if let Some(see_also) = docs.get("see_also").and_then(|v| v.as_array()) {
+                if see_also.is_empty() {
+                    code.push_str("        see_also: &[],\n");
+                } else {
+                    code.push_str("        see_also: &[");
+                    for (i, item) in see_also.iter().enumerate() {
+                        if i > 0 {
+                            code.push_str(", ");
+                        }
+                        code.push_str(&format!("{:?}", item.as_str().unwrap_or("")));
+                    }
+                    code.push_str("],\n");
+                }
+            } else {
+                code.push_str("        see_also: &[],\n");
+            }
+            code.push_str("    },\n");
+        }
+        code.push_str("];\n\n");
+    } else {
+        code.push_str("pub const PLATFORM_CONSTRUCTORS: &[RawPlatformConstructor] = &[];\n");
+        code.push_str("pub const CONSTRUCTOR_DOCS: &[RawConstructorDocs] = &[];\n\n");
+    }
+
     fs::write(output_path, code).expect("Failed to write generated.rs");
 }
 
@@ -918,6 +1149,8 @@ pub const PLATFORM_METHODS: &[RawPlatformMethod] = &[];
 pub const PLATFORM_GLOBAL_FUNCTIONS: &[RawGlobalFunction] = &[];
 pub const METHOD_DOCS: &[RawMethodDocs] = &[];
 pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[];
+pub const PLATFORM_CONSTRUCTORS: &[RawPlatformConstructor] = &[];
+pub const CONSTRUCTOR_DOCS: &[RawConstructorDocs] = &[];
 "#;
 
     fs::write(output_path, code).expect("Failed to write generated.rs");

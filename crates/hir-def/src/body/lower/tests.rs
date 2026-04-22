@@ -404,3 +404,80 @@ fn test_preprocessor_split_expressions() {
     // - Split expressions should be represented in HIR
     // We're just inspecting for now - assertions will come after we understand the behavior
 }
+
+// --- ERROR-node recovery lowering -------------------------------------------
+
+#[test]
+fn recovery_lowers_bare_field_access_as_stmt_expr() {
+    // `Сп.В` without `()` is not a valid BSL statement. Parser wraps the
+    // FIELD_EXPR in NodeKind::Error, but we still want an Expr::Field so
+    // completion/hover see the receiver type.
+    let method = parse_method(
+        "Процедура Тест()
+            Сп = Новый Массив;
+            Сп.В
+        КонецПроцедуры",
+    );
+    let result = super::lower_method(&method, false);
+
+    // Last statement must be a Stmt::Expr for the recovered field access.
+    assert!(
+        result.body.body_stmts.len() >= 2,
+        "expected at least assign + recovered stmt, got {}: {:?}",
+        result.body.body_stmts.len(),
+        result.body.body_stmts,
+    );
+    let last_stmt_id = *result.body.body_stmts.last().unwrap();
+    let last_stmt = result.body.stmt_idx(last_stmt_id);
+    let recovered_expr_id = match last_stmt {
+        Stmt::Expr(id) => *id,
+        other => panic!("last stmt should be Stmt::Expr (recovered), got {:?}", other),
+    };
+
+    let recovered_expr = result.body.expr_idx(recovered_expr_id);
+    let base_id = match recovered_expr {
+        Expr::Field { base, field } => {
+            assert_eq!(
+                field.as_str().to_lowercase(),
+                "в",
+                "field name should round-trip through recovery",
+            );
+            *base
+        }
+        other => panic!("recovered expr should be Expr::Field, got {:?}", other),
+    };
+
+    let base_expr = result.body.expr_idx(base_id);
+    match base_expr {
+        Expr::Path(name) => assert_eq!(name.as_str().to_lowercase(), "сп"),
+        other => panic!("base should be Expr::Path, got {:?}", other),
+    }
+
+    // Both expressions are flagged as recovered so downstream consumers
+    // (hir-ty diagnostics, CFG) can opt out.
+    use crate::ExprId;
+    assert!(
+        result.body.is_recovered(ExprId::from_idx(recovered_expr_id)),
+        "field-access expr must be recovered",
+    );
+    assert!(
+        result.body.is_recovered(ExprId::from_idx(base_id)),
+        "receiver expr must be recovered (mark propagates recursively)",
+    );
+}
+
+#[test]
+fn recovery_does_not_kick_in_for_well_formed_call_stmt() {
+    // Sanity: a normal `Сп.Добавить(1)` is a valid CALL_STMT, so lowering
+    // must not mark it as recovered.
+    let method = parse_method(
+        "Процедура Тест()
+            Сп = Новый Массив;
+            Сп.Добавить(1);
+        КонецПроцедуры",
+    );
+    let result = super::lower_method(&method, false);
+
+    let any_recovered = result.body.exprs_iter().any(|(id, _)| result.body.is_recovered(id));
+    assert!(!any_recovered, "well-formed call must not be flagged as recovered");
+}

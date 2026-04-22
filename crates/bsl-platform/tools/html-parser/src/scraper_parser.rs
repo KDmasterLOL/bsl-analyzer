@@ -1166,6 +1166,40 @@ pub fn extract_keyword_name(html_content: &str) -> Option<(String, String)> {
     None
 }
 
+/// Extracts constructor variant name from HTML page.
+///
+/// Source priority matches the real HBK layout observed in shcntx:
+/// 1. `<p class="V8SH_heading">По количеству элементов</p>` — canonical,
+///    strips the type prefix that `<h1>` keeps (`Массив.По ...`).
+/// 2. Fallback: part of `<h1 class="V8SH_pagetitle">` after the first dot,
+///    used when the page omits `V8SH_heading`.
+///
+/// Returns `None` when neither selector yields a non-empty string.
+pub fn extract_constructor_variant_name(html_content: &str) -> Option<String> {
+    let html = Html::parse_fragment(html_content);
+    let heading_sel = Selector::parse("p.V8SH_heading").ok()?;
+    if let Some(heading) = html.select(&heading_sel).next() {
+        let txt = heading.text().collect::<String>().replace('\u{00A0}', " ");
+        let trimmed = txt.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let h1_sel = Selector::parse("h1.V8SH_pagetitle").ok()?;
+    if let Some(h1) = html.select(&h1_sel).next() {
+        let txt = h1.text().collect::<String>().replace('\u{00A0}', " ");
+        if let Some((_, after)) = txt.split_once('.') {
+            let trimmed = after.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 /// Parses keyword HTML file and extracts full documentation.
 pub fn parse_keyword_html(html_content: &str) -> Option<KeywordDocumentation> {
     let (keyword_ru, keyword_en) = extract_keyword_name(html_content)?;

@@ -555,6 +555,7 @@ fn convert_completion_kind(kind: ide::CompletionItemKind) -> CompletionItemKind 
         ide::CompletionItemKind::Keyword => CompletionItemKind::KEYWORD,
         ide::CompletionItemKind::Constant => CompletionItemKind::CONSTANT,
         ide::CompletionItemKind::EnumMember => CompletionItemKind::ENUM_MEMBER,
+        ide::CompletionItemKind::Constructor => CompletionItemKind::CONSTRUCTOR,
     }
 }
 

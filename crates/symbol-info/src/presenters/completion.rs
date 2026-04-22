@@ -74,6 +74,7 @@ pub fn render_completion_detail(sig: &SymbolSignature) -> CompletionDetail {
     let filter_text = match sig.source {
         SignatureSource::Platform
         | SignatureSource::PlatformManager
+        | SignatureSource::PlatformConstructor
         | SignatureSource::GlobalFunction => {
             sig.name_english.as_ref().map(|en| format!("{} {}", sig.name_russian, en))
         }

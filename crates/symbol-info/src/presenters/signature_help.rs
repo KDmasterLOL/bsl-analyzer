@@ -48,12 +48,16 @@ pub fn render_signature_help(sig: &SymbolSignature, active_param: usize) -> Sign
 }
 
 fn make_header(sig: &SymbolSignature) -> String {
+    let prefix = sig.prefix.as_deref().unwrap_or("");
     let qualifier = sig.qualifier.as_deref().unwrap_or("");
-    let core = format!("{}{}", qualifier, sig.name_russian);
+    let core = format!("{}{}{}", prefix, qualifier, sig.name_russian);
     match sig.source {
-        // Platform methods read more naturally without `Процедура`/`Функция`,
-        // since the qualifier already names the receiver type or collection.
-        SignatureSource::Platform | SignatureSource::PlatformManager => core,
+        // Platform methods/constructors read more naturally without
+        // `Процедура`/`Функция` — the qualifier/prefix already carries the
+        // receiver or the `Новый` keyword.
+        SignatureSource::Platform
+        | SignatureSource::PlatformManager
+        | SignatureSource::PlatformConstructor => core,
         _ => match sig.kind {
             MethodKind::Procedure => format!("Процедура {}", core),
             MethodKind::Function => format!("Функция {}", core),

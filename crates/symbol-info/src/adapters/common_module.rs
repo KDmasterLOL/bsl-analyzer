@@ -51,6 +51,7 @@ pub(super) fn build(
         name_russian: SmolStr::new(method.as_str()),
         name_english: None,
         qualifier: Some(SmolStr::from(format!("{}.", module.as_str()))),
+        prefix: None,
         params,
         returns,
         purpose: docs_ref.and_then(|d| d.purpose.clone()),

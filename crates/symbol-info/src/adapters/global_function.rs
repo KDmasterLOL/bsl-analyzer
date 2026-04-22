@@ -45,6 +45,7 @@ pub fn from_global_function(
         name_russian: function.name.clone(),
         name_english: Some(function.english_name.clone()),
         qualifier: None,
+        prefix: None,
         params: build_platform_params(&function.parameters, docs),
         returns,
         purpose: docs.map(|d| d.description.clone()).filter(|s| !s.is_empty()),

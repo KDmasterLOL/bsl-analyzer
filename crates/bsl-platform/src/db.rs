@@ -4,7 +4,9 @@
 //! - Salsa tracked queries for IDE integration with caching
 //! - A singleton for standalone usage
 
-use crate::types::{GlobalFunction, PlatformMethod, PlatformType};
+use crate::types::{
+    ConstructorDocs, GlobalFunction, PlatformConstructor, PlatformMethod, PlatformType,
+};
 use once_cell::sync::OnceCell;
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
@@ -34,6 +36,13 @@ pub struct PlatformDataInner {
     method_docs_by_id: FxHashMap<u32, usize>,
     /// Global function documentation indexed by function ID
     global_function_docs_by_id: FxHashMap<u32, usize>,
+    /// Converted platform constructors (from raw const data).
+    constructors: Vec<PlatformConstructor>,
+    /// Constructors indexed by lowercase type name (both Russian and English).
+    /// Each key maps to the list of constructor overloads for that type.
+    constructors_by_type: FxHashMap<SmolStr, Vec<usize>>,
+    /// Constructor documentation indexed by constructor ID.
+    constructor_docs_by_id: FxHashMap<u32, usize>,
 }
 
 impl PlatformDataInner {
@@ -120,6 +129,28 @@ impl PlatformDataInner {
             global_function_docs_by_id.insert(docs.method_id, idx);
         }
 
+        // Convert raw constructors and build per-type index. Bilingual keying
+        // mirrors `methods_by_name`: same `type_en_to_ru` mapping, same
+        // lowercase normalization, so callers can look constructors up by
+        // either Russian or English type name without special-casing.
+        let constructors: Vec<PlatformConstructor> =
+            crate::generated::PLATFORM_CONSTRUCTORS.iter().map(PlatformConstructor::from).collect();
+
+        let mut constructors_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
+        for (idx, ctor) in constructors.iter().enumerate() {
+            let en_key: SmolStr = ctor.type_name.to_lowercase().into();
+            constructors_by_type.entry(en_key.clone()).or_default().push(idx);
+            if let Some(ru_key) = type_en_to_ru.get(&en_key) {
+                constructors_by_type.entry(ru_key.clone()).or_default().push(idx);
+            }
+        }
+
+        // Index constructor documentation by constructor ID.
+        let mut constructor_docs_by_id = FxHashMap::default();
+        for (idx, docs) in crate::generated::CONSTRUCTOR_DOCS.iter().enumerate() {
+            constructor_docs_by_id.insert(docs.constructor_id, idx);
+        }
+
         Self {
             types,
             types_by_name,
@@ -129,11 +160,20 @@ impl PlatformDataInner {
             global_functions_by_name,
             method_docs_by_id,
             global_function_docs_by_id,
+            constructors,
+            constructors_by_type,
+            constructor_docs_by_id,
         }
     }
 
     /// Get platform type by name (case-insensitive, bilingual).
-    pub(crate) fn get_type(&self, name: &str) -> Option<&PlatformType> {
+    ///
+    /// Accepts either the Russian or English name. Exposed publicly so
+    /// `symbol-info` adapters can translate an English primary key
+    /// (`PlatformMethod::type_name`, `PlatformConstructor::type_name`)
+    /// back to the Russian display name when building a qualifier. Cheap —
+    /// single hash lookup via `types_by_name`.
+    pub fn get_type(&self, name: &str) -> Option<&PlatformType> {
         let key: SmolStr = name.to_lowercase().into();
         let idx = *self.types_by_name.get(&key)?;
         self.types.get(idx)
@@ -199,6 +239,31 @@ impl PlatformDataInner {
         let idx = *self.method_docs_by_id.get(&method_id)?;
         let raw_docs = crate::generated::METHOD_DOCS.get(idx)?;
         Some(crate::types::MethodDocs::from(raw_docs))
+    }
+
+    /// Get constructors for a platform type (case-insensitive, bilingual).
+    ///
+    /// Returns all overloads (`Новый Массив()` vs `Новый Массив(КоличествоЭлементов)`
+    /// vs `Новый Массив(ФиксированныйМассив)`) in source order from the HBK.
+    /// Empty vector when the type has no constructors or the name is unknown.
+    pub fn get_constructors(&self, type_name: &str) -> Vec<&PlatformConstructor> {
+        let key: SmolStr = type_name.to_lowercase().into();
+        match self.constructors_by_type.get(&key) {
+            Some(indices) => indices.iter().filter_map(|&i| self.constructors.get(i)).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Get all platform constructors.
+    pub fn all_constructors(&self) -> &[PlatformConstructor] {
+        &self.constructors
+    }
+
+    /// Get constructor documentation by constructor ID.
+    pub fn get_constructor_docs(&self, constructor_id: u32) -> Option<ConstructorDocs> {
+        let idx = *self.constructor_docs_by_id.get(&constructor_id)?;
+        let raw = crate::generated::CONSTRUCTOR_DOCS.get(idx)?;
+        Some(ConstructorDocs::from(raw))
     }
 
     /// Get global function documentation by function ID.
@@ -425,6 +490,29 @@ pub fn global_function_query<'db>(
     data.get_global_function(&name).cloned()
 }
 
+/// Lookup platform constructors for a type (case-insensitive, bilingual).
+///
+/// Returns `Arc<Vec<_>>` so callers can share ownership across queries —
+/// mirrors the shape of [`type_methods_query`] / [`manager_methods_query`].
+/// Empty vector for types with no constructors (e.g. `Строка`, `Число`)
+/// or for unknown type names.
+///
+/// # Example
+/// ```ignore
+/// let input = TypeNameInput::new(db, "Массив".to_string());
+/// let ctors = platform_constructors_query(db, input);
+/// assert!(!ctors.is_empty(), "Массив has multiple constructor overloads");
+/// ```
+#[salsa::tracked(lru = 128)]
+pub fn platform_constructors_query<'db>(
+    db: &'db dyn salsa::Database,
+    input: TypeNameInput<'db>,
+) -> Arc<Vec<PlatformConstructor>> {
+    let type_name = input.name(db);
+    let data = PlatformDataInner::instance();
+    Arc::new(data.get_constructors(&type_name).into_iter().cloned().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,5 +707,53 @@ mod tests {
         let func_upper = data.get_global_function("НАЧАТЬТРАНЗАКЦИЮ");
         assert!(func_upper.is_some(), "Should be case-insensitive");
         assert_eq!(func_upper.unwrap().id, func.id);
+    }
+
+    #[test]
+    fn test_platform_constructors_query_bilingual() {
+        let db = TestDatabase::default();
+        let data = PlatformDataInner::instance();
+        if data.all_constructors().is_empty() {
+            println!("Skipping test: no constructor data");
+            return;
+        }
+
+        // Массив has multiple constructor overloads; both Russian and English
+        // lookups must agree on overload count and ids.
+        let ru = platform_constructors_query(&db, TypeNameInput::new(&db, "Массив".to_string()));
+        let en = platform_constructors_query(&db, TypeNameInput::new(&db, "Array".to_string()));
+
+        assert!(!ru.is_empty(), "Массив must have at least one constructor");
+        assert_eq!(ru.len(), en.len(), "RU and EN lookups must return the same overload set");
+        let ru_ids: Vec<u32> = ru.iter().map(|c| c.id).collect();
+        let en_ids: Vec<u32> = en.iter().map(|c| c.id).collect();
+        assert_eq!(ru_ids, en_ids);
+    }
+
+    #[test]
+    fn test_platform_constructors_query_unknown() {
+        let db = TestDatabase::default();
+        let result = platform_constructors_query(
+            &db,
+            TypeNameInput::new(&db, "ЗаведомоНесуществующийТип".to_string()),
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_constructor_docs_by_id() {
+        let data = PlatformDataInner::instance();
+        if data.all_constructors().is_empty() {
+            println!("Skipping test: no constructor data");
+            return;
+        }
+        // Pick a constructor that actually has a documentation record and
+        // check that get_constructor_docs returns the same id.
+        let ctor_with_docs =
+            data.all_constructors().iter().find(|c| data.get_constructor_docs(c.id).is_some());
+        if let Some(ctor) = ctor_with_docs {
+            let docs = data.get_constructor_docs(ctor.id).unwrap();
+            assert_eq!(docs.constructor_id, ctor.id);
+        }
     }
 }

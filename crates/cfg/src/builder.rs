@@ -115,6 +115,17 @@ impl CfgBuilder {
     /// Pattern matches on Stmt enum - no AST traversal needed.
     fn walk_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         let stmt = body.stmt_idx(stmt_id);
+        // Recovered `Stmt::Expr`s come from parser ERROR recovery (see
+        // `hir-def::body::lower::stmt::try_lower_recovered_expr_stmt`). They
+        // carry usable type info for completion/hover but represent code the
+        // user is still typing — including them in the CFG risks feeding
+        // dataflow / reachability checks junk and flickering diagnostics at
+        // the user. Skip them here.
+        if let Stmt::Expr(expr_idx) = stmt {
+            if body.is_recovered(ExprId::from_idx(*expr_idx)) {
+                return;
+            }
+        }
         match stmt {
             Stmt::Return { .. } => self.walk_return_statement_hir(stmt_id, body),
             Stmt::Raise { .. } => self.walk_raise_statement_hir(stmt_id, body),

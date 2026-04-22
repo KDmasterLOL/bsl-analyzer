@@ -79,6 +79,10 @@ pub enum CalleeKind {
     PlatformManagerMethod { mdo_type: MdoType, method: Name },
     /// Method in the caller's own module.
     LocalMethod { module_id: ModuleId, method: Name },
+    /// Constructor of a platform type (`Новый Массив(...)`). Carries the
+    /// user-typed (original-case) type name so presenters can reuse it
+    /// unchanged in the rendered signature.
+    PlatformConstructor { type_name: SmolStr },
 }
 
 /// Data source a signature was built from; carried mainly for diagnostics and
@@ -91,6 +95,10 @@ pub enum SignatureSource {
     CommonModule,
     ManagerModule,
     Local,
+    /// Built from [`CalleeKind::PlatformConstructor`]. Kept separate from
+    /// `Platform` so hover can render "Конструктор" instead of "Метод" and
+    /// completion can surface `CompletionItemKind::Constructor`.
+    PlatformConstructor,
 }
 
 /// A source code example, surfaced by hover.
@@ -116,6 +124,11 @@ pub struct SymbolSignature {
     /// (`"ОбщегоНазначения."`, `"Справочники.Партнеры."`). `None` for free
     /// functions and local methods.
     pub qualifier: Option<SmolStr>,
+    /// Non-dotted prefix printed before `qualifier + name` (e.g. `"Новый "`
+    /// for platform constructors). Kept separate from `qualifier` because
+    /// that field is contractually dot-terminated and callers compare on its
+    /// dotted shape.
+    pub prefix: Option<SmolStr>,
     pub params: Vec<SignatureParam>,
     /// Declared return types. Empty for procedures and for undocumented
     /// functions.
