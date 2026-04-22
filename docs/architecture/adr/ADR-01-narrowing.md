@@ -1,9 +1,15 @@
-# ADR-01 — Type narrowing (M4 scope)
+# ADR-01 — Type narrowing
 
-**Status:** draft / stub.
-**Milestone:** M4 of the type-system rollout.
+**Status:** Accepted, implemented.
 **Supersedes:** nothing.
 **Related:** [`TYPE_SYSTEM.md`](../TYPE_SYSTEM.md), [`DATAFLOW.md`](../DATAFLOW.md).
+
+Narrowing landed as Option A: a flow-sensitive dataflow analysis
+(`hir_ty::narrow::NarrowingAnalysis`) built on `cfg` + `dataflow`
+with branch-aware `Transfer::transfer_edge`. Результат выдаётся как
+per-`ExprId` overlay через `narrow_query(file_id, owner)` и мерджится
+в `Semantics::type_of_expr`. Behind feature flag `type_narrowing` в
+`bsl-analyzer.toml` (default: on). Acceptance criteria ниже все ✅.
 
 ## Context
 
@@ -93,49 +99,44 @@ Cons: block-level scopes don't always correspond to what the user
 reads — e.g., a variable narrowed in the `then`-branch but the user
 hovers on the `Иначе`-branch should NOT see the narrowing.
 
-## Recommendation (pending M4 decision)
+## Resolved questions
 
-Option A (full flow-sensitive rewrite) is the architecturally correct
-answer, but option B (overlay) may ship faster if the narrowing
-semantics can be defined narrowly (`ТипЗнч(X) = Тип(...)` only; no
-`ИЛИ` composition; no nested guards). A decision is blocked on
-implementation cost estimate and whether the user-visible improvement
-justifies the refactor.
+1. **Guard grammar.** Реализованы все MUST-шейпы:
+   `ТипЗнч(Х) = Тип("…")`, `Х = Неопределено`, `Х <> Неопределено`,
+   `ЗначениеЗаполнено(Х)`. `ИЛИ`-composition (`ТипЗнч(X)=Тип(A) ИЛИ
+   ТипЗнч(X)=Тип(B)`) отложено (см. Non-goals); `Х Есть Справочник`
+   и cast-via-assignment также отложены.
+2. **Merge semantics на `Иначе` / fall-through.** Вычисляется
+   точный `Union \ Narrowed` через smart-constructor
+   `ty_difference`. Receiver не-Union в else-ветке даёт `Unknown`.
+3. **Reassignment внутри narrowed-блока.** Narrowing
+   распространяется только до точки первого присваивания внутри
+   блока, после чего тип берётся из нового RHS. Наружу блока не
+   протекает (merge-point join с pre-state).
+4. **Hover на receiver гарда.** Показываем **pre-narrow** тип — на
+   самом выражении-приёмнике гарда narrowing ещё не применён. Внутри
+   then/else блока — post-narrow.
+5. **Performance.** Отдельный Salsa query `narrow_query(file_id,
+   owner)` — мерджится с `type_of_expr_query` только на чтении, без
+   удвоения работы `infer`. Overlay разреженный (только переменные
+   с активным narrowing).
+6. **`is_assignable_to`.** Реализован на `hir::Type` с правилами
+   reflexive / `Unknown` / `Null ≤ ref` / union-left / union-right /
+   `ThisObject` coercion / function variance (контравариантные
+   параметры, ковариантный return). Narrowing-awareness — через
+   callers, строящих `Type` от `Semantics::type_of_expr`; метод сам
+   остаётся чистым на `Ty`.
 
-## Open questions
+## Acceptance criteria
 
-1. **Guard grammar.** Which shapes narrow?
-   - Must: `ТипЗнч(Х) = Тип("Массив")`, `Х = Неопределено`, `Х <> Неопределено`, `ЗначениеЗаполнено(Х)`.
-   - Maybe: `ТипЗнч(Х) = Тип("…") ИЛИ ТипЗнч(Х) = Тип("…")` (union narrowing).
-   - Explicitly deferred: `Х Есть Справочник`, Cast-via-assignment.
-2. **Merge semantics on `Иначе` / fall-through.** If `Х: Union(A, B)`
-   and the `Если`-branch narrows to `A`, the `Иначе` branch sees
-   `B` (type-difference). Do we compute `Union \ Narrowed` precisely
-   or degrade to `Ty::Unknown`?
-3. **Interaction with reassignment.** `Х = СоздатьМассив()` inside
-   a narrowed block overrides the narrowing; does it extend outside
-   the block? (BSL is dynamically typed; user intent is ambiguous.)
-4. **Hover on the guard expression itself.** Do we show the *pre-narrow*
-   or *post-narrow* type on the receiver of `ТипЗнч(…)`?
-5. **Performance.** Flow-sensitive inference increases complexity by
-   roughly a factor of the average block count per body. Do we need
-   a new Salsa query key (per-body flow fact) or can we fold into
-   `infer_query`?
-6. **`is_assignable_to`.** ✅ Resolved in M4 Task 7: shipped in
-   `hir::Type::is_assignable_to` with reflexive / `Unknown` / `Null ≤ ref` /
-   union-left / union-right / `ThisObject` coercion rules. Narrowing
-   awareness enters via callers that build the [`Type`] from
-   `Semantics::type_of_expr` — the method itself is pure on [`Ty`].
-
-## Acceptance criteria for M4
-
-- Hover on a variable inside an `Если ТипЗнч(Х) = Тип("Массив") Тогда`
-  block shows `Array`, not `Union(Array, String, …)`.
-- `Х.Добавить()` resolves to `Ty::Undefined` (Array method) inside
-  the narrowed block, `Ty::Unknown` outside.
-- No regression on any M2 / M3 behavioural test when narrowing is
-  disabled (feature flag or empty guard set).
-- `hir::Type::is_assignable_to` lands with narrowing-aware semantics. ✅ (Task 7)
+- ✅ Hover на переменной внутри `Если ТипЗнч(Х) = Тип("Массив")
+  Тогда` блока показывает `Array`, не `Union(Array, String, …)`.
+- ✅ `Х.Добавить()` резолвится к `Ty::Undefined` (Array-метод)
+  внутри narrowed-блока, к `Ty::Unknown` снаружи.
+- ✅ Нет регрессий на behavioural-тестах M2 / M3 при выключенном
+  `type_narrowing`.
+- ✅ `hir::Type::is_assignable_to` реализован с narrowing-aware
+  семантикой через `Semantics::type_of_expr`.
 
 ## Non-goals
 

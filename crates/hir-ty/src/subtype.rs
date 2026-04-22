@@ -19,7 +19,7 @@ use crate::coerce_this_object_to_metadata_ref;
 /// Structural assignability: can a value of type `from` be used where
 /// a value of type `to` is expected?
 ///
-/// Rules (M4_PLAN.md §Task 7):
+/// Rules:
 ///
 /// - Reflexivity: `A ≤ A`.
 /// - Gradual top/bottom: `A ≤ Unknown` and `Unknown ≤ A`. Neither
@@ -42,9 +42,9 @@ use crate::coerce_this_object_to_metadata_ref;
 /// - Everything else: structural equality (`==`).
 pub fn is_assignable(from: &Ty, to: &Ty) -> bool {
     // GRADUAL TYPING: `Unknown` on either side short-circuits. The
-    // M4_PLAN spec only guarantees `A ≤ Unknown` (Unknown as top); we
-    // also accept `Unknown ≤ A` so a failed / partial inference on
-    // the from-side does not fire a `TypeMismatch`. This is
+    // strict rule is `A ≤ Unknown` (Unknown as top); we also accept
+    // `Unknown ≤ A` so a failed / partial inference on the from-side
+    // does not fire a `TypeMismatch`. This is
     // deliberately permissive because `Ty::Unknown` bubbles out of
     // `hir-ty::infer` for any expression the inferrer bailed on — the
     // common case today is "unresolved param type" in user procedures,
@@ -66,8 +66,7 @@ pub fn is_assignable(from: &Ty, to: &Ty) -> bool {
 
     // Union left: distributes — `A | B ≤ T` iff every component is
     // assignable to `T`. Evaluated before union-right so a union-to-
-    // union check unfolds left first, which matches the rule in
-    // M4_PLAN.md ("Union(A, B) ≤ T ↔ A ≤ T ∧ B ≤ T").
+    // union check unfolds left first (`Union(A, B) ≤ T ↔ A ≤ T ∧ B ≤ T`).
     if let Ty::Union(parts) = from {
         return parts.iter().all(|p| is_assignable(p, to));
     }

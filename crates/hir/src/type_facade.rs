@@ -117,7 +117,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
 
     /// Structural assignability: is `self` usable where `other` is expected?
     ///
-    /// Task 7 rules (M4_PLAN.md):
+    /// Rules:
     ///
     /// - Reflexivity: `A ≤ A`.
     /// - Gradual top/bottom: `A ≤ Unknown` and `Unknown ≤ A` — neither

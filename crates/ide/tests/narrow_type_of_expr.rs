@@ -603,11 +603,11 @@ fn type_narrowing_disabled_skips_overlay() {
 
 #[test]
 fn is_assignable_to_sees_narrowed_ty_from_semantics() {
-    // End-to-end: Task 7's "narrowing-aware" contract (M4_PLAN.md) is
-    // that callers build `hir::Type` from `Semantics::type_of_expr`
-    // rather than a declared / base type. The method itself stays
-    // pure on `Ty` — the narrowing enters via the `type_of_expr`
-    // overlay.
+    // End-to-end: the narrowing-aware contract of
+    // `hir::Type::is_assignable_to` is that callers build `hir::Type`
+    // from `Semantics::type_of_expr` rather than a declared / base
+    // type. The method itself stays pure on `Ty` — the narrowing
+    // enters via the `type_of_expr` overlay.
     //
     // Fixture seeds `Х = 42` (base `Ty::Number`) then narrows on the
     // `Ty::String` branch. Inside the narrowed block:
