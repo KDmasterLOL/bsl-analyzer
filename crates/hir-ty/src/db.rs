@@ -5,6 +5,7 @@ use std::sync::Arc;
 use vfs::FileId;
 
 use crate::infer::InferenceResult;
+use crate::narrow::NarrowState;
 use crate::Ty;
 
 /// Database trait for HIR type inference.
@@ -59,4 +60,26 @@ pub trait HirDatabase: ConfigsDatabase {
     /// # Implementation
     /// Should delegate to [`crate::infer::type_of_expr_query`].
     fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> Ty;
+
+    /// Run narrowing analysis on a single body (ADR-01 Option A).
+    ///
+    /// Returns the `Arc`-shared [`dataflow::DataflowResult`] produced by the
+    /// [`NarrowState`] lattice over the body's CFG. [`Semantics::type_of_expr`]
+    /// consumes it to overlay narrowed types on `Expr::Path` references — the
+    /// Task 6.5 invariant that hovers on a guard's receiver see the pre-narrow
+    /// type while hovers inside the then / else body see the narrowed one
+    /// falls out structurally from CFG vertex placement.
+    ///
+    /// Returns `None` when `owner` does not resolve to a body in this file,
+    /// or (impossibly) when the solver fails to converge.
+    ///
+    /// # Implementation
+    /// Should delegate to [`crate::narrow::narrow_query`].
+    ///
+    /// [`Semantics::type_of_expr`]: https://docs.rs/hir/latest/hir/struct.Semantics.html#method.type_of_expr
+    fn narrow(
+        &self,
+        file_id: FileId,
+        owner: DefWithBodyId,
+    ) -> Option<Arc<dataflow::DataflowResult<NarrowState>>>;
 }

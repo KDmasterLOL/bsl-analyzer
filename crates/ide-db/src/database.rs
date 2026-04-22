@@ -335,6 +335,14 @@ impl hir::HirDatabase for RootDatabaseImpl {
     ) -> hir::Ty {
         hir::type_of_expr_query(self, file_id, owner, expr)
     }
+
+    fn narrow(
+        &self,
+        file_id: FileId,
+        owner: hir::DefWithBodyId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::NarrowState>>> {
+        hir::narrow_query(self, file_id, owner)
+    }
 }
 
 #[salsa::db]

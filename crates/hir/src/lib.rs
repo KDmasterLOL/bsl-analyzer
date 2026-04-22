@@ -90,6 +90,7 @@ pub use hir_def::{
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
+pub use hir_ty::narrow::{narrow_query, narrowed_type_at, NarrowState};
 pub use hir_ty::{InferenceDiagnostic, InferenceResult, MetadataKind, Ty, UnresolvedMethodKind};
 
 use syntax::{ast::AstNode, TextRange};
@@ -581,6 +582,19 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// — before M3, `InferenceResult` dropped per-body `expr_types`
     /// during merge, so this function would always have seen `None`.
     ///
+    /// **Narrowing overlay (M4 Task 6.6).** If the matched expression is
+    /// an [`Expr::Path`], the inferred base [`Ty`] is merged with the
+    /// narrowing overlay produced by [`HirDatabase::narrow`]: the
+    /// block-IN state of the CFG vertex covering the expression supplies
+    /// the narrowed [`Ty`] for that variable. Per ADR-01 Q4, this
+    /// structurally returns:
+    /// - the **pre-narrow** type on a guard's own receiver (the receiver
+    ///   lives in a Conditional vertex whose IN carries the base overlay
+    ///   — the guard is only applied on outgoing True / False edges);
+    /// - the **narrowed** type inside the then / else body (those
+    ///   expressions live in successor BasicBlocks whose IN has the
+    ///   narrowing applied).
+    ///
     /// Returns [`Ty::Unknown`] when the node isn't an expression (no
     /// `ExprId` binding) or when inference produced no entry for it.
     pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> Ty {
@@ -593,10 +607,9 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         // key is unique per file, so a hit here is unambiguous.
         if let Some(result) = module_bodies.module_code_result() {
             if let Some(expr_id) = result.source_map.expr_at_range(range) {
-                return infer
-                    .type_of_expr_in(DefWithBodyId::ModuleCode, expr_id)
-                    .cloned()
-                    .unwrap_or(Ty::Unknown);
+                let owner = DefWithBodyId::ModuleCode;
+                let base = infer.type_of_expr_in(owner, expr_id).cloned().unwrap_or(Ty::Unknown);
+                return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base);
             }
         }
 
@@ -604,16 +617,54 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         // (local_id, body, source_map); `expr_at_range` returns `Some`
         // only for ranges that belong to that body, so the loop stops at
         // the first match.
-        for (local_id, _body, source_map) in module_bodies.method_bodies() {
+        for (local_id, body, source_map) in module_bodies.method_bodies() {
             if let Some(expr_id) = source_map.expr_at_range(range) {
-                return infer
-                    .type_of_expr_in(DefWithBodyId::Method(local_id), expr_id)
-                    .cloned()
-                    .unwrap_or(Ty::Unknown);
+                let owner = DefWithBodyId::Method(local_id);
+                let base = infer.type_of_expr_in(owner, expr_id).cloned().unwrap_or(Ty::Unknown);
+                return narrow_or_base(self.db, file_id, owner, body, expr_id, base);
             }
         }
 
         Ty::Unknown
+    }
+}
+
+/// Merge the narrowing overlay with the base [`Ty`] for a
+/// [`Semantics::type_of_expr`] lookup.
+///
+/// Only applies when the expression is an [`Expr::Path`] — narrowing
+/// targets named variables. For all other shapes we pass the base type
+/// through unchanged.
+///
+/// Fallback rules (in order):
+/// 1. Non-`Path` expr → `base`.
+/// 2. `db.narrow(...)` returns `None` (body not in this file, provider
+///    opted out) → `base`.
+/// 3. Overlay has no entry for this `Name` at this program point (variable
+///    untouched by any guard that dominates the expression) → `base`.
+/// 4. Overlay entry is [`Ty::Unknown`] (e.g., false-branch complement
+///    against a non-union base — Task 6.3 `ty_difference` degrades
+///    soundly) → `base`.
+/// 5. Otherwise → the narrowed [`Ty`].
+fn narrow_or_base<DB: HirDatabase>(
+    db: &DB,
+    file_id: FileId,
+    owner: DefWithBodyId,
+    body: &Body,
+    expr_id: ExprId,
+    base: Ty,
+) -> Ty {
+    use hir_def::IdConversion;
+
+    let Expr::Path(name) = body.expr(expr_id) else {
+        return base;
+    };
+    let Some(result) = db.narrow(file_id, owner) else {
+        return base;
+    };
+    match narrowed_type_at(&result, expr_id.to_idx(), name) {
+        Some(narrowed) if !matches!(narrowed, Ty::Unknown) => narrowed,
+        _ => base,
     }
 }
 

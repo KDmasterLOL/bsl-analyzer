@@ -56,9 +56,13 @@ use dataflow::{Lattice, Transfer};
 use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt};
 use hir_def::ty::Ty;
-use hir_def::{ExprId, IdConversion, Name};
+use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId, Name};
 use la_arena::{Idx, RawIdx};
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
+use vfs::FileId;
+
+use crate::db::HirDatabase;
 
 type ExprIdx = Idx<Expr>;
 type StmtIdx = Idx<Stmt>;
@@ -298,8 +302,12 @@ impl NarrowState {
     /// callers fall back to the base `var_types` lookup. A returned
     /// `Some(ty)` is guaranteed by the overlay contract not to be
     /// `Ty::Unknown`.
+    ///
+    /// Case-folds `name` before the lookup so `Х` and `х` hit the same
+    /// entry — BSL is case-insensitive and all narrowing writes fold
+    /// through [`fold_name`] at insert time.
     pub fn get(&self, name: &Name) -> Option<&Ty> {
-        self.narrowed.get(name)
+        self.narrowed.get(&fold_name(name))
     }
 
     /// Number of narrowed bindings. Exists for tests and introspection.
@@ -454,8 +462,12 @@ impl NarrowingTransfer {
 
     /// Compute `base_types[var] \ matched` via [`ty_difference`].
     /// Returns `Ty::Unknown` when the variable has no recorded base type.
+    ///
+    /// Folds `var` so mixed-case sources (`Х` / `х`) hit the same seed
+    /// entry — the overlay already round-trips through [`fold_name`] on
+    /// every write, so the base map must honour the same invariant.
     fn complement_of(&self, var: &Name, matched: &Ty) -> Ty {
-        match self.base_types.get(var) {
+        match self.base_types.get(&fold_name(var)) {
             Some(base) => ty_difference(base, matched),
             None => Ty::Unknown,
         }
@@ -492,12 +504,15 @@ impl NarrowingTransfer {
                 Literal::Undefined => Ty::Undefined,
                 Literal::Null => Ty::Null,
             },
-            Expr::Path(name) => state
-                .narrowed
-                .get(name)
-                .cloned()
-                .or_else(|| self.base_types.get(name).cloned())
-                .unwrap_or(Ty::Unknown),
+            Expr::Path(name) => {
+                let folded = fold_name(name);
+                state
+                    .narrowed
+                    .get(&folded)
+                    .cloned()
+                    .or_else(|| self.base_types.get(&folded).cloned())
+                    .unwrap_or(Ty::Unknown)
+            }
             _ => Ty::Unknown,
         }
     }
@@ -515,10 +530,11 @@ impl Transfer<NarrowState> for NarrowingTransfer {
                 // scope (returns `Ty::Unknown`), drop the entry so the
                 // overlay cannot keep showing the outdated narrowing.
                 let new_ty = self.infer_rhs_type(*value, &new_state, body);
+                let folded = fold_name(name);
                 if matches!(new_ty, Ty::Unknown) {
-                    new_state.narrowed.remove(name);
+                    new_state.narrowed.remove(&folded);
                 } else {
-                    new_state.narrowed.insert(name.clone(), new_ty);
+                    new_state.narrowed.insert(folded, new_ty);
                 }
             }
         }
@@ -550,8 +566,26 @@ impl Transfer<NarrowState> for NarrowingTransfer {
 /// gate — future refinements (Task 6.4) plug in here.
 fn insert_if_informative(state: &mut NarrowState, var: &Name, ty: Ty) {
     if !matches!(ty, Ty::Unknown) {
-        state.narrowed.insert(var.clone(), ty);
+        state.narrowed.insert(fold_name(var), ty);
     }
+}
+
+/// Case-fold a [`Name`] for use as a narrowing-overlay key.
+///
+/// BSL is case-insensitive (per ADR-01 and `name.eq_ignore_case`), but
+/// [`Name`]'s derived `Hash` / `Eq` are case-sensitive — a `SmolStr` wrapper.
+/// Without normalisation, `Если ТипЗнч(х) = Тип("Строка") Тогда А = Х` would
+/// write the narrowed overlay under `Name("х")` and then miss on the hover
+/// lookup under `Name("Х")`, violating ADR-01 Q4. This helper canonicalises
+/// the spelling to lowercase before both inserting into and reading from any
+/// narrowing-related `FxHashMap<Name, _>` — including `NarrowState::narrowed`,
+/// `NarrowingTransfer::base_types`, and the per-body seed built by
+/// [`build_base_types_for_body`]. All internal iterators already see
+/// pre-folded keys (they never call `fold_name` themselves), so the
+/// invariant holds structurally once every write site and every explicit
+/// lookup folds.
+fn fold_name(n: &Name) -> Name {
+    Name::new(&n.as_str().to_lowercase())
 }
 
 /// Set-difference on types: `base \ matched`.
@@ -604,14 +638,94 @@ pub fn narrow_body(
     body: Body,
     base_types: FxHashMap<Name, Ty>,
 ) -> Option<dataflow::DataflowResult<NarrowState>> {
-    let cfg = std::sync::Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(
-        body.body_stmts_typed(),
-        &body,
-        None,
-    ));
+    let cfg =
+        Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None));
     let mut solver = dataflow::DataflowSolver::new(cfg, body, NarrowingTransfer::new(base_types));
     solver.set_bottom_factory(NarrowState::new);
     solver.solve()
+}
+
+/// Salsa-facing wrapper around [`narrow_body`].
+///
+/// Resolves `owner` through [`hir_def::ModuleBodies`] to the `Body` that
+/// lives in `file_id`, seeds `base_types` from the body's own
+/// [`Expr::Path`] inferred types (see [`build_base_types_for_body`]),
+/// and returns the solver result wrapped in `Arc` so consumers share a
+/// single allocation.
+///
+/// Follows the same "plain function, no `#[salsa::tracked]` attribute"
+/// pattern as [`crate::infer::infer_query`] / [`crate::infer::type_of_expr_query`].
+/// The database implementation (`RootDatabaseImpl` in `ide-db`) delegates
+/// [`HirDatabase::narrow`] straight to this function; the tracked layer
+/// underneath (`module_bodies`, `infer`) supplies incremental invalidation.
+///
+/// Returns `None` when:
+/// - `owner` does not resolve to a body that lives in this file
+///   (stale call site after refactor, or mismatched `DefWithBodyId`);
+/// - [`narrow_body`] fails to converge within the default iteration cap
+///   (impossible for lowered HIR, kept for signature compatibility).
+pub fn narrow_query(
+    db: &dyn HirDatabase,
+    file_id: FileId,
+    owner: DefWithBodyId,
+) -> Option<Arc<dataflow::DataflowResult<NarrowState>>> {
+    let _span = tracing::info_span!("narrow_query", ?file_id, ?owner).entered();
+
+    let module_id = ModuleId { file_id };
+    let module_bodies = db.module_bodies(module_id);
+
+    let body: &Body = match owner {
+        DefWithBodyId::ModuleCode => module_bodies.module_code()?,
+        DefWithBodyId::Method(local_id) => {
+            module_bodies.lower_result(local_id).map(|lr| &lr.body)?
+        }
+    };
+
+    let infer = db.infer(file_id);
+    let per_body_types = infer.expr_types_by_body.get(&owner);
+    let base_types = build_base_types_for_body(body, per_body_types);
+
+    let result = narrow_body(body.clone(), base_types)?;
+    Some(Arc::new(result))
+}
+
+/// Build a per-body `Name → Ty` base map by scanning [`Expr::Path`]
+/// nodes and reading their inferred types from the body's per-expr map.
+///
+/// Why per-body, not from [`InferenceResult::var_types`]: the file-
+/// global `var_types` map keys variables by `String::to_lowercase()`,
+/// whereas [`NarrowingTransfer::base_types`] uses `Name` — whose
+/// `Hash` / `Eq` are **case-sensitive** — to look up entries keyed on
+/// the original-case names that appear inside `Expr::Path`. Routing
+/// through the body's own `expr_types` preserves source case and
+/// scopes collisions to a single procedure.
+///
+/// **Policy:** first-writer wins. Arena iteration order matches source
+/// order, so we pick the type associated with the first occurrence of
+/// each name — usually its declared / initial-assignment type, which is
+/// the value that best plays the role of a "pre-narrow base" for the
+/// [`ty_difference`]-driven false-branch complement.
+fn build_base_types_for_body(
+    body: &Body,
+    per_body_types: Option<&FxHashMap<hir_def::ExprId, Ty>>,
+) -> FxHashMap<Name, Ty> {
+    let mut base_types: FxHashMap<Name, Ty> = FxHashMap::default();
+    let Some(per_body) = per_body_types else {
+        return base_types;
+    };
+    for (expr_id, expr) in body.exprs_iter() {
+        if let Expr::Path(name) = expr {
+            if let Some(ty) = per_body.get(&expr_id) {
+                // Fold the key so a mixed-case source (`Х` and `х` both
+                // referring to the same BSL variable) lands on the same
+                // entry — the overlay round-trips through `fold_name`
+                // at every write, so the seed must honour the same
+                // invariant.
+                base_types.entry(fold_name(name)).or_insert_with(|| ty.clone());
+            }
+        }
+    }
+    base_types
 }
 
 /// Return the narrowed type of `name` observed at the program point
@@ -1249,7 +1363,12 @@ mod tests {
     fn state_with(entries: &[(&str, Ty)]) -> NarrowState {
         let mut s = NarrowState::new();
         for (n, t) in entries {
-            s.narrowed.insert(Name::new(n), t.clone());
+            // Fold the key to match the production invariant: every
+            // overlay write in `NarrowingTransfer` routes through
+            // `fold_name`, so the test helper must not short-circuit
+            // that — otherwise case-insensitivity regressions would
+            // hide behind raw `Name::new(...)` keys.
+            s.narrowed.insert(fold_name(&Name::new(n)), t.clone());
         }
         s
     }
@@ -1332,7 +1451,11 @@ mod tests {
     fn transfer_with_bases(entries: &[(&str, Ty)]) -> NarrowingTransfer {
         let mut bases = FxHashMap::default();
         for (name, ty) in entries {
-            bases.insert(Name::new(name), ty.clone());
+            // Match the production seed: `build_base_types_for_body`
+            // folds every key before inserting, so tests that read via
+            // `complement_of` (which also folds) need the same spelling
+            // on the way in.
+            bases.insert(fold_name(&Name::new(name)), ty.clone());
         }
         NarrowingTransfer::new(bases)
     }
@@ -1896,7 +2019,7 @@ mod tests {
 
         let body = b.body.clone();
         let mut bases = FxHashMap::default();
-        bases.insert(Name::new("Х"), Ty::union(vec![Ty::Number, Ty::String]));
+        bases.insert(fold_name(&Name::new("Х")), Ty::union(vec![Ty::Number, Ty::String]));
         let result = narrow_body(body, bases).expect("narrowing analysis must converge");
         let cfg = result.cfg();
 
@@ -2207,7 +2330,7 @@ mod tests {
         // `ty_difference` collapses the union to the remaining
         // member, so the else-block's IN state pins Х → Number.
         let mut bases = FxHashMap::default();
-        bases.insert(Name::new("Х"), Ty::union(vec![Ty::Number, Ty::String]));
+        bases.insert(fold_name(&Name::new("Х")), Ty::union(vec![Ty::Number, Ty::String]));
 
         let probe = build_probe_if_then_else(bases);
         let else_expr = probe.else_body_path.expect("else branch is present");
@@ -2325,7 +2448,7 @@ mod tests {
 
         let body = b.body.clone();
         let mut bases = FxHashMap::default();
-        bases.insert(Name::new("Х"), Ty::union(vec![Ty::Number, Ty::String]));
+        bases.insert(fold_name(&Name::new("Х")), Ty::union(vec![Ty::Number, Ty::String]));
         let result = narrow_body(body, bases).expect("narrowing analysis must converge");
 
         assert_eq!(
