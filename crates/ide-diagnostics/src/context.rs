@@ -136,6 +136,11 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_bodies(module_id))
     }
 
+    /// Get type-inference result for current file.
+    pub fn infer(&self) -> Arc<hir::InferenceResult> {
+        self.query(|p| p.infer(self.file_id))
+    }
+
     /// Get module metadata for current file.
     pub fn module_metadata(&self) -> Arc<hir::ModuleMetadata> {
         let module_id = hir::ModuleId::new(self.file_id);

@@ -87,6 +87,7 @@ pub mod magic_date;
 pub mod magic_number;
 pub mod metadata_object_name_length;
 pub mod method_size;
+pub mod mismatched_arg_count;
 pub mod missed_required_parameter;
 pub mod missing_code_try_catch_ex;
 pub mod missing_common_module_method;
@@ -147,11 +148,14 @@ pub mod timeouts_in_external_resources;
 pub mod too_many_returns;
 pub mod transferring_parameters_between_client_and_server;
 pub mod try_number;
+pub mod type_mismatch;
 pub mod typo;
 pub mod unary_plus_in_concatenation;
 pub mod union_all;
 pub mod unknown_preprocessor_symbol;
 pub mod unreachable_code;
+pub mod unresolved_field;
+pub mod unresolved_method_call;
 pub mod unsafe_find_by_code;
 pub mod unsafe_safe_mode_method_call;
 pub mod unused_local_method;
@@ -463,6 +467,12 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::WrongUseFunctionProceedWithCall => {
             Some(&wrong_use_function_proceed_with_call::METADATA)
         }
+
+        // Type-inference diagnostics (BSL-TY-*)
+        DiagnosticCode::UnresolvedMethodCall => Some(&unresolved_method_call::METADATA),
+        DiagnosticCode::MismatchedArgCount => Some(&mismatched_arg_count::METADATA),
+        DiagnosticCode::TypeMismatch => Some(&type_mismatch::METADATA),
+        DiagnosticCode::UnresolvedField => Some(&unresolved_field::METADATA),
     }
 }
 

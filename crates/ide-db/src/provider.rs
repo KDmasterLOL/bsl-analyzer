@@ -11,7 +11,8 @@ use std::sync::Arc;
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
 use hir::{
-    ItemTree, MethodDocs, MethodId, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
+    InferenceResult, ItemTree, MethodDocs, MethodId, ModuleBodies, ModuleId, ModuleIndex,
+    ModuleMetadata, SymbolTree,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
@@ -101,6 +102,22 @@ pub trait AnalysisProvider {
 
     /// Get lowered HIR bodies for all methods in module.
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
+
+    /// Get type-inference result for a file.
+    ///
+    /// Provides the file-level [`InferenceResult`] — per-body expression
+    /// types plus the `(DefWithBodyId, InferenceDiagnostic)` diagnostic
+    /// stream. Returned value is `Arc`-shared and cached by the provider.
+    ///
+    /// Default impl returns an empty result so streaming providers that
+    /// don't yet run inference can opt-out without failing any consumer
+    /// (ide-diagnostics degrades to "no type-inference diagnostics" in
+    /// that mode). Providers that do run inference **must** override this
+    /// — the silent default will otherwise mask a "nothing reported"
+    /// bug in any consumer that expects type-inference diagnostics.
+    fn infer(&self, _file_id: FileId) -> Arc<InferenceResult> {
+        Arc::new(InferenceResult::default())
+    }
 
     /// Get module metadata (type, execution context).
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;

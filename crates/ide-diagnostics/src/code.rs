@@ -176,6 +176,14 @@ pub enum DiagnosticCode {
     TransferringParametersBetweenClientAndServer,
     UnsafeFindByCode,
 
+    // Type-inference diagnostics (BSL-TY-*)
+    // Emitted by `hir-ty::infer` during type inference, wired into
+    // ide-diagnostics via the `hir_inference_dispatch` collector.
+    UnresolvedMethodCall,
+    MismatchedArgCount,
+    TypeMismatch,
+    UnresolvedField,
+
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
     FieldsFromJoinsWithoutIsNull,

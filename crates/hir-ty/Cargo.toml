@@ -7,9 +7,12 @@ license = "LGPL-3.0-or-later"
 repository = "https://github.com/1c-syntax/bsl-analyzer"
 
 [dependencies]
+cfg.workspace = true
 cfg-types = { path = "../cfg-types" }
+dataflow.workspace = true
 hir-def = { path = "../hir-def" }
 base-db = { path = "../base-db" }
+bsl-metadata = { path = "../bsl-metadata" }
 bsl-platform = { path = "../bsl-platform" }
 syntax = { path = "../syntax" }
 intern = { path = "../intern" }
@@ -24,3 +27,4 @@ smol_str.workspace = true
 
 [dev-dependencies]
 expect-test = "1.5.0"
+uuid = { version = "1.0", features = ["v4"] }

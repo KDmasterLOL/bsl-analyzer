@@ -33,17 +33,28 @@ Control Flow Graph + HIR Body
 A lattice defines the abstract domain for dataflow analysis:
 
 ```rust
-pub trait Lattice: Clone + Eq {
-    /// Bottom element (⊥): no information
-    fn bottom() -> Self;
-
-    /// Join operation (⊔): merge information from multiple paths
+pub trait Lattice: Clone + PartialEq + Eq {
+    /// Join operation (⊔): merge information from multiple paths.
     fn join(&self, other: &Self) -> Self;
 
-    /// Partial order check (⊑)
-    fn is_more_informative_than(&self, other: &Self) -> bool;
+    /// In-place join — optimization to avoid allocations at merge points.
+    /// Default falls back to `join()`.
+    fn join_in_place(&mut self, other: &Self) {
+        *self = self.join(other);
+    }
+
+    /// Partial order check (⊑): is `self` at least as informative as `other`?
+    /// Default compares by `PartialEq`.
+    fn is_more_informative_than(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 ```
+
+The bottom element (⊥) is supplied at solver setup via
+`DataflowSolver::set_bottom_factory(|| ...)` rather than being part of
+the `Lattice` trait, so lattices that need runtime context (e.g.
+`Arc<DefinitionIndex>` for reaching-defs) can still participate.
 
 **Example:** Reaching Definitions lattice uses sets of definitions:
 - **Bottom**: ∅ (no definitions reach)
@@ -51,12 +62,18 @@ pub trait Lattice: Clone + Eq {
 
 ### Transfer Function
 
-Defines how statements modify dataflow state:
+Defines how statements and CFG edges modify dataflow state:
 
 ```rust
 pub trait Transfer<L: Lattice> {
     /// Apply statement's effect to dataflow state
     fn transfer_stmt(&self, stmt_id: RawIdx, state: &L, body: &Body) -> L;
+
+    /// Refine state while crossing a specific CFG edge.
+    /// Defaults to identity — branch-blind analyses do not override it.
+    fn transfer_edge(&self, edge_kind: CfgEdgeType, state: &L) -> L {
+        state.clone()
+    }
 }
 ```
 
@@ -64,6 +81,21 @@ pub trait Transfer<L: Lattice> {
 - **Assignment** `x = 5`: Kill old definitions of `x`, gen new definition
 - **VarDecl** `Перем x`: Gen definition for `x`
 - **Loop variable** `Для x = 1 По 10`: Gen definition for `x`
+- **Edge**: inherits identity — reaching defs are branch-blind.
+
+### Edge-Sensitive Refinement (`transfer_edge`)
+
+The solver calls `transfer_edge(edge_kind, pred.out)` (forward) or
+`transfer_edge(edge_kind, succ.in)` (backward) **before joining** each
+predecessor / successor contribution into the block's IN / OUT state. This
+is the hook narrowing analyses use to split state along `CfgEdgeType::TrueBranch`
+vs `CfgEdgeType::FalseBranch` successors of a guard — e.g. after
+`Если ТипЗнч(x) = Тип("Строка") Тогда`, the `TrueBranch` edge refines
+`x: Ty` to `Строка` while the `FalseBranch` edge refines to
+`Ty \ Строка`.
+
+**Default impl is identity**, so reaching-defs / liveness remain unchanged.
+Override only when the analysis is branch-sensitive.
 
 ### DataflowSolver
 

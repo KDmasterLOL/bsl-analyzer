@@ -1546,8 +1546,11 @@ name = "hir-ty"
 version = "0.1.28"
 dependencies = [
  "base-db",
+ "bsl-metadata",
  "bsl-platform",
+ "cfg",
  "cfg-types",
+ "dataflow",
  "expect-test",
  "hir-def",
  "intern",
@@ -1558,6 +1561,7 @@ dependencies = [
  "stdx",
  "syntax",
  "tracing",
+ "uuid",
  "vfs",
 ]
 
@@ -1853,6 +1857,7 @@ dependencies = [
  "line-index",
  "parking_lot",
  "parser",
+ "project-model",
  "rustc-hash 2.1.2",
  "salsa",
  "sdbl-hir",

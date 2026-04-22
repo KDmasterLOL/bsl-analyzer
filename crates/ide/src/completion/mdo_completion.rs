@@ -5,7 +5,7 @@
 //! - `Справочники.Валюты.` / `Catalogs.Currencies.` → manager methods from platform data
 
 use bsl_metadata::MdoType;
-use bsl_platform::PlatformData;
+use bsl_platform::{manager_methods_query, TypeNameInput};
 use hir::{ManagerType, Name};
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -49,7 +49,7 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
 
             // Platform manager methods (НайтиПоКоду, СоздатьЭлемент, ...)
             if let Some(prefix) = mdo_type.manager_type_prefix() {
-                items.extend(complete_manager_methods(prefix));
+                items.extend(complete_manager_methods(db, prefix));
             }
 
             // Exported methods from ManagerModule.bsl
@@ -271,13 +271,21 @@ fn complete_mdo_objects<DB: RootDatabase>(
 /// Complete manager methods from platform data.
 ///
 /// Example: `Справочники.Валюты.` → [НайтиПоКоду, НайтиПоНаименованию, СоздатьЭлемент, ...]
-fn complete_manager_methods(manager_prefix: &str) -> Vec<CompletionItem> {
-    let data = PlatformData::instance();
-    let methods = data.get_manager_methods(manager_prefix);
+fn complete_manager_methods<DB: RootDatabase>(
+    db: &DB,
+    manager_prefix: &str,
+) -> Vec<CompletionItem> {
+    // Was: `PlatformData::instance().get_manager_methods(prefix)`. The
+    // M3 Task 12 migration routes the same call through the Salsa-
+    // tracked `manager_methods_query` so the facade boundary
+    // (Invariant #3) isn't crossed in IDE code — caching and
+    // invalidation live in bsl-platform.
+    let input = TypeNameInput::new(db, manager_prefix.to_string());
+    let methods = manager_methods_query(db, input);
 
     tracing::debug!(manager_prefix, method_count = methods.len(), "Manager methods found");
 
-    methods.iter().map(|method| super::platform_completion::render_manager_method(method)).collect()
+    methods.iter().map(super::platform_completion::render_manager_method).collect()
 }
 
 /// Complete exported methods from ManagerModule.bsl, rendered through the

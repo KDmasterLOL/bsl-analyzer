@@ -21,6 +21,8 @@
 
 use crate::docs::MethodDocs;
 use crate::item_tree::{Annotation, ItemTree, ModItem, Param};
+use crate::ty::doc_types::{parse_method_doc_types, MethodTypeHints};
+use crate::type_ref::TypeRef;
 use crate::{MethodId, ModuleId, Name, VariableId};
 use la_arena::{Arena, Idx};
 use rustc_hash::FxHashMap;
@@ -84,6 +86,16 @@ pub struct MethodSymbol {
     /// Parsed once during SymbolTree construction for efficient access.
     /// Contains deprecation info, parameter descriptions, return value docs, etc.
     pub docs: Option<Arc<MethodDocs>>,
+
+    /// JSDoc-derived return type hint.
+    ///
+    /// Populated by [`SymbolTreeBuilder`] when
+    /// [`parse_method_doc_types`] finds a return section. `None` means
+    /// the comment did not state a return type; callers treat this as
+    /// `Ty::Unknown` rather than "no return". Consumed by
+    /// `hir_ty::method_resolution::materialise_signature` via
+    /// [`hir_ty::TyLoweringContext::lower_type_ref`].
+    pub return_type_ref: Option<TypeRef>,
 }
 
 /// A module-level variable symbol.
@@ -124,6 +136,15 @@ pub struct ParamSymbol {
     ///
     /// For Iteration 8, this is always Unknown (full type inference in Iteration 12+).
     pub ty: crate::Ty,
+
+    /// JSDoc-derived syntactic type hint for this parameter.
+    ///
+    /// Matched against [`MethodTypeHints::params`] by case-insensitive name
+    /// during `SymbolTreeBuilder` construction. `None` when the doc comment
+    /// had no matching `Param - Type` line; callers treat this as
+    /// `Ty::Unknown` after
+    /// [`hir_ty::TyLoweringContext::lower_type_ref`].
+    pub type_ref: Option<TypeRef>,
 }
 
 impl SymbolTree {
@@ -196,6 +217,7 @@ impl SymbolTree {
                         return_type: crate::Ty::Undefined,
                         source_range: proc.source_range,
                         docs: None,
+                        return_type_ref: None,
                     };
                     let key: SmolStr = symbol.name.as_str().to_lowercase().into();
                     let idx = methods.alloc(symbol);
@@ -214,6 +236,7 @@ impl SymbolTree {
                         return_type: crate::Ty::Unknown,
                         source_range: func.source_range,
                         docs: None,
+                        return_type_ref: None,
                     };
                     let key: SmolStr = symbol.name.as_str().to_lowercase().into();
                     let idx = methods.alloc(symbol);
@@ -334,16 +357,18 @@ impl<'a> SymbolTreeBuilder<'a> {
 
         // Parse documentation for this method
         let docs = self.parse_method_docs(method_id);
+        let hints = docs.as_deref().and_then(|d| parse_method_doc_types(&d.raw));
 
         let symbol = MethodSymbol {
             id: method_id,
             name: proc.name.clone(),
             is_function: false,
             is_export: proc.is_export,
-            params: proc.params.iter().map(ParamSymbol::from).collect(),
+            params: Self::params_with_hints(&proc.params, hints.as_ref()),
             annotations: proc.annotations.to_vec(),
             return_type: crate::Ty::Undefined, // Procedures don't return values
             source_range: proc.source_range,
+            return_type_ref: hints.as_ref().map(|h| h.ret.clone()),
             docs,
         };
 
@@ -355,20 +380,45 @@ impl<'a> SymbolTreeBuilder<'a> {
 
         // Parse documentation for this method
         let docs = self.parse_method_docs(method_id);
+        let hints = docs.as_deref().and_then(|d| parse_method_doc_types(&d.raw));
 
         let symbol = MethodSymbol {
             id: method_id,
             name: func.name.clone(),
             is_function: true,
             is_export: func.is_export,
-            params: func.params.iter().map(ParamSymbol::from).collect(),
+            params: Self::params_with_hints(&func.params, hints.as_ref()),
             annotations: func.annotations.to_vec(),
             return_type: crate::Ty::Unknown, // TODO: Full type inference in Iteration 12+
             source_range: func.source_range,
+            return_type_ref: hints.as_ref().map(|h| h.ret.clone()),
             docs,
         };
 
         self.add_method_symbol(symbol);
+    }
+
+    /// Build [`ParamSymbol`]s from `ItemTree` params, attaching a JSDoc
+    /// [`TypeRef`] when the doc comment named the parameter.
+    ///
+    /// Matching is case-insensitive (BSL semantics). Params without a
+    /// matching doc line keep `type_ref = None`; `TyLoweringContext` then
+    /// treats that as `Ty::Unknown` at signature-materialisation time.
+    fn params_with_hints(params: &[Param], hints: Option<&MethodTypeHints>) -> Vec<ParamSymbol> {
+        params
+            .iter()
+            .map(|p| {
+                let mut sym = ParamSymbol::from(p);
+                if let Some(hints) = hints {
+                    sym.type_ref = hints
+                        .params
+                        .iter()
+                        .find(|(n, _)| p.name.eq_ignore_case(n))
+                        .map(|(_, t)| t.clone());
+                }
+                sym
+            })
+            .collect()
     }
 
     /// Parse documentation for a method.
@@ -426,6 +476,7 @@ impl From<&Param> for ParamSymbol {
             is_val: param.is_val,
             has_default: param.has_default,
             ty: crate::Ty::Unknown, // TODO: Full type inference in Iteration 12+
+            type_ref: None,
         }
     }
 }

@@ -85,6 +85,13 @@ pub enum PathResolution {
     /// Resolved to a variable (module-level variable).
     Variable(VariableId),
 
+    /// Resolved to a platform builtin (global function, e.g. `Сообщить`).
+    ///
+    /// In BSL, platform globals have higher priority than local variables
+    /// and cannot be shadowed by user code. Only single-segment paths may
+    /// resolve to a `Builtin`.
+    Builtin(Name),
+
     /// Could not resolve - the path is invalid or refers to a non-existent item.
     ///
     /// This can happen when:

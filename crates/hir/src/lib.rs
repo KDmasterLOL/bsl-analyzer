@@ -3,11 +3,15 @@
 //! This crate provides a high-level API for semantic analysis.
 
 mod definition;
+pub mod type_facade;
 
 pub use definition::Definition;
+pub use type_facade::Type;
 
 // Re-export core types
-pub use hir_def::{BindingId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId};
+pub use hir_def::{
+    BindingId, DefWithBodyId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId,
+};
 pub use hir_def::{ExecutionContext, QualifiedName};
 pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
@@ -83,9 +87,11 @@ pub use hir_def::{
 };
 
 // Re-export hir-ty types and queries
+pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
-pub use hir_ty::{InferenceDiagnostic, InferenceResult, Ty, UnresolvedMethodKind};
+pub use hir_ty::narrow::{narrow_query, narrowed_type_at, NarrowState};
+pub use hir_ty::{InferenceDiagnostic, InferenceResult, MetadataKind, Ty, UnresolvedMethodKind};
 
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
@@ -280,7 +286,7 @@ pub struct Semantics<'db, DB> {
     db: &'db DB,
 }
 
-impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
+impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     pub fn new(db: &'db DB) -> Self {
         Self { db }
     }
@@ -308,11 +314,11 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     ///
     /// # Resolution Priority (matches BSL semantics)
     ///
-    /// 1. Local symbols (parameters, local variables) — highest priority (shadowing)
-    /// 2. Builtin platform functions/methods
-    /// 3. MDO plural forms (Справочники, Документы)
-    /// 4. Module-level methods and variables
-    /// 5. Cross-module qualified names (Module.Method)
+    /// 1. Qualified names (`X.Y`, `X.Y.Z`) — resolved as a unit before unqualified lookup
+    /// 2. Builtin platform functions — **never shadowed** by user code
+    /// 3. Local symbols (parameters, local variables)
+    /// 4. MDO plural forms (Справочники, Документы)
+    /// 5. Module-level methods and variables
     ///
     /// # Examples
     ///
@@ -423,10 +429,17 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
                 tracing::debug!(?resolution, "resolved path");
 
-                // Convert PathResolution to Definition
+                // Convert PathResolution to Definition.
+                // The `Builtin` arm is unreachable with the current
+                // `with_workspace_scope` resolver (no `Scope::Builtins`).
+                // Task 1.7 migrates this caller to
+                // `with_builtins_and_workspace`, at which point the arm
+                // becomes live — kept now so the migration is a single
+                // constructor swap.
                 return match resolution {
                     PathResolution::Method(method_id) => Some(Definition::Method(method_id)),
                     PathResolution::Variable(var_id) => Some(Definition::Variable(var_id)),
+                    PathResolution::Builtin(name) => Some(Definition::BuiltinFunction(name)),
                     PathResolution::Unresolved(_) => None,
                 };
             }
@@ -554,6 +567,109 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         segments.reverse();
 
         Some(QualifiedName::from_segments(segments))
+    }
+}
+
+/// Type inference bridge. Lives in a separate impl block so only
+/// callers that need [`HirDatabase`] pay the trait-bound cost; the main
+/// IDE flows (definition, name resolution) don't.
+impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
+    /// Resolve a syntax node to its inferred [`Ty`].
+    ///
+    /// Uses the `BodySourceMap` of each body in the file to locate the
+    /// containing `Body`; once found, looks up the inferred type in
+    /// `InferenceResult::expr_types_by_body`. This is the Task 9 bridge
+    /// — before M3, `InferenceResult` dropped per-body `expr_types`
+    /// during merge, so this function would always have seen `None`.
+    ///
+    /// **Narrowing overlay (M4 Task 6.6).** If the matched expression is
+    /// an [`Expr::Path`], the inferred base [`Ty`] is merged with the
+    /// narrowing overlay produced by [`HirDatabase::narrow`]: the
+    /// block-IN state of the CFG vertex covering the expression supplies
+    /// the narrowed [`Ty`] for that variable. Per ADR-01 Q4, this
+    /// structurally returns:
+    /// - the **pre-narrow** type on a guard's own receiver (the receiver
+    ///   lives in a Conditional vertex whose IN carries the base overlay
+    ///   — the guard is only applied on outgoing True / False edges);
+    /// - the **narrowed** type inside the then / else body (those
+    ///   expressions live in successor BasicBlocks whose IN has the
+    ///   narrowing applied).
+    ///
+    /// Returns [`Ty::Unknown`] when the node isn't an expression (no
+    /// `ExprId` binding) or when inference produced no entry for it.
+    pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> Ty {
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.db.module_bodies(module_id);
+        let infer = self.db.infer(file_id);
+        let range = node.text_range();
+
+        // Module-level code first. Its `DefWithBodyId::ModuleCode`
+        // key is unique per file, so a hit here is unambiguous.
+        if let Some(result) = module_bodies.module_code_result() {
+            if let Some(expr_id) = result.source_map.expr_at_range(range) {
+                let owner = DefWithBodyId::ModuleCode;
+                let base = infer.type_of_expr_in(owner, expr_id).cloned().unwrap_or(Ty::Unknown);
+                return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base);
+            }
+        }
+
+        // Each method body. `method_bodies()` yields
+        // (local_id, body, source_map); `expr_at_range` returns `Some`
+        // only for ranges that belong to that body, so the loop stops at
+        // the first match.
+        for (local_id, body, source_map) in module_bodies.method_bodies() {
+            if let Some(expr_id) = source_map.expr_at_range(range) {
+                let owner = DefWithBodyId::Method(local_id);
+                let base = infer.type_of_expr_in(owner, expr_id).cloned().unwrap_or(Ty::Unknown);
+                return narrow_or_base(self.db, file_id, owner, body, expr_id, base);
+            }
+        }
+
+        Ty::Unknown
+    }
+}
+
+/// Merge the narrowing overlay with the base [`Ty`] for a
+/// [`Semantics::type_of_expr`] lookup.
+///
+/// Only applies when the expression is an [`Expr::Path`] — narrowing
+/// targets named variables. For all other shapes we pass the base type
+/// through unchanged.
+///
+/// Fallback rules (in order):
+/// 1. `db.type_narrowing_enabled() == false` (Task 6.7 feature flag;
+///    workspace opt-out) → `base`.
+/// 2. Non-`Path` expr → `base`.
+/// 3. `db.narrow(...)` returns `None` (body not in this file, provider
+///    opted out) → `base`.
+/// 4. Overlay has no entry for this `Name` at this program point (variable
+///    untouched by any guard that dominates the expression) → `base`.
+/// 5. Overlay entry is [`Ty::Unknown`] (e.g., false-branch complement
+///    against a non-union base — Task 6.3 `ty_difference` degrades
+///    soundly) → `base`.
+/// 6. Otherwise → the narrowed [`Ty`].
+fn narrow_or_base<DB: HirDatabase>(
+    db: &DB,
+    file_id: FileId,
+    owner: DefWithBodyId,
+    body: &Body,
+    expr_id: ExprId,
+    base: Ty,
+) -> Ty {
+    use hir_def::IdConversion;
+
+    if !db.type_narrowing_enabled() {
+        return base;
+    }
+    let Expr::Path(name) = body.expr(expr_id) else {
+        return base;
+    };
+    let Some(result) = db.narrow(file_id, owner) else {
+        return base;
+    };
+    match narrowed_type_at(&result, expr_id.to_idx(), name) {
+        Some(narrowed) if !matches!(narrowed, Ty::Unknown) => narrowed,
+        _ => base,
     }
 }
 

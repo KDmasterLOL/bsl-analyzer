@@ -724,6 +724,7 @@ mod tests {
             ("DATAFLOW_DIAGNOSTICS", DATAFLOW_DIAGNOSTICS),
             ("HIR_DIAGNOSTICS", crate::hir_dispatch::HIR_DIAGNOSTICS),
             ("METADATA_DIAGNOSTICS", crate::metadata_dispatch::METADATA_DIAGNOSTICS),
+            ("INFERENCE_DIAGNOSTICS", crate::hir_inference_dispatch::INFERENCE_DIAGNOSTICS),
         ];
 
         // Build map: code → list of arrays it appears in
