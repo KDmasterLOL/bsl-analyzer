@@ -39,6 +39,7 @@ pub mod lower;
 pub mod manager_lookup;
 pub mod method_lookup;
 pub mod method_resolution;
+pub mod narrow;
 pub mod this_object;
 
 // Re-export main types for convenience
