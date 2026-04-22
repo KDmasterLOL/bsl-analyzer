@@ -44,10 +44,12 @@ pub struct RootDatabaseImpl {
     /// Salsa input carrying workspace-wide feature flags (Task 6.7).
     ///
     /// Eagerly created in [`RootDatabaseImpl::new`] with defaults matching
-    /// [`project_model::FeaturesConfig::default`] (every flag on). Any query
-    /// reading from the input participates in Salsa's invalidation graph,
-    /// so toggling a flag through [`RootDatabaseImpl::set_features`] evicts
-    /// exactly the cached results that observed it.
+    /// [`project_model::FeaturesConfig::default`] (every flag on). Today's
+    /// only consumer — `narrow_or_base` in `hir` — is a plain Rust helper,
+    /// so flipping a flag through [`RootDatabaseImpl::set_type_narrowing_enabled`]
+    /// takes effect on the next call. If a future `#[salsa::tracked]`
+    /// query reads from this input, Salsa's standard revision tracking
+    /// kicks in for that query.
     features_input: parking_lot::RwLock<Option<FeaturesInput>>,
 }
 
