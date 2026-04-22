@@ -614,6 +614,154 @@ pub fn narrow_body(
     solver.solve()
 }
 
+/// Return the narrowed type of `name` observed at the program point
+/// occupied by `expr_idx`, or `None` when no overlay applies.
+///
+/// **Pre-narrow on guard receivers (ADR-01 Q4).** The receiver of a
+/// guard expression — e.g., the `Х` inside `ТипЗнч(Х) = Тип("Строка")` —
+/// lives in the Conditional vertex's `condition` sub-tree. Narrowing
+/// is applied on the vertex's *outgoing* True / False edges (Task 6.2
+/// wires the pending-guard through [`dataflow::Transfer::transfer_edge`]),
+/// so the Conditional's IN state still carries the base (pre-narrow)
+/// overlay. Expressions inside the then / else bodies live in
+/// successor BasicBlocks whose IN state carries the narrowed overlay.
+///
+/// This function implements the lookup by finding the CFG vertex whose
+/// evaluation covers `expr_idx` and returning `block_in[vertex].get(name)`.
+/// Task 6.6 will wrap the call site in a Salsa query and merge the
+/// result into [`Semantics::type_of_expr`]; until then, this is the
+/// raw reader that exercises the pre-narrow invariant end-to-end.
+///
+/// Returns `None` when `expr_idx` isn't reachable from any CFG vertex
+/// — e.g., a parameter's default value expression (those live outside
+/// the method body proper).
+pub fn narrowed_type_at(
+    result: &dataflow::DataflowResult<NarrowState>,
+    expr_idx: ExprIdx,
+    name: &Name,
+) -> Option<Ty> {
+    let body = result.body();
+    let cfg = result.cfg();
+
+    let node = containing_vertex(body, cfg, expr_idx)?;
+    result.block_in(node)?.get(name).cloned()
+}
+
+/// Find the CFG vertex whose evaluation covers `expr_idx`.
+///
+/// Mirrors the virtualization rule in [`cfg::CfgBuilder`]:
+/// `If` / `PreprocIf` / `While` / `For` / `ForEach` / `Try` statements
+/// never appear in a `BasicBlock::statements()` — their condition /
+/// from / to / collection sub-expressions are instead pinned at the
+/// specialised vertex that represents the statement itself. All other
+/// ("linear") statements flow into the BasicBlock arena.
+///
+/// The walk is O(body_size) per call — a single hover-type lookup
+/// visits every expression in the body at most once. Fine for this
+/// use case; Task 6.6's Salsa cache will memoise the full
+/// `narrow_query` result, so repeated hovers on the same body pay
+/// this traversal only once per revision.
+fn containing_vertex(
+    body: &Body,
+    cfg: &cfg::ControlFlowGraph,
+    expr_idx: ExprIdx,
+) -> Option<cfg::NodeIndex> {
+    use cfg::CfgVertex;
+
+    for (node_idx, vertex) in cfg.vertices() {
+        let covers = match vertex {
+            CfgVertex::BasicBlock(bb) => bb
+                .statements()
+                .iter()
+                .any(|stmt_id| stmt_covers_expr(body, stmt_id.to_idx(), expr_idx)),
+            CfgVertex::Conditional(v) => expr_covers_expr(body, v.condition.to_idx(), expr_idx),
+            CfgVertex::WhileLoop(v) => expr_covers_expr(body, v.condition.to_idx(), expr_idx),
+            CfgVertex::ForLoop(v) => {
+                expr_covers_expr(body, v.from.to_idx(), expr_idx)
+                    || expr_covers_expr(body, v.to.to_idx(), expr_idx)
+            }
+            CfgVertex::ForEachLoop(v) => expr_covers_expr(body, v.collection.to_idx(), expr_idx),
+            CfgVertex::TryExcept(_)
+            | CfgVertex::Label(_)
+            | CfgVertex::PreprocCondition(_)
+            | CfgVertex::Exit => false,
+        };
+        if covers {
+            return Some(node_idx);
+        }
+    }
+    None
+}
+
+/// Recursively check whether `stmt` contains `target` in any of its
+/// expression children.
+///
+/// Only covers the "linear" statement shapes that can appear in a
+/// BasicBlock (`Expr` / `Assign` / `Return` / `Raise` / `Execute` /
+/// `AddHandler` / `RemoveHandler`). Virtualized statements (`If` /
+/// `While` / `For` / `ForEach` / `Try` / `PreprocIf`) are handled by
+/// their specialised vertices in [`containing_vertex`].
+fn stmt_covers_expr(body: &Body, stmt_idx: StmtIdx, target: ExprIdx) -> bool {
+    match body.stmt_idx(stmt_idx) {
+        Stmt::Expr(e) => expr_covers_expr(body, *e, target),
+        Stmt::Assign { target: lhs, value } => {
+            expr_covers_expr(body, *lhs, target) || expr_covers_expr(body, *value, target)
+        }
+        Stmt::Return { value } | Stmt::Raise { value } => {
+            value.as_ref().is_some_and(|v| expr_covers_expr(body, *v, target))
+        }
+        Stmt::Execute { expr } => expr_covers_expr(body, *expr, target),
+        Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
+            expr_covers_expr(body, *event, target) || expr_covers_expr(body, *handler, target)
+        }
+        Stmt::VarDecl { .. } | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Label(_) => {
+            false
+        }
+        Stmt::If(_)
+        | Stmt::PreprocIf(_)
+        | Stmt::While { .. }
+        | Stmt::For { .. }
+        | Stmt::ForEach { .. }
+        | Stmt::Try { .. } => false,
+    }
+}
+
+/// Recursively check whether `target` is anywhere in the sub-tree
+/// rooted at `root`. Stops at `Literal`, `Path`, and `QualifiedPath`
+/// leaves — the only expression shapes with no nested [`ExprIdx`].
+fn expr_covers_expr(body: &Body, root: ExprIdx, target: ExprIdx) -> bool {
+    if root == target {
+        return true;
+    }
+    match body.expr_idx(root) {
+        Expr::Missing | Expr::Path(_) | Expr::QualifiedPath(_) | Expr::Literal(_) => false,
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_covers_expr(body, *lhs, target) || expr_covers_expr(body, *rhs, target)
+        }
+        Expr::UnaryOp { expr, .. } => expr_covers_expr(body, *expr, target),
+        Expr::Ternary { condition, then_expr, else_expr } => {
+            expr_covers_expr(body, *condition, target)
+                || expr_covers_expr(body, *then_expr, target)
+                || expr_covers_expr(body, *else_expr, target)
+        }
+        Expr::Call { callee, args } => {
+            expr_covers_expr(body, *callee, target)
+                || args.iter().any(|a| expr_covers_expr(body, *a, target))
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_covers_expr(body, *receiver, target)
+                || args.iter().any(|a| expr_covers_expr(body, *a, target))
+        }
+        Expr::Index { base, index } => {
+            expr_covers_expr(body, *base, target) || expr_covers_expr(body, *index, target)
+        }
+        Expr::Field { base, .. } => expr_covers_expr(body, *base, target),
+        Expr::New { args, .. } => args.iter().any(|a| expr_covers_expr(body, *a, target)),
+        Expr::Array(elems) => elems.iter().any(|e| expr_covers_expr(body, *e, target)),
+        Expr::Await { expr } => expr_covers_expr(body, *expr, target),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,6 +837,32 @@ mod tests {
                 else_branch: Some(Box::from([else_stmt])),
             };
             self.body.stmts_mut().alloc(Stmt::If(Box::new(if_stmt)))
+        }
+
+        /// Build an `If` stmt with one `ИначеЕсли`-branch and no else
+        /// — the minimum shape that produces a second CFG Conditional
+        /// vertex, used by Task 6.5 to exercise receiver resolution
+        /// on elsif conditions.
+        fn if_then_elsif(
+            &mut self,
+            condition: ExprIdx,
+            then_stmt: StmtIdx,
+            elsif_cond: ExprIdx,
+            elsif_stmt: StmtIdx,
+        ) -> StmtIdx {
+            let if_stmt = hir_def::hir::IfStmt {
+                condition,
+                then_branch: Box::from([then_stmt]),
+                elsif_branches: Box::from([(elsif_cond, Box::from([elsif_stmt]))]),
+                else_branch: None,
+            };
+            self.body.stmts_mut().alloc(Stmt::If(Box::new(if_stmt)))
+        }
+
+        /// Build a `Пока … Цикл … КонецЦикла` stmt with a single-
+        /// statement body, exercising CFG's `WhileLoop` vertex.
+        fn while_stmt(&mut self, condition: ExprIdx, body_stmt: StmtIdx) -> StmtIdx {
+            self.body.stmts_mut().alloc(Stmt::While { condition, body: Box::from([body_stmt]) })
         }
 
         fn set_top_level(&mut self, stmts: Vec<StmtIdx>) {
@@ -1871,6 +2045,359 @@ mod tests {
             exit_in.get(&Name::new("Х")),
             None,
             "one-sided `Х → Number` must NOT survive the post-КонецЕсли merge, got {exit_in:?}"
+        );
+    }
+
+    // ── Task 6.5: narrowed_type_at reader (pre-narrow on guard receivers,
+    // narrowed on then/else-body expressions).
+    //
+    // Builds a canonical if-else shape once and captures the ExprIdx
+    // values we want to probe — the receiver `Х` inside `ТипЗнч(Х)`,
+    // the `Х` inside the then-body's `Х = Х`, and same in the
+    // else-body. The tests below reuse this helper to pin down
+    // Task 6.5's lookup rule on each position.
+    struct NarrowProbe {
+        result: dataflow::DataflowResult<NarrowState>,
+        then_body_path: ExprIdx,
+        else_body_path: Option<ExprIdx>,
+    }
+
+    fn build_probe_if_then_else(bases: FxHashMap<Name, Ty>) -> NarrowProbe {
+        let mut b = ExprBuilder::new();
+
+        let receiver = b.path("Х");
+        let typznc = b.path("ТипЗнч");
+        let lhs = b.call(typznc, vec![receiver]);
+        let tip = b.path("Тип");
+        let s = b.string_lit("Строка");
+        let rhs = b.call(tip, vec![s]);
+        let condition = b.bin(lhs, rhs, BinaryOp::Eq);
+
+        // Then-body: `Х = Х`. `then_body_path` is the rhs `Х` —
+        // reading it sees the narrowed overlay from the TrueBranch
+        // edge applied to the then-block's IN state.
+        let then_lhs = b.path("Х");
+        let then_body_path = b.path("Х");
+        let then_assign = b.assign(then_lhs, then_body_path);
+
+        // Else-body: `Х = Х`. `else_body_path` is the rhs `Х` —
+        // reading it sees the FalseBranch complement applied to the
+        // else-block's IN state.
+        let else_lhs = b.path("Х");
+        let else_body_path = b.path("Х");
+        let else_assign = b.assign(else_lhs, else_body_path);
+
+        let if_stmt = b.if_then_else(condition, then_assign, else_assign);
+        b.set_top_level(vec![if_stmt]);
+
+        let body = b.body.clone();
+        let result = narrow_body(body, bases).expect("narrowing analysis must converge");
+        NarrowProbe { result, then_body_path, else_body_path: Some(else_body_path) }
+    }
+
+    fn build_probe_if_then_only() -> NarrowProbe {
+        let mut b = ExprBuilder::new();
+
+        let receiver = b.path("Х");
+        let typznc = b.path("ТипЗнч");
+        let lhs = b.call(typznc, vec![receiver]);
+        let tip = b.path("Тип");
+        let s = b.string_lit("Строка");
+        let rhs = b.call(tip, vec![s]);
+        let condition = b.bin(lhs, rhs, BinaryOp::Eq);
+
+        let then_lhs = b.path("Х");
+        let then_body_path = b.path("Х");
+        let then_assign = b.assign(then_lhs, then_body_path);
+
+        let if_stmt = b.if_then(condition, then_assign);
+        b.set_top_level(vec![if_stmt]);
+
+        let body = b.body.clone();
+        let result =
+            narrow_body(body, FxHashMap::default()).expect("narrowing analysis must converge");
+        NarrowProbe { result, then_body_path, else_body_path: None }
+    }
+
+    #[test]
+    fn narrowed_type_at_guard_receiver_returns_pre_narrow() {
+        // ADR-01 Q4 (stronger shape, per pair-review MUST-FIX):
+        //
+        //     Х = 42                                          // entry BB
+        //     Если ТипЗнч(Х) = Тип("Строка") Тогда            // Conditional
+        //         Х = Х                                       // then-block
+        //     КонецЕсли
+        //
+        // The preceding assignment seeds the overlay with
+        // `Х → Number` BEFORE the Если, so `block_in` of the
+        // Conditional vertex is a non-empty overlay. A hover on the
+        // receiver `Х` inside `ТипЗнч(Х)` must return
+        // `Some(Ty::Number)` — the pre-narrow value from the prior
+        // assignment.
+        //
+        // The weaker "empty-overlay → None" shape (the original
+        // Task 6.5 test) could pass even if `containing_vertex`
+        // failed to locate the receiver (returning `None`
+        // short-circuits `narrowed_type_at` to `None` too). This
+        // version distinguishes three possible regressions:
+        //   - `Some(Ty::Number)` — correct (pre-narrow).
+        //   - `Some(Ty::String)` — dispatched to then-block's IN
+        //     state (post-narrow bug).
+        //   - `None` — dispatched nowhere (walk missed the vertex).
+        let mut b = ExprBuilder::new();
+
+        let pre_target = b.path("Х");
+        let num42 = b.alloc(Expr::Literal(Literal::Number(42.0.try_into().unwrap())));
+        let pre_assign = b.assign(pre_target, num42);
+
+        let receiver = b.path("Х");
+        let typznc = b.path("ТипЗнч");
+        let lhs = b.call(typznc, vec![receiver]);
+        let tip = b.path("Тип");
+        let s = b.string_lit("Строка");
+        let rhs = b.call(tip, vec![s]);
+        let condition = b.bin(lhs, rhs, BinaryOp::Eq);
+
+        let then_lhs = b.path("Х");
+        let then_rhs = b.path("Х");
+        let then_assign = b.assign(then_lhs, then_rhs);
+        let if_stmt = b.if_then(condition, then_assign);
+
+        b.set_top_level(vec![pre_assign, if_stmt]);
+
+        let body = b.body.clone();
+        let result =
+            narrow_body(body, FxHashMap::default()).expect("narrowing analysis must converge");
+
+        assert_eq!(
+            narrowed_type_at(&result, receiver, &Name::new("Х")),
+            Some(Ty::Number),
+            "receiver must see pre-narrow overlay (Х → Number from prior assign), NOT the post-narrow String from the guard"
+        );
+
+        // Control: the then-body rhs still sees the TrueBranch
+        // narrowing. Pinning this in the same test guards against a
+        // future regression that disables narrowing wholesale.
+        assert_eq!(
+            narrowed_type_at(&result, then_rhs, &Name::new("Х")),
+            Some(Ty::String),
+            "then-body Х must see the guard's narrowing to Строка"
+        );
+    }
+
+    #[test]
+    fn narrowed_type_at_then_body_sees_narrowed() {
+        // A read of `Х` inside the then-body sees the narrowed overlay
+        // applied by the TrueBranch edge. This is the primary
+        // user-facing win of narrowing: hover on `Х` inside `Если
+        // ТипЗнч(Х) = Тип("Строка") Тогда … КонецЕсли` reports
+        // `Строка`, not the original union / unknown.
+        let probe = build_probe_if_then_else(FxHashMap::default());
+        assert_eq!(
+            narrowed_type_at(&probe.result, probe.then_body_path, &Name::new("Х")),
+            Some(Ty::String),
+            "then-body Х must carry the TrueBranch narrowing Х → Строка"
+        );
+    }
+
+    #[test]
+    fn narrowed_type_at_else_body_sees_complement() {
+        // Binary union base seeded (`Union(Number, String)`). On the
+        // FalseBranch of `ТипЗнч(Х) = Тип("Строка")`, Task 6.3's
+        // `ty_difference` collapses the union to the remaining
+        // member, so the else-block's IN state pins Х → Number.
+        let mut bases = FxHashMap::default();
+        bases.insert(Name::new("Х"), Ty::union(vec![Ty::Number, Ty::String]));
+
+        let probe = build_probe_if_then_else(bases);
+        let else_expr = probe.else_body_path.expect("else branch is present");
+        assert_eq!(
+            narrowed_type_at(&probe.result, else_expr, &Name::new("Х")),
+            Some(Ty::Number),
+            "else-body Х must carry the FalseBranch complement Union(Number,String) \\ String = Number"
+        );
+    }
+
+    #[test]
+    fn narrowed_type_at_untouched_var_returns_none() {
+        // Looking up a name the analysis never narrows must return
+        // `None` at every position — even in positions where *other*
+        // names are narrowed. Protects against accidentally leaking
+        // one variable's overlay to another.
+        let probe = build_probe_if_then_else(FxHashMap::default());
+        assert_eq!(
+            narrowed_type_at(&probe.result, probe.then_body_path, &Name::new("Y")),
+            None,
+            "unrelated variable Y must not pick up any narrowing"
+        );
+    }
+
+    #[test]
+    fn narrowed_type_at_after_konec_esli_drops_one_sided_narrowing() {
+        // Task 6.4 intersection-join: one-sided narrowings (only the
+        // then-block narrows Х, the else is absent) must NOT survive
+        // the post-КонецЕсли merge. We don't have a convenient
+        // post-merge expression in the `if_then_only` probe (the only
+        // expr after the If is the method's implicit Exit vertex, and
+        // no expressions live there), so we assert directly on the
+        // Exit vertex's IN state: `narrowed_type_at` is just a
+        // syntactic re-projection of `block_in`, and this test closes
+        // the loop with the Exit-vertex assertion the existing
+        // `e2e_one_sided_reassignment_does_not_leak_past_merge`
+        // exercises through the same channel.
+        use cfg::CfgVertex;
+
+        let probe = build_probe_if_then_only();
+        let cfg = probe.result.cfg();
+        let exit_idx = cfg
+            .vertices()
+            .find(|(_, v)| matches!(v, CfgVertex::Exit))
+            .map(|(idx, _)| idx)
+            .expect("CFG must contain an Exit vertex");
+        let exit_in = probe.result.block_in(exit_idx).expect("Exit IN must be populated");
+        assert_eq!(
+            exit_in.get(&Name::new("Х")),
+            None,
+            "one-sided narrowing Х → Строка must drop at post-КонецЕсли merge (intersection join)"
+        );
+    }
+
+    #[test]
+    fn narrowed_type_at_missing_expr_returns_none() {
+        // Safety: when `expr_idx` isn't reachable from any CFG vertex
+        // (here, a stray expression we allocate but never wire into
+        // any statement or vertex), `narrowed_type_at` must return
+        // `None` rather than panicking or picking a random vertex.
+        let probe = build_probe_if_then_else(FxHashMap::default());
+        let stray_expr = Idx::<Expr>::from_raw(RawIdx::from(u32::MAX - 1));
+        assert_eq!(
+            narrowed_type_at(&probe.result, stray_expr, &Name::new("Х")),
+            None,
+            "expression not reachable from any CFG vertex must return None"
+        );
+    }
+
+    #[test]
+    fn narrowed_type_at_elsif_condition_receiver_sees_pre_narrow() {
+        // Per pair-review NIT: exercise the secondary Conditional
+        // vertex that `ИначеЕсли` produces.
+        //
+        //     Если ТипЗнч(Х) = Тип("Строка") Тогда
+        //         Х = Х
+        //     ИначеЕсли ТипЗнч(Х) = Тип("Дата") Тогда     // ← receiver
+        //         Х = Х
+        //     КонецЕсли
+        //
+        // With base_types seeded as `Х: Union(Number, String)`, the
+        // FalseBranch from the first Conditional applies
+        // `Union(Number, String) \ String = Number`. The ИначеЕсли
+        // Conditional's IN state therefore carries `Х → Number`,
+        // which is the pre-narrow type the receiver must see (as
+        // distinct from the elsif's own narrowing target, `Дата`).
+        let mut b = ExprBuilder::new();
+
+        let x1 = b.path("Х");
+        let typznc1 = b.path("ТипЗнч");
+        let lhs1 = b.call(typznc1, vec![x1]);
+        let tip1 = b.path("Тип");
+        let s1 = b.string_lit("Строка");
+        let rhs1 = b.call(tip1, vec![s1]);
+        let cond1 = b.bin(lhs1, rhs1, BinaryOp::Eq);
+
+        let then_lhs = b.path("Х");
+        let then_rhs = b.path("Х");
+        let then_assign = b.assign(then_lhs, then_rhs);
+
+        let elsif_receiver = b.path("Х");
+        let typznc2 = b.path("ТипЗнч");
+        let lhs2 = b.call(typznc2, vec![elsif_receiver]);
+        let tip2 = b.path("Тип");
+        let s2 = b.string_lit("Дата");
+        let rhs2 = b.call(tip2, vec![s2]);
+        let cond2 = b.bin(lhs2, rhs2, BinaryOp::Eq);
+
+        let elsif_lhs = b.path("Х");
+        let elsif_rhs = b.path("Х");
+        let elsif_assign = b.assign(elsif_lhs, elsif_rhs);
+
+        let if_stmt = b.if_then_elsif(cond1, then_assign, cond2, elsif_assign);
+        b.set_top_level(vec![if_stmt]);
+
+        let body = b.body.clone();
+        let mut bases = FxHashMap::default();
+        bases.insert(Name::new("Х"), Ty::union(vec![Ty::Number, Ty::String]));
+        let result = narrow_body(body, bases).expect("narrowing analysis must converge");
+
+        assert_eq!(
+            narrowed_type_at(&result, elsif_receiver, &Name::new("Х")),
+            Some(Ty::Number),
+            "elsif-condition receiver must see the FalseBranch-complement from the first Conditional (Number), not its own elsif narrowing target (Дата)"
+        );
+
+        // Control: inside the elsif's then-body, the overlay is
+        // narrowed to the elsif's target type (Дата).
+        assert_eq!(
+            narrowed_type_at(&result, elsif_rhs, &Name::new("Х")),
+            Some(Ty::Date),
+            "elsif then-body Х must see the TrueBranch narrowing to Дата"
+        );
+    }
+
+    #[test]
+    fn narrowed_type_at_while_condition_receiver_sees_pre_narrow() {
+        // Per pair-review NIT: exercise the `WhileLoop` vertex.
+        //
+        //     Х = 42
+        //     Пока ТипЗнч(Х) = Тип("Строка") Цикл   // ← receiver
+        //         Х = Х
+        //     КонецЦикла
+        //
+        // `WhileLoop` vertex has two in-edges: the direct edge from
+        // the entry block (carrying `Х → Number` from the prior
+        // assignment) and the `LoopIteration` back-edge from the
+        // body (carrying `Х → String`, because the TrueBranch edge
+        // applied the guard on the first iteration). The join is
+        // `Ty::union([Number, String])`, which is the pre-narrow
+        // overlay the receiver must observe — *not* the String the
+        // body sees inside each iteration, and not the Number from
+        // the initial entry alone.
+        let mut b = ExprBuilder::new();
+
+        let pre_target = b.path("Х");
+        let num42 = b.alloc(Expr::Literal(Literal::Number(42.0.try_into().unwrap())));
+        let pre_assign = b.assign(pre_target, num42);
+
+        let receiver = b.path("Х");
+        let typznc = b.path("ТипЗнч");
+        let lhs = b.call(typznc, vec![receiver]);
+        let tip = b.path("Тип");
+        let s = b.string_lit("Строка");
+        let rhs = b.call(tip, vec![s]);
+        let condition = b.bin(lhs, rhs, BinaryOp::Eq);
+
+        let body_lhs = b.path("Х");
+        let body_rhs = b.path("Х");
+        let body_assign = b.assign(body_lhs, body_rhs);
+
+        let while_stmt = b.while_stmt(condition, body_assign);
+        b.set_top_level(vec![pre_assign, while_stmt]);
+
+        let body = b.body.clone();
+        let result =
+            narrow_body(body, FxHashMap::default()).expect("narrowing analysis must converge");
+
+        assert_eq!(
+            narrowed_type_at(&result, receiver, &Name::new("Х")),
+            Some(Ty::union(vec![Ty::Number, Ty::String])),
+            "while-condition receiver must see the merged pre-narrow overlay Union(Number, String), not either side in isolation"
+        );
+
+        // Control: inside the loop body, the guard's narrowing to
+        // Строка is visible through the TrueBranch edge.
+        assert_eq!(
+            narrowed_type_at(&result, body_rhs, &Name::new("Х")),
+            Some(Ty::String),
+            "while-body Х must see the TrueBranch narrowing to Строка"
         );
     }
 }
