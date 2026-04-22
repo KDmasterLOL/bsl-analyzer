@@ -33,7 +33,7 @@ use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 use hir_ty::lower::TyLoweringContext;
-use hir_ty::{lookup_field, lookup_method};
+use hir_ty::{coerce_this_object_to_metadata_ref, lookup_field, lookup_method};
 use std::collections::HashSet;
 use vfs::FileId;
 
@@ -122,6 +122,8 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
                     | MetadataKind::EnumRef
                     | MetadataKind::TaskRef
                     | MetadataKind::BusinessProcessRef
+                    | MetadataKind::ExchangePlanRef
+                    | MetadataKind::ChartOfAccountsRef
                     | MetadataKind::InformationRegisterRef
                     | MetadataKind::AccumulationRegisterRef
                     | MetadataKind::AccountingRegisterRef
@@ -134,8 +136,12 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// The corresponding manager type — e.g. `CatalogRef.Товары` →
     /// `CatalogManager.Товары` (`Ty::ObjectManager { Catalog, "Товары" }`).
     ///
-    /// Returns `None` for non-ref types (primitives, collections,
-    /// unions).
+    /// Operates as a coarse `MetadataKind → MdoType` family projection:
+    /// both `*Ref` and `*Object` variants resolve to the same manager
+    /// because a catalog object's manager hop is the same catalog manager
+    /// as the ref's. Returns `None` only for types without an MDO family
+    /// (primitives, collections, unions, platform objects, tabular
+    /// sections / rows, register record-set / record-manager receivers).
     pub fn manager(&self) -> Option<Self> {
         let (mdo_type, name) = match &self.ty {
             Ty::MetadataRef { kind, name } => {
@@ -145,6 +151,12 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
                     MetadataKind::EnumRef => MdoType::Enum,
                     MetadataKind::TaskRef => MdoType::Task,
                     MetadataKind::BusinessProcessRef => MdoType::BusinessProcess,
+                    MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
+                        MdoType::ExchangePlan
+                    }
+                    MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
+                        MdoType::ChartOfAccounts
+                    }
                     MetadataKind::InformationRegisterRef => MdoType::InformationRegister,
                     MetadataKind::AccumulationRegisterRef => MdoType::AccumulationRegister,
                     MetadataKind::AccountingRegisterRef => MdoType::AccountingRegister,
@@ -212,7 +224,15 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// are actually row-level accesses — use `.Строки[0].X` or the
     /// promoted `TabularSectionRow` receiver).
     pub fn fields(&self) -> Vec<Field> {
-        match &self.ty {
+        // `Ty::ThisObject` is coerced to its matching `*Object`
+        // `MetadataRef` so IDE callers that hover / complete on
+        // `ЭтотОбъект.` see the same attribute / tabular-section list
+        // as on the explicit object reference. Non-coercible owner
+        // kinds (forms, record sets, …) fall through to the empty
+        // default below.
+        let coerced = coerce_this_object_to_metadata_ref(&self.ty);
+        let ty = coerced.as_ref().unwrap_or(&self.ty);
+        match ty {
             Ty::MetadataRef { kind, name } => self.enumerate_metadata_ref_fields(*kind, name),
             _ => Vec::new(),
         }
@@ -291,6 +311,79 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
             }
         }
 
+        if let Some(parent) = register_parent_for_kind(kind) {
+            // Same extensions-override-main iteration order as the MDO
+            // branch; register parts are kept flat in the returned vec
+            // (dimensions + resources + attributes) so completion sees
+            // one unified field list, matching how `FieldLookup` walks
+            // them in order.
+            for cfg in configs.iter().rev() {
+                if let Some(register) =
+                    cfg.configuration.find_register_by_type_and_name(parent, mdo_name.as_str())
+                {
+                    let mut out = Vec::with_capacity(
+                        register.dimensions().len()
+                            + register.resources().len()
+                            + register.attributes().len(),
+                    );
+                    let mut seen_names = HashSet::with_capacity(out.capacity() * 2);
+                    for dim in register.dimensions() {
+                        push_unique_field(
+                            &mut out,
+                            &mut seen_names,
+                            Field {
+                                name: Name::new(dim.name()),
+                                english_name: Name::new(dim.name()),
+                                ty: register_part_ty_for_facade(
+                                    dim.attr_type(),
+                                    MetadataKind::RegisterDimension { parent },
+                                    mdo_name,
+                                    dim.name(),
+                                    &ctx,
+                                ),
+                            },
+                        );
+                    }
+                    for res in register.resources() {
+                        push_unique_field(
+                            &mut out,
+                            &mut seen_names,
+                            Field {
+                                name: Name::new(res.name()),
+                                english_name: metadata_english_name(res.name_en(), res.name()),
+                                ty: register_part_ty_for_facade(
+                                    res.attr_type(),
+                                    MetadataKind::RegisterResource { parent },
+                                    mdo_name,
+                                    res.name(),
+                                    &ctx,
+                                ),
+                            },
+                        );
+                    }
+                    for attr in register.attributes() {
+                        push_unique_field(
+                            &mut out,
+                            &mut seen_names,
+                            Field {
+                                name: Name::new(attr.name()),
+                                english_name: metadata_english_name(attr.name_en(), attr.name()),
+                                ty: register_part_ty_for_facade(
+                                    attr.attr_type(),
+                                    MetadataKind::RegisterAttribute { parent },
+                                    mdo_name,
+                                    attr.name(),
+                                    &ctx,
+                                ),
+                            },
+                        );
+                    }
+                    return out;
+                }
+            }
+            return Vec::new();
+        }
+
         Vec::new()
     }
 }
@@ -350,12 +443,67 @@ fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
         MetadataKind::EnumRef => Some(MdoType::Enum),
         MetadataKind::TaskRef => Some(MdoType::Task),
         MetadataKind::BusinessProcessRef => Some(MdoType::BusinessProcess),
-        _ => None,
+        MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
+            Some(MdoType::ExchangePlan)
+        }
+        MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
+            Some(MdoType::ChartOfAccounts)
+        }
+        MetadataKind::InformationRegisterRecordManager
+        | MetadataKind::InformationRegisterRef
+        | MetadataKind::AccumulationRegisterRecordSet
+        | MetadataKind::AccumulationRegisterRef
+        | MetadataKind::AccountingRegisterRef
+        | MetadataKind::CalculationRegisterRef
+        | MetadataKind::RegisterDimension { .. }
+        | MetadataKind::RegisterResource { .. }
+        | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::TabularSection { .. }
+        | MetadataKind::TabularSectionRow { .. } => None,
     }
 }
 
 fn lower_attribute_type(attr_type: &AttributeType, ctx: &TyLoweringContext) -> Ty {
     ctx.lower_type_ref(&TypeRef::from_attribute_type(attr_type))
+}
+
+/// Parity helper with `field_lookup::register_parent_for_kind` — maps the
+/// six register receiver kinds (RecordManager / RecordSet / *Ref) to
+/// their register flavour [`MdoType`]. Leaf part kinds
+/// (`RegisterDimension` / `RegisterResource` / `RegisterAttribute`) are
+/// deliberately excluded: they already carry their `parent` explicitly
+/// and have no field surface to enumerate.
+fn register_parent_for_kind(kind: MetadataKind) -> Option<MdoType> {
+    match kind {
+        MetadataKind::InformationRegisterRecordManager | MetadataKind::InformationRegisterRef => {
+            Some(MdoType::InformationRegister)
+        }
+        MetadataKind::AccumulationRegisterRecordSet | MetadataKind::AccumulationRegisterRef => {
+            Some(MdoType::AccumulationRegister)
+        }
+        MetadataKind::AccountingRegisterRef => Some(MdoType::AccountingRegister),
+        MetadataKind::CalculationRegisterRef => Some(MdoType::CalculationRegister),
+        _ => None,
+    }
+}
+
+/// Parity with `field_lookup::register_part_ty`: lower a register-part
+/// type or fall back to the symbolic `Register{Dimension,Resource,
+/// Attribute}` variant when `attr_type` is absent.
+fn register_part_ty_for_facade(
+    attr_type: Option<&AttributeType>,
+    fallback_kind: MetadataKind,
+    register_name: &Name,
+    part_name: &str,
+    ctx: &TyLoweringContext,
+) -> Ty {
+    match attr_type {
+        Some(at) => lower_attribute_type(at, ctx),
+        None => Ty::MetadataRef {
+            kind: fallback_kind,
+            name: Name::new(&format!("{}.{}", register_name.as_str(), part_name)),
+        },
+    }
 }
 
 fn split_parent_section(name: &str) -> Option<(&str, &str)> {
@@ -676,6 +824,39 @@ mod tests {
                 kind: MetadataKind::TabularSection { parent: MdoType::Catalog },
                 name: Name::new("Справочник1.ТабличнаяЧасть1"),
             }
+        );
+    }
+
+    #[test]
+    fn fields_include_register_parts_from_configuration() {
+        // Pins the M4 Task 2 register branch in `enumerate_metadata_ref_fields`.
+        // The designer fixture's `РегистрСведений1` is an InformationRegister
+        // with one dimension `Справочник1: CatalogRef.Справочник1`. The
+        // facade's `.fields()` must surface that dimension from
+        // `Configuration.registers` with its lowered concrete Ty — mirrors
+        // how `FieldLookup::lookup_on_register` resolves the same part
+        // but through the completion-surface API instead.
+        let (db, file_id) = db_with_configuration(designer_fixture_path());
+        let reg = Type::new(
+            &db,
+            file_id,
+            Ty::MetadataRef {
+                kind: MetadataKind::InformationRegisterRef,
+                name: Name::new("РегистрСведений1"),
+            },
+        );
+
+        let fields = reg.fields();
+        let dim = fields
+            .iter()
+            .find(|field| field.name == Name::new("Справочник1"))
+            .expect("register dimension must appear in .fields()");
+        assert_eq!(
+            dim.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
+            },
+            "typed dimension must lower through TyLoweringContext, not fall back to symbolic",
         );
     }
 

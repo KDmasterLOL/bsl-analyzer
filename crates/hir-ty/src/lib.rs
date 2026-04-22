@@ -36,8 +36,10 @@ pub mod db;
 pub mod field_lookup;
 pub mod infer;
 pub mod lower;
+pub mod manager_lookup;
 pub mod method_lookup;
 pub mod method_resolution;
+pub mod this_object;
 
 // Re-export main types for convenience
 pub use field_lookup::{lookup_field, FieldInfo};
@@ -46,5 +48,7 @@ pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use infer::{InferenceContext, InferenceDiagnostic, InferenceResult, UnresolvedMethodKind};
 pub use lower::TyLoweringContext;
+pub use manager_lookup::{lookup_manager_field, ManagerMemberInfo};
 pub use method_lookup::{lookup_method, MethodInfo};
 pub use method_resolution::{resolve_qualified_call, MethodResolution};
+pub use this_object::coerce_to_metadata_ref as coerce_this_object_to_metadata_ref;

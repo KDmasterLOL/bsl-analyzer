@@ -69,6 +69,17 @@ pub struct MethodInfo {
 ///   objects, unions, manager collectives);
 /// - the method name does not exist in the resolved table.
 pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo> {
+    // `Ty::ThisObject` is coerced to its matching `*Object`
+    // `Ty::MetadataRef` at adapter entry — see [`crate::this_object`].
+    // For now platform-data has no indexed method table for
+    // `*Object` receivers (same gap as plain `MetadataRef`), so
+    // `platform_type_key` still returns `None`. The coercion is
+    // wired through anyway so the day `PlatformData` grows a
+    // manager / object method table, this adapter picks it up
+    // without further changes.
+    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
+    let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
+
     let type_key = platform_type_key(receiver_ty)?;
     let data = PlatformData::instance();
     let method = data.get_method(type_key, method_name.as_str())?;
@@ -125,6 +136,13 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
         | Ty::Undefined
         | Ty::Null
         | Ty::Function { .. } => None,
+        // `ThisObject` is coerced to its matching `Ty::MetadataRef`
+        // companion at the entry of [`lookup_method`] (see
+        // `crate::this_object::coerce_to_metadata_ref`). A receiver
+        // that still lands here did not match a coercible MDO kind
+        // (form / record-set / command modules) — `None` matches the
+        // behaviour of other receivers with no platform method table.
+        Ty::ThisObject { .. } => None,
     }
 }
 

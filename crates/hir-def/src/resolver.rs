@@ -193,6 +193,57 @@ impl Resolver {
         Some(variable.id)
     }
 
+    /// Resolve the `ЭтотОбъект` / `ThisObject` receiver to the enclosing
+    /// MDO's `(kind, name)`.
+    ///
+    /// Reads [`DefDatabase::module_metadata`] for the current module and
+    /// returns `Some((mdo_type, name))` only when **both** conditions
+    /// hold:
+    ///
+    /// 1. The module is an `ObjectModule` — the single module type
+    ///    where `ЭтотОбъект` semantically means "the current MDO as a
+    ///    `*Object` reference" (record-set / form / manager / common /
+    ///    command modules have their own `ЭтотОбъект` semantics, out
+    ///    of scope for Task 5).
+    /// 2. The MDO flavour has a matching `*Object` companion in
+    ///    [`crate::ty::MetadataKind`] (checked via
+    ///    [`crate::ty::MetadataKind::object_kind_for`]). Without a
+    ///    coercion target the downstream `FieldLookup` /
+    ///    `MethodLookup` adapters have nothing to resolve against,
+    ///    so a `Ty::ThisObject` constructed here would dangle.
+    ///    `Task`, `BusinessProcess`, and
+    ///    `ChartOfCharacteristicTypes` all sit in this gap today —
+    ///    their ObjectModule `ЭтотОбъект` stays `Ty::Unknown` until
+    ///    dedicated `*Object` variants land.
+    ///
+    /// # Why in `Resolver`
+    ///
+    /// The identifier is intercepted ahead of the usual lookup cascade
+    /// (builtins / locals / module) because BSL treats `ЭтотОбъект`
+    /// like a platform global — not shadowable, resolved through module
+    /// metadata rather than scope chain. Keeping the helper on
+    /// `Resolver` groups it with the other `resolve_*` entry points so
+    /// hir-ty / ide callers have a single lookup surface.
+    pub fn resolve_this_object(
+        &self,
+        db: &dyn DefDatabase,
+    ) -> Option<(bsl_metadata::MdoType, Name)> {
+        let module_id = self.module_id()?;
+        let metadata = db.module_metadata(module_id);
+        let mdo = metadata.mdo.as_ref()?;
+
+        if metadata.module_type != bsl_metadata::ModuleType::ObjectModule {
+            return None;
+        }
+
+        // Only MDO flavours with an `*Object` companion in
+        // `MetadataKind` are allowed to surface `Ty::ThisObject`.
+        // See `resolve_this_object` doc block for rationale.
+        crate::ty::MetadataKind::object_kind_for(mdo.mdo_type)?;
+
+        Some((mdo.mdo_type, Name::new(&mdo.name)))
+    }
+
     /// Resolve a name at any level (builtin, local, module, workspace).
     ///
     /// Resolution order (first match wins):

@@ -37,11 +37,6 @@
 //!
 //! # Deferred (M4+)
 //!
-//! - **Register refs / record-sets / record-managers.** `MetadataKind`
-//!   already knows the register variants, but the `Configuration` stores
-//!   registers in a separate `registers` vec with a different per-type
-//!   shape (dimensions/resources/attributes instead of one `attributes`
-//!   list). A dedicated adapter is tracked for M4.
 //! - **`Ty::ObjectManager { kind, name }` predefined items / enum values.**
 //!   Predefined items and enum values are plain references to their
 //!   enclosing MDO (`EnumRef` / `CatalogRef`); lookup needs a manager-side
@@ -91,6 +86,15 @@ pub fn lookup_field(
     receiver_ty: &Ty,
     field_name: &Name,
 ) -> Option<FieldInfo> {
+    // `Ty::ThisObject` is the `ЭтотОбъект` / `ThisObject` receiver.
+    // The [`crate::this_object`] helper rewrites it to its matching
+    // `Ty::MetadataRef { *Object, name }` shape for MDO kinds that
+    // have an `*Object` companion (Catalog, Document, ExchangePlan,
+    // ChartOfAccounts). Doing the coercion here keeps downstream
+    // dispatch and every helper below ignorant of the variant.
+    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
+    let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
+
     match receiver_ty {
         Ty::MetadataRef { kind, name } => lookup_metadata_ref(configs, *kind, name, field_name),
         _ => None,
@@ -99,14 +103,22 @@ pub fn lookup_field(
 
 /// Dispatch entry for `Ty::MetadataRef` receivers.
 ///
-/// Splits into two flavours:
-/// - kinds backed by a plain MDO (Catalog/Document/Enum/Task/BusinessProcess)
-///   look up the MDO and walk attributes + tabular sections;
+/// Splits into three flavours:
+/// - kinds backed by a plain MDO (Catalog/Document/Enum/Task/BusinessProcess/
+///   ExchangePlan/ChartOfAccounts) look up the MDO and walk attributes +
+///   tabular sections;
+/// - register receiver kinds (`*RecordManager`, `*RecordSet`, `*Ref`) route
+///   through [`lookup_on_register`] against `Configuration.registers` —
+///   registers live in a separate vec with a per-part shape
+///   (dimensions / resources / attributes) rather than the flat attribute
+///   list used by regular MDOs;
 /// - `TabularSectionRow { parent }` decodes the `"Parent.Section"` name and
 ///   walks the section's own attribute list using `parent` to disambiguate
 ///   identically named MDOs across categories;
-/// - registers and `TabularSection` fall through to `None` per the
-///   deferred-gap documentation on the module.
+/// - `TabularSection` and the leaf register-part kinds
+///   (`RegisterDimension` / `RegisterResource` / `RegisterAttribute`) fall
+///   through to `None`: they are collection- or leaf-shaped, so field
+///   access on them goes through the row receiver or stays unresolved.
 fn lookup_metadata_ref(
     configs: &[VisibleConfig],
     kind: MetadataKind,
@@ -116,6 +128,10 @@ fn lookup_metadata_ref(
     if let Some(mdo_type) = mdo_type_for_kind(kind) {
         let mdo = find_mdo(configs, mdo_type, mdo_name.as_str())?;
         return lookup_on_mdo(mdo, mdo_type, mdo_name, field_name);
+    }
+
+    if let Some(register_parent) = register_parent_for_kind(kind) {
+        return lookup_on_register(configs, register_parent, mdo_name, field_name);
     }
 
     if let MetadataKind::TabularSectionRow { parent } = kind {
@@ -200,10 +216,14 @@ fn lookup_on_tabular_row(
 /// Map a `MetadataKind` to the [`MdoType`] used for `find_metadata_object`.
 ///
 /// Returns `None` for:
-/// - register variants (stored in `Configuration::registers`, different shape);
+/// - register variants (receivers — stored in `Configuration::registers`,
+///   routed through [`register_parent_for_kind`] + [`lookup_on_register`]);
 /// - `TabularSection` / `TabularSectionRow` (their parent MDO type is not
 ///   knowable from the kind alone — resolved via the `"Parent.Section"`
-///   name scan in [`lookup_on_tabular_row`]).
+///   name scan in [`lookup_on_tabular_row`]);
+/// - leaf register-part kinds (`RegisterDimension` / `RegisterResource` /
+///   `RegisterAttribute`) — opaque symbolic fallbacks with no further
+///   field surface.
 fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
     match kind {
         MetadataKind::CatalogRef | MetadataKind::CatalogObject => Some(MdoType::Catalog),
@@ -211,15 +231,161 @@ fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
         MetadataKind::EnumRef => Some(MdoType::Enum),
         MetadataKind::TaskRef => Some(MdoType::Task),
         MetadataKind::BusinessProcessRef => Some(MdoType::BusinessProcess),
+        MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
+            Some(MdoType::ExchangePlan)
+        }
+        MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
+            Some(MdoType::ChartOfAccounts)
+        }
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRecordSet
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef
+        | MetadataKind::RegisterDimension { .. }
+        | MetadataKind::RegisterResource { .. }
+        | MetadataKind::RegisterAttribute { .. }
         | MetadataKind::TabularSection { .. }
         | MetadataKind::TabularSectionRow { .. } => None,
     }
+}
+
+/// Map a register-flavoured receiver `MetadataKind` to the corresponding
+/// register [`MdoType`].
+///
+/// Covers the six register receivers that actually own a per-register
+/// field surface (RecordManager / RecordSet / the four Ref variants).
+/// Leaf part kinds (`RegisterDimension` / `RegisterResource` /
+/// `RegisterAttribute`) are deliberately excluded: they carry their
+/// `parent` explicitly but they are not lookup targets — field access
+/// on a part value returns `None`, and the register is recovered only
+/// for provenance (hover / rename).
+fn register_parent_for_kind(kind: MetadataKind) -> Option<MdoType> {
+    match kind {
+        MetadataKind::InformationRegisterRecordManager | MetadataKind::InformationRegisterRef => {
+            Some(MdoType::InformationRegister)
+        }
+        MetadataKind::AccumulationRegisterRecordSet | MetadataKind::AccumulationRegisterRef => {
+            Some(MdoType::AccumulationRegister)
+        }
+        MetadataKind::AccountingRegisterRef => Some(MdoType::AccountingRegister),
+        MetadataKind::CalculationRegisterRef => Some(MdoType::CalculationRegister),
+        _ => None,
+    }
+}
+
+/// Resolve a field access on a register receiver.
+///
+/// Registers live in `Configuration::registers` (separate from the
+/// generic `metadata_objects` vec used by Catalog/Document/…) and split
+/// their per-register surface into three buckets: dimensions, resources,
+/// attributes. The lookup walks them in order; iteration stops at the
+/// first hit, and the resulting [`Ty`] is either the lowered
+/// [`bsl_metadata::AttributeType`] (when the XML parser populated
+/// `attr_type`) or the symbolic
+/// [`MetadataKind::RegisterDimension`] / `::RegisterResource` /
+/// `::RegisterAttribute` fallback, with the register and part name
+/// encoded as `"Register.Part"` for downstream provenance.
+///
+/// `parent` pins the register flavour so [`Configuration::find_register_by_type_and_name`]
+/// can filter on it — two register families with an identically named
+/// register (e.g. an InformationRegister and an AccumulationRegister
+/// both called `"X"`) stay disambiguated at the lookup level.
+///
+/// [`Configuration::find_register_by_type_and_name`]: bsl_metadata::Configuration::find_register_by_type_and_name
+fn lookup_on_register(
+    configs: &[VisibleConfig],
+    parent: MdoType,
+    register_name: &Name,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let register = find_register(configs, parent, register_name.as_str())?;
+    let needle = field_name.as_str().to_lowercase();
+
+    // Dimensions — bsl-metadata's `Dimension` has no `name_en`, so we
+    // only match the Russian name.
+    for dim in register.dimensions() {
+        if matches_bilingual(dim.name(), None, &needle) {
+            return Some(FieldInfo {
+                ty: register_part_ty(
+                    dim.attr_type(),
+                    MetadataKind::RegisterDimension { parent },
+                    register_name,
+                    dim.name(),
+                ),
+            });
+        }
+    }
+
+    for res in register.resources() {
+        if matches_bilingual(res.name(), res.name_en(), &needle) {
+            return Some(FieldInfo {
+                ty: register_part_ty(
+                    res.attr_type(),
+                    MetadataKind::RegisterResource { parent },
+                    register_name,
+                    res.name(),
+                ),
+            });
+        }
+    }
+
+    for attr in register.attributes() {
+        if matches_bilingual(attr.name(), attr.name_en(), &needle) {
+            return Some(FieldInfo {
+                ty: register_part_ty(
+                    attr.attr_type(),
+                    MetadataKind::RegisterAttribute { parent },
+                    register_name,
+                    attr.name(),
+                ),
+            });
+        }
+    }
+
+    None
+}
+
+/// Lower a register-part type, falling back to a symbolic
+/// `MetadataKind::Register{Dimension,Resource,Attribute}` when
+/// `attr_type` is absent.
+///
+/// The XML loader populates `attr_type` for every part it parses, but
+/// some downstream constructors (notably tests and manual builders)
+/// leave it as `None`. Instead of lying to callers with `Ty::Unknown`,
+/// the fallback keeps provenance — the name encodes `"Register.Part"`
+/// and the variant payload pins the register flavour, so hover and
+/// rename tooling still have something to display.
+fn register_part_ty(
+    attr_type: Option<&AttributeType>,
+    fallback_kind: MetadataKind,
+    register_name: &Name,
+    part_name: &str,
+) -> Ty {
+    match attr_type {
+        Some(at) => attribute_type_to_ty(at),
+        None => Ty::MetadataRef {
+            kind: fallback_kind,
+            name: Name::new(&format!("{}.{}", register_name.as_str(), part_name)),
+        },
+    }
+}
+
+/// Look up a register in the visible configurations, latest-wins.
+///
+/// Same "extensions override main" order as [`find_mdo`]: iterate the
+/// visible-configs list in reverse so the last one to redeclare a
+/// register by `(MdoType, Name)` is the one returned.
+fn find_register<'a>(
+    configs: &'a [VisibleConfig],
+    parent: MdoType,
+    name: &str,
+) -> Option<&'a bsl_metadata::Register> {
+    configs
+        .iter()
+        .rev()
+        .find_map(|cfg| cfg.configuration.find_register_by_type_and_name(parent, name))
 }
 
 /// Look up an MDO in the visible configurations, latest-wins.
@@ -296,6 +462,58 @@ mod tests {
             mdo.add_attribute(a);
         }
         mdo
+    }
+
+    fn mdo_of(mdo_type: MdoType, name: &str, attrs: Vec<Attribute>) -> MetadataObject {
+        let mut mdo = MetadataObject::new(mdo_type, name);
+        for a in attrs {
+            mdo.add_attribute(a);
+        }
+        mdo
+    }
+
+    #[test]
+    fn field_lookup_mdo_attribute_exchange_plan_and_chart_of_accounts() {
+        // M4 Task 2b regression: the new `ExchangePlanRef` /
+        // `ChartOfAccountsRef` kinds must flow through
+        // `mdo_type_for_kind → find_metadata_object → attributes` with the
+        // same shape as Catalog/Document. One probe per flavour keeps the
+        // test deliberately narrow — the exhaustive lowering matrix lives
+        // in `hir-ty::lower::tests::metadata_kind_exchange_plan_and_chart_of_accounts_lower_bilingual`.
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(mdo_of(
+            MdoType::ExchangePlan,
+            "Контрагенты",
+            vec![attr("Признак", None, AttributeType::Boolean)],
+        ));
+        config.add_metadata_object(mdo_of(
+            MdoType::ChartOfAccounts,
+            "Хозрасчетный",
+            vec![attr("Порядок", None, AttributeType::Number { precision: 15, scale: 0 })],
+        ));
+        let configs = wrap(config);
+
+        let ep_info = lookup_field(
+            &configs,
+            &Ty::MetadataRef {
+                kind: MetadataKind::ExchangePlanRef,
+                name: Name::new("Контрагенты"),
+            },
+            &Name::new("Признак"),
+        )
+        .expect("ExchangePlanRef.Признак resolves");
+        assert_eq!(ep_info.ty, Ty::Boolean);
+
+        let coa_info = lookup_field(
+            &configs,
+            &Ty::MetadataRef {
+                kind: MetadataKind::ChartOfAccountsRef,
+                name: Name::new("Хозрасчетный"),
+            },
+            &Name::new("Порядок"),
+        )
+        .expect("ChartOfAccountsRef.Порядок resolves");
+        assert_eq!(coa_info.ty, Ty::Number);
     }
 
     #[test]
@@ -504,17 +722,284 @@ mod tests {
     }
 
     #[test]
-    fn field_lookup_register_kinds_return_none_deferred() {
-        // Registers have a different storage shape in `Configuration`;
-        // FieldLookup will gain a dedicated adapter in M4. Pins the
-        // deferred behaviour: register refs must return None instead of
-        // panicking or silently walking an empty `Configuration.metadata_objects`.
+    fn field_lookup_register_missing_in_config_returns_none() {
+        // No register by that name lives in the config — lookup must
+        // return None rather than panic or silently walk the MDO vec.
+        // Keeps the "fail honestly" contract that
+        // `lookup_field_unresolved_on_known_receiver` depends on to emit
+        // `UnresolvedField` diagnostics only when the receiver is fully
+        // resolved.
         let configs = wrap(Configuration::new("Test"));
         let r = Ty::MetadataRef {
             kind: MetadataKind::AccumulationRegisterRef,
             name: Name::new("ТоварыНаСкладах"),
         };
         assert!(lookup_field(&configs, &r, &Name::new("Количество")).is_none());
+    }
+
+    fn register_with(
+        name: &str,
+        mdo_type: MdoType,
+        dimensions: Vec<bsl_metadata::dimension::Dimension>,
+        resources: Vec<bsl_metadata::register::RegisterResource>,
+        attributes: Vec<bsl_metadata::register::RegisterAttribute>,
+    ) -> bsl_metadata::Register {
+        let mut builder = bsl_metadata::Register::builder().name(name).mdo_type(mdo_type);
+        for d in dimensions {
+            builder = builder.add_dimension(d);
+        }
+        for r in resources {
+            builder = builder.add_resource(r);
+        }
+        for a in attributes {
+            builder = builder.add_attribute(a);
+        }
+        builder.build()
+    }
+
+    fn dimension_typed(name: &str, attr_type: AttributeType) -> bsl_metadata::dimension::Dimension {
+        let mut d = bsl_metadata::dimension::Dimension::builder().name(name).build();
+        d.set_attr_type(attr_type);
+        d
+    }
+
+    fn resource_typed(
+        name: &str,
+        attr_type: AttributeType,
+    ) -> bsl_metadata::register::RegisterResource {
+        let mut r = bsl_metadata::register::RegisterResource::new(Uuid::new_v4(), name);
+        r.set_attr_type(attr_type);
+        r
+    }
+
+    fn attribute_typed(
+        name: &str,
+        attr_type: AttributeType,
+    ) -> bsl_metadata::register::RegisterAttribute {
+        let mut a = bsl_metadata::register::RegisterAttribute::new(Uuid::new_v4(), name);
+        a.set_attr_type(attr_type);
+        a
+    }
+
+    #[test]
+    fn field_lookup_register_dimension_typed_returns_lowered_ty() {
+        // Baseline: an InformationRegister dimension with a parsed
+        // `attr_type` must resolve to the lowered concrete `Ty`. This is
+        // the "happy path" the XML loader sets up for every register
+        // dimension it parses, so the symbolic fallback only kicks in
+        // for builder-constructed or partially-parsed registers.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "РегистрСведений1",
+            MdoType::InformationRegister,
+            vec![dimension_typed(
+                "Справочник1",
+                AttributeType::Ref {
+                    mdo_type: MdoType::Catalog, name: "Справочник1".into()
+                },
+            )],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRef,
+            name: Name::new("РегистрСведений1"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("Справочник1"))
+            .expect("dimension resolves against Configuration.registers");
+        assert_eq!(
+            info.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
+            },
+            "typed dimension must lower through TyLoweringContext to a concrete MetadataRef",
+        );
+    }
+
+    #[test]
+    fn field_lookup_register_resource_typed_on_accumulation() {
+        // Resources live on AccumulationRegister; exercise the per-family
+        // routing by using `AccumulationRegisterRecordSet` as the
+        // receiver. `Количество` is the classic Accum resource.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "ТоварыНаСкладах",
+            MdoType::AccumulationRegister,
+            vec![],
+            vec![resource_typed("Количество", AttributeType::Number { precision: 15, scale: 3 })],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::AccumulationRegisterRecordSet,
+            name: Name::new("ТоварыНаСкладах"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("Количество"))
+            .expect("resource resolves against Configuration.registers");
+        assert_eq!(info.ty, Ty::Number);
+    }
+
+    #[test]
+    fn field_lookup_register_attribute_typed_on_information() {
+        // Attributes are the InformationRegister's custom columns
+        // (distinct from dimensions / resources). Exercise via the
+        // `InformationRegisterRecordManager` receiver.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "РегистрСведений1",
+            MdoType::InformationRegister,
+            vec![],
+            vec![],
+            vec![attribute_typed("Комментарий", AttributeType::String { length: Some(100) })],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRecordManager,
+            name: Name::new("РегистрСведений1"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("Комментарий"))
+            .expect("attribute resolves against Configuration.registers");
+        assert_eq!(info.ty, Ty::String);
+    }
+
+    #[test]
+    fn field_lookup_register_untyped_part_returns_symbolic_fallback() {
+        // When `attr_type` is None (builder constructed the part without
+        // calling `set_attr_type`, or the XML parser hit an unknown type
+        // token), the lookup returns the symbolic
+        // `RegisterDimension { parent }` variant with a `"Register.Part"`
+        // name. Keeps provenance alive so downstream tooling can still
+        // say "dimension of InformationRegister X".
+        let mut config = Configuration::new("Test");
+        // `register_with` uses the dimension builder without calling
+        // `set_attr_type` — `attr_type` stays None.
+        config.add_register(register_with(
+            "РегистрСведений1",
+            MdoType::InformationRegister,
+            vec![bsl_metadata::dimension::Dimension::builder().name("Справочник1").build()],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRef,
+            name: Name::new("РегистрСведений1"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("Справочник1"))
+            .expect("untyped dimension still resolves with symbolic fallback");
+        assert_eq!(
+            info.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::RegisterDimension { parent: MdoType::InformationRegister },
+                name: Name::new("РегистрСведений1.Справочник1"),
+            },
+            "fallback must carry parent flavour + `Register.Part` name for provenance",
+        );
+    }
+
+    #[test]
+    fn field_lookup_register_all_four_flavours_resolve() {
+        // One register per flavour; pick the kind that actually surfaces
+        // the per-family routing (Accounting / Calculation only have Ref
+        // variants). Typed resources on each so we assert the lowered
+        // concrete Ty.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "РегСвед",
+            MdoType::InformationRegister,
+            vec![],
+            vec![resource_typed("R", AttributeType::Number { precision: 15, scale: 0 })],
+            vec![],
+        ));
+        config.add_register(register_with(
+            "РегНак",
+            MdoType::AccumulationRegister,
+            vec![],
+            vec![resource_typed("R", AttributeType::Number { precision: 15, scale: 0 })],
+            vec![],
+        ));
+        config.add_register(register_with(
+            "РегБух",
+            MdoType::AccountingRegister,
+            vec![],
+            vec![resource_typed("R", AttributeType::Number { precision: 15, scale: 0 })],
+            vec![],
+        ));
+        config.add_register(register_with(
+            "РегРасч",
+            MdoType::CalculationRegister,
+            vec![],
+            vec![resource_typed("R", AttributeType::Number { precision: 15, scale: 0 })],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let cases = [
+            (MetadataKind::InformationRegisterRef, "РегСвед"),
+            (MetadataKind::AccumulationRegisterRef, "РегНак"),
+            (MetadataKind::AccountingRegisterRef, "РегБух"),
+            (MetadataKind::CalculationRegisterRef, "РегРасч"),
+        ];
+        for (kind, name) in cases {
+            let receiver = Ty::MetadataRef { kind, name: Name::new(name) };
+            let info = lookup_field(&configs, &receiver, &Name::new("R"))
+                .unwrap_or_else(|| panic!("resource R must resolve on {kind:?}/{name}"));
+            assert_eq!(info.ty, Ty::Number, "{kind:?}/{name}.R must lower to Ty::Number");
+        }
+    }
+
+    #[test]
+    fn field_lookup_register_leaf_parts_have_no_field_surface() {
+        // Leaf part kinds (`RegisterDimension` / `::Resource` / `::Attribute`)
+        // are opaque symbolic fallbacks — field access on them returns
+        // None. Register name is irrelevant; the point is that the
+        // symbolic variant doesn't accidentally re-enter the lookup
+        // pipeline.
+        let configs = wrap(Configuration::new("Test"));
+        for kind in [
+            MetadataKind::RegisterDimension { parent: MdoType::InformationRegister },
+            MetadataKind::RegisterResource { parent: MdoType::AccumulationRegister },
+            MetadataKind::RegisterAttribute { parent: MdoType::CalculationRegister },
+        ] {
+            let receiver = Ty::MetadataRef {
+                kind,
+                name: Name::new("РегистрСведений1.Справочник1"),
+            };
+            assert!(
+                lookup_field(&configs, &receiver, &Name::new("ЛюбоеПоле")).is_none(),
+                "leaf part kind {kind:?} must not expose a field surface",
+            );
+        }
+    }
+
+    #[test]
+    fn field_lookup_register_wrong_flavour_returns_none() {
+        // A receiver kind must target a register of the matching flavour.
+        // Declaring an `InformationRegister` named "X" while the receiver
+        // is `AccumulationRegisterRef("X")` must not fold the two
+        // families together: `find_register_by_type_and_name` filters on
+        // `(MdoType, name)`, so this stays `None`.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "X",
+            MdoType::InformationRegister,
+            vec![],
+            vec![resource_typed("R", AttributeType::Number { precision: 15, scale: 0 })],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let wrong_flavour_receiver =
+            Ty::MetadataRef { kind: MetadataKind::AccumulationRegisterRef, name: Name::new("X") };
+        assert!(
+            lookup_field(&configs, &wrong_flavour_receiver, &Name::new("R")).is_none(),
+            "AccumulationRegisterRef must not resolve against an InformationRegister even with the same name",
+        );
     }
 
     #[test]
@@ -546,6 +1031,44 @@ mod tests {
         let info = lookup_field(&configs, &receiver, &Name::new("Цена"))
             .expect("Цена resolves via extension override");
         assert_eq!(info.ty, Ty::String, "extension type wins over main config");
+    }
+
+    #[test]
+    fn field_lookup_register_extension_wins_on_collision() {
+        // Parity with `field_lookup_extension_wins_on_collision` but for
+        // registers: main config declares `РегистрСведений1.R: Number`,
+        // an extension redeclares the resource as `String`. `find_register`
+        // iterates `configs.iter().rev()`, so the extension must win —
+        // registers live in a separate `Configuration.registers` vec and
+        // need their own override-order guard.
+        let mut main = Configuration::new("Main");
+        main.add_register(register_with(
+            "РегистрСведений1",
+            MdoType::InformationRegister,
+            vec![],
+            vec![resource_typed("R", AttributeType::Number { precision: 15, scale: 2 })],
+            vec![],
+        ));
+        let mut ext = Configuration::new("Ext");
+        ext.add_register(register_with(
+            "РегистрСведений1",
+            MdoType::InformationRegister,
+            vec![],
+            vec![resource_typed("R", AttributeType::String { length: Some(64) })],
+            vec![],
+        ));
+        let configs = vec![
+            VisibleConfig { name: None, configuration: Arc::new(main) },
+            VisibleConfig { name: Some("Ext".into()), configuration: Arc::new(ext) },
+        ];
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRef,
+            name: Name::new("РегистрСведений1"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("R"))
+            .expect("R resolves via extension override");
+        assert_eq!(info.ty, Ty::String, "extension register type wins over main config");
     }
 
     #[test]

@@ -31,7 +31,7 @@
 //! (same absolute path inside the workspace-style layout), so the JSDoc
 //! return hint is the one the Resolver reads.
 
-use hir::{HirDatabase, Name, Ty};
+use hir::{HirDatabase, InferenceDiagnostic, Name, Ty};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -186,6 +186,197 @@ fn infer_field_unknown_attribute_stays_none() {
         var_ty(&db, file_id, "х"),
         None,
         "unresolved field must produce Ty::Unknown (no var_types entry)"
+    );
+}
+
+#[test]
+fn infer_field_unresolved_on_known_receiver_emits_diagnostic() {
+    // Missing field on a fully-resolved receiver must emit
+    // `InferenceDiagnostic::UnresolvedField`. This is the M4 Task 1 gate:
+    // `FieldLookup=None` + `receiver_ty = CatalogRef.Справочник1` is a
+    // user-actionable miss ("you typed a field name that does not exist
+    // on this catalog"), as opposed to the `Ty::Unknown` receiver path
+    // (no authority to complain) or `Ty::Union` (waits for M4 narrowing).
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Возвращаемое значение:
+//   СправочникСсылка.Справочник1
+Функция Ссылка() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Функция Тест()
+    С = ПервыйОбщийМодуль.Ссылка();
+    Х = С.НесуществующееПоле;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let diags = &db.infer(file_id).diagnostics;
+    let unresolved: Vec<_> = diags
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedField { receiver_ty, field_name, .. } => {
+                Some((receiver_ty.clone(), field_name.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        unresolved.len(),
+        1,
+        "exactly one UnresolvedField diagnostic must be emitted, got {unresolved:?}"
+    );
+    let (ty, name) = &unresolved[0];
+    assert_eq!(name, &Name::new("НесуществующееПоле"));
+    assert!(
+        matches!(ty, Ty::MetadataRef { kind, .. } if *kind == hir::MetadataKind::CatalogRef),
+        "receiver_ty must carry the CatalogRef kind, got {ty:?}"
+    );
+}
+
+#[test]
+fn infer_field_unresolved_on_unknown_receiver_stays_silent() {
+    // Receiver without resolved type produces no UnresolvedField
+    // diagnostic. The M4 rule is: we only complain when inference nailed
+    // the receiver down — otherwise the miss is "we don't know enough",
+    // not "the user typed a non-existent field". `Ч` here binds to an
+    // unknown call (no JSDoc, no builtin), so `Ч.ЛюбоеПоле` sees a
+    // `Ty::Unknown` receiver and must not fire.
+    let fixture = r#"
+//- /test.bsl
+Функция Тест()
+    Ч = НеизвестнаяФункция();
+    Х = Ч.ЛюбоеПоле;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let unresolved = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter(|(_, d)| matches!(d, InferenceDiagnostic::UnresolvedField { .. }))
+        .count();
+    assert_eq!(unresolved, 0, "UnresolvedField must stay silent when the receiver type is Unknown");
+}
+
+#[test]
+fn infer_field_unresolved_on_primitive_receiver_stays_silent() {
+    // Regression guard for Codex Q1: prior to the emission-guard fix,
+    // `FieldLookup` returning `None` for any non-Unknown/non-Union receiver
+    // triggered the diagnostic. That over-reported on `Число.Х`,
+    // `Строка.Х`, `Массив.Х`, and other primitives / platform types
+    // where `lookup_field` legitimately does not know how to resolve
+    // fields. Since `lookup_field` is only authoritative on
+    // `Ty::MetadataRef`, primitive receivers must stay silent.
+    let fixture = r#"
+//- /test.bsl
+Функция Тест()
+    Ч = 42;
+    Х = Ч.ЛюбоеПоле;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let unresolved = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter(|(_, d)| matches!(d, InferenceDiagnostic::UnresolvedField { .. }))
+        .count();
+    assert_eq!(
+        unresolved, 0,
+        "UnresolvedField must stay silent on primitive receivers — FieldLookup is not authoritative there"
+    );
+}
+
+#[test]
+fn infer_field_unresolved_on_union_receiver_stays_silent() {
+    // Regression guard for Codex Q4: union-typed receivers defer to M4
+    // narrowing — a `None` from `FieldLookup` on a union just means "we
+    // haven't picked a component yet". Firing the diagnostic on raw
+    // unions would trip false positives the moment union attributes
+    // become common (JSDoc `// Возвращаемое значение: Число, Строка`
+    // already produces `Ty::Union`). The JSDoc-return path is the
+    // cheapest way to put a `Ty::Union` on a receiver today.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Возвращаемое значение:
+//   Число, Строка
+Функция Значение() Экспорт
+    Возврат 0;
+КонецФункции
+
+//- /test.bsl
+Функция Тест()
+    У = ПервыйОбщийМодуль.Значение();
+    Х = У.ЛюбоеПоле;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let unresolved = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter(|(_, d)| matches!(d, InferenceDiagnostic::UnresolvedField { .. }))
+        .count();
+    assert_eq!(
+        unresolved, 0,
+        "UnresolvedField must stay silent on union receivers — narrowing must pick a component first"
+    );
+}
+
+#[test]
+fn infer_field_unresolved_on_tabular_row_emits_diagnostic() {
+    // Tabular-section-row receivers are `Ty::MetadataRef { kind:
+    // TabularSectionRow { parent }, name: "Parent.Section" }` per the
+    // M3 FieldLookup invariants, so a missing row attribute is just as
+    // authoritative a miss as a missing MDO attribute. Proves the
+    // emission hits on `TabularSectionRow` without relying on a separate
+    // match arm — the `Ty::MetadataRef { .. }` guard in `infer_expr`
+    // covers all MetadataKind variants uniformly.
+    //
+    // Chain: `С.ТабличнаяЧасть1[0].НесуществующаяКолонка`. Indexing
+    // promotes `TabularSection` → `TabularSectionRow` (M3 field_lookup
+    // invariant); the row receiver then hits the miss and emits.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Возвращаемое значение:
+//   СправочникСсылка.Справочник1
+Функция Ссылка() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Функция Тест()
+    С = ПервыйОбщийМодуль.Ссылка();
+    Т = С.ТабличнаяЧасть1;
+    Р = Т[0];
+    Х = Р.НесуществующаяКолонка;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    // `Т[0]` lowers through `Expr::Index` which today returns
+    // `Ty::Unknown`; until indexing types-promote, the row receiver
+    // arrives as `Ty::Unknown` and the diagnostic stays silent. This
+    // asserts the *current* documented behaviour — once `Expr::Index`
+    // propagates `TabularSection → TabularSectionRow`, the expected
+    // count flips to 1 and this test flags the place that needs
+    // updating. The point of the test is to pin the emission path
+    // against regressions in either direction.
+    let unresolved = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter(|(_, d)| matches!(d, InferenceDiagnostic::UnresolvedField { .. }))
+        .count();
+    assert_eq!(
+        unresolved, 0,
+        "Until Expr::Index propagates row types, this stays silent; flip to 1 when indexing is typed"
     );
 }
 

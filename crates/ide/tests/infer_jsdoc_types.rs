@@ -137,7 +137,7 @@ fn missing_jsdoc_keeps_unknown_no_regression() {
     let unresolved: Vec<_> = infer
         .diagnostics
         .iter()
-        .filter(|d| matches!(d, hir::InferenceDiagnostic::UnresolvedMethodCall { .. }))
+        .filter(|(_, d)| matches!(d, hir::InferenceDiagnostic::UnresolvedMethodCall { .. }))
         .collect();
     assert!(unresolved.is_empty(), "method must resolve even without JSDoc");
 }

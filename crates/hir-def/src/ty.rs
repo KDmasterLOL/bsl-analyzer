@@ -85,6 +85,33 @@ pub enum Ty {
     /// table.
     ObjectManager { kind: MdoType, name: crate::Name },
 
+    /// Implicit receiver bound to `ЭтотОбъект` / `ThisObject`.
+    ///
+    /// `owner` pins the enclosing module's MDO — `(MdoType::Catalog,
+    /// Name::new("Номенклатура"))` for an `ObjectModule` under
+    /// `Catalogs/Номенклатура/`. The variant is deliberately distinct from
+    /// [`Self::MetadataRef`]: keeping the `ThisObject` provenance preserves
+    /// information diagnostics like `BodyDiagnostic::RedundantAccessToObject`
+    /// and future rename/refactor features need — collapsing to
+    /// `MetadataRef { CatalogObject, … }` at the Ty level would erase the
+    /// "explicitly self-referential" signal.
+    ///
+    /// Downstream adapters ([`crate::ty::Ty`] is consumed by `hir-ty`'s
+    /// `field_lookup` / `method_lookup`) coerce `ThisObject` to the right
+    /// `MetadataRef { *Object, name }` at their entry point, so field and
+    /// method lookup on `ЭтотОбъект` resolves transparently. Coercion is
+    /// scoped to MDO kinds that have an `*Object` companion
+    /// ([`MetadataKind::CatalogObject`], [`MetadataKind::DocumentObject`],
+    /// [`MetadataKind::ExchangePlanObject`],
+    /// [`MetadataKind::ChartOfAccountsObject`]); other module kinds (form
+    /// modules, record-set modules, common modules) fall through to
+    /// `Ty::Unknown` until follow-up PRs cover their receiver surfaces.
+    ThisObject {
+        /// `(kind, name)` of the MDO that owns the module in which
+        /// `ЭтотОбъект` appears.
+        owner: (MdoType, crate::Name),
+    },
+
     /// Function or procedure type.
     ///
     /// In BSL, functions and procedures are first-class values.
@@ -156,6 +183,14 @@ pub enum MetadataKind {
     TaskRef,
     /// Business process reference (БизнесПроцессСсылка).
     BusinessProcessRef,
+    /// Exchange plan reference (ПланОбменаСсылка).
+    ExchangePlanRef,
+    /// Exchange plan object (ПланОбменаОбъект).
+    ExchangePlanObject,
+    /// Chart of accounts reference (ПланСчетовСсылка).
+    ChartOfAccountsRef,
+    /// Chart of accounts object (ПланСчетовОбъект).
+    ChartOfAccountsObject,
     /// Information register reference / record key form
     /// (РегистрСведенийКлючЗаписи / `InformationRegisterRef`).
     ///
@@ -172,6 +207,45 @@ pub enum MetadataKind {
     /// Calculation register reference / record key form
     /// (РегистрРасчётаКлючЗаписи / `CalculationRegisterRef`).
     CalculationRegisterRef,
+    /// Dimension (измерение) of a register — opaque symbolic form.
+    ///
+    /// Used by [`crate::ty::Ty::MetadataRef`] as a fallback when the
+    /// XML-parsed `attr_type` on a [`bsl_metadata::register::Dimension`]
+    /// is absent and the field-lookup adapter has no concrete `Ty` to
+    /// return. `parent` pins the register flavour
+    /// (`InformationRegister`, `AccumulationRegister`,
+    /// `AccountingRegister`, `CalculationRegister`) so downstream
+    /// tooling can still surface "dimension of register X" even without
+    /// a typed payload. The enclosing `MetadataRef`'s name carries
+    /// `"Register.Dimension"` (mirrors the `TabularSection` convention)
+    /// so the originating register is recoverable.
+    ///
+    /// Kept as a leaf receiver in M4 Task 2: further field access on
+    /// this variant returns `None`. A follow-up that wires the
+    /// `Движения.X.Добавить()` record surface can promote it to a
+    /// receiver once `bsl-metadata` exposes the record shape.
+    RegisterDimension {
+        /// Register flavour that owns the dimension.
+        parent: MdoType,
+    },
+    /// Resource (ресурс) of a register — opaque symbolic form.
+    ///
+    /// Same semantics as [`Self::RegisterDimension`]: fallback `Ty` when
+    /// the XML-parsed `attr_type` is missing, `parent` pins the register
+    /// flavour, name carries `"Register.Resource"`.
+    RegisterResource {
+        /// Register flavour that owns the resource.
+        parent: MdoType,
+    },
+    /// Attribute (реквизит) of a register — opaque symbolic form.
+    ///
+    /// Same semantics as [`Self::RegisterDimension`]: fallback `Ty` when
+    /// the XML-parsed `attr_type` is missing, `parent` pins the register
+    /// flavour, name carries `"Register.Attribute"`.
+    RegisterAttribute {
+        /// Register flavour that owns the attribute.
+        parent: MdoType,
+    },
     /// Tabular section of a metadata object (`ТабличнаяЧасть`).
     ///
     /// `parent` identifies the MDO flavour that owns this section (Catalog,
@@ -194,6 +268,34 @@ pub enum MetadataKind {
         /// MDO flavour that owns the enclosing section.
         parent: MdoType,
     },
+}
+
+impl MetadataKind {
+    /// The `*Object` variant for an MDO flavour, or `None` if the
+    /// flavour does not carry an object form in [`MetadataKind`] today.
+    ///
+    /// Single source of truth for the `ЭтотОбъект` coercion (Task 5)
+    /// and any future callers that need to pick the right `*Object`
+    /// `MetadataKind` given an [`MdoType`]. Keeping the mapping here
+    /// rather than duplicating it at every call site lets the
+    /// resolver gate `Ty::ThisObject { .. }` construction on the same
+    /// set of flavours the field / method adapters actually coerce:
+    /// producing a `ThisObject` for an MDO with no `*Object` surface
+    /// would leave the receiver dangling (neither refusable by the
+    /// resolver nor resolvable by the adapters).
+    ///
+    /// New `*Object` variants should update this method — the
+    /// resolver's `resolve_this_object` and `hir-ty::this_object`
+    /// adapter pick the result up automatically.
+    pub fn object_kind_for(mdo_type: MdoType) -> Option<Self> {
+        match mdo_type {
+            MdoType::Catalog => Some(MetadataKind::CatalogObject),
+            MdoType::Document => Some(MetadataKind::DocumentObject),
+            MdoType::ExchangePlan => Some(MetadataKind::ExchangePlanObject),
+            MdoType::ChartOfAccounts => Some(MetadataKind::ChartOfAccountsObject),
+            _ => None,
+        }
+    }
 }
 
 impl Ty {
@@ -343,6 +445,7 @@ impl Ty {
                 kind.manager_type_prefix().unwrap_or("ManagerCollection")
             }
             Ty::ObjectManager { .. } => "ObjectManager",
+            Ty::ThisObject { .. } => "ThisObject",
             Ty::Function { .. } => "Function",
             Ty::PlatformObject(name) => name.as_str(),
             // Coarse label mirrors `MetadataRef` / `ObjectManager`: the
@@ -368,6 +471,12 @@ impl Ty {
             // from surfacing spurious methods before M3 wires the dedicated
             // manager lookup.
             Ty::ManagerCollection(_) | Ty::ObjectManager { .. } => None,
+            // `ThisObject` has no platform type on its own — it only
+            // becomes a method receiver after adapters coerce it to the
+            // matching `Ty::MetadataRef { *Object, name }`. Returning
+            // `None` here keeps the platform fallback from surfacing
+            // bogus methods before the coercion step runs.
+            Ty::ThisObject { .. } => None,
             // Unions have no single platform type by construction — a
             // caller that wants methods on `Ty::Union([Number, String])`
             // must narrow first (M4) or intersect method tables explicitly.
@@ -635,5 +744,47 @@ mod tests {
         // No single platform type corresponds to a union — method lookup must
         // narrow first before consulting `bsl-platform`.
         assert_eq!(Ty::union(vec![Ty::Number, Ty::String]).platform_type_name(), None);
+    }
+
+    #[test]
+    fn metadata_kind_object_kind_for_covers_ship_set() {
+        // Ships the 4 `*Object` coercions used by `Ty::ThisObject`.
+        // If one of these regresses, the resolver would stop promoting
+        // `ЭтотОбъект` in that MDO's ObjectModule and hover / completion
+        // would silently drop type information.
+        assert_eq!(
+            MetadataKind::object_kind_for(MdoType::Catalog),
+            Some(MetadataKind::CatalogObject)
+        );
+        assert_eq!(
+            MetadataKind::object_kind_for(MdoType::Document),
+            Some(MetadataKind::DocumentObject)
+        );
+        assert_eq!(
+            MetadataKind::object_kind_for(MdoType::ExchangePlan),
+            Some(MetadataKind::ExchangePlanObject)
+        );
+        assert_eq!(
+            MetadataKind::object_kind_for(MdoType::ChartOfAccounts),
+            Some(MetadataKind::ChartOfAccountsObject)
+        );
+    }
+
+    #[test]
+    fn metadata_kind_object_kind_for_rejects_non_object_mdo_kinds() {
+        // Register flavours, Task, BusinessProcess, and
+        // ChartOfCharacteristicTypes have no `*Object` companion yet.
+        // `resolve_this_object` keys off this to refuse promotion on
+        // those kinds — so a regression that starts returning `Some`
+        // here would let the resolver surface dangling `Ty::ThisObject`
+        // receivers with no downstream coercion surface.
+        assert!(MetadataKind::object_kind_for(MdoType::InformationRegister).is_none());
+        assert!(MetadataKind::object_kind_for(MdoType::AccumulationRegister).is_none());
+        assert!(MetadataKind::object_kind_for(MdoType::AccountingRegister).is_none());
+        assert!(MetadataKind::object_kind_for(MdoType::CalculationRegister).is_none());
+        assert!(MetadataKind::object_kind_for(MdoType::Task).is_none());
+        assert!(MetadataKind::object_kind_for(MdoType::BusinessProcess).is_none());
+        assert!(MetadataKind::object_kind_for(MdoType::Enum).is_none());
+        assert!(MetadataKind::object_kind_for(MdoType::CommonModule).is_none());
     }
 }

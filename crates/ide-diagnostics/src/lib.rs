@@ -7,6 +7,7 @@ mod config;
 mod context;
 pub mod docs;
 mod hir_dispatch;
+mod hir_inference_dispatch;
 mod metadata;
 mod metadata_dispatch;
 mod query;
@@ -64,6 +65,7 @@ pub fn simple_hir_diagnostic(
 }
 
 use hir_dispatch::collect_hir_diagnostics;
+use hir_inference_dispatch::collect_inference_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
 use runner::{
     collect_configuration_diagnostics, collect_dataflow_diagnostics, collect_item_tree_diagnostics,
@@ -84,8 +86,9 @@ use runner::{
 /// 4. **Configuration** - Configuration XML-based checks (SessionModule only)
 /// 5. **SDBL HIR** - Query language diagnostics (collected during SDBL lowering)
 /// 6. **HIR** - Diagnostics collected during BSL AST→HIR lowering
-/// 7. **Dataflow** - CFG + liveness/reaching definitions analysis
-/// 8. **Metadata HIR** - ModuleMetadata-based checks
+/// 7. **HIR Type Inference** - Diagnostics emitted by `hir-ty::infer`
+/// 8. **Dataflow** - CFG + liveness/reaching definitions analysis
+/// 9. **Metadata HIR** - ModuleMetadata-based checks
 pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
 
@@ -108,13 +111,16 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 6. HIR-based diagnostics (collected during AST→HIR lowering)
     result.extend(safe_collect("hir", || collect_hir_diagnostics(ctx)));
 
-    // 7. Dataflow-based diagnostics (using CFG + liveness analysis)
+    // 7. Type-inference diagnostics (BSL-TY-*, emitted by hir-ty::infer)
+    result.extend(safe_collect("hir_inference", || collect_inference_diagnostics(ctx)));
+
+    // 8. Dataflow-based diagnostics (using CFG + liveness analysis)
     result.extend(safe_collect("dataflow", || collect_dataflow_diagnostics(ctx)));
 
-    // 8. Metadata-based diagnostics (using module_metadata from HIR)
+    // 9. Metadata-based diagnostics (using module_metadata from HIR)
     result.extend(safe_collect("metadata", || collect_metadata_diagnostics(ctx)));
 
-    // 9. Deduplicate diagnostics with overlapping ranges for the same code
+    // 10. Deduplicate diagnostics with overlapping ranges for the same code
     deduplicate_diagnostics(&mut result);
 
     result

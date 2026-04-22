@@ -146,8 +146,10 @@ impl TyLoweringContext {
 /// # Coverage
 ///
 /// Mirrors the XML tokens emitted by `type_ref::mdo_ref_prefix` — every
-/// prefix there except `ExchangePlanRef`, `ChartOf*Ref`, and
-/// `ConstantValueManager` has a matching `MetadataKind` variant as of M3.
+/// prefix there except `ChartOfCharacteristicTypesRef`,
+/// `ChartOfCalculationTypesRef`, and `ConstantValueManager` has a matching
+/// `MetadataKind` variant. `ExchangePlan` and `ChartOfAccounts` joined in
+/// M4 Task 2b.
 /// The Russian side uses the canonical 1C platform names
 /// (`РегистрСведенийКлючЗаписи`, `ПеречислениеСсылка`, …) as recorded in
 /// `bsl-platform`'s `platform_data.json`.
@@ -165,6 +167,18 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
         "taskref" | "задачассылка" => Some(MetadataKind::TaskRef),
         "businessprocessref" | "бизнеспроцессссылка" => {
             Some(MetadataKind::BusinessProcessRef)
+        }
+        "exchangeplanref" | "планобменассылка" => {
+            Some(MetadataKind::ExchangePlanRef)
+        }
+        "exchangeplanobject" | "планобменаобъект" => {
+            Some(MetadataKind::ExchangePlanObject)
+        }
+        "chartofaccountsref" | "плансчетовссылка" => {
+            Some(MetadataKind::ChartOfAccountsRef)
+        }
+        "chartofaccountsobject" | "плансчетовобъект" => {
+            Some(MetadataKind::ChartOfAccountsObject)
         }
         "informationregisterrecordmanager" | "регистрсведенийменеджерзаписи" => {
             Some(MetadataKind::InformationRegisterRecordManager)
@@ -278,23 +292,44 @@ mod tests {
 
     #[test]
     fn ty_lowering_qualified_unmodelled_prefix_is_unknown() {
-        // Still narrow by design: M3 widened `MetadataKind` to cover the
-        // commonly-used XML prefixes but left `ExchangePlanRef`,
-        // `ChartOf*Ref`, and `ConstantValueManager` outside the model —
-        // these must land on `Ty::Unknown` rather than producing a
-        // misleading `MetadataRef` with a wrong kind.
-        for prefix in [
-            "ExchangePlanRef",
-            "ChartOfCharacteristicTypesRef",
-            "ChartOfAccountsRef",
-            "ChartOfCalculationTypesRef",
-            "ConstantValueManager",
-        ] {
+        // M3 left `ChartOfCharacteristicTypesRef`, `ChartOfCalculationTypesRef`,
+        // and `ConstantValueManager` outside the model; these must land on
+        // `Ty::Unknown` rather than producing a misleading `MetadataRef`
+        // with a wrong kind. `ExchangePlanRef` and `ChartOfAccountsRef`
+        // joined `MetadataKind` in M4 Task 2b — covered by the bilingual
+        // test below instead.
+        for prefix in
+            ["ChartOfCharacteristicTypesRef", "ChartOfCalculationTypesRef", "ConstantValueManager"]
+        {
             let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
             assert_eq!(
                 ctx().lower_qualified(&qname),
                 Ty::Unknown,
                 "expected Unknown for `{prefix}.Х`"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_kind_exchange_plan_and_chart_of_accounts_lower_bilingual() {
+        // M4 Task 2b: `ExchangePlan` and `ChartOfAccounts` joined
+        // `MetadataKind` so field-lookup and the type facade can walk their
+        // MDO metadata the same way Catalog/Document already do.
+        for (prefix, expected) in [
+            ("ExchangePlanRef", MetadataKind::ExchangePlanRef),
+            ("ПланОбменаСсылка", MetadataKind::ExchangePlanRef),
+            ("ExchangePlanObject", MetadataKind::ExchangePlanObject),
+            ("ПланОбменаОбъект", MetadataKind::ExchangePlanObject),
+            ("ChartOfAccountsRef", MetadataKind::ChartOfAccountsRef),
+            ("ПланСчетовСсылка", MetadataKind::ChartOfAccountsRef),
+            ("ChartOfAccountsObject", MetadataKind::ChartOfAccountsObject),
+            ("ПланСчетовОбъект", MetadataKind::ChartOfAccountsObject),
+        ] {
+            let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("Х")]);
+            assert_eq!(
+                ctx().lower_qualified(&qname),
+                Ty::MetadataRef { kind: expected, name: Name::new("Х") },
+                "expected MetadataRef({expected:?}) for `{prefix}.Х`"
             );
         }
     }

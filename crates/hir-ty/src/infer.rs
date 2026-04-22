@@ -76,10 +76,16 @@ pub struct InferenceResult {
     /// Used by completion to resolve receiver types for method lookup.
     pub var_types: FxHashMap<String, Ty>,
 
-    /// Diagnostics collected during type inference.
+    /// Diagnostics collected during type inference, paired with the body that
+    /// produced them.
     ///
-    /// Diagnostics are collected as a byproduct of type inference, not emitted immediately.
-    pub diagnostics: Vec<InferenceDiagnostic>,
+    /// Each `InferenceDiagnostic` variant carries an `ExprId`, which is only
+    /// unique **within a single `Body`**. The `DefWithBodyId` owner is the key
+    /// that lets downstream consumers (ide-diagnostics) recover the right
+    /// `BodySourceMap` to resolve `ExprId → TextRange`. Shape mirrors
+    /// [`hir_def::ModuleBodies::all_diagnostics`] for consistency with the rest
+    /// of the diagnostics pipeline.
+    pub diagnostics: Vec<(DefWithBodyId, InferenceDiagnostic)>,
 }
 
 impl InferenceResult {
@@ -132,6 +138,20 @@ pub enum InferenceDiagnostic {
     /// Emitted when expression type doesn't match expected type
     /// (e.g., assigning String to Number variable).
     TypeMismatch { expr: ExprId, expected: Ty, actual: Ty },
+
+    /// Field access on a typed receiver did not resolve.
+    ///
+    /// Emitted from `Expr::Field` when [`crate::field_lookup::lookup_field`]
+    /// returns `None` **and** the receiver carries enough type information
+    /// for the gap to be user-actionable — i.e. the receiver is not
+    /// [`Ty::Unknown`] (no type info to disagree with) and not a
+    /// [`Ty::Union`] (field lookup on unions defers to M4 narrowing, so a
+    /// `None` there is "can't decide yet", not "field does not exist").
+    ///
+    /// `receiver_ty` captures the type as seen at the access site so the
+    /// IDE layer can render `<CatalogRef.Номенклатура>.НеСуществует` in
+    /// the diagnostic message without re-running inference.
+    UnresolvedField { expr: ExprId, receiver_ty: Ty, field_name: Name },
 }
 
 /// Kind of unresolved method call error.
@@ -468,20 +488,66 @@ impl<'db> InferenceContext<'db> {
             Expr::Field { base, field } => {
                 let base_ty = self.infer_expr(ExprId::from_idx(*base));
 
-                // `FieldLookup` is the single adapter that turns
-                // `(base_ty, field_name)` into a resolved attribute or
-                // tabular-section type. Covers MDO attributes (custom +
-                // standard), tabular-section promotion, and tabular-row
-                // attributes; returns `None` for unions / primitives /
-                // managers / registers (deferred to M4). Pulling
-                // `configurations(file_id)` inside this branch keeps the
-                // Salsa dependency fine-grained — invalidating one
-                // configuration XML re-runs inference exactly for the
-                // bodies that observed it.
+                // Two adapters participate. `FieldLookup` resolves MDO
+                // attributes / tabular sections / register parts on
+                // `Ty::MetadataRef` receivers. `ManagerLookup` resolves
+                // manager-global members — promoting
+                // `ManagerCollection(kind).<MdoName>` to
+                // `ObjectManager { kind, MdoName }` when the MDO exists
+                // in `Configuration`, then resolving predefined items /
+                // enum values on the `ObjectManager` side in the next
+                // `Expr::Field` hop. The two adapters cover disjoint
+                // receiver shapes, so the order in which they are tried
+                // only matters for readability — try the field-table
+                // first (the common path) and fall through to the
+                // manager surface.
+                //
+                // Pulling `configurations(file_id)` inside this branch
+                // keeps the Salsa dependency fine-grained — invalidating
+                // one configuration XML re-runs inference exactly for
+                // the bodies that observed it.
                 let configs = self.db.configurations(self.file_id);
-                crate::field_lookup::lookup_field(&configs, &base_ty, field)
-                    .map(|info| info.ty)
-                    .unwrap_or(Ty::Unknown)
+                if let Some(info) = crate::field_lookup::lookup_field(&configs, &base_ty, field) {
+                    info.ty
+                } else if let Some(info) =
+                    crate::manager_lookup::lookup_manager_field(&configs, &base_ty, field)
+                {
+                    info.ty
+                } else {
+                    // Only emit on receivers where `lookup_field` is
+                    // actually authoritative — today that is
+                    // [`Ty::MetadataRef`] and [`Ty::ThisObject`].
+                    // `ThisObject` is coerced to the matching
+                    // `*Object` `MetadataRef` at `lookup_field`'s
+                    // entry (see `crate::this_object`), so a miss on
+                    // it is as conclusive as a miss on the explicit
+                    // object reference — the catalog's attribute
+                    // list was checked and the field genuinely isn't
+                    // there. Primitives, `Function`,
+                    // `ManagerCollection`, and `ObjectManager` all
+                    // fall through the adapter to `None` because
+                    // their field tables live elsewhere (predefined
+                    // items via the M4 Task 3 adapter, registers via
+                    // M4 Task 2) or simply do not exist. Treating
+                    // those misses as "field does not exist on the
+                    // receiver" would flood the IDE with false
+                    // positives on perfectly legal code like
+                    // `Число.ToString()`. `Unknown` and `Union` are
+                    // excluded by the match — `MetadataRef` is never
+                    // a union member by construction. `ManagerLookup`
+                    // misses (typo'd MDO names, unknown predefined
+                    // items) stay silent here; a follow-up can make
+                    // them authoritative once the method surface on
+                    // `ObjectManager` lands too.
+                    if matches!(base_ty, Ty::MetadataRef { .. } | Ty::ThisObject { .. }) {
+                        self.diagnostics.push(InferenceDiagnostic::UnresolvedField {
+                            expr: expr_id,
+                            receiver_ty: base_ty,
+                            field_name: field.clone(),
+                        });
+                    }
+                    Ty::Unknown
+                }
             }
 
             Expr::New { type_name, args } => {
@@ -548,6 +614,26 @@ impl<'db> InferenceContext<'db> {
         use hir_def::resolver::Resolution;
 
         let resolver = self.get_resolver();
+
+        // 0. `ЭтотОбъект` / `ThisObject` — intercepted ahead of every
+        //    other scope because BSL treats the identifier like a
+        //    platform global: not shadowable, resolved through module
+        //    metadata (the enclosing MDO) rather than the scope chain.
+        //    `Resolver::resolve_this_object` returns `None` for module
+        //    kinds that have no `*Object` companion (forms, record
+        //    sets, manager / common / command modules) — those fall
+        //    through to the normal cascade and become `Ty::Unknown`,
+        //    matching the "best-effort" inference semantics.
+        let name_lower = name.as_str().to_lowercase();
+        if name_lower == "этотобъект" || name_lower == "thisobject" {
+            if let Some(owner) = resolver.resolve_this_object(self.db) {
+                trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
+                return Ty::ThisObject { owner };
+            }
+            // Fall through: record-set / form / common-module
+            // `ЭтотОбъект` stays Unknown for now (M4 Task 5 follow-up).
+        }
+
         let resolved = resolver.resolve_name(self.db, name);
 
         // 1. Builtins — union of Resolver's platform-global view and the
@@ -918,11 +1004,13 @@ pub fn infer_query(db: &dyn HirDatabase, file_id: FileId) -> Arc<InferenceResult
         // the merge dropped `expr_types` entirely and every syntax-node
         // lookup returned `Ty::Unknown`.
         result.expr_types_by_body.insert(body_result.owner, body_result.expr_types);
-        // `var_types` and `diagnostics` stay file-global: completion
-        // matches variables by name across bodies, and diagnostics are
-        // surfaced file-at-a-time by the IDE layer.
+        // `var_types` stays file-global: completion matches variables by name
+        // across bodies. `diagnostics` is flat file-wide but each entry is
+        // paired with its `DefWithBodyId` owner so ide-diagnostics can resolve
+        // the body-local `ExprId` through the correct `BodySourceMap`.
         result.var_types.extend(body_result.var_types);
-        result.diagnostics.extend(body_result.diagnostics);
+        let owner = body_result.owner;
+        result.diagnostics.extend(body_result.diagnostics.into_iter().map(|d| (owner, d)));
     };
 
     // Infer module-level code (statements outside procedures/functions)
@@ -1060,16 +1148,43 @@ mod tests {
     }
 
     #[test]
+    fn test_unresolved_field_diagnostic() {
+        // Test that UnresolvedField diagnostic carries the receiver type
+        // and field name verbatim, so the ide-diagnostics layer can render
+        // `<ReceiverType>.<field_name>` without re-running inference.
+        let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
+        let receiver_ty = Ty::MetadataRef {
+            kind: hir_def::ty::MetadataKind::CatalogRef,
+            name: Name::new("Номенклатура"),
+        };
+        let field_name = Name::new("НесуществующееПоле");
+
+        let diag = InferenceDiagnostic::UnresolvedField {
+            expr: expr_id,
+            receiver_ty: receiver_ty.clone(),
+            field_name: field_name.clone(),
+        };
+
+        match diag {
+            InferenceDiagnostic::UnresolvedField { expr, receiver_ty: r, field_name: f } => {
+                assert_eq!(expr, expr_id);
+                assert_eq!(r, receiver_ty);
+                assert_eq!(f, field_name);
+            }
+            _ => panic!("Expected UnresolvedField"),
+        }
+    }
+
+    #[test]
     fn test_inference_result_with_diagnostics() {
         let mut result = InferenceResult::default();
         assert!(!result.has_diagnostics());
 
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        result.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
-            call_expr: expr_id,
-            expected: 2,
-            found: 1,
-        });
+        result.diagnostics.push((
+            DefWithBodyId::ModuleCode,
+            InferenceDiagnostic::MismatchedArgCount { call_expr: expr_id, expected: 2, found: 1 },
+        ));
 
         assert!(result.has_diagnostics());
         assert_eq!(result.diagnostics.len(), 1);

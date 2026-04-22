@@ -5,7 +5,8 @@ use std::sync::Arc;
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
 use hir::{
-    ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree, WorkspaceSymbols,
+    InferenceResult, ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
+    WorkspaceSymbols,
 };
 use rustc_hash::FxHashMap;
 use syntax::{Parse, SyntaxNode};
@@ -157,6 +158,13 @@ impl AnalysisProvider for StreamingProvider {
         // Fallback - compute on-the-fly
         let parse = self.parse(module_id.file_id);
         Arc::new(ModuleBodies::from_parse(&parse, module_id))
+    }
+
+    fn infer(&self, _file_id: FileId) -> Arc<InferenceResult> {
+        // Streaming mode does not run type inference today. Returning the
+        // default explicitly documents the opt-out rather than relying on
+        // the trait's default impl (which would do the same thing silently).
+        Arc::new(InferenceResult::default())
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata> {
