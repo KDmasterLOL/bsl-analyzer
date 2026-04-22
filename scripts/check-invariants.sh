@@ -28,14 +28,15 @@
 # Allowed (whitelist):
 #   - `crates/bsl-metadata/**` — source of truth for `AttributeType`.
 #   - `crates/hir-def/src/type_ref.rs` — the `TypeRef::from_attribute_type` bridge.
-#   - `crates/hir-ty/src/field_lookup.rs` — blessed adapter (goes through `TyLoweringContext`).
-#   - `crates/hir/src/type_facade.rs` — blessed adapter (goes through `TyLoweringContext`).
 #   - `crates/sdbl-hir/src/types.rs` — SDBL's parallel type system bridge.
 #   - `crates/sdbl-hir/src/lower/from_clause.rs` — SDBL `DefinedType` special-case.
 #
-# Test fixtures that construct `Attribute { attr_type: AttributeType::… }`
-# objects are exempt *by construction*: they only contain `AttributeType::`,
-# not `Ty::`, so the co-occurrence rule doesn't fire.
+# In-file test modules (`#[cfg(test)] mod tests { … }`) are stripped
+# before the co-occurrence check — `AttributeType::X` constructors in
+# test fixtures are a normal idiom and must not force whole production
+# files onto the whitelist. Test-fixture files that live *outside* a
+# production module (e.g. `crates/*/tests/`) are exempt by
+# construction: they only contain `AttributeType::`, never `Ty::`.
 #
 # The script runs both gates, aggregates violations, and exits non-zero
 # when either invariant is breached.
@@ -132,8 +133,6 @@ fi
 AT_WHITELIST=(
     'crates/bsl-metadata/'
     'crates/hir-def/src/type_ref.rs'
-    'crates/hir-ty/src/field_lookup.rs'
-    'crates/hir/src/type_facade.rs'
     'crates/sdbl-hir/src/types.rs'
     'crates/sdbl-hir/src/lower/from_clause.rs'
 )
@@ -167,12 +166,25 @@ if [[ -n "$at_files" ]]; then
         if is_whitelisted "$file"; then
             continue
         fi
-        # Co-occurrence trigger on non-comment lines only. Strip lines
-        # whose first non-whitespace is `//` or `*` (covers line
-        # comments, `///` doc comments, and typical `*` continuation
-        # inside block comments). This avoids flagging `Ty`-named files
-        # that mention `AttributeType` in prose.
-        stripped="$(sed -E 's|//.*$||' "$file" | grep -vE '^[[:space:]]*(\*|$)')"
+        # Co-occurrence trigger on production, non-comment lines only:
+        #
+        #  1. Cut everything from the first top-level `#[cfg(test)]`
+        #     attribute to EOF — idiomatic in this codebase for the
+        #     end-of-file `mod tests { … }` block. Attribute-driven
+        #     test fixtures legitimately mention `AttributeType::X`
+        #     constructors and must not force the production half of
+        #     the same file onto the whitelist. A file with an
+        #     intermixed `#[cfg(test)] fn helper() …` before real
+        #     production code would see that tail stripped too; no
+        #     file in `crates/` uses that layout today (all files
+        #     place `#[cfg(test)]` immediately before the trailing
+        #     `mod tests`).
+        #  2. Strip line comments (`//` and `///`) and block-comment
+        #     `*` continuations, covering prose that names `Ty::` or
+        #     `AttributeType::` without actually constructing them.
+        stripped="$(awk '/^#\[cfg\(test\)\]/ { exit } { print }' "$file" \
+            | sed -E 's|//.*$||' \
+            | grep -vE '^[[:space:]]*(\*|$)')"
         if echo "$stripped" | grep -qF 'AttributeType::' \
            && echo "$stripped" | grep -qF 'Ty::'; then
             at_violations+="${file}
