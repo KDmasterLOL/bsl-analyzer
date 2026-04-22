@@ -249,6 +249,55 @@ fn type_mismatch_fires_on_three_level_manager_call() {
 }
 
 #[test]
+fn type_mismatch_fires_on_fluent_method_call() {
+    // Fluent-chain path: `receiver.method(...)` lowers to
+    // `Expr::Call { callee: Expr::Field }` and routes through
+    // `method_lookup::lookup_method`. Before M4 Task 7 this branch
+    // skipped arg-type checking entirely — the emitter is wired by
+    // `emit_arg_type_mismatches(args, &info.params)` at the fluent-path
+    // return.
+    //
+    // Using `Новый ТаблицаЗначений` as the receiver: platform-data lists
+    // `ValueTable.Вставить(Индекс - Число)` as a 1-param method, so a
+    // String literal arg must fire exactly one `TypeMismatch`. This
+    // mirrors the qualified-path `type_mismatch_fires_on_concrete_mismatch`
+    // but exercises a different code path in `infer.rs`.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    ТЗ = Новый ТаблицаЗначений();
+    ТЗ.Вставить("не число");
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_vfs_only(fixture);
+    assert_eq!(
+        mismatches(&db, file_id),
+        vec![(Ty::Number, Ty::String)],
+        "fluent method call with wrong-typed arg must fire TypeMismatch via Expr::Field callee branch"
+    );
+}
+
+#[test]
+fn type_mismatch_silent_on_fluent_method_call_matching_arg() {
+    // Negative control for the fluent-path emitter: same receiver /
+    // method as above, but the arg now matches the declared `Число`
+    // param. Locks "emitter doesn't fire on well-typed fluent calls"
+    // independently of the qualified-path version.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    ТЗ = Новый ТаблицаЗначений();
+    ТЗ.Вставить(0);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_vfs_only(fixture);
+    assert!(
+        mismatches(&db, file_id).is_empty(),
+        "fluent method call with matching arg must not produce any TypeMismatch"
+    );
+}
+
+#[test]
 fn type_mismatch_does_not_double_fire_on_arg_count_mismatch() {
     // Pair with `MismatchedArgCount`: passing *fewer* args than the
     // param list must emit `MismatchedArgCount` (pre-existing) but
