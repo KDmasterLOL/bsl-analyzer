@@ -705,6 +705,15 @@ pub fn narrow_query(
 /// each name — usually its declared / initial-assignment type, which is
 /// the value that best plays the role of a "pre-narrow base" for the
 /// [`ty_difference`]-driven false-branch complement.
+///
+/// **Soundness.** A stale base never over-narrows. If the seed is
+/// narrower than the true reaching type (e.g., first assign was
+/// `Х = 42` but `Х` was later rewritten to `"abc"`), [`ty_difference`]
+/// on the false branch sees a non-Union base → degrades to
+/// [`Ty::Unknown`] → [`insert_if_informative`] skips → overlay stays
+/// unchanged. The worst case is losing else-branch precision, never a
+/// wrong overlay entry. Task 6.7 can upgrade the seed to the merged
+/// reaching type without violating this invariant.
 fn build_base_types_for_body(
     body: &Body,
     per_body_types: Option<&FxHashMap<hir_def::ExprId, Ty>>,

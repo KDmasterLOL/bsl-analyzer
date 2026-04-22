@@ -70,6 +70,7 @@ impl GlobalState {
 
         // Update diagnostics config from project settings
         self.update_diagnostics_config();
+        self.update_features_config();
 
         // Configure VFS loader to scan source path in background thread
         self.vfs_progress_config_version += 1;
@@ -224,6 +225,7 @@ impl GlobalState {
             let project = project_model::Project::new(&root);
             self.project = Some(project);
             self.update_diagnostics_config();
+            self.update_features_config();
             true
         } else {
             false

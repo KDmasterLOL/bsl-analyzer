@@ -13,6 +13,7 @@ use hir::{
 };
 use vfs::FileId;
 
+use crate::features::FeaturesInput;
 use crate::queries::{
     all_sdbl_in_file_query, line_index_query, liveness_analysis_query, method_cfg_query,
     module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
@@ -39,6 +40,15 @@ pub struct RootDatabaseImpl {
     /// `bump_metadata_version`. Queries read `paths` / `version` from this
     /// input, so mutations propagate through Salsa's invalidation graph.
     workspace_configs_input: parking_lot::RwLock<Option<metadata::WorkspaceConfigsInput>>,
+
+    /// Salsa input carrying workspace-wide feature flags (Task 6.7).
+    ///
+    /// Eagerly created in [`RootDatabaseImpl::new`] with defaults matching
+    /// [`project_model::FeaturesConfig::default`] (every flag on). Any query
+    /// reading from the input participates in Salsa's invalidation graph,
+    /// so toggling a flag through [`RootDatabaseImpl::set_features`] evicts
+    /// exactly the cached results that observed it.
+    features_input: parking_lot::RwLock<Option<FeaturesInput>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -55,6 +65,7 @@ impl Clone for RootDatabaseImpl {
             // WorkspaceConfigsInput is Copy and tied to the shared storage,
             // so cloning the handle is safe.
             workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
+            features_input: parking_lot::RwLock::new(*self.features_input.read()),
         }
     }
 }
@@ -71,9 +82,17 @@ impl RootDatabaseImpl {
             storage: salsa::Storage::default(),
             files: Files::new(),
             workspace_configs_input: parking_lot::RwLock::new(None),
+            features_input: parking_lot::RwLock::new(None),
         };
         let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new(), 0);
         *db.workspace_configs_input.write() = Some(input);
+        // Defaults come from `project_model::FeaturesConfig::default` so
+        // that a fresh database and a freshly-parsed project config agree
+        // on the initial flag values — no risk of silent divergence if a
+        // future default flips.
+        let defaults = project_model::FeaturesConfig::default();
+        let features = FeaturesInput::new(&db, defaults.type_narrowing);
+        *db.features_input.write() = Some(features);
         db
     }
 
@@ -117,6 +136,34 @@ impl RootDatabaseImpl {
     /// Get all registered configuration paths.
     pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
         self.workspace_configs().paths(self)
+    }
+
+    /// Handle of the singleton features Salsa input.
+    ///
+    /// Invariant: always `Some` after `new()` returns.
+    fn features(&self) -> FeaturesInput {
+        self.features_input.read().expect("features_input is initialized in RootDatabaseImpl::new")
+    }
+
+    /// Whether the type narrowing overlay is enabled for this workspace.
+    ///
+    /// Proxy for the underlying Salsa reader, exposed on the impl so the
+    /// LSP layer can read the flag without importing the trait.
+    pub fn type_narrowing_enabled(&self) -> bool {
+        self.features().type_narrowing(self)
+    }
+
+    /// Toggle the type-narrowing overlay feature flag.
+    ///
+    /// Called by the LSP layer after loading `bsl-analyzer.toml`. The
+    /// next `narrow_or_base` call (or any future Salsa-tracked query that
+    /// reads the same input) observes the new value. Taking a plain
+    /// `bool` keeps this helper callable from contexts that don't want
+    /// to construct a full `FeaturesConfig`.
+    pub fn set_type_narrowing_enabled(&mut self, enabled: bool) {
+        use salsa::Setter;
+        let input = self.features();
+        input.set_type_narrowing(self).to(enabled);
     }
 
     /// Get file path from FileId by traversing SourceRoot.
@@ -342,6 +389,10 @@ impl hir::HirDatabase for RootDatabaseImpl {
         owner: hir::DefWithBodyId,
     ) -> Option<Arc<hir::dataflow::DataflowResult<hir::NarrowState>>> {
         hir::narrow_query(self, file_id, owner)
+    }
+
+    fn type_narrowing_enabled(&self) -> bool {
+        RootDatabaseImpl::type_narrowing_enabled(self)
     }
 }
 

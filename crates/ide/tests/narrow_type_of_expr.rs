@@ -509,3 +509,90 @@ fn narrow_query_returns_none_for_unknown_owner() {
         "narrow_query must return None when the owner does not resolve to a body in the file"
     );
 }
+
+// -----------------------------------------------------------------------------
+// Task 6.7 — `type_narrowing` feature flag.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn type_narrowing_enabled_by_default() {
+    // The Salsa `FeaturesInput` is eagerly initialised in
+    // `RootDatabaseImpl::new()` with defaults matching
+    // `FeaturesConfig::default()` (all flags on). A fresh database must
+    // therefore report `type_narrowing_enabled() == true` and keep
+    // `Semantics::type_of_expr` running the overlay merge — otherwise
+    // every consumer would need to call the setter before expecting any
+    // narrowing to happen, which contradicts the "opt-out, not opt-in"
+    // decision from the Task 6.7 plan.
+    let fixture = r#"
+//- /test.bsl
+Процедура П()
+    Х = 42;
+    Если ТипЗнч(Х) = Тип("Строка") Тогда
+        А = Х;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(db.type_narrowing_enabled(), "fresh database must default `type_narrowing = true`");
+
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let then_rhs = nth_ident_expr_at_distinct_position(&root, "Х", 1);
+
+    let sema = Semantics::new(&db);
+    assert_eq!(
+        sema.type_of_expr(file_id, &then_rhs),
+        Ty::String,
+        "with default flags the narrowing overlay is applied — then-body `Х` sees `Ty::String`"
+    );
+}
+
+#[test]
+fn type_narrowing_disabled_skips_overlay() {
+    // Toggling `type_narrowing` off makes `narrow_or_base` short-circuit
+    // to the base inferred type *before* it invokes `db.narrow(...)`,
+    // which is exactly what the feature flag is supposed to provide as a
+    // rollback switch. The fixture is the same as
+    // `narrowed_type_at_then_body_returns_narrowed_ty` — with narrowing
+    // on the then-body `Х` is `Ty::String`; with it off, the overlay is
+    // skipped and we fall back to the base `Ty::Number` inferred from
+    // `Х = 42`.
+    let fixture = r#"
+//- /test.bsl
+Процедура П()
+    Х = 42;
+    Если ТипЗнч(Х) = Тип("Строка") Тогда
+        А = Х;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+    let (mut db, file_id) = setup(fixture);
+    db.set_type_narrowing_enabled(false);
+    assert!(
+        !db.type_narrowing_enabled(),
+        "setter must flip the Salsa input so subsequent reads return false"
+    );
+
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let then_rhs = nth_ident_expr_at_distinct_position(&root, "Х", 1);
+
+    let sema = Semantics::new(&db);
+    assert_eq!(
+        sema.type_of_expr(file_id, &then_rhs),
+        Ty::Number,
+        "with narrowing disabled, the then-body `Х` falls back to the base `Ty::Number`"
+    );
+
+    // Re-enable and confirm the flip is observable without recreating
+    // the database. Salsa invalidates any cached read of the input, so
+    // the next `narrow_or_base` call sees the new value.
+    db.set_type_narrowing_enabled(true);
+    let sema = Semantics::new(&db);
+    assert_eq!(
+        sema.type_of_expr(file_id, &then_rhs),
+        Ty::String,
+        "re-enabling the flag restores the narrowed `Ty::String` without DB rebuild"
+    );
+}

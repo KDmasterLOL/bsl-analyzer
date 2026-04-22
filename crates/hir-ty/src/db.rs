@@ -82,4 +82,22 @@ pub trait HirDatabase: ConfigsDatabase {
         file_id: FileId,
         owner: DefWithBodyId,
     ) -> Option<Arc<dataflow::DataflowResult<NarrowState>>>;
+
+    /// Whether the type narrowing overlay (ADR-01 Option A) is enabled.
+    ///
+    /// Implementations read the current value from a Salsa input hosted
+    /// by `ide_db`, so the method always observes the latest value set
+    /// through the corresponding setter — but note: the only current
+    /// consumer, [`narrow_or_base`] in `hir`, is a plain Rust helper
+    /// called from `Semantics::type_of_expr`, not a Salsa-tracked query.
+    /// Flipping the flag therefore takes effect on the next call, not
+    /// by Salsa invalidation. If a future query is added that reads
+    /// this flag from a `#[salsa::tracked]` function, Salsa revision
+    /// tracking *will* kick in for that query.
+    ///
+    /// Consumers inside hir use it as a short-circuit before calling
+    /// [`HirDatabase::narrow`].
+    ///
+    /// [`narrow_or_base`]: ../../../hir/fn.narrow_or_base.html
+    fn type_narrowing_enabled(&self) -> bool;
 }

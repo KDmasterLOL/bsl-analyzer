@@ -637,15 +637,17 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 /// through unchanged.
 ///
 /// Fallback rules (in order):
-/// 1. Non-`Path` expr → `base`.
-/// 2. `db.narrow(...)` returns `None` (body not in this file, provider
+/// 1. `db.type_narrowing_enabled() == false` (Task 6.7 feature flag;
+///    workspace opt-out) → `base`.
+/// 2. Non-`Path` expr → `base`.
+/// 3. `db.narrow(...)` returns `None` (body not in this file, provider
 ///    opted out) → `base`.
-/// 3. Overlay has no entry for this `Name` at this program point (variable
+/// 4. Overlay has no entry for this `Name` at this program point (variable
 ///    untouched by any guard that dominates the expression) → `base`.
-/// 4. Overlay entry is [`Ty::Unknown`] (e.g., false-branch complement
+/// 5. Overlay entry is [`Ty::Unknown`] (e.g., false-branch complement
 ///    against a non-union base — Task 6.3 `ty_difference` degrades
 ///    soundly) → `base`.
-/// 5. Otherwise → the narrowed [`Ty`].
+/// 6. Otherwise → the narrowed [`Ty`].
 fn narrow_or_base<DB: HirDatabase>(
     db: &DB,
     file_id: FileId,
@@ -656,6 +658,9 @@ fn narrow_or_base<DB: HirDatabase>(
 ) -> Ty {
     use hir_def::IdConversion;
 
+    if !db.type_narrowing_enabled() {
+        return base;
+    }
     let Expr::Path(name) = body.expr(expr_id) else {
         return base;
     };
