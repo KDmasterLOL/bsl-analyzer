@@ -1,147 +1,66 @@
-# ADR-01 — Type narrowing
+# ADR-01 — Сужение типов (narrowing)
 
-**Status:** Accepted, implemented.
-**Supersedes:** nothing.
-**Related:** [`TYPE_SYSTEM.md`](../TYPE_SYSTEM.md), [`DATAFLOW.md`](../DATAFLOW.md).
+**Статус:** принято, реализовано.
+**Связано с:** [`TYPE_SYSTEM.md`](../TYPE_SYSTEM.md), [`DATAFLOW.md`](../DATAFLOW.md).
 
-Narrowing landed as Option A: a flow-sensitive dataflow analysis
-(`hir_ty::narrow::NarrowingAnalysis`) built on `cfg` + `dataflow`
-with branch-aware `Transfer::transfer_edge`. Результат выдаётся как
-per-`ExprId` overlay через `narrow_query(file_id, owner)` и мерджится
-в `Semantics::type_of_expr`. Behind feature flag `type_narrowing` в
-`bsl-analyzer.toml` (default: on). Acceptance criteria ниже все ✅.
+## Контекст
 
-## Context
+BSL позволяет переменной содержать значения одного из нескольких типов
+(`ОписаниеТипов`, XML `Composite`, JSDoc-списки через запятую — лоуверятся
+в `Ty::Union`). Без сужения hover внутри `Если ТипЗнч(Х) = Тип("Массив")`
+показывает исходный `Union`, а `method_lookup` / `field_lookup` на
+union-receiver'e возвращают `None` — union'ы остаются трубой без
+полезного сигнала.
 
-M3 shipped `Ty::Union(Arc<[Ty]>)` as a canonical, `Eq`-stable
-representation of "this expression could be one of N types" (e.g.
-`ОписаниеТипов(...)`, XML `Composite`, JSDoc `Число, Строка`). The
-union type is load-bearing on paper — XML `AttributeType::Composite`
-and JSDoc comma-lists both lower into it — but at runtime every
-consumer currently treats `Ty::Union` as opaque: method lookup,
-field lookup, and completion all return `None` / empty when the
-receiver is a union.
+## Принятое решение
 
-Narrowing is what makes unions useful. In BSL the idiomatic guard
-shapes are:
+Сужение — отдельный flow-sensitive анализ поверх CFG, **не** расширение
+линейного `InferenceContext`.
 
-```bsl
-Если ТипЗнч(Х) = Тип("Массив") Тогда
-    // here Х must be treated as Ty::Array
-КонецЕсли
+### Архитектура
 
-Если Х <> Неопределено Тогда
-    // Ty::Union([Ty::CatalogRef.Х, Ty::Undefined]) → Ty::CatalogRef.Х
-КонецЕсли
+- **Solver:** `hir_ty::narrow::NarrowingAnalysis`. Латтис `Name → Ty`
+  поверх инфраструктуры `cfg` + `dataflow`.
+- **Branch-awareness:** `dataflow::Transfer::transfer_edge` со знанием
+  `cfg::EdgeKind` (True/False на рёбрах условного перехода) — общий
+  хук, не narrowing-специфичный, reaching-defs и liveness берут его
+  default-impl.
+- **Salsa:** отдельный запрос `narrow_query(file_id, owner)`; базовый
+  `infer_query` от него не зависит и не пересчитывается при изменении
+  overlay'я.
+- **Чтение:** `Semantics::type_of_expr` мерджит overlay с базовым
+  типом выражения на запросе от IDE.
+- **Feature flag:** `type_narrowing` в `bsl-analyzer.toml` (по
+  умолчанию включён) — off-switch для регрессий.
 
-Если ТипЗнч(Х) = Тип("Строка") ИЛИ ТипЗнч(Х) = Тип("Число") Тогда
-    // Х narrows to Ty::Union([String, Number]) inside the block
-КонецЕсли
-```
+### Поддерживаемые формы гардов
 
-The M3 plan intentionally left narrowing out of scope because the
-current `InferenceContext` walks statements linearly: a single
-`var_types: FxHashMap<String, Ty>` per body, updated in-order, with
-no notion of "this binding has different types on different paths".
-Narrowing requires flow-sensitive inference — the `Ty` of a variable
-depends on which block we're currently in, not just on the latest
-assignment.
+- `ТипЗнч(Х) = Тип("…")` — сужение до указанного типа.
+- `Х = Неопределено` / `Х <> Неопределено` — сужение через
+  `Ty::Undefined`.
+- `ЗначениеЗаполнено(Х)` — снятие `Undefined` / `Null` из union'а.
 
-## Decision drivers
+### Поведение
 
-- **User-visible signal.** Narrowing is the single biggest typing
-  improvement a BSL programmer would notice — it's the difference
-  between "hover on `Х` inside an `Если`-block shows `Union`" and
-  "hover shows the concrete branch type". Without it, the M3 union
-  machinery is plumbing with no daylight.
-- **Existing CFG infrastructure.** `cfg` + `dataflow` crates already
-  model control flow with `Lattice` / `Transfer` / `DataflowSolver`
-  (used by reaching definitions and liveness). Narrowing is another
-  dataflow analysis with a custom transfer function; the framework
-  is not greenfield.
-- **Model mismatch with current inference.** `InferenceContext` is
-  linear. Narrowing needs a merge-on-branch operator (`join`) and a
-  scope that distinguishes "before `Если`" from "inside the
-  `then`-branch". This is a **smoothed smaller refactor** of
-  inference, not a feature toggle.
+- **Then-ветка:** `Х` получает сужённый тип.
+- **Else-ветка / fall-through:** точное `Union \ Narrowed` через
+  smart-constructor `ty_difference`; non-Union receiver даёт `Unknown`.
+- **Присваивание внутри сужённого блока:** сужение действует до
+  точки первого переприсваивания; после неё тип берётся из RHS. Не
+  протекает за границы блока (merge-point join с pre-state).
+- **Hover на receiver'е гарда** (`Х` в `ТипЗнч(Х)`): **pre-narrow**
+  тип. Внутри then / else — post-narrow.
+- **`hir::Type::is_assignable_to`:** чистая на `Ty`; narrowing
+  попадает в неё через callers, строящих `hir::Type` от
+  `Semantics::type_of_expr`.
 
-## Options considered
+## Текущие ограничения
 
-**A. Full flow-sensitive rewrite of `InferenceContext`.**
-Replace the linear walk with a CFG-driven fixed-point solver (like
-reaching-defs). Each program point carries a `FxHashMap<String, Ty>`
-and narrowing is a transfer function on `Если` / `Если Тогда` /
-`КонецЕсли` edges.
-
-Pros: clean, reuses the existing dataflow solver.
-Cons: large refactor; high risk of breaking the 30+ M2 / M3 behavioural
-tests that rely on the linear model.
-
-**B. Targeted overlay: keep linear inference, add a
-"narrowing overlay" layer.**
-Linear inference produces the base `var_types`. A second pass walks
-`Если` blocks, collects type-guards from conditions, and emits
-narrowed types into a shadow map keyed by `(BlockId, VarName)`.
-`Semantics::type_of_expr` consults the overlay before the base map.
-
-Pros: zero blast radius on existing inference; incremental.
-Cons: cannot correctly handle nested narrowing (`Если A И B` where
-both narrow the same variable), loses invalidation precision.
-
-**C. Scope-tree narrowing via `ExprScopes`.**
-`hir-def`'s `ExprScopes` already models lexical scopes. Extend it
-with "narrowing facts" — per-scope (not per-statement) `Map<Name, Ty>`
-attached to specific scopes (e.g. the body of an `Если`-branch).
-Inference queries `(scope, name)` and merges with the base type.
-
-Pros: uses existing scope tree; lexical model matches BSL semantics.
-Cons: block-level scopes don't always correspond to what the user
-reads — e.g., a variable narrowed in the `then`-branch but the user
-hovers on the `Иначе`-branch should NOT see the narrowing.
-
-## Resolved questions
-
-1. **Guard grammar.** Реализованы все MUST-шейпы:
-   `ТипЗнч(Х) = Тип("…")`, `Х = Неопределено`, `Х <> Неопределено`,
-   `ЗначениеЗаполнено(Х)`. `ИЛИ`-composition (`ТипЗнч(X)=Тип(A) ИЛИ
-   ТипЗнч(X)=Тип(B)`) отложено (см. Non-goals); `Х Есть Справочник`
-   и cast-via-assignment также отложены.
-2. **Merge semantics на `Иначе` / fall-through.** Вычисляется
-   точный `Union \ Narrowed` через smart-constructor
-   `ty_difference`. Receiver не-Union в else-ветке даёт `Unknown`.
-3. **Reassignment внутри narrowed-блока.** Narrowing
-   распространяется только до точки первого присваивания внутри
-   блока, после чего тип берётся из нового RHS. Наружу блока не
-   протекает (merge-point join с pre-state).
-4. **Hover на receiver гарда.** Показываем **pre-narrow** тип — на
-   самом выражении-приёмнике гарда narrowing ещё не применён. Внутри
-   then/else блока — post-narrow.
-5. **Performance.** Отдельный Salsa query `narrow_query(file_id,
-   owner)` — мерджится с `type_of_expr_query` только на чтении, без
-   удвоения работы `infer`. Overlay разреженный (только переменные
-   с активным narrowing).
-6. **`is_assignable_to`.** Реализован на `hir::Type` с правилами
-   reflexive / `Unknown` / `Null ≤ ref` / union-left / union-right /
-   `ThisObject` coercion / function variance (контравариантные
-   параметры, ковариантный return). Narrowing-awareness — через
-   callers, строящих `Type` от `Semantics::type_of_expr`; метод сам
-   остаётся чистым на `Ty`.
-
-## Acceptance criteria
-
-- ✅ Hover на переменной внутри `Если ТипЗнч(Х) = Тип("Массив")
-  Тогда` блока показывает `Array`, не `Union(Array, String, …)`.
-- ✅ `Х.Добавить()` резолвится к `Ty::Undefined` (Array-метод)
-  внутри narrowed-блока, к `Ty::Unknown` снаружи.
-- ✅ Нет регрессий на behavioural-тестах M2 / M3 при выключенном
-  `type_narrowing`.
-- ✅ `hir::Type::is_assignable_to` реализован с narrowing-aware
-  семантикой через `Semantics::type_of_expr`.
-
-## Non-goals
-
-- Full type-system dependent-types (refinements, index-based narrowing).
-- Narrowing across function call boundaries (callers see parameters
-  pre-narrowed; callees don't inherit caller-side narrowing).
-- Narrowing on `Попытка` / `Исключение` boundaries — would need
-  an escape analysis not yet present.
+- **`ИЛИ`-composition в гардах** (`ТипЗнч(X) = Тип(A) ИЛИ ТипЗнч(X) = Тип(B)`)
+  — не сужает.
+- **Cross-call narrowing** — сужение не пересекает границы вызовов;
+  параметры callee'и всегда видны pre-narrowed.
+- **`Попытка` / `Исключение`** — не сужает (требует escape-анализа).
+- **`Х Есть Справочник`** — не сужает.
+- **Cast-via-assignment** (`Х = Х КАК Строка`) — не сужает.
+- **Refinement types** (dependent / index-based) — вне скоупа.
