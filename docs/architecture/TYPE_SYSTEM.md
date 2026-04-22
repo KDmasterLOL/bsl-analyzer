@@ -273,7 +273,7 @@ Narrowing проектируется отдельным ADR и реализуе�
 | 3. Один публичный API для IDE — `hir::Semantics` + `hir::Type` | ✅ M3 | Фасад `hir::Type` (`crates/hir/src/type_facade.rs`) с `.methods()`, `.fields()`, `.method_return_type()`, `.field_type()`, `.is_ref_type()`, `.manager()`, `.display_name()`. `Semantics::type_of_expr(SyntaxNode) -> Ty` даёт IDE одну точку входа поверх `InferenceResult::expr_types_by_body`. Миграция consumers: `platform_completion`, `mdo_completion`. Гейт CI: `scripts/check-invariants.sh` (keyword docs — исключение). |
 | 4. Источники знаний о типах через trait-адаптеры | ✅ M3 | `ConfigsDatabase` (M1), bridge `AttributeType → TypeRef` (M2); в M3 добавились `hir_ty::method_lookup::lookup_method` (Task 5) и `hir_ty::field_lookup::lookup_field` (Task 7) — единственные путь `(receiver_ty, name) → Ty` для методов и полей. `bsl_platform::manager_methods_query` вынес последний IDE-side `PlatformData::instance()` за Salsa-gate. |
 | 5. Инвалидация через Salsa inputs | ✅ M1 + M2 | `db.infer` транзитивно зависит от `db.configurations`; 2-level и 3-level ре-resolving подтверждены `infer_invalidation::infer_invalidates_when_config_set_changes` + `infer_three_level::three_level_invalidates_on_config_change`. |
-| 6. Диагностики типов коллектятся единым каналом | 🟡 частично | `InferenceDiagnostic::{UnresolvedMethodCall, MismatchedArgCount, TypeMismatch}` покрывают method calls; narrowing / field-unresolved — M4+. |
+| 6. Диагностики типов коллектятся единым каналом | ✅ M4.1–M4.3 | Канал подключён для всех четырёх вариантов (`UnresolvedMethodCall`, `MismatchedArgCount`, `TypeMismatch`, `UnresolvedField`); сам emitter `TypeMismatch` всё ещё отложен (`infer.rs:825` stub). |
 | 7. `hir-ty` видит main + CFE через `visible_configurations` | ✅ M1 | `ConfigsDatabase::configurations`, visibility-gate в resolver, invalidation test. |
 
 ## Что M2 закрыл, и что осталось
@@ -304,14 +304,23 @@ Narrowing проектируется отдельным ADR и реализуе�
 - **Регрессионный набор**: `infer_field_lookup.rs` (5 behavioral E2E через designer fixture), `type_of_expr.rs` (6 acceptance для ExprId-bridge), `type_system_invariants.rs` расширен до 4 тестов (включая single-method-lookup и single-field-lookup invariants).
 - **Task 14 bonus fix**: `infer_call` теперь детектит `Expr::Call { callee: Expr::Field { base, field } }` и роутит через `MethodLookup` — иначе fluent chains (`Запрос.Выполнить().Выбрать()`) возвращали `Ty::Unknown` после Task 11 убрал syntax-fallback.
 
+### Что M4 закрыл
+
+| Задача | Артефакт |
+|--------|----------|
+| Task 1: InferenceDiagnostic → ide-diagnostics channel | commit 3080fc3; `crates/hir-ty/src/infer.rs`, `ide-diagnostics/src/hir_inference_dispatch.rs` |
+| Task 2 + 2b: MetadataKind для регистров / ExchangePlan / ChartOfAccounts + FieldLookup | `crates/hir-ty/src/infer.rs` (field lookup dispatch) |
+| Task 3: Предопределённые элементы / enum values на ObjectManager (частично) | `crates/hir-ty/src/manager_lookup.rs` |
+| Task 4: AttributeType → TypeRef миграция (IDE-side) | `crates/hir/src/type_facade.rs`, `crates/ide/**` |
+| Task 5: Ty::ThisObject { owner } + коэрция | `crates/hir-def/src/ty.rs:109`, `crates/hir-ty/src/this_object.rs`, тесты `crates/ide/tests/infer_this_object.rs` |
+| Task 6.0–6.7: Narrowing (NarrowState lattice, branch-aware dataflow, overlay merge, feature flag) | `crates/hir-ty/src/narrow.rs`, `crates/dataflow`, `crates/ide/tests/narrow_type_of_expr.rs` |
+| Task 7: hir::Type::is_assignable_to | `crates/hir/src/type_facade.rs:116-150` |
+
 **Оставлено для M4**:
 
-- **Narrowing** (`Если ТипЗнч(Х) = Тип("Массив")` сужает `Х: Union(..., Array)` до `Array` внутри блока). Требует смены `InferenceContext` с линейной модели на CFG-driven merge — отдельный ADR (`ADR-01-narrowing.md`, stub).
-- **`Ty::ThisObject { owner }`** — редкая фича модуля объекта; отдельный ADR, блокирован на стабилизации field-lookup для `CatalogObject`.
-- **Полная миграция `bsl_metadata::AttributeType` консьюмеров** → `TypeRef` (40+ производственных ссылок).
+- **Полная миграция `bsl_metadata::AttributeType` консьюмеров** → `TypeRef`: IDE-side consumers мигрированы (Task 4); платформенный слой (XML-парсер, `sdbl-hir`, часть linter-обработчиков) остаётся на MDO-уровне.
 - **Полноценный FieldLookup для регистров/планов/задач**: `MetadataKind::{AccumulationRegisterRef, AccountingRegisterRef, …}` узнаются как типы, но `.Измерения.X` / `.Движения.ДобавитьРасход()` — пока `Ty::Unknown` (register storage в отдельном `Configuration.registers`).
-- **Предопределённые элементы / значения перечислений** на `Ty::ObjectManager` (`Перечисления.Состояния.Активен`, `Справочники.Валюты.Доллар`). Требует manager-side adapter.
-- **`UnresolvedField`-диагностика** в `InferenceDiagnostic` (сейчас FieldLookup просто молча отдаёт `Ty::Unknown`).
+- **Предопределённые элементы / значения перечислений** на `Ty::ObjectManager` (`Перечисления.Состояния.Активен`, `Справочники.Валюты.Доллар`). Требует manager-side adapter. [VERIFY]
 
 ## Связанные документы
 
