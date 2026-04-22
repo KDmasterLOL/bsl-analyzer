@@ -40,7 +40,7 @@
 pub mod liveness;
 pub mod reaching_defs;
 
-use cfg::ControlFlowGraph;
+use cfg::{CfgEdgeType, ControlFlowGraph};
 use hir_def::body::Body;
 use la_arena::RawIdx;
 use petgraph::graph::NodeIndex;
@@ -188,6 +188,53 @@ pub trait Transfer<L: Lattice> {
     /// Default implementation falls back to `transfer_expr()`.
     fn transfer_expr_in_place(&self, expr_id: hir_def::ExprId, state: &mut L, body: &Body) {
         *state = self.transfer_expr(expr_id, state, body);
+    }
+
+    /// Apply an edge-sensitive refinement to a lattice value crossing an edge.
+    ///
+    /// Called by the solver at every join point — once per predecessor edge in
+    /// forward analyses and once per successor edge in backward analyses —
+    /// before the value is joined into the accumulating IN/OUT state. The
+    /// returned lattice value represents the information that flows *through*
+    /// the given edge; e.g. narrowing analyses use this hook to restrict the
+    /// state on `TrueBranch` / `FalseBranch` successors of a guard.
+    ///
+    /// ## Arguments
+    ///
+    /// - `edge_kind`: the kind of CFG edge being traversed
+    ///   ([`CfgEdgeType::TrueBranch`] / [`CfgEdgeType::FalseBranch`] for
+    ///   conditional successors, [`CfgEdgeType::Direct`] for sequential
+    ///   fall-through, etc.)
+    /// - `state`: the upstream lattice value (forward: `OUT[pred]`, backward:
+    ///   `IN[succ]`)
+    ///
+    /// ## Returns
+    ///
+    /// The refined state after traversing the edge. Default implementation
+    /// returns a clone of `state` — edge-blind analyses such as reaching
+    /// definitions and liveness do not need to override this.
+    ///
+    /// ## Contract for edge-sensitive analyses
+    ///
+    /// `transfer_edge` receives the lattice value but **not** a direct
+    /// handle to the source block or the guard expression that produced
+    /// the branch. That is by design: the solver already runs
+    /// [`Transfer::transfer_expr_in_place`] on the conditional vertex's
+    /// condition *before* visiting outgoing edges (see
+    /// `DataflowSolver::transfer_block` for `CfgVertex::Conditional` /
+    /// `WhileLoop`). An edge-sensitive analysis must therefore encode
+    /// whatever guard facts it needs into `L` during `transfer_expr`, so
+    /// that `transfer_edge` can consume them here. For Task 6's narrowing
+    /// analysis this means the `Name → Ty` lattice also carries a
+    /// "pending guard" slot that `transfer_expr` fills when it sees
+    /// `ТипЗнч(x) = Тип("…")` and `transfer_edge` consumes (and clears)
+    /// on the `TrueBranch` / `FalseBranch` edge.
+    ///
+    /// Keeping the API narrow (just `edge_kind` + `&L`) keeps the
+    /// solver's hot path free of per-edge `body`/`cfg` lookups and
+    /// matches the shape `transfer_stmt` / `transfer_expr` already use.
+    fn transfer_edge(&self, _edge_kind: CfgEdgeType, state: &L) -> L {
+        state.clone()
     }
 }
 
@@ -387,19 +434,26 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 // Entry block with no predecessors: preserve initial state
                 self.block_in.get(&block_idx).cloned().expect("block_in should be initialized")
             } else {
-                // Normal case: join from predecessors
-                // Clone first predecessor's OUT state, then join_in_place with the rest
+                // Normal case: join from predecessors.
+                //
+                // Each predecessor's OUT state is passed through the
+                // transfer's edge-sensitive hook before joining so branch-aware
+                // analyses (narrowing) can refine state on TrueBranch /
+                // FalseBranch edges. For edge-blind analyses the default
+                // `transfer_edge` impl is identity (state.clone()).
                 let mut state: Option<L> = None;
-                for (pred_idx, _edge) in self.cfg.incoming_edges(block_idx) {
+                for (pred_idx, edge_kind) in self.cfg.incoming_edges(block_idx) {
                     if let Some(pred_out) = self.block_out.get(&pred_idx) {
+                        let edge_state = self.transfer.transfer_edge(*edge_kind, pred_out);
                         match &mut state {
                             None => {
-                                // First predecessor: clone its OUT state as starting point
-                                state = Some(pred_out.clone());
+                                // First predecessor: move the edge-refined
+                                // state in as the starting point.
+                                state = Some(edge_state);
                             }
                             Some(s) => {
-                                // Subsequent predecessors: join in-place (no clone!)
-                                s.join_in_place(pred_out);
+                                // Subsequent predecessors: join in-place.
+                                s.join_in_place(&edge_state);
                             }
                         }
                     }
@@ -527,19 +581,23 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 // Exit block with no successors: preserve initial state (usually bottom)
                 self.block_out.get(&block_idx).cloned().expect("block_out should be initialized")
             } else {
-                // Normal case: join from successors
-                // Clone first successor's IN state, then join_in_place with the rest
+                // Normal case: join from successors.
+                //
+                // Mirror of the forward solver: each successor's IN state is
+                // passed through `transfer_edge` before joining so a backward
+                // analysis that cares about branch provenance (e.g. taint on
+                // the taken branch) can observe the edge kind. Default
+                // `transfer_edge` is identity — liveness remains zero-cost.
                 let mut state: Option<L> = None;
-                for (succ_idx, _edge) in self.cfg.outgoing_edges(block_idx) {
+                for (succ_idx, edge_kind) in self.cfg.outgoing_edges(block_idx) {
                     if let Some(succ_in) = self.block_in.get(&succ_idx) {
+                        let edge_state = self.transfer.transfer_edge(*edge_kind, succ_in);
                         match &mut state {
                             None => {
-                                // First successor: clone its IN state as starting point
-                                state = Some(succ_in.clone());
+                                state = Some(edge_state);
                             }
                             Some(s) => {
-                                // Subsequent successors: join in-place (no clone!)
-                                s.join_in_place(succ_in);
+                                s.join_in_place(&edge_state);
                             }
                         }
                     }
@@ -790,5 +848,133 @@ mod tests {
         let bottom = IntSetLattice { values: vec![] };
         assert_eq!(bottom.join(&a), a);
         assert_eq!(a.join(&bottom), a);
+    }
+
+    /// Edge-blind `Transfer` impl — inherits the default `transfer_edge`.
+    /// Exists purely to exercise the trait's default implementation so the
+    /// zero-regression guarantee for reaching-defs / liveness is pinned.
+    struct NoopTransfer;
+
+    impl Transfer<IntSetLattice> for NoopTransfer {
+        fn transfer_stmt(&self, _: RawIdx, state: &IntSetLattice, _: &Body) -> IntSetLattice {
+            state.clone()
+        }
+    }
+
+    #[test]
+    fn transfer_edge_default_is_identity_across_all_edge_kinds() {
+        // Regression guard for Task 6.0: every existing analysis relies on
+        // the default `transfer_edge` being a clean identity so migrating to
+        // the branch-aware API costs zero.
+        let s = IntSetLattice { values: vec![1, 2, 3] };
+        let t = NoopTransfer;
+        for edge in [
+            CfgEdgeType::Direct,
+            CfgEdgeType::TrueBranch,
+            CfgEdgeType::FalseBranch,
+            CfgEdgeType::LoopIteration,
+            CfgEdgeType::AdjacentCode,
+        ] {
+            assert_eq!(t.transfer_edge(edge, &s), s, "edge {edge:?}");
+        }
+    }
+
+    /// Branch-aware `Transfer` that filters the lattice by sign on
+    /// `TrueBranch` / `FalseBranch`. Stand-in for a narrowing analysis's
+    /// edge hook: future `NarrowingAnalysis` will return the narrowed
+    /// `Name → Ty` map instead of a bit-filtered set, but the override
+    /// machinery is the same.
+    struct SignSplitTransfer;
+
+    impl Transfer<IntSetLattice> for SignSplitTransfer {
+        fn transfer_stmt(&self, _: RawIdx, state: &IntSetLattice, _: &Body) -> IntSetLattice {
+            state.clone()
+        }
+        fn transfer_edge(&self, edge_kind: CfgEdgeType, state: &IntSetLattice) -> IntSetLattice {
+            match edge_kind {
+                CfgEdgeType::TrueBranch => IntSetLattice {
+                    values: state.values.iter().copied().filter(|v| *v > 0).collect(),
+                },
+                CfgEdgeType::FalseBranch => IntSetLattice {
+                    values: state.values.iter().copied().filter(|v| *v <= 0).collect(),
+                },
+                _ => state.clone(),
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_edge_override_refines_per_branch() {
+        // Pins that overriding `transfer_edge` is sufficient to split state
+        // along `TrueBranch` vs `FalseBranch` — the exact shape Task 6's
+        // narrowing analysis will use when reading a boolean guard.
+        let s = IntSetLattice { values: vec![-2, -1, 0, 1, 2] };
+        let t = SignSplitTransfer;
+        assert_eq!(t.transfer_edge(CfgEdgeType::TrueBranch, &s).values, vec![1, 2]);
+        assert_eq!(t.transfer_edge(CfgEdgeType::FalseBranch, &s).values, vec![-2, -1, 0]);
+        // Non-conditional edges stay identity — LoopIteration / AdjacentCode
+        // are guard-free and must not be refined.
+        assert_eq!(t.transfer_edge(CfgEdgeType::Direct, &s), s);
+        assert_eq!(t.transfer_edge(CfgEdgeType::LoopIteration, &s), s);
+        assert_eq!(t.transfer_edge(CfgEdgeType::AdjacentCode, &s), s);
+    }
+
+    /// End-to-end: build a hand-rolled diamond CFG, feed an entry state,
+    /// run `DataflowSolver::solve()` with a branch-aware `SignSplitTransfer`,
+    /// and assert the `TrueBranch` / `FalseBranch` successors observe
+    /// refined IN states. Without the solver wiring from this task the
+    /// merge block would see the unrefined state on both sides and this
+    /// test would fail on the `tside` / `fside` assertions — so it
+    /// directly pins the `solve_forward` edge-hook plumbing, not just the
+    /// trait method in isolation.
+    #[test]
+    fn solve_forward_applies_transfer_edge_at_branch_successors() {
+        use cfg::{BasicBlockVertex, CfgVertex, ControlFlowGraph};
+
+        // Diamond:
+        //
+        //   entry ──direct──▶ cond ──true──▶ tside ─┐
+        //                         └──false──▶ fside ┤
+        //                                           ▼
+        //                                         merge ──direct──▶ exit
+        let mut cfg = ControlFlowGraph::new();
+        let entry = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let cond = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let tside = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let fside = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let merge = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let exit = cfg.exit_point();
+        cfg.set_entry_point(entry);
+        cfg.add_edge(entry, cond, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(cond, tside, CfgEdgeType::TrueBranch).unwrap();
+        cfg.add_edge(cond, fside, CfgEdgeType::FalseBranch).unwrap();
+        cfg.add_edge(tside, merge, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(fside, merge, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(merge, exit, CfgEdgeType::Direct).unwrap();
+
+        let body = Body::default();
+        let initial = IntSetLattice { values: vec![-2, -1, 0, 1, 2] };
+
+        let mut solver = DataflowSolver::new(Arc::new(cfg), body, SignSplitTransfer);
+        let bottom = IntSetLattice { values: vec![] };
+        solver.set_bottom_factory(move || bottom.clone());
+        solver.set_initial_state(initial.clone());
+        let result = solver.solve().expect("forward solve converges");
+
+        // TrueBranch edge must have refined the state: only positives reach tside.
+        let tside_in = result.block_in(tside).expect("tside IN exists");
+        assert_eq!(tside_in.values, vec![1, 2], "TrueBranch edge did not refine state");
+
+        // FalseBranch edge must have refined symmetrically: only ≤0 reach fside.
+        let fside_in = result.block_in(fside).expect("fside IN exists");
+        assert_eq!(fside_in.values, vec![-2, -1, 0], "FalseBranch edge did not refine state");
+
+        // After the merge, join of both refined sides must recover the full
+        // original set — proves we are not over-narrowing on the merge edges
+        // and that join_in_place composes correctly with the new hook.
+        let merge_in = result.block_in(merge).expect("merge IN exists");
+        let mut merged: Vec<i32> = merge_in.values.clone();
+        merged.sort_unstable();
+        assert_eq!(merged, vec![-2, -1, 0, 1, 2], "diamond merge must recover full set");
     }
 }
