@@ -3,26 +3,29 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-In the texts of modules (including comments) it is not allowed to use inextricable spaces and the minus sign "-" in other encodings (short, long dash, soft hyphen, etc.).
+Module text should not contain non-breaking spaces or characters that only look
+like the normal hyphen-minus `-` but have a different Unicode code point.
 
-Such characters often appear in the text of the modules when copying from office documents and lead to a number of difficulties in the development.
+These characters typically appear after copying code from office documents,
+browsers, or rich-text editors and can cause difficult-to-debug problems.
 
-Example:
+Typical effects:
 
-- the search for fragments of text that includes “wrong” minuses and spaces does not work
-- hints of types of parameters of procedures and functions in the configurator and extended verification in 1C: EDT are incorrectly displayed
-- specifying a “wrong” minus in expressions will result in a syntax error
+- text search stops matching as expected;
+- editor assistance and static analysis can behave incorrectly;
+- using a wrong dash instead of `-` can produce syntax errors.
 
-Diagnostics detects the following invalid characters
+The current implementation detects:
 
-- En Dash
-- Figure Dash
-- Em Dash
-- Horizontal Bar
-- "Wrong" Minus
-- Soft Hyphen
-- Non-breaking Space
+- soft hyphen;
+- figure dash;
+- en dash;
+- em dash;
+- horizontal bar;
+- Unicode minus sign;
+- non-breaking space.
 
 ## Sources
 
-* [Standard: Modules texts(RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
+* Primary source: [ITS / v8std #std456: Module texts (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
+* Secondary source: [v8std.ru: #std456](https://v8std.ru/std/456/)
