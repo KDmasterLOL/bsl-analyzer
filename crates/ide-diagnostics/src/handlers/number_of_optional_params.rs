@@ -1,33 +1,6 @@
 //! NumberOfOptionalParams diagnostic.
 //!
-//! Detects functions and procedures with too many optional parameters.
-//!
-//! ## Why?
-//! Too many optional parameters make methods hard to understand and use correctly.
-//! They often indicate that the method is trying to do too much.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура СОченьМногоПараметров(А = 1, Б = 2, В = 3, Г = 4, Д = 5)
-//!     // ...
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! Use parameter structures or split into multiple methods:
-//! ```bsl
-//! Процедура ВыполнитьОперацию(Параметры)
-//!     // Параметры - структура с полями
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **maxOptionalParamsCount** (default: 3) - Maximum allowed optional parameters
-//! - **Enabled by default:** Yes
-//! - **Severity:** MINOR → Warning
-//!
-//! ## Implementation
-//! Uses ItemTree for efficiency (cached by Salsa).
+//! Reports methods with too many optional parameters.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -49,10 +22,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_OPTIONAL_PARAMS: i64 = 3;
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::NumberOfOptionalParams` is encountered.
-/// Applies configuration filtering (maxOptionalParamsCount).
+/// Creates a diagnostic from HIR when the number of optional parameters exceeds
+/// the configured limit.
 pub fn from_hir(
     _method_name: &str,
     count: u32,

@@ -1,31 +1,36 @@
 # Limit number of optional parameters in method (NumberOfOptionalParams)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-It is not recommended to declare many parameters in functions (best practice to use not more than seven parameters). Meanwhile there should not be many parameters with default values set (best practice to have not more than three such parameters). Otherwise code readability decreases. For example it is easy to make a mistake in number of commas passing optional parameters.  
-If need to pass many parameters to a function, it is recommended to group same-type parameters into one or more composite parameters of type Structure.
+This diagnostic reports procedures and functions that declare too many optional
+parameters.
+
+The general rationale comes from the 1C recommendations for procedure and
+function parameters: a large number of optional arguments makes calls harder to
+read and easier to misuse. In practice it becomes difficult to understand which
+values are intentionally passed and which ones are just skipped through default
+positions.
+
+By default the diagnostic allows up to `3` optional parameters, but the limit
+can be changed with `maxOptionalParamsCount`.
 
 ## Examples
 
 Incorrect:
 
 ```bsl
-// Create an item in catalog "Goods"
-Procedure CreateSKU(Name, Goods, Units, Weight, Check = True)
-// ... 
+Procedure CreateItem(Name, Goods, Units, Weight, Check = True, Archive = False, Notify = True, Validate = True)
 EndProcedure
 ```
 
-Correct:  
-Group parameters, having goods item properties into Structure Values.
+Correct:
 
 ```bsl
-// Create item in catalog "Goods"
-Procedure CreateNewGoods(Values, Check = True)
+Procedure CreateItem(Name, Goods, Params = Undefined)
 EndProcedure
 ```
 
 ## Sources
 
-* [Standard: Parameters of procedures and functions (RU)](https://its.1c.ru/db/v8std#content:640:hdoc)
+- Source: [1C standard: Parameters of procedures and functions (#std640)](https://its.1c.ru/db/v8std#content:640:hdoc)
+- Secondary reference: [v8std.ru: NumberOfOptionalParams](https://v8std.ru/diagnostics/bslls/NumberOfOptionalParams/)
