@@ -1,3 +1,5 @@
+//! Reports `ОтменитьТранзакцию` / `RollbackTransaction` calls in invalid positions.
+
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
