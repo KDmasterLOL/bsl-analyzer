@@ -3,18 +3,16 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-On `Linux` OS `COM`, `OLE`, `ActiveDocument` are not available. For integration use other options, for example XML file exchange or web-services. For COM AddIns, it is recommended to change them to `NativeAPI` AddIn.
+On Linux, technologies such as `COM`, `OLE`, and `ActiveDocument` are unavailable. When cross-platform support is required, such integrations should be replaced with alternatives such as XML exchange, HTTP/web services, or `NativeAPI` add-ins.
 
-Checked the use of unavailable in:
+The current implementation reports use of:
 
 * `COMObject`
 * `Mail`
 
-**Checking the value of the condition is not satisfied.**
-
 ### Addition
 
-When found unavailable in Linux objects, the method is checked to include condition flow for platform type:
+The diagnostic also checks whether the call is guarded by a platform condition. In the current implementation, reporting is suppressed when a surrounding condition mentions platform-specific markers such as:
 
 * `Linux_x86`
 * `Windows`
