@@ -29,3 +29,4 @@
 ## Источники
 
 * [Стандарт: Использование перейти](https://its.1c.ru/db/v8std/content/547/hdoc/_top/)
+* [v8std: UsingGoto](https://v8std.ru/diagnostics/bslls/UsingGoto/)
