@@ -1,18 +1,36 @@
 # Style element constructor (StyleElementConstructors)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-You should use style elements to change the appearance, rather than setting specific values directly in the controls. This is required in order for similar controls to look the same in all forms where they occur.
 
-Types of style elements:
+UI appearance should be controlled through style elements rather than by constructing concrete colors, fonts, or borders directly in code. This keeps similar controls visually consistent across forms and makes appearance changes centralized.
 
-* `Color` - RGB value is set
-* `Font` - type, size and style are set
-* `Border` - the type and width of the borders are set
+The current implementation is narrower than the full style-guidance topic. It reports direct constructors for these style-related types:
+
+- `Color`
+- `Font`
+- `Border`
+
+It also catches string-based constructor forms such as `New("Color", ...)` and nested constructor usage inside other `New(...)` expressions.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+
+### Incorrect
+
+```bsl
+Control.TextColor = New Color(255, 0, 0);
+```
+
+```bsl
+FontData = New ValueStorage(New("Font"));
+```
+
+### Correct
+
+```bsl
+Control.TextColor = StyleItems.ErrorColor;
+```
 
 ## Sources
-System of standards
-* Source: [Standard: Style Elements (RU)](https://its.1c.ru/db/v8std#content:667:hdoc)
+
+- [Style elements - Standard 1C (RU)](https://its.1c.ru/db/v8std#content:667:hdoc)
+- [v8std.ru: StyleElementConstructors](https://v8std.ru/diagnostics/bslls/StyleElementConstructors/)
