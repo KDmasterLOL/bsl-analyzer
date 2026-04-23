@@ -1,31 +1,6 @@
 //! OrdinaryAppSupport diagnostic.
 //!
-//! Validates ordinary application support settings in Configuration metadata.
-//!
-//! ## What it checks
-//!
-//! This diagnostic validates two Configuration properties:
-//! 1. `UseManagedFormInOrdinaryApplication` must be `true`
-//! 2. `UseOrdinaryFormInManagedApplication` must be `false`
-//!
-//! ## Why?
-//!
-//! These settings ensure proper form mode behavior in mixed environments.
-//! Incorrect settings can lead to runtime errors when switching between
-//! managed and ordinary application modes.
-//!
-//! ## Scope
-//!
-//! This diagnostic only runs for **SessionModule** files.
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** No (requires `ordinaryAppSupport: true` in config)
-//! - **Severity:** Major
-//! - **Type:** CODE_SMELL
-//!
-//! ## Reference
-//!
+//! Validates ordinary-application support settings in configuration metadata.
 
 use crate::define_metadata;
 use crate::metadata::*;
