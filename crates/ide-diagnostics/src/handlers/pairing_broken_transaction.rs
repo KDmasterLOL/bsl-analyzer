@@ -1,43 +1,7 @@
 //! PairingBrokenTransaction diagnostic (CFG-based).
 //!
-//! Checks that transaction method calls are properly paired **across all execution paths**:
-//! - `BeginTransaction()`/`НачатьТранзакцию()` must be paired with
-//! - `CommitTransaction()`/`ЗафиксироватьТранзакцию()` **or**
-//! - `RollbackTransaction()`/`ОтменитьТранзакцию()`
-//!
-//! A transaction is considered "closed" if it has EITHER Commit OR Rollback on each path.
-//! This is important for try-except patterns where:
-//! - Try block contains Commit (normal path)
-//! - Except block contains Rollback (error path)
-//!
-//! ## CFG-based approach advantage
-//!
-//! Uses CFG to analyze **all execution paths**, catching errors missed by simple stack-based analysis:
-//!
-//! ```bsl
-//! Если Условие Тогда
-//!     НачатьТранзакцию();  // Begin only in true branch
-//! Иначе
-//!     ЗафиксироватьТранзакцию();  // Commit only in false branch - ERROR!
-//! КонецЕсли;
-//! ```
-//!
-//! Stack-based analysis: Considers this "paired" (1 begin, 1 commit)
-//! CFG (path-based): Catches BOTH errors - orphaned begin AND orphaned commit
-//!
-//! ## Algorithm
-//!
-//! For each method:
-//! 1. Build CFG (via `ctx.module_cfgs()`)
-//! 2. DFS through all paths from entry to exit
-//! 3. Track `transaction_level` per path:
-//!    - BeginTransaction → level++
-//!    - CommitTransaction OR RollbackTransaction → level--
-//! 4. If level < 0 at any point → orphaned commit/rollback
-//! 5. If level > 0 at exit → orphaned begin (missing Commit OR Rollback)
-//!
-//! Ported from:
-//! - Enhanced with CFG-based path analysis for higher precision
+//! Reports transaction calls that are not properly paired on all execution
+//! paths.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -86,7 +50,7 @@ struct TransactionIssue {
     pair_method: &'static str,
 }
 
-/// Collect PairingBrokenTransaction diagnostics using CFG-based path analysis.
+/// Collect diagnostics using CFG-based path analysis.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::PairingBrokenTransaction;
 

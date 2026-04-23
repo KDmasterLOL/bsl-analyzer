@@ -1,56 +1,54 @@
 # Violation of pairing using methods "BeginTransaction()" & "CommitTransaction()" / "RollbackTransaction()" (PairingBrokenTransaction)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Beginning of transaction and it's committing (rollback) have to be executed withing context of the same method.
+This diagnostic reports broken transaction pairing inside a single method.
+
+The public rule is straightforward: `BeginTransaction()` must be matched by
+either `CommitTransaction()` or `RollbackTransaction()`. In the current project
+the check is path-sensitive: it analyzes all execution paths and reports both
+unclosed transactions and orphaned `CommitTransaction()` /
+`RollbackTransaction()` calls.
+
+The implementation also supports a local safety limit, `maxTransactionLevel`,
+to avoid pathological traversal depth.
 
 ## Examples
 
-*Correct*
+Correct:
 
 ```bsl
-Procedure WriteDataToIB()
-
-    StartTransaction();
-
+Procedure SaveData()
+    BeginTransaction();
     Try
-        ... // read or write data
-        DocumentObject.Write()
+        DocumentObject.Write();
         CommitTransaction();
-    Raise
+    Except
         RollbackTransaction();
-        ... // additional steps to handle the exception
+        Raise;
     EndTry;
-
 EndProcedure
 ```
 
-*Incorrect*
+Incorrect:
 
 ```bsl
-Procedure WriteDataToIB()
-
-    StartTransaction();
+Procedure StartWrite()
+    BeginTransaction();
     WriteDocument();
-
-EndProcedure;
-
-Procedure WriteDocument()
-
-    Try
-        ... // read or write data
-        DocumentObject.Write()
-        CommitTransaction();
-    Raise
-        RollbackTransaction();
-        ... // additional steps to handle the exception
-    EndTry;
-
 EndProcedure
 
+Procedure WriteDocument()
+    Try
+        DocumentObject.Write();
+        CommitTransaction();
+    Except
+        RollbackTransaction();
+    EndTry;
+EndProcedure
 ```
 
 ## Sources
 
-* [Transactions: Rules of Use (RU)](https://its.1c.ru/db/v8std/content/783/hdoc/_top/)
+- Source: [1C standard: Transactions, rules of use (#std783)](https://its.1c.ru/db/v8std#content:783:hdoc)
+- Secondary reference: [v8std.ru: PairingBrokenTransaction](https://v8std.ru/diagnostics/bslls/PairingBrokenTransaction/)
