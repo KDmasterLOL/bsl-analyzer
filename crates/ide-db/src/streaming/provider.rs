@@ -210,6 +210,17 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
+        // Hot path: diagnostic collection asks for a line index per finding
+        // while walking a 25k-file workspace. Re-allocating a fresh index
+        // each time dominated the profile at ~43% self time, so share the
+        // per-file index cached on `ParsedFile` when we have shared state.
+        // Fallback rebuilds on-the-fly for callers that skip Phase-1
+        // caching (legacy paths / tests).
+        if let Some(shared) = &self.shared_state {
+            if let Some(parsed) = shared.get_parsed_file(file_id) {
+                return parsed.line_index();
+            }
+        }
         let text = self.file_text(file_id);
         Arc::new(line_index::LineIndex::new(&text))
     }

@@ -1422,12 +1422,6 @@ enum QualifiedCallInfo {
 /// - `None` for local variable calls or field access
 fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<QualifiedCallInfo> {
     let first_child = node.children().next()?;
-    tracing::warn!(
-        node_kind = ?node.kind(),
-        first_child_kind = ?first_child.kind(),
-        first_child_text = %first_child.text(),
-        "analyze_qualified_call: entry"
-    );
 
     // Check for three-level call: first child is FIELD_EXPR.
     // The inner FIELD_EXPR must be exactly `IDENT.IDENT`, otherwise this is a
@@ -1494,11 +1488,9 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
     // Check if module name is a local variable
     let key = module.to_lowercase();
     if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
-        tracing::warn!(module = %module, "analyze_qualified_call: is local variable, returning None");
         return None;
     }
 
-    tracing::warn!(module = %module, "analyze_qualified_call: returning TwoLevel");
     Some(QualifiedCallInfo::TwoLevel { module })
 }
 
