@@ -1,16 +1,4 @@
-//! UnresolvedMethodCall diagnostic.
-//!
-//! Emitted from `hir-ty::infer` when a qualified call
-//! (`CommonModule.Method(...)`) fails to resolve through the workspace's
-//! `module_index` + `symbol_tree` pipeline. Four distinct situations funnel
-//! into one diagnostic code, disambiguated by
-//! [`hir::UnresolvedMethodKind`]:
-//!
-//! - `MethodNotFound` — module resolved but no method by that name.
-//! - `MethodNotExport` — module + method exist, but method lacks `Экспорт`.
-//! - `CommonModuleNoSource` — module referenced in metadata, source file
-//!   missing from VFS.
-//! - `ReceiverNotResolved` — receiver couldn't be resolved at all.
+//! Reports qualified method calls that cannot be resolved semantically.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -32,7 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from `InferenceDiagnostic::UnresolvedMethodCall`.
+/// Creates a diagnostic from `InferenceDiagnostic::UnresolvedMethodCall`.
 pub fn from_hir(
     receiver_name: &Name,
     method_name: &Name,
