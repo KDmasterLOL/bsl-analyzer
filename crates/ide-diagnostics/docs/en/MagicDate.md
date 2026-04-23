@@ -2,64 +2,78 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-Magic date is any date in your code that does not immediately become apparent without being immersed in context.
+
+A magic date is a hard-coded date literal whose meaning is not obvious from the
+code around it.
+
+Such values make code harder to read and maintain. Prefer moving the date into
+a named variable or returning it from a helper function with a clear semantic
+name.
 
 ## Examples
 
-Bad
+Invalid:
 
 ```bsl
-If now < '20151021' Then
-    HoverBoardIsReal = Undefined;
+If CurrentDate < '20240301' Then
+    ApplyOldRate = True;
 EndIf;
 ```
 
-Good
+Better:
 
 ```bsl
-PredictedDate = '20151021'; 
-If now < PredictedDate Then
-    HoverBoardIsReal = Undefined;
+VatRateChangeDate = '20240301';
+If CurrentDate < VatRateChangeDate Then
+    ApplyOldRate = True;
 EndIf;
 ```
 
-Also, a good solution is to use a special method with "telling name" that returns
-constant
+Another good option:
 
 ```bsl
-Function DateInventionHover()
-    Return '20151021';
+Function VatRateChangeDate()
+    Return '20240301';
 EndFunction
 
-If CurrentDate < DateInventionHover() Then
-    HoverBoardWillBeInvented = Undefined;
+If CurrentDate < VatRateChangeDate() Then
+    ApplyOldRate = True;
 EndIf;
 ```
 
 ## Exceptions
 
-Magic dates used in structures and correspondences are not considered errors, as they are used as keys or values in data structures where the context is clear:
+The current implementation intentionally skips several contexts where the date
+literal is treated as acceptable or structurally meaningful, for example:
+
+- authorized dates from configuration;
+- simple `Date(...)` assignments;
+- return statements and default parameter values;
+- structure and correspondence inserts;
+- structure constructors and property assignments.
+
+Examples:
 
 ```bsl
-// Structure insert - no error
 Structure = New Structure;
-Structure.Insert("StartDate", '20250101'); // No error
-Structure.Insert("EndDate", '20251231'); // No error
-Structure.Insert("MaxDate", '39991231235959'); // No error
+Structure.Insert("StartDate", '20250101');
+Structure.Insert("EndDate", '20251231');
 
-// Structure constructor - no error
-Structure2 = New Structure("StartDate, EndDate", '20250101', '20251231'); // No error
+Structure2 = New Structure("StartDate, EndDate", '20250101', '20251231');
 
-// Direct structure property assignment - no error
 StructureWithFields = New Structure("StartDate, EndDate");
-StructureWithFields.StartDate = '20250101'; // No error
-StructureWithFields.EndDate = '20251231'; // No error
+StructureWithFields.StartDate = '20250101';
+StructureWithFields.EndDate = '20251231';
 
-// Fixed structure - no error
-FixedStructure = New FixedStructure("Value", '20240101'); // No error
-
-// Correspondence - no error (both key and value)
 Correspondence = New Correspondence;
-Correspondence.Insert("Code", '20230101'); // No error
-Correspondence.Insert('19800101', "Olympics in Moscow"); // No error
+Correspondence.Insert("Code", '20230101');
+Correspondence.Insert('19800101', "Olympics in Moscow");
 ```
+
+## Sources
+
+This diagnostic has no direct normative 1C standard source.
+
+Related public context:
+
+* [v8std.ru / bslls / MagicDate](https://v8std.ru/diagnostics/bslls/MagicDate/)
