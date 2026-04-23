@@ -1,24 +1,4 @@
-//! Diagnostic: UnaryPlusInConcatenation
-//!
-//! Detects accidental double plus in concatenation: `"str" + + expr`.
-//! The second plus is treated as unary operator, causing type conversion error at runtime.
-//!
-//! ## Severity
-//! Blocker
-//!
-//! ## Example
-//! ```bsl
-//! // Bad - accidental double plus
-//! Плохо = "Строка1" + + "Строка2";
-//! Плохо = "Строка" + + Переменная;
-//!
-//! // OK - unary plus on numeric literal
-//! Допустимо = "Строка" + + 5;
-//!
-//! // Good - single plus
-//! Хорошо = "Строка1" + "Строка2";
-//! ```
-//!
+//! Detects accidental unary plus inside string concatenation.
 
 use crate::define_metadata;
 use crate::metadata::*;
