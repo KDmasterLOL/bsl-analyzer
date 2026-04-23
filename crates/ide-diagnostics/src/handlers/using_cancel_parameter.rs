@@ -1,32 +1,4 @@
-//! Diagnostic: UsingCancelParameter
-//!
-//! Detects invalid assignments to Cancel/Отказ parameter in event handlers.
-//!
-//! The Cancel parameter should only be set to True or combined with OR operation
-//! to preserve any previously set cancel flag from other handlers.
-//!
-//! ## Severity
-//! Major
-//!
-//! ## Example
-//! ```bsl
-//! // Good - setting to True
-//! Отказ = Истина;
-//!
-//! // Good - preserving existing value with OR
-//! Отказ = Отказ ИЛИ НашаПроверка();
-//! Отказ = НашаПроверка() ИЛИ Отказ;
-//!
-//! // Bad - setting to False (may reset cancel from other handlers)
-//! Отказ = Ложь;
-//!
-//! // Bad - overwriting without OR (loses previous value)
-//! Отказ = НашаПроверка();
-//!
-//! // Bad - using AND instead of OR
-//! Отказ = Отказ И НашаПроверка();
-//! ```
-//!
+//! Reports unsafe assignments to the `Cancel` / `Отказ` event-handler parameter.
 
 use crate::define_metadata;
 use crate::metadata::*;

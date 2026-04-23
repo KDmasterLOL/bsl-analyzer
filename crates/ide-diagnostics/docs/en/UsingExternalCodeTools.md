@@ -1,26 +1,35 @@
 # Using external code tools (UsingExternalCodeTools)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-For application solutions it is forbidden to execute in unsafe mode any code on the 1C:Enterprise server that is not part of the application solution (configuration) itself.  
-The restriction does not apply to the code that has passed the audit, and to the code executed on the client.
+In application solutions, loading or creating external code artifacts requires special care because such code is outside the main configuration and may bypass normal review and delivery controls.
 
-Examples of invalid execution of "external" code in unsafe mode:
+The current implementation reports direct use of APIs such as:
 
-* external reports and processings (print forms, etc.)
-* configuration extensions
+- `ExternalDataProcessors.Create/Connect`
+- `ExternalReports.Create/Connect`
+- `ConfigurationExtensions.Create`
 
 ### Restrictions
 
-At the moment, the server context is not analyzed, so diagnostic works both at client and server contexts
+The current implementation does not distinguish server and client execution context, so the diagnostic may report both.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+
+Incorrect:
+
+```bsl
+ExternalDataProcessors.Connect("PathToProcessing", False);
+ExternalReports.Create("ReportName");
+```
+
+Safer approach:
+
+```bsl
+// Use reviewed and built-in functionality instead of loading external code directly.
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-
-* [Restriction on the execution of "external" code (RU)](https://its.1c.ru/db/v8std#content:669:hdoc)
+* [Restriction on execution of "external" code (RU)](https://its.1c.ru/db/v8std#content:669:hdoc)
+* [v8std: UsingExternalCodeTools](https://v8std.ru/diagnostics/bslls/UsingExternalCodeTools/)
