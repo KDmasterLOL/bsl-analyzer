@@ -17,6 +17,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Checks a single syntax node for ternary expressions reducible to a simpler form.
 /// Check a single syntax node for useless ternary operators (node-based API).
 ///
 /// This is called from `collect_syntax_single_pass()` for each node in single AST pass.
@@ -34,9 +35,7 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-/// Main entry point for UselessTernaryOperator diagnostic.
-///
-/// Traverses AST and calls `check_node()` for each node.
+/// Main entry point for syntax-based useless-ternary detection.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UselessTernaryOperator;
 
