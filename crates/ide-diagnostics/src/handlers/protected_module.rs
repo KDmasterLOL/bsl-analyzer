@@ -1,25 +1,6 @@
 //! ProtectedModule diagnostic.
 //!
-//! Detects password-protected CommonModules in the configuration.
-//!
-//! ## What it checks
-//!
-//! When a CommonModule is protected by password, its source code is replaced
-//! with a `.bin` file instead of `.bsl`. This diagnostic reports all protected
-//! modules found in the configuration.
-//!
-//! ## Scope
-//!
-//! This diagnostic only runs for SessionModule (`/Ext/SessionModule.bsl`).
-//! One diagnostic is created for each protected module.
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** Yes
-//! - **Severity:** Major
-//!
-//! ## Reference
-//!
+//! Reports password-protected common modules found in configuration metadata.
 
 use bsl_metadata::traits::{MdObject, Module};
 use ide_db::TextRange;
