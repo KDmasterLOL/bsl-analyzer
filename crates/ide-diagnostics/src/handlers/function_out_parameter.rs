@@ -1,31 +1,4 @@
-//! FunctionOutParameter diagnostic
-//!
-//! Detects when a function modifies its by-reference parameters (output parameters).
-//!
-//!
-//! ## Why?
-//! Functions in BSL should not modify their parameters. This is a code smell that makes
-//! code harder to understand and maintain. Functions should use return values instead of
-//! output parameters.
-//!
-//! **Note:** This diagnostic only applies to functions, not procedures. Procedures are
-//! allowed to modify parameters.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Функция Вычислить(Данные, Знач Режим)  // Данные - by reference (no Знач)
-//!     Данные = ОбработатьДанные();  // Bad! Modifying parameter
-//!     Возврат Истина;
-//! КонецФункции
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Функция Вычислить(Знач Данные, Знач Режим)  // All by value
-//!     Результат = ОбработатьДанные();
-//!     Возврат Результат;
-//! КонецФункции
-//! ```
+//! Reports function parameters used as output parameters.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -46,9 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when FunctionOutParameter diagnostic is emitted during lowering.
+/// Creates a diagnostic from the HIR lowering result.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::FunctionOutParameter;
 
