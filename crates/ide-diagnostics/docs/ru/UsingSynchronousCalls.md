@@ -44,3 +44,4 @@
 * [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
 * [Соответствие синхронных методов асинхронным аналогам](https://its.1c.ru/db/v838doc#bookmark:dev:TI000000438)
 * [Асинхронные вызовы расширений и внешних компонентов](http://v8.1c.ru/o7/201412async/index.htm)
+* [v8std: UsingSynchronousCalls](https://v8std.ru/diagnostics/bslls/UsingSynchronousCalls/)

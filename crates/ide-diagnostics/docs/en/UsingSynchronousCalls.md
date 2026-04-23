@@ -45,3 +45,4 @@ Method list:
 * Useful information: [Refusal to use modal windows (RU)](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
 * [Correspondence of synchronous methods to asynchronous analogues (RU)](https://its.1c.ru/db/v838doc#bookmark:dev:TI000000438)
 * [Asynchronous calls to extensions and external components (RU)](http://v8.1c.ru/o7/201412async/index.htm)
+* [v8std: UsingSynchronousCalls](https://v8std.ru/diagnostics/bslls/UsingSynchronousCalls/)
