@@ -1,30 +1,6 @@
 //! MultilineStringInQuery diagnostic.
 //!
-//! Detects multiline string literals in SDBL queries.
-//!
-//! ## Why?
-//! Multiline string literals in SDBL queries are very rare and usually indicate
-//! an error from incorrect number of double quotes. In SDBL, to represent an
-//! empty string you should use """" (4 quotes), not "" (2 quotes).
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query.Text = "SELECT
-//! |   ЕСТЬNULL(Field, "") AS Code  // Wrong: "" becomes multiline string
-//! |FROM Table";
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Query.Text = "SELECT
-//! |   ЕСТЬNULL(Field, """") AS Code  // Correct: """" is empty string in SDBL
-//! |FROM Table";
-//! ```
-//!
-//! ## Implementation
-//!
-//! Migrated to HIR-based approach for consistency with other SDBL diagnostics.
-//! Diagnostics are collected during HIR lowering when processing string literals.
+//! Reports suspicious multi-line string literals inside SDBL query text.
 
 use crate::define_metadata;
 use crate::metadata::*;
