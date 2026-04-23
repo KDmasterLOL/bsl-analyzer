@@ -1,8 +1,36 @@
 # Statement should end with semicolon symbol ";" (SemicolonPresence)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-In the texts of program procedures and functions, operators should be separated by a semicolon (";"). The end of the line is not a sign of the end of the statement. Despite the fact that in some cases the platform allows you to skip the semicolon, you must always indicate this character, clearly indicating the completion of the statement.
+In BSL, the end of line is not a statement terminator. Statements are separated by the semicolon character `;`.
 
-**NOTE**: The keywords `Procedure`, `EndProcedure`, `Function`, `EndFunction` are not operators, but operator brackets, therefore, **DO NOT** end with a semicolon (this can lead to module execution errors).
+Even in cases where the platform tolerates a missing semicolon, leaving it out makes statement boundaries less explicit and hurts readability.
+
+The current implementation is narrow and syntax-oriented:
+
+- it reports statements that reached HIR lowering without a trailing semicolon;
+- it skips labels, empty statements, and statements that already have parse errors;
+- it provides an automatic fix that inserts `;` at the end of the reported range.
+
+`Procedure`, `EndProcedure`, `Function`, and `EndFunction` are not ordinary statements and should not end with `;`.
+
+## Examples
+
+### Incorrect
+
+```bsl
+А = 1
+Б = 2
+```
+
+### Correct
+
+```bsl
+А = 1;
+Б = 2;
+```
+
+## Sources
+
+- [Module texts - Standard 1C (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
+- [v8std.ru: BSL language](https://v8std.ru/lang/)
