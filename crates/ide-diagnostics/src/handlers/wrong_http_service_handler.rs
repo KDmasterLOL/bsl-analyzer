@@ -1,9 +1,4 @@
-//! WrongHttpServiceHandler diagnostic.
-//!
-//! Checks HTTP service handlers for:
-//! - Missing handler (empty handler name)
-//! - Handler not found in module
-//! - Incorrect handler (wrong number of parameters)
+//! Reports missing or invalid HTTP service method handlers.
 
 use crate::define_metadata;
 use crate::metadata::*;
