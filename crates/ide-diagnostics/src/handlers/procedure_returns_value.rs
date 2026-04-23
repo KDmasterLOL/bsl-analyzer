@@ -1,30 +1,6 @@
 //! ProcedureReturnsValue diagnostic.
 //!
-//! Detects return statements with values inside procedures.
-//! Only functions can return values, procedures must use `Return;` without value.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура Тест()
-//!     Возврат 42;  // Error: procedure cannot return value
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура Тест()
-//!     Возврат;  // OK: procedure without return value
-//! КонецПроцедуры
-//!
-//! Функция Тест()
-//!     Возврат 42;  // OK: function can return value
-//! КонецФункции
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Blocker
-//! - **Type:** ERROR
+//! Reports `Возврат` statements with values inside procedures.
 
 use crate::define_metadata;
 use crate::metadata::*;
