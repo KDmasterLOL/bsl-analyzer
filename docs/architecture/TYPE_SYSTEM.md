@@ -116,7 +116,9 @@ Inference использует тот же `Resolver`, что и Semantics:
 - `Expr::Field { base, field }` → `field_lookup::lookup_field`
   (type-directed по receiver'у: ManagerCollection → MDO-объект,
   ObjectManager → manager prop, MetadataRef → реквизит через
-  `Configuration`, PlatformObject → `bsl-platform`);
+  `Configuration`, PlatformObject / collection / primitive →
+  `platform_property_lookup::lookup_platform_property` — свойства из
+  `platform_data.json` с `is_readonly` флагом и union return types);
 - `Expr::Call { callee, args }` — три ветки:
   - quailfied `CommonModule.Method()` → `resolve_qualified_call`;
   - 3-level `Документы.ПКО.Метод()` → `infer_three_level_call`;

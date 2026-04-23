@@ -402,6 +402,13 @@ impl Ty {
             "таблицазначений" | "valuetable" => Ty::ValueTable,
             "списокзначений" | "valuelist" => Ty::ValueList,
 
+            // Bottom-ish markers that appear in platform return-type union
+            // strings (e.g. "РезультатЗапроса, Неопределено"). Recognising
+            // them as their canonical `Ty` lets `Ty::union(...)` dedup and
+            // lets `lookup_method` strip them before chained dispatch.
+            "неопределено" | "undefined" => Ty::Undefined,
+            "null" => Ty::Null,
+
             _ => Ty::Unknown,
         }
     }

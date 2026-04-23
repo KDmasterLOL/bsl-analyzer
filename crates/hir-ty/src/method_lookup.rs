@@ -85,6 +85,36 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
     // call site in `infer.rs` — this fallback only runs through
     // `Expr::MethodCall` / aliased-manager shapes, where there is no
     // CFE resolver to consult.
+    // `Ty::Union` receivers are the common "happy path + Неопределено"
+    // shape from platform return types (e.g. `Запрос.Выполнить()` →
+    // `Ty::Union([QueryResult, Undefined])`). Strip `Undefined` / `Null`
+    // sentinels (they have no instance methods) and dispatch on each
+    // remaining branch; the caller sees a unioned return type so chained
+    // calls like `Запрос.Выполнить().Выгрузить()` resolve without waiting
+    // for M4 full narrowing.
+    if let Ty::Union(members) = receiver_ty {
+        let live: Vec<&Ty> =
+            members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
+        let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
+        let mut params: Vec<Ty> = Vec::new();
+        let mut hit_any = false;
+        for m in live {
+            if let Some(info) = lookup_method(m, method_name) {
+                hit_any = true;
+                returns.push(info.return_ty);
+                // Parameter lists are taken from the first successful
+                // branch — platform overloads with differing signatures
+                // across union branches are vanishingly rare in HBK data,
+                // and inference only consults `params` for arity-style
+                // checks where widening is harmless.
+                if params.is_empty() {
+                    params = info.params;
+                }
+            }
+        }
+        return hit_any.then(|| MethodInfo { return_ty: Ty::union(returns), params });
+    }
+
     match receiver_ty {
         Ty::ObjectManager { kind, name } => {
             if let Some(res) = crate::platform_manager_lookup::resolve_platform_manager_method(
@@ -141,7 +171,7 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
 /// because BSL exposes no instance methods on them — string/date
 /// "methods" are global functions (`СтрДлина`, `ДобавитьМесяц`) reachable
 /// only through free-function syntax, not `receiver.method()`.
-fn platform_type_key(ty: &Ty) -> Option<&str> {
+pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
     match ty {
         // Value types — English canonical names hit the bilingual index.
         Ty::Array => Some("Array"),
@@ -186,25 +216,53 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
 ///   `Ty::from_type_name`); unrecognised names fall back to
 ///   `Ty::PlatformObject(name)` so hover / chained calls still carry a
 ///   meaningful type.
+/// - `return_type = Some("РезультатЗапроса, Неопределено")` — comma-joined
+///   union strings emitted by the HBK scraper when a method returns one of
+///   several types (happy-path + null sentinel). Split on `,`, map each
+///   segment via `resolve_platform_type_name`, and feed the list to
+///   `Ty::union` so chained calls see `Ty::Union([QueryResult, Undefined])`
+///   instead of a poisoned `Ty::PlatformObject("... ,Неопределено")`.
 /// - `return_type = None` → procedure; `Ty::Undefined`.
-/// - Parameter types follow the same path; missing `param_type` becomes
-///   `Ty::Unknown` to signal "any".
+/// - Parameter types are kept as raw scalars for now; malformed comma-heavy
+///   HBK prose stays a single `Ty::PlatformObject(...)` instead of poisoning
+///   argument checks with bogus union members.
 fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     let return_ty = method
         .return_type
         .as_ref()
-        .map(|ret| resolve_platform_type_name(ret))
+        .map(|ret| resolve_platform_type_union(ret))
         .unwrap_or(Ty::Undefined);
 
     let params: Vec<Ty> = method
         .parameters
         .iter()
-        .map(|p| {
-            p.param_type.as_ref().map(|t| resolve_platform_type_name(t)).unwrap_or(Ty::Unknown)
-        })
+        .map(|p| p.param_type.as_ref().map(|t| Ty::from_type_name(t)).unwrap_or(Ty::Unknown))
         .collect();
 
     MethodInfo { return_ty, params }
+}
+
+/// Split a comma-joined platform type string into a `Ty::union(...)`.
+///
+/// Only comma-joined strings whose every segment resolves to a known structured
+/// type or sentinel are treated as a union. Free-prose commas fall back to a
+/// single raw platform object type.
+fn resolve_platform_type_union(raw: &str) -> Ty {
+    let segments: Vec<&str> = raw.split(',').map(str::trim).collect();
+    if segments.iter().any(|segment| !segment_is_valid_type(segment)) {
+        resolve_platform_type_name(raw)
+    } else {
+        Ty::union(segments.into_iter().map(resolve_platform_type_name).collect())
+    }
+}
+
+fn segment_is_valid_type(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    let ty = Ty::from_type_name(s);
+    !ty.is_unknown() || PlatformData::instance().get_type(s).is_some()
 }
 
 /// Map a platform type-name string to a `Ty`. Primitives / collections
@@ -224,7 +282,25 @@ pub(crate) fn resolve_platform_type_name(name: &str) -> Ty {
 mod tests {
     use super::*;
     use bsl_metadata::MdoType;
+    use bsl_platform::MethodParam;
     use hir_def::ty::MetadataKind;
+
+    fn test_method(return_type: Option<&str>, param_type: Option<&str>) -> PlatformMethod {
+        PlatformMethod {
+            id: 0,
+            type_name: "TestType".into(),
+            name: "Тест".into(),
+            english_name: "Test".into(),
+            return_type: return_type.map(Into::into),
+            parameters: vec![MethodParam {
+                name: "Параметр".into(),
+                param_type: param_type.map(Into::into),
+                is_optional: false,
+            }],
+            min_version: None,
+            context: None,
+        }
+    }
 
     #[test]
     fn method_lookup_platform_type_hit() {
@@ -252,10 +328,97 @@ mod tests {
     }
 
     #[test]
-    fn method_lookup_returns_none_for_union() {
-        // Unions defer to M4 narrowing — today no method lookup happens.
+    fn method_lookup_returns_none_for_union_without_live_method() {
+        // Primitives expose no instance methods → union of primitives still
+        // returns `None` for any method name (every branch misses).
         let u = Ty::union(vec![Ty::Number, Ty::String]);
         assert!(lookup_method(&u, &Name::new("Любой")).is_none());
+    }
+
+    #[test]
+    fn method_lookup_union_narrows_past_undefined_sentinel() {
+        // `Запрос.Выполнить()` returns `"РезультатЗапроса, Неопределено"`
+        // → `Ty::Union([QueryResult, Undefined])`. Chained
+        // `.Выгрузить()` must resolve against the live branch (QueryResult
+        // has a `Выгрузить` method in platform data) — the `Undefined`
+        // sentinel is stripped before dispatch so the chain survives.
+        let u = Ty::union(vec![Ty::PlatformObject(Name::new("РезультатЗапроса")), Ty::Undefined]);
+        let info = lookup_method(&u, &Name::new("Выгрузить")).expect(
+            "Union([QueryResult, Undefined]).Выгрузить must resolve through the live branch",
+        );
+        // HBK declares `QueryResult.Выгрузить` as `"ТаблицаЗначений,
+        // ДеревоЗначений"` — the narrowing must at least preserve
+        // `Ty::ValueTable` in the result so chained `.Добавить()` works.
+        let contains_value_table = match &info.return_ty {
+            Ty::ValueTable => true,
+            Ty::Union(members) => members.iter().any(|m| matches!(m, Ty::ValueTable)),
+            _ => false,
+        };
+        assert!(
+            contains_value_table,
+            "return type must include Ty::ValueTable, got {:?}",
+            info.return_ty,
+        );
+    }
+
+    #[test]
+    fn method_lookup_platform_object_query_execute_direct() {
+        // Direct check: `Ty::PlatformObject("Запрос").Выполнить` must
+        // resolve — the receiver shape that inference produces when
+        // `Зап = Новый Запрос`. If this asserts None while the bilingual
+        // test below passes, inference is hitting a different code path.
+        let info = lookup_method(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"));
+        assert!(info.is_some(), "PlatformObject(Запрос).Выполнить must resolve");
+    }
+
+    #[test]
+    fn method_lookup_query_execute_returns_union_with_undefined() {
+        // Pins the HBK shape for `Запрос.Выполнить` — return_type is the
+        // comma-joined string `"РезультатЗапроса, Неопределено"`. After
+        // `to_method_info` splits it we must see both branches as the
+        // receiver for any downstream chain.
+        let info = lookup_method(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"))
+            .expect("Запрос.Выполнить must resolve in platform data");
+        match info.return_ty {
+            Ty::Union(members) => {
+                assert!(
+                    members.iter().any(|m| matches!(
+                        m,
+                        Ty::PlatformObject(n) if n.as_str().eq_ignore_ascii_case("РезультатЗапроса")
+                    )),
+                    "union must include РезультатЗапроса, got {members:?}",
+                );
+                assert!(
+                    members.iter().any(|m| matches!(m, Ty::Undefined)),
+                    "union must include Ty::Undefined, got {members:?}",
+                );
+            }
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_platform_type_union_falls_back_for_prose_commas() {
+        assert_eq!(
+            resolve_platform_type_union("ТабличныйДокумент, ТекстовыйДокумент; другой объект"),
+            Ty::PlatformObject(Name::new("ТабличныйДокумент, ТекстовыйДокумент; другой объект",)),
+        );
+        assert_eq!(
+            resolve_platform_type_union("Ссылка на объект, либо"),
+            Ty::PlatformObject(Name::new("Ссылка на объект, либо")),
+        );
+        assert_eq!(
+            resolve_platform_type_union("Метаданные,"),
+            Ty::PlatformObject(Name::new("Метаданные,")),
+        );
+        assert_eq!(resolve_platform_type_union(", ,"), Ty::PlatformObject(Name::new(", ,")));
+    }
+
+    #[test]
+    fn to_method_info_keeps_param_type_as_single_raw_value() {
+        let info = to_method_info(&test_method(Some("Число, Неопределено"), Some("Метаданные,")));
+        assert_eq!(info.return_ty, Ty::union(vec![Ty::Number, Ty::Undefined]));
+        assert_eq!(info.params, vec![Ty::Unknown]);
     }
 
     #[test]

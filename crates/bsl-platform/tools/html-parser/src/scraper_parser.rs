@@ -1003,6 +1003,61 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_readonly_true() {
+        let html = r#"
+            <p class="V8SH_chapter">Использование:</p>Только чтение.
+            <p class="V8SH_chapter">Описание:</p>Тип: Структура.
+        "#;
+        assert!(extract_readonly(html));
+    }
+
+    #[test]
+    fn test_extract_readonly_read_write() {
+        let html = r#"
+            <p class="V8SH_chapter">Использование:</p>Чтение и запись.
+            <p class="V8SH_chapter">Описание:</p>Тип: Строка.
+        "#;
+        assert!(!extract_readonly(html));
+    }
+
+    #[test]
+    fn test_extract_readonly_missing_chapter() {
+        let html = r#"
+            <p class="V8SH_chapter">Описание:</p>Тип: Строка.
+        "#;
+        assert!(!extract_readonly(html));
+    }
+
+    #[test]
+    fn test_extract_property_types_single() {
+        let html = r#"
+            <p class="V8SH_chapter">Использование:</p>Только чтение.
+            <p class="V8SH_chapter">Описание:</p>Тип: <a href="...">Структура</a>. <br>
+            Содержит значения параметров.
+        "#;
+        assert_eq!(extract_property_types(html), vec!["Структура".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_property_types_union() {
+        let html = r#"
+            <p class="V8SH_chapter">Описание:</p>Тип: <a>МенеджерВременныхТаблиц</a>, <a>Неопределено</a>. <br>Содержит…
+        "#;
+        assert_eq!(
+            extract_property_types(html),
+            vec!["МенеджерВременныхТаблиц".to_string(), "Неопределено".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_extract_property_types_missing_tip() {
+        let html = r#"
+            <p class="V8SH_chapter">Описание:</p>Свободное описание без метки Тип.
+        "#;
+        assert!(extract_property_types(html).is_empty());
+    }
+
+    #[test]
     fn test_extract_default_value() {
         // Colon variant
         let text = "Тип: Число. Значение по умолчанию: 10. Описание...";
@@ -1198,6 +1253,53 @@ pub fn extract_constructor_variant_name(html_content: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Extracts the raw chapter content for a chapter whose title is the
+/// literal `Использование` block on a property page.
+///
+/// Property pages encode read-only semantics as plain text sibling to the
+/// `Использование:` chapter header, e.g.
+/// `<p class="V8SH_chapter">Использование:</p>Только чтение.` or
+/// `…</p>Чтение и запись.`.
+/// Returns `true` when the first non-empty text after the header contains
+/// `Только чтение` (case-insensitive, Russian); otherwise `false`.
+pub fn extract_readonly(html_content: &str) -> bool {
+    let Some(text) = extract_chapter_content(html_content, "Использование") else {
+        return false;
+    };
+    let lc = text.to_lowercase();
+    lc.contains("только чтение")
+}
+
+/// Extracts the declared value types from a property page.
+///
+/// Property pages embed the property type inside the `Описание:` chapter
+/// under the `Тип:` prefix, e.g.
+/// `<p class="V8SH_chapter">Описание:</p>Тип: <a href="...">Структура</a>. <br>Содержит…`
+/// or, for union returns,
+/// `…Тип: <a>МенеджерВременныхТаблиц</a>, <a>Неопределено</a>. <br>…`.
+///
+/// Returns the list of Russian type names in source order. Empty when the
+/// page omits the `Тип:` block or the description is free prose.
+pub fn extract_property_types(html_content: &str) -> Vec<String> {
+    let Some(desc) = extract_chapter_content(html_content, "Описание") else {
+        return Vec::new();
+    };
+    let Some(pos) = desc.find("Тип:") else {
+        return Vec::new();
+    };
+    let after = &desc[pos + "Тип:".len()..];
+    let end = after
+        .find('.')
+        .or_else(|| after.find('\n'))
+        .unwrap_or(after.len());
+    let segment = after[..end].trim();
+    segment
+        .split(',')
+        .map(|s| s.trim().trim_matches('.').trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Parses keyword HTML file and extracts full documentation.

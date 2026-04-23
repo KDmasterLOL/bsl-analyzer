@@ -76,8 +76,14 @@ pub enum CompletionItemKind {
     MdoType,
     /// Metadata object instance (Валюты, Контрагенты)
     MdoObject,
-    /// Field/property
+    /// Field (MDO attribute / standard attribute).
     Field,
+    /// Property of a platform type (e.g. `Запрос.Параметры`, `Запрос.Текст`).
+    ///
+    /// Distinct from [`Self::Field`] so the editor can pick a different
+    /// icon and rank properties alongside methods when completing after a
+    /// dot on a platform-value receiver.
+    Property,
     /// Function
     Function,
     /// Method (platform or user-defined)

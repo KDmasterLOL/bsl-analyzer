@@ -180,6 +180,67 @@ impl From<&RawPlatformConstructor> for PlatformConstructor {
     }
 }
 
+/// Property of a platform type (e.g. `Запрос.Параметры`, `Запрос.Текст`).
+///
+/// Unlike [`PlatformMethod`], property pages in HBK encode the value type as a
+/// list of references inside the `Описание:` chapter. A property may declare
+/// several types simultaneously (`МенеджерВременныхТаблиц, Неопределено`), so
+/// the runtime keeps them as a `Vec<SmolStr>` and lets the `hir-ty` adapter
+/// decide whether to collapse to a scalar `Ty` or a union. The `is_readonly`
+/// flag is derived from the `Использование:` chapter (`"Только чтение"` vs
+/// `"Чтение и запись"`) and feeds the `ReadOnlyPropertyAssignment` diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformProperty {
+    /// Stable numeric id (monotonic across the extraction run).
+    pub id: u32,
+    /// English name of the enclosing platform type (e.g. "Query"). Same shape
+    /// and case as [`PlatformMethod::type_name`] so both indices key on the
+    /// same string.
+    pub type_name: SmolStr,
+    /// Russian property name (e.g. "Параметры").
+    pub name: SmolStr,
+    /// English property name (e.g. "Parameters").
+    pub english_name: SmolStr,
+    /// Declared value types in source order. Single-element for scalars,
+    /// multi-element for union declarations. Empty when the HBK page omits
+    /// the `Тип:` marker (free-prose description).
+    pub property_types: Vec<SmolStr>,
+    /// `true` when the `Использование:` chapter reads "Только чтение";
+    /// `false` for read-write properties.
+    pub is_readonly: bool,
+    pub min_version: Option<SmolStr>,
+    pub context: Option<ContextAvailability>,
+}
+
+/// Raw platform property for const initialization (internal use only).
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct RawPlatformProperty {
+    pub id: u32,
+    pub type_name: &'static str,
+    pub name: &'static str,
+    pub english_name: &'static str,
+    pub property_types: &'static [&'static str],
+    pub is_readonly: bool,
+    pub min_version: Option<&'static str>,
+    pub context: Option<RawContextAvailability>,
+}
+
+impl From<&RawPlatformProperty> for PlatformProperty {
+    fn from(raw: &RawPlatformProperty) -> Self {
+        Self {
+            id: raw.id,
+            type_name: raw.type_name.into(),
+            name: raw.name.into(),
+            english_name: raw.english_name.into(),
+            property_types: raw.property_types.iter().map(|s| SmolStr::new(*s)).collect(),
+            is_readonly: raw.is_readonly,
+            min_version: raw.min_version.map(SmolStr::from),
+            context: raw.context.as_ref().map(ContextAvailability::from),
+        }
+    }
+}
+
 /// Method parameter
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodParam {
@@ -385,6 +446,42 @@ impl From<&RawConstructorDocs> for ConstructorDocs {
             description: raw.description.to_string(),
             params: raw.params.iter().map(ParamDocs::from).collect(),
             examples: raw.examples.iter().map(CodeExample::from).collect(),
+            notes: raw.notes.map(|n| n.to_string()),
+            see_also: raw.see_also.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+/// Full property documentation (by property id).
+///
+/// Mirrors [`MethodDocs`] / [`ConstructorDocs`] but stripped down to the parts
+/// a property page actually ships: a free-prose description, an optional
+/// `Примечание:` block, and a `См. также:` list. Structured data like
+/// `Тип:` already lives on [`PlatformProperty::property_types`], so it's
+/// deliberately not duplicated here.
+#[derive(Debug, Clone)]
+pub struct PropertyDocs {
+    pub property_id: u32,
+    pub description: String,
+    pub notes: Option<String>,
+    pub see_also: Vec<String>,
+}
+
+/// Raw property documentation for const initialization.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct RawPropertyDocs {
+    pub property_id: u32,
+    pub description: &'static str,
+    pub notes: Option<&'static str>,
+    pub see_also: &'static [&'static str],
+}
+
+impl From<&RawPropertyDocs> for PropertyDocs {
+    fn from(raw: &RawPropertyDocs) -> Self {
+        Self {
+            property_id: raw.property_id,
+            description: raw.description.to_string(),
             notes: raw.notes.map(|n| n.to_string()),
             see_also: raw.see_also.iter().map(|s| s.to_string()).collect(),
         }

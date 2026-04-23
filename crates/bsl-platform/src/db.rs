@@ -5,7 +5,8 @@
 //! - A singleton for standalone usage
 
 use crate::types::{
-    ConstructorDocs, GlobalFunction, PlatformConstructor, PlatformMethod, PlatformType,
+    ConstructorDocs, GlobalFunction, PlatformConstructor, PlatformMethod, PlatformProperty,
+    PlatformType, PropertyDocs,
 };
 use once_cell::sync::OnceCell;
 use rustc_hash::FxHashMap;
@@ -43,6 +44,15 @@ pub struct PlatformDataInner {
     constructors_by_type: FxHashMap<SmolStr, Vec<usize>>,
     /// Constructor documentation indexed by constructor ID.
     constructor_docs_by_id: FxHashMap<u32, usize>,
+    /// Converted platform properties (from raw const data).
+    properties: Vec<PlatformProperty>,
+    /// Properties indexed by (type_name, property_name). Bilingual — same
+    /// indexing shape as `methods_by_name`, so callers can pass either the
+    /// Russian or English type name and either the Russian or English
+    /// property name.
+    properties_by_name: FxHashMap<(SmolStr, SmolStr), usize>,
+    /// Property documentation indexed by property ID.
+    property_docs_by_id: FxHashMap<u32, usize>,
 }
 
 impl PlatformDataInner {
@@ -151,6 +161,34 @@ impl PlatformDataInner {
             constructor_docs_by_id.insert(docs.constructor_id, idx);
         }
 
+        // Convert raw properties and build the bilingual lookup index. Key
+        // shape mirrors `methods_by_name`: `(lowercase_type, lowercase_prop)`
+        // with four combinations (en/ru × en/ru) per entry so callers can
+        // supply either language.
+        let properties: Vec<PlatformProperty> =
+            crate::generated::PLATFORM_PROPERTIES.iter().map(PlatformProperty::from).collect();
+
+        let mut properties_by_name = FxHashMap::default();
+        for (idx, prop) in properties.iter().enumerate() {
+            let en_type_key: SmolStr = prop.type_name.to_lowercase().into();
+            let ru_prop_key: SmolStr = prop.name.to_lowercase().into();
+            let en_prop_key: SmolStr = prop.english_name.to_lowercase().into();
+
+            properties_by_name.insert((en_type_key.clone(), ru_prop_key.clone()), idx);
+            properties_by_name.insert((en_type_key.clone(), en_prop_key.clone()), idx);
+
+            if let Some(ru_type_key) = type_en_to_ru.get(&en_type_key) {
+                properties_by_name.insert((ru_type_key.clone(), ru_prop_key), idx);
+                properties_by_name.insert((ru_type_key.clone(), en_prop_key), idx);
+            }
+        }
+
+        // Index property documentation by property ID.
+        let mut property_docs_by_id = FxHashMap::default();
+        for (idx, docs) in crate::generated::PROPERTY_DOCS.iter().enumerate() {
+            property_docs_by_id.insert(docs.property_id, idx);
+        }
+
         Self {
             types,
             types_by_name,
@@ -163,6 +201,9 @@ impl PlatformDataInner {
             constructors,
             constructors_by_type,
             constructor_docs_by_id,
+            properties,
+            properties_by_name,
+            property_docs_by_id,
         }
     }
 
@@ -271,6 +312,48 @@ impl PlatformDataInner {
         let idx = *self.global_function_docs_by_id.get(&function_id)?;
         let raw_docs = crate::generated::GLOBAL_FUNCTION_DOCS.get(idx)?;
         Some(crate::types::MethodDocs::from(raw_docs))
+    }
+
+    /// Get platform property by type and property name (case-insensitive, bilingual).
+    ///
+    /// Accepts both Russian and English names on either side. Returns `None`
+    /// when the type has no declared properties, when the property name is
+    /// unknown, or when the type name itself is not in the platform catalogue.
+    pub fn get_property(&self, type_name: &str, prop_name: &str) -> Option<&PlatformProperty> {
+        let type_key: SmolStr = type_name.to_lowercase().into();
+        let prop_key: SmolStr = prop_name.to_lowercase().into();
+        let idx = *self.properties_by_name.get(&(type_key, prop_key))?;
+        self.properties.get(idx)
+    }
+
+    /// Get all properties for a specific type (case-insensitive, bilingual).
+    ///
+    /// Mirrors [`Self::get_type_methods`]: walks `properties` and filters by
+    /// the English type key so the caller can pass either the Russian or
+    /// English display name.
+    pub fn get_type_properties(&self, type_name: &str) -> Vec<&PlatformProperty> {
+        let type_key: SmolStr = type_name.to_lowercase().into();
+        let en_type_key = if let Some(idx) = self.types_by_name.get(&type_key) {
+            self.types[*idx].english_name.to_lowercase().into()
+        } else {
+            type_key
+        };
+        self.properties
+            .iter()
+            .filter(|p| p.type_name.to_lowercase() == en_type_key.as_str())
+            .collect()
+    }
+
+    /// Get all platform properties.
+    pub fn all_properties(&self) -> &[PlatformProperty] {
+        &self.properties
+    }
+
+    /// Get property documentation by property id.
+    pub fn get_property_docs(&self, property_id: u32) -> Option<PropertyDocs> {
+        let idx = *self.property_docs_by_id.get(&property_id)?;
+        let raw = crate::generated::PROPERTY_DOCS.get(idx)?;
+        Some(PropertyDocs::from(raw))
     }
 
     /// Returns keyword documentation by name (case-insensitive).
@@ -513,6 +596,40 @@ pub fn platform_constructors_query<'db>(
     Arc::new(data.get_constructors(&type_name).into_iter().cloned().collect())
 }
 
+/// Lookup a platform property by type + property name (case-insensitive, bilingual).
+///
+/// Thin Salsa wrapper around [`PlatformDataInner::get_property`]. Uses the
+/// existing [`MethodLookupInput`] interned input: property lookup shares the
+/// `(type_name, member_name)` key shape with method lookup, and reusing the
+/// same interned input avoids paying for a second Salsa interner over the
+/// same string pairs.
+#[salsa::tracked(lru = 256)]
+pub fn platform_property_query<'db>(
+    db: &'db dyn salsa::Database,
+    input: MethodLookupInput<'db>,
+) -> Option<PlatformProperty> {
+    let type_name = input.type_name(db);
+    let prop_name = input.method_name(db);
+    let data = PlatformDataInner::instance();
+    data.get_property(&type_name, &prop_name).cloned()
+}
+
+/// Get all properties for a specific platform type (case-insensitive, bilingual).
+///
+/// Mirrors [`type_methods_query`] — returns `Arc<Vec<_>>` so completion
+/// providers can share ownership across queries, and uses the same
+/// [`TypeNameInput`] interned key so both queries cache against the same
+/// input.
+#[salsa::tracked(lru = 128)]
+pub fn type_properties_query<'db>(
+    db: &'db dyn salsa::Database,
+    input: TypeNameInput<'db>,
+) -> Arc<Vec<PlatformProperty>> {
+    let type_name = input.name(db);
+    let data = PlatformDataInner::instance();
+    Arc::new(data.get_type_properties(&type_name).into_iter().cloned().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +855,107 @@ mod tests {
             TypeNameInput::new(&db, "ЗаведомоНесуществующийТип".to_string()),
         );
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_platform_property_query_bilingual() {
+        let db = TestDatabase::default();
+        let data = PlatformDataInner::instance();
+        if data.all_properties().is_empty() {
+            println!("Skipping test: no property data");
+            return;
+        }
+
+        // `Query.Текст` is the canonical sanity check: writable scalar
+        // returning `Строка`. Verify bilingual lookup on both sides —
+        // (en type, ru prop), (ru type, en prop), (en type, en prop).
+        let ru_ru = platform_property_query(
+            &db,
+            MethodLookupInput::new(&db, "Запрос".to_string(), "Текст".to_string()),
+        );
+        let en_en = platform_property_query(
+            &db,
+            MethodLookupInput::new(&db, "Query".to_string(), "Text".to_string()),
+        );
+        let en_ru = platform_property_query(
+            &db,
+            MethodLookupInput::new(&db, "Query".to_string(), "Текст".to_string()),
+        );
+        let ru_en = platform_property_query(
+            &db,
+            MethodLookupInput::new(&db, "Запрос".to_string(), "Text".to_string()),
+        );
+
+        for got in [&ru_ru, &en_en, &en_ru, &ru_en] {
+            let prop = got.as_ref().expect("Query.Text property must exist in platform data");
+            assert_eq!(prop.name.as_str(), "Текст");
+            assert_eq!(prop.english_name.as_str(), "Text");
+            assert_eq!(prop.property_types, vec![smol_str::SmolStr::new("Строка")]);
+            assert!(!prop.is_readonly, "Текст is read-write");
+        }
+    }
+
+    #[test]
+    fn test_platform_property_query_readonly_union() {
+        let db = TestDatabase::default();
+        let data = PlatformDataInner::instance();
+        if data.all_properties().is_empty() {
+            println!("Skipping test: no property data");
+            return;
+        }
+
+        // `Запрос.Параметры` is the user's headline scenario — read-only
+        // Структура. Flag + scalar type must round-trip through the query.
+        let got = platform_property_query(
+            &db,
+            MethodLookupInput::new(&db, "Запрос".to_string(), "Параметры".to_string()),
+        );
+        let prop = got.expect("Query.Parameters property must exist");
+        assert!(prop.is_readonly, "Параметры is read-only");
+        assert_eq!(prop.property_types, vec![smol_str::SmolStr::new("Структура")]);
+
+        // `Запрос.МенеджерВременныхТаблиц` is the union property sanity check.
+        let got = platform_property_query(
+            &db,
+            MethodLookupInput::new(
+                &db,
+                "Запрос".to_string(),
+                "МенеджерВременныхТаблиц".to_string(),
+            ),
+        );
+        let prop = got.expect("Query.TempTablesManager property must exist");
+        assert!(!prop.is_readonly, "МенеджерВременныхТаблиц is read-write");
+        assert_eq!(prop.property_types.len(), 2, "union property_types");
+    }
+
+    #[test]
+    fn test_type_properties_query_lists_all_members() {
+        let db = TestDatabase::default();
+        let data = PlatformDataInner::instance();
+        if data.all_properties().is_empty() {
+            println!("Skipping test: no property data");
+            return;
+        }
+
+        let props = type_properties_query(&db, TypeNameInput::new(&db, "Запрос".to_string()));
+        let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"Текст"));
+        assert!(names.contains(&"Параметры"));
+        assert!(names.contains(&"МенеджерВременныхТаблиц"));
+    }
+
+    #[test]
+    fn test_platform_property_query_unknown_returns_none() {
+        let db = TestDatabase::default();
+        let got = platform_property_query(
+            &db,
+            MethodLookupInput::new(
+                &db,
+                "Запрос".to_string(),
+                "ЗаведомоНесуществующееСвойство".to_string(),
+            ),
+        );
+        assert!(got.is_none());
     }
 
     #[test]

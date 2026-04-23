@@ -6,7 +6,8 @@
 //! - Snippets with parameter placeholders
 
 use bsl_platform::{
-    manager_methods_query, type_methods_query, PlatformDataInner, PlatformMethod, TypeNameInput,
+    manager_methods_query, type_methods_query, type_properties_query, PlatformDataInner,
+    PlatformMethod, PlatformProperty, TypeNameInput,
 };
 use hir::{MethodSymbol, Name, Semantics, Ty};
 use ide_db::RootDatabase;
@@ -103,6 +104,29 @@ pub(super) fn platform_completions<DB: RootDatabase>(
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
         let items = complete_platform_methods(db, type_name);
         return Some(apply_prefix_filter(items, &prefix, db));
+    }
+
+    // `Ty::Union` receivers show up whenever a platform method declares a
+    // comma-joined return type (e.g. `Запрос.Выполнить` →
+    // `"РезультатЗапроса, Неопределено"`, `QueryResult.Выгрузить` →
+    // `"ТаблицаЗначений, ДеревоЗначений"`). Strip the `Undefined` / `Null`
+    // sentinels — they have no instance members — and merge the surviving
+    // branches' completion lists. Labels are deduped so members shared
+    // across branches (e.g. `Количество`) surface once.
+    if let Ty::Union(members) = &receiver_ty {
+        let mut items: Vec<CompletionItem> = Vec::new();
+        let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for m in members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)) {
+            let Some(type_name) = m.platform_type_name() else { continue };
+            for item in complete_platform_methods(db, type_name) {
+                if seen_labels.insert(item.label.clone()) {
+                    items.push(item);
+                }
+            }
+        }
+        if !items.is_empty() {
+            return Some(apply_prefix_filter(items, &prefix, db));
+        }
     }
 
     None
@@ -387,16 +411,34 @@ fn fallback_item(method: &MethodSymbol) -> CompletionItem {
     }
 }
 
-/// Completes platform methods for a receiver type.
+/// Completes platform **members** — methods *and* properties — for a
+/// receiver type.
 ///
-/// Example: For receiver "Строка", shows: ВРег, НРег, Длина, etc.
+/// Example: For receiver "Запрос", shows methods (`Выполнить`,
+/// `УстановитьПараметр`, …) plus properties (`Текст`, `Параметры`,
+/// `МенеджерВременныхТаблиц`, …). Properties are rendered with
+/// `CompletionItemKind::Property` so the editor's icon and ranking
+/// differ from methods; methods keep the existing insert-with-parens
+/// snippet, properties insert just the label.
+///
+/// Keeping both lookups behind a single salsa-cached pair of queries
+/// (`type_methods_query` + `type_properties_query`) means completion
+/// doesn't pay for a live walk of `PlatformData` on every keystroke.
 fn complete_platform_methods(db: &dyn RootDatabase, receiver_type: &str) -> Vec<CompletionItem> {
-    let input = TypeNameInput::new(db, receiver_type.to_string());
-    let methods = type_methods_query(db, input);
+    let methods_input = TypeNameInput::new(db, receiver_type.to_string());
+    let methods = type_methods_query(db, methods_input);
+    let props_input = TypeNameInput::new(db, receiver_type.to_string());
+    let properties = type_properties_query(db, props_input);
 
-    tracing::debug!(method_count = methods.len(), "Found platform methods");
+    tracing::debug!(
+        method_count = methods.len(),
+        property_count = properties.len(),
+        "Found platform members"
+    );
 
-    methods.iter().map(render_platform_method).collect()
+    let mut items: Vec<CompletionItem> = methods.iter().map(render_platform_method).collect();
+    items.extend(properties.iter().map(render_platform_property));
+    items
 }
 
 /// Renders a platform manager method (`Справочники.Склады.НайтиПоКоду`, …) as
@@ -417,6 +459,61 @@ pub(super) fn render_platform_method(method: &PlatformMethod) -> CompletionItem 
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
     let sig = from_platform_method(method, docs.as_ref());
     item_from_signature(&sig)
+}
+
+/// Render a platform property as a completion item.
+///
+/// Unlike methods, properties don't go through the `symbol_info` signature
+/// pipeline: there are no parameters to format, no parentheses to insert,
+/// and their `detail` only needs the value-type summary plus the optional
+/// `[Только чтение]` marker. Keeping the renderer local keeps the
+/// property item shape obvious at the call site.
+///
+/// - `label` — Russian name (primary display).
+/// - `filter_text` — `"{russian} {english}"` so typing either language
+///   narrows the list (same shape as `symbol_info::render_completion_detail`
+///   builds for methods).
+/// - `detail` — `"{property_types} [Только чтение?]"`, e.g.
+///   `"Структура [Только чтение]"` or `"Строка"`.
+/// - `insert_text` — just the Russian name. Properties have no parens.
+/// - `kind` — `CompletionItemKind::Property`, distinguishing them from
+///   methods in the editor's completion popup.
+pub(super) fn render_platform_property(prop: &PlatformProperty) -> CompletionItem {
+    let type_summary = if prop.property_types.is_empty() {
+        String::from("Произвольный")
+    } else {
+        prop.property_types.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+    };
+    let detail = if prop.is_readonly {
+        format!("{type_summary} [Только чтение]")
+    } else {
+        type_summary
+    };
+
+    let documentation = PlatformDataInner::instance()
+        .get_property_docs(prop.id)
+        .map(|d| {
+            let mut out = d.description;
+            if let Some(notes) = d.notes {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&notes);
+            }
+            out
+        })
+        .filter(|s| !s.is_empty());
+
+    CompletionItem {
+        label: prop.name.to_string(),
+        detail: Some(detail),
+        kind: CompletionItemKind::Property,
+        insert_text: prop.name.to_string(),
+        documentation,
+        sort_text: None,
+        filter_text: Some(format!("{} {}", prop.name, prop.english_name)),
+        source: None,
+    }
 }
 
 #[cfg(test)]
@@ -517,30 +614,42 @@ mod tests {
         let items = items.unwrap();
         assert!(!items.is_empty(), "Expected at least one method completion");
 
-        // All items should be methods
-        for item in &items {
-            assert_eq!(item.kind, CompletionItemKind::Method);
-        }
+        // Split by kind — the completion list now mixes methods (with
+        // parenthesised snippets) and properties (bare labels). Each kind
+        // is checked separately; both may be empty for rarely-used types,
+        // but at least one must be present.
+        let methods: Vec<&CompletionItem> =
+            items.iter().filter(|i| i.kind == CompletionItemKind::Method).collect();
+        let properties: Vec<&CompletionItem> =
+            items.iter().filter(|i| i.kind == CompletionItemKind::Property).collect();
+        assert_eq!(
+            methods.len() + properties.len(),
+            items.len(),
+            "Unexpected CompletionItemKind in platform member completion"
+        );
+        println!("Found {} method + {} property completions", methods.len(), properties.len());
 
-        // Should contain common String methods if platform data is available
-        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
-        println!("Found {} method completions", labels.len());
-
-        // If we have methods, verify snippet format
-        for item in &items {
-            // All methods should have snippets ending with $0)
+        // Methods must carry the paren-snippet with a tail-$0 cursor.
+        for item in methods {
             assert!(
                 item.insert_text.ends_with("$0)"),
                 "Method snippet should end with $0): {}",
                 item.insert_text
             );
-
-            // All methods should have parentheses
             assert!(
                 item.insert_text.contains('(') && item.insert_text.contains(')'),
                 "Method snippet should have parentheses: {}",
                 item.insert_text
             );
+        }
+        // Properties insert just the label — no parens, no snippet cursor.
+        for item in properties {
+            assert!(
+                !item.insert_text.contains('('),
+                "Property insert_text must not contain '(': {}",
+                item.insert_text
+            );
+            assert_eq!(item.insert_text, item.label);
         }
     }
 }

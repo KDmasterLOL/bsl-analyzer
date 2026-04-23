@@ -183,6 +183,7 @@ pub enum DiagnosticCode {
     MismatchedArgCount,
     TypeMismatch,
     UnresolvedField,
+    ReadOnlyPropertyAssignment,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,

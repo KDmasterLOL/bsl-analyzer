@@ -64,6 +64,11 @@ pub struct FieldInfo {
     /// Type of the field after lowering its `AttributeType` through
     /// [`TyLoweringContext`].
     pub ty: Ty,
+    /// `true` when the field is a platform property marked `"Только чтение"`
+    /// in HBK. MDO attributes are always read-write in BSL, so this is
+    /// `false` for any MetadataRef-backed `FieldInfo`. Consumed by the
+    /// `ReadOnlyPropertyAssignment` diagnostic.
+    pub is_readonly: bool,
 }
 
 /// Resolve a field access on a typed receiver.
@@ -96,8 +101,25 @@ pub fn lookup_field(
     let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
 
     match receiver_ty {
+        // MetadataRef receivers own the MDO-attribute surface and MUST NOT
+        // be routed through platform-property lookup — the `Ссылка` /
+        // `Код` / `Наименование` fields for `CatalogRef.X` live in the
+        // XML `Configuration`, not `platform_data.json`. Platform
+        // properties only apply to generic receivers (`Ty::PlatformObject`,
+        // value types, primitives).
         Ty::MetadataRef { kind, name } => lookup_metadata_ref(configs, *kind, name, field_name),
-        _ => None,
+        // Every other receiver type delegates to the platform-property
+        // adapter. `lookup_platform_property` itself decides whether the
+        // shape is supported (primitives return `None` — BSL exposes no
+        // declared properties on Число/Строка/Булево/Дата), so we can
+        // safely call it for any non-MetadataRef receiver.
+        //
+        // `UnresolvedField` semantics are preserved: the diagnostic in
+        // `infer_field_lookup` only fires for MetadataRef receivers, so
+        // a `None` here for a platform type keeps the existing
+        // "don't over-report on platform opaque" behaviour.
+        _ => crate::platform_property_lookup::lookup_platform_property(receiver_ty, field_name)
+            .map(|res| FieldInfo { ty: res.return_ty, is_readonly: res.is_readonly }),
     }
 }
 
@@ -167,7 +189,10 @@ fn lookup_on_mdo(
 
     for attr in &mdo.attributes {
         if matches_bilingual(&attr.name, attr.name_en.as_deref(), &needle) {
-            return Some(FieldInfo { ty: attribute_type_to_ty(&attr.attr_type) });
+            return Some(FieldInfo {
+                ty: attribute_type_to_ty(&attr.attr_type),
+                is_readonly: false,
+            });
         }
     }
 
@@ -179,6 +204,7 @@ fn lookup_on_mdo(
                     kind: MetadataKind::TabularSection { parent: parent_mdo_type },
                     name: qualified,
                 },
+                is_readonly: false,
             });
         }
     }
@@ -207,7 +233,10 @@ fn lookup_on_tabular_row(
     let needle = field_name.as_str().to_lowercase();
     for attr in ts.attributes() {
         if matches_bilingual(attr.name(), attr.name_en(), &needle) {
-            return Some(FieldInfo { ty: attribute_type_to_ty(attr.attr_type()) });
+            return Some(FieldInfo {
+                ty: attribute_type_to_ty(attr.attr_type()),
+                is_readonly: false,
+            });
         }
     }
     None
@@ -314,6 +343,7 @@ fn lookup_on_register(
                     register_name,
                     dim.name(),
                 ),
+                is_readonly: false,
             });
         }
     }
@@ -327,6 +357,7 @@ fn lookup_on_register(
                     register_name,
                     res.name(),
                 ),
+                is_readonly: false,
             });
         }
     }
@@ -340,6 +371,7 @@ fn lookup_on_register(
                     register_name,
                     attr.name(),
                 ),
+                is_readonly: false,
             });
         }
     }

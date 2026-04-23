@@ -550,6 +550,7 @@ fn convert_completion_kind(kind: ide::CompletionItemKind) -> CompletionItemKind 
         ide::CompletionItemKind::MdoType => CompletionItemKind::CLASS,
         ide::CompletionItemKind::MdoObject => CompletionItemKind::MODULE,
         ide::CompletionItemKind::Field => CompletionItemKind::FIELD,
+        ide::CompletionItemKind::Property => CompletionItemKind::PROPERTY,
         ide::CompletionItemKind::Function => CompletionItemKind::FUNCTION,
         ide::CompletionItemKind::Method => CompletionItemKind::METHOD,
         ide::CompletionItemKind::Keyword => CompletionItemKind::KEYWORD,

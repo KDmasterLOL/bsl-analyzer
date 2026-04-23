@@ -1134,6 +1134,155 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const CONSTRUCTOR_DOCS: &[RawConstructorDocs] = &[];\n\n");
     }
 
+    // ---- Platform properties ---------------------------------------------
+    // Properties carry a `Vec<SmolStr>` of declared value types plus an
+    // `is_readonly` flag. Missing `properties` key in the JSON is treated
+    // as "no properties" — the fallback emits empty const arrays so the
+    // crate still compiles while the JSON is being regenerated or when
+    // `platform_data.json` pre-dates the property extractor.
+    if let Some(properties) = data.get("properties").and_then(|v| v.as_array()) {
+        // Pass 1: per-property supporting arrays — `PROP_TYPES_{N}` for the
+        // value-type list, `PROP_CONTEXT_{N}` for availability, and
+        // `PROP_SEE_ALSO_{N}` for docs' see_also. The property-types list
+        // is flattened into a plain `&[&'static str]` const so
+        // `RawPlatformProperty::property_types` stays a `'static` slice
+        // (SmolStr conversion happens at runtime in `From<&Raw…>`).
+        let mut prop_types_names: Vec<Option<String>> = Vec::with_capacity(properties.len());
+        let mut prop_context_names: Vec<Option<String>> = Vec::with_capacity(properties.len());
+
+        let mut prop_types_counter = 0usize;
+        let mut prop_context_counter = 0usize;
+
+        for prop in properties {
+            // property_types
+            if let Some(types) = prop.get("property_types").and_then(|v| v.as_array()) {
+                if !types.is_empty() {
+                    let arr = format!("PROP_TYPES_{}", prop_types_counter);
+                    prop_types_counter += 1;
+                    code.push_str(&format!("const {}: &[&str] = &[", arr));
+                    for (i, t) in types.iter().enumerate() {
+                        if i > 0 {
+                            code.push_str(", ");
+                        }
+                        code.push_str(&format!("{:?}", t.as_str().unwrap_or("")));
+                    }
+                    code.push_str("];\n\n");
+                    prop_types_names.push(Some(arr));
+                } else {
+                    prop_types_names.push(None);
+                }
+            } else {
+                prop_types_names.push(None);
+            }
+
+            // context
+            if let Some(ctx) = prop.get("context").and_then(|v| v.as_object()) {
+                let name = format!("PROP_CONTEXT_{}", prop_context_counter);
+                prop_context_counter += 1;
+                code.push_str(&format!(
+                    "const {}: RawContextAvailability = RawContextAvailability {{\n",
+                    name
+                ));
+                for field in &[
+                    "thick_client",
+                    "thin_client",
+                    "web_client",
+                    "server",
+                    "mobile_client",
+                    "external_connection",
+                ] {
+                    code.push_str(&format!(
+                        "    {}: {},\n",
+                        field,
+                        ctx.get(*field).and_then(|v| v.as_bool()).unwrap_or(false)
+                    ));
+                }
+                code.push_str("};\n\n");
+                prop_context_names.push(Some(name));
+            } else {
+                prop_context_names.push(None);
+            }
+        }
+
+        // Pass 2: PLATFORM_PROPERTIES table.
+        code.push_str("pub const PLATFORM_PROPERTIES: &[RawPlatformProperty] = &[\n");
+        for (idx, prop) in properties.iter().enumerate() {
+            let id = prop.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let type_name = prop.get("type_name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = prop.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let english_name = prop.get("english_name").and_then(|v| v.as_str()).unwrap_or("");
+            let is_readonly = prop.get("is_readonly").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            code.push_str("    RawPlatformProperty {\n");
+            code.push_str(&format!("        id: {},\n", id));
+            code.push_str(&format!("        type_name: {:?},\n", type_name));
+            code.push_str(&format!("        name: {:?},\n", name));
+            code.push_str(&format!("        english_name: {:?},\n", english_name));
+            if let Some(arr) = &prop_types_names[idx] {
+                code.push_str(&format!("        property_types: {},\n", arr));
+            } else {
+                code.push_str("        property_types: &[],\n");
+            }
+            code.push_str(&format!("        is_readonly: {},\n", is_readonly));
+            if let Some(v) = prop.get("min_version").and_then(|v| v.as_str()) {
+                code.push_str(&format!("        min_version: Some({:?}),\n", v));
+            } else {
+                code.push_str("        min_version: None,\n");
+            }
+            if let Some(n) = &prop_context_names[idx] {
+                code.push_str(&format!("        context: Some({}),\n", n));
+            } else {
+                code.push_str("        context: None,\n");
+            }
+            code.push_str("    },\n");
+        }
+        code.push_str("];\n\n");
+
+        // Pass 3: PROPERTY_DOCS table — one entry per property with a
+        // documentation block (pages with only a `Тип:` segment and no
+        // narrative / notes / see-also are skipped on the parser side, so
+        // the missing-documentation case simply means no entry here).
+        code.push_str("pub const PROPERTY_DOCS: &[RawPropertyDocs] = &[\n");
+        for prop in properties.iter() {
+            let Some(docs) = prop.get("documentation").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            let property_id = prop.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let description = docs.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let notes = docs.get("notes").and_then(|v| v.as_str());
+
+            code.push_str("    RawPropertyDocs {\n");
+            code.push_str(&format!("        property_id: {},\n", property_id));
+            code.push_str(&format!("        description: {:?},\n", description));
+            if let Some(n) = notes {
+                code.push_str(&format!("        notes: Some({:?}),\n", n));
+            } else {
+                code.push_str("        notes: None,\n");
+            }
+            if let Some(see_also) = docs.get("see_also").and_then(|v| v.as_array()) {
+                if see_also.is_empty() {
+                    code.push_str("        see_also: &[],\n");
+                } else {
+                    code.push_str("        see_also: &[");
+                    for (i, item) in see_also.iter().enumerate() {
+                        if i > 0 {
+                            code.push_str(", ");
+                        }
+                        code.push_str(&format!("{:?}", item.as_str().unwrap_or("")));
+                    }
+                    code.push_str("],\n");
+                }
+            } else {
+                code.push_str("        see_also: &[],\n");
+            }
+            code.push_str("    },\n");
+        }
+        code.push_str("];\n\n");
+    } else {
+        code.push_str("pub const PLATFORM_PROPERTIES: &[RawPlatformProperty] = &[];\n");
+        code.push_str("pub const PROPERTY_DOCS: &[RawPropertyDocs] = &[];\n\n");
+    }
+
     fs::write(output_path, code).expect("Failed to write generated.rs");
 }
 
@@ -1151,6 +1300,8 @@ pub const METHOD_DOCS: &[RawMethodDocs] = &[];
 pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[];
 pub const PLATFORM_CONSTRUCTORS: &[RawPlatformConstructor] = &[];
 pub const CONSTRUCTOR_DOCS: &[RawConstructorDocs] = &[];
+pub const PLATFORM_PROPERTIES: &[RawPlatformProperty] = &[];
+pub const PROPERTY_DOCS: &[RawPropertyDocs] = &[];
 "#;
 
     fs::write(output_path, code).expect("Failed to write generated.rs");

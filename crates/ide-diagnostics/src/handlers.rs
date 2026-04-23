@@ -123,6 +123,7 @@ pub mod public_methods_description;
 pub mod query_nested_fields_by_dot;
 pub mod query_parse_error;
 pub mod query_to_missing_metadata;
+pub mod read_only_property;
 pub mod redundant_access_to_object;
 pub mod ref_overuse;
 pub mod reserved_parameter_names;
@@ -473,6 +474,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::MismatchedArgCount => Some(&mismatched_arg_count::METADATA),
         DiagnosticCode::TypeMismatch => Some(&type_mismatch::METADATA),
         DiagnosticCode::UnresolvedField => Some(&unresolved_field::METADATA),
+        DiagnosticCode::ReadOnlyPropertyAssignment => Some(&read_only_property::METADATA),
     }
 }
 

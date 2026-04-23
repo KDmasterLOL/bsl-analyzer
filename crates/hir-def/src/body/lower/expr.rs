@@ -2,7 +2,7 @@
 //!
 //! This module handles lowering of BSL expressions from AST to HIR.
 
-use syntax::{SyntaxKind, SyntaxNode};
+use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::body::{
     Body, BodyDiagnostic, ExternalRef, MagicNumberContext, ManagerType, RedundantAccessKind,
@@ -13,6 +13,30 @@ use crate::{Name, QualifiedName};
 use super::diagnostics::{is_deprecated_method, is_followed_by_loop_exit};
 use super::utils::{extract_string_content, looks_like_sdbl};
 use super::LoweringCtx;
+
+/// Whether a token kind is usable as the tail name of a `FIELD_EXPR`.
+///
+/// The parser accepts any keyword after `.` in addition to `IDENT`, so HIR
+/// lowering must mirror that rule or keyword-shaped members degrade to
+/// `Name::missing()`.
+fn is_field_name_token(kind: SyntaxKind) -> bool {
+    kind == SyntaxKind::IDENT || kind.is_keyword()
+}
+
+/// Return the first field-tail token that appears after `.` inside a `FIELD_EXPR`.
+///
+/// The scan is limited to direct `children_with_tokens()` of the field node, so
+/// it cannot descend into the base subtree.
+fn field_name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    let mut saw_dot = false;
+    node.children_with_tokens().filter_map(|el| el.into_token()).find(|tok| {
+        if !saw_dot {
+            saw_dot = tok.kind() == SyntaxKind::DOT;
+            return false;
+        }
+        is_field_name_token(tok.kind())
+    })
+}
 
 /// Lower an expression node (handles EXPR wrapper).
 pub(crate) fn lower_expr_node(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
@@ -1034,12 +1058,8 @@ fn maybe_lower_as_qualified_call(
 ) -> Option<Expr> {
     let call_info = analyze_qualified_call(field_expr_node, ctx)?;
 
-    // Last IDENT inside the FIELD_EXPR is the method name.
-    let field_token = field_expr_node
-        .children_with_tokens()
-        .filter_map(|el| el.into_token())
-        .filter(|tok| tok.kind() == SyntaxKind::IDENT)
-        .last()?;
+    // The first identifier-or-keyword token after `.` is the field tail.
+    let field_token = field_name_token(field_expr_node)?;
     let field_name = Name::new(field_token.text());
 
     let arg_presence = arg_list_node.map(extract_arg_presence).unwrap_or_default();
@@ -1286,12 +1306,10 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     let base =
         children.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
 
-    // Find field name (IDENT token after DOT)
-    let field_token = node
-        .children_with_tokens()
-        .filter_map(|el| el.into_token())
-        .filter(|tok| tok.kind() == SyntaxKind::IDENT)
-        .last();
+    // Match the parser rule: after `.` any identifier or keyword can be the
+    // field tail. Restricting the scan to direct children keeps the base
+    // subtree out of scope.
+    let field_token = field_name_token(node);
 
     let field_name =
         field_token.as_ref().map(|tok| Name::new(tok.text())).unwrap_or_else(Name::missing);

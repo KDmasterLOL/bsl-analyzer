@@ -153,6 +153,20 @@ pub enum InferenceDiagnostic {
     /// IDE layer can render `<CatalogRef.Номенклатура>.НеСуществует` in
     /// the diagnostic message without re-running inference.
     UnresolvedField { expr: ExprId, receiver_ty: Ty, field_name: Name },
+
+    /// Assignment to a field whose platform-property entry carries
+    /// `is_readonly = true` in HBK (`Использование:` chapter reads
+    /// `"Только чтение"`).
+    ///
+    /// Emitted from `Stmt::Assign` when the LHS is `Expr::Field` and
+    /// [`crate::field_lookup::lookup_field`] returns a [`crate::FieldInfo`]
+    /// flagged read-only. Propagated to the IDE layer as the
+    /// `ReadOnlyPropertyAssignment` diagnostic.
+    ///
+    /// `lhs` anchors the diagnostic to the field-access expression so the
+    /// editor underlines `.Параметры` rather than the whole statement;
+    /// `receiver_ty` and `field_name` feed the message body.
+    ReadOnlyPropertyAssignment { lhs: ExprId, receiver_ty: Ty, field_name: Name },
 }
 
 /// Kind of unresolved method call error.
@@ -266,6 +280,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::MismatchedArgCount { call_expr, .. } => *call_expr,
             InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
             InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
+            InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
         };
         if self.body.is_recovered(key) {
             return;
@@ -334,11 +349,40 @@ impl<'db> InferenceContext<'db> {
                 let value_ty = self.infer_expr(ExprId::from_idx(*value));
 
                 // Track variable type if target is a simple name
-                let target_expr = self.body.expr_idx(*target);
-                if let Expr::Path(name) = target_expr {
-                    if !value_ty.is_unknown() {
+                let target_expr = self.body.expr_idx(*target).clone();
+                match &target_expr {
+                    Expr::Path(name) if !value_ty.is_unknown() => {
                         self.var_types.insert(name.as_str().to_lowercase(), value_ty);
                     }
+                    Expr::Field { base, field } => {
+                        // Read-only-property gate. We resolve the receiver
+                        // type (already cached by the `infer_expr(target)`
+                        // call below, but we need it *before* the assignment
+                        // has a chance to misresolve anything) through
+                        // `field_lookup`, which is the same adapter hover
+                        // and completion consult. A hit with
+                        // `is_readonly = true` fires
+                        // `ReadOnlyPropertyAssignment`; a miss is simply
+                        // "we don't know what this is" and stays silent
+                        // (the companion `UnresolvedField` diagnostic
+                        // covers the Authoritative-receiver case).
+                        let base_ty = self.infer_expr(ExprId::from_idx(*base));
+                        let configs = self.db.configurations(self.file_id);
+                        if let Some(info) =
+                            crate::field_lookup::lookup_field(&configs, &base_ty, field)
+                        {
+                            if info.is_readonly {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::ReadOnlyPropertyAssignment {
+                                        lhs: ExprId::from_idx(*target),
+                                        receiver_ty: base_ty,
+                                        field_name: field.clone(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
 
                 self.infer_expr(ExprId::from_idx(*target));

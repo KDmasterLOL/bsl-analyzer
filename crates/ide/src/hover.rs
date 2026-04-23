@@ -6,8 +6,9 @@
 //! - User-defined symbols (methods, variables, parameters)
 
 use bsl_platform::{
-    global_function_query, platform_method_query, platform_type_query, type_methods_query,
-    ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod, TypeNameInput,
+    global_function_query, platform_method_query, platform_property_query, platform_type_query,
+    type_methods_query, ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod,
+    PlatformProperty, TypeNameInput,
 };
 use hir::{MetadataKind, Semantics, Ty};
 use ide_db::RootDatabase;
@@ -37,6 +38,18 @@ pub(crate) fn hover<DB: RootDatabase>(
     // Try user-defined symbols (via Definition API) FIRST
     // This has higher priority than platform symbols (local shadowing)
     if let Some(result) = hover_user_defined(db, file_id, &token) {
+        return Some(result);
+    }
+
+    // Try platform-property hover BEFORE `hover_platform`. The method/type
+    // hover in `hover_platform` uses the bare receiver IDENT text as the
+    // platform type key (`Строка.ВРег` works because `Строка` is literally
+    // the type), but platform-typed variables (`Зап = Новый Запрос; Зап.`)
+    // need `Semantics::type_of_expr` on the receiver. Keeping the property
+    // path separate keeps `hover_platform`'s purely-syntactic shortcut
+    // fast and reserves Salsa-backed type resolution for cases that
+    // actually need it.
+    if let Some(result) = hover_platform_property(db, file_id, &token) {
         return Some(result);
     }
 
@@ -296,6 +309,97 @@ fn definition_to_hover<DB: RootDatabase>(
     }
 
     Some(HoverResult { markup, range: Some(range) })
+}
+
+/// Attempts to provide hover information for a platform-type property
+/// access (`Зап.Параметры`, `РезультатЗапроса.Колонки`, …).
+///
+/// Unlike [`hover_platform`], this path resolves the receiver's actual
+/// `Ty` via `Semantics::type_of_expr` instead of treating the bare
+/// identifier text as a type name — it has to, because the receiver is
+/// typically a variable (`Зап` in `Зап = Новый Запрос;`), not a type
+/// literal. Once the receiver type is known, the property is looked up
+/// through the bilingual platform index, and the hover markup includes
+/// the declared value type(s), the `[Только чтение]` marker, and the
+/// free-prose documentation from `PropertyDocs`.
+///
+/// Returns `None` when:
+/// - the token is not an identifier,
+/// - the token's parent is not a `FIELD_EXPR` (i.e. we're not actually
+///   hovering a property access),
+/// - the receiver's type is not a platform-value shape with a scalar
+///   key (managers / metadata refs go through their own adapters),
+/// - the property name does not exist on the resolved type.
+fn hover_platform_property<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    token: &SyntaxToken,
+) -> Option<HoverResult> {
+    if token.kind() != SyntaxKind::IDENT {
+        return None;
+    }
+
+    // Identify the property-access shape. The token must sit under a
+    // FIELD_EXPR whose first child is the receiver — mirrors what
+    // `platform_completion::find_receiver_expr` does for completion.
+    let parent = token.parent()?;
+    if parent.kind() != SyntaxKind::FIELD_EXPR {
+        return None;
+    }
+    let receiver_node = parent.children().next()?;
+
+    // Resolve the receiver's inferred type via Semantics. Anything
+    // unknown / not a platform value type stays silent.
+    let sema = Semantics::new(db);
+    let receiver_ty = sema.type_of_expr(file_id, &receiver_node);
+    if receiver_ty.is_unknown() {
+        return None;
+    }
+
+    // Route through the same bilingual property index the IDE
+    // completion path uses. `platform_type_name()` only yields a key
+    // for platform-value receivers (PlatformObject, Array, Map,
+    // Structure, ValueTable, primitives); managers / metadata refs
+    // return None, so we naturally skip those here.
+    let type_key = receiver_ty.platform_type_name()?;
+    let prop_name = token.text().to_string();
+    let input = MethodLookupInput::new(db, type_key.to_string(), prop_name.clone());
+    let prop = platform_property_query(db, input)?;
+
+    Some(render_property_hover(&prop, token.text_range()))
+}
+
+/// Build the markdown block for a platform-property hover.
+///
+/// Emits in this order:
+/// 1. H4 title with the bilingual name (`**Параметры (Parameters)**`).
+/// 2. `[Только чтение]` marker when `is_readonly`; otherwise no line
+///    (read-write is the default, not worth surfacing).
+/// 3. `**Тип:**` with the declared value types joined by `, `.
+/// 4. The free-prose description / notes from `PropertyDocs` if any.
+fn render_property_hover(prop: &PlatformProperty, range: TextRange) -> HoverResult {
+    let mut markup = format!("**{} ({})**\n\n", prop.name, prop.english_name);
+    if prop.is_readonly {
+        markup.push_str("*Только чтение*\n\n");
+    }
+    if !prop.property_types.is_empty() {
+        let types: Vec<&str> = prop.property_types.iter().map(|s| s.as_str()).collect();
+        markup.push_str(&format!("**Тип:** {}\n\n", types.join(", ")));
+    }
+    if let Some(docs) = PlatformDataInner::instance().get_property_docs(prop.id) {
+        if !docs.description.is_empty() {
+            markup.push_str(&docs.description);
+            markup.push_str("\n\n");
+        }
+        if let Some(notes) = docs.notes {
+            if !notes.is_empty() {
+                markup.push_str("**Примечание:** ");
+                markup.push_str(&notes);
+                markup.push('\n');
+            }
+        }
+    }
+    HoverResult { markup, range: Some(range) }
 }
 
 /// Attempts to provide hover information for platform types and methods.

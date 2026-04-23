@@ -20,6 +20,14 @@ struct PlatformData {
     global_functions: Vec<GlobalFunctionInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     constructors: Vec<ConstructorInfo>,
+    /// Properties of platform types (e.g. `Запрос.Параметры`, `Запрос.Текст`).
+    ///
+    /// Top-level vec mirroring `methods`: each entry carries `type_name` (the
+    /// English name of the enclosing type) so the runtime can build a bilingual
+    /// index keyed by `(type_name_en, property_name_{ru,en})` without walking
+    /// a nested `TypeInfo.properties` path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    properties: Vec<PropertyInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -153,6 +161,50 @@ struct ConstructorDocumentation {
     see_also: Vec<String>,
 }
 
+/// Property of a platform type (e.g. `Запрос.Параметры`, `Запрос.Текст`).
+///
+/// Parsed from `{type_dir}/properties/<PropName>.html`. Carries the list of
+/// declared value types (single entry for scalar properties, multiple for
+/// union declarations like `МенеджерВременныхТаблиц, Неопределено`) and a
+/// `is_readonly` flag derived from the `Использование:` chapter.
+#[derive(Debug, Serialize, Deserialize)]
+struct PropertyInfo {
+    /// Stable numeric id assigned at parse time.
+    id: u32,
+    /// English name of the enclosing platform type (e.g. "Query"), same
+    /// shape as `MethodInfo::type_name`.
+    type_name: String,
+    /// Russian property name (e.g. "Параметры").
+    name: String,
+    /// English property name (e.g. "Parameters").
+    english_name: String,
+    /// Declared value types in source order. Single-element for scalars,
+    /// multi-element for union properties. Empty when the HBK page omits
+    /// the `Тип:` marker (free-prose description).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    property_types: Vec<String>,
+    /// `true` when the `Использование:` chapter states "Только чтение";
+    /// `false` for read-write properties (the page says "Чтение и запись").
+    is_readonly: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<ContextAvailability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<PropertyDocumentation>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PropertyDocumentation {
+    /// Free-prose description (text after the `Описание:` chapter with the
+    /// `Тип:` segment trimmed — the caller already has `property_types`).
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    see_also: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct MethodParameter {
     /// Parameter name (e.g., "Значение")
@@ -227,12 +279,16 @@ fn main() -> Result<()> {
     };
 
     // Parse platform types and methods from shcntx
-    let (types, methods, global_functions, constructors) = parse_shcntx_data(&shcntx_dir)
-        .context("Failed to parse shcntx data")?;
+    let (types, methods, global_functions, constructors, properties) =
+        parse_shcntx_data(&shcntx_dir).context("Failed to parse shcntx data")?;
 
     println!(
-        "Parsed {} types, {} methods, {} global functions, and {} constructors",
-        types.len(), methods.len(), global_functions.len(), constructors.len()
+        "Parsed {} types, {} methods, {} global functions, {} constructors, and {} properties",
+        types.len(),
+        methods.len(),
+        global_functions.len(),
+        constructors.len(),
+        properties.len()
     );
 
     // Generate JSON
@@ -242,6 +298,7 @@ fn main() -> Result<()> {
         methods,
         global_functions,
         constructors,
+        properties,
     };
 
     let json = serde_json::to_string_pretty(&platform_data)
@@ -311,14 +368,22 @@ fn parse_keyword_file(st_path: &Path) -> Result<Option<KeywordInfo>> {
     }
 }
 
-/// Parses shcntx directory for platform types, methods, global functions, and constructors.
+/// Parses shcntx directory for platform types, methods, global functions, constructors,
+/// and properties.
 fn parse_shcntx_data(
     shcntx_dir: &Path,
-) -> Result<(Vec<TypeInfo>, Vec<MethodInfo>, Vec<GlobalFunctionInfo>, Vec<ConstructorInfo>)> {
+) -> Result<(
+    Vec<TypeInfo>,
+    Vec<MethodInfo>,
+    Vec<GlobalFunctionInfo>,
+    Vec<ConstructorInfo>,
+    Vec<PropertyInfo>,
+)> {
     let mut types = Vec::new();
     let mut methods = Vec::new();
     let mut global_functions = Vec::new();
     let mut constructors = Vec::new();
+    let mut properties = Vec::new();
     let mut method_id_counter = 0u32;
     let mut function_id_counter = 0u32;
     // Constructors use a monotonic counter instead of the `ctor{N}.html`
@@ -326,10 +391,16 @@ fn parse_shcntx_data(
     // ship `ctor_Auto.html`, which would collapse to id=0 and collide with
     // every other non-numeric page in `constructor_docs_by_id`.
     let mut ctor_id_counter = 0u32;
+    // Property ids follow the same monotonic strategy as constructors. Many
+    // HBK pages are named `<Name><N>.html` where `<N>` is not unique across
+    // different types (e.g. both `Query/properties/Parameters7503.html` and
+    // an unrelated type could ship the same digit suffix), so a content-derived
+    // id wouldn't round-trip.
+    let mut prop_id_counter = 0u32;
 
     let objects_dir = shcntx_dir.join("objects");
     if !objects_dir.exists() {
-        return Ok((types, methods, global_functions, constructors));
+        return Ok((types, methods, global_functions, constructors, properties));
     }
 
     // Check for "Global context" directory
@@ -362,22 +433,28 @@ fn parse_shcntx_data(
             &mut types,
             &mut methods,
             &mut constructors,
+            &mut properties,
             &mut method_id_counter,
             &mut ctor_id_counter,
+            &mut prop_id_counter,
         )?;
     }
 
-    Ok((types, methods, global_functions, constructors))
+    Ok((types, methods, global_functions, constructors, properties))
 }
 
-/// Recursively parses a catalog directory for types, methods, and constructors.
+/// Recursively parses a catalog directory for types, methods, constructors,
+/// and properties.
+#[allow(clippy::too_many_arguments)]
 fn parse_catalog_directory(
     catalog_path: &Path,
     types: &mut Vec<TypeInfo>,
     methods: &mut Vec<MethodInfo>,
     constructors: &mut Vec<ConstructorInfo>,
+    properties: &mut Vec<PropertyInfo>,
     method_id_counter: &mut u32,
     ctor_id_counter: &mut u32,
+    prop_id_counter: &mut u32,
 ) -> Result<()> {
     // Iterate through entries in this catalog.
     // Sort so `fs::read_dir`'s platform-dependent order doesn't leak into
@@ -401,8 +478,10 @@ fn parse_catalog_directory(
                 types,
                 methods,
                 constructors,
+                properties,
                 method_id_counter,
                 ctor_id_counter,
+                prop_id_counter,
             )?;
             continue;
         }
@@ -426,6 +505,16 @@ fn parse_catalog_directory(
                     ctor_id_counter,
                 )?;
                 constructors.extend(type_ctors);
+
+                // Parse properties for this type. Same "missing directory is
+                // normal" contract as ctors — many primitives / purely-method
+                // types have no `properties/` at all.
+                let type_properties = parse_type_properties(
+                    &entry_path,
+                    &type_info.english_name,
+                    prop_id_counter,
+                )?;
+                properties.extend(type_properties);
 
                 types.push(type_info);
             }
@@ -662,6 +751,174 @@ fn parse_constructor_html(
         context,
         documentation,
     }))
+}
+
+/// Parses `{type_dir}/properties/*.html` into `PropertyInfo`s.
+///
+/// Mirrors the shape of [`parse_type_methods`] and [`parse_type_constructors`]:
+/// absence of the `properties/` directory is normal (not every platform type
+/// has declared properties — many primitives and collections only expose
+/// methods) and must not propagate as an error. Files are sorted before reading
+/// so ids stay stable across platforms / regenerations.
+fn parse_type_properties(
+    type_dir: &Path,
+    type_name_en: &str,
+    prop_id_counter: &mut u32,
+) -> Result<Vec<PropertyInfo>> {
+    let properties_dir = type_dir.join("properties");
+    if !properties_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut html_paths: Vec<std::path::PathBuf> = Vec::new();
+    for entry in fs::read_dir(&properties_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("html") {
+            html_paths.push(path);
+        }
+    }
+    html_paths.sort();
+
+    let mut out = Vec::new();
+    for path in html_paths {
+        if let Some(info) = parse_property_html(&path, type_name_en, prop_id_counter)? {
+            out.push(info);
+        }
+    }
+    Ok(out)
+}
+
+/// Parses a single property HTML page.
+///
+/// Expected title shape: `<h1 class="V8SH_pagetitle">Запрос.Параметры (Query.Parameters)</h1>`.
+/// Returns `None` when the file does not look like a property page
+/// (missing or malformed `<h1>`).
+fn parse_property_html(
+    html_path: &Path,
+    type_name_en: &str,
+    prop_id_counter: &mut u32,
+) -> Result<Option<PropertyInfo>> {
+    let html_content = fs::read_to_string(html_path)?;
+
+    // Title format: `Запрос.Параметры (Query.Parameters)`. Same two-step
+    // split as `parse_method_html`: dot separates the type prefix, parens
+    // separate the Russian and English sides.
+    let Some(title_start) = html_content.find(r#"<h1 class="V8SH_pagetitle">"#) else {
+        return Ok(None);
+    };
+    let after_title = &html_content[title_start + r#"<h1 class="V8SH_pagetitle">"#.len()..];
+    let Some(title_end) = after_title.find("</h1>") else {
+        return Ok(None);
+    };
+    let title = &after_title[..title_end];
+
+    let Some(dot_pos) = title.find('.') else {
+        return Ok(None);
+    };
+    let after_dot = &title[dot_pos + 1..];
+    let Some(space_pos) = after_dot.find(' ') else {
+        return Ok(None);
+    };
+    let russian_prop = after_dot[..space_pos].trim().to_string();
+
+    let Some(paren_start) = title.find('(') else {
+        return Ok(None);
+    };
+    let after_paren = &title[paren_start + 1..];
+    let Some(dot_in_paren) = after_paren.find('.') else {
+        return Ok(None);
+    };
+    let after_paren_dot = &after_paren[dot_in_paren + 1..];
+    let Some(paren_end) = after_paren_dot.find(')') else {
+        return Ok(None);
+    };
+    let english_prop = after_paren_dot[..paren_end].trim().to_string();
+
+    if russian_prop.is_empty() || english_prop.is_empty() {
+        return Ok(None);
+    }
+
+    // Skip HBK placeholder pages. Manager-style composite types
+    // (`Structure.<Имя ключа>`, `CatalogManager.<Имя>`, `CatalogRef.<Имя>`)
+    // ship generic "any user-defined key/member" pages whose title
+    // contains literal `<…>` markers — HTML-escaped as `&lt;…&gt;`. The
+    // method side already uses the `<Имя>` placeholder convention, and
+    // the scalar property index matches on real member names, not the
+    // placeholder itself. Filtering here keeps completion from
+    // surfacing noise like `&lt;Имя ключа` as a suggestion.
+    let looks_like_placeholder = |s: &str| s.starts_with('<') || s.starts_with("&lt;");
+    if looks_like_placeholder(&russian_prop) || looks_like_placeholder(&english_prop) {
+        return Ok(None);
+    }
+
+    let id = *prop_id_counter;
+    *prop_id_counter += 1;
+
+    let property_types = scraper_parser::extract_property_types(&html_content);
+    let is_readonly = scraper_parser::extract_readonly(&html_content);
+    let min_version = scraper_parser::extract_version(&html_content);
+    let context = scraper_parser::extract_context(&html_content);
+    let documentation = extract_property_documentation(&html_content);
+
+    Ok(Some(PropertyInfo {
+        id,
+        type_name: type_name_en.to_string(),
+        name: russian_prop,
+        english_name: english_prop,
+        property_types,
+        is_readonly,
+        min_version,
+        context,
+        documentation,
+    }))
+}
+
+/// Collects the free-prose description + notes + see-also block of a
+/// property page.
+///
+/// The `Описание:` chapter starts with `Тип: …` followed by the prose
+/// narrative. `property_types` already captures the structured type
+/// reference, so we strip the leading `Тип: …` sentence from the
+/// description here — otherwise hover would duplicate the type string
+/// between the `**Тип:**` line rendered from `property_types` and the
+/// first sentence of the narrative. When the page carries only the
+/// `Тип:` marker without prose, the stripped description becomes empty
+/// and (combined with empty `notes` / `see_also`) suppresses the doc
+/// block entirely.
+fn extract_property_documentation(html_content: &str) -> Option<PropertyDocumentation> {
+    let description = scraper_parser::extract_description(html_content)
+        .map(|d| strip_leading_tip_prefix(&d))
+        .unwrap_or_default();
+    let notes = scraper_parser::extract_notes(html_content);
+    let see_also = scraper_parser::extract_see_also(html_content);
+
+    if description.is_empty() && notes.is_none() && see_also.is_empty() {
+        return None;
+    }
+
+    Some(PropertyDocumentation { description, notes, see_also })
+}
+
+/// Drop the leading `Тип: … .` segment from a property description.
+///
+/// Example input: `"Тип: Структура. Содержит значения параметров."`
+/// Returns:       `"Содержит значения параметров."`
+///
+/// Leaves non-`Тип:` descriptions unchanged, and is tolerant to missing
+/// terminal period or trailing whitespace around the segment.
+fn strip_leading_tip_prefix(desc: &str) -> String {
+    let trimmed = desc.trim_start();
+    let Some(after_label) = trimmed.strip_prefix("Тип:") else {
+        return desc.to_string();
+    };
+    let rest = after_label.trim_start();
+    // Look for the first `.` that terminates the type list; anything
+    // past it is the actual narrative.
+    match rest.find('.') {
+        Some(idx) => rest[idx + 1..].trim_start().to_string(),
+        None => String::new(),
+    }
 }
 
 /// Collects the full documentation block of a constructor. Mirrors
