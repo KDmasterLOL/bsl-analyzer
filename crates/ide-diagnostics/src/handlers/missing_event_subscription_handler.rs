@@ -1,60 +1,4 @@
-//! MissingEventSubscriptionHandler diagnostic.
-//!
-//! Validates event subscription handlers in 1C SessionModule files.
-//!
-//! ## What it checks
-//!
-//! This diagnostic validates that all event subscriptions in the configuration have valid handlers:
-//!
-//! 1. **Handler must not be empty** - Each subscription must have a handler defined
-//! 2. **Handler format** - Must be "CommonModule.ModuleName.MethodName" with method name present
-//! 3. **CommonModule exists** - The referenced common module must exist in configuration
-//! 4. **Module is server-side** - Common module must have Server flag set to true
-//! 5. **Method exists** - The method must be defined in the common module
-//! 6. **Method is exported** - The method must have Экспорт (Export) keyword
-//!
-//! ## Why?
-//!
-//! Event subscriptions bind system events (OnWrite, BeforeWrite, etc.) to handler procedures.
-//! Invalid handlers lead to runtime errors when events are triggered.
-//!
-//! ## Example (bad)
-//!
-//! ```bsl
-//! // In EventSubscription metadata:
-//! // Handler: CommonModule.МодульОтсутствует.МетодОбработки
-//! // ERROR: Module doesn't exist
-//! ```
-//!
-//! ## Example (good)
-//!
-//! ```bsl
-//! // In CommonModule.ПодпискиНаСобытия:
-//! Процедура ПриЗаписиДокумента(Источник, Отказ) Экспорт
-//!     // Implementation
-//! КонецПроцедуры
-//!
-//! // In EventSubscription metadata:
-//! // Handler: CommonModule.ПодпискиНаСобытия.ПриЗаписиДокумента
-//! // OK: Module exists, is server-side, method exists and exported
-//! ```
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** Yes
-//! - **Severity:** BLOCKER (ERROR)
-//! - **Tags:** ERROR
-//! - **Minutes to fix:** 5
-//! - **No configurable parameters** (strict validator)
-//!
-//! ## Scope
-//!
-//! This diagnostic only runs for **SessionModule** files (Configuration/SessionModule.bsl).
-//! All diagnostics are reported at the beginning of the SessionModule (line 1, columns 1-8).
-//!
-//! ## Reference
-//!
-//! Ported from:
+//! Reports invalid event subscription handlers declared in configuration metadata.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -77,22 +21,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Main entry point for MissingEventSubscriptionHandler diagnostic.
-///
-/// Validates event subscription handlers in SessionModule.
-///
-/// ## Algorithm
-///
-/// 1. Early return if disabled or not SessionModule
-/// 2. Load Configuration metadata via Salsa (cached!)
-/// 3. Iterate all event subscriptions
-/// 4. For each subscription, perform 6 validation checks:
-///    - Handler not empty
-///    - Handler format correct (has method name)
-///    - CommonModule exists
-///    - CommonModule has Server flag
-///    - Method exists in module
-///    - Method is exported
+/// Main entry point for event subscription handler validation.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingEventSubscriptionHandler;
 
