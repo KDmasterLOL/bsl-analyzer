@@ -1,31 +1,37 @@
 # Initialization of method and constructor parameters by calling nested methods (NestedFunctionInParameters)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-Similarly, it is not recommended to use nested calls of other functions or other parameterized constructors when initializing constructor parameters  
-.
+This diagnostic reports nested function calls and parameterized constructors
+used directly as arguments of other calls and constructors.
 
-At the same time, if the code with nested calls is compact (does not require the hyphenation of expressions) and is easy to read, then nested calls are acceptable.
+The rule is aimed at readability. Long chains of nested calls are harder to
+scan, debug, and step through. In practice it is often clearer to split the
+expression into several intermediate variables.
+
+Compact one-line expressions may still be acceptable. The diagnostic therefore
+has configuration that allows one-line calls and a small allowlist of method
+names such as `NStr` and `PredefinedValue`.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
 Incorrect:
 
 ```bsl
-Attachments.Insert(  AttachedFile.Description,  New Picture(GetFromTempStorage(   AttachedFiles.GetFileData(AttachedFile.Ref).RefToFileBinaryData)));
+Attachments.Insert(
+    AttachedFile.Description,
+    New Picture(GetFromTempStorage(AttachedFiles.GetFileData(AttachedFile.Ref))));
 ```
 
-It is correct to break such calls into separate operators using additional local variables:
+Correct:
 
 ```bsl
-FileImageHRef = AttachedFiles.GetFileData(AttachedFile.Ref).RefToFileBinaryData; PictureData = New Picture(GetFromTempStorage(FileImageHRef)); Attachments.Insert(AttachedFile.Description, PictureData);
+FileData = AttachedFiles.GetFileData(AttachedFile.Ref);
+PictureData = GetFromTempStorage(FileData);
+Attachments.Insert(AttachedFile.Description, New Picture(PictureData));
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-
-* [Parameters of procedures and functions (RU)](https://its.1c.ru/db/v8std#content:640:hdoc)
+- Source: [1C standard: Parameters of procedures and functions (#std640)](https://its.1c.ru/db/v8std#content:640:hdoc)
+- Secondary reference: [v8std.ru: NestedFunctionInParameters](https://v8std.ru/diagnostics/bslls/NestedFunctionInParameters/)
