@@ -1,3 +1,5 @@
+//! Reports service tags and placeholder comments left in code.
+
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

@@ -20,4 +20,8 @@
 * Insert handler contents
 * Paste handler content
 
-Перечень тегов может быть расширен через настройки диагностики.
+Перечень тегов может быть заменён или расширен через настройки диагностики.
+
+## Источники
+
+* [v8std: UsingServiceTag](https://v8std.ru/diagnostics/bslls/UsingServiceTag/)
