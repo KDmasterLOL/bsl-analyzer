@@ -1,4 +1,4 @@
-//! MissingParameterDescription diagnostic.
+//! Reports missing, extra, duplicated, or misordered parameter descriptions.
 
 use crate::define_metadata;
 use crate::metadata::*;
