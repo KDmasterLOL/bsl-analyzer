@@ -1,82 +1,4 @@
-//! RewriteMethodParameter diagnostic.
-//!
-//! Detects byValue parameters that are overwritten without prior use.
-//!
-//! ## Why?
-//!
-//! When a parameter is marked with `Знач` (ByValue) and immediately overwritten without using
-//! its original value, it suggests either:
-//! - The parameter should not be passed (convert to local variable)
-//! - The parameter name/semantics are misleading
-//!
-//! This is a code smell that confuses code readers.
-//!
-//! ## Bad practice
-//!
-//! ```bsl
-//! Функция Конфигуратор(Знач СтрокаПодключения, Знач Пользователь = "", Знач Пароль = "") Экспорт
-//!     СтрокаПодключения = "/F""" + КаталогБазы + """";  // ❌ Parameter overwritten!
-//!     // ... rest of function
-//! КонецФункции
-//! ```
-//!
-//! ## Good practice
-//!
-//! ```bsl
-//! // Option 1: Rename parameter to reflect actual input
-//! Функция Конфигуратор(Знач КаталогБазы, Знач Пользователь = "", Знач Пароль = "") Экспорт
-//!     СтрокаПодключения = "/F""" + КаталогБазы + """";  // ✅ Clear semantics
-//!     // ...
-//! КонецФункции
-//!
-//! // Option 2: Use local variable
-//! Функция Конфигуратор(Знач Пользователь = "", Знач Пароль = "") Экспорт
-//!     СтрокаПодключения = "/F""" + КаталогБазы + """";  // ✅ Local variable
-//!     // ...
-//! КонецФункции
-//! ```
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** Yes
-//! - **Severity:** Major
-//! - **Tags:** SUSPICIOUS
-//! - **Minutes to fix:** 2
-//!
-//! ## Implementation
-//!
-//! Uses **CFG + reaching definitions** for accurate flow-sensitive analysis:
-//! 1. HIR lowering emits BodyDiagnostic for all assignments to byValue parameters
-//! 2. Handler uses reaching definitions to check if parameter was used before assignment
-//! 3. If reaching defs contain only initial parameter definition → diagnostic
-//!
-//! ### Why CFG is required
-//!
-//! Textual-order analysis (sorts references by line/column) produces
-//! **false negatives** on conditional branches:
-//!
-//! ```bsl
-//! Процедура Тест(Знач Парам)
-//!     Если Условие Тогда
-//!         Результат = Парам;  // USE (line 3)
-//!     Иначе
-//!         Парам = 0;  // OVERWRITE (line 5) - missed by textual-order analysis
-//!     КонецЕсли;
-//! КонецПроцедуры
-//! ```
-//!
-//! Textual order sees USE before OVERWRITE → no diagnostic.
-//! But on else branch: parameter overwritten WITHOUT use!
-//!
-//! Our CFG-based approach correctly analyzes each execution path.
-//!
-//! ### Self-assign handling
-//!
-//! `Парам = Парам` is not considered a "meaningful use" and is skipped:
-//! - First assignment is self-assign → skip, check next assignment
-//! - Multiple self-assigns in a row → skip all, check first non-self-assign
-//!
-//! Ported from:
+//! Reports by-value parameters overwritten before any meaningful use.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -98,22 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::RewriteMethodParameter` is encountered.
-///
-/// ## Algorithm
-///
-/// 1. Find StmtId for the assignment using stmt_range lookup in BodySourceMap
-/// 2. Get reaching definitions for this statement from module-level query
-/// 3. Check if reaching defs contain only initial parameter definition
-/// 4. Handle self-assign case: if RHS uses parameter, skip this assignment
-/// 5. Emit diagnostic if parameter not used before overwrite
-///
-/// ## Parameters
-///
-/// - `stmt_range`: Full statement range for BodySourceMap lookup
-/// - `ident_range`: Identifier range for diagnostic display
+/// Creates a diagnostic from HIR rewrite-parameter data.
 pub fn from_hir(
     param_id: BindingId,
     _stmt_id: StmtId, // Placeholder from lowering - we'll find real one via range
