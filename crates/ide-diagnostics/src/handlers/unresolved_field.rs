@@ -1,10 +1,4 @@
-//! UnresolvedField diagnostic.
-//!
-//! Emitted from `hir-ty::infer` when a field access (`receiver.field`) on a
-//! typed receiver fails to resolve through [`hir_ty::field_lookup`]. Only
-//! fires when the receiver carries enough type information for the miss to
-//! be user-actionable — i.e. `Ty::MetadataRef { .. }`. `Ty::Unknown`,
-//! `Ty::Union`, and primitive receivers stay silent (see `infer::Expr::Field`).
+//! Reports field access that cannot be resolved for a known receiver type.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -12,11 +6,8 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Name, Ty};
 use ide_db::TextRange;
 
-// Severity is Major/Error because when this fires it already carries a
-// high-confidence signal: the emit guard in `hir-ty::infer::Expr::Field`
-// only pushes the diagnostic on `Ty::MetadataRef { .. }` receivers, where
-// `FieldLookup` is authoritative. Conservative coverage lives on the emit
-// side (unions, primitives, `Ty::Unknown` stay silent), not here.
+// Major/Error is appropriate here because the emit side is intentionally
+// conservative: only high-confidence typed receivers produce this diagnostic.
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
@@ -31,7 +22,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from `InferenceDiagnostic::UnresolvedField`.
+/// Creates a diagnostic from `InferenceDiagnostic::UnresolvedField`.
 pub fn from_hir(
     receiver_ty: &Ty,
     field_name: &Name,
