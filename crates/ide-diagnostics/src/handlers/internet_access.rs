@@ -49,23 +49,6 @@
 //! - **Type:** VULNERABILITY
 //! - **Tags:** SUSPICIOUS
 //! - **Minutes to fix:** 60
-//!
-//! ## Implementation
-//! Ported from:
-//!
-//! **Architecture:** HIR-based diagnostic (migrated from AST).
-//!
-//! ### HIR approach
-//! - Scans `Expr::New { type_name, args }` in method bodies and module-level code
-//! - Supports both named constructors (`Новый HTTPСоединение(...)`) and string constructors (`Новый("HTTPСоединение")`)
-//! - Case-insensitive matching against 18 internet access patterns
-//! - Uses `ModuleBodies` and `BodySourceMap` for accurate source locations
-//!
-//! ### Advantages over AST
-//! - Semantic analysis - operates on lowered HIR representation
-//! - Salsa caching - benefits from automatic invalidation
-//! - Consistent with other diagnostics - same pattern as identical_expressions, incorrect_use_of_str_template
-//! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::define_metadata;
 use crate::metadata::*;

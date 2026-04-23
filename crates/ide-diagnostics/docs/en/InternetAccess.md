@@ -2,20 +2,36 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-Check access to Internet resources and the set of transmitted data to prevent the transfer of confidential or protected information.
+This diagnostic is a security-audit rule for code that creates objects used for
+network communication or access to Internet-facing resources.
+
+It is intentionally disabled by default. The purpose is not to forbid all such
+code automatically, but to make it visible during review and verify that:
+
+- external communication is really required;
+- transmitted data is authorized and safe to expose;
+- the chosen protocol and endpoint are appropriate;
+- access is controlled and documented.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 ```bsl
-HTTPConnection = New HTTPConnection("zabbix.localhost", 80); // error
-FTPConnection = New FTPConnection(Server, Port, User, Pwd); // error
+HTTPConnection = New HTTPConnection("api.example.com", 80);
+FTPConnection = New FTPConnection(Server, Port, User, Pwd);
+MailClient = New InternetMail();
+```
+
+```bsl
+// Review required:
+// - is external access expected here?
+// - is the destination controlled?
+// - are secrets or protected data involved?
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
 
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
+This diagnostic has no direct one-to-one normative 1C standard source.
+
+Related public context:
+
+* [ITS / v8std #std794: Restrictions on the use of external resources](https://its.1c.ru/db/v8std#content:794:hdoc)
+* [ITS / v8std #std678: Server API security](https://its.1c.ru/db/v8std#content:678:hdoc)
