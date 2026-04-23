@@ -3,10 +3,27 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-`SystemInformation` provides data about the computer and configuration in 1C, which can be used for malicious purposes.
+`SystemInformation` / `СистемнаяИнформация` exposes information about the client environment and system configuration. Such data may be sensitive in security-sensitive code because it can be used for profiling, environment discovery, or other forms of information disclosure.
+
+This diagnostic marks direct construction of that object for manual review.
+
+The rule is disabled by default because not every use is automatically wrong. Some projects may need it for administration or diagnostics, but such usage should be explicit and justified.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+
+Incorrect:
+
+```bsl
+Info = New SystemInfo;
+SendToServer(Info.OSVersion, Info.RAM);
+```
+
+More explicit and reviewable approach:
+
+```bsl
+// Collect only the exact value that is really required,
+// and use this only in a reviewed administrative scenario.
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
+* Public platform semantics of `SystemInfo` / `СистемнаяИнформация`
