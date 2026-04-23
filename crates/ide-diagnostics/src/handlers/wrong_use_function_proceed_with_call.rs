@@ -1,18 +1,4 @@
-//! WrongUseFunctionProceedWithCall diagnostic
-//!
-//! Detects wrong usage of ПродолжитьВызов/ProceedWithCall function.
-//!
-//!
-//! The ПродолжитьВызов/ProceedWithCall function can only be called inside extension
-//! methods with &Вместо (&Around) annotation. Calling it from methods with &До (&Before),
-//! &После (&After), or without extension annotation causes a runtime error.
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! The diagnostic is emitted in `hir-def/body/lower/expr.rs` when a global call
-//! to ПродолжитьВызов/ProceedWithCall is encountered and the current method
-//! does not have &Вместо annotation.
+//! Reports `ПродолжитьВызов` / `ProceedWithCall` calls outside `&Вместо` methods.
 
 use crate::define_metadata;
 use crate::metadata::*;
