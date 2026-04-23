@@ -1,10 +1,36 @@
 # There is a localized text for all languages declared in the configuration (MultilingualStringHasAllDeclaredLanguages)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-NStr in a multilingual configuration has different fragments for different languages. If you start a session under a language code that is not in the string passed to NStr, it will return an empty string.
+In a multilingual configuration, `NStr(...)` / `НСтр(...)` should contain text for every language that the project declares as required.
+
+If a required language is missing, the expression may return an empty string for that language.
+
+The current implementation is configuration-driven and syntax-based:
+
+- required languages come from the `declaredLanguages` setting;
+- by default the rule assumes only `ru`;
+- it parses language keys from the first string literal argument of `NStr`;
+- empty `NStr()` calls are reported as missing all declared languages;
+- some `NStr` uses inside `StrTemplate` / `СтрШаблон` flows are intentionally skipped to avoid noisy false positives.
+
+## Examples
+
+### Incorrect
+
+Configuration declares `ru` and `en`.
+
+```bsl
+Message = NStr("ru = 'Document saved successfully'");
+```
+
+### Correct
+
+```bsl
+Message = NStr("ru = 'Документ успешно записан'; en = 'Document saved successfully'");
+```
 
 ## Sources
 
-- [Standard: Localization Requirements (RU)](https://its.1c.ru/db/v8std/content/763/hdoc)
+- [Localization requirements - Standard 1C (RU)](https://its.1c.ru/db/v8std/content/763/hdoc)
+- [v8std.ru: MultilingualStringHasAllDeclaredLanguages](https://v8std.ru/diagnostics/bslls/MultilingualStringHasAllDeclaredLanguages/)
