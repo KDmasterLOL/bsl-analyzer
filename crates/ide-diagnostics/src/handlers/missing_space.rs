@@ -1,43 +1,4 @@
-//! MissingSpace diagnostic
-//!
-//! Detects missing spaces around operators and keywords in BSL code.
-//!
-//!
-//! ## Why?
-//!
-//! Proper spacing around operators and keywords improves code readability:
-//! - `А=Б+1` - hard to read
-//! - `А = Б + 1` - clear and readable
-//! - `Если(условие)Тогда` - hard to parse
-//! - `Если (условие) Тогда` - clear structure
-//!
-//! ## What gets detected?
-//!
-//! 1. Missing spaces around operators: `+`, `-`, `*`, `/`, `=`, `%`, `<`, `>`, `<>`, `<=`, `>=`
-//! 2. Missing spaces around commas and semicolons: `,`, `;`
-//! 3. Missing spaces around keywords: `IF`, `ELSIF`, `WHILE`, `FOR`, `NOT`, `EACH`, `OR`, `AND`, `IN`, `TO`, `EXPORT`, `THEN`, `DO`
-//!
-//! ## Configuration
-//!
-//! ### `listForCheckLeft` (String)
-//! Space-separated list of symbols requiring left space.
-//! Default: `""` (empty)
-//!
-//! ### `listForCheckRight` (String)
-//! Space-separated list of symbols requiring right space.
-//! Default: `", ;"`
-//!
-//! ### `listForCheckLeftAndRight` (String)
-//! Space-separated list of symbols requiring both left and right space.
-//! Default: `"+ - * / = % < > <> <= >="`
-//!
-//! ### `checkSpaceToRightOfUnary` (Boolean)
-//! Enforce space after unary `+` and `-` operators.
-//! Default: `false`
-//!
-//! ### `allowMultipleCommas` (Boolean)
-//! Allow consecutive commas without spaces between them.
-//! Default: `false`
+//! Reports missing spaces around configured operators, punctuation, and keywords.
 
 use crate::define_metadata;
 use crate::metadata::*;
