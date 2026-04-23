@@ -27,4 +27,5 @@
 
 ## Источники
 
-[Параметры процедур и функций](https://its.1c.ru/db/v8std#content:640:hdoc)
+* [Параметры процедур и функций](https://its.1c.ru/db/v8std#content:640:hdoc)
+* [Публичное зеркало: v8std.ru / #std640](https://v8std.ru/std/640/)
