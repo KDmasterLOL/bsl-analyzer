@@ -1,23 +1,4 @@
-//! Diagnostic: FunctionShouldHaveReturn
-//!
-//! Checks that functions contain at least one return statement.
-//! Procedures don't require return statements.
-//!
-//! ## Severity
-//! Major
-//!
-//! ## Example
-//! ```bsl
-//! // Bad - function without return
-//! Функция БезВозврата()
-//!     Перем Х;
-//! КонецФункции
-//!
-//! // Good - function with return
-//! Функция СВозвратом()
-//!     Возврат 42;
-//! КонецФункции
-//! ```
+//! Reports functions that have no `Возврат` / `Return` at all.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -38,9 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::FunctionShouldHaveReturn` is encountered.
+/// Creates a diagnostic from the HIR lowering result.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::FunctionShouldHaveReturn,
