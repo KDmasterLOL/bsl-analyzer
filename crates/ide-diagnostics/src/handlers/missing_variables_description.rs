@@ -1,4 +1,4 @@
-//! MissingVariablesDescription diagnostic.
+//! Reports module-level variable declarations that have no description comment.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -20,6 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Checks top-level module variables for a trailing or header description comment.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingVariablesDescription;
 
