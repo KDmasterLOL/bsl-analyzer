@@ -1,24 +1,4 @@
-//! UnusedLocalMethod diagnostic.
-//!
-//! Detects local methods (procedures/functions) that are declared but never called.
-//!
-//! ## Why?
-//! Unused methods:
-//! - Increase code complexity and maintenance burden
-//! - May indicate incomplete refactoring
-//! - Clutter the codebase
-//!
-//! ## Excluded from check
-//! - Exported methods (Экспорт)
-//! - Extension methods (@Перед/@До, @После, @Вместо, @ИзменениеИКонтроль)
-//! - Attachable methods (configurable prefix, default: подключаемый_, attachable_)
-//! - Platform event handlers (fixed signature defined by 1C platform)
-//!
-//! ## Configuration
-//! - **attachableMethodPrefixes** (string, default: "подключаемый_,attachable_") - comma-separated prefixes
-//! - **checkObjectModule** (boolean, default: false) - check ObjectModule type
-//!
-//! ## Implementation
+//! Reports local procedures and functions that are declared but never used.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -235,7 +215,7 @@ mod tests {
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
     #[test]
-    fn test_java_fixture() {
+    fn test_detects_unused_local_methods() {
         let code = r#"
 Процедура НеИспользуется() // Тут
 КонецПроцедуры
