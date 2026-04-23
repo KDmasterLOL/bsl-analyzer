@@ -14,6 +14,30 @@ The SDBL language itself belongs to the 1C platform as a language/specification.
 That does **not** mean an implementation of the language can automatically be
 placed under `LGPL`.
 
+### Practical ownership note
+
+As a working legal/engineering assumption, the best current framing is:
+
+- only **1C**, as the platform author and publisher of the official query-language
+  documentation, can realistically claim rights in the **official language
+  specification itself**;
+- third-party projects such as `bsl-parser` can hold rights only in their own
+  concrete expression:
+  - grammar text;
+  - lexer/parser organization;
+  - tests and examples;
+  - implementation code and documentation.
+
+This is an inference from:
+
+- official 1C query-language materials, for example:
+  - `https://its.1c.ru/db/pubqlang/content/12/hdoc`
+  - `https://its.1c.ru/db/pubqlang/content/10/hdoc`
+- the general copyright principle that ideas, systems, methods of operation, and
+  languages as systems are distinct from a particular text or implementation.
+
+This note is a practical project position, not a court determination.
+
 For licensing purposes, these must be separated:
 
 - the language, syntax, semantics, and standard behavior;

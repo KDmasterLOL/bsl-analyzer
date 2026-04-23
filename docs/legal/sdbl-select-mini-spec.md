@@ -39,13 +39,17 @@ When implementing from this spec:
 
 ## Licensing note
 
-The SDBL language, its keywords, clauses, and semantic constructs belong to the
-1C platform as a language/specification.
+As a practical working assumption, the SDBL language, its keywords, clauses, and
+semantic constructs belong to the 1C platform as a language/specification, and
+only 1C can realistically claim rights in the official language definition
+itself.
 
 That means:
 
 - the existence of `SELECT`, `FROM`, `WHERE`, `JOIN`, `ОБЪЕДИНИТЬ`, `ПОМЕСТИТЬ`,
   etc. is not proprietary to `bsl-parser`;
+- third-party projects may still hold rights in their own grammar text,
+  examples, implementation code, and documentation;
 - but a concrete grammar text or its close adaptation may still be copyrightable
   expression.
 
