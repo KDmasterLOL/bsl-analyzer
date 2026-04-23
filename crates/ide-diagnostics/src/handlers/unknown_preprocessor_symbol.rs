@@ -1,53 +1,4 @@
-//! UnknownPreprocessorSymbol diagnostic.
-//!
-//! Detects unknown symbols in preprocessor conditional directives (#Если/#If).
-//!
-//! ## Why?
-//! Using unknown preprocessor symbols can lead to logical errors when the platform
-//! ignores the code without warning. Only platform-defined symbols should be used
-//! in conditional compilation directives.
-//!
-//! ## Bad practice
-//! ```bsl
-//! #Если Нечто Тогда
-//!     // This condition will always be false (unknown symbol)
-//! #КонецЕсли
-//!
-//! #Если _ Тогда
-//!     // Invalid symbol
-//! #КонецЕсли
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! #Если Сервер Тогда
-//!     // Valid: Server-side code
-//! #КонецЕсли
-//!
-//! #Если НЕ МобильныйАвтономныйСервер Тогда
-//!     // Valid: All platforms except mobile autonomous server
-//! #КонецЕсли
-//! ```
-//!
-//! ## Known symbols
-//! Platform contexts:
-//! - Клиент/Client, Сервер/Server
-//! - НаКлиенте/AtClient, НаСервере/AtServer
-//! - ТонкийКлиент/ThinClient, ВебКлиент/WebClient
-//! - ТолстыйКлиентУправляемоеПриложение/ThickClientManagedApplication
-//! - ТолстыйКлиентОбычноеПриложение/ThickClientOrdinaryApplication
-//! - ВнешнееСоединение/ExternalConnection
-//! - МобильныйКлиент/MobileClient
-//! - МобильноеПриложениеКлиент/MobileAppClient
-//! - МобильноеПриложениеСервер/MobileAppServer
-//! - МобильныйАвтономныйСервер/MobileStandaloneServer
-//!
-//! Operating systems:
-//! - Linux, Windows, MacOS
-//!
-//! ## Implementation
-//! AST-based diagnostic that walks PRE_SYMBOL nodes and validates them against
-//! the known symbols list. Single pass for optimal performance.
+//! Reports unknown symbols in `#Если` / `#If` preprocessor conditions.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -70,7 +21,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Single-pass node handler for UnknownPreprocessorSymbol diagnostic.
+/// Single-pass node handler for UnknownPreprocessorSymbol.
 #[inline]
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::UnknownPreprocessorSymbol;
@@ -96,7 +47,7 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-/// Legacy check function (delegates to single-pass).
+/// Legacy entry point that delegates to single-pass node processing.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = ctx.parse().syntax_node();
     let mut diagnostics = Vec::new();

@@ -3,4 +3,24 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-The use of unknown preprocessor symbols is unacceptable, this can lead to various errors, including logical ones, when, for some reason, the platform will miss an error by simply ignoring the written code.
+Unknown preprocessor symbols in `#If` / `#Если` conditions are invalid. When such a symbol is used, the conditional compilation logic becomes unreliable and the intended code branch may be skipped silently.
+
+Use only symbols supported by the BSL platform preprocessor.
+
+## Examples
+
+Incorrect:
+
+```bsl
+#If UnknownSymbol Then
+    DoWork();
+#EndIf
+```
+
+Correct:
+
+```bsl
+#If Server Then
+    DoWork();
+#EndIf
+```
