@@ -1,16 +1,31 @@
-# Order of Parameters in method (OrderOfParams)
+# Order of parameters in method (OrderOfParams)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Optional parameters (parameters with default values) should follow mandatory parameters (the ones without default values).
+This diagnostic reports procedures and functions where parameters with default
+values are declared before required parameters.
+
+The rationale comes from the 1C recommendations for procedure and function
+parameters: optional parameters should follow mandatory ones. Violating this
+order makes signatures harder to read and creates confusion at call sites.
 
 ## Examples
 
+Incorrect:
+
 ```bsl
-Function CurrencyRateOnDate(Currency, Date = Notdefined) Export
+Function CalculateDiscount(Percent = 5, SaleAmount)
+EndFunction
+```
+
+Correct:
+
+```bsl
+Function CalculateDiscount(SaleAmount, Percent = 5)
+EndFunction
 ```
 
 ## Sources
 
-* [Standard: Parameters of procedures and functions (RU)](https://its.1c.ru/db/v8std#content:640:hdoc)
+- Source: [1C standard: Parameters of procedures and functions (#std640)](https://its.1c.ru/db/v8std#content:640:hdoc)
+- Secondary reference: [v8std.ru: OrderOfParams](https://v8std.ru/diagnostics/bslls/OrderOfParams/)
