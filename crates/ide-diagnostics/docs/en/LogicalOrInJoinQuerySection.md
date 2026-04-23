@@ -2,77 +2,71 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-Diagnostics reveals the use of the `OR` operator in the conditions of table joins.
+This diagnostic reports `OR` operators inside query join conditions.
 
-The presence of the `OR` operators in connection conditions may cause the DBMS to be unable to use
-table indexes and perform scans, which will increase query running time and the likelihood of locks.
+When a join condition combines predicates over different fields with `OR`, the
+DBMS may stop using indexes effectively and fall back to scan-heavy execution
+plans. That usually means slower queries and less predictable performance.
 
-The error can be solved by "spreading" the predicates of the condition with `OR` into different query packages with combining
+The current rule is intentionally narrower than “any `OR` is bad”. It does not
+report cases where `OR` is used over the same field, because such expressions
+can often be normalized to `IN`.
 
-IMPORTANT:
-Diagnostics monitors the presence of predicates in the condition `OR`, over various fields, since the use of the operator `OR`
-When executing a query on the SQL side, the control over the variants of one field is automatically converted to the IN condition.
+Possible rewrites include:
+
+- splitting the query into separate branches and combining them with
+  `UNION ALL`;
+- rethinking the join structure;
+- moving expensive logic into temporary tables when that preserves semantics.
 ## Examples
-1) The error will not be fixed when using `OR` over variants of a single field.
+No diagnostic: `OR` over the same field
 
 ```bsl
-LEFT JOIN Catalog.NomenclatureTypes КАК NomenclatureTypes
-    ON CatalogNomenclature.NomenclatureType = NomenclatureTypes.Reference
-        AND (CatalogNomenclature.ExpirationDate > 1
-     OR CatalogNomenclature.ExpirationDate < 10)
+ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Контрагенты КАК Контрагенты
+ПО Заказы.Контрагент = Контрагенты.Ссылка
+   И (Контрагенты.Рейтинг = 1
+     ИЛИ Контрагенты.Рейтинг = 5)
 ```
-2) When using the `OR` operator over various fields, the error will be fixed for each occurrence of the operator.
+
+Diagnostic: `OR` over different fields
 
 ```bsl
-INNER JOIN Document.GoodsServicesSaling КАК GoodsServicesSaling
-ON GoodsServicesSalingGoods.Reference = GoodsServicesSaling.Reference
-   AND (GoodsServicesSalingGoods.Amount  > 0 
-   OR GoodsServicesSalingGoods.AmountVAT > 0 
-   OR GoodsServicesSalingGoods.AmountWithVAT > 0)
-
+ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ПоступлениеТоваров КАК Поступление
+ПО ПоступлениеТовары.Ссылка = Поступление.Ссылка
+   И (ПоступлениеТовары.Количество > 0
+   ИЛИ ПоступлениеТовары.Цена > 0)
 ```
 
-It is proposed to correct such constructions by placing requests in separate packages with combining:
+One possible rewrite:
 
 ```bsl
-SELECT *
-FROM
-INNER JOIN Document.GoodsServicesSaling КАК GoodsServicesSaling
-ON GoodsServicesSalingGoods.Reference = GoodsServicesSaling.Reference
-   AND GoodsServicesSalingGoods.Amount  > 0 
+ВЫБРАТЬ *
+ИЗ
+ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ПоступлениеТоваров КАК Поступление
+ПО ПоступлениеТовары.Ссылка = Поступление.Ссылка
+   И ПоступлениеТовары.Количество > 0
 
-UNION ALL 
+ОБЪЕДИНИТЬ ВСЕ
 
-SELECT *
-FROM
-INNER JOIN Document.GoodsServicesSaling КАК GoodsServicesSaling
-ON GoodsServicesSalingGoods.Reference = GoodsServicesSaling.Reference 
-    AND GoodsServicesSalingGoods.AmountVAT > 0 
-
-UNION ALL 
-
-SELECT *
-FROM
-INNER JOIN Document.GoodsServicesSaling КАК GoodsServicesSaling
-ON GoodsServicesSalingGoods.Reference = GoodsServicesSaling.Reference 
-    AND GoodsServicesSalingGoods.AmountWithVAT > 0       
+ВЫБРАТЬ *
+ИЗ
+ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ПоступлениеТоваров КАК Поступление
+ПО ПоступлениеТовары.Ссылка = Поступление.Ссылка
+   И ПоступлениеТовары.Цена > 0
 ```
 
-3) Diagnostics will also work for nested connections using `OR` in conditions.
+Nested joins are also covered:
 
 ```bsl
-Document.GoodsServicesSaling.Goods КАК GoodsServicesSalingGoods
-INNER JOIN Document.GoodsServicesSaling КАК GoodsServicesSaling
-ON GoodsServicesSalingGoods.Reference = GoodsServicesSaling.Reference
-LEFT JOIN Catalog.Nomenclature КАК CatalogNomenclature
-    LEFT JOIN Catalog.NomenclatureTypes КАК NomenclatureTypes
-    ON CatalogNomenclature.NomenclatureType = NomenclatureTypes.Reference
-        AND (CatalogNomenclature.ExpirationDate > 1
-         OR NomenclatureTypes.SaleThroughAPatentIsProhibited = TRUE)
-
+Справочник.Товары КАК Товары
+ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Категории КАК Категории
+    ЛЕВОЕ СОЕДИНЕНИЕ Справочник.ГруппыКатегорий КАК Группы
+    ПО Категории.Группа = Группы.Ссылка
+        И (Категории.Активна = ИСТИНА
+         ИЛИ Группы.ОбязательнаяПроверка = ИСТИНА)
 ```
-A fix similar to paragraph 2 is recommended by replacing the nested connection with a connection with the creation of an intermediate temporary table.
 
 ## Sources
 - [Standard: Effective Query Conditions, Clause 2 (RU)](https://its.1c.ru/db/v8std/content/658/hdoc)
 - [Typical Causes of Suboptimal Query Performance and Optimization Techniques: Using Logical OR in Conditions (RU)](https://its.1c.ru/db/content/metod8dev/src/developers/scalability/standards/i8105842.htm#or)
+ - [Public mirror: v8std.ru / #std658](https://v8std.ru/std/658/)
