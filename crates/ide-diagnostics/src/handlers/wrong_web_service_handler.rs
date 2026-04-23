@@ -1,8 +1,4 @@
-//! WrongWebServiceHandler diagnostic.
-//!
-//! Checks Web service (SOAP) operation handlers for:
-//! - Missing handler (empty procedure name)
-//! - Handler not found in module
+//! Reports missing or unresolved Web service operation handlers.
 
 use crate::define_metadata;
 use crate::metadata::*;
