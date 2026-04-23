@@ -1,3 +1,5 @@
+//! Reports hardcoded IPv4 and IPv6 addresses in string literals.
+
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

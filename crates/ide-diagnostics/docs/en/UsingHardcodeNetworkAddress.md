@@ -1,22 +1,19 @@
 # Using hardcode ip addresses in code (UsingHardcodeNetworkAddress)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-It's forbidden to store in code:
+Hardcoded network addresses should not be stored directly in source code.
 
-* Network addresses (ip6, ip4)
+This applies to both IPv4 and IPv6 literals. Such values are infrastructure settings and usually need to be changed independently from application code.
 
-There are several ways to properly store such information:
+Recommended storage options:
 
-* Store in Constants.
-* Store in Information registers.
-* Store in separate module, where this diagnostic is disabled (not recommended).
-* Store in Catalog, Exchange plan node and etc.
+* constants
+* information registers
+* catalogs, exchange plan nodes, or other metadata objects
+* a dedicated module with this rule disabled as a last resort
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
 Incorrect:
 ```bsl
@@ -27,3 +24,7 @@ Correct:
 ```bsl
 NetworkAddress = MyModuleReUse.ServerNetworkAddress();
 ```
+
+## Sources
+
+* [v8std: UsingHardcodeNetworkAddress](https://v8std.ru/diagnostics/bslls/UsingHardcodeNetworkAddress/)

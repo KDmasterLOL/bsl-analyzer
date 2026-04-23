@@ -30,3 +30,7 @@
 ```bsl
 АдресСервера = НастройкиПодключенияПовтИсп.АдресСервера();
 ```
+
+## Источники
+
+* [v8std: UsingHardcodeNetworkAddress](https://v8std.ru/diagnostics/bslls/UsingHardcodeNetworkAddress/)
