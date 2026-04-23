@@ -40,3 +40,4 @@ ShowMessageBox(, NStr("ru = 'Выберите документ!'; en = 'Select a
 
 * [Limit on the use of modal windows and synchronous calls (RU)](https://its.1c.ru/db/v8std/content/703/hdoc/)
 * Useful information: [Refusal to use modal windows (RU)](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
+* [v8std: UsingModalWindows](https://v8std.ru/diagnostics/bslls/UsingModalWindows/)

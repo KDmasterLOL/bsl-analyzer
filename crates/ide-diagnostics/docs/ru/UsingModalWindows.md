@@ -43,3 +43,4 @@
 
 * [Ограничение на использование модальных окон и синхронных вызовов](https://its.1c.ru/db/v8std/content/703/hdoc/)
 * Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
+* [v8std: UsingModalWindows](https://v8std.ru/diagnostics/bslls/UsingModalWindows/)
