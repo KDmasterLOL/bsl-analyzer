@@ -4,7 +4,7 @@ version = "0.1.28"
 edition = "2021"
 authors = ["BSL Analyzer Contributors"]
 description = "1C:Enterprise platform types and methods database"
-license = "LGPL-3.0-or-later"
+license.workspace = true
 
 [dependencies]
 smol_str = { workspace = true }

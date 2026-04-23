@@ -3,7 +3,7 @@ name = "hir-ty"
 version = "0.1.28"
 edition = "2021"
 authors = ["BSL Analyzer Contributors"]
-license = "LGPL-3.0-or-later"
+license.workspace = true
 repository = "https://github.com/1c-syntax/bsl-analyzer"
 
 [dependencies]

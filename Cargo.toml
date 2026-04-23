@@ -8,7 +8,7 @@ members = [
 [workspace.package]
 version = "0.1.134"
 edition = "2021"
-license = "LGPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
 repository = "https://github.com/itrous/bsl-analyzer"
 rust-version = "1.91"
