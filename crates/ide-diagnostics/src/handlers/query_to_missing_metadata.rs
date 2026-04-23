@@ -1,20 +1,4 @@
-//! QueryToMissingMetadata diagnostic.
-//!
-//! Detects references to non-existent metadata objects in SDBL queries.
-//!
-//! ## Why?
-//! Querying a table that doesn't exist in metadata will fail at runtime.
-//!
-//! ## Supported table paths
-//! - 2-part: `МдоТип.ИмяОбъекта` (e.g., `Справочник.Валюты`)
-//! - 3-part: `МдоТип.ИмяОбъекта.ТабличнаяЧасть` (e.g., `Документ.Заказ.Товары`)
-//! - 4-part: `ВнешнийИсточникДанных.EDSName.Таблица.TableName`
-//! - 6-part: `ВнешнийИсточникДанных.EDSName.Куб.CubeName.ТаблицаИзмерения.DimTableName`
-//!
-//! ## Implementation
-//!
-//! Uses SDBL HIR with diagnostics collected during lowering.
-//! Diagnostics are emitted in `from_clause.rs` when table resolution fails.
+//! Reports query tables that do not resolve to existing metadata objects.
 
 use crate::define_metadata;
 use crate::metadata::*;
