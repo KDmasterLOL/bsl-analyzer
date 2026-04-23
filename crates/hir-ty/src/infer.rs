@@ -41,6 +41,7 @@ use crate::builtin;
 use crate::db::HirDatabase;
 use crate::lower::TyLoweringContext;
 use crate::method_resolution;
+use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
 
 /// Result of type inference for a file/module.
 ///
@@ -1009,6 +1010,52 @@ impl<'db> InferenceContext<'db> {
 
                 resolution.return_type
             }
+            Err(UnresolvedMethodKind::MethodNotFound) => {
+                // Workspace lookup missed — fall back to the platform
+                // manager catalogue. This is where stock methods like
+                // `Справочники.X.СоздатьЭлемент()` /
+                // `Документы.X.СоздатьДокумент()` live. Only the
+                // `MethodNotFound` arm falls through: `MethodNotExport`
+                // means the workspace *has* a method with this name
+                // that is just not exported — the diagnostic belongs to
+                // the user's module, not to the platform catalogue.
+                //
+                // Gating: only fall back when the MDO itself is
+                // declared in a visible configuration. Without this
+                // check, a typo'd receiver
+                // (`Документы.НетТакогоДокумента.ПолучитьСсылку()`) would
+                // silently succeed against platform data instead of
+                // surfacing the missing MDO. `configurations.is_empty()`
+                // preserves historic behaviour for fixture-only tests
+                // that never register a configuration — they pre-date
+                // the platform fallback and rely on the diagnostic
+                // firing.
+                let plat_res: Option<PlatformMethodResolution> =
+                    bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str())
+                        .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
+                        .and_then(|mdo_type| {
+                            resolve_platform_manager_method(mdo_type, mdo_name, method_name)
+                        });
+                if let Some(res) = plat_res {
+                    if args.len() != res.signature.params.len() {
+                        self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
+                            call_expr,
+                            expected: res.signature.params.len(),
+                            found: args.len(),
+                        });
+                    }
+                    self.emit_arg_type_mismatches(args, &res.signature.params);
+                    return res.return_ty;
+                }
+
+                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                    expr: call_expr,
+                    receiver_name,
+                    method_name: method_name.clone(),
+                    kind: UnresolvedMethodKind::MethodNotFound,
+                });
+                Ty::Unknown
+            }
             Err(kind) => {
                 self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,
@@ -1034,6 +1081,37 @@ impl<'db> InferenceContext<'db> {
     /// [`crate::subtype`]), so expressions the inferrer could not type
     /// and parameters without declared types produce no false
     /// positives.
+    /// Is `(mdo_type, mdo_name)` declared in a configuration visible from
+    /// the current file?
+    ///
+    /// Guards the platform-manager fallback in
+    /// [`Self::infer_three_level_call`]: without this check a typo'd
+    /// receiver would silently hit platform data. The policy mirrors
+    /// `Resolver::mdo_visible_in_configs` — the visibility gate the
+    /// resolver itself uses before traversing manager modules.
+    ///
+    /// Returns `false` when no configuration is registered so the
+    /// behaviour for fixture-only tests stays consistent with the
+    /// pre-fallback baseline (they never saw platform resolution and
+    /// relied on `UnresolvedMethodCall` for missing MDO names).
+    fn mdo_declared(&self, mdo_type: bsl_metadata::MdoType, mdo_name: &Name) -> bool {
+        let configs = self.db.configurations(self.file_id);
+        if configs.is_empty() {
+            return false;
+        }
+        let needle = mdo_name.as_str();
+        configs.iter().any(|vc| {
+            // `find_metadata_object` covers catalog / document / enum /
+            // chart-of-* / task / business-process / exchange-plan, but
+            // registers live in a parallel `find_register_by_type_and_name`
+            // table. Check both so a real
+            // `РегистрыСведений.Курсы.СоздатьМенеджерЗаписи()` reaches
+            // the platform fallback.
+            vc.configuration.find_metadata_object(mdo_type, needle).is_some()
+                || vc.configuration.find_register_by_type_and_name(mdo_type, needle).is_some()
+        })
+    }
+
     fn emit_arg_type_mismatches(&mut self, args: &[ExprId], params: &[Ty]) {
         for (arg_id, param_ty) in args.iter().zip(params.iter()) {
             let arg_ty = self.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);

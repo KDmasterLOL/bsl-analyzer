@@ -5,7 +5,9 @@
 //! - CommonModule method completion (e.g., `ОбщегоНазначения.` shows exported methods)
 //! - Snippets with parameter placeholders
 
-use bsl_platform::{type_methods_query, PlatformDataInner, PlatformMethod, TypeNameInput};
+use bsl_platform::{
+    manager_methods_query, type_methods_query, PlatformDataInner, PlatformMethod, TypeNameInput,
+};
 use hir::{MethodSymbol, Name, Semantics, Ty};
 use ide_db::RootDatabase;
 use symbol_info::{
@@ -88,6 +90,15 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 
     tracing::debug!(receiver_ty = ?receiver_ty, "Resolved receiver type");
 
+    // Manager / metadata-ref receivers are not indexed under a scalar
+    // type key — their platform methods live behind composite
+    // `type_name` prefixes (`"CatalogManager."`, `"CatalogObject."`,
+    // …). Route them through `manager_methods_query` with the
+    // `bsl-metadata` / `hir::MetadataKind` prefix tables.
+    if let Some(items) = complete_prefix_methods_for_receiver(db, &receiver_ty) {
+        return Some(apply_prefix_filter(items, &prefix, db));
+    }
+
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
         let items = complete_platform_methods(db, type_name);
@@ -95,6 +106,34 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     }
 
     None
+}
+
+/// Enumerate platform methods for receivers that use a composite
+/// `type_name` prefix instead of a scalar key.
+///
+/// - `Ty::ObjectManager { kind, .. }` → `"CatalogManager"` /
+///   `"DocumentManager"` / … via `MdoType::manager_type_prefix`.
+/// - `Ty::MetadataRef { kind, .. }` → `"CatalogObject"` / `"CatalogRef"` /
+///   … via `MetadataKind::platform_prefix`.
+///
+/// Returns `None` for every other receiver shape so the scalar path
+/// below (`platform_type_name()` + `complete_platform_methods`) keeps
+/// handling value types, primitives, and `PlatformObject`. No Salsa-DB
+/// overhead is paid for those cases — the prefix arm only fires when
+/// the receiver is specifically a manager / metadata-ref.
+fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
+    db: &DB,
+    receiver_ty: &Ty,
+) -> Option<Vec<CompletionItem>> {
+    let prefix = match receiver_ty {
+        Ty::ObjectManager { kind, .. } => kind.manager_type_prefix()?,
+        Ty::MetadataRef { kind, .. } => kind.platform_prefix()?,
+        _ => return None,
+    };
+    tracing::debug!(prefix, "Prefix-based completion for manager / metadata-ref receiver");
+    let input = TypeNameInput::new(db, prefix.to_string());
+    let methods = manager_methods_query(db, input);
+    Some(methods.iter().map(render_manager_method).collect())
 }
 
 /// Decide whether we are in `X.| ` / `X.Yyy|` position and, if so, return

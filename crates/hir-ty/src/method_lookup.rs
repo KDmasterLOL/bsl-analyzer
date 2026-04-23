@@ -21,15 +21,15 @@
 //!   resolve via `PlatformData::get_method(type_name, method)`. Keys are
 //!   the English canonical names; the platform index is bilingual, so a
 //!   Russian method name still matches.
-//! - **`Ty::ObjectManager` / `Ty::MetadataRef`** — **deferred**.
-//!   Platform-data stores manager and ref methods with
-//!   `type_name = "CatalogManager.<Catalog name>"` /
-//!   `"CatalogRef.<Catalog name>"` and mangled per-method
-//!   `name` fields (`"<Имя"`, `"<Catalog name>.CreateItem"`), so no
-//!   direct method-name index exists. Returning `None` matches what the
-//!   pre-M3 `resolve_method_return_type` effectively did; re-enabling
-//!   requires either a richer platform-data shape or parsing
-//!   `documentation.syntax`.
+//! - **`Ty::ObjectManager`** / **`Ty::MetadataRef`** (object / ref
+//!   flavours) — route through
+//!   [`crate::platform_manager_lookup`]. That adapter walks the
+//!   platform-data table by `type_name`-prefix (`"CatalogManager.*"`,
+//!   `"CatalogObject.*"`, …) and matches the method name against
+//!   `docs.syntax` / the `english_name` tail — the shape that pairs
+//!   with placeholder `name = "<Имя"` entries. Return types that arrive
+//!   as generics (`"СправочникОбъект"`) are rebound to
+//!   `Ty::MetadataRef { <kind>, <current mdo_name> }` there.
 //! - **`Ty::ManagerCollection(_)`** / **`Ty::Union(_)`** / primitives
 //!   (`Number`, `String`, `Boolean`, `Date`) — `None`. Collections only
 //!   expose iteration, unions wait for M4 narrowing, and primitives have
@@ -71,14 +71,52 @@ pub struct MethodInfo {
 pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo> {
     // `Ty::ThisObject` is coerced to its matching `*Object`
     // `Ty::MetadataRef` at adapter entry — see [`crate::this_object`].
-    // For now platform-data has no indexed method table for
-    // `*Object` receivers (same gap as plain `MetadataRef`), so
-    // `platform_type_key` still returns `None`. The coercion is
-    // wired through anyway so the day `PlatformData` grows a
-    // manager / object method table, this adapter picks it up
-    // without further changes.
+    // The coercion lands on `MetadataRef { *Object, .. }`, which is then
+    // picked up by the `platform_manager_lookup` branch below.
     let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
     let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
+
+    // Route manager / metadata-ref receivers through the dedicated
+    // platform-manager adapter — platform data indexes them with
+    // composite `type_name` (`"CatalogManager.<Имя>"`) and
+    // placeholder per-method `name`, so the scalar `get_method` path
+    // below never hits. Workspace `ManagerModule.bsl` overrides win
+    // via `Resolver::resolve_three_level_method` at the 3-segment
+    // call site in `infer.rs` — this fallback only runs through
+    // `Expr::MethodCall` / aliased-manager shapes, where there is no
+    // CFE resolver to consult.
+    match receiver_ty {
+        Ty::ObjectManager { kind, name } => {
+            if let Some(res) = crate::platform_manager_lookup::resolve_platform_manager_method(
+                *kind,
+                name,
+                method_name,
+            ) {
+                return Some(MethodInfo {
+                    return_ty: res.return_ty,
+                    params: res.signature.params.to_vec(),
+                });
+            }
+            return None;
+        }
+        Ty::MetadataRef { kind, name } => {
+            if let Some(res) = crate::platform_manager_lookup::resolve_platform_metadata_ref_method(
+                *kind,
+                name,
+                method_name,
+            ) {
+                return Some(MethodInfo {
+                    return_ty: res.return_ty,
+                    params: res.signature.params.to_vec(),
+                });
+            }
+            // MetadataRef flavours without a platform surface (register
+            // dimensions, tabular sections) fall through `None` — same
+            // behaviour as before the adapter existed.
+            return None;
+        }
+        _ => {}
+    }
 
     let type_key = platform_type_key(receiver_ty)?;
     let data = PlatformData::instance();
@@ -86,28 +124,21 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
     Some(to_method_info(method))
 }
 
-/// Pick the `PlatformData::get_method` key for a receiver.
+/// Pick the `PlatformData::get_method` key for a scalar receiver.
 ///
 /// The platform-data index uses **English** type names keyed through a
 /// bilingual map, so passing the English canonical name resolves methods
 /// whose `name` is Russian (and vice versa).
 ///
-/// # What is not covered yet
+/// `Ty::ObjectManager` / `Ty::MetadataRef` are **not** routed through
+/// this key — their platform entries carry composite
+/// `type_name = "CatalogManager.<Имя>"` with placeholder per-method
+/// `name = "<Имя"`, which the scalar index cannot serve. Those
+/// receivers are handled upstream in [`lookup_method`] via
+/// [`crate::platform_manager_lookup`].
 ///
-/// `Ty::ObjectManager { kind, .. }` / `Ty::MetadataRef { kind, .. }`
-/// method lookup is a deferred gap. Platform-data entries for manager and
-/// reference types carry `type_name = "CatalogManager.<Catalog name>"` /
-/// `"CatalogRef.<Catalog name>"`, and their per-method `name` / `english_name`
-/// fields are placeholders (`"<Имя"`, `"<Catalog name>.CreateItem"`) —
-/// no direct method-name index exists. Returning `None` here matches what
-/// the pre-M3 `resolve_method_return_type` effectively did (via
-/// `platform_type_name()` returning `None` for ObjectManager and a
-/// mismatched `"MetadataRef"` key for MetadataRef). Re-enabling these
-/// requires either richer platform-data indexing or parsing
-/// `documentation.syntax`; tracked for a later milestone.
-///
-/// Similarly, primitives (`Ty::Number | String | Boolean | Date`) return
-/// `None` because BSL exposes no instance methods on them — string/date
+/// Primitives (`Ty::Number | String | Boolean | Date`) return `None`
+/// because BSL exposes no instance methods on them — string/date
 /// "methods" are global functions (`СтрДлина`, `ДобавитьМесяц`) reachable
 /// only through free-function syntax, not `receiver.method()`.
 fn platform_type_key(ty: &Ty) -> Option<&str> {
@@ -122,8 +153,10 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
         // Platform object name is stored as-authored in the `Ty` and the
         // bilingual index translates it.
         Ty::PlatformObject(name) => Some(name.as_str()),
-        // Deferred: manager / ref method lookup, primitives, unions,
-        // collectives, opaque types.
+        // Manager / ref receivers are resolved earlier in
+        // [`lookup_method`] via `platform_manager_lookup` — this arm
+        // is unreachable in practice, returning `None` preserves the
+        // invariant "scalar key only" for any future fall-through.
         Ty::ObjectManager { .. }
         | Ty::MetadataRef { .. }
         | Ty::Number
@@ -138,10 +171,11 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
         | Ty::Function { .. } => None,
         // `ThisObject` is coerced to its matching `Ty::MetadataRef`
         // companion at the entry of [`lookup_method`] (see
-        // `crate::this_object::coerce_to_metadata_ref`). A receiver
-        // that still lands here did not match a coercible MDO kind
-        // (form / record-set / command modules) — `None` matches the
-        // behaviour of other receivers with no platform method table.
+        // `crate::this_object::coerce_to_metadata_ref`), which the
+        // `MetadataRef` branch above then routes through
+        // `platform_manager_lookup`. A receiver that still lands here
+        // did not match a coercible MDO kind — `None` is the safe
+        // fallback.
         Ty::ThisObject { .. } => None,
     }
 }
@@ -177,7 +211,7 @@ fn to_method_info(method: &PlatformMethod) -> MethodInfo {
 /// take their canonical variant; anything else becomes
 /// `Ty::PlatformObject` so fluent chains like
 /// `Запрос.Выполнить().Выбрать()` can continue resolving.
-fn resolve_platform_type_name(name: &str) -> Ty {
+pub(crate) fn resolve_platform_type_name(name: &str) -> Ty {
     let ty = Ty::from_type_name(name);
     if ty.is_unknown() {
         Ty::PlatformObject(Name::new(name))
@@ -250,25 +284,45 @@ mod tests {
     }
 
     #[test]
-    fn method_lookup_object_manager_returns_none_deferred() {
-        // ObjectManager method lookup is deferred: platform-data's
-        // per-method `name` / `english_name` fields are placeholders
-        // (`"<Имя"`, `"<Catalog name>.CreateItem"`) with no real
-        // method-name index. Until that data-quality gap is bridged we
-        // return None — matching the pre-M3 `resolve_method_return_type`
-        // which also returned None via `platform_type_name()`.
+    fn method_lookup_object_manager_resolves_through_platform_manager_adapter() {
+        // `ObjectManager { Catalog, "Номенклатура" }.СоздатьЭлемент()`
+        // routes through `platform_manager_lookup` — the generic
+        // `СправочникОбъект` return must rebind to
+        // `MetadataRef { CatalogObject, "Номенклатура" }`.
         let om = Ty::ObjectManager {
             kind: MdoType::Catalog, name: Name::new("Номенклатура")
         };
-        assert!(lookup_method(&om, &Name::new("СоздатьЭлемент")).is_none());
+        let info = lookup_method(&om, &Name::new("СоздатьЭлемент"))
+            .expect("ObjectManager.СоздатьЭлемент must resolve via platform adapter");
+        assert_eq!(
+            info.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
+            }
+        );
     }
 
     #[test]
-    fn method_lookup_metadata_ref_returns_none_deferred() {
-        // Same data-quality story as ObjectManager; tracked together.
-        let r = Ty::MetadataRef {
-            kind: MetadataKind::CatalogRef, name: Name::new("Номенклатура")
+    fn method_lookup_object_manager_unknown_method_returns_none() {
+        // Fabricated method — no platform entry, lookup still returns
+        // `None` so the caller emits `UnresolvedMethodCall`.
+        let om = Ty::ObjectManager {
+            kind: MdoType::Catalog, name: Name::new("Номенклатура")
         };
-        assert!(lookup_method(&r, &Name::new("ПолучитьОбъект")).is_none());
+        assert!(lookup_method(&om, &Name::new("НетТакогоМетода")).is_none());
+    }
+
+    #[test]
+    fn method_lookup_metadata_ref_catalog_object_resolves_write() {
+        // `MetadataRef { CatalogObject, .. }.Записать()` routes to the
+        // CatalogObject platform method (procedure — return is
+        // `Ty::Undefined`).
+        let r = Ty::MetadataRef {
+            kind: MetadataKind::CatalogObject,
+            name: Name::new("Номенклатура"),
+        };
+        let info = lookup_method(&r, &Name::new("Записать"))
+            .expect("MetadataRef CatalogObject.Записать must resolve");
+        assert_eq!(info.return_ty, Ty::Undefined);
     }
 }

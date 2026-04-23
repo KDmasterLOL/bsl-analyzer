@@ -296,6 +296,48 @@ impl MetadataKind {
             _ => None,
         }
     }
+
+    /// English prefix under which this kind's platform methods are
+    /// indexed in `bsl-platform` (`CatalogObject`, `CatalogRef`, …).
+    ///
+    /// `None` for kinds without a platform surface today (register
+    /// record-manager / record-set flavours, dimensions, resources,
+    /// attributes, tabular sections). Single source of truth shared by:
+    ///
+    /// - `hir-ty::platform_manager_lookup::resolve_platform_metadata_ref_method`
+    ///   (semantic method resolution);
+    /// - `ide::completion::platform_completion` (dot-completion on
+    ///   `Ty::MetadataRef` receivers).
+    ///
+    /// Keep in sync with the `MdoType` mapping inside
+    /// `metadata_kind_to_prefix_and_mdo` — when a new kind grows a
+    /// platform table, both places pick it up.
+    pub fn platform_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::CatalogObject => Some("CatalogObject"),
+            Self::CatalogRef => Some("CatalogRef"),
+            Self::DocumentObject => Some("DocumentObject"),
+            Self::DocumentRef => Some("DocumentRef"),
+            Self::EnumRef => Some("EnumRef"),
+            Self::TaskRef => Some("TaskRef"),
+            Self::BusinessProcessRef => Some("BusinessProcessRef"),
+            Self::ExchangePlanRef => Some("ExchangePlanRef"),
+            Self::ExchangePlanObject => Some("ExchangePlanObject"),
+            Self::ChartOfAccountsRef => Some("ChartOfAccountsRef"),
+            Self::ChartOfAccountsObject => Some("ChartOfAccountsObject"),
+            Self::InformationRegisterRecordManager
+            | Self::AccumulationRegisterRecordSet
+            | Self::InformationRegisterRef
+            | Self::AccumulationRegisterRef
+            | Self::AccountingRegisterRef
+            | Self::CalculationRegisterRef
+            | Self::RegisterDimension { .. }
+            | Self::RegisterResource { .. }
+            | Self::RegisterAttribute { .. }
+            | Self::TabularSection { .. }
+            | Self::TabularSectionRow { .. } => None,
+        }
+    }
 }
 
 impl Ty {

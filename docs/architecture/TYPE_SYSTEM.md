@@ -255,6 +255,34 @@ pub trait HirDatabase: DefDatabase {
    `Semantics::type_of_expr`**; recovered marker меняет только
    behaviour соседних консьюмеров, не контракт фасада.
 
+7. **Platform-fallback для менеджеров и object/ref-контекстов.**
+   `Справочники.Х.СоздатьЭлемент()` /
+   `М = Справочники.Х; М.СоздатьЭлемент()` /
+   `Спр.Записать()` после `Спр = … .СоздатьЭлемент()` резолвятся
+   через `hir-ty::platform_manager_lookup`. Единая точка вызывается
+   из двух путей: `infer_three_level_call` для 3-сегментного вызова
+   и `method_lookup::lookup_method` для `Ty::ObjectManager` /
+   `Ty::MetadataRef { *Object | *Ref, .. }` — чтобы алиасированный
+   менеджер (`М = Справочники.Х`) не обходил фолбэк.
+   * **Приоритет workspace → platform**: fallback срабатывает только
+     на `Err(MethodNotFound)` от `Resolver::resolve_three_level_method`.
+     `MethodNotExport` оставляем workspace-диагностикой (платформа не
+     должна перезатирать ошибку видимости пользовательского модуля).
+   * **Context-aware return type**: generic
+     `PlatformMethod.return_type = "СправочникОбъект"` переписывается в
+     `Ty::MetadataRef { CatalogObject, <mdo_name> }` через
+     `map_generic_metadata_return_type` — таблица `(raw, MdoType) →
+     MetadataKind` симметрична `MetadataKind::object_kind_for`.
+   * **Гейт typo-safety**: 3-сегментный фолбэк требует, чтобы MDO
+     был объявлен в хотя бы одной visible configuration (зеркалит
+     `Resolver::mdo_visible_in_configs`) — иначе типичный опечаточный
+     `Документы.НетТакогоДокумента.ПолучитьСсылку()` тихо завершался бы
+     через platform data вместо честного `UnresolvedMethodCall`.
+     В `lookup_method` на `Ty::ObjectManager` / `Ty::MetadataRef`
+     такой гейт не нужен — receiver уже прошёл через
+     `manager_lookup::lookup_manager_field`, который отвергает
+     несуществующие MDO ещё до присвоения типа `ObjectManager`.
+
 ## Path-sensitive анализ (narrowing)
 
 Narrowing типов через `Если ТипЗнч(Х) = Тип("…")` или
