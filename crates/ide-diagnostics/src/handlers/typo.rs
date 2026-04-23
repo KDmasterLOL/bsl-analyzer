@@ -1,32 +1,4 @@
-//! Typo diagnostic
-//!
-//! Detects possible typos in identifiers and string literals using Hunspell dictionaries.
-//!
-//! ## Why?
-//! Typos in code lead to:
-//! - Reduced code readability
-//! - Confusion for other developers
-//! - Potential bugs due to misnamed variables/functions
-//! - Unprofessional appearance
-//!
-//! ## Bad practice
-//! ```bsl
-//! Функция ВаринатыОплаты()  // Typo: should be "Варианты"
-//!     Сообщить("Атмена");   // Typo: should be "Отмена"
-//! КонецФункции
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Функция ВариантыОплаты()
-//!     Сообщить("Отмена");
-//! КонецФункции
-//! ```
-//!
-//! ## Configuration
-//! - `minWordLength`: Minimum word length to check (default: 3)
-//! - `userWordsToIgnore`: Comma-separated list of words to ignore (default: "")
-//! - `caseInsensitive`: Case-insensitive matching for user dictionary (default: false)
+//! Heuristic Hunspell-based typo detector for identifiers and string literals.
 
 use crate::define_metadata;
 use crate::metadata::*;
