@@ -1,40 +1,4 @@
-//! DuplicatedInsertionIntoCollection diagnostic.
-//!
-//! Detects duplicate insertions of the same value into a collection.
-//!
-//! ## Why?
-//! Duplicate insertions are likely errors:
-//! - Same value inserted twice (copy-paste error)
-//! - Logic mistake
-//! - Unnecessary operations
-//!
-//! ## Bad practice
-//! ```bsl
-//! Массив.Добавить(Значение1);
-//! Массив.Добавить(Значение1);  // Duplicate!
-//!
-//! Соответствие.Вставить("Ключ1", Значение);
-//! Соответствие.Вставить("Ключ1", Значение);  // Duplicate key!
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Массив.Добавить(Значение1);
-//! Массив.Добавить(Значение2);  // Different values
-//!
-//! // Or if intentional, use loop:
-//! Для Индекс = 1 По 3 Цикл
-//!     Массив.Добавить(ЗначениеПоУмолчанию);
-//! КонецЦикла;
-//! ```
-//!
-//! ## Configuration
-//! - `isAllowedMethodADD` (boolean, default: true) - If false, only Вставить/Insert checked
-//!
-//! ## Implementation
-//!
-//! This diagnostic uses HIR-based post-analysis for structural expression comparison.
-//! Instead of regex-based text normalization, it compares HIR expression trees directly.
+//! Reports repeated insertions of the same value or key into a collection.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -59,10 +23,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Check a HIR body for duplicated insertions.
-///
-/// This is a post-HIR analysis function that examines the body after lowering.
-/// It tracks variable generations and detects duplicate insertions into collections.
+/// Check a lowered HIR body for duplicated insertions.
 pub fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
