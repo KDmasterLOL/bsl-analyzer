@@ -2,10 +2,9 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-When you use GetTemporaryFileName(), 1С:Enterprise retains control over these files and by default deletes them as soon as a working process (if a file is created on the server side) or client application (if a file is created on the client side) is restarted.
+For temporary files, the platform recommends using `GetTempFileName()` / `ПолучитьИмяВременногоФайла()`. Files created that way remain under platform control and are easier to clean up correctly.
 
-If a temporary file name is generated otherwise, and the application code fails (or is for any other reason unable) to delete a temporary file, it is not controlled by the platform and is saved in the file system for an indefinite time. Lost temporary files accumulated in the system can pose a serious problem, specifically for infobases with a great number of active users (for example, in the service mode).
+The current diagnostic reports direct calls to `TempFilesDir()` / `КаталогВременныхФайлов()`, because that API often leads to manual construction of temporary file paths that are easier to leak.
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
@@ -25,7 +24,7 @@ TempFile = GetTempFileName("xml");
 Data.Write(TempFile);
 ```
 
-To create a temporary directory, it is recommended to use the one obtained by the GetTempFileName method (with the exception of the web client).
+To create a temporary directory, it is also recommended to build it from a value returned by `GetTempFileName()` (except for special platform-specific cases such as the web client).
 
 Incorrect:
 
@@ -47,4 +46,4 @@ ArchFile.ExtractAll(ArchCatalog);
 
 ## Sources
 
-* Source: [Standard: Temporary Files and Directories](https://its.1c.ru/db/v8std#content:542:hdoc)
+- [#std542: Filesystem access from configuration code (RU)](https://its.1c.ru/db/v8std#content:542:hdoc)
