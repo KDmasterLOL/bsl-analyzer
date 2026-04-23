@@ -1,18 +1,4 @@
-//! Diagnostic: ServerSideExportFormMethod
-//!
-//! Forbids creating server-side export methods in managed forms.
-//!
-//! Export methods in managed forms must have only `&НаКлиенте` annotation.
-//! Any other annotation or missing annotation is an error.
-//!
-//! ## Severity
-//! BLOCKER
-//!
-//! ## Conditions
-//! - Module is FormModule
-//! - Form is Managed (not Ordinary)
-//! - Method is exported (`Экспорт`)
-//! - Method does NOT have `&НаКлиенте` annotation
+//! Forbids export methods in managed forms unless they are explicitly `&НаКлиенте`.
 
 use bsl_metadata::{FormType, ModuleType};
 use hir::AnnotationKind;
