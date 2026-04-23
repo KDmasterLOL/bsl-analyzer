@@ -1,38 +1,4 @@
-//! SetPermissionsForNewObjects diagnostic.
-//!
-//! Validates that roles do not have "Set permissions for new objects" flag enabled.
-//!
-//! ## What it checks
-//!
-//! This diagnostic validates that roles (except explicitly allowed ones like ПолныеПрава/FullAccess)
-//! do not have the "setForNewObjects" flag enabled in their Rights.xml.
-//!
-//! ## Why?
-//!
-//! When this flag is enabled, the role automatically gets permissions for any newly created
-//! metadata objects. This is a security vulnerability for non-admin roles, as it may grant
-//! unintended access to sensitive data.
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** Yes
-//! - **Severity:** CRITICAL (VULNERABILITY)
-//! - **Tags:** STANDARD, BADPRACTICE, DESIGN
-//! - **Minutes to fix:** 1
-//!
-//! ## Parameter
-//!
-//! - `namesFullAccessRole` (string, default: "FullAccess,ПолныеПрава") - comma-separated list
-//!   of role names that are allowed to have this flag enabled
-//!
-//! ## Scope
-//!
-//! This diagnostic only runs for **ManagedApplicationModule** files.
-//! All diagnostics are reported at the beginning of the module (line 1, columns 1-9).
-//!
-//! ## Reference
-//!
-//! Ported from:
+//! Checks that only explicitly allowed roles keep `setForNewObjects=true`.
 
 use crate::define_metadata;
 use crate::metadata::*;
