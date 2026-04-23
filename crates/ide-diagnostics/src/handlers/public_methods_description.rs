@@ -1,48 +1,6 @@
 //! PublicMethodsDescription diagnostic.
 //!
-//! Checks that all export methods in API regions have descriptions (comments before method).
-//!
-//! ## Configuration
-//!
-//! - `checkAllRegion` (boolean, default: false)
-//!   - `true`: Check all export methods regardless of region
-//!   - `false`: Only check export methods in API regions (ПрограммныйИнтерфейс/Public)
-//!
-//! ## API Regions
-//!
-//! Unlike `is_api_region_name()` which includes Internal/СлужебныйПрограммныйИнтерфейс,
-//! this diagnostic only checks:
-//! - Russian: ПрограммныйИнтерфейс
-//! - English: Public
-//!
-//! ## Examples
-//!
-//! ### Bad practice (export function without description in API region)
-//! ```bsl
-//! #Область ПрограммныйИнтерфейс
-//!
-//! Функция БезОписания() Экспорт
-//!     Возврат Неопределено;
-//! КонецФункции
-//!
-//! #КонецОбласти
-//! ```
-//!
-//! ### Good practice
-//! ```bsl
-//! #Область ПрограммныйИнтерфейс
-//!
-//! // Возвращает значение по умолчанию.
-//! //
-//! // Возвращаемое значение:
-//! //   Неопределено
-//! //
-//! Функция ЗначениеПоУмолчанию() Экспорт
-//!     Возврат Неопределено;
-//! КонецФункции
-//!
-//! #КонецОбласти
-//! ```
+//! Reports exported methods without a documentation comment.
 
 use crate::define_metadata;
 use crate::metadata::*;
