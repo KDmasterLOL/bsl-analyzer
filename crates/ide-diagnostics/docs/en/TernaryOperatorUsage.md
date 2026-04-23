@@ -1,43 +1,56 @@
 # Ternary operator usage (TernaryOperatorUsage)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Instead of the ternary operator, use the "If-else" construct.
+This diagnostic recommends replacing the ternary operator `?(...)` with an explicit `If ... Else ... EndIf` construct.
+
+The rationale is readability: compact ternary expressions become hard to parse, especially when nested or embedded into larger expressions.
+
+The current implementation is intentionally broad:
+
+- it reports every ternary operator usage;
+- nested ternaries are reported separately for each nested `?(...)`;
+- the rule is disabled by default and only works when explicitly enabled in configuration.
 
 ## Examples
 
-Bad:
+### Incorrect
 
 ```bsl
-Result = ?(X%15 <> 0, ?(X%5 <> 0, ?(X%3 <> 0, x, "Fizz"), "Buzz"), "FizzBuzz"); 
+Result = ?(X % 15 <> 0, ?(X % 5 <> 0, ?(X % 3 <> 0, X, "Fizz"), "Buzz"), "FizzBuzz");
 ```
 
-Good:
+### Correct
 
 ```bsl
-If x% 15 = 0 Then
+If X % 15 = 0 Then
     Result = "FizzBuzz";
-ElseIf, if x% 3 = 0 Then
+ElseIf X % 3 = 0 Then
     Result = "Fizz";
-ElseIf, if x% 5 = 0 Then
+ElseIf X % 5 = 0 Then
     Result = "Buzz";
 Else
-    Result = x;
+    Result = X;
 EndIf;
 ```
 
-Bad:
+### Incorrect
 
 ```bsl
 If ?(P.Emp_emptype = Null, 0, P.Emp_emptype) = 0 Then
-      Status = "Done";
+    Status = "Done";
 EndIf;
 ```
-Good:
+
+### Correct
 
 ```bsl
 If P.Emp_emptype = Null OR P.Emp_emptype = 0 Then
-      Status = "Done";
-End If;
+    Status = "Done";
+EndIf;
 ```
+
+## Sources
+
+- Generic readability guidance for conditional expressions.
+- [v8std.ru: TernaryOperatorUsage](https://v8std.ru/diagnostics/bslls/TernaryOperatorUsage/)
