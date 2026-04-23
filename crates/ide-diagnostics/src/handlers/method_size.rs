@@ -75,7 +75,7 @@ mod tests {
         //   ...
         //   Line 419:  Функция Функция201Строка()       <- diagnostic here
         //
-        // Sizes are computed as stop_line - start_line (ANTLR behavior).
+        // Sizes are computed as stop_line - start_line.
         // Процедура201Строка: lines 6-212 → size 206? No — we need size=201.
         // Original has 201 А=0 statements, making the method span 203 lines (start + 201 body + end).
         // Size = stop_line - start_line = 202 lines diff but reports 201.

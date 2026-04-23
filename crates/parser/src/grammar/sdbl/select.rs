@@ -866,8 +866,8 @@ fn is_join_keyword(p: &Parser) -> bool {
 fn join_clause(p: &mut Parser) {
     let m = p.start();
 
-    // Parse join type (LEFT, RIGHT, FULL, INNER)
-    // Note: In ANTLR grammar, JOIN alone defaults to INNER JOIN
+    // Parse join type (LEFT, RIGHT, FULL, INNER).
+    // Bare JOIN without an explicit type is accepted as implicit INNER JOIN.
     let has_join_type = p.at_keyword("LEFT")
         || p.at_keyword("ЛЕВОЕ")
         || p.at_keyword("RIGHT")
@@ -929,8 +929,8 @@ fn is_limitation_keyword(p: &Parser) -> bool {
 /// limitations: (DISTINCT | TOP count | ALLOWED)+
 /// ```
 ///
-/// ANTLR grammar has all permutations, but we simplify by accepting keywords in any order.
-/// This accepts all valid combinations and some invalid ones (which is acceptable for error recovery).
+/// Keywords are accepted in any order to keep the parser tolerant; strict
+/// ordering (where required) is enforced by semantic diagnostics, not here.
 fn limitations(p: &mut Parser) {
     let m = p.start();
 

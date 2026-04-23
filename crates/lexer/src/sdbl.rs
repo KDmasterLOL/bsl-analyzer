@@ -956,8 +956,7 @@ mod tests {
 
     #[test]
     fn test_string_with_embedded_newline() {
-        // Test a string that has a newline INSIDE it (like ANTLR STR+)
-        // This simulates what ANTLR would create for multiString
+        // Test a string that contains an embedded newline between quotes.
         let input = "\"text\nmore\"";
         let tokens = tokenize_sdbl(input);
 
