@@ -1,25 +1,4 @@
-//! UnsafeFindByCode diagnostic.
-//!
-//! Detects calls to FindByCode() / НайтиПоКоду() on metadata objects
-//! where uniqueness is not guaranteed.
-//!
-//! ## Why?
-//! When code uniqueness control is disabled (CheckUnique=false) or
-//! code series is applied within subordination/owner (CodeSeries!=WholeCatalog),
-//! FindByCode may return unexpected results because multiple objects
-//! can have the same code.
-//!
-//! ## Affected metadata types
-//! - Catalogs (Справочники)
-//! - Charts of Characteristic Types (ПланыВидовХарактеристик)
-//! - Charts of Accounts (ПланыСчетов)
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Major
-//! - **Type:** CODE_SMELL
-//! - **Tags:** DESIGN, SUSPICIOUS
-//! - **Minutes to fix:** 5
+//! Reports unsafe `FindByCode()` / `НайтиПоКоду()` calls when code uniqueness is not guaranteed.
 
 use crate::define_metadata;
 use crate::metadata::*;

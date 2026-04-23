@@ -1,36 +1,44 @@
 # Methods should not have too many return statements (TooManyReturns)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-A large number of returns in a method (procedure or function) increases its complexity and reduces performance and perception.
+Too many `Return` statements make a method harder to read, refactor, and debug.
+
+This diagnostic reports procedures and functions whose number of return statements exceeds the configured limit. The default limit in this project is `3`.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
-Bad method example
+Bad example
 
 ```bsl
 Function Example(Condition)
-     If Condition = 1 Then
-         Return "Check passed";
-     ElsIf Condition = 2 Then
-         ExecuteSomething();
-         Return "Check not passed";
-     ElsIf Condition > 7 Then
-         Если Validate(Contidtion) Then
-             Return "Check passed";
-         Else
-             Return "Check not passed";
-         EndIf;
-     EndIf;
-     Return "";
+    If Condition = 1 Then
+        Return "Accepted";
+    ElsIf Condition = 2 Then
+        Return "Rejected";
+    ElsIf Condition = 3 Then
+        Return "Deferred";
+    EndIf;
+    Return "Unknown";
+EndFunction
+```
+
+Better
+
+```bsl
+Function Example(Condition)
+    Result = "Unknown";
+    If Condition = 1 Then
+        Result = "Accepted";
+    ElsIf Condition = 2 Then
+        Result = "Rejected";
+    ElsIf Condition = 3 Then
+        Result = "Deferred";
+    EndIf;
+    Return Result;
 EndFunction
 ```
 
 ## Sources
 
-* [Why Many Return Statements Are a Bad Idea in OOP](https://www.yegor256.com/2015/08/18/multiple-return-statements-in-oop.html)
-* [JAVA: Methods should not have too many return statements](https://rules.sonarsource.com/java/RSPEC-1142)
-* [Why fast return is so important?](https://habr.com/ru/post/348074/)
+* [Sonar rule S1142: Methods should not have too many return statements](https://rules.sonarsource.com/java/RSPEC-1142)
