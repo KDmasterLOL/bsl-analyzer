@@ -1,22 +1,32 @@
 # Reserved parameter names (ReservedParameterNames)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
+If a procedure or function parameter has the same name as a reserved platform identifier, that parameter hides the original name in the local scope. In practice this often leads to confusing code and broken access to system enumeration names or other reserved identifiers.
 
-If a parameter name matches one of a system enumeration's name, then all values of that enumeration will not be available in the local context.
-Module code's syntax checking will not detect an error. To prevent this situation, a parameter name should not match all names of system enumerations.
+The current implementation is fully configuration-driven:
 
-Parameter names should not contain reserved words such as system enumerations.
-The list of reserved words is set by a regular expression.
-The search is case-insensitive.
+- it checks only procedure and function parameters;
+- it compares parameter names against the configured `reservedWords` list;
+- matching is case-insensitive;
+- matching is exact, not partial.
 
-**For example:**
+If `reservedWords` is empty, the diagnostic produces no findings.
 
-"FormGroupType|FormFieldType"
+### Example configuration
+
+```json
+{
+  "diagnostics": {
+    "ReservedParameterNames": {
+      "reservedWords": ["FormGroupType", "FormFieldType"]
+    }
+  }
+}
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-* Source: [Standard: Procedure and Function Parameters (RU)](https://its.1c.ru/db/v8std/content/640/hdoc)
-* Source: [Standard: Rules for generating variable names (RU)](https://its.1c.ru/db/v8std#content:454:hdoc)
+- [Procedure and function parameters - Standard 1C (RU)](https://its.1c.ru/db/v8std/content/640/hdoc)
+- [Rules for generating variable names - Standard 1C (RU)](https://its.1c.ru/db/v8std#content:454:hdoc)
+- [v8std.ru: ReservedParameterNames](https://v8std.ru/diagnostics/bslls/ReservedParameterNames/)
