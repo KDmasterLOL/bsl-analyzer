@@ -1,16 +1,35 @@
 # Accessing privileged module methods (PrivilegedModuleMethodCall)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-Code running in `privileged` `mode` must be checked.
+
+This diagnostic reports calls to exported methods of privileged common modules.
+
+Privileged modules execute with elevated rights and may bypass ordinary access
+checks. Because of that, every call to their public API deserves manual review:
+the caller might accidentally or intentionally gain access to operations that
+should stay behind an explicit security boundary.
+
+The diagnostic also supports a local `validateNestedCalls` option. When it is
+disabled, self-calls from inside the same privileged module are ignored.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+
+Assume the configuration contains a privileged module `SystemTasks`:
+
+```bsl
+Function ExecuteOperation(OperationName, Params) Export
+EndFunction
+```
+
+A call from another module:
+
+```bsl
+SystemTasks.ExecuteOperation("DeleteData", Params);
+```
+
+Such calls should be reviewed to make sure the exposed privileged operation is
+really safe for the calling context.
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
-* Источник: [Стандарт: `Тексты модулей`](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* `Источник`: [Cognitive complexity, `ver`. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
+
+- Secondary reference: [v8std.ru: PrivilegedModuleMethodCall](https://v8std.ru/diagnostics/bslls/PrivilegedModuleMethodCall/)

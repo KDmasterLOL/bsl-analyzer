@@ -1,25 +1,6 @@
 //! PrivilegedModuleMethodCall diagnostic.
 //!
-//! Detects calls to public methods of privileged CommonModules.
-//!
-//! ## What it checks
-//!
-//! Privileged modules run with elevated rights, bypassing RLS and role checks.
-//! Calls to their methods require review to exclude security vulnerabilities.
-//!
-//! ## Parameters
-//!
-//! - `validateNestedCalls` (bool, default: true) - If false, calls from within
-//!   a privileged module to itself are not flagged.
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** Yes
-//! - **Severity:** Major
-//! - **Type:** SECURITY_HOTSPOT
-//!
-//! ## Reference
-//!
+//! Reports calls to exported methods of privileged common modules.
 
 use bsl_metadata::traits::MdObject;
 
