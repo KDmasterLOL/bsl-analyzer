@@ -1,41 +1,4 @@
-//! Diagnostic: UnusedLocalVariable
-//!
-//! Detects local variables that are declared but never used.
-//!
-//! ## Implementation
-//!
-//! Uses backward liveness dataflow analysis to accurately detect unused variables.
-//! A variable is "unused" if it's never live at any program point (never read).
-//!
-//! **Algorithm:**
-//! 1. Build CFG for each method
-//! 2. Run backward liveness analysis (OUT → IN)
-//! 3. Check if each declared variable is live at entry point
-//! 4. If not live → unused → report diagnostic
-//!
-//! **Why liveness analysis?**
-//! - Handles control flow correctly (loops, branches, etc.)
-//! - Distinguishes read vs write (assignment alone doesn't make variable "used")
-//! - Fixes false positives from simple tracking (e.g., While loop control variables)
-//!
-//! ## Severity
-//! Info (with Unnecessary tag)
-//!
-//! ## Example
-//! ```bsl
-//! // Bad - unused variable
-//! Процедура Тест()
-//!     Перем НеИспользуется;  // Warning: unused
-//!     Сообщить("Привет");
-//! КонецПроцедуры
-//!
-//! // Good - variable is used
-//! Процедура Тест()
-//!     Перем Сообщение;
-//!     Сообщение = "Привет";
-//!     Сообщить(Сообщение);
-//! КонецПроцедуры
-//! ```
+//! Reports local variables that are declared or assigned but never read.
 
 use rustc_hash::FxHashSet;
 
@@ -916,7 +879,7 @@ mod tests {
     /// - We don't handle `&НаКлиенте`/`&НаСервере` annotations (both vars with same name flagged)
     /// - We may detect additional unused variables
     #[test]
-    fn test_java_fixture_full() {
+    fn test_detects_unused_local_variables_in_fixture() {
         let code = r#"&НаКлиенте
 Перем ПеременнаяМодуляНеИспользуемая; // Тут ошибка
 
