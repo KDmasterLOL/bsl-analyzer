@@ -1,21 +1,4 @@
-//! Diagnostic: SelfAssign
-//!
-//! Detects self-assignment patterns like `a = a` or `Obj.X = Obj.X`.
-//!
-//! ## Severity
-//! Major
-//!
-//! ## Example
-//! ```bsl
-//! // Bad - self-assignment
-//! А = А;
-//! СтруктураДанных.Поле = СтруктураДанных.Поле;
-//!
-//! // Good
-//! А = Б;
-//! СтруктураДанных.Поле = НовоеЗначение;
-//! ```
-//!
+//! Reports assignments where the target is assigned to itself.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -36,9 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::SelfAssign` is encountered.
+/// Creates a diagnostic from HIR self-assignment lowering data.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::SelfAssign,
