@@ -3,57 +3,65 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Magic numbers are any number in your code that does not immediately become apparent without being immersed in context.
+A magic number is a hard-coded numeric literal whose meaning is not obvious from
+the code around it.
+
+Such values make code harder to read and maintain. Prefer replacing them with a
+named variable or constant that explains the intent.
+
+The current implementation is configurable. By default it ignores some widely
+used values and several structural contexts such as:
+
+- default parameter values;
+- structure and correspondence inserts;
+- structure constructors and property assignments;
+- some constructor calls such as number/string qualifiers;
+- array indexes when `allowMagicIndexes` is enabled.
 
 ## Examples
 
-Bad
+Invalid:
 
 ```bsl
-Function GetsTheInterval(Duration)
-
-     Return Duration < 10 * 60 * 60;
-
-End Function
+Function WeightInKilograms(WeightInGrams)
+    Return WeightInGrams / 1000;
+EndFunction
 ```
 
-Good
+Better:
 
 ```bsl
-Function GetsTheInterval (Duration in Seconds)
-
-    MinutesHour     = 60;
-    SecondsMinute   = 60;
-    SecondsHour     = SecondsMinute * MinutesHour;
-    HoursIninterval = 10;
-    Return Duration < HoursWininterval * SecondsHour;
-
-End Function
+Function WeightInKilograms(WeightInGrams)
+    GramsPerKilogram = 1000;
+    Return WeightInGrams / GramsPerKilogram;
+EndFunction
 ```
 
 ## Exceptions
 
-Magic numbers used in structures and correspondences are not considered errors, as they are used as keys or values in data structures where the context is clear:
+Some numeric literals are intentionally not reported when their context is
+treated as structurally meaningful by the current implementation:
 
 ```bsl
-// Structure insert - no error
 Structure = New Structure;
-Structure.Insert("MyVariable", 20); // No error
-Structure.Insert("AnotherVariable", 42); // No error
+Structure.Insert("Width", 800);
+Structure.Insert("Height", 600);
 
-// Structure constructor - no error
-Structure2 = New Structure("Field1, Field2", 5, 15); // No error
+Structure2 = New Structure("Field1, Field2", 5, 15);
 
-// Direct structure property assignment - no error
 StructureWithFields = New Structure("MyVariable, AnotherField");
-StructureWithFields.MyVariable = 20; // No error
-StructureWithFields.AnotherField = 50; // No error
+StructureWithFields.MyVariable = 20;
+StructureWithFields.AnotherField = 50;
 
-// Fixed structure - no error
-FixedStructure = New FixedStructure("Value", 200); // No error
-
-// Correspondence - no error (both key and value)
 Correspondence = New Correspondence;
-Correspondence.Insert("Code", 123); // No error
-Correspondence.Insert(1980, "Olympics in Moscow"); // No error
+Correspondence.Insert("Code", 123);
+Correspondence.Insert(1980, "Olympics in Moscow");
 ```
+
+## Sources
+
+This diagnostic has no direct normative 1C standard source.
+
+Related public context:
+
+* [v8std.ru / bslls / MagicNumber](https://v8std.ru/diagnostics/bslls/MagicNumber/)
