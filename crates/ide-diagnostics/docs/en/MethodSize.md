@@ -3,17 +3,48 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-There are cumbersome methods (procedures and functions) which mskes it impossible to work effectively precisely because of their huge size.  
-A large method often arises when a developer adds new functionality to a method. “Why should I put the parameter check in a separate method, if I can write it here?”, “Why do I need to create a separate method for the search of maximum element in the array, let’s leave it here. So the code is clearer”, and other misconceptions.
+A large method is harder to understand, test, and maintain.
 
-There are two rules for refactoring a large method:
+Methods usually become too large when new logic keeps being added directly to
+the same procedure or function instead of being extracted into smaller parts.
 
-- If when writing a method you want to add a comment to the code, you must put this functionality in a separate method
-- If the method takes more than 50-100 lines of code, you should determine the tasks and subtasks that it performs and try to put the subtasks in a separate method
+The current implementation uses a configurable line-count threshold:
+
+- `maxMethodSize`, `200` by default.
+
+Practical refactoring heuristics:
+
+- if you want to add a comment explaining a code block, that block may deserve a
+  separate method with a meaningful name;
+- if one method performs several subtasks, split them into focused helper
+  methods.
+
+## Examples
+
+Invalid:
+
+```bsl
+Procedure ProcessDocument(Document)
+    // 200 lines of validation, calculations, persistence, notifications
+EndProcedure
+```
+
+Better:
+
+```bsl
+Procedure ProcessDocument(Document)
+    ValidateDocument(Document);
+    CalculateTotals(Document);
+    SaveDocument(Document);
+    NotifyUser(Document);
+EndProcedure
+```
 
 ## Sources
 
-- [Software Architecture Refactoring: Layering](http://citforum.ru/SE/project/refactor/)
+This diagnostic has no direct normative 1C standard source.
+
+Related public context:
+
 - [Martin Fowler: Refactoring](https://www.refactoring.com/)
-- [Refactoring and opt-out tools (RU)](https://v8.1c.ru/o7/201312ref/index.htm)
-- [Refactoring tools in 1C (RU)](https://www.koderline.ru/expert/programming/article-vspomogatelnye-funktsii-v-1s/#anchor6)
+- [Refactoring tools in 1C (RU)](https://v8.1c.ru/o7/201312ref/index.htm)
