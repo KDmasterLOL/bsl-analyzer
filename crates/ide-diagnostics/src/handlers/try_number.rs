@@ -1,37 +1,4 @@
-//! TryNumber diagnostic.
-//!
-//! Detects use of Number()/Число() method inside Try blocks.
-//!
-//! ## Why?
-//! Using exceptions for type casting is incorrect. Use TypeDescription capabilities instead.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Попытка
-//!     КоличествоДнейРазрешения = Число(Значение);
-//! Исключение
-//!     КоличествоДнейРазрешения = 0;
-//! КонецПопытки;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! ОписаниеТипа = Новый ОписаниеТипов("Число");
-//! КоличествоДнейРазрешения = ОписаниеТипа.ПривестиЗначение(Значение);
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** MAJOR
-//! - **Type:** CODE_SMELL
-//! - **Tags:** STANDARD
-//! - **Minutes to fix:** 2
-//!
-//! ## Implementation
-//! Uses HIR-based detection during lowering. Число()/Number() calls inside try blocks
-//! are detected and emitted as BodyDiagnostic::TryNumber.
-//!
-//! Ported from:
+//! Detects `Число()` / `Number()` calls inside `try` blocks.
 
 use crate::define_metadata;
 use crate::metadata::*;
