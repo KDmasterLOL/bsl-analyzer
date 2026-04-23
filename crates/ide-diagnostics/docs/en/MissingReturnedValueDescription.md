@@ -15,15 +15,32 @@ Diagnostics detects typical errors:
 - Poor description of the return value: when the type name is present in the description, but its description is not specified
   - To activate this more stringent check, you must turn off the short form permission by the diagnostic parameter
 
+The current implementation has a few important scope details:
+
+- missing returned-value documentation is checked only for export functions;
+- procedures are checked only to ensure they do not contain a returned-value section;
+- hyperlink-style comments such as `See OtherMethod()` are skipped;
+- the `allowShortDescriptionReturnValues` parameter controls whether a type name alone is accepted.
+
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+
+### Incorrect
+
+```bsl
+// Calculates the total order amount.
+Function TotalOrderAmount(Order) Export
+```
+
+### Correct
+
+```bsl
+// Calculates the total order amount.
+//
+// Return value:
+//   Number - total amount of all order lines including discounts
+Function TotalOrderAmount(Order) Export
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
-
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-
-* Standart: [Procedures and functions description (RU)](https://its.1c.ru/db/v8std#content:453:hdoc)
+- [Standard: Procedures and functions description (RU)](https://its.1c.ru/db/v8std#content:453:hdoc)
+- [v8std.ru: MissingReturnedValueDescription (RU)](https://v8std.ru/diagnostics/bslls/MissingReturnedValueDescription/)
