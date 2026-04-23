@@ -1,3 +1,5 @@
+//! Reports hardcoded secret values such as passwords in code.
+
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
