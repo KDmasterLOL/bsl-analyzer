@@ -132,6 +132,115 @@ impl From<&RawGlobalFunction> for GlobalFunction {
     }
 }
 
+/// Platform constructor overload (`Новый X(...)`).
+///
+/// A single BSL platform type can expose several constructor forms (`Массив`,
+/// `Структура`, `СписокЗначений` — all have multiple variants). Each variant is
+/// a distinct `PlatformConstructor`. `id` mirrors the source HBK's
+/// `ctor{N}.html` filename so the numeric identity stays stable across
+/// regenerations of the same help book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformConstructor {
+    /// Stable numeric id (from `ctor{N}.html`).
+    pub id: u32,
+    /// English name of the enclosing platform type (e.g. "Array"). Matches
+    /// `PlatformMethod::type_name` so both tables key on the same string.
+    pub type_name: SmolStr,
+    /// Human-readable variant label (e.g. "По количеству элементов"). `None`
+    /// only for malformed HBK pages; normal pages always have it.
+    pub variant_name: Option<SmolStr>,
+    /// Declared parameters of this overload.
+    pub parameters: Vec<MethodParam>,
+    pub min_version: Option<SmolStr>,
+    pub context: Option<ContextAvailability>,
+}
+
+/// Raw platform constructor for const initialization (internal use only).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawPlatformConstructor {
+    pub id: u32,
+    pub type_name: &'static str,
+    pub variant_name: Option<&'static str>,
+    pub parameters: &'static [RawMethodParam],
+    pub min_version: Option<&'static str>,
+    pub context: Option<RawContextAvailability>,
+}
+
+impl From<&RawPlatformConstructor> for PlatformConstructor {
+    fn from(raw: &RawPlatformConstructor) -> Self {
+        Self {
+            id: raw.id,
+            type_name: raw.type_name.into(),
+            variant_name: raw.variant_name.map(SmolStr::from),
+            parameters: raw.parameters.iter().map(MethodParam::from).collect(),
+            min_version: raw.min_version.map(SmolStr::from),
+            context: raw.context.as_ref().map(ContextAvailability::from),
+        }
+    }
+}
+
+/// Property of a platform type (e.g. `Запрос.Параметры`, `Запрос.Текст`).
+///
+/// Unlike [`PlatformMethod`], property pages in HBK encode the value type as a
+/// list of references inside the `Описание:` chapter. A property may declare
+/// several types simultaneously (`МенеджерВременныхТаблиц, Неопределено`), so
+/// the runtime keeps them as a `Vec<SmolStr>` and lets the `hir-ty` adapter
+/// decide whether to collapse to a scalar `Ty` or a union. The `is_readonly`
+/// flag is derived from the `Использование:` chapter (`"Только чтение"` vs
+/// `"Чтение и запись"`) and feeds the `ReadOnlyPropertyAssignment` diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformProperty {
+    /// Stable numeric id (monotonic across the extraction run).
+    pub id: u32,
+    /// English name of the enclosing platform type (e.g. "Query"). Same shape
+    /// and case as [`PlatformMethod::type_name`] so both indices key on the
+    /// same string.
+    pub type_name: SmolStr,
+    /// Russian property name (e.g. "Параметры").
+    pub name: SmolStr,
+    /// English property name (e.g. "Parameters").
+    pub english_name: SmolStr,
+    /// Declared value types in source order. Single-element for scalars,
+    /// multi-element for union declarations. Empty when the HBK page omits
+    /// the `Тип:` marker (free-prose description).
+    pub property_types: Vec<SmolStr>,
+    /// `true` when the `Использование:` chapter reads "Только чтение";
+    /// `false` for read-write properties.
+    pub is_readonly: bool,
+    pub min_version: Option<SmolStr>,
+    pub context: Option<ContextAvailability>,
+}
+
+/// Raw platform property for const initialization (internal use only).
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct RawPlatformProperty {
+    pub id: u32,
+    pub type_name: &'static str,
+    pub name: &'static str,
+    pub english_name: &'static str,
+    pub property_types: &'static [&'static str],
+    pub is_readonly: bool,
+    pub min_version: Option<&'static str>,
+    pub context: Option<RawContextAvailability>,
+}
+
+impl From<&RawPlatformProperty> for PlatformProperty {
+    fn from(raw: &RawPlatformProperty) -> Self {
+        Self {
+            id: raw.id,
+            type_name: raw.type_name.into(),
+            name: raw.name.into(),
+            english_name: raw.english_name.into(),
+            property_types: raw.property_types.iter().map(|s| SmolStr::new(*s)).collect(),
+            is_readonly: raw.is_readonly,
+            min_version: raw.min_version.map(SmolStr::from),
+            context: raw.context.as_ref().map(ContextAvailability::from),
+        }
+    }
+}
+
 /// Method parameter
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodParam {
@@ -297,6 +406,85 @@ impl From<&RawParamDocs> for ParamDocs {
 impl From<&RawCodeExample> for CodeExample {
     fn from(raw: &RawCodeExample) -> Self {
         Self { code: raw.code.to_string(), description: raw.description.map(|d| d.to_string()) }
+    }
+}
+
+/// Full constructor documentation (by constructor id).
+///
+/// Mirrors [`MethodDocs`] but carries `constructor_id` instead of `method_id`
+/// so the lookup index in `PlatformDataInner` cannot be accidentally confused
+/// with the method index.
+#[derive(Debug, Clone)]
+pub struct ConstructorDocs {
+    pub constructor_id: u32,
+    pub syntax: String,
+    pub description: String,
+    pub params: Vec<ParamDocs>,
+    pub examples: Vec<CodeExample>,
+    pub notes: Option<String>,
+    pub see_also: Vec<String>,
+}
+
+/// Raw constructor documentation for const initialization.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct RawConstructorDocs {
+    pub constructor_id: u32,
+    pub syntax: &'static str,
+    pub description: &'static str,
+    pub params: &'static [RawParamDocs],
+    pub examples: &'static [RawCodeExample],
+    pub notes: Option<&'static str>,
+    pub see_also: &'static [&'static str],
+}
+
+impl From<&RawConstructorDocs> for ConstructorDocs {
+    fn from(raw: &RawConstructorDocs) -> Self {
+        Self {
+            constructor_id: raw.constructor_id,
+            syntax: raw.syntax.to_string(),
+            description: raw.description.to_string(),
+            params: raw.params.iter().map(ParamDocs::from).collect(),
+            examples: raw.examples.iter().map(CodeExample::from).collect(),
+            notes: raw.notes.map(|n| n.to_string()),
+            see_also: raw.see_also.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+/// Full property documentation (by property id).
+///
+/// Mirrors [`MethodDocs`] / [`ConstructorDocs`] but stripped down to the parts
+/// a property page actually ships: a free-prose description, an optional
+/// `Примечание:` block, and a `См. также:` list. Structured data like
+/// `Тип:` already lives on [`PlatformProperty::property_types`], so it's
+/// deliberately not duplicated here.
+#[derive(Debug, Clone)]
+pub struct PropertyDocs {
+    pub property_id: u32,
+    pub description: String,
+    pub notes: Option<String>,
+    pub see_also: Vec<String>,
+}
+
+/// Raw property documentation for const initialization.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct RawPropertyDocs {
+    pub property_id: u32,
+    pub description: &'static str,
+    pub notes: Option<&'static str>,
+    pub see_also: &'static [&'static str],
+}
+
+impl From<&RawPropertyDocs> for PropertyDocs {
+    fn from(raw: &RawPropertyDocs) -> Self {
+        Self {
+            property_id: raw.property_id,
+            description: raw.description.to_string(),
+            notes: raw.notes.map(|n| n.to_string()),
+            see_also: raw.see_also.iter().map(|s| s.to_string()).collect(),
+        }
     }
 }
 

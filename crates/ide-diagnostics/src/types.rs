@@ -66,7 +66,27 @@ impl Diagnostic {
     /// This is necessary because external tools (SonarQube, editors) expect character positions,
     /// while internal TextRange uses byte offsets. For Cyrillic text, 1 char = 2 bytes in UTF-8.
     pub fn to_output(&self, file_text: &str) -> DiagnosticOutput {
-        use line_index::{LineIndex, LineIndexExt};
+        // Convenience wrapper: callers that only ever emit one diagnostic per
+        // file still get the old behaviour. Hot paths (streaming diagnostics
+        // for a 25k-file workspace, CLI `analyze`) **must** go through
+        // [`Self::to_output_with_index`] with a pre-built
+        // [`line_index::LineIndex`] — profiling showed this function
+        // dominating at ~43% self time when rebuilt per diagnostic.
+        let line_index = line_index::LineIndex::new(file_text);
+        self.to_output_with_index(file_text, &line_index)
+    }
+
+    /// Convert to output DTO using a pre-built [`line_index::LineIndex`].
+    ///
+    /// Use this on any hot path that emits multiple diagnostics per file —
+    /// the shared index drops `to_output` from ~43% self time to
+    /// ~negligible on a 25k-file ERP workspace.
+    pub fn to_output_with_index(
+        &self,
+        file_text: &str,
+        line_index: &line_index::LineIndex,
+    ) -> DiagnosticOutput {
+        use line_index::LineIndexExt;
 
         let file_len = file_text.len();
         let range_start: u32 = self.range.start().into();
@@ -85,8 +105,6 @@ impl Diagnostic {
                 self.message
             );
         }
-
-        let line_index = LineIndex::new(file_text);
 
         let start = line_index.line_col(self.range.start());
         let end = line_index.line_col(self.range.end());

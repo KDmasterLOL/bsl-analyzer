@@ -2735,9 +2735,15 @@ fn analyze_salsa(
                     }
                 };
 
-                // Convert diagnostics to output format
-                let mut diagnostic_outputs: Vec<_> =
-                    diagnostics.iter().map(|d| d.to_output(&file_text)).collect();
+                // Convert diagnostics to output format.
+                // Build the line index once per file — per-diagnostic
+                // `to_output()` rebuilt it on every call, dominating the CLI
+                // `analyze` profile at ~43% self time on a 25k-file workspace.
+                let file_line_index = line_index::LineIndex::new(&file_text);
+                let mut diagnostic_outputs: Vec<_> = diagnostics
+                    .iter()
+                    .map(|d| d.to_output_with_index(&file_text, &file_line_index))
+                    .collect();
 
                 // Filter diagnostics by diff hunks if enabled
                 if let Some(ref filter) = *diff_filter_arc {

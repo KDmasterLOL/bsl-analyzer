@@ -23,6 +23,7 @@ pub use vfs;
 // ========================================================================
 
 pub mod database;
+pub mod features;
 pub mod metadata;
 pub mod provider;
 pub mod queries;

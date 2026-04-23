@@ -228,6 +228,9 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub search: SearchConfig,
+
+    #[serde(default)]
+    pub features: FeaturesConfig,
 }
 
 impl ProjectConfig {
@@ -392,6 +395,34 @@ pub struct FormattingConfig {
 
 fn default_indent_size() -> u32 {
     4
+}
+
+/// Opt-in feature flags for analysis passes.
+///
+/// Consumers read the flags via the Salsa `FeaturesInput` exposed by
+/// `ide-db`, so toggling a flag at runtime invalidates any query that
+/// observes it. Defaults are conservative: every flag is on by default
+/// and opting out is an explicit project decision.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeaturesConfig {
+    /// Type narrowing overlay (ADR-01 Option A). Default: `true`.
+    ///
+    /// When `false`, `Semantics::type_of_expr` skips the narrowing
+    /// analysis entirely and returns the base inferred type — useful as
+    /// a rollback switch if narrowing regressions surface in the field.
+    #[serde(default = "default_true", alias = "type_narrowing")]
+    pub type_narrowing: bool,
+}
+
+impl Default for FeaturesConfig {
+    fn default() -> Self {
+        Self { type_narrowing: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Search subsystem configuration.
@@ -832,6 +863,8 @@ struct TomlConfig {
     formatting: FormattingConfig,
     #[serde(default)]
     search: TomlSearchConfig,
+    #[serde(default)]
+    features: FeaturesConfig,
 }
 
 impl Default for TomlConfig {
@@ -842,6 +875,7 @@ impl Default for TomlConfig {
             code_lens: CodeLensConfig::default(),
             formatting: FormattingConfig::default(),
             search: TomlSearchConfig::default(),
+            features: FeaturesConfig::default(),
         }
     }
 }
@@ -930,6 +964,7 @@ impl From<TomlConfig> for ProjectConfig {
                     reference: toml.search.baseline.reference,
                 },
             },
+            features: toml.features,
         }
     }
 }
@@ -1352,8 +1387,8 @@ mod tests {
     use super::{
         branch_pattern_matches, current_git_branch, current_git_commit,
         evaluate_workspace_baseline_support, is_publish_branch_allowed, parse_timestamp_utc,
-        resolve_postgres_url, resolve_workspace_branch_policy, PostgresAccessMode, ProjectConfig,
-        ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
+        resolve_postgres_url, resolve_workspace_branch_policy, FeaturesConfig, PostgresAccessMode,
+        ProjectConfig, ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
         SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
     };
     use chrono::{Duration, TimeZone, Utc};
@@ -2025,5 +2060,71 @@ LineLength = { maxLineLength = 120 }
             },
         };
         assert!(config.is_configured());
+    }
+
+    // -------------------------------------------------------------------
+    // Task 6.7 — `FeaturesConfig` serde round-trips.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn features_config_defaults_type_narrowing_to_true() {
+        let features = FeaturesConfig::default();
+        assert!(
+            features.type_narrowing,
+            "narrowing must default to enabled so fresh projects inherit the feature without opt-in"
+        );
+    }
+
+    #[test]
+    fn project_config_defaults_features_to_enabled() {
+        let config: ProjectConfig = serde_json::from_str("{}").unwrap();
+        assert!(
+            config.features.type_narrowing,
+            "omitted `features` section must yield `FeaturesConfig::default`"
+        );
+    }
+
+    #[test]
+    fn project_config_deserializes_features_disabled_json() {
+        // camelCase per `#[serde(rename_all = "camelCase")]` on
+        // `FeaturesConfig`. Matches the on-disk JSON format expected by
+        // the LSP layer.
+        let config: ProjectConfig = serde_json::from_str(
+            r#"{
+                "features": { "typeNarrowing": false }
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            !config.features.type_narrowing,
+            "explicit `typeNarrowing = false` must propagate through JSON deserialization"
+        );
+    }
+
+    #[test]
+    fn project_config_load_from_toml_disables_narrowing() {
+        // End-to-end: write a bsl-analyzer.toml with
+        // `[features]` setting `type_narrowing = false`, then run the
+        // same `ProjectConfig::load` path used by `Project::new` at
+        // workspace init. Guards against serde renames, `TomlConfig`
+        // wiring regressions, and accidentally dropping the field in the
+        // `From<TomlConfig>` conversion.
+        let dir = tempdir().unwrap();
+        let toml_path = dir.path().join("bsl-analyzer.toml");
+        fs::write(
+            &toml_path,
+            r#"
+[features]
+type_narrowing = false
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(dir.path())
+            .expect("ProjectConfig::load must succeed for a well-formed TOML");
+        assert!(
+            !config.features.type_narrowing,
+            "`[features] type_narrowing = false` in TOML must round-trip to FeaturesConfig"
+        );
     }
 }

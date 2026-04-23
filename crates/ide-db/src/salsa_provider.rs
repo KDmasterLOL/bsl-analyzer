@@ -7,7 +7,10 @@ use std::sync::Arc;
 
 use base_db::{FileIdInput, SourceRootId};
 use bsl_metadata::Configuration;
-use hir::{ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree};
+use hir::{
+    HirDatabase, InferenceResult, ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata,
+    SymbolTree,
+};
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
@@ -112,6 +115,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
         self.db.module_bodies(module_id)
+    }
+
+    fn infer(&self, file_id: FileId) -> Arc<InferenceResult> {
+        HirDatabase::infer(self.db, file_id)
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata> {

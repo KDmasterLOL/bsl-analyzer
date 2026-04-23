@@ -6,15 +6,15 @@
 //! - Snippets with parameter placeholders
 
 use bsl_platform::{
-    type_methods_query, PlatformData, PlatformDataInner, PlatformMethod, TypeNameInput,
+    manager_methods_query, type_methods_query, type_properties_query, PlatformDataInner,
+    PlatformMethod, PlatformProperty, TypeNameInput,
 };
-use hir::{InferenceResult, MethodSymbol, Name, Ty};
+use hir::{MethodSymbol, Name, Semantics, Ty};
 use ide_db::RootDatabase;
 use symbol_info::{
     build_signature, from_platform_method, render_completion_detail, CalleeKind, CompletionDetail,
     MethodKind, SignatureSource, SymbolSignature,
 };
-use syntax::ast::{self, AstNode};
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use vfs::FileId;
 
@@ -29,8 +29,8 @@ use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 /// - Simple variable: `МойМассив.` → methods of Массив
 /// - Direct type: `Строка.` → methods of Строка
 /// - Fluent chains: `Запрос.Выполнить().Выбрать().` → methods of return type
-pub(super) fn platform_completions(
-    db: &dyn RootDatabase,
+pub(super) fn platform_completions<DB: RootDatabase>(
+    db: &DB,
     position: CompletionPosition,
 ) -> Option<Vec<CompletionItem>> {
     let _span = tracing::info_span!("platform_completions").entered();
@@ -42,11 +42,15 @@ pub(super) fn platform_completions(
 
     tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "Completion token");
 
-    if token.kind() != SyntaxKind::DOT {
-        return None;
-    }
+    // Accept two cursor positions after a dot:
+    //   1. cursor directly on `.` (`Сп.|`)          → anchor = DOT, no prefix.
+    //   2. cursor inside/after an IDENT whose previous non-trivia token is `.`
+    //      (`Сп.В|`)                                → anchor = that DOT,
+    //      prefix = IDENT text up to the cursor.
+    // Any other shape is not our context.
+    let (dot_token, prefix) = resolve_dot_anchor(&token, position.offset)?;
 
-    let receiver_expr = find_receiver_expr(&token)?;
+    let receiver_expr = find_receiver_expr(&dot_token)?;
 
     // Fast path: bare-IDENT receiver (`ОбщегоНазначения.`) is almost always a
     // CommonModule call. Resolve via `module_index` (path-only, cheap) before
@@ -60,20 +64,171 @@ pub(super) fn platform_completions(
         }
     }
 
-    // Slow path: full inference for non-trivial receivers
-    // (`expr.Method().`, `ЭтотОбъект.`, fluent chains).
-    let infer_result = db.infer(position.file_id);
+    // Primary: `Semantics::type_of_expr` (M3 Task 9) walks the file's
+    // `BodySourceMap` and looks up the inferred `Ty` for this exact
+    // syntax node — same pipeline that `Expr::Field` / `Expr::MethodCall`
+    // inference uses. Closes the Task 11 piece of Invariant #3: IDE
+    // completion no longer dips into `PlatformData::instance()` for
+    // receiver resolution.
+    let sema = Semantics::new(db);
+    let mut receiver_ty = sema.type_of_expr(position.file_id, &receiver_expr);
 
-    let receiver_ty = resolve_syntax_expr_type(&receiver_expr, &infer_result);
+    // Fallback: a bare identifier that HIR couldn't resolve — typically
+    // a literal type name (`Строка.`) or a platform constructor name
+    // (`Запрос.`) without a variable binding. `Ty::from_type_name`
+    // catches primitives / collections; anything else becomes a
+    // `PlatformObject(name)` so `platform_type_name()` below can ask
+    // `type_methods_query` for matching methods (empty result is safe
+    // — completion just shows nothing).
+    if receiver_ty.is_unknown() {
+        if let Some(name) = extract_receiver_ident(&receiver_expr) {
+            receiver_ty = Ty::from_type_name(&name);
+            if receiver_ty.is_unknown() {
+                receiver_ty = Ty::PlatformObject(Name::new(&name));
+            }
+        }
+    }
+
     tracing::debug!(receiver_ty = ?receiver_ty, "Resolved receiver type");
 
-    // Try platform type completion first
+    // Manager / metadata-ref receivers are not indexed under a scalar
+    // type key — their platform methods live behind composite
+    // `type_name` prefixes (`"CatalogManager."`, `"CatalogObject."`,
+    // …). Route them through `manager_methods_query` with the
+    // `bsl-metadata` / `hir::MetadataKind` prefix tables.
+    if let Some(items) = complete_prefix_methods_for_receiver(db, &receiver_ty) {
+        return Some(apply_prefix_filter(items, &prefix, db));
+    }
+
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
-        return Some(complete_platform_methods(db, type_name));
+        let items = complete_platform_methods(db, type_name);
+        return Some(apply_prefix_filter(items, &prefix, db));
+    }
+
+    // `Ty::Union` receivers show up whenever a platform method declares a
+    // comma-joined return type (e.g. `Запрос.Выполнить` →
+    // `"РезультатЗапроса, Неопределено"`, `QueryResult.Выгрузить` →
+    // `"ТаблицаЗначений, ДеревоЗначений"`). Strip the `Undefined` / `Null`
+    // sentinels — they have no instance members — and merge the surviving
+    // branches' completion lists. Labels are deduped so members shared
+    // across branches (e.g. `Количество`) surface once.
+    if let Ty::Union(members) = &receiver_ty {
+        let mut items: Vec<CompletionItem> = Vec::new();
+        let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for m in members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)) {
+            let Some(type_name) = m.platform_type_name() else { continue };
+            for item in complete_platform_methods(db, type_name) {
+                if seen_labels.insert(item.label.clone()) {
+                    items.push(item);
+                }
+            }
+        }
+        if !items.is_empty() {
+            return Some(apply_prefix_filter(items, &prefix, db));
+        }
     }
 
     None
+}
+
+/// Enumerate platform methods for receivers that use a composite
+/// `type_name` prefix instead of a scalar key.
+///
+/// - `Ty::ObjectManager { kind, .. }` → `"CatalogManager"` /
+///   `"DocumentManager"` / … via `MdoType::manager_type_prefix`.
+/// - `Ty::MetadataRef { kind, .. }` → `"CatalogObject"` / `"CatalogRef"` /
+///   … via `MetadataKind::platform_prefix`.
+///
+/// Returns `None` for every other receiver shape so the scalar path
+/// below (`platform_type_name()` + `complete_platform_methods`) keeps
+/// handling value types, primitives, and `PlatformObject`. No Salsa-DB
+/// overhead is paid for those cases — the prefix arm only fires when
+/// the receiver is specifically a manager / metadata-ref.
+fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
+    db: &DB,
+    receiver_ty: &Ty,
+) -> Option<Vec<CompletionItem>> {
+    let prefix = match receiver_ty {
+        Ty::ObjectManager { kind, .. } => kind.manager_type_prefix()?,
+        Ty::MetadataRef { kind, .. } => kind.platform_prefix()?,
+        _ => return None,
+    };
+    tracing::debug!(prefix, "Prefix-based completion for manager / metadata-ref receiver");
+    let input = TypeNameInput::new(db, prefix.to_string());
+    let methods = manager_methods_query(db, input);
+    Some(methods.iter().map(render_manager_method).collect())
+}
+
+/// Decide whether we are in `X.| ` / `X.Yyy|` position and, if so, return
+/// the anchor DOT token plus the partial identifier typed after it.
+///
+/// The cursor-on-DOT case is trivial. The cursor-on-IDENT case walks
+/// leftward over trivia (whitespace/newlines/comments) looking for a DOT
+/// sibling — the same approach `new_expr_completion::is_after_new_keyword`
+/// uses for the `Новый <type>` context.
+///
+/// Returns `None` when the cursor isn't in a member-access context;
+/// callers short-circuit and let the next completion provider run.
+fn resolve_dot_anchor(
+    token: &SyntaxToken,
+    offset: syntax::TextSize,
+) -> Option<(SyntaxToken, String)> {
+    match token.kind() {
+        SyntaxKind::DOT => Some((token.clone(), String::new())),
+        SyntaxKind::IDENT => {
+            let mut cur = token.prev_token();
+            while let Some(t) = cur.clone() {
+                if t.kind().is_trivia() {
+                    cur = t.prev_token();
+                } else {
+                    break;
+                }
+            }
+            let dot = cur.filter(|t| t.kind() == SyntaxKind::DOT)?;
+            // Prefix = text from the IDENT start up to the cursor. For
+            // `Сп.В|` this is `"В"`; for `Сп.Вста|вить` it's `"Вста"`.
+            let token_start = token.text_range().start();
+            let cursor_in_token: usize = offset.checked_sub(token_start)?.into();
+            let text = token.text();
+            let prefix = text[..cursor_in_token.min(text.len())].to_string();
+            Some((dot, prefix))
+        }
+        _ => None,
+    }
+}
+
+/// Case-insensitive starts-with match against the method's Russian *or*
+/// English name, mirroring the filter in
+/// `bsl_completion::complete_global_functions`. Pulls the English name off
+/// the existing `PlatformData` index — the only lookup keyed by Russian
+/// name that survives the M3 Task 11 facade migration.
+fn apply_prefix_filter(
+    items: Vec<CompletionItem>,
+    prefix: &str,
+    _db: &dyn RootDatabase,
+) -> Vec<CompletionItem> {
+    if prefix.is_empty() {
+        return items;
+    }
+    let prefix_lower = prefix.to_lowercase();
+    items
+        .into_iter()
+        .filter(|item| {
+            let label_lc = item.label.to_lowercase();
+            if label_lc.starts_with(&prefix_lower) {
+                return true;
+            }
+            // `filter_text` carries the bilingual label (`"Массив Array"`) built
+            // by `presenters::completion::render_completion_detail`; split on
+            // whitespace to compare against each name individually.
+            if let Some(ft) = &item.filter_text {
+                ft.split_whitespace().any(|tok| tok.to_lowercase().starts_with(&prefix_lower))
+            } else {
+                false
+            }
+        })
+        .collect()
 }
 
 /// Find the receiver expression node before the DOT token.
@@ -118,146 +273,12 @@ fn find_receiver_expr(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
     None
 }
 
-/// Recursively resolve the type of a syntax expression node.
-///
-/// This is a lightweight syntax-level type resolver for completion.
-/// It uses inference results (var_types) for variables and platform data
-/// for method return types to support fluent chains.
-fn resolve_syntax_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
-    match node.kind() {
-        // Simple identifier — look up in var_types or treat as type name
-        SyntaxKind::IDENT | SyntaxKind::EXPR => {
-            if let Some(ident_token) = node.first_token() {
-                if ident_token.kind() == SyntaxKind::IDENT {
-                    return resolve_ident_type(ident_token.text(), infer_result);
-                }
-            }
-            Ty::Unknown
-        }
-
-        // Call expression: callee(args) — resolve callee type
-        // For method calls like `obj.Method()`, this is a CALL_EXPR wrapping a FIELD_EXPR
-        SyntaxKind::CALL_EXPR => resolve_call_expr_type(node, infer_result),
-
-        // Field expression: base.field — resolve for intermediate chains
-        SyntaxKind::FIELD_EXPR => resolve_field_expr_type(node, infer_result),
-
-        // New expression: Новый Type(...)
-        SyntaxKind::NEW_EXPR => {
-            if let Some(new_expr) = ast::NewExpr::cast(node.clone()) {
-                Ty::from_new_expr(&new_expr)
-            } else {
-                Ty::Unknown
-            }
-        }
-
-        // Parenthesized expression
-        SyntaxKind::PAREN_EXPR => node
-            .children()
-            .next()
-            .map(|child| resolve_syntax_expr_type(&child, infer_result))
-            .unwrap_or(Ty::Unknown),
-
-        _ => {
-            // Try to find an IDENT token in this node (fallback)
-            if let Some(ident) = node.first_token().filter(|t| t.kind() == SyntaxKind::IDENT) {
-                return resolve_ident_type(ident.text(), infer_result);
-            }
-            Ty::Unknown
-        }
-    }
-}
-
-/// Resolve type of an identifier (variable name or type name).
-fn resolve_ident_type(name: &str, infer_result: &InferenceResult) -> Ty {
-    let key = name.to_lowercase();
-
-    // Check var_types from inference
-    if let Some(ty) = infer_result.var_types.get(&key) {
-        if !ty.is_unknown() {
-            return ty.clone();
-        }
-    }
-
-    // Check if it's a known platform type name directly (e.g., `Строка.`)
-    let ty = Ty::from_type_name(name);
-    if !ty.is_unknown() {
-        return ty;
-    }
-
-    // Check if it's a known platform type (e.g., `Запрос.`)
-    let data = PlatformData::instance();
-    if !data.get_type_methods(name).is_empty() {
-        return Ty::PlatformObject(Name::new(name));
-    }
-
-    Ty::Unknown
-}
-
-/// Resolve type of a CALL_EXPR node.
-///
-/// Structure: CALL_EXPR → [callee_expr, ARG_LIST]
-/// If callee is a FIELD_EXPR (method call), resolve receiver type + method return type.
-fn resolve_call_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
-    let callee = node.children().next();
-    let callee = match callee {
-        Some(c) => c,
-        None => return Ty::Unknown,
-    };
-
-    // Method call: callee is FIELD_EXPR (base.method)
-    if callee.kind() == SyntaxKind::FIELD_EXPR {
-        let mut children = callee.children();
-        let base = children.next();
-        // Skip to find method name (IDENT after DOT)
-        let method_name = callee
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .filter(|t| t.kind() == SyntaxKind::IDENT)
-            .last();
-
-        if let (Some(base_node), Some(method_token)) = (base, method_name) {
-            let base_ty = resolve_syntax_expr_type(&base_node, infer_result);
-            if let Some(type_name) = base_ty.platform_type_name() {
-                let data = PlatformData::instance();
-                if let Some(method) = data.get_method(type_name, method_token.text()) {
-                    if let Some(ret_type) = &method.return_type {
-                        let ty = Ty::from_type_name(ret_type);
-                        if !ty.is_unknown() {
-                            return ty;
-                        }
-                        return Ty::PlatformObject(Name::new(ret_type));
-                    }
-                    return Ty::Undefined;
-                }
-            }
-        }
-    }
-
-    // Simple function call — could check global function return types
-    // For now, return Unknown
-    Ty::Unknown
-}
-
-/// Resolve type of a FIELD_EXPR node (base.field).
-///
-/// Used for intermediate chain resolution.
-fn resolve_field_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
-    // FIELD_EXPR has: base_expr, DOT, IDENT(field_name)
-    let base = node.children().next();
-    let field_name = node
-        .children_with_tokens()
-        .filter_map(|it| it.into_token())
-        .filter(|t| t.kind() == SyntaxKind::IDENT)
-        .last();
-
-    if let (Some(base_node), Some(_field_token)) = (base, field_name) {
-        // For now, resolve base type (field access on platform types returns Unknown)
-        resolve_syntax_expr_type(&base_node, infer_result)
-    } else {
-        Ty::Unknown
-    }
-}
+// Former helpers `resolve_syntax_expr_type` / `resolve_call_expr_type` /
+// `resolve_field_expr_type` / `resolve_ident_type` are removed by M3 Task 11.
+// They duplicated the `method_lookup` pipeline via direct
+// `PlatformData::instance()` access, and the entry-point now delegates to
+// `Semantics::type_of_expr` (Task 9 bridge) with a small bare-identifier
+// fallback covering literal type names.
 
 /// Extract identifier text from receiver expression node.
 fn extract_receiver_ident(node: &SyntaxNode) -> Option<String> {
@@ -344,6 +365,7 @@ pub(super) fn item_from_signature(sig: &SymbolSignature) -> CompletionItem {
     let detail = render_completion_detail(sig);
     let kind = match sig.source {
         SignatureSource::Platform | SignatureSource::PlatformManager => CompletionItemKind::Method,
+        SignatureSource::PlatformConstructor => CompletionItemKind::Constructor,
         SignatureSource::GlobalFunction => CompletionItemKind::Function,
         SignatureSource::CommonModule | SignatureSource::ManagerModule | SignatureSource::Local => {
             match sig.kind {
@@ -389,16 +411,34 @@ fn fallback_item(method: &MethodSymbol) -> CompletionItem {
     }
 }
 
-/// Completes platform methods for a receiver type.
+/// Completes platform **members** — methods *and* properties — for a
+/// receiver type.
 ///
-/// Example: For receiver "Строка", shows: ВРег, НРег, Длина, etc.
+/// Example: For receiver "Запрос", shows methods (`Выполнить`,
+/// `УстановитьПараметр`, …) plus properties (`Текст`, `Параметры`,
+/// `МенеджерВременныхТаблиц`, …). Properties are rendered with
+/// `CompletionItemKind::Property` so the editor's icon and ranking
+/// differ from methods; methods keep the existing insert-with-parens
+/// snippet, properties insert just the label.
+///
+/// Keeping both lookups behind a single salsa-cached pair of queries
+/// (`type_methods_query` + `type_properties_query`) means completion
+/// doesn't pay for a live walk of `PlatformData` on every keystroke.
 fn complete_platform_methods(db: &dyn RootDatabase, receiver_type: &str) -> Vec<CompletionItem> {
-    let input = TypeNameInput::new(db, receiver_type.to_string());
-    let methods = type_methods_query(db, input);
+    let methods_input = TypeNameInput::new(db, receiver_type.to_string());
+    let methods = type_methods_query(db, methods_input);
+    let props_input = TypeNameInput::new(db, receiver_type.to_string());
+    let properties = type_properties_query(db, props_input);
 
-    tracing::debug!(method_count = methods.len(), "Found platform methods");
+    tracing::debug!(
+        method_count = methods.len(),
+        property_count = properties.len(),
+        "Found platform members"
+    );
 
-    methods.iter().map(render_platform_method).collect()
+    let mut items: Vec<CompletionItem> = methods.iter().map(render_platform_method).collect();
+    items.extend(properties.iter().map(render_platform_property));
+    items
 }
 
 /// Renders a platform manager method (`Справочники.Склады.НайтиПоКоду`, …) as
@@ -419,6 +459,61 @@ pub(super) fn render_platform_method(method: &PlatformMethod) -> CompletionItem 
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
     let sig = from_platform_method(method, docs.as_ref());
     item_from_signature(&sig)
+}
+
+/// Render a platform property as a completion item.
+///
+/// Unlike methods, properties don't go through the `symbol_info` signature
+/// pipeline: there are no parameters to format, no parentheses to insert,
+/// and their `detail` only needs the value-type summary plus the optional
+/// `[Только чтение]` marker. Keeping the renderer local keeps the
+/// property item shape obvious at the call site.
+///
+/// - `label` — Russian name (primary display).
+/// - `filter_text` — `"{russian} {english}"` so typing either language
+///   narrows the list (same shape as `symbol_info::render_completion_detail`
+///   builds for methods).
+/// - `detail` — `"{property_types} [Только чтение?]"`, e.g.
+///   `"Структура [Только чтение]"` or `"Строка"`.
+/// - `insert_text` — just the Russian name. Properties have no parens.
+/// - `kind` — `CompletionItemKind::Property`, distinguishing them from
+///   methods in the editor's completion popup.
+pub(super) fn render_platform_property(prop: &PlatformProperty) -> CompletionItem {
+    let type_summary = if prop.property_types.is_empty() {
+        String::from("Произвольный")
+    } else {
+        prop.property_types.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+    };
+    let detail = if prop.is_readonly {
+        format!("{type_summary} [Только чтение]")
+    } else {
+        type_summary
+    };
+
+    let documentation = PlatformDataInner::instance()
+        .get_property_docs(prop.id)
+        .map(|d| {
+            let mut out = d.description;
+            if let Some(notes) = d.notes {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&notes);
+            }
+            out
+        })
+        .filter(|s| !s.is_empty());
+
+    CompletionItem {
+        label: prop.name.to_string(),
+        detail: Some(detail),
+        kind: CompletionItemKind::Property,
+        insert_text: prop.name.to_string(),
+        documentation,
+        sort_text: None,
+        filter_text: Some(format!("{} {}", prop.name, prop.english_name)),
+        source: None,
+    }
 }
 
 #[cfg(test)]
@@ -519,30 +614,42 @@ mod tests {
         let items = items.unwrap();
         assert!(!items.is_empty(), "Expected at least one method completion");
 
-        // All items should be methods
-        for item in &items {
-            assert_eq!(item.kind, CompletionItemKind::Method);
-        }
+        // Split by kind — the completion list now mixes methods (with
+        // parenthesised snippets) and properties (bare labels). Each kind
+        // is checked separately; both may be empty for rarely-used types,
+        // but at least one must be present.
+        let methods: Vec<&CompletionItem> =
+            items.iter().filter(|i| i.kind == CompletionItemKind::Method).collect();
+        let properties: Vec<&CompletionItem> =
+            items.iter().filter(|i| i.kind == CompletionItemKind::Property).collect();
+        assert_eq!(
+            methods.len() + properties.len(),
+            items.len(),
+            "Unexpected CompletionItemKind in platform member completion"
+        );
+        println!("Found {} method + {} property completions", methods.len(), properties.len());
 
-        // Should contain common String methods if platform data is available
-        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
-        println!("Found {} method completions", labels.len());
-
-        // If we have methods, verify snippet format
-        for item in &items {
-            // All methods should have snippets ending with $0)
+        // Methods must carry the paren-snippet with a tail-$0 cursor.
+        for item in methods {
             assert!(
                 item.insert_text.ends_with("$0)"),
                 "Method snippet should end with $0): {}",
                 item.insert_text
             );
-
-            // All methods should have parentheses
             assert!(
                 item.insert_text.contains('(') && item.insert_text.contains(')'),
                 "Method snippet should have parentheses: {}",
                 item.insert_text
             );
+        }
+        // Properties insert just the label — no parens, no snippet cursor.
+        for item in properties {
+            assert!(
+                !item.insert_text.contains('('),
+                "Property insert_text must not contain '(': {}",
+                item.insert_text
+            );
+            assert_eq!(item.insert_text, item.label);
         }
     }
 }

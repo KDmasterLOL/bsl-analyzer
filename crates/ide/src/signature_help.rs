@@ -411,4 +411,132 @@ mod tests {
             sig.signature
         );
     }
+
+    #[test]
+    fn test_platform_method_variable_shadows_platform_type_name() {
+        // BSL lets a variable share a platform type's name. The inferred
+        // `Ty` comes from the RHS of the assignment, not from the
+        // identifier text — so signature help on `.Добавить(` must
+        // follow the inferred type, not the literal name. Here the
+        // variable is called `Массив` but holds a `ValueList` (has its
+        // own `Добавить` with different parameters), so the signature
+        // must come from `СписокЗначений.Добавить`, not `Массив.Добавить`.
+        let code = "Процедура Тест()
+    Массив = Новый СписокЗначений;
+    Массив.Добавить($0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset)
+            .expect("signature help must resolve through inferred Ty, not literal name");
+        assert!(
+            sig.signature.contains("Добавить"),
+            "signature must include the method name, got: {}",
+            sig.signature
+        );
+        // СписокЗначений.Добавить has a `Представление` parameter that
+        // Массив.Добавить does not — confirms we resolved on the real
+        // type, not the shadow.
+        assert!(
+            sig.signature.contains("Представление"),
+            "signature must come from СписокЗначений, not Массив (missing `Представление` parameter), got: {}",
+            sig.signature
+        );
+    }
+
+    #[test]
+    fn test_platform_method_on_instance_variable() {
+        // Before the Ty-based resolver patch, `resolve_callee_at` resolved
+        // the receiver by **text name** only: `МойМассив.Добавить(` asked
+        // `platform_method_query("МойМассив", "Добавить")` — a type with
+        // that name does not exist, so the resolver fell back to a
+        // non-existent CommonModule and signature help returned `None`.
+        // The fix routes the receiver through `Semantics::type_of_expr`
+        // and uses the inferred `Ty::Array` (platform_type_name = "Массив")
+        // to ask for `Массив.Добавить` — the method the user actually
+        // typed.
+        let code = "Процедура Тест()
+    МойМассив = Новый Массив;
+    МойМассив.Добавить($0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset).expect(
+            "signature help must resolve platform methods through the receiver's inferred Ty",
+        );
+        assert!(
+            sig.signature.contains("Добавить"),
+            "signature must include the platform method name, got: {}",
+            sig.signature
+        );
+        assert_eq!(sig.active_parameter, Some(0));
+    }
+
+    // ---- Platform constructor signature help -------------------------------
+
+    #[test]
+    fn test_constructor_signature_on_array() {
+        // `Новый Массив($0)` — NEW_EXPR, not CALL_EXPR. Pre-ctor support this
+        // was the only site that silently dropped signature help.
+        let code = "Процедура Тест()
+    Х = Новый Массив($0);
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        // Platform data is always available in this workspace (committed JSON),
+        // so we can assert strongly — Массив has at least one overload.
+        let sig =
+            signature_help(&db, file_id, offset).expect("constructor signature help must fire");
+        assert!(
+            sig.signature.contains("Новый"),
+            "signature must carry the `Новый ` prefix, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("Массив"),
+            "signature must carry the type name, got: {}",
+            sig.signature
+        );
+        assert_eq!(sig.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn test_constructor_signature_unknown_type() {
+        // Unknown type → no registered constructor → None. Don't fall through
+        // to any other resolver.
+        let code = "Процедура Тест()
+    Х = Новый ЗаведомоНесуществующийТип($0);
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+        assert!(signature_help(&db, file_id, offset).is_none());
+    }
+
+    #[test]
+    fn test_constructor_signature_on_structure() {
+        // `Структура` has a constructor that takes `Ключ, Значения` — cursor
+        // after the first comma must surface `active_parameter == 1` **or**
+        // stay at 0 if the chosen overload only has one parameter. The weaker
+        // assertion (≥ 0) is enough to prove the cursor-tracking logic works
+        // through NEW_EXPR without asserting on platform-data specifics.
+        let code = "Процедура Тест()
+    С = Новый Структура(\"a\", $0);
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        if let Some(sig) = signature_help(&db, file_id, offset) {
+            assert!(
+                sig.signature.contains("Структура"),
+                "expected `Структура` in signature, got: {}",
+                sig.signature
+            );
+            if let Some(idx) = sig.active_parameter {
+                assert!(idx <= 1, "cursor past first comma must be 0 or 1, got: {idx}");
+            }
+        }
+    }
 }

@@ -28,6 +28,7 @@ pub mod body;
 pub mod call_graph;
 pub mod cognitive_complexity;
 pub mod conditional_tree;
+pub mod configs;
 pub mod cyclomatic_complexity;
 pub mod docs;
 pub mod hir;
@@ -41,6 +42,7 @@ pub mod resolver;
 pub mod scope;
 pub mod symbol_tree;
 pub mod ty;
+pub mod type_ref;
 pub mod workspace;
 pub mod workspace_index;
 
@@ -61,6 +63,7 @@ pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
+pub use configs::{ConfigsDatabase, VisibleConfig};
 pub use item_tree::ItemTree;
 pub use module_index::ModuleIndex;
 pub use name::Name;
@@ -68,6 +71,7 @@ pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::{FunctionSignature, Ty};
+pub use type_ref::{BuiltinTypeRef, TypeRef};
 pub use workspace::{CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 

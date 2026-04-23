@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 /// Metadata object type (MDO Type)
 ///
 /// Represents different types of 1C:Enterprise metadata objects
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MdoType {
     /// Справочник / Catalog
     Catalog,

@@ -61,6 +61,12 @@ pub(crate) fn is_statement_node(node: &SyntaxNode) -> bool {
             | SyntaxKind::REMOVE_HANDLER_STMT
             | SyntaxKind::VAR_DEF
             | SyntaxKind::EMPTY_STMT
+            // ERROR statements are lowered best-effort by
+            // `try_lower_recovered_expr_stmt` (see `stmt.rs`) so the editor
+            // can reason about expressions the user is still typing. Keeps
+            // `stmt_list_terminates` honest too — an ERROR is never itself a
+            // control-flow terminator.
+            | SyntaxKind::ERROR
     )
 }
 

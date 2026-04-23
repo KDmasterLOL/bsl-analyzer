@@ -425,6 +425,60 @@ fn test_resolver_with_workspace_scope() {
     assert_eq!(resolver.scopes.len(), 2);
 }
 
+#[test]
+fn test_resolver_cross_module_gated_by_configurations() {
+    // When a configuration is registered but the BSL file for a CommonModule
+    // is NOT declared in that configuration, `resolve_cross_module` must
+    // return `Unresolved` without falling back to path-based lookup.
+    //
+    // We simulate this by registering a non-existent configuration path,
+    // which forces `load_configuration` onto its empty-fallback branch. That
+    // leaves the registered config with zero common_modules — so any module
+    // call the fixture otherwise "sees" via `module_index` must be rejected
+    // by the new metadata visibility gate.
+    use hir::{ModuleId, Name, PathResolution, QualifiedName, Resolver};
+
+    let mut db = RootDatabaseImpl::new();
+    let test_file = FileId(0);
+    let om_file = FileId(1);
+
+    let mut file_set = FileSet::new();
+    file_set.insert(test_file, VfsPath::new("/test.bsl"));
+    file_set.insert(om_file, VfsPath::new("/CommonModules/ОбщегоНазначения/Ext/Module.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(test_file, SourceRootId(0));
+    db.set_file_source_root(om_file, SourceRootId(0));
+
+    db.set_file_text(test_file, "Процедура Тест() КонецПроцедуры");
+    db.set_file_text(om_file, "Функция ПолучитьЗначение() Экспорт\n    Возврат 1;\nКонецФункции");
+
+    // Sanity: with no config registered, path-based lookup currently finds
+    // ОбщегоНазначения (baseline before the gate kicks in).
+    let resolver = Resolver::with_workspace_scope(ModuleId::new(test_file));
+    let path = QualifiedName::from_segments([
+        Name::new("ОбщегоНазначения"),
+        Name::new("ПолучитьЗначение"),
+    ]);
+    let before = resolver.resolve_path(&db, &path);
+    assert!(
+        matches!(before, PathResolution::Method(_)),
+        "baseline: empty-config fallback must still resolve path-based lookup, got {:?}",
+        before
+    );
+
+    // Register a non-existent config path — `load_configuration` will
+    // silently produce an empty `Configuration`, so the visibility gate
+    // sees one config with zero common_modules declared.
+    db.set_all_config_paths(vec![(None, std::path::PathBuf::from("/does-not-exist"))]);
+
+    let after = resolver.resolve_path(&db, &path);
+    assert!(
+        matches!(after, PathResolution::Unresolved(_)),
+        "with a config registered but no matching declaration, resolution must fail, got {:?}",
+        after
+    );
+}
+
 // ========== SDBL Integration Tests (migrated from base-db) ==========
 
 #[test]

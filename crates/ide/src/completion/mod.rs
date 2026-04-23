@@ -7,6 +7,7 @@
 
 mod bsl_completion;
 mod mdo_completion;
+mod new_expr_completion;
 mod platform_completion;
 mod sdbl;
 
@@ -75,8 +76,14 @@ pub enum CompletionItemKind {
     MdoType,
     /// Metadata object instance (Валюты, Контрагенты)
     MdoObject,
-    /// Field/property
+    /// Field (MDO attribute / standard attribute).
     Field,
+    /// Property of a platform type (e.g. `Запрос.Параметры`, `Запрос.Текст`).
+    ///
+    /// Distinct from [`Self::Field`] so the editor can pick a different
+    /// icon and rank properties alongside methods when completing after a
+    /// dot on a platform-value receiver.
+    Property,
     /// Function
     Function,
     /// Method (platform or user-defined)
@@ -87,6 +94,8 @@ pub enum CompletionItemKind {
     Constant,
     /// Enumeration member (enum value)
     EnumMember,
+    /// Platform type constructor (`Новый X(...)`).
+    Constructor,
 }
 
 /// Main completion entry point.
@@ -107,6 +116,15 @@ pub fn completions<DB: RootDatabase>(db: &DB, position: CompletionPosition) -> V
     // Try SDBL completion first (new Clean Architecture implementation)
     if let Some(items) = sdbl::sdbl_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning SDBL completions");
+        return items;
+    }
+
+    // Try `Новый <type>` completion. Must run before MDO/platform/BSL: in this
+    // context BSL accepts only platform type names; offering locals, keywords,
+    // global functions, or MDO plurals would be misleading. Returning `Some`
+    // short-circuits the dispatcher unconditionally (even for an empty Vec).
+    if let Some(items) = new_expr_completion::new_expr_completions(db, position.clone()) {
+        tracing::debug!(items = items.len(), "returning constructor completions after `Новый`");
         return items;
     }
 

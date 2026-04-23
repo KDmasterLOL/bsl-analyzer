@@ -4,7 +4,9 @@
 //! platform (`MethodParam` + platform `MethodDocs`). Both funnel into the same
 //! domain shape so presenters do not branch on source.
 
-use bsl_platform::{MethodDocs as PlatformMethodDocs, MethodParam};
+use bsl_platform::{
+    ConstructorDocs as PlatformConstructorDocs, MethodDocs as PlatformMethodDocs, MethodParam,
+};
 use hir::{MethodDocs as UserMethodDocs, Param, ParameterDoc};
 use hir_def::docs::TypeDoc;
 use smol_str::SmolStr;
@@ -38,11 +40,32 @@ pub(super) fn build_platform_params(
     items: &[MethodParam],
     docs: Option<&PlatformMethodDocs>,
 ) -> Vec<SignatureParam> {
+    build_from_param_docs(items, docs.map(|d| d.params.as_slice()))
+}
+
+/// Maps platform constructor parameters into domain [`SignatureParam`]s.
+///
+/// Same shape as [`build_platform_params`] — the only difference is the doc
+/// container (`ConstructorDocs` vs `MethodDocs`); both expose `.params` as
+/// `Vec<ParamDocs>`, so we delegate to a shared helper rather than
+/// duplicate the body.
+pub(super) fn build_constructor_params(
+    items: &[MethodParam],
+    docs: Option<&PlatformConstructorDocs>,
+) -> Vec<SignatureParam> {
+    build_from_param_docs(items, docs.map(|d| d.params.as_slice()))
+}
+
+/// Shared body of `build_platform_params` and `build_constructor_params`.
+fn build_from_param_docs(
+    items: &[MethodParam],
+    param_docs: Option<&[bsl_platform::ParamDocs]>,
+) -> Vec<SignatureParam> {
     items
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let pdoc = docs.and_then(|d| d.params.get(i));
+            let pdoc = param_docs.and_then(|d| d.get(i));
             // Platform descriptions typically start with `Тип: T1, T2 . prose`,
             // duplicating the type label. Lift the richer type list out of the
             // description and clean the prose so consumers don't render types

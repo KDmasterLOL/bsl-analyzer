@@ -42,7 +42,7 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
     infer
         .diagnostics
         .iter()
-        .filter_map(|diag| match diag {
+        .filter_map(|(_, diag)| match diag {
             InferenceDiagnostic::UnresolvedMethodCall { kind, .. } => Some(*kind),
             _ => None,
         })
@@ -62,7 +62,7 @@ fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, 
     infer
         .diagnostics
         .iter()
-        .filter_map(|diag| match diag {
+        .filter_map(|(_, diag)| match diag {
             InferenceDiagnostic::MismatchedArgCount { expected, found, .. } => {
                 Some((*expected, *found))
             }

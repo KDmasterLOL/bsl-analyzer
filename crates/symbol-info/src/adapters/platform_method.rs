@@ -56,11 +56,22 @@ pub fn from_platform_method(
         })
         .unwrap_or_default();
 
+    // `method.type_name` stores the English primary key (`"Array"`,
+    // `"String"`, …). Surfacing that as the qualifier — e.g.
+    // `"Array.Добавить"` — looks broken for BSL's Russian audience.
+    // Translate via the bilingual `PlatformData` index; fall back to
+    // the raw English name only when the type somehow isn't registered.
+    let russian_type_name = PlatformDataInner::instance()
+        .get_type(&method.type_name)
+        .map(|ty| ty.name.clone())
+        .unwrap_or_else(|| method.type_name.clone());
+
     SymbolSignature {
         kind,
         name_russian: display_name,
         name_english: Some(english_name),
-        qualifier: Some(SmolStr::from(format!("{}.", method.type_name))),
+        qualifier: Some(SmolStr::from(format!("{}.", russian_type_name))),
+        prefix: None,
         params: build_platform_params(&method.parameters, docs),
         returns,
         purpose: docs.map(|d| d.description.clone()).filter(|s| !s.is_empty()),

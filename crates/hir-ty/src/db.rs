@@ -1,10 +1,11 @@
 //! Salsa database trait for type inference queries.
 
-use hir_def::ExprId;
+use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId};
 use std::sync::Arc;
 use vfs::FileId;
 
 use crate::infer::InferenceResult;
+use crate::narrow::NarrowState;
 use crate::Ty;
 
 /// Database trait for HIR type inference.
@@ -24,7 +25,7 @@ use crate::Ty;
 /// }
 /// ```
 #[salsa::db]
-pub trait HirDatabase: hir_def::DefDatabase {
+pub trait HirDatabase: ConfigsDatabase {
     /// Infer types for all expressions in a file.
     ///
     /// This is the main entry point for type inference. It runs type inference
@@ -43,17 +44,60 @@ pub trait HirDatabase: hir_def::DefDatabase {
     /// Should delegate to [`crate::infer::infer_query`].
     fn infer(&self, file_id: FileId) -> Arc<InferenceResult>;
 
-    /// Get type of a specific expression.
+    /// Get type of a specific expression in a specific body.
     ///
-    /// This is a convenience query derived from `infer()`. It returns the type
-    /// of a single expression without exposing the entire inference result.
+    /// `ExprId` is only unique within a single `Body`, so callers must
+    /// disambiguate with `DefWithBodyId` — `Method(local_id)` for a
+    /// procedure / function body, `ModuleCode` for module-level code.
+    /// The IDE-facing `Semantics::type_of_expr(SyntaxNode)` derives the
+    /// owner automatically via `BodySourceMap`.
     ///
     /// # Returns
     ///
-    /// - The inferred type of the expression
-    /// - `Ty::Unknown` if the expression was not found in the inference result
+    /// - The inferred type for `(owner, expr)`.
+    /// - `Ty::Unknown` if inference produced no entry for that pair.
     ///
     /// # Implementation
     /// Should delegate to [`crate::infer::type_of_expr_query`].
-    fn type_of_expr(&self, file_id: FileId, expr: ExprId) -> Ty;
+    fn type_of_expr(&self, file_id: FileId, owner: DefWithBodyId, expr: ExprId) -> Ty;
+
+    /// Run narrowing analysis on a single body (ADR-01 Option A).
+    ///
+    /// Returns the `Arc`-shared [`dataflow::DataflowResult`] produced by the
+    /// [`NarrowState`] lattice over the body's CFG. [`Semantics::type_of_expr`]
+    /// consumes it to overlay narrowed types on `Expr::Path` references — the
+    /// Task 6.5 invariant that hovers on a guard's receiver see the pre-narrow
+    /// type while hovers inside the then / else body see the narrowed one
+    /// falls out structurally from CFG vertex placement.
+    ///
+    /// Returns `None` when `owner` does not resolve to a body in this file,
+    /// or (impossibly) when the solver fails to converge.
+    ///
+    /// # Implementation
+    /// Should delegate to [`crate::narrow::narrow_query`].
+    ///
+    /// [`Semantics::type_of_expr`]: https://docs.rs/hir/latest/hir/struct.Semantics.html#method.type_of_expr
+    fn narrow(
+        &self,
+        file_id: FileId,
+        owner: DefWithBodyId,
+    ) -> Option<Arc<dataflow::DataflowResult<NarrowState>>>;
+
+    /// Whether the type narrowing overlay (ADR-01 Option A) is enabled.
+    ///
+    /// Implementations read the current value from a Salsa input hosted
+    /// by `ide_db`, so the method always observes the latest value set
+    /// through the corresponding setter — but note: the only current
+    /// consumer, [`narrow_or_base`] in `hir`, is a plain Rust helper
+    /// called from `Semantics::type_of_expr`, not a Salsa-tracked query.
+    /// Flipping the flag therefore takes effect on the next call, not
+    /// by Salsa invalidation. If a future query is added that reads
+    /// this flag from a `#[salsa::tracked]` function, Salsa revision
+    /// tracking *will* kick in for that query.
+    ///
+    /// Consumers inside hir use it as a short-circuit before calling
+    /// [`HirDatabase::narrow`].
+    ///
+    /// [`narrow_or_base`]: ../../../hir/fn.narrow_or_base.html
+    fn type_narrowing_enabled(&self) -> bool;
 }

@@ -8,6 +8,7 @@ pub mod tracing {
 pub mod analysis_host;
 pub mod diagnostics_state;
 pub mod diff_filter;
+pub mod features_state;
 pub mod frozen_context;
 pub mod global_state;
 pub mod handlers;

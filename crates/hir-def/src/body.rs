@@ -36,7 +36,7 @@
 pub mod lower;
 
 use la_arena::Arena;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::SyntaxNode;
 use text_size::TextRange;
 
@@ -69,6 +69,17 @@ pub struct Body {
     /// SDBL queries found in this method body (typed ExprIdx for internal use).
     /// Maps ExprIdx (Expr::Literal with SDBL string) to parsed SDBL query info.
     pub(crate) sdbl_exprs: Vec<(ExprIdx, syntax::SdblQueryInfo)>,
+
+    /// Expressions lowered from syntactic `ERROR` recovery nodes.
+    ///
+    /// BSL rejects bare member access like `obj.` or `obj.field` as a
+    /// statement (only assign/call are valid). The parser emits a well-formed
+    /// `FIELD_EXPR` subtree inside a `NodeKind::Error` wrapper; HIR lowering
+    /// unwraps that subtree as a best-effort `Stmt::Expr` so completion /
+    /// hover / inference can still reason about the receiver. These ExprIds
+    /// are marked "recovered" so inference-layer diagnostics and the CFG can
+    /// opt out (see `crates/hir-ty/src/infer.rs` and `crates/cfg`).
+    pub(crate) recovered_exprs: FxHashSet<ExprIdx>,
 }
 
 impl Default for Body {
@@ -87,6 +98,7 @@ impl Body {
             params: Box::new([]),
             body_stmts: Box::new([]),
             sdbl_exprs: Vec::new(),
+            recovered_exprs: FxHashSet::default(),
         }
     }
 
@@ -167,6 +179,17 @@ impl Body {
     /// Get all SDBL expressions in this body (with opaque ExprId).
     pub fn sdbl_exprs(&self) -> impl Iterator<Item = (ExprId, &syntax::SdblQueryInfo)> {
         self.sdbl_exprs.iter().map(|(idx, info)| (ExprId::from_idx(*idx), info))
+    }
+
+    /// Whether this expression was reconstructed from a parser ERROR node.
+    ///
+    /// Recovered expressions carry valid type information (inference looks at
+    /// them like any other expression), but inference-layer diagnostics and
+    /// CFG construction should usually skip them to avoid noise on code the
+    /// user is still typing.
+    pub fn is_recovered(&self, id: ExprId) -> bool {
+        let typed_id: ExprIdx = id.to_idx();
+        self.recovered_exprs.contains(&typed_id)
     }
 
     /// Get parameter binding IDs (opaque, in declaration order).

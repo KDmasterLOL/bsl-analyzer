@@ -31,7 +31,7 @@ use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::ty::Ty;
-use hir_def::{ExprId, Name};
+use hir_def::{DefWithBodyId, ExprId, Name};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use tracing::{debug, info, trace};
@@ -39,16 +39,36 @@ use vfs::FileId;
 
 use crate::builtin;
 use crate::db::HirDatabase;
+use crate::lower::TyLoweringContext;
 use crate::method_resolution;
+use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
 
 /// Result of type inference for a file/module.
 ///
 /// Contains inferred types for all expressions and collected diagnostics.
 /// This structure is cached by Salsa.
+///
+/// `ExprId`s are only unique **within a single `Body`**, so the merged
+/// `expr_types_by_body` keys the per-body maps by [`DefWithBodyId`]
+/// (method local-id, or `ModuleCode` for module-level code). This is the
+/// M3 Task 9 bridge that lets `Semantics::type_of_expr` go from a
+/// `SyntaxNode` — resolved through `BodySourceMap::expr_at_range` — to
+/// the inferred `Ty`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceResult {
-    /// Type of each expression, keyed by ExprId.
-    pub expr_types: FxHashMap<ExprId, Ty>,
+    /// Per-body inferred expression types.
+    ///
+    /// Outer key = body owner (`Method(local_id)` or `ModuleCode`), inner
+    /// map = that body's `ExprId -> Ty`.
+    ///
+    /// Shape note: M3 ships this as a nested map, not a flat
+    /// `FxHashMap<(DefWithBodyId, ExprId), Ty>`. No current caller uses
+    /// the "grab the whole body's map in one lookup" shortcut the nesting
+    /// would enable (`Semantics::type_of_expr` does a single point
+    /// lookup), but the nested shape stays open for Tasks 10-12 hooks
+    /// (body-scoped completion, narrowing) that need per-body iteration.
+    /// If those never materialise, a later cleanup can flatten.
+    pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, Ty>>,
 
     /// Variable types inferred from assignments.
     ///
@@ -57,16 +77,27 @@ pub struct InferenceResult {
     /// Used by completion to resolve receiver types for method lookup.
     pub var_types: FxHashMap<String, Ty>,
 
-    /// Diagnostics collected during type inference.
+    /// Diagnostics collected during type inference, paired with the body that
+    /// produced them.
     ///
-    /// Diagnostics are collected as a byproduct of type inference, not emitted immediately.
-    pub diagnostics: Vec<InferenceDiagnostic>,
+    /// Each `InferenceDiagnostic` variant carries an `ExprId`, which is only
+    /// unique **within a single `Body`**. The `DefWithBodyId` owner is the key
+    /// that lets downstream consumers (ide-diagnostics) recover the right
+    /// `BodySourceMap` to resolve `ExprId → TextRange`. Shape mirrors
+    /// [`hir_def::ModuleBodies::all_diagnostics`] for consistency with the rest
+    /// of the diagnostics pipeline.
+    pub diagnostics: Vec<(DefWithBodyId, InferenceDiagnostic)>,
 }
 
 impl InferenceResult {
-    /// Get the type of an expression.
-    pub fn type_of_expr(&self, expr: ExprId) -> Option<&Ty> {
-        self.expr_types.get(&expr)
+    /// Get the type of an expression in a specific body.
+    ///
+    /// `owner` identifies the body — `DefWithBodyId::Method(local_id)`
+    /// for a procedure / function, `DefWithBodyId::ModuleCode` for
+    /// module-level code. Returns `None` if inference produced no entry
+    /// for that `(owner, expr)` pair.
+    pub fn type_of_expr_in(&self, owner: DefWithBodyId, expr: ExprId) -> Option<&Ty> {
+        self.expr_types_by_body.get(&owner)?.get(&expr)
     }
 
     /// Check if there are any diagnostics.
@@ -108,6 +139,34 @@ pub enum InferenceDiagnostic {
     /// Emitted when expression type doesn't match expected type
     /// (e.g., assigning String to Number variable).
     TypeMismatch { expr: ExprId, expected: Ty, actual: Ty },
+
+    /// Field access on a typed receiver did not resolve.
+    ///
+    /// Emitted from `Expr::Field` when [`crate::field_lookup::lookup_field`]
+    /// returns `None` **and** the receiver carries enough type information
+    /// for the gap to be user-actionable — i.e. the receiver is not
+    /// [`Ty::Unknown`] (no type info to disagree with) and not a
+    /// [`Ty::Union`] (field lookup on unions defers to M4 narrowing, so a
+    /// `None` there is "can't decide yet", not "field does not exist").
+    ///
+    /// `receiver_ty` captures the type as seen at the access site so the
+    /// IDE layer can render `<CatalogRef.Номенклатура>.НеСуществует` in
+    /// the diagnostic message without re-running inference.
+    UnresolvedField { expr: ExprId, receiver_ty: Ty, field_name: Name },
+
+    /// Assignment to a field whose platform-property entry carries
+    /// `is_readonly = true` in HBK (`Использование:` chapter reads
+    /// `"Только чтение"`).
+    ///
+    /// Emitted from `Stmt::Assign` when the LHS is `Expr::Field` and
+    /// [`crate::field_lookup::lookup_field`] returns a [`crate::FieldInfo`]
+    /// flagged read-only. Propagated to the IDE layer as the
+    /// `ReadOnlyPropertyAssignment` diagnostic.
+    ///
+    /// `lhs` anchors the diagnostic to the field-access expression so the
+    /// editor underlines `.Параметры` rather than the whole statement;
+    /// `receiver_ty` and `field_name` feed the message body.
+    ReadOnlyPropertyAssignment { lhs: ExprId, receiver_ty: Ty, field_name: Name },
 }
 
 /// Kind of unresolved method call error.
@@ -125,7 +184,10 @@ pub enum UnresolvedMethodKind {
 
 /// Context for type inference.
 ///
-/// Performs type inference for a single file/module, building up an InferenceResult.
+/// Performs type inference for a **single body** (one method, or the
+/// module-level code block), building up expr-type and diagnostic
+/// sub-results that `infer_query` merges into the file-level
+/// [`InferenceResult`].
 pub struct InferenceContext<'db> {
     /// Database for queries.
     ///
@@ -137,46 +199,113 @@ pub struct InferenceContext<'db> {
     /// Used for diagnostics reporting and workspace file collection.
     file_id: FileId,
 
+    /// Body owner. Preserved so the per-body `expr_types` map can be
+    /// keyed by `DefWithBodyId` when `finish()` folds into
+    /// [`InferenceResult::expr_types_by_body`].
+    owner: DefWithBodyId,
+
     /// HIR body for the file.
     body: Arc<Body>,
 
     /// Variable types tracked from assignments (lowercase name → Ty).
     var_types: FxHashMap<String, Ty>,
 
-    /// Accumulated inference results.
-    result: InferenceResult,
+    /// Per-body `ExprId -> Ty` cache. Doubles as the memoisation table
+    /// (`infer_expr` short-circuits when the entry already exists) and
+    /// as the payload we hand to the merged result keyed by `owner`.
+    expr_types: FxHashMap<ExprId, Ty>,
+
+    /// Diagnostics collected while inferring this body.
+    diagnostics: Vec<InferenceDiagnostic>,
+}
+
+/// Single-body inference output.
+///
+/// Intermediate record returned from [`InferenceContext::finish`]: keeps
+/// the body's expr-type map and diagnostics separate from the variable
+/// map so `infer_query` can fold them into the file-level
+/// [`InferenceResult`] without re-walking anything.
+pub struct BodyInferenceResult {
+    /// Owner of the body that produced this output.
+    pub owner: DefWithBodyId,
+    /// Variable types discovered during inference (lowercase name → Ty).
+    pub var_types: FxHashMap<String, Ty>,
+    /// Expression types keyed by body-local `ExprId`.
+    pub expr_types: FxHashMap<ExprId, Ty>,
+    /// Diagnostics collected during inference.
+    pub diagnostics: Vec<InferenceDiagnostic>,
 }
 
 impl<'db> InferenceContext<'db> {
-    /// Create a new inference context for a file.
-    pub fn new(db: &'db dyn HirDatabase, file_id: FileId, body: &Arc<Body>) -> Self {
+    /// Create a new inference context for a single body.
+    ///
+    /// `owner` records whether the body is a method (and which
+    /// `local_id`) or module-level code. `infer_query` supplies the
+    /// right value per call.
+    pub fn new(
+        db: &'db dyn HirDatabase,
+        file_id: FileId,
+        owner: DefWithBodyId,
+        body: &Arc<Body>,
+    ) -> Self {
         Self {
             db,
             file_id,
+            owner,
             body: Arc::clone(body),
             var_types: FxHashMap::default(),
-            result: InferenceResult::default(),
+            expr_types: FxHashMap::default(),
+            diagnostics: Vec::new(),
         }
     }
 
-    /// Finish inference and return the result.
-    pub fn finish(mut self) -> InferenceResult {
-        self.result.var_types = self.var_types;
-        self.result
+    /// Suppress inference diagnostics whose key expression was lowered
+    /// from a parser ERROR node.
+    ///
+    /// Rust-analyzer-style recovery (`hir-def/src/body/lower/stmt.rs`) lets
+    /// us type-check expressions the user is still typing (`Сп.В`, bare
+    /// field access, etc.). Those expressions intentionally lack full
+    /// syntactic context, so firing `UnresolvedField` /
+    /// `UnresolvedMethodCall` / `MismatchedArgCount` / `TypeMismatch` on
+    /// them would flicker in the editor as the user types. The recovery
+    /// marker (`Body::is_recovered`) is the single source of truth for
+    /// "this expression came from an ERROR node, don't complain".
+    ///
+    /// Call this instead of `self.diagnostics.push(...)` whenever the
+    /// diagnostic is anchored to an expression the user could still be
+    /// editing.
+    fn push_inference_diagnostic(&mut self, diag: InferenceDiagnostic) {
+        let key = match &diag {
+            InferenceDiagnostic::UnresolvedMethodCall { expr, .. } => *expr,
+            InferenceDiagnostic::MismatchedArgCount { call_expr, .. } => *call_expr,
+            InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
+            InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
+            InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+        };
+        if self.body.is_recovered(key) {
+            return;
+        }
+        self.diagnostics.push(diag);
     }
 
-    /// Get source root ID for the current file.
-    ///
-    /// Used for workspace symbol resolution (Salsa-cached).
-    fn get_source_root_id(&self) -> base_db::SourceRootId {
-        let file_source_root_input = self.db.file_source_root_input(self.file_id);
-        file_source_root_input.source_root_id(self.db)
+    /// Finish inference and return the per-body output.
+    pub fn finish(self) -> BodyInferenceResult {
+        BodyInferenceResult {
+            owner: self.owner,
+            var_types: self.var_types,
+            expr_types: self.expr_types,
+            diagnostics: self.diagnostics,
+        }
     }
 
     /// Get resolver for the current module.
+    ///
+    /// Includes `Scope::Builtins` so that platform globals (`Сообщить`,
+    /// `ТекущаяДата`, ...) are recognised by `Resolver::resolve_name`; this
+    /// lets inference share the same lookup cascade as hover / goto-def.
     fn get_resolver(&self) -> Resolver {
         let module_id = hir_def::ModuleId { file_id: self.file_id };
-        Resolver::with_workspace_scope(module_id)
+        Resolver::with_builtins_and_workspace(module_id)
     }
 
     /// Infer types for all expressions in the body.
@@ -199,9 +328,9 @@ impl<'db> InferenceContext<'db> {
 
         debug!(
             "inferred {} expression types, {} var types, {} diagnostics",
-            self.result.expr_types.len(),
+            self.expr_types.len(),
             self.var_types.len(),
-            self.result.diagnostics.len()
+            self.diagnostics.len()
         );
     }
 
@@ -220,11 +349,40 @@ impl<'db> InferenceContext<'db> {
                 let value_ty = self.infer_expr(ExprId::from_idx(*value));
 
                 // Track variable type if target is a simple name
-                let target_expr = self.body.expr_idx(*target);
-                if let Expr::Path(name) = target_expr {
-                    if !value_ty.is_unknown() {
+                let target_expr = self.body.expr_idx(*target).clone();
+                match &target_expr {
+                    Expr::Path(name) if !value_ty.is_unknown() => {
                         self.var_types.insert(name.as_str().to_lowercase(), value_ty);
                     }
+                    Expr::Field { base, field } => {
+                        // Read-only-property gate. We resolve the receiver
+                        // type (already cached by the `infer_expr(target)`
+                        // call below, but we need it *before* the assignment
+                        // has a chance to misresolve anything) through
+                        // `field_lookup`, which is the same adapter hover
+                        // and completion consult. A hit with
+                        // `is_readonly = true` fires
+                        // `ReadOnlyPropertyAssignment`; a miss is simply
+                        // "we don't know what this is" and stays silent
+                        // (the companion `UnresolvedField` diagnostic
+                        // covers the Authoritative-receiver case).
+                        let base_ty = self.infer_expr(ExprId::from_idx(*base));
+                        let configs = self.db.configurations(self.file_id);
+                        if let Some(info) =
+                            crate::field_lookup::lookup_field(&configs, &base_ty, field)
+                        {
+                            if info.is_readonly {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::ReadOnlyPropertyAssignment {
+                                        lhs: ExprId::from_idx(*target),
+                                        receiver_ty: base_ty,
+                                        field_name: field.clone(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
 
                 self.infer_expr(ExprId::from_idx(*target));
@@ -312,7 +470,7 @@ impl<'db> InferenceContext<'db> {
     /// kind and dispatches to specialized inference functions.
     fn infer_expr(&mut self, expr_id: ExprId) -> Ty {
         // Check if already inferred (avoid re-inference)
-        if let Some(ty) = self.result.expr_types.get(&expr_id) {
+        if let Some(ty) = self.expr_types.get(&expr_id) {
             return ty.clone();
         }
 
@@ -326,25 +484,23 @@ impl<'db> InferenceContext<'db> {
 
             Expr::Literal(lit) => self.infer_literal(lit),
 
-            Expr::Path(name) => {
-                // Try builtin functions first
-                if let Some(sig) = builtin::builtin_functions().get(name.as_str()) {
-                    trace!("resolved {} to builtin function", name);
-                    return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
-                }
-
-                // Look up variable type from tracked assignments
-                if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
-                    trace!("resolved {} to variable type {:?}", name, ty);
-                    return ty.clone();
-                }
-
-                Ty::Unknown
-            }
+            Expr::Path(name) => self.infer_path_name(name),
 
             Expr::QualifiedPath(_path) => {
-                // Phase 1: Return Unknown
-                // Phase 3: Resolve CommonModule.Method or Metadata.Manager paths
+                // Standalone qualified paths never reach this branch in
+                // practice: HIR lowering (`body::lower::expr`) only produces
+                // `Expr::QualifiedPath` when rewriting call syntax
+                // `a.b()` / `a.b.c()` — the callee ends up in
+                // `Expr::Call { callee: QualifiedPath, .. }` and the match
+                // in `infer_call` takes over before this arm fires. For
+                // non-call access (`Х = Документы.ПКО`) HIR emits
+                // `Expr::Field { base, field }` instead.
+                //
+                // Leaving the arm as `Unknown` documents the contract: if
+                // a future HIR pass ever lifts standalone 2-segment paths
+                // into `QualifiedPath`, Ty resolution lives in the call
+                // site already (`infer_two_segment_qualified_path`
+                // analogue must be added here, gated on arity == 2).
                 Ty::Unknown
             }
 
@@ -380,8 +536,17 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
-                // Resolve method return type via platform data
-                self.resolve_method_return_type(&receiver_ty, method)
+                // `MethodLookup` is the single adapter that turns
+                // `(receiver_ty, method_name)` into a return type. Covers
+                // platform-value types, object managers, and metadata refs;
+                // returns `None` for unions / collectives / unknown
+                // receivers. When lookup fails, inference keeps the
+                // previous "best effort" semantics by emitting
+                // `Ty::Unknown` — chain continuation still typechecks
+                // structurally, it just doesn't carry a concrete type.
+                crate::method_lookup::lookup_method(&receiver_ty, method)
+                    .map(|info| info.return_ty)
+                    .unwrap_or(Ty::Unknown)
             }
 
             Expr::Index { base, index } => {
@@ -393,12 +558,69 @@ impl<'db> InferenceContext<'db> {
                 Ty::Unknown
             }
 
-            Expr::Field { base, field: _ } => {
-                self.infer_expr(ExprId::from_idx(*base));
+            Expr::Field { base, field } => {
+                let base_ty = self.infer_expr(ExprId::from_idx(*base));
 
-                // Phase 1: Return Unknown
-                // Phase 2+: Resolve field type from base type
-                Ty::Unknown
+                // Two adapters participate. `FieldLookup` resolves MDO
+                // attributes / tabular sections / register parts on
+                // `Ty::MetadataRef` receivers. `ManagerLookup` resolves
+                // manager-global members — promoting
+                // `ManagerCollection(kind).<MdoName>` to
+                // `ObjectManager { kind, MdoName }` when the MDO exists
+                // in `Configuration`, then resolving predefined items /
+                // enum values on the `ObjectManager` side in the next
+                // `Expr::Field` hop. The two adapters cover disjoint
+                // receiver shapes, so the order in which they are tried
+                // only matters for readability — try the field-table
+                // first (the common path) and fall through to the
+                // manager surface.
+                //
+                // Pulling `configurations(file_id)` inside this branch
+                // keeps the Salsa dependency fine-grained — invalidating
+                // one configuration XML re-runs inference exactly for
+                // the bodies that observed it.
+                let configs = self.db.configurations(self.file_id);
+                if let Some(info) = crate::field_lookup::lookup_field(&configs, &base_ty, field) {
+                    info.ty
+                } else if let Some(info) =
+                    crate::manager_lookup::lookup_manager_field(&configs, &base_ty, field)
+                {
+                    info.ty
+                } else {
+                    // Only emit on receivers where `lookup_field` is
+                    // actually authoritative — today that is
+                    // [`Ty::MetadataRef`] and [`Ty::ThisObject`].
+                    // `ThisObject` is coerced to the matching
+                    // `*Object` `MetadataRef` at `lookup_field`'s
+                    // entry (see `crate::this_object`), so a miss on
+                    // it is as conclusive as a miss on the explicit
+                    // object reference — the catalog's attribute
+                    // list was checked and the field genuinely isn't
+                    // there. Primitives, `Function`,
+                    // `ManagerCollection`, and `ObjectManager` all
+                    // fall through the adapter to `None` because
+                    // their field tables live elsewhere (predefined
+                    // items via the M4 Task 3 adapter, registers via
+                    // M4 Task 2) or simply do not exist. Treating
+                    // those misses as "field does not exist on the
+                    // receiver" would flood the IDE with false
+                    // positives on perfectly legal code like
+                    // `Число.ToString()`. `Unknown` and `Union` are
+                    // excluded by the match — `MetadataRef` is never
+                    // a union member by construction. `ManagerLookup`
+                    // misses (typo'd MDO names, unknown predefined
+                    // items) stay silent here; a follow-up can make
+                    // them authoritative once the method surface on
+                    // `ObjectManager` lands too.
+                    if matches!(base_ty, Ty::MetadataRef { .. } | Ty::ThisObject { .. }) {
+                        self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
+                            expr: expr_id,
+                            receiver_ty: base_ty,
+                            field_name: field.clone(),
+                        });
+                    }
+                    Ty::Unknown
+                }
             }
 
             Expr::New { type_name, args } => {
@@ -407,18 +629,14 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
-                // Infer type from constructor
+                // Lower the constructor name through the shared TypeRef →
+                // Ty adapter. The cascade (builtin → MDO plural → platform
+                // object fallback) moved into `lower_bare_name`, so every
+                // syntactic source of type info (`Новый X`, `Тип("…")`,
+                // JSDoc) now takes the same path — editing the fallback
+                // rules in one place is enough.
                 match type_name {
-                    Some(name) => {
-                        let ty = Ty::from_type_name(name.as_str());
-                        if ty.is_unknown() {
-                            // Not a basic type — treat as platform object
-                            // (e.g., Запрос, HTTPЗапрос, ТекстовыйДокумент)
-                            Ty::PlatformObject(name.clone())
-                        } else {
-                            ty
-                        }
-                    }
+                    Some(name) => TyLoweringContext::new().lower_bare_name(name),
                     None => Ty::Unknown,
                 }
             }
@@ -439,8 +657,105 @@ impl<'db> InferenceContext<'db> {
         };
 
         // Store the inferred type
-        self.result.expr_types.insert(expr_id, ty.clone());
+        self.expr_types.insert(expr_id, ty.clone());
         ty
+    }
+
+    /// Resolve a bare `Expr::Path` identifier to a [`Ty`].
+    ///
+    /// Lookup order mirrors BSL visibility:
+    ///
+    /// 1. **Platform builtins** — acknowledged by either
+    ///    [`Resolver::resolve_name`] (via the `Scope::Builtins` port into
+    ///    `bsl_platform`) **or** by the hand-curated `hir-ty::builtin`
+    ///    signature table. Either source is enough: the platform index
+    ///    covers more names, but the `hir-ty::builtin` table carries the
+    ///    only typed signatures today and includes constructor-like
+    ///    globals (`Новый`, `ПустоеЗначение`, `ОписаниеТипов`, `Выполнить`,
+    ///    …) that are absent from the platform global-function index.
+    ///    Builtins are never shadowed by user code.
+    /// 2. **Implicit locals** — BSL has no explicit `Var` declarations;
+    ///    a name springs into existence at its first assignment. The
+    ///    inference context captures those types in [`Self::var_types`]
+    ///    as [`Stmt::Assign`] is walked in [`Self::infer_stmts`].
+    ///    Implicit locals *do* shadow module-level names, so `var_types`
+    ///    is checked before the module/variable Resolver branches.
+    /// 3. **Module-level methods / variables** — returned as `Unknown`
+    ///    today (no signature carrier yet); Task 2.x will synthesise
+    ///    `Ty::Function` from `MethodId`.
+    fn infer_path_name(&mut self, name: &hir_def::Name) -> Ty {
+        use hir_def::resolver::Resolution;
+
+        let resolver = self.get_resolver();
+
+        // 0. `ЭтотОбъект` / `ThisObject` — intercepted ahead of every
+        //    other scope because BSL treats the identifier like a
+        //    platform global: not shadowable, resolved through module
+        //    metadata (the enclosing MDO) rather than the scope chain.
+        //    `Resolver::resolve_this_object` returns `None` for module
+        //    kinds that have no `*Object` companion (forms, record
+        //    sets, manager / common / command modules) — those fall
+        //    through to the normal cascade and become `Ty::Unknown`,
+        //    matching the "best-effort" inference semantics.
+        let name_lower = name.as_str().to_lowercase();
+        if name_lower == "этотобъект" || name_lower == "thisobject" {
+            if let Some(owner) = resolver.resolve_this_object(self.db) {
+                trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
+                return Ty::ThisObject { owner };
+            }
+            // Fall through: record-set / form / common-module
+            // `ЭтотОбъект` stays Unknown for now (M4 Task 5 follow-up).
+        }
+
+        let resolved = resolver.resolve_name(self.db, name);
+
+        // 1. Builtins — union of Resolver's platform-global view and the
+        //    narrower hir-ty signature table. Either hit makes the name a
+        //    builtin; only the hir-ty table supplies a typed signature.
+        let resolver_says_builtin = matches!(resolved, Some(Resolution::Builtin(_)));
+        let hir_sig = builtin::builtin_functions().get(name.as_str());
+        if resolver_says_builtin || hir_sig.is_some() {
+            if let Some(sig) = hir_sig {
+                trace!("resolved {} as builtin via hir-ty signature table", name);
+                return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
+            }
+            // Resolver classifies the name as a platform global but the
+            // hir-ty signature table has no typed entry for it. Leave
+            // `Ty::Unknown` until Task 2.x broadens signature coverage.
+            return Ty::Unknown;
+        }
+
+        // 2. BSL implicit locals shadow module-level and manager names.
+        //    A user writing `Документы = 42;` rebinds the identifier in the
+        //    local scope — the manager collective is only visible if no
+        //    local assignment exists.
+        if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
+            trace!("resolved {} via var_types = {:?}", name, ty);
+            return ty.clone();
+        }
+
+        // 3. MDO plural globals (`Документы`, `Справочники`, …) lower into
+        //    `Ty::ManagerCollection(MdoType)`. This is the single path a
+        //    plural form takes when no local variable shadows it; consumers
+        //    (hover / completion) observe the collective type and can
+        //    eventually chain `.Name` into `Ty::ObjectManager` once HIR
+        //    lifts standalone 2-segment paths into `Expr::QualifiedPath`.
+        if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
+            if let Some(ty) = Ty::manager_collection(mdo_type) {
+                trace!("resolved {} as manager collection {:?}", name, mdo_type);
+                return ty;
+            }
+        }
+
+        // 4. Module-level methods / variables (Unknown today; Task 2.x
+        //    will synthesise Ty::Function from MethodId).
+        match resolved {
+            Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => Ty::Unknown,
+            // `Local` is unreachable here because `get_resolver` does not
+            // push an ExprScope; any local-looking name already returned
+            // from the `var_types` branch above.
+            Some(Resolution::Builtin(_)) | Some(Resolution::Local(_)) | None => Ty::Unknown,
+        }
     }
 
     /// Infer type from a literal.
@@ -453,28 +768,6 @@ impl<'db> InferenceContext<'db> {
             Literal::Undefined => Ty::Undefined,
             Literal::Null => Ty::Null,
         }
-    }
-
-    /// Resolve return type of a platform method call.
-    ///
-    /// Given a receiver type and method name, looks up the method in platform data
-    /// and returns its return type. Enables fluent chains like `Запрос.Выполнить().Выбрать()`.
-    fn resolve_method_return_type(&self, receiver_ty: &Ty, method_name: &Name) -> Ty {
-        if let Some(type_name) = receiver_ty.platform_type_name() {
-            let data = bsl_platform::PlatformData::instance();
-            if let Some(platform_method) = data.get_method(type_name, method_name.as_str()) {
-                if let Some(ret_type_name) = &platform_method.return_type {
-                    let ty = Ty::from_type_name(ret_type_name);
-                    if ty.is_unknown() {
-                        return Ty::PlatformObject(Name::new(ret_type_name));
-                    }
-                    return ty;
-                }
-                // Method exists but returns void (procedure)
-                return Ty::Undefined;
-            }
-        }
-        Ty::Unknown
     }
 
     /// Infer type from a binary operation.
@@ -531,17 +824,62 @@ impl<'db> InferenceContext<'db> {
 
     /// Infer type from a function call.
     fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> Ty {
-        // Phase 3: Check if callee is a qualified path (Module.Method)
-        // If yes, try to resolve it
+        // Qualified callees dispatch by segment count:
+        //   2 → `CommonModule.Method()`  → resolve_qualified_call
+        //   3 → `Документы.ПКО.Метод()` → resolve_three_level_call
+        // Everything else falls through to the generic function-type path.
         let callee_expr = self.body.expr(callee);
         if let Expr::QualifiedPath(qualified_path) = callee_expr {
-            // Phase 3: Handle two-level qualified calls (Module.Method)
-            if qualified_path.segments().len() == 2 {
-                // Clone the names to avoid borrow checker issues
-                let module_name = qualified_path.first().clone();
-                let method_name = qualified_path.last().clone();
-                return self.infer_qualified_call(&module_name, &method_name, args, callee);
+            match qualified_path.segments().len() {
+                2 => {
+                    let module_name = qualified_path.first().clone();
+                    let method_name = qualified_path.last().clone();
+                    return self.infer_qualified_call(&module_name, &method_name, args, callee);
+                }
+                3 => {
+                    let mdo_type_plural = qualified_path.segments()[0].clone();
+                    let mdo_name = qualified_path.segments()[1].clone();
+                    let method_name = qualified_path.segments()[2].clone();
+                    return self.infer_three_level_call(
+                        &mdo_type_plural,
+                        &mdo_name,
+                        &method_name,
+                        args,
+                        callee,
+                    );
+                }
+                _ => {}
             }
+        }
+
+        // Method-call shape: `receiver.method(...)` lowers to
+        // `Expr::Call { callee: Expr::Field { base, field } }` because
+        // HIR never emits the dedicated `Expr::MethodCall` variant today
+        // (dead-code branch, kept for future use). Route through
+        // `method_lookup::lookup_method` with the receiver's inferred
+        // type — otherwise `infer_expr(callee)` would go to the
+        // `Expr::Field` branch, fail `lookup_field` (methods aren't
+        // fields), and hand `infer_call` a `Ty::Unknown` callee, which
+        // kills fluent chains like `Запрос.Выполнить().Выбрать()`.
+        if let Expr::Field { base, field } = callee_expr {
+            let base_id = ExprId::from_idx(*base);
+            let method_name = field.clone();
+            let receiver_ty = self.infer_expr(base_id);
+            for arg in args {
+                self.infer_expr(*arg);
+            }
+            return match crate::method_lookup::lookup_method(&receiver_ty, &method_name) {
+                Some(info) => {
+                    // Argument type check (M4 Task 7 follow-up): the
+                    // fluent-chain path historically skipped both arg-
+                    // count and arg-type diagnostics. Emit the type
+                    // check here — count-check stays deferred so this
+                    // patch stays scoped to the TypeMismatch emitter.
+                    self.emit_arg_type_mismatches(args, &info.params);
+                    info.return_ty
+                }
+                None => Ty::Unknown,
+            };
         }
 
         // Infer callee type for non-qualified calls
@@ -557,20 +895,22 @@ impl<'db> InferenceContext<'db> {
             Ty::Function { ref params, ref ret } => {
                 // Phase 2: Check argument count
                 if args.len() != params.len() {
-                    self.result.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr: callee,
                         expected: params.len(),
                         found: args.len(),
                     });
                 }
 
-                // TODO Phase 2+: Check argument types
-                // for (arg_id, param_ty) in args.iter().zip(params.iter()) {
-                //     let arg_ty = self.result.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);
-                //     if !self.is_compatible(&arg_ty, param_ty) {
-                //         self.result.diagnostics.push(InferenceDiagnostic::TypeMismatch { ... });
-                //     }
-                // }
+                // M4 Task 7 follow-up: argument type check. Pairs zip
+                // to `min(args, params)` so a prior `MismatchedArgCount`
+                // does not double-fire as a `TypeMismatch` on the
+                // unpaired tail. The per-pair predicate is
+                // [`crate::subtype::is_assignable`], which treats
+                // `Ty::Unknown` on either side as permissive — typical
+                // for BSL where param declarations are often absent or
+                // only partially typed via JSDoc.
+                self.emit_arg_type_mismatches(args, params);
 
                 // Return function's return type
                 (**ret).clone()
@@ -603,24 +943,23 @@ impl<'db> InferenceContext<'db> {
             self.infer_expr(*arg);
         }
 
-        // Get source root and resolver
-        let source_root_id = self.get_source_root_id();
         let resolver = self.get_resolver();
 
-        // Resolve the qualified call
+        // Resolve the qualified call. The Resolver reads `db.configurations()`
+        // so `db.infer` transitively depends on the workspace config set,
+        // and `set_all_config_paths` invalidates inference through Salsa.
         match method_resolution::resolve_qualified_call(
             self.db,
             module_name,
             method_name,
             &resolver,
-            source_root_id,
         ) {
             Ok(resolution) => {
                 // Method found!
 
                 // Check export flag
                 if !resolution.is_export {
-                    self.result.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                    self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                         expr: call_expr,
                         receiver_name: module_name.clone(),
                         method_name: method_name.clone(),
@@ -630,19 +969,23 @@ impl<'db> InferenceContext<'db> {
 
                 // Check argument count
                 if args.len() != resolution.signature.params.len() {
-                    self.result.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
+                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr,
                         expected: resolution.signature.params.len(),
                         found: args.len(),
                     });
                 }
 
+                // Argument type check — same rationale as the
+                // plain-function branch in `infer_call`.
+                self.emit_arg_type_mismatches(args, &resolution.signature.params);
+
                 // Return method's return type
                 resolution.return_type
             }
             Err(kind) => {
                 // Method not found - emit diagnostic
-                self.result.diagnostics.push(InferenceDiagnostic::UnresolvedMethodCall {
+                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,
                     receiver_name: module_name.clone(),
                     method_name: method_name.clone(),
@@ -650,6 +993,178 @@ impl<'db> InferenceContext<'db> {
                 });
 
                 Ty::Unknown
+            }
+        }
+    }
+
+    /// Infer type from a three-segment manager-chain call
+    /// (`Документы.ПКО.СоздатьДокумент()`).
+    ///
+    /// Delegates to [`method_resolution::resolve_three_level_call`], which
+    /// in turn goes through [`Resolver::resolve_three_level_method`] — so
+    /// `db.infer` transitively depends on `db.configurations()` via Salsa
+    /// and the CFE visibility gate is enforced automatically.
+    ///
+    /// Diagnostic shape mirrors `infer_qualified_call`: the receiver name
+    /// glued as `<mdo_type>.<mdo_name>` so callers see the full head when
+    /// the method is missing or non-exported.
+    fn infer_three_level_call(
+        &mut self,
+        mdo_type_plural: &Name,
+        mdo_name: &Name,
+        method_name: &Name,
+        args: &[ExprId],
+        call_expr: ExprId,
+    ) -> Ty {
+        for arg in args {
+            self.infer_expr(*arg);
+        }
+
+        let resolver = self.get_resolver();
+        let receiver_name =
+            Name::new(&format!("{}.{}", mdo_type_plural.as_str(), mdo_name.as_str()));
+
+        match method_resolution::resolve_three_level_call(
+            self.db,
+            mdo_type_plural,
+            mdo_name,
+            method_name,
+            &resolver,
+        ) {
+            Ok(resolution) => {
+                if !resolution.is_export {
+                    self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                        expr: call_expr,
+                        receiver_name: receiver_name.clone(),
+                        method_name: method_name.clone(),
+                        kind: UnresolvedMethodKind::MethodNotExport,
+                    });
+                }
+
+                if args.len() != resolution.signature.params.len() {
+                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
+                        call_expr,
+                        expected: resolution.signature.params.len(),
+                        found: args.len(),
+                    });
+                }
+
+                // Argument type check — mirrors `infer_qualified_call`.
+                self.emit_arg_type_mismatches(args, &resolution.signature.params);
+
+                resolution.return_type
+            }
+            Err(UnresolvedMethodKind::MethodNotFound) => {
+                // Workspace lookup missed — fall back to the platform
+                // manager catalogue. This is where stock methods like
+                // `Справочники.X.СоздатьЭлемент()` /
+                // `Документы.X.СоздатьДокумент()` live. Only the
+                // `MethodNotFound` arm falls through: `MethodNotExport`
+                // means the workspace *has* a method with this name
+                // that is just not exported — the diagnostic belongs to
+                // the user's module, not to the platform catalogue.
+                //
+                // Gating: only fall back when the MDO itself is
+                // declared in a visible configuration. Without this
+                // check, a typo'd receiver
+                // (`Документы.НетТакогоДокумента.ПолучитьСсылку()`) would
+                // silently succeed against platform data instead of
+                // surfacing the missing MDO. `configurations.is_empty()`
+                // preserves historic behaviour for fixture-only tests
+                // that never register a configuration — they pre-date
+                // the platform fallback and rely on the diagnostic
+                // firing.
+                let plat_res: Option<PlatformMethodResolution> =
+                    bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str())
+                        .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
+                        .and_then(|mdo_type| {
+                            resolve_platform_manager_method(mdo_type, mdo_name, method_name)
+                        });
+                if let Some(res) = plat_res {
+                    if args.len() != res.signature.params.len() {
+                        self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
+                            call_expr,
+                            expected: res.signature.params.len(),
+                            found: args.len(),
+                        });
+                    }
+                    self.emit_arg_type_mismatches(args, &res.signature.params);
+                    return res.return_ty;
+                }
+
+                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                    expr: call_expr,
+                    receiver_name,
+                    method_name: method_name.clone(),
+                    kind: UnresolvedMethodKind::MethodNotFound,
+                });
+                Ty::Unknown
+            }
+            Err(kind) => {
+                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                    expr: call_expr,
+                    receiver_name,
+                    method_name: method_name.clone(),
+                    kind,
+                });
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// Emit a [`InferenceDiagnostic::TypeMismatch`] per argument whose
+    /// inferred type is not assignable to the corresponding parameter
+    /// type.
+    ///
+    /// Walks `args.iter().zip(params.iter())`, so an extra unpaired
+    /// argument (caught separately by
+    /// [`InferenceDiagnostic::MismatchedArgCount`]) does not also fire
+    /// a pair-wise mismatch. The per-pair predicate is
+    /// [`crate::subtype::is_assignable`] — `Ty::Unknown` on either
+    /// side is permissive (see the `GRADUAL TYPING` note in
+    /// [`crate::subtype`]), so expressions the inferrer could not type
+    /// and parameters without declared types produce no false
+    /// positives.
+    /// Is `(mdo_type, mdo_name)` declared in a configuration visible from
+    /// the current file?
+    ///
+    /// Guards the platform-manager fallback in
+    /// [`Self::infer_three_level_call`]: without this check a typo'd
+    /// receiver would silently hit platform data. The policy mirrors
+    /// `Resolver::mdo_visible_in_configs` — the visibility gate the
+    /// resolver itself uses before traversing manager modules.
+    ///
+    /// Returns `false` when no configuration is registered so the
+    /// behaviour for fixture-only tests stays consistent with the
+    /// pre-fallback baseline (they never saw platform resolution and
+    /// relied on `UnresolvedMethodCall` for missing MDO names).
+    fn mdo_declared(&self, mdo_type: bsl_metadata::MdoType, mdo_name: &Name) -> bool {
+        let configs = self.db.configurations(self.file_id);
+        if configs.is_empty() {
+            return false;
+        }
+        let needle = mdo_name.as_str();
+        configs.iter().any(|vc| {
+            // `find_metadata_object` covers catalog / document / enum /
+            // chart-of-* / task / business-process / exchange-plan, but
+            // registers live in a parallel `find_register_by_type_and_name`
+            // table. Check both so a real
+            // `РегистрыСведений.Курсы.СоздатьМенеджерЗаписи()` reaches
+            // the platform fallback.
+            vc.configuration.find_metadata_object(mdo_type, needle).is_some()
+                || vc.configuration.find_register_by_type_and_name(mdo_type, needle).is_some()
+        })
+    }
+
+    fn emit_arg_type_mismatches(&mut self, args: &[ExprId], params: &[Ty]) {
+        for (arg_id, param_ty) in args.iter().zip(params.iter()) {
+            let arg_ty = self.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);
+            if !crate::subtype::is_assignable(&arg_ty, param_ty) {
+                self.push_inference_diagnostic(InferenceDiagnostic::TypeMismatch {
+                    expr: *arg_id,
+                    expected: param_ty.clone(),
+                    actual: arg_ty,
+                });
             }
         }
     }
@@ -677,27 +1192,44 @@ pub fn infer_query(db: &dyn HirDatabase, file_id: FileId) -> Arc<InferenceResult
 
     let mut result = InferenceResult::default();
 
+    let fold_body = |result: &mut InferenceResult, body_result: BodyInferenceResult| {
+        // Preserve per-body expr_types so `Semantics::type_of_expr`
+        // (M3 Task 9) can look them up via `BodySourceMap`. Before this,
+        // the merge dropped `expr_types` entirely and every syntax-node
+        // lookup returned `Ty::Unknown`.
+        result.expr_types_by_body.insert(body_result.owner, body_result.expr_types);
+        // `var_types` stays file-global: completion matches variables by name
+        // across bodies. `diagnostics` is flat file-wide but each entry is
+        // paired with its `DefWithBodyId` owner so ide-diagnostics can resolve
+        // the body-local `ExprId` through the correct `BodySourceMap`.
+        result.var_types.extend(body_result.var_types);
+        let owner = body_result.owner;
+        result.diagnostics.extend(body_result.diagnostics.into_iter().map(|d| (owner, d)));
+    };
+
     // Infer module-level code (statements outside procedures/functions)
     if let Some(body) = module_bodies.module_code() {
-        let mut ctx = InferenceContext::new(db, file_id, &Arc::new(body.clone()));
+        let mut ctx =
+            InferenceContext::new(db, file_id, DefWithBodyId::ModuleCode, &Arc::new(body.clone()));
         ctx.infer_all();
-        let module_result = ctx.finish();
-        result.var_types.extend(module_result.var_types);
-        result.diagnostics.extend(module_result.diagnostics);
+        fold_body(&mut result, ctx.finish());
     }
 
     // Infer all method bodies (procedures and functions)
-    for (_local_id, body) in module_bodies.iter_bodies() {
-        let mut ctx = InferenceContext::new(db, file_id, &Arc::new(body.clone()));
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let mut ctx = InferenceContext::new(
+            db,
+            file_id,
+            DefWithBodyId::Method(local_id),
+            &Arc::new(body.clone()),
+        );
         ctx.infer_all();
-        let method_result = ctx.finish();
-        // Merge var_types from all methods (completion will match by variable name)
-        result.var_types.extend(method_result.var_types);
-        result.diagnostics.extend(method_result.diagnostics);
+        fold_body(&mut result, ctx.finish());
     }
 
     info!(
-        "type inference complete: {} var types, {} diagnostics",
+        "type inference complete: {} bodies, {} var types, {} diagnostics",
+        result.expr_types_by_body.len(),
         result.var_types.len(),
         result.diagnostics.len()
     );
@@ -705,18 +1237,26 @@ pub fn infer_query(db: &dyn HirDatabase, file_id: FileId) -> Arc<InferenceResult
     Arc::new(result)
 }
 
-/// Salsa query: Get type of a specific expression.
+/// Salsa query: Get type of an expression in a specific body.
 ///
-/// This is a convenience query derived from `infer()`. It avoids
-/// exposing the entire InferenceResult when only one type is needed.
+/// `ExprId` is only unique within a single `Body`, so callers must
+/// disambiguate with `DefWithBodyId` — `Method(local_id)` for a
+/// procedure / function, `ModuleCode` for module-level code. The
+/// `Semantics::type_of_expr(SyntaxNode)` helper in `hir` derives the
+/// owner automatically by walking up the syntax tree.
 ///
 /// # Returns
 ///
-/// - The inferred type of the expression
-/// - `Ty::Unknown` if the expression was not found
-pub fn type_of_expr_query(db: &dyn HirDatabase, file_id: FileId, expr: ExprId) -> Ty {
+/// - The inferred type for `(owner, expr)` if present.
+/// - `Ty::Unknown` if inference produced no entry for that pair.
+pub fn type_of_expr_query(
+    db: &dyn HirDatabase,
+    file_id: FileId,
+    owner: DefWithBodyId,
+    expr: ExprId,
+) -> Ty {
     let infer = db.infer(file_id);
-    infer.type_of_expr(expr).cloned().unwrap_or(Ty::Unknown)
+    infer.type_of_expr_in(owner, expr).cloned().unwrap_or(Ty::Unknown)
 }
 
 #[cfg(test)]
@@ -726,7 +1266,7 @@ mod tests {
     #[test]
     fn test_inference_result_default() {
         let result = InferenceResult::default();
-        assert_eq!(result.expr_types.len(), 0);
+        assert_eq!(result.expr_types_by_body.len(), 0);
         assert_eq!(result.diagnostics.len(), 0);
         assert!(!result.has_diagnostics());
     }
@@ -802,16 +1342,43 @@ mod tests {
     }
 
     #[test]
+    fn test_unresolved_field_diagnostic() {
+        // Test that UnresolvedField diagnostic carries the receiver type
+        // and field name verbatim, so the ide-diagnostics layer can render
+        // `<ReceiverType>.<field_name>` without re-running inference.
+        let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
+        let receiver_ty = Ty::MetadataRef {
+            kind: hir_def::ty::MetadataKind::CatalogRef,
+            name: Name::new("Номенклатура"),
+        };
+        let field_name = Name::new("НесуществующееПоле");
+
+        let diag = InferenceDiagnostic::UnresolvedField {
+            expr: expr_id,
+            receiver_ty: receiver_ty.clone(),
+            field_name: field_name.clone(),
+        };
+
+        match diag {
+            InferenceDiagnostic::UnresolvedField { expr, receiver_ty: r, field_name: f } => {
+                assert_eq!(expr, expr_id);
+                assert_eq!(r, receiver_ty);
+                assert_eq!(f, field_name);
+            }
+            _ => panic!("Expected UnresolvedField"),
+        }
+    }
+
+    #[test]
     fn test_inference_result_with_diagnostics() {
         let mut result = InferenceResult::default();
         assert!(!result.has_diagnostics());
 
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        result.diagnostics.push(InferenceDiagnostic::MismatchedArgCount {
-            call_expr: expr_id,
-            expected: 2,
-            found: 1,
-        });
+        result.diagnostics.push((
+            DefWithBodyId::ModuleCode,
+            InferenceDiagnostic::MismatchedArgCount { call_expr: expr_id, expected: 2, found: 1 },
+        ));
 
         assert!(result.has_diagnostics());
         assert_eq!(result.diagnostics.len(), 1);

@@ -13,6 +13,7 @@ use hir::{
 };
 use vfs::FileId;
 
+use crate::features::FeaturesInput;
 use crate::queries::{
     all_sdbl_in_file_query, line_index_query, liveness_analysis_query, method_cfg_query,
     module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
@@ -32,14 +33,24 @@ pub struct RootDatabaseImpl {
     /// Base file storage
     files: Files,
 
-    /// Generation counter for metadata cache invalidation.
-    /// Bumped when VFS detects .xml file changes in the configuration directory.
-    metadata_version: std::sync::atomic::AtomicU32,
+    /// Salsa input carrying the workspace-wide set of configuration roots and
+    /// the metadata generation counter.
+    ///
+    /// Lazily initialized on the first call to `set_all_config_paths` /
+    /// `bump_metadata_version`. Queries read `paths` / `version` from this
+    /// input, so mutations propagate through Salsa's invalidation graph.
+    workspace_configs_input: parking_lot::RwLock<Option<metadata::WorkspaceConfigsInput>>,
 
-    /// All configuration paths: main config + extensions.
-    /// Each entry: (name or None for main, path).
-    /// Set by the LSP server when workspace root is configured.
-    all_config_paths: parking_lot::RwLock<Vec<(Option<String>, std::path::PathBuf)>>,
+    /// Salsa input carrying workspace-wide feature flags (Task 6.7).
+    ///
+    /// Eagerly created in [`RootDatabaseImpl::new`] with defaults matching
+    /// [`project_model::FeaturesConfig::default`] (every flag on). Today's
+    /// only consumer — `narrow_or_base` in `hir` — is a plain Rust helper,
+    /// so flipping a flag through [`RootDatabaseImpl::set_type_narrowing_enabled`]
+    /// takes effect on the next call. If a future `#[salsa::tracked]`
+    /// query reads from this input, Salsa's standard revision tracking
+    /// kicks in for that query.
+    features_input: parking_lot::RwLock<Option<FeaturesInput>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -53,45 +64,108 @@ impl Clone for RootDatabaseImpl {
         Self {
             storage: self.storage.clone(),
             files: self.files.clone(),
-            metadata_version: std::sync::atomic::AtomicU32::new(
-                self.metadata_version.load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            all_config_paths: parking_lot::RwLock::new(self.all_config_paths.read().clone()),
+            // WorkspaceConfigsInput is Copy and tied to the shared storage,
+            // so cloning the handle is safe.
+            workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
+            features_input: parking_lot::RwLock::new(*self.features_input.read()),
         }
     }
 }
 
 impl RootDatabaseImpl {
     /// Create a new empty database.
+    ///
+    /// Eagerly creates the singleton [`metadata::WorkspaceConfigsInput`] so
+    /// that tracked queries that read configuration metadata always observe
+    /// a Salsa input and register a proper invalidation dependency — even
+    /// before the LSP layer has published any configuration paths.
     pub fn new() -> Self {
-        Self {
+        let db = Self {
             storage: salsa::Storage::default(),
             files: Files::new(),
-            metadata_version: std::sync::atomic::AtomicU32::new(0),
-            all_config_paths: parking_lot::RwLock::new(Vec::new()),
-        }
+            workspace_configs_input: parking_lot::RwLock::new(None),
+            features_input: parking_lot::RwLock::new(None),
+        };
+        let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new(), 0);
+        *db.workspace_configs_input.write() = Some(input);
+        // Defaults come from `project_model::FeaturesConfig::default` so
+        // that a fresh database and a freshly-parsed project config agree
+        // on the initial flag values — no risk of silent divergence if a
+        // future default flips.
+        let defaults = project_model::FeaturesConfig::default();
+        let features = FeaturesInput::new(&db, defaults.type_narrowing);
+        *db.features_input.write() = Some(features);
+        db
+    }
+
+    /// Handle of the singleton workspace-configs Salsa input.
+    ///
+    /// Invariant: always `Some` after `new()` returns.
+    fn workspace_configs(&self) -> metadata::WorkspaceConfigsInput {
+        self.workspace_configs_input
+            .read()
+            .expect("workspace_configs_input is initialized in RootDatabaseImpl::new")
+    }
+
+    /// Expose the singleton handle (for consumers that need to read via
+    /// Salsa getters).
+    pub fn workspace_configs_input(&self) -> metadata::WorkspaceConfigsInput {
+        self.workspace_configs()
     }
 
     /// Get the current metadata version (for configuration cache invalidation).
     pub fn metadata_version(&self) -> u32 {
-        self.metadata_version.load(std::sync::atomic::Ordering::Relaxed)
+        self.workspace_configs().version(self)
     }
 
     /// Bump metadata version to invalidate configuration cache.
     /// Call this when .xml metadata files change.
-    pub fn bump_metadata_version(&self) {
-        self.metadata_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    pub fn bump_metadata_version(&mut self) {
+        use salsa::Setter;
+        let input = self.workspace_configs();
+        let current = input.version(self);
+        input.set_version(self).to(current + 1);
     }
 
     /// Set all configuration paths: main + extensions.
     /// Called from LSP when workspace root is set.
-    pub fn set_all_config_paths(&self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
-        *self.all_config_paths.write() = paths;
+    pub fn set_all_config_paths(&mut self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
+        use salsa::Setter;
+        let input = self.workspace_configs();
+        input.set_paths(self).to(paths);
     }
 
     /// Get all registered configuration paths.
     pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
-        self.all_config_paths.read().clone()
+        self.workspace_configs().paths(self)
+    }
+
+    /// Handle of the singleton features Salsa input.
+    ///
+    /// Invariant: always `Some` after `new()` returns.
+    fn features(&self) -> FeaturesInput {
+        self.features_input.read().expect("features_input is initialized in RootDatabaseImpl::new")
+    }
+
+    /// Whether the type narrowing overlay is enabled for this workspace.
+    ///
+    /// Proxy for the underlying Salsa reader, exposed on the impl so the
+    /// LSP layer can read the flag without importing the trait.
+    pub fn type_narrowing_enabled(&self) -> bool {
+        self.features().type_narrowing(self)
+    }
+
+    /// Toggle the type-narrowing overlay feature flag.
+    ///
+    /// Called by the LSP layer after loading `bsl-analyzer.toml`. The
+    /// next `narrow_or_base` call (or any future Salsa-tracked query that
+    /// reads the same input) observes the new value. Taking a plain
+    /// `bool` keeps this helper callable from contexts that don't want
+    /// to construct a full `FeaturesConfig`.
+    pub fn set_type_narrowing_enabled(&mut self, enabled: bool) {
+        use salsa::Setter;
+        let input = self.features();
+        input.set_type_narrowing(self).to(enabled);
     }
 
     /// Get file path from FileId by traversing SourceRoot.
@@ -287,13 +361,40 @@ impl DefDatabase for RootDatabaseImpl {
 }
 
 #[salsa::db]
+impl hir::ConfigsDatabase for RootDatabaseImpl {
+    fn configurations(&self, file_id: FileId) -> Vec<hir::VisibleConfig> {
+        RootDatabase::get_all_configurations(self, file_id)
+            .into_iter()
+            .map(|(name, configuration)| hir::VisibleConfig { name, configuration })
+            .collect()
+    }
+}
+
+#[salsa::db]
 impl hir::HirDatabase for RootDatabaseImpl {
     fn infer(&self, file_id: FileId) -> Arc<hir::InferenceResult> {
         hir::infer_query(self, file_id)
     }
 
-    fn type_of_expr(&self, file_id: FileId, expr: hir::ExprId) -> hir::Ty {
-        hir::type_of_expr_query(self, file_id, expr)
+    fn type_of_expr(
+        &self,
+        file_id: FileId,
+        owner: hir::DefWithBodyId,
+        expr: hir::ExprId,
+    ) -> hir::Ty {
+        hir::type_of_expr_query(self, file_id, owner, expr)
+    }
+
+    fn narrow(
+        &self,
+        file_id: FileId,
+        owner: hir::DefWithBodyId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::NarrowState>>> {
+        hir::narrow_query(self, file_id, owner)
+    }
+
+    fn type_narrowing_enabled(&self) -> bool {
+        RootDatabaseImpl::type_narrowing_enabled(self)
     }
 }
 
@@ -408,7 +509,7 @@ impl RootDatabase for RootDatabaseImpl {
     }
 
     fn metadata_version(&self) -> u32 {
-        self.metadata_version.load(std::sync::atomic::Ordering::Relaxed)
+        RootDatabaseImpl::metadata_version(self)
     }
 }
 

@@ -1,67 +1,38 @@
-//! Method resolution for BSL type inference.
+//! Method resolution adapter for BSL type inference.
 //!
-//! This module implements method resolution for qualified calls like `CommonModule.Method()`.
-//! It handles:
-//! - CommonModule lookup in workspace
-//! - Method lookup within CommonModule
-//! - Export flag validation
-//! - Shadowing detection (local variables vs CommonModule names)
+//! Thin bridge that lifts [`Resolver::resolve_qualified_method`] (owned by
+//! `hir-def` — the single source of truth for name resolution) into a
+//! diagnostic-ready [`MethodResolution`] carrying the [`FunctionSignature`]
+//! that inference needs.
 //!
-//! ## Architecture
+//! ## Why this exists as a separate layer
 //!
-//! ```text
-//! CommonModule.Method() call
-//!        ↓
-//! resolve_qualified_call()
-//!        ↓
-//! 1. Resolve CommonModule name → FileId via module_index (path-based, cheap)
-//! 2. Find Method in CommonModule's SymbolTree
-//! 3. Check export flag
-//! 4. Return MethodResolution or error kind
-//! ```
+//! `Resolver` returns a method-oriented outcome expressed purely in
+//! `hir-def` entities (`QualifiedMethodResolution` / `QualifiedMethodError`)
+//! — `hir-def` must not depend on `hir-ty::UnresolvedMethodKind`. This
+//! adapter:
+//!
+//! 1. Delegates resolution to the Resolver so `db.infer()` transitively
+//!    depends on `db.configurations(...)` through Salsa: changing the
+//!    workspace config set invalidates inference automatically.
+//! 2. Maps [`QualifiedMethodError`] to [`UnresolvedMethodKind`] variants.
+//! 3. Materialises [`FunctionSignature`] from the target method's symbol
+//!    so `infer_qualified_call` can check arg counts and return type.
 //!
 //! ## Shadowing
 //!
 //! Shadowing (a local variable named identically to a CommonModule) is
-//! handled **before** this function is ever called:
-//! `maybe_lower_as_qualified_call` in `crates/hir-def/src/body/lower/expr.rs`
-//! refuses to promote the call into `Expr::QualifiedPath` when the receiver
-//! IDENT is a known local/parameter, so inference keeps it as
-//! `Expr::Call { callee: Expr::Field, .. }` and this function does not run
-//! for the shadowed call. The resolver passed in by
-//! `InferenceContext::get_resolver` is `Resolver::with_workspace_scope`
-//! (no expression scopes), so a defensive `resolver.resolve_local` check
-//! here would silently not fire anyway.
-//!
-//! ## Why module_index, not workspace_symbols
-//!
-//! Both indexes map CommonModule names to FileIds, but `workspace_symbols`
-//! forces `symbol_tree` on every file in the source root to build the
-//! methods list — a ~50 s workspace-wide scan on cold start for a 12k file
-//! project. `module_index` is built purely from VFS paths (no BSL parsing),
-//! so lookup is O(1) and the hit is followed by a single
-//! `symbol_tree(target)` call, which is already prewarmed by
-//! `preload_dependencies` for files that the open file depends on. This
-//! aligns the inference path with the diagnostics path
-//! (`ctx.resolve_qualified_path` in `ide-diagnostics`), which has always
-//! used `module_index`.
-//!
-//! ## Phase 3 Scope
-//!
-//! - Two-level qualified calls: `Module.Method()`
-//! - CommonModule resolution only
-//! - Export flag validation
-//! - Shadowing detection
-//!
-//! ## Future (Phase 4+)
-//!
-//! - Three-level calls: `Документы.ПКО.Создать()`
-//! - ThisObject resolution: `ЭтотОбъект.Method()`
-//! - Metadata-based types
+//! handled during HIR lowering (`maybe_lower_as_qualified_call` in
+//! `crates/hir-def/src/body/lower/expr.rs`): the call is not promoted to
+//! `Expr::QualifiedPath`, so this function is never reached for a
+//! shadowed receiver.
 
-use hir_def::resolver::Resolver;
+use hir_def::resolver::{QualifiedMethodError, Resolver};
+use hir_def::symbol_tree::MethodSymbol;
 use hir_def::ty::{FunctionSignature, Ty};
-use hir_def::{DefDatabase, MethodId, ModuleId, Name};
+use hir_def::{ConfigsDatabase, MethodId, Name};
+
+use crate::lower::TyLoweringContext;
 #[cfg(test)]
 use vfs::FileId;
 
@@ -100,77 +71,155 @@ impl MethodResolution {
 
 /// Resolve a qualified method call like `CommonModule.Method()`.
 ///
-/// This is the main entry point for method resolution during type inference.
+/// Thin adapter over [`Resolver::resolve_qualified_method`]: delegates name
+/// resolution (with the CFE visibility gate and Salsa invalidation) to
+/// `hir-def`, then materialises the [`FunctionSignature`] from the target
+/// method's symbol.
 ///
 /// # Parameters
 ///
-/// - `db`: Database for queries
-/// - `module_name`: Name of the module (e.g., "ОбщегоНазначения")
-/// - `method_name`: Name of the method (e.g., "СтрДлина")
-/// - `_resolver`: unused (see module-level docs on shadowing)
+/// - `db`: database; must provide [`ConfigsDatabase`] so resolution reads
+///   `db.configurations(...)` through Salsa and `db.infer()` transitively
+///   depends on the workspace config set.
+/// - `module_name`: receiver module name (`ОбщегоНазначения`).
+/// - `method_name`: method name (`СтрДлина`).
+/// - `resolver`: inference-layer resolver (must include
+///   [`Scope::WorkspaceScope`](hir_def::resolver::Scope)).
 ///
 /// # Returns
 ///
-/// - `Ok(MethodResolution)`: Method found and resolved
-/// - `Err(UnresolvedMethodKind)`: Method not found, reason specified
-///
-/// # Shadowing
-///
-/// Shadowing of a CommonModule name by a local variable or parameter is
-/// handled during HIR lowering (`maybe_lower_as_qualified_call`), before
-/// this function is invoked. See the module-level docs.
-///
-/// # Phase 3 Implementation
-///
-/// Currently only resolves CommonModule calls. Future phases will add:
-/// - Metadata manager calls: `Документы.ПКО.Создать()`
-/// - ThisObject calls: `ЭтотОбъект.Method()`
+/// - `Ok(MethodResolution)` — method found (may be non-exported; see
+///   `is_export`).
+/// - `Err(UnresolvedMethodKind::MethodNotFound)` — module not declared in
+///   any visible configuration, not indexed, or method absent in the
+///   resolved module.
 pub fn resolve_qualified_call(
-    db: &dyn DefDatabase,
+    db: &dyn ConfigsDatabase,
     module_name: &Name,
     method_name: &Name,
-    _resolver: &Resolver,
-    source_root_id: base_db::SourceRootId,
+    resolver: &Resolver,
 ) -> Result<MethodResolution, UnresolvedMethodKind> {
-    // Shadowing is resolved earlier during HIR lowering (see module-level
-    // docs). The resolver argument is kept for API stability and for future
-    // phases that may need it (e.g. ThisObject / three-level calls where
-    // body-local context matters).
+    let resolution =
+        resolver.resolve_qualified_method(db, module_name, method_name).map_err(|e| match e {
+            // Both the config gate and the path-based lookup collapse to
+            // `MethodNotFound` here. The distinction is preserved inside
+            // hir-def (`QualifiedMethodError::NotVisibleInConfigs`) for any
+            // future consumer that wants to surface a config-specific hint.
+            QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
+                UnresolvedMethodKind::MethodNotFound
+            }
+        })?;
 
-    // 1. Resolve CommonModule name → FileId via module_index
+    // Materialise the signature from the resolved method's symbol.
     //
-    // module_index is built from VFS paths only (no BSL parsing), so the
-    // lookup is O(1) and doesn't trigger a workspace-wide scan. Previously
-    // this went through db.workspace_symbols() which forces symbol_tree on
-    // every file in the source root.
-    let module_index = db.module_index(source_root_id);
-    let target_file_id = module_index
-        .resolve_common_module(module_name)
-        .ok_or(UnresolvedMethodKind::MethodNotFound)?;
-
-    // 2. Get SymbolTree for the resolved CommonModule (single-file query,
-    //    prewarmed by preload_dependencies for open-file neighbours).
-    let symbol_tree = db.symbol_tree(ModuleId::new(target_file_id));
-
-    // 3. Find method in SymbolTree
-    let method_symbol =
-        symbol_tree.find_method(method_name).ok_or(UnresolvedMethodKind::MethodNotFound)?;
-
-    // 4. Check export flag
+    // Look up **by MethodId** rather than by name: when error recovery
+    // leaves two methods with the same name, `find_method` returns the
+    // first match, which may not be the symbol the Resolver picked.
+    // By-id lookup guarantees the signature matches the resolved
+    // `method_id`.
     //
-    // Phase 3: We still resolve non-exported methods (for type inference)
-    // but mark them so caller can emit diagnostic
-    let is_export = method_symbol.is_export;
+    // The Resolver just read the target `symbol_tree` via the same Salsa
+    // revision, so the MethodId must be present. `.expect` documents the
+    // invariant loudly — if it ever fires, the symbol_tree is genuinely
+    // out of sync with what the Resolver saw (tree corruption, not a
+    // recoverable condition).
+    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in symbol_tree — \
+         symbol_tree / Resolver are out of sync",
+    );
 
-    // 5. Build function signature
-    //
-    // Phase 3: Use existing return_type from MethodSymbol (Ty::Unknown for most)
-    // Phase 4+: Improve with JSDoc parsing and type inference
-    let param_types: Vec<Ty> = method_symbol.params.iter().map(|_p| Ty::Unknown).collect();
+    let signature = materialise_signature(method_symbol);
+    Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
+}
 
-    let signature = FunctionSignature::new(param_types, method_symbol.return_type.clone());
+/// Resolve a 3-segment manager-chain call like `Документы.ПКО.СоздатьДокумент()`.
+///
+/// Mirrors [`resolve_qualified_call`] for the manager chain: delegates name
+/// resolution to [`Resolver::resolve_three_level_method`] (which owns the
+/// CFE visibility gate and Salsa invalidation) and then materialises the
+/// [`FunctionSignature`] from the target method's `MethodSymbol`.
+///
+/// # Parameters
+///
+/// - `db`: database; must implement [`ConfigsDatabase`] so the resolver
+///   can consult `db.configurations(...)` through Salsa (the caller's
+///   `infer` query transitively depends on the config set).
+/// - `mdo_type_plural`: head segment — the plural collective name
+///   (`Документы`, `Справочники`).
+/// - `mdo_name`: middle segment — the metadata object identifier as it
+///   appears in the configuration (`ПКО`).
+/// - `method_name`: tail segment — the exported manager-module method.
+/// - `resolver`: inference-layer resolver (must include
+///   [`Scope::WorkspaceScope`](hir_def::resolver::Scope)).
+///
+/// # Returns
+///
+/// - `Ok(MethodResolution)` when the method exists, even if non-exported;
+///   the caller inspects `is_export` to pick between `MethodNotExport` and
+///   success.
+/// - `Err(UnresolvedMethodKind::MethodNotFound)` for any resolver failure
+///   — missing MDO declaration, missing manager module, unknown method.
+///   The distinction between `NotVisibleInConfigs` and `NotFound` is
+///   preserved inside `hir-def` for a future config-specific hint.
+pub fn resolve_three_level_call(
+    db: &dyn ConfigsDatabase,
+    mdo_type_plural: &Name,
+    mdo_name: &Name,
+    method_name: &Name,
+    resolver: &Resolver,
+) -> Result<MethodResolution, UnresolvedMethodKind> {
+    let resolution = resolver
+        .resolve_three_level_method(db, mdo_type_plural, mdo_name, method_name)
+        .map_err(|e| match e {
+            QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
+                UnresolvedMethodKind::MethodNotFound
+            }
+        })?;
 
-    Ok(MethodResolution::new(method_symbol.id, is_export, signature))
+    // Same invariant as `resolve_qualified_call`: Resolver just read the
+    // target `symbol_tree` via the same Salsa revision, so the MethodId
+    // must be present by id. `.expect` documents the contract loudly.
+    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in symbol_tree — \
+         symbol_tree / Resolver are out of sync",
+    );
+
+    let signature = materialise_signature(method_symbol);
+    Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
+}
+
+/// Lower a [`MethodSymbol`] into a semantic [`FunctionSignature`].
+///
+/// Shared by `resolve_qualified_call` (2-segment) and
+/// `resolve_three_level_call` (3-segment): both resolve a method by name
+/// and then need to hand the caller typed parameters / return type. The
+/// cascade walks the JSDoc-derived `TypeRef` first (when present), then
+/// falls back to `Ty::Unknown` for parameters and to the
+/// `MethodSymbol::return_type` default for the return type — `Ty::Undefined`
+/// for procedures and `Ty::Unknown` for functions without a
+/// `// Возвращаемое значение:` block.
+///
+/// Lowering runs through [`TyLoweringContext`] so the JSDoc `TypeRef`
+/// lookups share a single path with `Expr::New` and XML metadata: adding
+/// a new prefix or a future `Ty::Union` is a one-place edit.
+fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignature {
+    let ctx = TyLoweringContext::new();
+
+    let param_types: Vec<Ty> = method_symbol
+        .params
+        .iter()
+        .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref(t)).unwrap_or(Ty::Unknown))
+        .collect();
+
+    let ret = method_symbol
+        .return_type_ref
+        .as_ref()
+        .map(|t| ctx.lower_type_ref(t))
+        .unwrap_or_else(|| method_symbol.return_type.clone());
+
+    FunctionSignature::new(param_types, ret)
 }
 
 #[cfg(test)]

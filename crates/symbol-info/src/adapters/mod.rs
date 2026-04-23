@@ -14,6 +14,7 @@ mod local_method;
 mod manager_module;
 mod mdo_naming;
 mod params;
+mod platform_constructor;
 mod platform_manager;
 pub mod platform_method;
 
@@ -47,5 +48,6 @@ pub fn build_signature(
         CalleeKind::LocalMethod { module_id, method } => {
             local_method::build(db, *module_id, method)
         }
+        CalleeKind::PlatformConstructor { type_name } => platform_constructor::build(db, type_name),
     }
 }

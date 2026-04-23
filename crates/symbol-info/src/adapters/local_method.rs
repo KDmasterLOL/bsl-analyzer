@@ -52,6 +52,7 @@ pub(super) fn build(
         name_russian: SmolStr::new(&name_ru),
         name_english: None,
         qualifier: None,
+        prefix: None,
         params,
         returns,
         purpose: docs_ref.and_then(|d| d.purpose.clone()),

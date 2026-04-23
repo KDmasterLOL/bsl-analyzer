@@ -62,6 +62,15 @@ pub struct ParsedFile {
     /// Lazily computed call summary (call edges, notify regs, idle handler regs, etc.).
     /// Computed on first access during Phase 2 (requires module_bodies + module_metadata).
     call_summary: OnceLock<Arc<hir::call_graph::ModuleCallSummary>>,
+
+    /// Lazily computed line index (byte-offset → line/col map).
+    ///
+    /// Until this cache landed, `StreamingProvider::line_index` rebuilt the
+    /// index on every call site — and diagnostic collection touches it per
+    /// finding, so for a 25k-file ERP run it dominated the profile at ~43%
+    /// self time. `OnceLock` gives us a single build per file without a
+    /// separate mutex, matching the pattern used by `module_bodies`.
+    line_index: OnceLock<Arc<line_index::LineIndex>>,
 }
 
 impl std::fmt::Debug for ParsedFile {
@@ -98,7 +107,18 @@ impl ParsedFile {
             sdbl_hir: OnceLock::new(),
             module_metadata: OnceLock::new(),
             call_summary: OnceLock::new(),
+            line_index: OnceLock::new(),
         }
+    }
+
+    /// Get or compute the line index for this file.
+    ///
+    /// Thread-safe: computed at most once per `ParsedFile` via `OnceLock`.
+    /// Diagnostic collection calls this for every finding's range mapping,
+    /// so sharing one index per file is the difference between ~43%
+    /// self-time spent in `LineIndex::new` and it not showing up at all.
+    pub fn line_index(&self) -> Arc<line_index::LineIndex> {
+        self.line_index.get_or_init(|| Arc::new(line_index::LineIndex::new(&self.text))).clone()
     }
 
     /// Get or compute module bodies (HIR).

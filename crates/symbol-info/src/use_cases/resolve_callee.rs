@@ -7,7 +7,7 @@ use bsl_metadata::MdoType;
 use bsl_platform::{
     global_function_query, platform_method_query, MethodLookupInput, TypeNameInput,
 };
-use hir::{ManagerType, ModuleId, Name, Resolver};
+use hir::{ManagerType, ModuleId, Name, Resolver, Semantics};
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
 use vfs::FileId;
@@ -29,8 +29,8 @@ pub struct ActiveParam {
 /// **Resolution precedence for `Coll.Object.Method` chains** is user-first,
 /// platform-fallback: a method declared in a project-local `ManagerModule.bsl`
 /// shadows a same-name platform manager method (matches BSL runtime semantics).
-pub fn resolve_callee_at(
-    db: &dyn RootDatabase,
+pub fn resolve_callee_at<DB: RootDatabase>(
+    db: &DB,
     file_id: FileId,
     offset: TextSize,
 ) -> Option<(CalleeKind, ActiveParam)> {
@@ -42,6 +42,21 @@ pub fn resolve_callee_at(
     if is_on_closing_paren(&token, &arg_list) {
         return None;
     }
+
+    // `Новый X(...)` — the arg list's parent is `NEW_EXPR`, not `CALL_EXPR`.
+    // Detect it before the regular call-path resolver so we can route the
+    // site to `CalleeKind::PlatformConstructor`. Phase 1 handles only the
+    // single-identifier form (`Новый X`); dot-path (`Новый A.B`) is not
+    // admitted by the parser and would never reach here.
+    if let Some(new_expr) = arg_list.parent().filter(|p| p.kind() == SyntaxKind::NEW_EXPR) {
+        if let Some(type_name) = extract_new_expr_type_name(&new_expr) {
+            let active = ActiveParam { index: count_commas_before(&arg_list, offset) };
+            return Some((CalleeKind::PlatformConstructor { type_name: type_name.into() }, active));
+        }
+        // `Новый` without an IDENT is syntactically malformed — no callee.
+        return None;
+    }
+
     let call_expr = find_call_expr(&arg_list)?;
 
     let (receiver, callee_name) = extract_callee_info(&call_expr)?;
@@ -51,11 +66,41 @@ pub fn resolve_callee_at(
         return Some((kind, active));
     }
 
-    if let Some(receiver_name) = receiver.as_deref() {
-        // 2-segment: try platform method, then common module.
+    if let Some((receiver_name, receiver_node)) = receiver {
+        // Inferred-type platform method (primary): mirrors the completion
+        // pipeline in `ide::completion::platform_completion` — same Ty
+        // lookup, same `platform_type_name()` bridge. Runs **before** the
+        // bare text-name check below because BSL happily lets a variable
+        // shadow a platform type (`Массив = Новый СписокЗначений;`), and
+        // `platform_method_query("Массив", "Добавить")` would otherwise
+        // return the wrong overload for the shadowed receiver.
+        let sema = Semantics::new(db);
+        let ty = sema.type_of_expr(file_id, &receiver_node);
+        if let Some(type_name) = ty.platform_type_name() {
+            if platform_method_query(
+                db,
+                MethodLookupInput::new(db, type_name.to_string(), callee_name.clone()),
+            )
+            .is_some()
+            {
+                return Some((
+                    CalleeKind::PlatformMethod {
+                        type_name: type_name.into(),
+                        method_name: callee_name.into(),
+                    },
+                    active,
+                ));
+            }
+        }
+
+        // Text-name platform method (fallback): the receiver token **is**
+        // a literal platform type name (`Строка.ВРег()`, `Формат.ДатаВремя()`)
+        // with no `infer_path_name` binding — `type_of_expr` returns
+        // Unknown for them, so only the text-name resolver can find the
+        // method.
         if platform_method_query(
             db,
-            MethodLookupInput::new(db, receiver_name.to_string(), callee_name.to_string()),
+            MethodLookupInput::new(db, receiver_name.clone(), callee_name.clone()),
         )
         .is_some()
         {
@@ -67,9 +112,14 @@ pub fn resolve_callee_at(
                 active,
             ));
         }
+
+        // Final fallback: treat the receiver as a CommonModule name. The
+        // downstream adapter returns `None` if no such module exists,
+        // which surfaces to the LSP as "no signature help" for clearly
+        // unmatched receivers.
         return Some((
             CalleeKind::CommonModuleMethod {
-                module: Name::new(receiver_name),
+                module: Name::new(&receiver_name),
                 method: Name::new(&callee_name),
             },
             active,
@@ -96,8 +146,8 @@ pub fn resolve_callee_at(
 /// Returns `Some(ManagerModuleMethod)` when a user-defined method exists in
 /// the matching `ManagerModule.bsl`; falls back to `PlatformManagerMethod`
 /// when the platform exposes the method; otherwise `None`.
-fn classify_mdo_chain(
-    db: &dyn RootDatabase,
+fn classify_mdo_chain<DB: RootDatabase>(
+    db: &DB,
     file_id: FileId,
     call_expr: &SyntaxNode,
     callee_name: &str,
@@ -159,7 +209,30 @@ fn find_call_expr(arg_list: &SyntaxNode) -> Option<SyntaxNode> {
     arg_list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)
 }
 
-fn extract_callee_info(call_expr: &SyntaxNode) -> Option<(Option<String>, String)> {
+/// Extracts the single IDENT child of a `NEW_EXPR` (the constructor type
+/// name). Returns `None` when the parser emitted zero or more than one IDENT
+/// — the latter shouldn't happen for well-formed source but we stay defensive.
+fn extract_new_expr_type_name(new_expr: &SyntaxNode) -> Option<String> {
+    let mut idents = new_expr
+        .children_with_tokens()
+        .filter_map(|c| c.into_token())
+        .filter(|t| t.kind() == SyntaxKind::IDENT);
+
+    let first = idents.next()?;
+    if idents.next().is_some() {
+        return None;
+    }
+    Some(first.text().to_string())
+}
+
+/// Split `call_expr` into `(Option<(receiver_name, receiver_node)>, method_name)`.
+///
+/// The receiver node is the syntactic expression immediately left of the DOT
+/// (e.g. the `КомпоновщикНастроек` IdentExpr in `КомпоновщикНастроек.M()`, or
+/// the inner `FIELD_EXPR` in `a.b.c(...)`). It lets [`resolve_callee_at`] ask
+/// `Semantics::type_of_expr` for the receiver's inferred `Ty` when the bare
+/// text name does not match any platform type.
+fn extract_callee_info(call_expr: &SyntaxNode) -> Option<(Option<(String, SyntaxNode)>, String)> {
     let first_child = call_expr.first_child()?;
 
     match first_child.kind() {
@@ -175,8 +248,9 @@ fn extract_callee_info(call_expr: &SyntaxNode) -> Option<(Option<String>, String
                 1 => Some((None, idents.pop().unwrap())),
                 _ => {
                     let method = idents.pop().unwrap();
-                    let receiver = idents.pop().unwrap();
-                    Some((Some(receiver), method))
+                    let receiver_name = idents.pop().unwrap();
+                    let receiver_node = first_child.first_child()?;
+                    Some((Some((receiver_name, receiver_node)), method))
                 }
             }
         }

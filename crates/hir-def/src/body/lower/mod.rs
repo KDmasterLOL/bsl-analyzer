@@ -289,6 +289,23 @@ impl LoweringCtx {
         self.body.exprs.alloc(Expr::Missing)
     }
 
+    /// Mark an expression (and its transitive sub-expressions) as reconstructed
+    /// from a parser ERROR node. Downstream consumers read this via
+    /// `Body::is_recovered`.
+    ///
+    /// Call this *after* the expression tree has been allocated.
+    pub(crate) fn mark_recovered_rec(&mut self, root: ExprIdx) {
+        if !self.body.recovered_exprs.insert(root) {
+            return;
+        }
+        // Snapshot child ids — Arena lookups borrow self.body.exprs immutably
+        // and we can't hold that borrow across the recursive insert calls.
+        let children: Vec<ExprIdx> = collect_child_exprs(&self.body.exprs[root]);
+        for child in children {
+            self.mark_recovered_rec(child);
+        }
+    }
+
     /// Enter a loop (increment loop depth).
     pub(crate) fn enter_loop(&mut self) {
         self.loop_depth += 1;
@@ -356,6 +373,39 @@ impl LoweringCtx {
 /// Lower a method AST node to HIR.
 pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult {
     lower_method_with_externals(method_node, is_function, None)
+}
+
+/// Collect direct sub-expression IDs from an `Expr`.
+///
+/// Keep in lock-step with the `Expr` enum in `hir.rs`: every variant that
+/// embeds `ExprIdx` / `Box<[ExprIdx]>` must return them here so the recovery
+/// marker can propagate through the tree. Adding a new variant without
+/// updating this helper means recovered sub-expressions stop being flagged.
+fn collect_child_exprs(expr: &Expr) -> Vec<ExprIdx> {
+    match expr {
+        Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => Vec::new(),
+        Expr::BinaryOp { lhs, rhs, .. } => vec![*lhs, *rhs],
+        Expr::UnaryOp { expr, .. } | Expr::Await { expr } => vec![*expr],
+        Expr::Ternary { condition, then_expr, else_expr } => {
+            vec![*condition, *then_expr, *else_expr]
+        }
+        Expr::Call { callee, args } => {
+            let mut out = Vec::with_capacity(1 + args.len());
+            out.push(*callee);
+            out.extend(args.iter().copied());
+            out
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            let mut out = Vec::with_capacity(1 + args.len());
+            out.push(*receiver);
+            out.extend(args.iter().copied());
+            out
+        }
+        Expr::Index { base, index } => vec![*base, *index],
+        Expr::Field { base, .. } => vec![*base],
+        Expr::New { args, .. } => args.to_vec(),
+        Expr::Array(elems) => elems.to_vec(),
+    }
 }
 
 /// Check if method has ONLY &НаКлиенте annotation.
