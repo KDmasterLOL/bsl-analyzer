@@ -1,25 +1,6 @@
 //! OSUsersMethod diagnostic.
 //!
-//! Detects calls to ПользователиОС() / OSUsers() global method.
-//!
-//! ## Why?
-//! OSUsers method returns information about operating system users.
-//! This creates security vulnerabilities:
-//! - Pass-the-hash attack vectors
-//! - Information disclosure
-//! - May violate security policies
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ПолучитьПользователей()
-//!     Пользователи = ПользователиОС();
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Critical
-//! - **Type:** SECURITY_HOTSPOT
+//! Reports calls to the global method `ПользователиОС()` / `OSUsers()`.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -54,7 +35,7 @@ mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
     #[test]
-    fn test_java_fixture() {
+    fn test_detects_os_users_calls() {
         let code = r#"Функция Тест1()
 Сообщить("Здесь не должно сработать");
 КонецФункции
