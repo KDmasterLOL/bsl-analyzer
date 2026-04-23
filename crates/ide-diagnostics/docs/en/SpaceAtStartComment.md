@@ -1,12 +1,28 @@
 # Space at the beginning of the comment (SpaceAtStartComment)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Between comment symbols "//" and comment text has to be a space.
+There should be a space between `//` and the comment text.
 
-Exception from the rule is _**comments-annotations**_, comments starting with special symbols sequence.
+The diagnostic does not report separator lines made only of slashes and spaces, and it also skips configured annotation prefixes such as `//@`, `//(c)`, and `//©`.
+
+## Examples
+
+Incorrect
+
+```bsl
+//Load counterparties
+Counterparties = GetCounterparties();
+```
+
+Correct
+
+```bsl
+// Load counterparties
+Counterparties = GetCounterparties();
+```
 
 ## Sources
 
-* Source: [Standard: Modules (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
+* [Standard: Module texts (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
+* [v8std: SpaceAtStartComment](https://v8std.ru/diagnostics/bslls/SpaceAtStartComment/)

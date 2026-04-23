@@ -1,16 +1,4 @@
-//! SpaceAtStartComment diagnostic
-//!
-//! Detects comments without space after // delimiter.
-//!
-//!
-//! Between comment symbols "//" and comment text there should be a space.
-//! Exceptions are comment-annotations (starting with specific sequences like //@, //(c), //©).
-//!
-//! ## Implementation
-//!
-//! File-level token-based diagnostic: iterates through all tokens in the file once to find
-//! COMMENT tokens. This avoids false positives on // inside strings (lexer distinguishes them).
-//! Cannot use per-node check_node() API because comments are tokens, not nodes.
+//! Reports comments that do not have a space after `//`.
 
 use crate::define_metadata;
 use crate::metadata::*;
