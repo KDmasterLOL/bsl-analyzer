@@ -1,43 +1,6 @@
 //! NestedConstructorsInStructureDeclaration diagnostic.
 //!
-//! Detects when Structure/FixedStructure constructors contain nested constructors
-//! with parameters, which reduces code readability.
-//!
-//! ## Why?
-//! Nested constructors in structure declarations make code harder to read and understand.
-//! It's better to create nested structures as separate variables.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Результат = Новый Структура("ДанныеНоменклатуры, Количество",
-//!                              Новый Структура("Код, Наименование"),
-//!                              10);
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! ДанныеНоменклатуры = Новый Структура("Код, Наименование");
-//! Результат = Новый Структура("ДанныеНоменклатуры, Количество",
-//!                              ДанныеНоменклатуры,
-//!                              10);
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Minor (Warning)
-//! - **Tags:** BADPRACTICE, BRAINOVERLOAD
-//! - **Minutes to fix:** 10
-//!
-//! ## Implementation
-//! Ported from:
-//!
-//! **HIR-based implementation** using semantic analysis instead of AST traversal.
-//!
-//! Migrated from AST to HIR for:
-//! - Type-safe expression handling via Expr enum
-//! - Automatic Salsa caching via module_bodies()
-//! - Module-level code coverage (not just methods)
-//! - Cleaner recursive checking via ExprId references
+//! Reports nested constructors with parameters inside structure declarations.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -75,9 +38,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check a single Body for nested constructors in structure declarations.
-///
-/// HIR-based approach: iterates over expressions and checks New expressions semantically.
+/// Check a single body for nested constructors in structure declarations.
 fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
