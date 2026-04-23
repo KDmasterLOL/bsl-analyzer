@@ -1,31 +1,4 @@
-//! WrongDataPathForFormElements diagnostic.
-//!
-//! Checks form elements for DataPath starting with `~` (unresolved reference).
-//! Such elements indicate that the form attribute was deleted or renamed.
-//!
-//! ## Why?
-//! When a form attribute is deleted or renamed, but the form element still
-//! references it, the platform marks the DataPath with `~` prefix. This indicates
-//! a broken binding that will cause runtime errors or incorrect form behavior.
-//!
-//! ## Bad practice
-//! ```xml
-//! <InputField name="НесуществующийРеквизит" id="4">
-//!     <DataPath>~Объект.НесуществующийРеквизит</DataPath>  <!-- ← ERROR! -->
-//! </InputField>
-//! ```
-//!
-//! ## Good practice
-//! ```xml
-//! <InputField name="Код" id="1">
-//!     <DataPath>Объект.Code</DataPath>  <!-- ← OK -->
-//! </InputField>
-//! ```
-//!
-//! ## Implementation
-//!
-//! Tier 3 diagnostic: Requires metadata (Form with elements).
-//! Applies to FormModule (checks current form's elements).
+//! Reports form elements whose XML `DataPath` starts with `~`.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -50,9 +23,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Collect diagnostics from module metadata.
-///
-/// Checks form elements for DataPath starting with `~`.
+/// Collect diagnostics from form metadata.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
     ctx: &crate::DiagnosticsContext,
