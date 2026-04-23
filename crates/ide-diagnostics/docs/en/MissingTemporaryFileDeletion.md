@@ -1,52 +1,50 @@
 # Missing temporary file deletion after using (MissingTemporaryFileDeletion)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-After you finished working with temporary file or folder, you need to delete it yourself. 
-You should not rely on automatic deletion of files and folders before platform start. This can cause temp folder free space shortage.
+This diagnostic checks temporary files created with `GetTempFileName()` / `ПолучитьИмяВременногоФайла()`.
+
+The public rationale comes from 1C guidance: temporary files should be removed explicitly after use instead of relying on cleanup at the next platform start.
+
+The current implementation is a local HIR + CFG check:
+
+- if `GetTempFileName()` is assigned to a variable, the diagnostic looks for a reachable later deletion or move call that uses the same variable;
+- if `GetTempFileName()` is used inline, the diagnostic always reports it because cleanup cannot be tracked reliably;
+- the set of cleanup methods is configurable through `searchDeleteFileMethod`.
+
+By default the diagnostic treats these methods as cleanup:
+
+- `УдалитьФайлы` / `DeleteFiles`
+- `НачатьУдалениеФайлов` / `BeginDeletingFiles`
+- `ПереместитьФайл` / `MoveFile`
+
+Custom global, common-module, or manager-module methods can be added through the configuration regex.
 
 ## Examples
 
-Incorrect:
+### Correct
 
 ```bsl
 TempFileName = GetTempFileName("xml");
 Data.Write(TempFileName);
-// Not delete temporary file
+DeleteFiles(TempFileName);
 ```
 
-Correct:
+### Incorrect
 
 ```bsl
 TempFileName = GetTempFileName("xml");
 Data.Write(TempFileName);
-
-// Work with file
-...
-
-// Delete temporary file
-Try
-   DeleteFiles(TempFileName);
-Catch
-   WriteLogEvent(НСтр("ru = 'My subsystem.Action'"), EventLogLevel.Error, , , DetailErrorDescription(ErrorInfo()));
-EndTry;
 ```
 
-## Nuances
+### Incorrect inline usage
 
-Diagnostics determines the correctness of working with temporary files by the presence of methods for deleting or moving.
-
-If the applied solution uses its own method of removing/moving over the platform one, then it is worth specifying it in the diagnostic parameter, adding it after `|`. Diagnostics understands both global methods and those located in common modules or manager modules.
-
-The following is an examples of a settings
-
-- The global method `MyFileDeletion` in the `GlobalServer` module in the parameter is specified as `MyFileDeletion`
-- Method `MyFileDeletion` in the common module `FilesClientServer` in the parameter is specified as `FilesClientServer.MyFileDelete`
-- Method `MyFileOperations` in the module of the catalog manager `FileOperations` in the parameter is specified as `Catalogs.FileOperations.MyFileOperations`
-
-and so on.
+```bsl
+Write(GetTempFileName("xml"));
+```
 
 ## Sources
 
-* [File system access from application code (RU)](https://its.1c.ru/db/v8std#content:542:hdoc)
+- [File system access from application code - Standard 1C (RU)](https://its.1c.ru/db/v8std#content:542:hdoc)
+- [v8std.ru: MissingTemporaryFileDeletion](https://v8std.ru/diagnostics/bslls/MissingTemporaryFileDeletion/)
+- [v8std.ru: missing-temporary-file-deletion](https://v8std.ru/diagnostics/v8-code-style/missing-temporary-file-deletion/)

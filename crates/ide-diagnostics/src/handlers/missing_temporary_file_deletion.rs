@@ -1,69 +1,4 @@
-//! MissingTemporaryFileDeletion diagnostic.
-//!
-//! Detects temporary files created with GetTempFileName() that are not properly deleted.
-//!
-//! ## Why?
-//!
-//! Temporary files created with `ПолучитьИмяВременногоФайла()` / `GetTempFileName()` must be
-//! explicitly deleted after use. Failure to delete temporary files can:
-//! - Exhaust disk space in temp directory
-//! - Leave sensitive data on disk
-//! - Cause issues in long-running server processes
-//!
-//! ## Bad practice
-//!
-//! ```bsl
-//! Процедура ОбработатьДанные()
-//!     ИмяФайла = ПолучитьИмяВременногоФайла("xml");
-//!     // ... use file ...
-//! КонецПроцедуры  // ❌ Temporary file not deleted!
-//! ```
-//!
-//! ## Good practice
-//!
-//! ```bsl
-//! Процедура ОбработатьДанные()
-//!     ИмяФайла = ПолучитьИмяВременногоФайла("xml");
-//!     Попытка
-//!         // ... use file ...
-//!     Исключение
-//!         УдалитьФайлы(ИмяФайла);  // ✅ Clean up on error
-//!         ВызватьИсключение;
-//!     КонецПопытки;
-//!     УдалитьФайлы(ИмяФайла);  // ✅ Clean up on success
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//!
-//! The diagnostic supports one configuration parameter:
-//!
-//! - **searchDeleteFileMethod** (string, regex pattern):
-//!   Pipe-separated list of method names that delete/move files.
-//!   Default: `"УдалитьФайлы|DeleteFiles|НачатьУдалениеФайлов|BeginDeletingFiles|ПереместитьФайл|MoveFile"`
-//!
-//! Example configuration:
-//!
-//! ```json
-//! {
-//!   "diagnostics": {
-//!     "MissingTemporaryFileDeletion": {
-//!       "searchDeleteFileMethod": "УдалитьФайлы|DeleteFiles|РаботаСФайламиКлиент.УдалитьФайл"
-//!     }
-//!   }
-//! }
-//! ```
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** Yes
-//! - **Severity:** Major (ERROR)
-//! - **Tags:** BADPRACTICE, STANDARD
-//! - **Minutes to fix:** 5
-//!
-//! ## Implementation
-//!
-//! Ported from:
+//! Reports temp files from `GetTempFileName()` that are not cleaned up locally.
 
 use hir::{Body, BodySourceMap, Expr, ExprIdx, IdConversion, Stmt, StmtId};
 
@@ -122,17 +57,7 @@ impl Config {
     }
 }
 
-/// HIR + CFG based entry point for MissingTemporaryFileDeletion diagnostic.
-///
-/// Uses Salsa-cached module_bodies and module_cfgs instead of raw AST traversal.
-///
-/// ## Algorithm
-///
-/// For each method in the module:
-/// 1. Walk HIR expressions to find GetTempFileName() calls
-/// 2. Determine if call is assigned to a variable (Assign stmt) or inline
-/// 3. For assigned calls: check if any deletion call in the body uses that variable
-/// 4. Use CFG to verify the deletion call is reachable from the GetTempFileName call
+/// HIR + CFG based entry point for temp-file cleanup validation.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingTemporaryFileDeletion;
 
