@@ -1,17 +1,4 @@
-//! ReservedWordAsMethodName diagnostic.
-//!
-//! Detects procedures/functions named with reserved BSL keywords.
-//! The 1C platform rejects such names with a compilation error.
-//!
-//! ## Example
-//! ```bsl
-//! Процедура Выполнить(Команда)  // Error: "Выполнить" is a reserved word
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Blocker (ERROR)
+//! Reports procedures and functions named with reserved BSL keywords.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -32,6 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Creates a diagnostic from HIR lowering data for reserved method names.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::ReservedWordAsMethodName;
 

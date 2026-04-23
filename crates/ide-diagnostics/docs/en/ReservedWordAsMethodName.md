@@ -2,13 +2,17 @@
 
 ## Description
 
-Procedure and function names cannot match BSL reserved words. The 1C platform will reject such code with a compilation error: "Procedure name expected".
+Procedure and function names cannot match reserved BSL keywords. Such code is invalid at the language level and is rejected by the platform parser or compiler.
 
-Reserved words include: `Procedure`, `Function`, `If`, `Then`, `Else`, `For`, `Each`, `In`, `While`, `Do`, `Return`, `Try`, `Except`, `Raise`, `Var`, `New`, `Execute`, `Export`, `Val`, `True`, `False`, `Undefined`, `Null`, `Not`, `And`, `Or`, `Async`, `Await`, `Goto`, `Continue`, `Break`, `AddHandler`, `RemoveHandler` and other language keywords.
+The current implementation is intentionally simple:
+
+- it reports procedures and functions whose declared name is already recognized as a reserved word during HIR lowering;
+- it applies to both Russian and English keywords;
+- it does not rely on project-specific configuration.
 
 ## Examples
 
-Incorrect:
+### Incorrect
 
 ```bsl
 &AtClient
@@ -17,7 +21,7 @@ Procedure Execute(Command)
 EndProcedure
 ```
 
-Correct:
+### Correct
 
 ```bsl
 &AtClient
@@ -25,3 +29,7 @@ Procedure ExecuteCommand(Command)
     // ...
 EndProcedure
 ```
+
+## Sources
+
+- Public BSL language syntax and reserved-keyword rules.
