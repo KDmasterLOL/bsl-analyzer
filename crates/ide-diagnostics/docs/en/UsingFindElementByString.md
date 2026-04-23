@@ -1,13 +1,12 @@
 # Using FindByName, FindByCode and FindByNumber (UsingFindElementByString)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-The rule finds the use of the `FindByName`, `FindByCode` or `FindByNumber` methods using specific numbers, codes and names of elements or documents. 
-Similar code may not work correctly in other databases.
-Often such code is test code included in the release version, which is also not recommended.
+This diagnostic reports calls to `FindByDescription`, `FindByCode`, and `FindByNumber` when a hardcoded string or numeric literal is passed directly.
 
-It is recommended to specify constant data values ​​from the database in "Сonstants" or predefined metadata elements.
+Such code is tied to data from a specific database and may stop working after deployment to another environment. It is also a common sign of test or temporary code left in production logic.
+
+The current implementation primarily detects direct literal arguments and empty calls such as `FindByDescription()`.
 
 ## Examples
 
@@ -37,3 +36,7 @@ Catalogs.BankClassifier.FindByCode(BankDetails.BIK);
 ```bsl
 Documents.Invoice.FindByNumber(Number);
 ```
+
+## Sources
+
+* [v8std: UsingFindElementByString](https://v8std.ru/diagnostics/bslls/UsingFindElementByString/)
