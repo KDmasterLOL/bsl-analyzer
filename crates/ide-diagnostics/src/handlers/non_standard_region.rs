@@ -1,35 +1,7 @@
 //! NonStandardRegion diagnostic.
 //!
-//! Validates that all region names in a module conform to standard region names for that specific module type.
-//!
-//! ## Why?
-//! Standard region names improve code organization and maintainability. Each module type
-//! (FormModule, ObjectModule, CommonModule, etc.) has specific allowed region names defined by 1C standards.
-//!
-//! ## Bad practice
-//! ```bsl
-//! #Область Переменные  // Non-standard for most modules, should be "ОписаниеПеременных"
-//! Перем А;
-//! #КонецОбласти
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! #Область ОписаниеПеременных  // Standard region name
-//! Перем А;
-//! #КонецОбласти
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Information (INFO)
-//! - **Tags:** STANDARD
-//! - **Minutes to fix:** 1
-//! - **No parameters:** Standard regions are fixed for each module type
-//!
-//! ## Implementation
-//! Uses Salsa-cached `module_level_regions()` query for performance.
-//! Ported from:
+//! Reports regions whose names do not match the standard region set for the
+//! current module type.
 
 use crate::define_metadata;
 use crate::metadata::*;
