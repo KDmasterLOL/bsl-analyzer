@@ -231,10 +231,15 @@ HIR lowering tests in `sdbl-hir`, the 1572 diagnostic tests in
 `ide-diagnostics` (which includes the `AssignAliasFieldsInQuery`
 gate), the SDBL tests in `ide-db`, and the nested UNION package
 scenarios in the `ide` `sdbl_completion_integration_test` form the
-regression gate that the re-derived 5 functions accept exactly the
-same input set and produce exactly the same AST as the pre-refactor
-implementation. At parser level there is no byte-identity golden
-corpus analogous to the lexer's; the test suite is the gate.
+regression gate for Slice 8. They cover the locked compatibility
+surfaces (public API, NodeKind identity, child-attachment
+invariants, AST-shape invariants, bilingual keyword acceptance,
+recovery shapes for incomplete input) and a sampled regression
+corpus of accepted inputs; they do not constitute a byte-identity
+golden corpus across the full SDBL input space. At parser level
+there is no byte-identity golden corpus analogous to the lexer's;
+the test suite is the gate, and behaviour is preserved within the
+sampled surface rather than proven equivalent across all inputs.
 
 ## Preserved pre-refactor behaviours
 
