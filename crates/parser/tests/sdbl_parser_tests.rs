@@ -158,6 +158,23 @@ fn test_asterisk_no_alias() {
 
 // Bucket A.
 #[test]
+fn test_russian_table_asterisk() {
+    // Russian identifier + .* — parallel to English `Products.*`.
+    // Locks that `is_asterisk_start` accepts Russian Ident in the Ident.* form.
+    check_no_errors("ВЫБРАТЬ Товары.* ИЗ Товары");
+}
+
+// Bucket A.
+#[test]
+fn test_russian_into_simple() {
+    // Minimal Russian ПОМЕСТИТЬ (INTO) in canonical field-then-INTO-then-FROM order.
+    // Complementary to the complex Bucket-B fixture at test_into_clause_with_union_...;
+    // adds a spec-shaped minimal gate for Slice 7 INTO parsing.
+    check_no_errors("ВЫБРАТЬ Поле ПОМЕСТИТЬ ВремТаблица ИЗ Товары");
+}
+
+// Bucket A.
+#[test]
 fn test_union_simple() {
     check_no_errors("SELECT Name FROM Products UNION SELECT Name FROM Services");
 }
