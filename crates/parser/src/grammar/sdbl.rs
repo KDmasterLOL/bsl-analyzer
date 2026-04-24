@@ -21,9 +21,22 @@
 //! each function body. See `docs/legal/sdbl-clean-room-slice6.md` for the
 //! attestation (landed with C3).
 //!
-//! Slices 7–11 pending: `query` body and all clause bodies (SELECT fields,
-//! FROM, WHERE, GROUP, ORDER, TOTALS, JOIN, FOR UPDATE, INDEX BY) remain
-//! Tier B until their respective clean-room slices.
+//! Slice 7 — clean-room (in progress, landed with C3): `query` wrapper,
+//! `selected_fields`, `selected_field`, `is_field_start`, `is_asterisk_start`,
+//! `asterisk_field`, `selected_field_alias`, `into_clause` (all in submodule
+//! `select`) cover the SELECT prefix: field list, aliases, and INTO /
+//! ПОМЕСТИТЬ. Authored from ITS pubqlang/10, /12, /51 h47 (for INTO), the
+//! local mini-spec at `docs/legal/sdbl-select-mini-spec.md`, and the
+//! project's own event-parser conventions from Slices 1, 2, and 6. The
+//! former `alias` helper was call-site-split in C1: `selected_field_alias`
+//! (Slice 7 target) and `source_alias_legacy` (LEGACY, Slice 8 target) —
+//! see `docs/legal/sdbl-clean-room-slice7.md` for the attestation.
+//!
+//! Slices 8–11 pending: FROM-source chains (`from_clause`, `data_source`,
+//! `table_ref`, `source_alias_legacy`), JOIN family, WHERE / GROUP / HAVING
+//! / ORDER / TOTALS / FOR UPDATE / INDEX BY clause bodies, and the
+//! `query_body_clauses` dispatch helper remain Tier B until their respective
+//! clean-room slices.
 
 pub mod expressions;
 pub mod select;

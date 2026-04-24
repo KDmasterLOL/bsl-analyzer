@@ -201,27 +201,6 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
     err.complete(p, NodeKind::Error);
 }
 
-/// Check if current token can start a selected field.
-///
-/// Used for error recovery in SELECT field list parsing.
-///
-/// # Returns
-///
-/// `true` if current token can start a field:
-/// - Expression start tokens (see is_expression_start)
-/// - `*` - asterisk field
-///
-/// `false` otherwise (including clause keywords)
-fn is_field_start(p: &Parser) -> bool {
-    // Asterisk field (*, Table.*)
-    if is_asterisk_start(p) {
-        return true;
-    }
-
-    // Expression (column, function, literal, etc.)
-    super::expressions::is_expression_start(p)
-}
-
 // ============================================================================
 // CLEAN-ROOM Slice 6 — select entry wrapper, subquery, UNION clause
 // ============================================================================
@@ -302,56 +281,12 @@ fn union_clause(p: &mut Parser) {
 }
 
 // ============================================================================
-// LEGACY (Slices 7–11 pending)
+// CLEAN-ROOM Slice 7 — SELECT prefix: field list, aliases, INTO
 // ============================================================================
 //
-// Everything below this banner — `select_tail_clauses`, `query` body, FROM,
-// JOIN, WHERE, GROUP, ORDER, TOTALS, FOR UPDATE, INDEX BY, expression glue —
-// remains Tier B pre-refactor code until the corresponding clean-room slice
-// rewrites it. No per-function provenance comments here.
-
-/// Parse the optional AUTOORDER / ORDER BY / TOTALS BY tail-clause loop.
-///
-/// Extracted verbatim from the pre-C1 `select_query` body as a pure refactor
-/// so the `select_query` wrapper above can be attested under the Slice 6
-/// clean-room banner without dragging clause-body scope in. Rewrite of this
-/// helper is deferred to Slice 11 (clauses after FROM).
-fn select_tail_clauses(p: &mut Parser) {
-    // Parse AUTOORDER, ORDER BY, and TOTALS BY in any order
-    // These clauses are all optional and can appear in any combination
-    let mut parsed_autoorder = false;
-    let mut parsed_order_by = false;
-    let mut parsed_totals_by = false;
-
-    loop {
-        p.skip_trivia();
-
-        // Check for AUTOORDER
-        if !parsed_autoorder && at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
-        {
-            autoorder_clause(p);
-            parsed_autoorder = true;
-            continue;
-        }
-
-        // Check for ORDER BY
-        if !parsed_order_by && at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
-            order_by_clause(p);
-            parsed_order_by = true;
-            continue;
-        }
-
-        // Check for TOTALS BY
-        if !parsed_totals_by && at_sdbl_keyword(p, "TOTALS", "ИТОГИ") {
-            totals_by_clause(p);
-            parsed_totals_by = true;
-            continue;
-        }
-
-        // No more clauses to parse
-        break;
-    }
-}
+// See `docs/legal/sdbl-clean-room-slice7.md` for authorship and source
+// citations (landed with C3). Per-function provenance comments are attached
+// at C2.
 
 /// Parse a single SELECT query
 ///
@@ -398,49 +333,9 @@ fn query(p: &mut Parser) {
         into_clause(p);
     }
 
-    // FROM clause (optional)
-    p.skip_trivia(); // CRITICAL: Must skip trivia before checking for FROM
-    if at_sdbl_keyword(p, "FROM", "ИЗ") {
-        from_clause(p);
-    }
-
-    // WHERE clause (optional)
-    p.skip_trivia(); // CRITICAL: Must skip trivia before checking for WHERE
-    if at_sdbl_keyword(p, "WHERE", "ГДЕ") {
-        where_clause(p);
-    }
-
-    // GROUP BY clause (optional)
-    p.skip_trivia();
-    if at_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ") {
-        group_by_clause(p);
-    }
-
-    // HAVING clause (optional)
-    p.skip_trivia();
-    if at_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ") {
-        having_clause(p);
-    }
-
-    // FOR UPDATE clause (optional)
-    // Note: We check for FOR UPDATE in one place
-    // The function will handle cases where UPDATE is missing
-    p.skip_trivia();
-    if at_sdbl_keyword(p, "FOR", "ДЛЯ") {
-        for_update_clause(p);
-    }
-
-    // INDEX BY clause (optional)
-    p.skip_trivia();
-    if at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ") {
-        index_by_clause(p);
-    }
-
-    // ORDER BY clause (optional) - can appear in query()
-    p.skip_trivia();
-    if at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
-        order_by_clause(p);
-    }
+    // Remaining clauses (FROM → ORDER BY) — Tier B, see `query_body_clauses`
+    // under the LEGACY banner. Rewrite deferred to Slices 8 / 9 / 11.
+    query_body_clauses(p);
 
     m.complete(p, NodeKind::SdblQuery);
 }
@@ -521,11 +416,32 @@ fn selected_field(p: &mut Parser) {
     if at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p) {
         // Lookahead to avoid consuming keywords that start next clause
         if !is_clause_keyword(p) {
-            alias(p);
+            selected_field_alias(p);
         }
     }
 
     m.complete(p, NodeKind::SdblSelectedField);
+}
+
+/// Check if current token can start a selected field.
+///
+/// Used for error recovery in SELECT field list parsing.
+///
+/// # Returns
+///
+/// `true` if current token can start a field:
+/// - Expression start tokens (see is_expression_start)
+/// - `*` - asterisk field
+///
+/// `false` otherwise (including clause keywords)
+fn is_field_start(p: &Parser) -> bool {
+    // Asterisk field (*, Table.*)
+    if is_asterisk_start(p) {
+        return true;
+    }
+
+    // Expression (column, function, literal, etc.)
+    super::expressions::is_expression_start(p)
 }
 
 /// Check if current position starts an asterisk field
@@ -574,14 +490,187 @@ fn asterisk_field(p: &mut Parser) {
     m.complete(p, NodeKind::SdblAsteriskField);
 }
 
-/// Parse a field alias
+/// Parse a field alias (selected-field site).
 ///
 /// Grammar: `alias: AS? name=identifier`
+///
+/// Split from the former `alias()` helper in Slice 7 C1 (pure refactor): the
+/// pre-split function was called from two slices' surfaces — `selected_field`
+/// (Slice 7) and `data_source`/table-ref (Slice 8). The body is bit-identical
+/// to the pre-C1 `alias()` and to its LEGACY twin `source_alias_legacy`; the
+/// split lets Slice 7 clean-room this helper without silently re-authoring
+/// Slice 8 source-alias parsing. See `docs/legal/sdbl-clean-room-slice7.md`
+/// §Preserved pre-refactor behaviours (landed with C3).
 ///
 /// CRITICAL for AssignAliasFieldsInQuery diagnostic:
 /// - AS keyword is optional in grammar but diagnostic requires it
 /// - Must track whether AS keyword is present
-fn alias(p: &mut Parser) {
+fn selected_field_alias(p: &mut Parser) {
+    let m = p.start();
+
+    // Optional AS keyword
+    eat_sdbl_keyword(p, "AS", "КАК");
+
+    p.skip_trivia();
+
+    // ERROR RECOVERY: Check if next token is clause keyword (FROM, WHERE, etc.)
+    // This prevents "КАК\nИЗ" from consuming ИЗ as alias name
+    if is_clause_keyword(p) {
+        // Incomplete AS without alias - create empty ERROR node
+        let err = p.start();
+        err.complete(p, NodeKind::Error);
+        m.complete(p, NodeKind::SdblAlias);
+        return;
+    }
+
+    // Identifier (mandatory)
+    if !p.expect(TokenKind::Ident) {
+        // Error recovery: complete anyway
+    }
+
+    m.complete(p, NodeKind::SdblAlias);
+}
+
+/// Parse INTO clause for temporary tables
+///
+/// Grammar: `INTO|ПОМЕСТИТЬ tempTableName`
+fn into_clause(p: &mut Parser) {
+    let m = p.start();
+
+    eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
+    p.skip_trivia();
+
+    // Parse temporary table name
+    if p.at(TokenKind::Ident) {
+        let table_m = p.start();
+        p.bump();
+        table_m.complete(p, NodeKind::SdblTempTableName);
+    } else {
+        p.error();
+    }
+
+    m.complete(p, NodeKind::SdblIntoClause);
+}
+
+// ============================================================================
+// LEGACY (Slices 8–11 pending)
+// ============================================================================
+//
+// Everything below this banner — `select_tail_clauses` (Slice 11 target),
+// `query_body_clauses` (Slices 8 / 9 / 11 target), `source_alias_legacy`
+// (Slice 8 target), `from_clause` / `data_source` / `table_ref` (Slice 8),
+// `where_clause` / `group_by_clause` / `having_clause` / `order_by_clause` /
+// `for_update_clause` / `index_by_clause` / `autoorder_clause` /
+// `totals_by_clause` (Slice 11), JOIN family and the `is_join_keyword` /
+// `join_clause` helpers (Slice 9), and the `limitations` / `top_clause`
+// dispatchers remains Tier B pre-refactor code until the corresponding
+// clean-room slice rewrites it. No per-function provenance comments here.
+
+/// Parse the optional AUTOORDER / ORDER BY / TOTALS BY tail-clause loop.
+///
+/// Extracted verbatim from the pre-C1 `select_query` body as a pure refactor
+/// so the Slice 6 `select_query` wrapper earlier in this file can be attested
+/// under the Slice 6 clean-room banner without dragging clause-body scope in.
+/// Rewrite of this helper is deferred to Slice 11 (clauses after FROM).
+fn select_tail_clauses(p: &mut Parser) {
+    // Parse AUTOORDER, ORDER BY, and TOTALS BY in any order
+    // These clauses are all optional and can appear in any combination
+    let mut parsed_autoorder = false;
+    let mut parsed_order_by = false;
+    let mut parsed_totals_by = false;
+
+    loop {
+        p.skip_trivia();
+
+        // Check for AUTOORDER
+        if !parsed_autoorder && at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
+        {
+            autoorder_clause(p);
+            parsed_autoorder = true;
+            continue;
+        }
+
+        // Check for ORDER BY
+        if !parsed_order_by && at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
+            order_by_clause(p);
+            parsed_order_by = true;
+            continue;
+        }
+
+        // Check for TOTALS BY
+        if !parsed_totals_by && at_sdbl_keyword(p, "TOTALS", "ИТОГИ") {
+            totals_by_clause(p);
+            parsed_totals_by = true;
+            continue;
+        }
+
+        // No more clauses to parse
+        break;
+    }
+}
+
+/// Parse the optional FROM → ORDER BY clause tail of a single query.
+///
+/// Extracted verbatim from the pre-C1 `query()` body as a pure refactor so
+/// the Slice 7 `query()` wrapper earlier in this file can be attested under
+/// the Slice 7 clean-room banner without dragging clause-body scope in.
+/// Rewrite of this helper is deferred to Slices 8 (FROM), 9 (JOIN via
+/// data_source), and 11 (WHERE / GROUP / HAVING / FOR UPDATE / INDEX BY /
+/// ORDER BY).
+fn query_body_clauses(p: &mut Parser) {
+    // FROM clause (optional)
+    p.skip_trivia(); // CRITICAL: Must skip trivia before checking for FROM
+    if at_sdbl_keyword(p, "FROM", "ИЗ") {
+        from_clause(p);
+    }
+
+    // WHERE clause (optional)
+    p.skip_trivia(); // CRITICAL: Must skip trivia before checking for WHERE
+    if at_sdbl_keyword(p, "WHERE", "ГДЕ") {
+        where_clause(p);
+    }
+
+    // GROUP BY clause (optional)
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ") {
+        group_by_clause(p);
+    }
+
+    // HAVING clause (optional)
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ") {
+        having_clause(p);
+    }
+
+    // FOR UPDATE clause (optional)
+    // Note: We check for FOR UPDATE in one place
+    // The function will handle cases where UPDATE is missing
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "FOR", "ДЛЯ") {
+        for_update_clause(p);
+    }
+
+    // INDEX BY clause (optional)
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ") {
+        index_by_clause(p);
+    }
+
+    // ORDER BY clause (optional) - can appear in query()
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
+        order_by_clause(p);
+    }
+}
+
+/// Parse a source alias (FROM-clause data-source and table-ref sites).
+///
+/// LEGACY twin of `selected_field_alias`: bit-identical body, separate
+/// call-site ownership. Clean-room rewrite deferred to Slice 8 (FROM sources
+/// and source chains). Whether Slice 8 re-merges the two helpers into a
+/// unified clean-room `alias()` is a Slice 8 decision; Slice 7 preserves the
+/// split.
+fn source_alias_legacy(p: &mut Parser) {
     let m = p.start();
 
     // Optional AS keyword
@@ -629,27 +718,6 @@ fn from_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblFromClause);
 }
 
-/// Parse INTO clause for temporary tables
-///
-/// Grammar: `INTO|ПОМЕСТИТЬ tempTableName`
-fn into_clause(p: &mut Parser) {
-    let m = p.start();
-
-    eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
-    p.skip_trivia();
-
-    // Parse temporary table name
-    if p.at(TokenKind::Ident) {
-        let table_m = p.start();
-        p.bump();
-        table_m.complete(p, NodeKind::SdblTempTableName);
-    } else {
-        p.error();
-    }
-
-    m.complete(p, NodeKind::SdblIntoClause);
-}
-
 /// Parse a data source (table, subquery, or parameter)
 ///
 /// Grammar:
@@ -676,7 +744,7 @@ fn data_source(p: &mut Parser) {
 
         // Optional alias for subquery
         if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
-            alias(p);
+            source_alias_legacy(p);
         }
     } else {
         // Table reference
@@ -686,7 +754,7 @@ fn data_source(p: &mut Parser) {
 
         // Optional alias for table
         if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
-            alias(p);
+            source_alias_legacy(p);
         }
     }
 
