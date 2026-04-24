@@ -511,49 +511,49 @@ fn into_clause(p: &mut Parser) {
 }
 
 // ============================================================================
-// CLEAN-ROOM Slice 8 — FROM sources and source chains (C1 placeholder;
-//                     C2 + C3 pending)
+// CLEAN-ROOM Slice 8 — FROM sources and source chains (C3 attestation
+//                     pending)
 // ============================================================================
 //
-// At this C1 commit the 5 functions below (`is_data_source_start`,
-// `from_clause`, `data_source`, `table_ref`, `source_alias`) are
-// pure-refactor placeholders — bodies are verbatim from pre-C1 code. The
-// ITS-sourced clean-room rewrites and per-function provenance comments
-// land in C2; the Slice 8 attestation is authored in C3 at
-// `docs/legal/sdbl-clean-room-slice8.md` (planned). Until C2 and C3 have
-// both landed, do not cite this section as clean-room-attested code.
+// Per-function provenance comments are attached below. The Slice 8
+// attestation lands in C3 at `docs/legal/sdbl-clean-room-slice8.md`; until
+// then, treat the per-function provenance citations as the authoritative
+// provenance record.
 
-/// Check if current token can start a data source.
+/// Predicate: does the current token open a data-source?
 ///
-/// Used for error recovery in FROM clause list parsing.
-///
-/// # Returns
-///
-/// `true` if current token can start a data source:
-/// - `(` - subquery in parentheses
-/// - Identifier - table name
-///
-/// `false` otherwise (including clause keywords)
+/// Consulted by the FROM-clause delimited-list loop to decide whether the
+/// next comma-separated element is a parseable data-source or a stray
+/// token that should be skipped by the list recovery path.
 fn is_data_source_start(p: &Parser) -> bool {
+    // local: event-parser predicate for FROM-list head detection per
+    // mini-spec §FROM / primary-source (subquery-source | table-ref |
+    // parameter-source). Accepts LParen for subquery-source, Ampersand
+    // for parameter-source, and Ident (provided it is not a clause
+    // keyword) for table-ref.
     match p.current() {
-        Some(TokenKind::LParen) => true,                 // Subquery
-        Some(TokenKind::Ident) => !is_clause_keyword(p), // Table name (but not clause keyword)
-        Some(TokenKind::Ampersand) => true,              // Parameter as data source (&ТЗ)
+        Some(TokenKind::LParen) => true,
+        Some(TokenKind::Ampersand) => true,
+        Some(TokenKind::Ident) => !is_clause_keyword(p),
         _ => false,
     }
 }
 
-/// Parse FROM clause
+/// Parse a FROM clause.
 ///
-/// Grammar: `FROM dataSources`
-/// where `dataSources: tables+=dataSource (COMMA tables+=dataSource)*`
+/// Grammar: `from-clause := (FROM|ИЗ) data-source (',' data-source)*`.
 fn from_clause(p: &mut Parser) {
+    // ITS pubqlang/10 + mini-spec §FROM clause — (FROM|ИЗ) data-source
+    // (COMMA data-source)*. Keyword is bilingual per pubqlang/12.
+    // Delegates the comma-separated list body to the Tier B
+    // parse_delimited_list helper with LIST_RECOVERY so an incomplete
+    // source node at any position can be recovered (§Recovery
+    // requirements #7) without aborting the enclosing query.
     let m = p.start();
 
     eat_sdbl_keyword(p, "FROM", "ИЗ");
     p.skip_trivia();
 
-    // Parse data sources (comma-separated) with error recovery
     super::expressions::parse_delimited_list(
         p,
         TokenKind::Comma,
@@ -565,47 +565,45 @@ fn from_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblFromClause);
 }
 
-/// Parse a data source (table, subquery, or parameter)
+/// Parse a single data source in a FROM clause.
 ///
-/// Grammar:
-/// ```text
-/// dataSource:
-///     (LPAREN dataSource RPAREN)
-///   | ((table | subquery) alias? joins+=joinPart*)
-/// ```
+/// Grammar: `data-source := primary-source alias? join-clause*`,
+/// `primary-source := subquery-source | table-ref | parameter-source`,
+/// `subquery-source := '(' subquery ')' alias?`.
 ///
-/// Each data source can have zero or more JOINs attached to it.
+/// The parameter-source branch is dispatched inside [`table_ref`]: a bare
+/// `&Ident` enters the identifier branch at the top of `table_ref`, which
+/// owns the `SdblParameter` sub-node shape. An LParen at the data-source
+/// head always enters the subquery-source branch regardless of inner
+/// token shape.
 fn data_source(p: &mut Parser) {
+    // ITS pubqlang/10 + mini-spec §Data source — primary-source alias?
+    // join-clause*. Primary-source is either '(' subquery ')' (the
+    // subquery-source branch) or table-ref (which itself dispatches the
+    // parameter-source branch on leading Ampersand). Alias is optional
+    // at this level; the combined guard
+    // (is_AS/КАК || is_identifier_token) && !is_clause_keyword prevents
+    // an immediately following clause keyword (WHERE / GROUP / etc.)
+    // from being captured as an implicit bare alias, matching
+    // mini-spec §Recovery requirements #3. JOIN attachment delegates
+    // into Tier B `join_clause` (Slice 9 target); the attachment-point
+    // loop is owned by Slice 8 per mini-spec §Data source join-clause*.
     let m = p.start();
 
-    // Check for subquery in parentheses
     if p.at(TokenKind::LParen) {
-        p.bump(); // (
+        p.bump();
         p.skip_trivia();
-
-        // Parse subquery
         subquery(p);
-
         p.expect(TokenKind::RParen);
-        p.skip_trivia();
-
-        // Optional alias for subquery
-        if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
-            source_alias(p);
-        }
     } else {
-        // Table reference
         table_ref(p);
-
-        p.skip_trivia(); // Skip whitespace before checking for alias
-
-        // Optional alias for table
-        if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
-            source_alias(p);
-        }
     }
 
-    // Parse JOIN clauses (zero or more)
+    p.skip_trivia();
+    if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
+        source_alias(p);
+    }
+
     p.skip_trivia();
     while is_join_keyword(p) {
         join_clause(p);
@@ -615,109 +613,103 @@ fn data_source(p: &mut Parser) {
     m.complete(p, NodeKind::SdblDataSource);
 }
 
-/// Parse a table reference
+/// Parse a table reference inside a data source.
 ///
-/// Grammar (simplified):
-/// ```text
-/// table:
-///     mdo
-///   | mdo DOT objectTableName=identifier
-///   | tableName=identifier
-/// ```
-///
-/// Patterns:
-/// - `Catalog.Products` - MDO reference
-/// - `Catalog.Products.SliceLast` - Virtual table
-/// - `#TempTable` - Temporary table
-/// - `Products` - Simple table name
+/// Grammar: `table-ref := parameter-source | identifier ('.' identifier)*`,
+/// `parameter-source := '&' identifier`. The identifier chain covers the
+/// simple-name, MDO path, and MDO-with-virtual-table-trail forms.
+/// Virtual-table method-call arguments are delegated to the Tier B
+/// [`virtual_table_args_legacy`] helper (Slice 5 target).
 fn table_ref(p: &mut Parser) {
+    // ITS pubqlang/10 + /12 + mini-spec §FROM / primary-source +
+    // parameter-source. The body is either a parameter-source
+    // (Ampersand + identifier) wrapped in an SdblParameter sub-node, or
+    // an identifier ('.' identifier)* chain (simple, MDO path, or
+    // MDO-with-virtual-table-trail). DOT-recovery inserts an Error
+    // sub-node when the next token after '.' is not an identifier or is
+    // a clause / AS / КАК keyword, so an incomplete qualified name is
+    // recoverable for IDE use without aborting the enclosing source
+    // (§Recovery requirements #4). The parameter-source branch admits a
+    // bare `&` without identifier as an IDE-recovery allowance: the
+    // identifier bump is guarded by `if p.at(Ident)`, not required by
+    // `p.expect`, so the user can keep typing the parameter name with
+    // the SdblParameter marker already open. VT method-call arguments
+    // are delegated to Tier B `virtual_table_args_legacy` (Slice 5
+    // target — virtual-table and external-source handling).
     let m = p.start();
 
-    // Parameter as data source: &Parameter (e.g., ИЗ &ТЗ КАК ТЗ)
     if p.at(TokenKind::Ampersand) {
         let pm = p.start();
-        p.bump(); // &
+        p.bump();
         if p.at(TokenKind::Ident) {
-            p.bump(); // parameter name
+            p.bump();
         }
         pm.complete(p, NodeKind::SdblParameter);
         m.complete(p, NodeKind::SdblTableRef);
         return;
     }
 
-    // Parse identifier chain (Table, MDO.Table, MDO.Table.VT)
     if !p.expect(TokenKind::Ident) {
-        // Error recovery
         m.complete(p, NodeKind::SdblTableRef);
         return;
     }
 
-    // Parse additional segments (DOT identifier)*
     while p.eat(TokenKind::Dot) {
-        p.check_iteration_limit(); // Prevent infinite loops
+        p.check_iteration_limit();
         p.skip_trivia();
 
-        // ERROR RECOVERY: After DOT, only Ident is valid for table/MDO name
-        // Whitelist approach: if NOT Ident, mark incomplete and stop
         if !p.at(TokenKind::Ident) {
-            // Incomplete: operators, punctuation, EOF, etc.
             let err = p.start();
             err.complete(p, NodeKind::Error);
             break;
         }
 
-        // Check if this Ident is clause keyword (FROM, WHERE) or AS keyword
-        // Prevents "Справочник.\nКАК" from consuming КАК as table name
         if is_clause_keyword(p) || p.at_keyword("AS") || p.at_keyword("КАК") {
-            // Incomplete table ref - don't consume keyword
             let err = p.start();
             err.complete(p, NodeKind::Error);
             break;
         }
 
-        // Consume the identifier - it's a valid table/MDO name
-        p.bump(); // Ident
+        p.bump();
     }
 
-    // Check for virtual table method call (e.g., .Обороты(...), .Остатки(...))
-    // If next token is '(', parse it as function call with arguments
     p.skip_trivia();
     virtual_table_args_legacy(p);
 
     m.complete(p, NodeKind::SdblTableRef);
 }
 
-/// Parse a source alias (FROM-clause data-source and table-ref sites).
+/// Parse a source alias at a FROM-clause data-source site.
 ///
-/// Slice 8 C1 renamed the pre-C1 `source_alias_legacy` helper to
-/// `source_alias` and relocated it under this clean-room banner as a pure
-/// refactor; the body is preserved verbatim from the pre-C1 LEGACY helper.
-/// The Slice 8 clean-room rewrite and per-function provenance comment land
-/// in C2. The call-site split from `selected_field_alias` is preserved per
-/// the Slice 7 attestation §Preserved pre-refactor behaviours; re-merge is a
-/// Slice 12 (recovery and IDE allowances) decision.
+/// Grammar: `alias := (AS|КАК)? identifier`.
+///
+/// Behaviorally equivalent to [`selected_field_alias`] but kept as a
+/// distinct helper so each call-site chain stays under its own
+/// clean-room slice. Re-merge is a Slice 12 decision.
 fn source_alias(p: &mut Parser) {
+    // ITS pubqlang/10 + mini-spec §Alias — (AS|КАК)? identifier at the
+    // FROM-clause data-source / table-ref site. The AS/КАК keyword is
+    // optional: the implicit (bare) alias form is accepted for
+    // syntax-tree parity with the explicit form, per mini-spec
+    // §Selected fields → Alias and §Recovery requirements #3. A clause
+    // keyword appearing where the alias name is expected (e.g. AS
+    // followed by WHERE) yields an empty Error sub-node inside
+    // SdblAlias and then completes the marker, so the enclosing clause
+    // loop can consume the keyword at the next level up without
+    // aborting the data source.
     let m = p.start();
 
-    // Optional AS keyword
     eat_sdbl_keyword(p, "AS", "КАК");
-
     p.skip_trivia();
 
-    // ERROR RECOVERY: Check if next token is clause keyword (FROM, WHERE, etc.)
-    // This prevents "КАК\nИЗ" from consuming ИЗ as alias name
     if is_clause_keyword(p) {
-        // Incomplete AS without alias - create empty ERROR node
         let err = p.start();
         err.complete(p, NodeKind::Error);
         m.complete(p, NodeKind::SdblAlias);
         return;
     }
 
-    // Identifier (mandatory)
-    if !p.expect(TokenKind::Ident) {
-        // Error recovery: complete anyway
-    }
+    p.expect(TokenKind::Ident);
 
     m.complete(p, NodeKind::SdblAlias);
 }
