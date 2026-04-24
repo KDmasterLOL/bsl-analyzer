@@ -15,7 +15,10 @@
 //! Slice 6 — clean-room: `query_package`, `queries`, `drop_table_query`
 //! (this file) and `select_query` wrapper, `subquery`, `union_clause`
 //! (in submodule `select`) are authored from ITS pubqlang/10 and /12
-//! grammar-shape rules. See `docs/legal/sdbl-clean-room-slice6.md` for the
+//! grammar-shape rules and from the project's own event-parser conventions
+//! established in Slices 1 and 2. `../bsl-parser/*` grammar text was not
+//! consulted during authoring; per-function provenance comments appear on
+//! each function body. See `docs/legal/sdbl-clean-room-slice6.md` for the
 //! attestation (landed with C3).
 //!
 //! Slices 7–11 pending: `query` body and all clause bodies (SELECT fields,
@@ -60,12 +63,16 @@ pub(super) const LIST_RECOVERY: TokenSet = TokenSet::new(&[
 // See `docs/legal/sdbl-clean-room-slice6.md` for authorship and source
 // citations. Per-function provenance comments are attached at C2.
 
-/// Entry point for SDBL parsing
+/// Entry point for SDBL parsing.
 ///
-/// Grammar: `queryPackage: queries (SEMICOLON queries)* SEMICOLON? EOF`
+/// Grammar: `query-package := query-item (';' query-item)* ';'?`
 ///
-/// Parses a complete SDBL query package, which may contain multiple queries
-/// separated by semicolons.
+/// Consumes an optional leading trivia run, then one or more query items
+/// separated by `;`. A trailing `;` is allowed; the package ends at EOF.
+///
+/// Parser tolerance (not formal grammar): empty or trivia-only input is
+/// accepted as an `SdblQueryPackage` node with no children, so the IDE can
+/// reason about incomplete documents without parse aborts.
 ///
 /// # Examples
 ///
@@ -74,31 +81,25 @@ pub(super) const LIST_RECOVERY: TokenSet = TokenSet::new(&[
 /// SELECT Code FROM Catalog.Products
 /// ```
 pub fn query_package(p: &mut Parser) {
+    // ITS pubqlang/10 — query package shape: queries (SEMICOLON queries)* SEMICOLON? EOF.
     let m = p.start();
 
-    // Skip leading trivia (whitespace, newlines) before first query
     p.skip_trivia();
-
-    // Parse first query (mandatory)
     if !p.at_end() {
         queries(p);
     }
 
-    // Parse additional queries (SEMICOLON queries)*
-    // Note: Must skip trivia BEFORE checking for semicolon, as queries may end with newlines
     loop {
-        p.check_iteration_limit(); // Prevent infinite loops
+        p.check_iteration_limit();
         p.skip_trivia();
 
-        // Check for semicolon
         if !p.at(TokenKind::Semicolon) {
             break;
         }
 
-        p.bump(); // consume semicolon
+        p.bump();
         p.skip_trivia();
 
-        // Check for trailing semicolon (allowed but optional)
         if p.at_end() {
             break;
         }
@@ -109,10 +110,13 @@ pub fn query_package(p: &mut Parser) {
     m.complete(p, NodeKind::SdblQueryPackage);
 }
 
-/// Parse a single query (either SELECT or DROP TABLE)
+/// Dispatch a single query item to SELECT or DROP.
 ///
-/// Grammar: `queries: selectQuery | dropTableQuery`
+/// Grammar: `query-item := select-query | drop-query`
 fn queries(p: &mut Parser) {
+    // local: dispatcher between SELECT entry and DROP statement; DROP-first
+    // check because the DROP/УНИЧТОЖИТЬ keyword is the single-token prefix
+    // per ITS pubqlang/10 + /12 temporary-table statement vocabulary.
     if select::at_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ") {
         drop_table_query(p);
     } else {
@@ -120,10 +124,17 @@ fn queries(p: &mut Parser) {
     }
 }
 
-/// Parse DROP TABLE query
+/// Parse a DROP statement for a temporary table.
 ///
-/// Grammar: `dropTableQuery: DROP temporaryTableName=identifier`
+/// Grammar: `drop-query := (DROP|УНИЧТОЖИТЬ) identifier`
 fn drop_table_query(p: &mut Parser) {
+    // ITS pubqlang/10 + /12 (statement vocabulary) and pubqlang/51 h47
+    // (temporary-table lifecycle) — DROP / УНИЧТОЖИТЬ terminates the
+    // lifetime of a temporary table named by a single identifier. The
+    // minimal `DROP <ident>` shape below is spec-derivable from these pages;
+    // the attestation §Preserved pre-refactor behaviours notes that the
+    // identifier-recovery path is local-preserved and that a tightened
+    // rewrite is expected when Slice 3 promotes the KwDrop lexer variant.
     let m = p.start();
     select::eat_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ");
     p.skip_trivia();

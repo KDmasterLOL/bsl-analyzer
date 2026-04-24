@@ -229,35 +229,41 @@ fn is_field_start(p: &Parser) -> bool {
 // See `docs/legal/sdbl-clean-room-slice6.md` for authorship and source
 // citations. Per-function provenance comments are attached at C2.
 
-/// Parse a SELECT query
+/// Parse a SELECT query.
 ///
-/// Grammar: `selectQuery: subquery (AUTOORDER | ORDER BY | TOTALS BY)*`
+/// Grammar: `select-query := subquery trailing-select-clauses*`
 ///
 /// Opens the `SdblSelectQuery` marker around the `subquery` body and the
 /// AUTOORDER / ORDER BY / TOTALS BY tail-clause loop. The tail-clause loop
 /// itself lives under the LEGACY banner in `select_tail_clauses` because its
 /// clean-room rewrite belongs to Slice 11 (clauses after FROM).
 pub fn select_query(p: &mut Parser) {
+    // local: event-parser entry shell; opens SdblSelectQuery around the
+    // subquery body (main query + UNION chain) and the AUTOORDER / ORDER BY /
+    // TOTALS BY tail-clause loop. The wrapper itself is glue; the tail-clause
+    // loop is Tier B (see select_tail_clauses under the LEGACY banner).
     let m = p.start();
     subquery(p);
     select_tail_clauses(p);
     m.complete(p, NodeKind::SdblSelectQuery);
 }
 
-/// Parse a subquery (main query + optional UNIONs)
+/// Parse a subquery (main query plus any UNION clauses).
 ///
-/// Grammar: `subquery: main=query orderBy? (unions+=union+)?`
+/// Grammar: `subquery := query (union-clause)*`
 pub(super) fn subquery(p: &mut Parser) {
+    // ITS pubqlang/10 — a subquery is a single query body optionally followed
+    // by UNION / UNION ALL clauses. The UNION loop terminates on a
+    // package-level ';' or on any non-UNION token (including EOF);
+    // parenthesised subqueries are closed by the caller (data_source) so ')'
+    // is handled there, not here.
     let m = p.start();
 
-    // Parse main query
     query(p);
 
-    // Parse UNION clauses
     loop {
-        p.skip_trivia(); // Must skip trivia before checking for UNION keyword
+        p.skip_trivia();
 
-        // Stop at semicolons (end of query package item)
         if p.at(TokenKind::Semicolon) {
             break;
         }
@@ -272,26 +278,25 @@ pub(super) fn subquery(p: &mut Parser) {
     m.complete(p, NodeKind::SdblSubquery);
 }
 
-/// Parse a UNION clause
+/// Parse a single UNION clause.
 ///
-/// Grammar: `union: UNION ALL? query orderBy?`
+/// Grammar: `union-clause := UNION [ALL] query`
 fn union_clause(p: &mut Parser) {
+    // ITS pubqlang/10 — UNION clause: UNION | UNION ALL followed by a query.
+    // UNION and UNION ALL share SdblUnionClause; the optional ALL modifier is
+    // carried as an IDENT token inside the node, detected post-parse by
+    // SdblUnionClause::has_all() (see sdbl-clean-room-slice6.md §Preserved
+    // pre-refactor behaviours — the split into SdblUnionAllClause is deferred
+    // to Slice 13).
     let m = p.start();
 
     eat_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ");
 
-    p.skip_trivia(); // Skip whitespace before checking for ALL
-
-    // Optional ALL keyword
+    p.skip_trivia();
     eat_sdbl_keyword(p, "ALL", "ВСЕ");
 
     p.skip_trivia();
-
-    // Parse the UNION query
     query(p);
-
-    // Phase 2: Add ORDER BY support for UNION queries
-    // if p.at_keyword("ORDER") { order_by(p); }
 
     m.complete(p, NodeKind::SdblUnionClause);
 }
