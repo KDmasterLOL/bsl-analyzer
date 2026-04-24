@@ -1,22 +1,246 @@
-//! SDBL (Structured Data Base Language) lexer for 1C:Enterprise query language.
+//! SDBL (Structured Data Base Language) lexer for 1C:Enterprise query
+//! language.
 //!
-//! Supports both Russian and English keywords (case-insensitive).
+//! ## Provenance
 //!
-//! SDBL is the SQL-like query language embedded within BSL code as string literals.
-//! It's used to query the 1C platform's metadata-based database structure.
+//! The `SdblTokenKind` enum below is split by banner comments into two
+//! clearly demarcated provenance sections:
 //!
+//! - **Slice 1 — clean-room.** Whitespace, line terminators, line
+//!   comments, separators, punctuation, comparison and arithmetic
+//!   operators, numeric literals, the string-literal opening quote
+//!   (with content handled by the companion [`strings_mode`] module),
+//!   date literals, identifiers, and parameter references. These
+//!   variants were re-derived from the ITS documentation of the
+//!   1C:Enterprise query language (<https://its.1c.ru/db/pubqlang>)
+//!   and are attested in `docs/legal/sdbl-clean-room-slice1.md`.
+//!
+//! - **Slices 2–5 — pending.** SDBL keywords, built-in functions,
+//!   metadata-object tokens, virtual-table tokens, type literals,
+//!   boolean/null literals, logical operators, period-type tokens,
+//!   and the logos error fallback. These remain as carried over from
+//!   the pre-clean-room implementation and will be re-derived by
+//!   subsequent slices.
+//!
+//! All variants share a single longest-match precedence space — the
+//! physical reordering below does not change matching semantics. A
+//! byte-identity golden corpus (`crates/lexer/tests/sdbl_golden_corpus.rs`)
+//! gates any accidental drift.
 
 mod strings_mode;
 
 use logos::Logos;
 use smol_str::SmolStr;
 
-/// Token kinds for SDBL query language.
+/// Token kinds produced by the SDBL lexer.
 ///
-/// Each token represents a lexical element in SDBL queries.
-/// Keywords support both Russian and English variants (case-insensitive).
+/// Variants support bilingual (Russian + English) spelling where the
+/// underlying language does; the regex on each variant is the single
+/// source of truth.
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SdblTokenKind {
+    // ============================================================================
+    // CLEAN-ROOM Slice 1 — ITS-derived
+    // ============================================================================
+    //
+    // Every variant in this section carries an inline provenance
+    // comment pointing at the ITS section (or a local mini-spec) it
+    // was re-derived from. Nothing in this block was copied from the
+    // pre-clean-room regex text or from any third-party SDBL grammar.
+    /// Horizontal whitespace: ASCII space, tab, carriage return.
+    // ITS pubqlang/12 — lexical elements: inter-token whitespace.
+    #[regex(r"[ \t\r]+")]
+    Whitespace,
+
+    /// Line terminator.
+    // ITS pubqlang/12 — lexical elements: newline terminates a line.
+    #[token("\n")]
+    Newline,
+
+    /// Line comment `// ...` up to end-of-line.
+    // Local spec (see `docs/legal/sdbl-clean-room-slice1.md` § Scope —
+    // line comment): the upstream SDBL grammar at
+    // <https://its.1c.ru/db/pubqlang/content/12/hdoc> does not define
+    // comments; this token is a tooling concession so that queries
+    // extracted from BSL source whose bodies happen to contain `//`
+    // tails survive lexing, and so queries can be annotated during
+    // review. The regex accepts `//` followed by any non-newline run.
+    #[regex(r"//[^\n]*")]
+    Comment,
+
+    /// Left parenthesis `(`.
+    // ITS pubqlang/12 — separators: opens a parenthesised expression.
+    #[token("(")]
+    LParen,
+
+    /// Right parenthesis `)`.
+    // ITS pubqlang/12 — separators: closes a parenthesised expression.
+    #[token(")")]
+    RParen,
+
+    /// Dot `.` — member access and dot-path separator.
+    // ITS pubqlang/12 — separators: joins the parts of a metadata or
+    // field path (e.g. `Catalog.Products.Ref`).
+    #[token(".")]
+    Dot,
+
+    /// Comma `,` — argument and list-element separator.
+    // ITS pubqlang/12 — separators: separates select-list columns and
+    // function argument lists.
+    #[token(",")]
+    Comma,
+
+    /// Semicolon `;` — statement / query separator within a batch.
+    // ITS pubqlang/12 — separators: terminates a query in a batch.
+    #[token(";")]
+    Semicolon,
+
+    /// Hash `#` — temporary-table name marker.
+    // ITS pubqlang/10 — temporary tables: a name prefixed with `#`
+    // identifies a temporary table in `INTO`/`DROP` position.
+    #[token("#")]
+    Hash,
+
+    /// Bare ampersand `&`. When followed immediately by an
+    /// identifier, the longer `Parameter` match wins; this variant
+    /// only appears when `&` stands alone.
+    // ITS pubqlang/10 — parameters: parameter references start with `&`.
+    #[token("&")]
+    Ampersand,
+
+    /// Vertical bar `|` — multiline continuation marker used when a
+    /// SDBL query is embedded as a BSL multiline string literal.
+    // Local spec (see `docs/legal/sdbl-clean-room-slice1.md` § Scope —
+    // bar): BSL multiline-string convention, also described in the
+    // mini-spec at the top of `strings_mode`. The bar at the start
+    // of each continuation line is preserved through to the parser
+    // rather than elided, so layout is reconstructible.
+    #[token("|")]
+    Bar,
+
+    /// Equality operator `=`.
+    // ITS pubqlang/10 — comparison operators: equality.
+    #[token("=")]
+    Eq,
+
+    /// Inequality operator `<>`. Declared so longest-match picks it
+    /// over the one-char `<` followed by `>`.
+    // ITS pubqlang/10 — comparison operators: inequality.
+    #[token("<>")]
+    Neq,
+
+    /// Less-or-equal operator `<=`. Longest-match beats `<`.
+    // ITS pubqlang/10 — comparison operators: less-or-equal.
+    #[token("<=")]
+    Le,
+
+    /// Less-than operator `<`.
+    // ITS pubqlang/10 — comparison operators: less-than.
+    #[token("<")]
+    Lt,
+
+    /// Greater-or-equal operator `>=`. Longest-match beats `>`.
+    // ITS pubqlang/10 — comparison operators: greater-or-equal.
+    #[token(">=")]
+    Ge,
+
+    /// Greater-than operator `>`.
+    // ITS pubqlang/10 — comparison operators: greater-than.
+    #[token(">")]
+    Gt,
+
+    /// Addition operator `+`.
+    // ITS pubqlang/10 — arithmetic operators: addition.
+    #[token("+")]
+    Plus,
+
+    /// Subtraction operator `-` (also appears as the unary-minus
+    /// prefix; that distinction is parser-level).
+    // ITS pubqlang/10 — arithmetic operators: subtraction / unary minus.
+    #[token("-")]
+    Minus,
+
+    /// Multiplication operator `*`. The select-all column form is
+    /// parsed as the same token in select-list position.
+    // ITS pubqlang/10 — arithmetic operators: multiplication; doubles
+    // as the `*` select-all wildcard at the parser level.
+    #[token("*")]
+    Star,
+
+    /// Division operator `/`.
+    // ITS pubqlang/10 — arithmetic operators: division.
+    #[token("/")]
+    Slash,
+
+    /// Modulo operator `%`.
+    // ITS pubqlang/10 — arithmetic operators: modulo.
+    #[token("%")]
+    Percent,
+
+    /// Fractional numeric literal (e.g. `3.14`). Declared before the
+    /// integer variant so longest-match picks `3.14` over `3` + `.` +
+    /// `14`.
+    // ITS pubqlang/12 — numeric literals: fractional form is
+    // `DIGITS"."DIGITS`.
+    #[regex(r"[0-9]+\.[0-9]+")]
+    Float,
+
+    /// Integer numeric literal (e.g. `42`).
+    // ITS pubqlang/12 — numeric literals: integer form is `DIGITS`.
+    #[regex(r"[0-9]+")]
+    Decimal,
+
+    /// String-literal opening quote. The string body is not produced
+    /// by logos; the top-level tokeniser detects `"` directly and
+    /// hands off to [`strings_mode::scan`], which emits the full run
+    /// as a sequence of `String` tokens.
+    // ITS pubqlang/12 — string literals: `"`-delimited; see the
+    // mini-spec at the top of the `strings_mode` module for the
+    // multiline convention.
+    #[token("\"")]
+    Quote,
+
+    /// String content or delimiter emitted by the strings-mode
+    /// scanner. Never produced by logos directly.
+    // Local spec: string body structure is defined by the mini-spec
+    // at the top of the `strings_mode` module; see
+    // <https://its.1c.ru/db/pubqlang/content/12/hdoc> for the
+    // upstream `"`-delimited string-literal rule.
+    String,
+
+    /// Date literal: `'YYYYMMDD'` (date only) or `'YYYYMMDDhhmmss'`
+    /// (date + time).
+    // ITS pubqlang/12 — date literals: apostrophe-delimited, 8 or 14
+    // decimal digits for calendar date or date-plus-time.
+    #[regex(r"'[0-9]{8,14}'")]
+    Date,
+
+    /// Identifier: a Unicode letter or underscore followed by any
+    /// number of letters, digits, or underscores. Declared with lower
+    /// priority than keyword variants so reserved words keep their
+    /// specific `Kw*` / `Fn*` kinds.
+    // ITS pubqlang/12 — identifiers: start with a letter or
+    // underscore, continue with letters, digits, or underscores.
+    #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
+    Ident,
+
+    /// Parameter reference `&Name`: a bound query parameter. Matches
+    /// longer than a bare `Ampersand` when an identifier follows the
+    /// `&`, so the longer match wins.
+    // ITS pubqlang/10 — parameters: `&` immediately followed by an
+    // identifier is a named host-bound parameter reference.
+    #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
+    Parameter,
+
+    // ============================================================================
+    // LEGACY (Slices 2–5 pending — not part of the clean-room claim)
+    // ============================================================================
+    //
+    // The variants below are carried over unchanged from the
+    // pre-clean-room implementation. They remain Tier B material for
+    // the duration of the staged migration; each subsequent slice
+    // will re-derive one group from ITS documentation and move it up
+    // into the clean-room section above.
     #[regex(r"(?i)выбрать|(?i)select")]
     KwSelect,
 
@@ -389,104 +613,9 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)полугодие|(?i)halfyear")]
     PeriodHalfYear,
 
-    #[token("=")]
-    Eq,
-
-    #[token("<>")]
-    Neq,
-
-    #[token("<=")]
-    Le,
-
-    #[token("<")]
-    Lt,
-
-    #[token(">=")]
-    Ge,
-
-    #[token(">")]
-    Gt,
-
-    #[token("+")]
-    Plus,
-
-    #[token("-")]
-    Minus,
-
-    #[token("*")]
-    Star,
-
-    #[token("/")]
-    Slash,
-
-    #[token("%")]
-    Percent,
-
-    #[token("(")]
-    LParen,
-
-    #[token(")")]
-    RParen,
-
-    #[token(".")]
-    Dot,
-
-    #[token(",")]
-    Comma,
-
-    #[token(";")]
-    Semicolon,
-
-    #[token("#")]
-    Hash, // For temporary table names (#TempTable)
-
-    #[token("&")]
-    Ampersand, // For query parameters (&Parameter)
-
-    #[token("|")]
-    Bar, // For multiline query strings
-
-    // Numbers: floats must come before integers
-    #[regex(r"[0-9]+\.[0-9]+")]
-    Float,
-
-    #[regex(r"[0-9]+")]
-    Decimal,
-
-    #[token("\"")]
-    Quote,
-
-    String,
-
-    // Date literals: '20240101' or '20240101120000'
-    #[regex(r"'[0-9]{8,14}'")]
-    Date,
-
-    // Identifier: Unicode letters, digits, underscore
-    // Lower priority than keywords
-    #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
-    Ident,
-
-    // Parameter reference: &Name
-    #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
-    Parameter,
-
-    // Line comment: // ...
-    // NOTE: SDBL standard does not define comments, but we support them for:
-    // 1. Robustness when parsing queries extracted from BSL strings that may contain "//" text
-    // 2. Developer convenience when testing queries
-    #[regex(r"//[^\n]*")]
-    Comment,
-
-    // Newline
-    #[token("\n")]
-    Newline,
-
-    // Whitespace (spaces, tabs, carriage returns)
-    #[regex(r"[ \t\r]+")]
-    Whitespace,
-
-    // Error token for unrecognized input
+    /// Logos error fallback for any byte sequence that does not match
+    /// a declared token. Retained unchanged pending the full Slice 1
+    /// → Slice 5 migration.
     Error,
 }
 
