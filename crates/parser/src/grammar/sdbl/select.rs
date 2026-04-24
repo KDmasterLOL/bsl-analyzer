@@ -288,72 +288,58 @@ fn union_clause(p: &mut Parser) {
 // citations (landed with C3). Per-function provenance comments are attached
 // at C2.
 
-/// Parse a single SELECT query
+/// Parse a single SELECT query.
 ///
-/// Grammar:
-/// ```text
-/// query:
-///     SELECT limitations?
-///     columns=selectedFields
-///     (INTO temporaryTableName)?
-///     (FROM dataSources)?
-///     (WHERE logicalExpression)?
-///     (GROUP BY groupByItem)?
-///     (HAVING logicalExpression)?
-///     (FOR UPDATE forUpdate)?
-///     (INDEX BY indexingItem*)?
-/// ```
+/// Grammar: `query := SELECT limitations? selected-fields into-clause?
+/// query-body-clauses`.
 ///
-/// Phase 1: SELECT fields FROM sources WHERE condition
-/// Phase 2: Add GROUP BY, HAVING, INTO, FOR UPDATE, INDEX BY
+/// This wrapper owns the SELECT prefix (keyword, limitations dispatch, field
+/// list, INTO). Remaining clauses (FROM / JOIN / WHERE / GROUP / HAVING /
+/// FOR UPDATE / INDEX BY / ORDER BY) are delegated to `query_body_clauses`
+/// under the LEGACY banner — rewrite deferred to Slices 8 / 9 / 11.
 fn query(p: &mut Parser) {
+    // ITS pubqlang/10 — SELECT header: SELECT keyword, optional limitations,
+    // selected fields, optional INTO; remainder delegated to
+    // query_body_clauses (Tier B — Slices 8 / 9 / 11 pending).
     let m = p.start();
 
-    // SELECT/ВЫБРАТЬ keyword (mandatory)
     if !eat_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") {
-        p.error(); // Expected SELECT/ВЫБРАТЬ
+        p.error();
         m.complete(p, NodeKind::SdblQuery);
         return;
     }
 
     p.skip_trivia();
-
-    // Parse limitations (DISTINCT, TOP, ALLOWED) if present
     if is_limitation_keyword(p) {
         limitations(p);
         p.skip_trivia();
     }
 
-    // Selected fields (mandatory)
     selected_fields(p);
 
-    // INTO clause for temporary tables
     p.skip_trivia();
     if at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ") {
         into_clause(p);
     }
 
-    // Remaining clauses (FROM → ORDER BY) — Tier B, see `query_body_clauses`
-    // under the LEGACY banner. Rewrite deferred to Slices 8 / 9 / 11.
     query_body_clauses(p);
 
     m.complete(p, NodeKind::SdblQuery);
 }
 
-/// Parse selected fields list
+/// Parse selected fields list.
 ///
-/// Grammar: `selectedFields: fields+=selectedField (COMMA fields+=selectedField)*`
+/// Grammar: `selected-fields := selected-field (',' selected-field)*`.
 ///
-/// Error recovery: Uses parse_delimited_list to handle:
-/// - Incomplete fields (e.g., "SELECT Table.| FROM ...")
-/// - Empty fields (e.g., "SELECT a, , b")
-/// - Invalid tokens between commas
-///
-/// Recovery stops at clause keywords (FROM, WHERE, etc.) to allow rest of query to parse.
+/// Delegates to the Tier B event-parser helper `parse_delimited_list` with
+/// `LIST_RECOVERY` so incomplete / empty / unrecognised list elements produce
+/// recoverable error nodes rather than abort the surrounding parse (IDE
+/// recovery contract). The helper is Slice 10 project prior art.
 pub(super) fn selected_fields(p: &mut Parser) {
+    // ITS pubqlang/10 — selected field list: selectedField (COMMA selectedField)*;
+    // uses event-parser parse_delimited_list with LIST_RECOVERY.
     let m = p.start();
 
-    // Parse fields (comma-separated) with error recovery
     super::expressions::parse_delimited_list(
         p,
         TokenKind::Comma,
@@ -365,97 +351,81 @@ pub(super) fn selected_fields(p: &mut Parser) {
     m.complete(p, NodeKind::SdblFieldList);
 }
 
-/// Parse a single selected field
+/// Parse a single selected field.
 ///
-/// Grammar: `selectedField: (asteriskField | columnField | expressionField | ...) alias?`
+/// Grammar: `selected-field := asterisk-field | expression alias?`.
 ///
-/// CRITICAL for AssignAliasFieldsInQuery diagnostic:
-/// - Must distinguish asterisk fields (no alias needed)
-/// - Must capture alias with/without AS keyword
-///
-/// ERROR RECOVERY: After parsing expression, if there are unexpected tokens before
-/// comma/clause keyword (e.g., unsupported SDBL constructs like CASE in arithmetic),
-/// consume them into ERROR node and continue parsing next field.
+/// Alias detection is guarded against clause keywords (FROM, WHERE, ...) so
+/// that a bare-identifier after an expression is only consumed as an implicit
+/// alias when the identifier is not the start of the next clause. After
+/// expression parsing, if the next token is neither an alias start, a list
+/// delimiter, nor the end of a clause, `recover_field_to_alias_or_delimiter`
+/// (local Tier B recovery helper) consumes the unexpected span into an ERROR
+/// node so the rest of the field list can still parse.
 fn selected_field(p: &mut Parser) {
+    // ITS pubqlang/10 — selected field: asteriskField | expression alias?;
+    // recover_field_to_alias_or_delimiter is local event-parser recovery glue
+    // (see attestation §Preserved pre-refactor behaviours).
     let m = p.start();
 
-    // Check for asterisk field (* or Table.*)
     if is_asterisk_start(p) {
         asterisk_field(p);
     } else {
-        // Parse expression (column reference, function call, etc.)
         expressions::expression(p);
-
-        // ERROR RECOVERY: After expression, check if we're in a clean state
-        // If we see unexpected tokens (not alias, not comma, not clause keyword),
-        // it means expression parsing stopped early (unsupported construct)
-        // Example: "name + ВЫБОР...КОНЕЦ КАК alias" - after "name", parser stops,
-        // we need to consume "+ ВЫБОР...КОНЕЦ" as ERROR
         p.skip_trivia();
 
-        // Check if we're in expected position (alias or end of field)
         let at_expected_position = at_sdbl_keyword(p, "AS", "КАК")
             || (is_identifier_token(p) && !is_clause_keyword(p))
             || p.at(TokenKind::Comma)
-            || p.at(TokenKind::Semicolon) // End of query
+            || p.at(TokenKind::Semicolon)
             || is_clause_keyword(p)
             || p.at_end();
 
         if !at_expected_position {
-            // Unexpected tokens after expression - consume them as ERROR
-            // This handles: CASE expressions, type operators, unknown constructs, etc.
             recover_field_to_alias_or_delimiter(p);
             p.skip_trivia();
         }
     }
 
-    // Optional alias
-    // Parse alias if we see AS keyword OR an identifier
-    // (identifier could be implicit alias or explicit with AS)
-    p.skip_trivia(); // CRITICAL: Skip trivia before checking for alias
-    if at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p) {
-        // Lookahead to avoid consuming keywords that start next clause
-        if !is_clause_keyword(p) {
-            selected_field_alias(p);
-        }
+    p.skip_trivia();
+    if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
+        selected_field_alias(p);
     }
 
     m.complete(p, NodeKind::SdblSelectedField);
 }
 
-/// Check if current token can start a selected field.
+/// Predicate: can the current token start a selected field?
 ///
-/// Used for error recovery in SELECT field list parsing.
-///
-/// # Returns
-///
-/// `true` if current token can start a field:
-/// - Expression start tokens (see is_expression_start)
-/// - `*` - asterisk field
-///
-/// `false` otherwise (including clause keywords)
+/// Returns `true` for asterisk-start tokens (`*`, `Ident . *`) or any
+/// expression-start token. Used by `parse_delimited_list` to tell apart a
+/// missing-element recovery from a clause boundary.
 fn is_field_start(p: &Parser) -> bool {
-    // Asterisk field (*, Table.*)
+    // local: event-parser predicate for field-list head detection; returns
+    // true for asterisk-start or expression-start tokens.
     if is_asterisk_start(p) {
         return true;
     }
-
-    // Expression (column, function, literal, etc.)
     super::expressions::is_expression_start(p)
 }
 
-/// Check if current position starts an asterisk field
+/// Predicate: can the current token start an asterisk field?
 ///
-/// Asterisk field patterns:
-/// - `*` - all fields
-/// - `Table.*` - all fields from table
+/// Returns `true` for a literal `*` or a single-segment `Ident . *` prefix.
+/// Multi-segment qualified asterisks (`Catalog.Products.*`) and
+/// temp-table-prefixed asterisks (`#Temp.*`) are NOT recognised here; they
+/// either arrive through expression parsing or fall through to the field
+/// recovery path. See the Slice 7 attestation §Preserved pre-refactor
+/// behaviours.
 fn is_asterisk_start(p: &Parser) -> bool {
-    // Case 1: Just asterisk
+    // ITS pubqlang/10 — asterisk field start detection: literal * or Ident
+    // followed by Dot Asterisk. Multi-segment and #Temp. prefixes are not
+    // detected here and rely on expression-parsing entry (see attestation
+    // §Preserved pre-refactor behaviours).
     if p.at(TokenKind::Star) {
         return true;
     }
 
-    // Case 2: Table.* pattern (requires lookahead)
     if p.at(TokenKind::Ident) {
         if let Some(TokenKind::Dot) = p.nth(1) {
             if let Some(TokenKind::Star) = p.nth(2) {
@@ -467,24 +437,29 @@ fn is_asterisk_start(p: &Parser) -> bool {
     false
 }
 
-/// Parse an asterisk field
+/// Parse an asterisk field.
 ///
-/// Grammar: `asteriskField: (tableName=identifier DOT)* MUL`
+/// Grammar: `asterisk-field := (identifier '.')* '*'`.
+///
+/// Entry is gated by `is_asterisk_start`, which only recognises the
+/// zero-prefix (`*`) and single-prefix (`Ident . *`) forms. Once inside, the
+/// loop consumes any number of `Ident .` pairs before the mandatory `*` so
+/// multi-segment prefixes still parse correctly if another path reaches
+/// this function.
 fn asterisk_field(p: &mut Parser) {
+    // ITS pubqlang/10 — asterisk field: * | Ident . * at the predicate level;
+    // once inside, consumes arbitrary prefix segments before the trailing .*.
     let m = p.start();
 
-    // Optional table name prefix (Table.*)
-    // Handle multiple dots (MDO.Table.*)
     while p.at(TokenKind::Ident) {
         if let Some(TokenKind::Dot) = p.nth(1) {
-            p.bump(); // Ident
-            p.bump(); // Dot
+            p.bump();
+            p.bump();
         } else {
             break;
         }
     }
 
-    // Asterisk (mandatory)
     p.expect(TokenKind::Star);
 
     m.complete(p, NodeKind::SdblAsteriskField);
@@ -492,55 +467,58 @@ fn asterisk_field(p: &mut Parser) {
 
 /// Parse a field alias (selected-field site).
 ///
-/// Grammar: `alias: AS? name=identifier`
+/// Grammar: `alias := (AS | КАК)? identifier`.
 ///
-/// Split from the former `alias()` helper in Slice 7 C1 (pure refactor): the
-/// pre-split function was called from two slices' surfaces — `selected_field`
-/// (Slice 7) and `data_source`/table-ref (Slice 8). The body is bit-identical
-/// to the pre-C1 `alias()` and to its LEGACY twin `source_alias_legacy`; the
-/// split lets Slice 7 clean-room this helper without silently re-authoring
-/// Slice 8 source-alias parsing. See `docs/legal/sdbl-clean-room-slice7.md`
-/// §Preserved pre-refactor behaviours (landed with C3).
+/// The AS / КАК keyword is optional; a bare identifier after an expression
+/// is a valid implicit alias — accepted structurally so the IDE can observe
+/// it, with diagnostic enforcement (e.g. `AssignAliasFieldsInQuery`) layered
+/// on top of the lossless tree. If the keyword is present but the identifier
+/// is missing (`КАК ИЗ …`), an empty ERROR sub-node stands in for the alias
+/// name and the outer parse continues.
 ///
-/// CRITICAL for AssignAliasFieldsInQuery diagnostic:
-/// - AS keyword is optional in grammar but diagnostic requires it
-/// - Must track whether AS keyword is present
+/// Split from the former `alias()` helper in C1 (pure refactor). The LEGACY
+/// twin `source_alias_legacy` stays under the LEGACY banner until Slice 8
+/// clean-rooms source-alias parsing — see the Slice 7 attestation
+/// §Preserved pre-refactor behaviours.
 fn selected_field_alias(p: &mut Parser) {
+    // ITS pubqlang/10 — alias: (AS | КАК)? identifier; bare-identifier alias
+    // preserved as IDE-recovery behaviour per attestation §Preserved
+    // pre-refactor behaviours. Dual-use alias() was split in C1 —
+    // source-alias rewrite deferred to Slice 8.
     let m = p.start();
 
-    // Optional AS keyword
     eat_sdbl_keyword(p, "AS", "КАК");
-
     p.skip_trivia();
 
-    // ERROR RECOVERY: Check if next token is clause keyword (FROM, WHERE, etc.)
-    // This prevents "КАК\nИЗ" from consuming ИЗ as alias name
     if is_clause_keyword(p) {
-        // Incomplete AS without alias - create empty ERROR node
         let err = p.start();
         err.complete(p, NodeKind::Error);
         m.complete(p, NodeKind::SdblAlias);
         return;
     }
 
-    // Identifier (mandatory)
-    if !p.expect(TokenKind::Ident) {
-        // Error recovery: complete anyway
-    }
+    let _ = p.expect(TokenKind::Ident);
 
     m.complete(p, NodeKind::SdblAlias);
 }
 
-/// Parse INTO clause for temporary tables
+/// Parse INTO clause for a temporary table destination.
 ///
-/// Grammar: `INTO|ПОМЕСТИТЬ tempTableName`
+/// Grammar: `into-clause := (INTO | ПОМЕСТИТЬ) identifier`.
+///
+/// The identifier names the temporary table receiving the query result and
+/// is wrapped in a dedicated `SdblTempTableName` node so downstream
+/// (sdbl-hir) can resolve it against the temporary-table scope. A missing
+/// identifier produces a recoverable parse error — the IDE still observes
+/// the INTO keyword.
 fn into_clause(p: &mut Parser) {
+    // ITS pubqlang/10 + /51 h47 — (INTO | ПОМЕСТИТЬ) identifier;
+    // identifier-recovery path is local-preserved per attestation.
     let m = p.start();
 
     eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
     p.skip_trivia();
 
-    // Parse temporary table name
     if p.at(TokenKind::Ident) {
         let table_m = p.start();
         p.bump();
