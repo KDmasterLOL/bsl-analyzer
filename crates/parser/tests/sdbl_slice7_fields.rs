@@ -1,0 +1,374 @@
+//! SDBL Slice 7 — SELECT prefix (field list, aliases, INTO) acceptance tests.
+//!
+//! These tests are authored against the 1C ITS query-language documentation
+//! listed below and the project's own mini-spec, not against the pre-refactor
+//! parser output:
+//!
+//! - <https://its.1c.ru/db/pubqlang/content/10/hdoc> — query-language
+//!   structure: selected field list, asterisk field, alias grammar, INTO
+//!   destination.
+//! - <https://its.1c.ru/db/pubqlang/content/12/hdoc> — lexical elements:
+//!   bilingual SELECT / ВЫБРАТЬ, INTO / ПОМЕСТИТЬ, AS / КАК, FROM / ИЗ
+//!   vocabulary.
+//! - <https://its.1c.ru/db/pubqlang/content/51/hdoc/h47> — temporary-table
+//!   lifecycle: INTO names a temporary table by a single identifier.
+//!
+//! See `docs/legal/sdbl-clean-room-slice7.md` for the clean-room attestation
+//! (§Preserved pre-refactor behaviours is cited from tests where the
+//! behaviour is narrower than a strict ITS reading would produce).
+
+use parser::parse_sdbl;
+
+fn tree(input: &str) -> String {
+    let parse = parse_sdbl(input);
+    format!("{:#?}", parse.syntax_node())
+}
+
+fn count_nodes(tree: &str, kind: &str) -> usize {
+    // Match node names followed by the `@start..end` range marker so the
+    // prefix-sharing kinds (SDBL_QUERY vs SDBL_QUERY_PACKAGE vs
+    // SDBL_SELECT_QUERY vs SDBL_SUBQUERY vs SDBL_DROP_QUERY) do not
+    // contaminate each other's counts.
+    let needle = format!("{kind}@");
+    tree.matches(&needle).count()
+}
+
+fn parse_clean(input: &str) {
+    let parse = parse_sdbl(input);
+    assert!(
+        !parse.has_errors(),
+        "Expected clean parse for {input:?}, got errors: {:?}",
+        parse.errors()
+    );
+}
+
+// =============================================================================
+// Selected field list — ITS pubqlang/10 (selectedFields)
+// =============================================================================
+
+#[test]
+fn test_single_field() {
+    // ITS pubqlang/10 — a selected-field list of one field is the minimal
+    // well-formed SELECT prefix.
+    parse_clean("SELECT Name FROM T");
+    let t = tree("SELECT Name FROM T");
+    assert_eq!(count_nodes(&t, "SDBL_SELECTED_FIELD"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_FIELD_LIST"), 1);
+}
+
+#[test]
+fn test_two_fields() {
+    // ITS pubqlang/10 — selectedField COMMA selectedField.
+    parse_clean("SELECT Name, Code FROM Products");
+    let t = tree("SELECT Name, Code FROM Products");
+    assert_eq!(count_nodes(&t, "SDBL_SELECTED_FIELD"), 2);
+}
+
+#[test]
+fn test_four_fields() {
+    // ITS pubqlang/10 — the selectedField list repeats via COMMA.
+    parse_clean("SELECT A, B, C, D FROM T");
+    let t = tree("SELECT A, B, C, D FROM T");
+    assert_eq!(count_nodes(&t, "SDBL_SELECTED_FIELD"), 4);
+}
+
+#[test]
+fn test_trailing_comma_recoverable() {
+    // Parser tolerance (§Preserved pre-refactor behaviours item 4): a
+    // trailing comma followed by a clause keyword must not abort the
+    // parse — the FROM clause must still be reached.
+    let t = tree("SELECT Name, FROM Products");
+    assert!(
+        t.contains("SDBL_FROM_CLAUSE"),
+        "FROM clause must parse after trailing comma. Tree: {}",
+        t
+    );
+}
+
+// =============================================================================
+// Asterisk field — ITS pubqlang/10 (asteriskField)
+// =============================================================================
+
+#[test]
+fn test_bare_asterisk() {
+    // ITS pubqlang/10 — `*` names all fields of the enclosing scope.
+    parse_clean("SELECT * FROM T");
+    let t = tree("SELECT * FROM T");
+    assert_eq!(count_nodes(&t, "SDBL_ASTERISK_FIELD"), 1);
+}
+
+#[test]
+fn test_qualified_asterisk_english() {
+    // ITS pubqlang/10 — `Ident . *` names all fields of the named table.
+    parse_clean("SELECT Products.* FROM Products");
+    let t = tree("SELECT Products.* FROM Products");
+    assert_eq!(count_nodes(&t, "SDBL_ASTERISK_FIELD"), 1);
+}
+
+#[test]
+fn test_qualified_asterisk_russian() {
+    // ITS pubqlang/12 — identifiers accept Cyrillic characters, and
+    // Slice 2 keyword lookup is bilingual. A Russian-named table with
+    // `.*` is the same production as its English counterpart.
+    parse_clean("ВЫБРАТЬ Товары.* ИЗ Товары");
+    let t = tree("ВЫБРАТЬ Товары.* ИЗ Товары");
+    assert_eq!(count_nodes(&t, "SDBL_ASTERISK_FIELD"), 1);
+}
+
+#[test]
+fn test_multi_segment_asterisk_not_detected_by_predicate() {
+    // §Preserved pre-refactor behaviours item 3: the `is_asterisk_start`
+    // predicate looks exactly one `Ident Dot Star` ahead; it does not see
+    // a multi-segment `Ident Dot Ident Dot Star` prefix. A multi-segment
+    // qualified asterisk therefore does not produce an
+    // SDBL_ASTERISK_FIELD node via the predicate entry path.
+    let t = tree("SELECT Catalog.Products.* FROM Products");
+    assert_eq!(
+        count_nodes(&t, "SDBL_ASTERISK_FIELD"),
+        0,
+        "Multi-segment Catalog.Products.* must not enter via is_asterisk_start. Tree: {}",
+        t
+    );
+}
+
+#[test]
+fn test_temp_table_asterisk_not_parsed_as_asterisk_field() {
+    // §Preserved pre-refactor behaviours item 3: `#Temp.*` is not detected
+    // by `is_asterisk_start` because the lookahead matches only
+    // `Ident Dot Star`, not `Hash Ident Dot Star`; `Hash` is also not in
+    // `is_expression_start`, so the field list cannot start on this input.
+    let t = tree("SELECT #Temp.* FROM #Temp");
+    assert_eq!(
+        count_nodes(&t, "SDBL_ASTERISK_FIELD"),
+        0,
+        "Temp-table-prefixed #Temp.* must not be detected as an asterisk field. Tree: {}",
+        t
+    );
+}
+
+#[test]
+fn test_asterisk_with_regular_field() {
+    // ITS pubqlang/10 — a selected-field list may mix asterisk fields and
+    // ordinary expression fields.
+    parse_clean("SELECT T.*, Name FROM T");
+    let t = tree("SELECT T.*, Name FROM T");
+    assert_eq!(count_nodes(&t, "SDBL_ASTERISK_FIELD"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_SELECTED_FIELD"), 2);
+}
+
+// =============================================================================
+// Alias — ITS pubqlang/10 (alias)
+// =============================================================================
+
+#[test]
+fn test_alias_with_as() {
+    // ITS pubqlang/10 — alias: (AS | КАК)? identifier. Explicit English AS.
+    parse_clean("SELECT Name AS ProductName FROM T");
+    let t = tree("SELECT Name AS ProductName FROM T");
+    assert_eq!(count_nodes(&t, "SDBL_ALIAS"), 1);
+}
+
+#[test]
+fn test_alias_with_kak() {
+    // ITS pubqlang/12 — Russian КАК is equivalent to English AS.
+    parse_clean("ВЫБРАТЬ Имя КАК Имя2 ИЗ Товары");
+    let t = tree("ВЫБРАТЬ Имя КАК Имя2 ИЗ Товары");
+    assert_eq!(count_nodes(&t, "SDBL_ALIAS"), 1);
+}
+
+#[test]
+fn test_alias_bare_identifier() {
+    // ITS pubqlang/10 §Alias + mini-spec §Alias — the AS / КАК keyword is
+    // structurally optional; a bare identifier after an expression is
+    // accepted as an implicit alias. Strict-syntax semantics layer on top
+    // of this via AssignAliasFieldsInQuery.
+    parse_clean("SELECT Name ProductName FROM T");
+    let t = tree("SELECT Name ProductName FROM T");
+    assert_eq!(count_nodes(&t, "SDBL_ALIAS"), 1);
+}
+
+#[test]
+fn test_alias_case_insensitive_as() {
+    // ITS pubqlang/12 §Case-insensitive keywords — the AS keyword is
+    // recognised regardless of case.
+    parse_clean("SELECT Name as Alias1 FROM T");
+    parse_clean("SELECT Name As Alias2 FROM T");
+    parse_clean("SELECT Name AS Alias3 FROM T");
+}
+
+#[test]
+fn test_alias_clause_keyword_guard() {
+    // Parser tolerance: in `SELECT x FROM T`, the bare `FROM` keyword must
+    // not be captured as the implicit alias of `x`. The
+    // `is_clause_keyword` guard in the alias-dispatch path of
+    // `selected_field` prevents this capture.
+    let t = tree("SELECT x FROM T");
+    assert!(t.contains("SDBL_FROM_CLAUSE"), "FROM clause must parse. Tree: {}", t);
+    assert_eq!(
+        count_nodes(&t, "SDBL_ALIAS"),
+        0,
+        "Clause keyword FROM must not be captured as alias. Tree: {}",
+        t
+    );
+}
+
+#[test]
+fn test_alias_as_without_name_recoverable() {
+    // ITS pubqlang/10 + mini-spec §Alias — if AS / КАК is present but the
+    // alias name is missing (next token is a clause keyword), the parser
+    // emits an empty ERROR sub-node inside SDBL_ALIAS and continues so
+    // the rest of the query still parses.
+    let t = tree("SELECT x AS FROM T");
+    assert!(t.contains("SDBL_ALIAS"), "Alias node expected. Tree: {}", t);
+    assert!(t.contains("ERROR"), "Empty alias name expected as ERROR. Tree: {}", t);
+    assert!(t.contains("SDBL_FROM_CLAUSE"), "FROM must still parse. Tree: {}", t);
+}
+
+#[test]
+fn test_multi_field_mixed_aliases() {
+    // ITS pubqlang/10 — each selected field carries its own optional alias;
+    // mixing AS and bare-identifier forms across fields must parse cleanly.
+    parse_clean("SELECT Name AS N, Code C FROM Products");
+    let t = tree("SELECT Name AS N, Code C FROM Products");
+    assert_eq!(count_nodes(&t, "SDBL_SELECTED_FIELD"), 2);
+    assert_eq!(count_nodes(&t, "SDBL_ALIAS"), 2);
+}
+
+// =============================================================================
+// INTO clause — ITS pubqlang/10 + pubqlang/51 h47
+// =============================================================================
+
+#[test]
+fn test_into_english_simple() {
+    // ITS pubqlang/10 + /51 h47 — INTO identifier names a temporary-table
+    // destination; the identifier is wrapped in SDBL_TEMP_TABLE_NAME.
+    parse_clean("SELECT Name INTO TempNames FROM T");
+    let t = tree("SELECT Name INTO TempNames FROM T");
+    assert_eq!(count_nodes(&t, "SDBL_INTO_CLAUSE"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_TEMP_TABLE_NAME"), 1);
+}
+
+#[test]
+fn test_into_russian_pomestit() {
+    // ITS pubqlang/12 — ПОМЕСТИТЬ is the Russian INTO keyword. The
+    // SDBL_TEMP_TABLE_NAME wrapper is identical to the English form.
+    parse_clean("ВЫБРАТЬ Имя ПОМЕСТИТЬ ВремТаблица ИЗ Товары");
+    let t = tree("ВЫБРАТЬ Имя ПОМЕСТИТЬ ВремТаблица ИЗ Товары");
+    assert_eq!(count_nodes(&t, "SDBL_INTO_CLAUSE"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_TEMP_TABLE_NAME"), 1);
+}
+
+#[test]
+fn test_into_before_from_ordering() {
+    // ITS pubqlang/10 — INTO appears after the field list and before FROM.
+    // Both clauses must parse and INTO must precede FROM in the tree.
+    parse_clean("SELECT Name INTO TempNames FROM Products");
+    let t = tree("SELECT Name INTO TempNames FROM Products");
+    let into_pos = t.find("SDBL_INTO_CLAUSE").expect("INTO must parse");
+    let from_pos = t.find("SDBL_FROM_CLAUSE").expect("FROM must parse");
+    assert!(into_pos < from_pos, "INTO must appear before FROM in the tree. Tree: {}", t);
+}
+
+#[test]
+fn test_into_semicolon_recoverable() {
+    // §Preserved pre-refactor behaviours item 5: INTO followed by a
+    // semicolon (no identifier) emits a bare parser error. The
+    // SDBL_INTO_CLAUSE node still exists but carries no
+    // SDBL_TEMP_TABLE_NAME child. The error-recovery path consumes the
+    // semicolon into an ERROR sub-node — documented as preserved
+    // behaviour; a tighter recovery (keep the semicolon as a package
+    // boundary) is deferred to Slice 12.
+    let t = tree("SELECT Name INTO ;");
+    assert!(t.contains("SDBL_INTO_CLAUSE"), "INTO clause still emitted. Tree: {}", t);
+    assert_eq!(
+        count_nodes(&t, "SDBL_TEMP_TABLE_NAME"),
+        0,
+        "Missing-identifier path must not emit SDBL_TEMP_TABLE_NAME. Tree: {}",
+        t
+    );
+}
+
+// =============================================================================
+// Query wrapper — ITS pubqlang/10 (query)
+// =============================================================================
+
+#[test]
+fn test_query_wrapper_minimal_shape() {
+    // ITS pubqlang/10 — a single query is wrapped in SdblQuery with at
+    // least one SdblSelectedField inside SdblFieldList. `SELECT 1` is the
+    // minimal content (the expression layer decodes `1` to a numeric
+    // literal — that decoding is Slice 10 Tier B and is not asserted here).
+    parse_clean("SELECT 1");
+    let t = tree("SELECT 1");
+    assert_eq!(count_nodes(&t, "SDBL_QUERY"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_FIELD_LIST"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_SELECTED_FIELD"), 1);
+}
+
+#[test]
+fn test_query_missing_select_keyword_recoverable() {
+    // Parser tolerance — an input that does not start with SELECT / ВЫБРАТЬ
+    // must still produce an SDBL_QUERY node with an ERROR marker so the
+    // IDE can show the incomplete state. `p.error()` in `query()` creates
+    // the ERROR marker in the tree (it does not populate
+    // `parse.errors()` — that list is reserved for the lexer / list-level
+    // path).
+    let t = tree("FROM Products");
+    assert_eq!(
+        count_nodes(&t, "SDBL_QUERY"),
+        1,
+        "SDBL_QUERY must exist even without SELECT keyword. Tree: {}",
+        t
+    );
+    assert!(t.contains("ERROR"), "Missing SELECT must produce an ERROR marker. Tree: {}", t);
+}
+
+// =============================================================================
+// NodeKind preservation — AssignAliasFieldsInQuery HIR gate
+// =============================================================================
+
+#[test]
+fn test_nodekind_identity_selected_field_with_alias() {
+    // §Preserved pre-refactor behaviours item 6: the
+    // AssignAliasFieldsInQuery diagnostic consumes the HIR diagnostic
+    // AliasWithoutAsKeyword emitted from sdbl-hir/src/lower/diagnostics.rs,
+    // which walks the AST via sdbl-hir/src/lower/select_fields.rs. NodeKind
+    // identity for SdblSelectedField + SdblAlias is the load-bearing
+    // invariant for that gate; Slice 7 must emit the same node kinds for
+    // both explicit `AS` and bare-identifier alias forms.
+    let with_as = tree("SELECT Name AS N FROM T");
+    let without_as = tree("SELECT Name N FROM T");
+    for t in [&with_as, &without_as] {
+        assert_eq!(count_nodes(t, "SDBL_SELECTED_FIELD"), 1, "Tree: {}", t);
+        assert_eq!(count_nodes(t, "SDBL_ALIAS"), 1, "Tree: {}", t);
+    }
+}
+
+// =============================================================================
+// Bilingual integration — ITS pubqlang/12
+// =============================================================================
+
+#[test]
+fn test_bilingual_full_prefix() {
+    // ITS pubqlang/12 — each Slice 7 keyword has a Russian and an English
+    // spelling. A query using ВЫБРАТЬ, КАК, ПОМЕСТИТЬ, ИЗ exercises the
+    // full bilingual keyword vocabulary of the Slice 7 surface.
+    parse_clean("ВЫБРАТЬ Имя КАК Наименование ПОМЕСТИТЬ ВремТаблица ИЗ Товары");
+    let t = tree("ВЫБРАТЬ Имя КАК Наименование ПОМЕСТИТЬ ВремТаблица ИЗ Товары");
+    assert_eq!(count_nodes(&t, "SDBL_SELECTED_FIELD"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_ALIAS"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_INTO_CLAUSE"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_FROM_CLAUSE"), 1);
+}
+
+#[test]
+fn test_into_drop_package_integration() {
+    // ITS pubqlang/10 + /51 h47 — a query package can alternate SELECT ...
+    // INTO (creating a temp table) with DROP / УНИЧТОЖИТЬ (terminating it).
+    // Slice 7 INTO must coexist with the Slice 6 DROP statement without
+    // package-boundary regressions.
+    parse_clean("SELECT Name INTO TmpTable FROM T; DROP TmpTable");
+    let t = tree("SELECT Name INTO TmpTable FROM T; DROP TmpTable");
+    assert_eq!(count_nodes(&t, "SDBL_INTO_CLAUSE"), 1);
+    assert_eq!(count_nodes(&t, "SDBL_DROP_QUERY"), 1);
+}

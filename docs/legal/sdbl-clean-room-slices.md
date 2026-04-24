@@ -261,6 +261,11 @@ Rebuild the top-level SDBL parse shape with minimum grammar content.
 
 ## Slice 7: SELECT field list, aliases, and INTO
 
+**Status: complete (2026-04-25).** See
+[`sdbl-clean-room-slice7.md`](sdbl-clean-room-slice7.md) for the full
+attestation. Commit trail: C0 `062d0a72`, C1 `2e091d85`, C2
+`a22d98a7`, C3 landed with the attestation.
+
 ### Goal
 
 Rebuild the smallest useful `SELECT` body.
@@ -274,8 +279,17 @@ Rebuild the smallest useful `SELECT` body.
 
 ### Files
 
-- `crates/parser/src/grammar/sdbl/select.rs`
-- tests that power `AssignAliasFieldsInQuery`
+- `crates/parser/src/grammar/sdbl.rs` (module-level `## Provenance`
+  docstring Slice 7 addition)
+- `crates/parser/src/grammar/sdbl/select.rs` (the `CLEAN-ROOM Slice 7`
+  section — `query` wrapper, `selected_fields`, `selected_field`,
+  `is_field_start`, `is_asterisk_start`, `asterisk_field`,
+  `selected_field_alias`, `into_clause`; plus the C1-born LEGACY
+  helpers `query_body_clauses` and `source_alias_legacy`)
+- `crates/parser/tests/sdbl_parser_tests.rs` (C0 Bucket-A additions:
+  `test_russian_table_asterisk`, `test_russian_into_simple`)
+- `crates/parser/tests/sdbl_slice7_fields.rs`
+- `docs/legal/sdbl-clean-room-slice7.md`
 
 ## Slice 8: FROM sources and source chains
 
