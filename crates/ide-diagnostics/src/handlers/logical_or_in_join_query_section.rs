@@ -105,12 +105,8 @@ mod tests {
 //Итоговое количество срабатываний - 8."#;
         let diagnostics = check_sdbl_diagnostic(code, check);
 
-        // Expect exactly 8 diagnostics matching reference implementation
-        assert_eq!(
-            diagnostics.len(),
-            8,
-            "Expected 8 diagnostics matching reference implementation"
-        );
+        // Expect exactly 8 diagnostics.
+        assert_eq!(diagnostics.len(), 8, "Expected 8 diagnostics");
 
         // Verify all are on correct code
         for diag in &diagnostics {

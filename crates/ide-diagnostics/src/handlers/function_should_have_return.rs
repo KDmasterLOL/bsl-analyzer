@@ -145,7 +145,7 @@ EndFunction"#;
     }
 
     /// Tests fixture cases.
-    /// reference test: assertThat(diagnostics).hasSize(1); hasRange(0, 8, 0, 26);
+    /// Asserts: one FunctionShouldHaveReturn diagnostic with range (line 0, cols 8..=26).
     #[test]
     fn test_fixture_only_function_without_return_triggers() {
         // Mirrors FunctionShouldHaveReturnDiagnostic.bsl:
@@ -179,12 +179,7 @@ EndFunction"#;
             .collect();
 
         // Only ФункцияБезВозврата triggers — hasRange(0, 8, 0, 26)
-        assert_eq!(
-            return_diags.len(),
-            1,
-            "reference test expects 1 diagnostic, got {}",
-            return_diags.len()
-        );
+        assert_eq!(return_diags.len(), 1, "Expected 1 diagnostic, got {}", return_diags.len());
 
         assert_diagnostic_range(code, return_diags[0], 0, 8, 26);
     }

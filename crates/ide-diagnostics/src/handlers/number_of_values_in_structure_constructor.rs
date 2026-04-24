@@ -255,11 +255,7 @@ Result = New FixedStructure("Goods, Property, Count", Goods, Property, 5);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(
-            diagnostics.len(),
-            4,
-            "Should find exactly 4 diagnostics (matching reference implementation)"
-        );
+        assert_eq!(diagnostics.len(), 4, "Should find exactly 4 diagnostics");
 
         // Verify exact positions (uses 0-indexed lines)
         assert_diagnostic_range(code, &diagnostics[0], 18, 12, 119);

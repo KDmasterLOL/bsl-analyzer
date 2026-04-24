@@ -237,11 +237,7 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
     А = Новый ФиксированнаяСтруктура(Новый Структура("Источник, Данные"));"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(
-            diagnostics.len(),
-            8,
-            "Should find exactly 8 diagnostics (matching reference implementation)"
-        );
+        assert_eq!(diagnostics.len(), 8, "Should find exactly 8 diagnostics");
 
         // Verify exact positions (uses 0-indexed lines)
         assert_diagnostic_range_multiline(code, &diagnostics[0], 10, 16, 12, 36);

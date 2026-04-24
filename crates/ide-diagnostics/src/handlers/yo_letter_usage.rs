@@ -83,7 +83,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics");
 
-        // Reference test positions:
+        // Expected diagnostic positions:
         assert_diagnostic_range(code, &diagnostics[0], 0, 6, 11);
         assert_diagnostic_range(code, &diagnostics[1], 2, 10, 20);
         assert_diagnostic_range(code, &diagnostics[2], 2, 21, 25);

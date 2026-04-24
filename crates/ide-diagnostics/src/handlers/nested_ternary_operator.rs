@@ -161,11 +161,7 @@ mod tests {
 КонецЕсли;"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(
-            diagnostics.len(),
-            4,
-            "Should find exactly 4 diagnostics (matching reference implementation)"
-        );
+        assert_eq!(diagnostics.len(), 4, "Should find exactly 4 diagnostics");
 
         assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 13, 8, 14);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 13, 5, 13, 50);

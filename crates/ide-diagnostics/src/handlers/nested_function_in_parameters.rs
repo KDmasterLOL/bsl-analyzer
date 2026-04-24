@@ -767,10 +767,10 @@ mod tests {
         let diagnostics = check_ast_diagnostic(FIXTURE, check);
 
         // With default config (allowOneliner=true), should find 3 diagnostics
-        // Matching reference test: lines 1, 3, 51 (0-indexed)
+        // Expected diagnostics at lines 1, 3, 51 (0-indexed)
         assert_eq!(diagnostics.len(), 3, "Should find exactly 3 diagnostics with default config");
 
-        // Verify exact positions matching reference implementation
+        // Verify exact diagnostic positions
         // Line 1 (0-indexed), columns 22-30: Вставить
         assert_diagnostic_range(FIXTURE, &diagnostics[0], 1, 22, 30);
         // Line 3 (0-indexed), columns 11-19: Картинка

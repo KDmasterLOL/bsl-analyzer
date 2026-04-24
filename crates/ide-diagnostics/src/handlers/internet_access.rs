@@ -218,7 +218,7 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // 13 internet access detections (matching reference test: hasSize(13))
+        // Expected 13 internet-access detections
         assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics");
 
         // assert_diagnostic_range uses 0-indexed lines

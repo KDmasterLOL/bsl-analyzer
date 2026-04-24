@@ -986,7 +986,7 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // Check that we detect the key cases from reference test
+        // Check that all key unused-variable cases are detected
         let messages: Vec<&str> = unused_diags.iter().map(|d| d.message.as_str()).collect();
 
         // These should be detected :
@@ -1019,7 +1019,7 @@ mod tests {
         // Duplicate module variable declarations are skipped (handled in SymbolTreeBuilder.add_variable).
         assert_eq!(unused_diags.len(), 5, "Should detect 5 unused variables ");
 
-        // Verify exact positions (matching reference test)
+        // Verify exact diagnostic positions
         // Sort diagnostics by line number for consistent comparison
         use crate::test_utils::{assert_diagnostic_range, range_to_line_col};
         let mut sorted_diags = unused_diags.clone();
