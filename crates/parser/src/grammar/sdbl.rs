@@ -21,7 +21,7 @@
 //! each function body. See `docs/legal/sdbl-clean-room-slice6.md` for the
 //! attestation (landed with C3).
 //!
-//! Slice 7 — clean-room (in progress, landed with C3): `query` wrapper,
+//! Slice 7 — clean-room (complete, landed with C3): `query` wrapper,
 //! `selected_fields`, `selected_field`, `is_field_start`, `is_asterisk_start`,
 //! `asterisk_field`, `selected_field_alias`, `into_clause` (all in submodule
 //! `select`) cover the SELECT prefix: field list, aliases, and INTO /

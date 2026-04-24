@@ -69,8 +69,13 @@ listed here only for completeness.
   to Slices 8 (FROM / `data_source`), 9 (JOIN via `data_source`), and
   11 (WHERE / GROUP / HAVING / FOR UPDATE / INDEX BY / ORDER BY).
 - `source_alias_legacy` — born in C1 as the LEGACY twin of the split
-  `alias()` helper. Its body is bit-identical to `selected_field_alias`
-  but its call sites sit inside `data_source` (Slice 8 scope: both the
+  `alias()` helper. Its body was bit-identical to `selected_field_alias`
+  at C1; after the C2 clean-room polish on the Slice 7 side (a minor
+  `let _ = p.expect(TokenKind::Ident)` tightening that discarded an
+  empty `if !p.expect(...) {}` recovery block), the two helpers are
+  no longer textually identical but remain behaviorally equivalent —
+  `source_alias_legacy` preserves the pre-C1 shape as scope discipline.
+  Its call sites sit inside `data_source` (Slice 8 scope: both the
   subquery-source and table-ref alias positions). Clean-room rewrite
   deferred to Slice 8; whether Slice 8 re-merges the two helpers back
   into a unified `alias()` is a Slice 8 decision, not a Slice 7 one.
@@ -218,11 +223,15 @@ preserved bit-for-bit in Slice 7:
    identity is preserved for the `AssignAliasFieldsInQuery` diagnostic
    gate. Both accept the `(AS | КАК)? identifier` form, including the
    bare-identifier implicit-alias form and the `AS` / `КАК` without an
-   identifier recovery path (empty `Error` sub-node). The bodies are
-   bit-identical in C1 and stay structurally identical after C2 on the
-   Slice 7 side; the Slice 8 side (`source_alias_legacy`) remains
-   pre-refactor Tier B. Whether Slice 8 re-merges the two helpers back
-   into a unified clean-room `alias()` is a Slice 8 decision.
+   identifier recovery path (empty `Error` sub-node). The bodies were
+   bit-identical in C1. After the C2 clean-room polish on the Slice 7
+   side (`let _ = p.expect(TokenKind::Ident)` replacing an empty
+   `if !p.expect(...) {}` recovery block in `selected_field_alias`),
+   the two helpers are no longer textually identical but remain
+   behaviorally equivalent; the Slice 8 side (`source_alias_legacy`)
+   preserves the pre-C1 shape as scope discipline. Whether Slice 8
+   re-merges the two helpers back into a unified clean-room `alias()`
+   is a Slice 8 decision.
 
 3. **`asterisk_field` accepts `*` and single-segment `Ident.*` via
    `is_asterisk_start`; multi-segment `Catalog.Products.*` and
@@ -252,15 +261,18 @@ preserved bit-for-bit in Slice 7:
    local-preserved; its clean-room rewrite is deferred to Slice 12
    (recovery and IDE allowances) or earlier as needed.
 
-5. **`into_clause` missing-identifier recovery emits a bare parser
-   error (no Error sub-node).** When the identifier after `INTO` /
-   `ПОМЕСТИТЬ` is missing, `into_clause` calls `p.error()` without
-   wrapping the position in an explicit `Error` node — the resulting
-   `SdblIntoClause` carries only the keyword token. This matches the
-   pre-C1 parser and the mini-spec's "missing name should produce a
-   recoverable parse error" phrasing; whether to tighten this to an
-   `Error` sub-node similar to the `DROP` / `УНИЧТОЖИТЬ` path in
-   Slice 6 is deferred to Slice 12.
+5. **`into_clause` missing-identifier recovery emits an ERROR
+   sub-node that consumes one token.** When the identifier after
+   `INTO` / `ПОМЕСТИТЬ` is missing, `into_clause` calls `p.error()`.
+   The project-level `Parser::error` implementation creates an ERROR
+   marker that bumps the current token, so a following `;`, keyword,
+   or arbitrary token is absorbed into an ERROR sub-node inside
+   `SdblIntoClause`. The clause still carries no
+   `SdblTempTableName` child, which is the load-bearing invariant for
+   sdbl-hir's temp-table resolution. This matches the pre-C1 parser;
+   a tighter recovery (e.g. treating `;` as an outer package boundary
+   while emitting an empty ERROR marker at the missing-ident site)
+   is deferred to Slice 12.
 
 6. **`AssignAliasFieldsInQuery` diagnostic gate runs via the HIR path,
    not via direct AST walk.** The diagnostic at

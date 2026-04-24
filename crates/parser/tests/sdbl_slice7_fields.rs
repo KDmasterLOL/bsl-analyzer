@@ -272,12 +272,12 @@ fn test_into_before_from_ordering() {
 #[test]
 fn test_into_semicolon_recoverable() {
     // §Preserved pre-refactor behaviours item 5: INTO followed by a
-    // semicolon (no identifier) emits a bare parser error. The
+    // semicolon (no identifier) calls `p.error()`, which creates an
+    // ERROR marker that consumes the next token (the semicolon). The
     // SDBL_INTO_CLAUSE node still exists but carries no
-    // SDBL_TEMP_TABLE_NAME child. The error-recovery path consumes the
-    // semicolon into an ERROR sub-node — documented as preserved
-    // behaviour; a tighter recovery (keep the semicolon as a package
-    // boundary) is deferred to Slice 12.
+    // SDBL_TEMP_TABLE_NAME child — the load-bearing invariant for
+    // sdbl-hir temp-table resolution. A tighter recovery that keeps
+    // the semicolon as a package boundary is deferred to Slice 12.
     let t = tree("SELECT Name INTO ;");
     assert!(t.contains("SDBL_INTO_CLAUSE"), "INTO clause still emitted. Tree: {}", t);
     assert_eq!(
@@ -286,6 +286,7 @@ fn test_into_semicolon_recoverable() {
         "Missing-identifier path must not emit SDBL_TEMP_TABLE_NAME. Tree: {}",
         t
     );
+    assert!(t.contains("ERROR@"), "Missing-identifier path must emit an ERROR marker. Tree: {}", t);
 }
 
 // =============================================================================
