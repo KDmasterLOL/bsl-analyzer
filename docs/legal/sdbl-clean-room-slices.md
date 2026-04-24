@@ -68,6 +68,11 @@ Stabilize the acceptance surface before rewriting lexer/parser internals.
 
 ## Slice 1: lexer core, without vocabulary-heavy domains
 
+**Status: complete (2026-04-24).** See
+[`sdbl-clean-room-slice1.md`](sdbl-clean-room-slice1.md) for the full
+attestation. Commit trail: C0 `f4a3c9ce`, C1 `49aa192c`, C2
+`ac4cbad2`, C3 landed with the attestation.
+
 ### Goal
 
 Replace the most generic lexer mechanics first.
@@ -85,12 +90,19 @@ Replace the most generic lexer mechanics first.
 
 ### Files
 
-- `crates/lexer/src/sdbl.rs`
-- dedicated lexer tests
+- `crates/lexer/src/sdbl/mod.rs` (the CLEAN-ROOM section of the
+  `SdblTokenKind` enum)
+- `crates/lexer/src/sdbl/strings_mode.rs`
+- `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`
+- `crates/lexer/tests/sdbl_golden_corpus.rs`
+- `crates/lexer/tests/sdbl_slice1_core.rs`
 
 ### Notes
 
-This slice should intentionally exclude the large vocabulary-heavy sets such as:
+This slice intentionally excludes the large vocabulary-heavy sets —
+they remain under the `LEGACY (Slices 2–5 pending)` banner inside the
+same `SdblTokenKind` enum and stay Tier B material until their own
+slice PRs:
 
 - metadata object kinds
 - virtual tables
