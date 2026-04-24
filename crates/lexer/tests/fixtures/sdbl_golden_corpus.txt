@@ -1,0 +1,100 @@
+---- 001 empty input
+---- 002 whitespace only
+   	 
+---- 003 newline only
+
+---- 004 line comment
+// comment line
+---- 005 ascii select with dot path
+SELECT Name FROM Catalog.Products
+---- 006 cyrillic select with dot path
+ВЫБРАТЬ Наименование ИЗ Справочник.Товары
+---- 007 mixed case keywords
+Select A From Document.Line
+---- 008 integer and float literals
+SELECT 42, 3.14
+---- 009 comparison operators
+WHERE A = B OR C <> D OR E <= F OR G >= H OR I < J OR K > L
+---- 010 arithmetic operators
+A + B - C * D / E % F
+---- 011 punctuation and parens
+(A, B; C.D)
+---- 012 simple string
+"Hello World"
+---- 013 string with doubled-quote escape
+"A""B"
+---- 014 multiline string with bar
+"line1
+| line2"
+---- 015 unterminated string at eof
+"no end
+---- 016 date 8-digit
+'20240101'
+---- 017 date 14-digit
+'20240101120000'
+---- 018 parameter ascii
+&StartDate
+---- 019 parameter cyrillic
+&Имя
+---- 020 temp-table marker with identifier
+INTO #TempTable
+---- 021 hash standalone
+SELECT # FROM T
+---- 022 ampersand bare
+&
+---- 023 bar standalone
+|
+---- 024 identifier leading underscore and digits
+_priv_1
+---- 025 LEFT JOIN with ON russian
+ЛЕВОЕ СОЕДИНЕНИЕ T ПО A = B
+---- 026 INNER RIGHT FULL OUTER JOIN keywords
+INNER RIGHT FULL OUTER JOIN
+---- 027 GROUP BY HAVING
+GROUP BY Cat HAVING COUNT(*) > 5
+---- 028 ORDER BY ASC DESC HIERARCHY
+ORDER BY Name ASC, Price DESC HIERARCHY
+---- 029 UNION ALL subqueries
+SELECT 1 UNION ALL SELECT 2
+---- 030 DISTINCT TOP literal
+SELECT DISTINCT TOP 100 Name
+---- 031 BETWEEN AND predicate
+WHERE P BETWEEN 1 AND 10
+---- 032 LIKE ESCAPE predicate
+WHERE N LIKE "%X%" ESCAPE "!"
+---- 033 IS NULL predicate
+WHERE X IS NULL
+---- 034 CASE WHEN THEN ELSE END
+CASE WHEN X > 0 THEN 1 ELSE 0 END
+---- 035 CAST AS NUMBER
+CAST(P AS NUMBER(15, 2))
+---- 036 REFS predicate
+WHERE R REFS Catalog.Products
+---- 037 IN predicate with parameter
+WHERE C IN (&List)
+---- 038 INTO temp and DROP russian
+SELECT 1 ПОМЕСТИТЬ #T; УНИЧТОЖИТЬ #T
+---- 039 FOR UPDATE INDEX BY ONLY ALLOWED OVERALL
+FOR UPDATE INDEX BY T.F ONLY ALLOWED OVERALL
+---- 040 TOTALS AUTOORDER PERIODS russian
+ИТОГИ СУММА(X) ПО ОБЩИЕ АВТОУПОРЯДОЧИВАНИЕ ПЕРИОДЫ(ДЕНЬ, ДАТАВРЕМЯ(2024, 1, 1), &End)
+---- 041 aggregate functions
+SUM(A) AVG(B) MIN(C) MAX(D) COUNT(*)
+---- 042 date functions
+YEAR(D) QUARTER(D) MONTH(D) WEEK(D) DAY(D) HOUR(D) MINUTE(D) SECOND(D) WEEKDAY(D) DAYOFYEAR(D)
+---- 043 date arithmetic functions
+DATEADD(D, YEAR, 1) DATEDIFF(D1, D2, DAY) BEGINOFPERIOD(D, QUARTER) ENDOFPERIOD(D, MONTH)
+---- 044 string functions
+SUBSTRING(S, 1, 10) STRINGLENGTH(S) STRFIND(S, "x") UPPER(S) LOWER(S) TRIMALL(S) TRIML(S) TRIMR(S)
+---- 045 math functions
+ROUND(X) INT(X) LOG(X) LOG10(X) POW(X, 2) SQRT(X)
+---- 046 type and null functions
+VALUETYPE(X) PRESENTATION(X) REFPRESENTATION(X) ISNULL(X, 0) EMPTYTABLE EMPTYREF UUID
+---- 047 metadata objects dot paths
+Catalog.C Document.D InformationRegister.I AccumulationRegister.A AccountingRegister.R CalculationRegister.CR ChartOfAccounts.COA ChartOfCalculationTypes.CCT ChartOfCharacteristicTypes.CCH Enum.E BusinessProcess.BP Task.T Constant.K Sequence.S ExternalDataSource.X
+---- 048 virtual tables
+AccumulationRegister.Stock.Balance AccumulationRegister.Stock.Turnovers AccumulationRegister.Stock.BalanceAndTurnovers InformationRegister.Prices.SliceLast InformationRegister.Prices.SliceFirst AccountingRegister.Main.DrCrTurnovers
+---- 049 type literals and bool and null literals
+TYPE(Boolean) TYPE(Number) TYPE(String) TYPE(Date) TRUE FALSE ИСТИНА ЛОЖЬ NULL Неопределено VALUE(Enum.Status.Done)
+---- 050 logical operators and period types
+A AND B OR NOT C; ДЕКАДА ПОЛУГОДИЕ
