@@ -5,6 +5,9 @@
 //! SDBL is the SQL-like query language embedded within BSL code as string literals.
 //! It's used to query the 1C platform's metadata-based database structure.
 //!
+
+mod strings_mode;
+
 use logos::Logos;
 use smol_str::SmolStr;
 
@@ -516,7 +519,7 @@ pub fn tokenize_sdbl(input: &str) -> Vec<SdblToken> {
         let remaining = &input[pos..];
 
         if remaining.starts_with('"') {
-            let strings = tokenize_strings_mode(input, pos);
+            let strings = strings_mode::scan(input, pos);
             result.extend(strings.tokens);
             pos = strings.end_pos;
         } else {
@@ -537,87 +540,6 @@ pub fn tokenize_sdbl(input: &str) -> Vec<SdblToken> {
     }
 
     result
-}
-
-struct StringsResult {
-    tokens: Vec<SdblToken>,
-    end_pos: usize,
-}
-
-fn tokenize_strings_mode(input: &str, start_pos: usize) -> StringsResult {
-    let mut tokens = Vec::new();
-    let mut pos = start_pos;
-    let bytes = input.as_bytes();
-
-    if pos >= bytes.len() || bytes[pos] != b'"' {
-        return StringsResult { tokens, end_pos: pos };
-    }
-
-    let opening_quote_pos = pos;
-    tokens.push(SdblToken {
-        kind: SdblTokenKind::String,
-        text: SmolStr::new(&input[opening_quote_pos..opening_quote_pos + 1]),
-        offset: opening_quote_pos,
-    });
-    pos += 1;
-
-    loop {
-        let content_start = pos;
-
-        while pos < bytes.len() && bytes[pos] != b'"' && bytes[pos] != b'\n' && bytes[pos] != b'\r'
-        {
-            pos += 1;
-        }
-
-        if pos >= bytes.len() {
-            if content_start < pos {
-                let text = SmolStr::new(&input[content_start..pos]);
-                tokens.push(SdblToken { kind: SdblTokenKind::String, text, offset: content_start });
-            }
-            break;
-        }
-
-        if bytes[pos] == b'"' {
-            if pos + 1 < bytes.len() && bytes[pos + 1] == b'"' {
-                pos += 2;
-                continue;
-            } else {
-                if content_start < pos {
-                    let text = SmolStr::new(&input[content_start..pos]);
-                    tokens.push(SdblToken {
-                        kind: SdblTokenKind::String,
-                        text,
-                        offset: content_start,
-                    });
-                }
-                tokens.push(SdblToken {
-                    kind: SdblTokenKind::String,
-                    text: SmolStr::new(&input[pos..pos + 1]),
-                    offset: pos,
-                });
-                pos += 1;
-                break;
-            }
-        }
-
-        if bytes[pos] == b'\n' || bytes[pos] == b'\r' {
-            if content_start < pos {
-                let text = SmolStr::new(&input[content_start..pos]);
-                tokens.push(SdblToken { kind: SdblTokenKind::String, text, offset: content_start });
-            }
-
-            while pos < bytes.len()
-                && (bytes[pos] == b'\n'
-                    || bytes[pos] == b'\r'
-                    || bytes[pos] == b' '
-                    || bytes[pos] == b'\t')
-            {
-                pos += 1;
-            }
-        }
-    }
-
-    StringsResult { tokens, end_pos: pos }
 }
 
 #[cfg(test)]
