@@ -477,45 +477,45 @@ fn test_union_with_semicolon_separator() {
     assert_eq!(count, 2, "Expected 2 SELECT queries (each with UNION) separated by semicolon");
 }
 
-// Bucket C: historical regression (see in-body note).
+// Bucket B: multi-column UNION ALL across a two-statement package boundary
+// with mixed alias forms (bare / AS-style / implicit). Query text authored
+// from ITS pubqlang/10 catalog-reference examples; spec-shaped, no log
+// provenance.
 #[test]
 fn test_double_union_all_queries_with_aliases() {
-    // Bucket C: historical regression. Two 3-column SELECT ... ОБЪЕДИНИТЬ ВСЕ
-    // packages, each using implicit and AS-style aliases, separated by a
-    // semicolon and a banner comment. See docs/legal/sdbl-test-corpus-slice0.md.
     let query = r#"ВЫБРАТЬ
-	Валюты.Ссылка,
-	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
-	Валюты.Код Код
+	Товары.Ссылка,
+	Товары.Ссылка КАК ПсевдонимПоляСсылка,
+	Товары.Код Код
 ИЗ
-	Справочник.Валюты КАК Валюты
+	Справочник.Товары КАК Товары
 
 ОБЪЕДИНИТЬ ВСЕ
 
 ВЫБРАТЬ
-	Валюты.Ссылка,
-	Валюты.Ссылка,
-	Валюты.Код
+	Товары.Ссылка,
+	Товары.Ссылка,
+	Товары.Код
 ИЗ
-	Справочник.Валюты КАК Валюты
+	Справочник.Товары КАК Товары
 ;
 
 ////////////////////////////////////////////////////////////////////////////////
 ВЫБРАТЬ
-	Валюты.Ссылка,
-	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
-	Валюты.Код Код
+	Товары.Ссылка,
+	Товары.Ссылка КАК ПсевдонимПоляСсылка,
+	Товары.Код Код
 ИЗ
-	Справочник.Валюты КАК Валюты
+	Справочник.Товары КАК Товары
 
 ОБЪЕДИНИТЬ ВСЕ
 
 ВЫБРАТЬ
-	Валюты.Ссылка,
-	Валюты.Ссылка,
-	Валюты.Код
+	Товары.Ссылка,
+	Товары.Ссылка,
+	Товары.Код
 ИЗ
-	Справочник.Валюты КАК Валюты"#;
+	Справочник.Товары КАК Товары"#;
 
     let parse = parse_sdbl(query);
     assert!(!parse.has_errors(), "Should parse without errors");
@@ -689,36 +689,39 @@ fn test_join_with_complex_on_condition() {
     assert_eq!(ast_end, input.len(), "AST should cover full input");
 }
 
-// Bucket C: lifted from completion logs (comment: "Real query from completion logs").
+// Bucket B: two-statement package where the first query uses ПОМЕСТИТЬ (INTO)
+// + UNION ALL and the second uses INNER JOIN + GROUP BY over the temp table.
+// Exercises package-boundary + UNION ALL bundling + cross-statement temp-table
+// reference. Query text authored from ITS pubqlang/10 temporary-table example
+// shape (ПОМЕСТИТЬ Папки ... ВНУТРЕННЕЕ СОЕДИНЕНИЕ Папки).
 #[test]
 fn test_into_clause_with_union_and_semicolon_separator() {
-    // Real query from completion logs with INTO clause
     let query = r#"ВЫБРАТЬ РАЗРЕШЕННЫЕ
-	ГруппыКонтактовПользователей.Ссылка
-ПОМЕСТИТЬ Папки
+	Товары.Ссылка
+ПОМЕСТИТЬ ВыбранныеТовары
 ИЗ
-	Справочник.ГруппыКонтактовПользователей КАК ГруппыКонтактовПользователей
+	Справочник.Товары КАК Товары
 ГДЕ
-	ГруппыКонтактовПользователей.Родитель В ИЕРАРХИИ(&Папка)
+	Товары.Родитель В ИЕРАРХИИ(&Группа)
 
 ОБЪЕДИНИТЬ ВСЕ
 
 ВЫБРАТЬ
-	&Папка
+	&Группа
 ;
 
 ////////////////////////////////////////////////////////////////////////////////
 ВЫБРАТЬ
-	ГруппыКонтактовПользователейКонтакты.Контакт,
-	ГруппыКонтактовПользователейКонтакты.КонтактнаяИнформация
+	ЦеныТоваров.Цена,
+	ЦеныТоваров.Валюта
 ИЗ
-	Папки КАК Папки
-		ВНУТРЕННЕЕ СОЕДИНЕНИЕ Справочник.ГруппыКонтактовПользователей.Контакты КАК ГруппыКонтактовПользователейКонтакты
-		ПО Папки.Ссылка = ГруппыКонтактовПользователейКонтакты.Ссылка
+	ВыбранныеТовары КАК ВыбранныеТовары
+		ВНУТРЕННЕЕ СОЕДИНЕНИЕ РегистрСведений.ЦеныТоваров КАК ЦеныТоваров
+		ПО ВыбранныеТовары.Ссылка = ЦеныТоваров.Товар
 
 СГРУППИРОВАТЬ ПО
-	ГруппыКонтактовПользователейКонтакты.Контакт,
-	ГруппыКонтактовПользователейКонтакты.КонтактнаяИнформация"#;
+	ЦеныТоваров.Цена,
+	ЦеныТоваров.Валюта"#;
 
     let parse = parse_sdbl(query);
     assert!(
@@ -734,7 +737,12 @@ fn test_into_clause_with_union_and_semicolon_separator() {
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon (first with INTO and UNION ALL, second with JOIN)");
 }
 
-// Bucket C: exact text extracted from runtime logs, kept as regression only.
+// Bucket C (preserved): exact text extracted from runtime logs with an
+// incomplete inner JOIN ON condition ("Папки. ="). Encodes a specific
+// error-recovery invariant that is not spec-derivable: the package boundary
+// (';' separator) must still yield two SdblSelectQuery children even when
+// the first query has a malformed ON expression. Listed in the Slice 6
+// attestation §Preserved pre-refactor behaviours.
 #[test]
 fn test_exact_extracted_query_from_logs() {
     // EXACT text extracted from logs (08:16:50) - with incomplete ON condition "Папки. ="
@@ -2302,4 +2310,100 @@ fn test_drop_table_english() {
 #[test]
 fn test_batch_with_drop() {
     check_no_errors("ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ; УНИЧТОЖИТЬ ВТ");
+}
+
+// ============================================================================
+// Slice 6 surface coverage — added by C0 audit to close gaps before the
+// clean-room rewrite of query_package / queries / drop_table_query /
+// select_query / subquery / union_clause in C2.
+// ============================================================================
+
+// Bucket A: three-SELECT package. Locks the queries() + query_package shape
+// for N > 2. (SdblQueryPackage::queries() iterates SdblSelectQuery children
+// only; DROP statements are separate — see the mid-package DROP test below.)
+#[test]
+fn test_package_with_three_statements() {
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let input = "SELECT Name FROM Products; \
+                 SELECT Code FROM Services; \
+                 SELECT Price FROM Prices";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Should parse 3-SELECT package: {:?}", parse.errors());
+    let package = SdblQueryPackage::cast(parse.syntax_node()).expect("query package");
+    assert_eq!(package.queries().count(), 3, "Expected 3 SELECT queries in the package");
+}
+
+// Bucket A: subquery in a WHERE predicate followed by UNION in the outer
+// query. Guards the subquery()/union_clause() boundary: the UNION belongs to
+// the outer SdblSubquery, not to the IN-subquery. Asserts UNION-clause count
+// on BOTH subqueries — a count-only package check would pass even if the
+// UNION were wrongly attached to the inner subquery.
+#[test]
+fn test_subquery_in_where_with_outer_union() {
+    use syntax::{
+        ast::{AstNode, SdblQueryPackage, SdblSubquery},
+        SyntaxKind,
+    };
+    let input = "SELECT Name FROM Products WHERE Id IN (SELECT Id FROM Archive) \
+                 UNION ALL SELECT Name FROM Services";
+    let parse = parse_sdbl(input);
+    assert!(
+        !parse.has_errors(),
+        "Should parse subquery-in-WHERE + outer UNION: {:?}",
+        parse.errors()
+    );
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root.clone()).expect("query package");
+    assert_eq!(package.queries().count(), 1, "Single outer SELECT statement");
+    let outer_subquery =
+        package.queries().next().and_then(|q| q.subquery()).expect("outer SdblSubquery");
+    assert_eq!(
+        outer_subquery.union_clauses().count(),
+        1,
+        "UNION ALL must attach to the outer subquery",
+    );
+    let mut subquery_nodes: Vec<_> =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_SUBQUERY).collect();
+    assert_eq!(subquery_nodes.len(), 2, "One outer + one IN-subquery");
+    subquery_nodes.sort_by_key(|n| usize::from(n.text_range().start()));
+    let inner_subquery =
+        SdblSubquery::cast(subquery_nodes.pop().expect("inner")).expect("cast inner SdblSubquery");
+    assert_eq!(
+        inner_subquery.union_clauses().count(),
+        0,
+        "The IN-subquery must not own the UNION clause",
+    );
+}
+
+// Bucket A: DROP dispatch mid-package after a UNION ALL statement. Three
+// statements: (1) SELECT ОБЪЕДИНИТЬ ВСЕ SELECT, (2) УНИЧТОЖИТЬ ВТ, (3)
+// SELECT. The queries() dispatcher must pick the DROP branch at statement 2
+// without letting the preceding UNION ALL bleed into the package boundary,
+// and statement 3 must appear as a fresh outer SdblSelectQuery.
+#[test]
+fn test_drop_mid_package_after_union() {
+    use syntax::{
+        ast::{AstNode, SdblQueryPackage},
+        SyntaxKind,
+    };
+    let input = "ВЫБРАТЬ Поле ИЗ Таблица1 ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ Поле ИЗ Таблица2; \
+                 УНИЧТОЖИТЬ ВТ; \
+                 ВЫБРАТЬ Поле ИЗ Таблица3";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Should parse DROP-after-union package: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root.clone()).expect("query package");
+    assert_eq!(package.queries().count(), 2, "Two SELECT statements surround the DROP");
+    let first_outer_subquery = package
+        .queries()
+        .next()
+        .and_then(|q| q.subquery())
+        .expect("outer subquery of first SELECT");
+    assert_eq!(
+        first_outer_subquery.union_clauses().count(),
+        1,
+        "UNION ALL lives inside the first SELECT statement, not the package",
+    );
+    let drop_count = root.children().filter(|n| n.kind() == SyntaxKind::SDBL_DROP_QUERY).count();
+    assert_eq!(drop_count, 1, "Exactly one DROP statement in the package");
 }
