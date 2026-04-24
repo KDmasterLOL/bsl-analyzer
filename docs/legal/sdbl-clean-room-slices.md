@@ -111,6 +111,11 @@ slice PRs:
 
 ## Slice 2: structural keyword vocabulary
 
+**Status: complete (2026-04-24).** See
+[`sdbl-clean-room-slice2.md`](sdbl-clean-room-slice2.md) for the full
+attestation. Commit trail: C0 `3da0f41d`, C1 `bc8fd550`, C2
+`ea0e34d2`, C3 landed with the attestation.
+
 ### Goal
 
 Rebuild only the core clause keywords from official SDBL syntax.
@@ -132,16 +137,38 @@ Rebuild only the core clause keywords from official SDBL syntax.
 - join family
 - CASE family
 - basic predicate keywords
+- logical operators (`AND` / `OR` / `NOT`)
+- boolean and `NULL` literals
 
 ### Files
 
-- `crates/lexer/src/sdbl.rs`
-- parser-facing token mapping/tests
+- `crates/lexer/src/sdbl/mod.rs` (the `CLEAN-ROOM Slice 2` section
+  of the `SdblTokenKind` enum)
+- `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`
+- `crates/lexer/tests/sdbl_golden_corpus.rs`
+- `crates/lexer/tests/sdbl_slice2_keywords.rs`
+- `docs/legal/sdbl-clean-room-slice2.md`
 
 ### Notes
 
-Prefer a small declarative vocabulary table over a large interleaved token wall.
-That will make provenance review and future updates much easier.
+The Slice 2 block is organised into five labeled sub-sections
+(clause starters, join family, aliasing & predicates, CASE family,
+logical operators & literals) with a top-of-block convenience index
+mapping every variant to its ITS section. The `#[regex]` attributes
+remain the single source of truth; the index is an authorship
+scanning aid, not a separate vocabulary table (that would create a
+drift hazard since logos requires regex at the variant declaration
+site). A true tabular vocabulary map lives in
+[`sdbl-clean-room-slice2.md`](sdbl-clean-room-slice2.md) §Scope.
+
+Sibling-module extraction (a dedicated `keywords.rs`) is reserved
+for Slices 3–4 where the vocabularies (metadata objects, function
+names) are genuinely catalog-shaped and may outgrow `mod.rs`.
+
+`KwOnOrBy` bundles the `ON` / `BY` / `ПО` keywords into a single
+token kind — preserved pre-refactor behaviour. The split will
+happen naturally in Slice 9 (joins) and/or Slice 11 (clauses after
+FROM) where converter edits are in scope.
 
 ## Slice 3: metadata object and type vocabulary
 
