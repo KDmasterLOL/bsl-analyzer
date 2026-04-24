@@ -29,14 +29,35 @@
 //! local mini-spec at `docs/legal/sdbl-select-mini-spec.md`, and the
 //! project's own event-parser conventions from Slices 1, 2, and 6. The
 //! former `alias` helper was call-site-split in C1: `selected_field_alias`
-//! (Slice 7 target) and `source_alias_legacy` (LEGACY, Slice 8 target) —
-//! see `docs/legal/sdbl-clean-room-slice7.md` for the attestation.
+//! (Slice 7 target) and `source_alias_legacy` (LEGACY twin, Slice 8 target;
+//! renamed to `source_alias` in Slice 8 C1) — see
+//! `docs/legal/sdbl-clean-room-slice7.md` for the attestation.
 //!
-//! Slices 8–11 pending: FROM-source chains (`from_clause`, `data_source`,
-//! `table_ref`, `source_alias_legacy`), JOIN family, WHERE / GROUP / HAVING
-//! / ORDER / TOTALS / FOR UPDATE / INDEX BY clause bodies, and the
-//! `query_body_clauses` dispatch helper remain Tier B until their respective
-//! clean-room slices.
+//! Slice 8 — clean-room (in progress; C1 landed, C2/C3 pending):
+//! `is_data_source_start`, `from_clause`, `data_source`, `table_ref`,
+//! `source_alias` (all in submodule `select`) cover FROM sources and source
+//! chains: table references, subqueries in FROM, parameter sources, and
+//! source aliases. At this C1 commit the five functions sit under the
+//! Slice 8 clean-room banner as pure-refactor placeholders — bodies are
+//! verbatim from pre-C1 code and must NOT be cited as clean-room-attested
+//! until C2 lands the ITS-sourced rewrites and per-function provenance
+//! comments, and C3 lands the attestation at
+//! `docs/legal/sdbl-clean-room-slice8.md`. Source plan: ITS pubqlang/10
+//! and /12 grammar-shape rules, the local mini-spec at
+//! `docs/legal/sdbl-select-mini-spec.md` §FROM clause, and the project's
+//! own event-parser conventions from Slices 1, 2, 6, and 7. The
+//! virtual-table method-call argument parser was extracted during Slice 8
+//! C1 into LEGACY helper `virtual_table_args_legacy`; its clean-room
+//! rewrite is deferred to Slice 5 (virtual table and external-source
+//! handling).
+//!
+//! Slices 9–11 pending: JOIN family (`is_join_keyword`, `join_clause` —
+//! Slice 9), WHERE / GROUP / HAVING / ORDER / TOTALS / FOR UPDATE /
+//! INDEX BY clause bodies and the clause-body dispatchers
+//! `query_body_clauses` and `select_tail_clauses` (Slice 11) remain Tier B
+//! until their respective clean-room slices. Virtual-table method-call
+//! arguments (`virtual_table_args_legacy`) remain Tier B under the Slice 5
+//! banner.
 
 pub mod expressions;
 pub mod select;
