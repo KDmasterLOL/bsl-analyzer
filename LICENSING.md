@@ -88,8 +88,14 @@ file or crate follows the per-crate SPDX identifier in that crate's
 
 ## External fixtures and third-party content
 
-| Path | Source | License |
+The workspace license does **not** cover the files below. They are
+bundled for build reproducibility and interoperability with the
+1C:Enterprise platform. Downstream redistribution of the final binary
+inherits the obligations of the original sources.
+
+| Path | Source | Status |
 |---|---|---|
 | `crates/parser/tests/fixtures/Module.bsl` | ООО «1С-Софт» | CC BY 4.0 (header preserved in the file) |
+| `crates/bsl-platform/data/platform_data.json` | ООО «1С-Софт» | 1C copyright, see `crates/bsl-platform/data/PROVENANCE.md` — not covered by MIT / Apache-2.0 / LGPL-3.0 |
 
 See `NOTICE` for upstream acknowledgements.
