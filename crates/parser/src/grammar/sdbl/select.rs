@@ -511,14 +511,12 @@ fn into_clause(p: &mut Parser) {
 }
 
 // ============================================================================
-// CLEAN-ROOM Slice 8 — FROM sources and source chains (C3 attestation
-//                     pending)
+// CLEAN-ROOM Slice 8 — FROM sources and source chains
 // ============================================================================
 //
-// Per-function provenance comments are attached below. The Slice 8
-// attestation lands in C3 at `docs/legal/sdbl-clean-room-slice8.md`; until
-// then, treat the per-function provenance citations as the authoritative
-// provenance record.
+// See `docs/legal/sdbl-clean-room-slice8.md` for authorship and source
+// citations (landed with C3). Per-function provenance comments are
+// attached below.
 
 /// Predicate: does the current token open a data-source?
 ///

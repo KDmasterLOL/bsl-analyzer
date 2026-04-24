@@ -33,20 +33,20 @@
 //! renamed to `source_alias` in Slice 8 C1) — see
 //! `docs/legal/sdbl-clean-room-slice7.md` for the attestation.
 //!
-//! Slice 8 — clean-room (C1 + C2 landed; C3 attestation pending):
-//! `is_data_source_start`, `from_clause`, `data_source`, `table_ref`,
-//! `source_alias` (all in submodule `select`) cover FROM sources and source
-//! chains: table references, subqueries in FROM, parameter sources, and
-//! source aliases. Each of the five functions carries a per-function
-//! provenance comment on its body; those per-function citations are the
-//! authoritative C2 provenance record. The full Slice 8 attestation —
-//! including the sources-consulted list, non-consultation statement, and
-//! preserved-pre-refactor-behaviours roster — is authored in C3 at
-//! `docs/legal/sdbl-clean-room-slice8.md` and must not be cited as
-//! current evidence until it lands. The virtual-table method-call
-//! argument parser was extracted during Slice 8 C1 into LEGACY helper
-//! `virtual_table_args_legacy`; its clean-room rewrite is deferred to
-//! Slice 5 (virtual table and external-source handling).
+//! Slice 8 — clean-room (complete, landed with C3): `is_data_source_start`,
+//! `from_clause`, `data_source`, `table_ref`, `source_alias` (all in
+//! submodule `select`) cover FROM sources and source chains: table
+//! references, subqueries in FROM, parameter sources, and source aliases.
+//! Authored from ITS pubqlang/10 and /12 grammar-shape rules, the local
+//! mini-spec at `docs/legal/sdbl-select-mini-spec.md` §FROM clause, and
+//! the project's own event-parser conventions from Slices 1, 2, 6, and 7.
+//! `../bsl-parser/*` grammar text was not consulted during authoring;
+//! per-function provenance comments appear on each function body. The
+//! virtual-table method-call argument parser was extracted during Slice 8
+//! C1 into LEGACY helper `virtual_table_args_legacy`; its clean-room
+//! rewrite is deferred to Slice 5 (virtual table and external-source
+//! handling). See `docs/legal/sdbl-clean-room-slice8.md` for the
+//! attestation.
 //!
 //! Slices 9–11 pending: JOIN family (`is_join_keyword`, `join_clause` —
 //! Slice 9), WHERE / GROUP / HAVING / ORDER / TOTALS / FOR UPDATE /

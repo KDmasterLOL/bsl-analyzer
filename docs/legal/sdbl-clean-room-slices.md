@@ -293,6 +293,11 @@ Rebuild the smallest useful `SELECT` body.
 
 ## Slice 8: FROM sources and source chains
 
+**Status: complete (2026-04-25).** See
+[`sdbl-clean-room-slice8.md`](sdbl-clean-room-slice8.md) for the full
+attestation. Commit trail: C0 `078dd808`, C1 `1be6dd69`, C2
+`85b4005e`, C3 landed with the attestation.
+
 ### Goal
 
 Rebuild source parsing independently from full expression complexity.
@@ -306,7 +311,20 @@ Rebuild source parsing independently from full expression complexity.
 
 ### Files
 
-- `crates/parser/src/grammar/sdbl/select.rs`
+- `crates/parser/src/grammar/sdbl.rs` (module-level `## Provenance`
+  docstring Slice 8 addition)
+- `crates/parser/src/grammar/sdbl/select.rs` (the `CLEAN-ROOM Slice 8`
+  section — `is_data_source_start`, `from_clause`, `data_source`,
+  `table_ref`, `source_alias`; plus the C1-born LEGACY helper
+  `virtual_table_args_legacy` extracted from pre-C1 `table_ref` and
+  deferred to Slice 5)
+- `crates/parser/tests/sdbl_parser_tests.rs` (C0 Bucket-A additions:
+  `test_slice8_from_multi_source_with_bare_alias`,
+  `test_slice8_russian_subquery_source_with_alias`,
+  `test_slice8_temp_table_source_across_package_boundary`,
+  `test_slice8_parameter_source_without_alias`)
+- `crates/parser/tests/sdbl_slice8_sources.rs`
+- `docs/legal/sdbl-clean-room-slice8.md`
 
 ## Slice 9: JOIN family
 
