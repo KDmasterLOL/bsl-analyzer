@@ -39,36 +39,43 @@ fn check_no_errors(input: &str) {
     assert!(!parse.has_errors(), "Expected no errors, but got: {:#?}", parse.errors());
 }
 
+// Bucket A.
 #[test]
 fn test_select_asterisk() {
     check_no_errors("SELECT * FROM Table");
 }
 
+// Bucket A.
 #[test]
 fn test_select_single_column() {
     check_no_errors("SELECT Name FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_select_multiple_columns() {
     check_no_errors("SELECT Name, Code, Description FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_select_with_where() {
     check_no_errors("SELECT Name FROM Products WHERE Active = TRUE");
 }
 
+// Bucket A.
 #[test]
 fn test_select_table_asterisk() {
     check_no_errors("SELECT Products.* FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_select_qualified_column() {
     check_no_errors("SELECT Products.Name FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_alias_with_as_keyword() {
     // This should have AS keyword in the tree
@@ -105,29 +112,34 @@ fn test_alias_with_as_keyword() {
     );
 }
 
+// Bucket A.
 #[test]
 fn test_alias_without_as_keyword() {
     // Implicit alias (no AS keyword) - this is what the diagnostic should catch
     check_no_errors("SELECT Name ProductName FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_multiple_aliases_with_as() {
     check_no_errors("SELECT Name AS ProductName, Code AS ProductCode FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_multiple_aliases_mixed() {
     // Some with AS, some without
     check_no_errors("SELECT Name AS ProductName, Code ProductCode FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_russian_alias_with_kak() {
     // Russian КАК keyword
     check_no_errors("ВЫБРАТЬ Имя КАК ИмяПродукта ИЗ Товары");
 }
 
+// Bucket A.
 #[test]
 fn test_alias_case_insensitive() {
     // AS in various cases
@@ -136,6 +148,7 @@ fn test_alias_case_insensitive() {
     check_no_errors("SELECT Name aS ProductName FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_asterisk_no_alias() {
     // Asterisk shouldn't have alias
@@ -143,46 +156,55 @@ fn test_asterisk_no_alias() {
     check_no_errors("SELECT Products.* FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_union_simple() {
     check_no_errors("SELECT Name FROM Products UNION SELECT Name FROM Services");
 }
 
+// Bucket A.
 #[test]
 fn test_union_all() {
     check_no_errors("SELECT Name FROM Products UNION ALL SELECT Name FROM Services");
 }
 
+// Bucket A.
 #[test]
 fn test_union_multiple() {
     check_no_errors("SELECT A FROM T1 UNION SELECT B FROM T2 UNION SELECT C FROM T3");
 }
 
+// Bucket A.
 #[test]
 fn test_union_with_aliases() {
     check_no_errors("SELECT Name AS N FROM Products UNION SELECT Title AS N FROM Services");
 }
 
+// Bucket A.
 #[test]
 fn test_subquery_in_from() {
     check_no_errors("SELECT * FROM (SELECT Name FROM Products) AS Sub");
 }
 
+// Bucket A.
 #[test]
 fn test_subquery_nested() {
     check_no_errors("SELECT * FROM (SELECT * FROM (SELECT Name FROM Products) AS Inner) AS Outer");
 }
 
+// Bucket A.
 #[test]
 fn test_subquery_with_where() {
     check_no_errors("SELECT * FROM (SELECT Name FROM Products WHERE Active = TRUE) AS Sub");
 }
 
+// Bucket A.
 #[test]
 fn test_subquery_in_expression() {
     check_no_errors("SELECT Name FROM Products WHERE Code IN (SELECT Code FROM Active)");
 }
 
+// Bucket A.
 #[test]
 fn test_arithmetic_expressions() {
     check_no_errors("SELECT Price * Quantity AS Total FROM Orders");
@@ -190,6 +212,7 @@ fn test_arithmetic_expressions() {
     check_no_errors("SELECT Amount - Discount AS Final FROM Sales");
 }
 
+// Bucket A.
 #[test]
 fn test_logical_expressions() {
     check_no_errors("SELECT * FROM Products WHERE Active = TRUE AND Price > 100");
@@ -197,6 +220,7 @@ fn test_logical_expressions() {
     check_no_errors("SELECT * FROM Products WHERE NOT Deleted");
 }
 
+// Bucket A.
 #[test]
 fn test_comparison_expressions() {
     check_no_errors("SELECT * FROM Products WHERE Price > 100");
@@ -204,6 +228,7 @@ fn test_comparison_expressions() {
     check_no_errors("SELECT * FROM Products WHERE Code <> 0");
 }
 
+// Bucket A.
 #[test]
 fn test_function_calls() {
     check_no_errors("SELECT COUNT(*) AS Total FROM Products");
@@ -211,49 +236,58 @@ fn test_function_calls() {
     check_no_errors("SELECT YEAR(Date) AS Year FROM Orders");
 }
 
+// Bucket A.
 #[test]
 fn test_mdo_table_reference() {
     check_no_errors("SELECT Name FROM Catalog.Products");
     check_no_errors("SELECT Ref FROM Document.Sales");
 }
 
+// Bucket A.
 #[test]
 fn test_mdo_qualified_column() {
     check_no_errors("SELECT Catalog.Products.Name FROM Catalog.Products");
 }
 
+// Bucket A.
 #[test]
 fn test_numeric_literals() {
     check_no_errors("SELECT * FROM Products WHERE Price = 100");
     check_no_errors("SELECT * FROM Products WHERE Price = 99.99");
 }
 
+// Bucket A.
 #[test]
 fn test_string_literals() {
     check_no_errors(r#"SELECT * FROM Products WHERE Name = "Product""#);
 }
 
+// Bucket A.
 #[test]
 fn test_boolean_literals() {
     check_no_errors("SELECT * FROM Products WHERE Active = TRUE");
     check_no_errors("SELECT * FROM Products WHERE Deleted = FALSE");
 }
 
+// Bucket A.
 #[test]
 fn test_null_literal() {
     check_no_errors("SELECT * FROM Products WHERE Description = NULL");
 }
 
+// Bucket A.
 #[test]
 fn test_parameter() {
     check_no_errors("SELECT * FROM Products WHERE Code = &ProductCode");
 }
 
+// Bucket A.
 #[test]
 fn test_multiple_parameters() {
     check_no_errors("SELECT * FROM Products WHERE Code = &Code AND Active = &IsActive");
 }
 
+// Bucket A.
 #[test]
 fn test_complex_query_with_all_features() {
     check_no_errors(
@@ -270,16 +304,19 @@ fn test_complex_query_with_all_features() {
     );
 }
 
+// Bucket A.
 #[test]
 fn test_multiple_queries_with_semicolon() {
     check_no_errors("SELECT Name FROM Products; SELECT Code FROM Services");
 }
 
+// Bucket A.
 #[test]
 fn test_multiple_queries_trailing_semicolon() {
     check_no_errors("SELECT Name FROM Products; SELECT Code FROM Services;");
 }
 
+// Bucket A: AST API contract.
 #[test]
 fn test_ast_alias_has_as_keyword() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -301,6 +338,7 @@ fn test_ast_alias_has_as_keyword() {
     assert_eq!(alias.name(), Some("ProductName".to_string()));
 }
 
+// Bucket A: AST API contract.
 #[test]
 fn test_ast_alias_without_as_keyword() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -326,6 +364,7 @@ fn test_ast_alias_without_as_keyword() {
     assert_eq!(alias.name(), Some("ProductName".to_string()));
 }
 
+// Bucket A: AST API contract.
 #[test]
 fn test_ast_asterisk_field() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -346,6 +385,7 @@ fn test_ast_asterisk_field() {
     assert!(field.alias().is_none(), "Asterisk should not have alias");
 }
 
+// Bucket A: AST API contract.
 #[test]
 fn test_ast_union_queries() {
     use syntax::ast::{AstNode, SdblQueryPackage};
@@ -372,6 +412,7 @@ fn test_ast_union_queries() {
     assert_eq!(union_count, 1, "Should have 1 UNION query");
 }
 
+// Bucket B: banner-separator semicolon pattern with historically shaped query text.
 #[test]
 fn test_debug_semicolon_tokens() {
     let query = r#"ВЫБРАТЬ
@@ -396,6 +437,7 @@ fn test_debug_semicolon_tokens() {
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
 }
 
+// Bucket B: banner-separator UNION pattern with historically shaped query text.
 #[test]
 fn test_union_with_semicolon_separator() {
     // Pattern: SELECT … ОБЪЕДИНИТЬ ВСЕ … ; <comment line> SELECT … ОБЪЕДИНИТЬ ВСЕ …
@@ -435,6 +477,7 @@ fn test_union_with_semicolon_separator() {
     assert_eq!(count, 2, "Expected 2 SELECT queries (each with UNION) separated by semicolon");
 }
 
+// Bucket C: historical regression (see in-body note).
 #[test]
 fn test_double_union_all_queries_with_aliases() {
     // Bucket C: historical regression. Two 3-column SELECT ... ОБЪЕДИНИТЬ ВСЕ
@@ -486,6 +529,7 @@ fn test_double_union_all_queries_with_aliases() {
 
 // Tests for FULL OUTER JOIN parsing (fix for keyword consumption bug)
 
+// Bucket A.
 #[test]
 fn test_full_outer_join_simple() {
     let input = "SELECT * FROM T1 FULL OUTER JOIN T2 ON T1.A = T2.A";
@@ -493,6 +537,7 @@ fn test_full_outer_join_simple() {
     assert!(!parse.has_errors(), "Should parse without errors");
 }
 
+// Bucket A.
 #[test]
 fn test_multiple_full_outer_joins() {
     let input =
@@ -501,6 +546,7 @@ fn test_multiple_full_outer_joins() {
     assert!(!parse.has_errors(), "Should parse multiple JOINs");
 }
 
+// Bucket A.
 #[test]
 fn test_on_not_consumed_as_alias() {
     let input = "SELECT * FROM T1 JOIN T2 ON T1.ID = T2.ID";
@@ -510,6 +556,7 @@ fn test_on_not_consumed_as_alias() {
     assert!(text.contains("ON"), "ON keyword should be in AST, not consumed as alias");
 }
 
+// Bucket B: multiline RU join with historically shaped schema names (Товары/ПланПродаж).
 #[test]
 fn test_nested_joins_multiline_russian() {
     let input = "ВЫБРАТЬ Товары.Номенклатура
@@ -525,30 +572,35 @@ fn test_nested_joins_multiline_russian() {
 
 // Tests for multi-argument function calls (bug fix)
 
+// Bucket A.
 #[test]
 fn test_function_with_two_arguments() {
     // Simplest case: two-argument function without alias
     check_no_errors("SELECT ISNULL(A, 0) FROM T");
 }
 
+// Bucket A.
 #[test]
 fn test_function_with_two_arguments_and_alias() {
     // With alias
     check_no_errors("SELECT ISNULL(Amount, 0) AS Total FROM Products");
 }
 
+// Bucket A.
 #[test]
 fn test_russian_function_with_arguments() {
     // Russian version
     check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) ИЗ Товары");
 }
 
+// Bucket A.
 #[test]
 fn test_multiple_fields_with_function_arguments() {
     // Multiple fields, one with multi-arg function
     check_no_errors("SELECT Name, ISNULL(Amount, 0) AS Total FROM Products");
 }
 
+// Bucket B: multiline RU query with historically shaped schema (Товары/ПланПродаж/ФактическиеПродажи).
 #[test]
 fn test_multiple_multi_arg_functions() {
     // Multiple multi-arg functions like the failing diagnostic test
@@ -577,44 +629,52 @@ fn test_multiple_multi_arg_functions() {
 
 // Comprehensive test coverage for multi-argument functions
 
+// Bucket A.
 #[test]
 fn test_single_arg_function() {
     check_no_errors("SELECT SUM(Amount) FROM T");
     check_no_errors("SELECT YEAR(Date) FROM T");
 }
 
+// Bucket A.
 #[test]
 fn test_two_arg_functions() {
     check_no_errors("SELECT ISNULL(A, 0) FROM T");
     check_no_errors("SELECT SUBSTRING(Name, 1, 10) FROM T");
 }
 
+// Bucket A.
 #[test]
 fn test_three_arg_functions() {
     check_no_errors("SELECT SUBSTRING(Text, 1, 5) FROM T");
 }
 
+// Bucket A.
 #[test]
 fn test_multi_arg_with_alias() {
     check_no_errors("SELECT ISNULL(Amount, 0) AS Total FROM T");
 }
 
+// Bucket A.
 #[test]
 fn test_mixed_fields_and_functions() {
     check_no_errors("SELECT Name, ISNULL(Amount, 0), Code FROM T");
 }
 
+// Bucket A.
 #[test]
 fn test_nested_functions() {
     check_no_errors("SELECT ISNULL(SUM(Amount), 0) FROM T");
 }
 
+// Bucket A.
 #[test]
 fn test_russian_multi_arg_functions() {
     check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) ИЗ Товары");
     check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) КАК Итого ИЗ Товары");
 }
 
+// Bucket A.
 #[test]
 fn test_join_with_complex_on_condition() {
     let input =
@@ -629,6 +689,7 @@ fn test_join_with_complex_on_condition() {
     assert_eq!(ast_end, input.len(), "AST should cover full input");
 }
 
+// Bucket C: lifted from completion logs (comment: "Real query from completion logs").
 #[test]
 fn test_into_clause_with_union_and_semicolon_separator() {
     // Real query from completion logs with INTO clause
@@ -673,6 +734,7 @@ fn test_into_clause_with_union_and_semicolon_separator() {
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon (first with INTO and UNION ALL, second with JOIN)");
 }
 
+// Bucket C: exact text extracted from runtime logs, kept as regression only.
 #[test]
 fn test_exact_extracted_query_from_logs() {
     // EXACT text extracted from logs (08:16:50) - with incomplete ON condition "Папки. ="
@@ -730,6 +792,7 @@ fn test_exact_extracted_query_from_logs() {
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon, but found {}", count);
 }
 
+// Bucket C: user-extracted highlighting bug query (БизнесПроцессы schema).
 #[test]
 fn test_nested_join_with_parameters_highlighting() {
     // Test for highlighting issue after &Действие parameter in nested JOIN
@@ -784,6 +847,7 @@ fn test_nested_join_with_parameters_highlighting() {
     assert!(!parse.has_errors(), "Should parse nested JOINs without errors: {:?}", parse.errors());
 }
 
+// Bucket C: user-extracted completion scenario (incomplete ON condition).
 #[test]
 fn test_incomplete_on_condition_for_completion() {
     // Test incomplete ON conditions - cursor at "ПроцессыДействий." with incomplete condition
@@ -835,6 +899,7 @@ fn test_incomplete_on_condition_for_completion() {
 }
 
 // Test for empty parameters in function calls (accumulator register methods)
+// Bucket B: register virtual-table access pattern with historically shaped schema.
 #[test]
 fn test_function_with_empty_parameters() {
     // Test empty parameters in .Обороты() method call
@@ -859,6 +924,7 @@ fn test_function_with_empty_parameters() {
     assert!(!parse.has_errors(), "Should parse function with empty parameters without errors");
 }
 
+// Bucket C: user's real query (comment: "like in the user's real query").
 #[test]
 fn test_function_with_mixed_empty_and_filled_parameters() {
     // Test mix of empty and filled parameters like in the user's real query
@@ -883,6 +949,7 @@ fn test_function_with_mixed_empty_and_filled_parameters() {
     );
 }
 
+// Bucket A.
 #[test]
 fn test_multiple_functions_with_empty_parameters() {
     // Test multiple function calls with empty parameters in same query
@@ -897,6 +964,7 @@ fn test_multiple_functions_with_empty_parameters() {
     assert!(!parse.has_errors(), "Should parse multiple functions with empty parameters");
 }
 
+// Bucket C: from user's real query (comment: "Test from user's real query").
 #[test]
 fn test_function_with_in_subquery_parameter() {
     // Test from user's real query: .Обороты() with IN (subquery) as parameter
@@ -927,6 +995,7 @@ fn test_function_with_in_subquery_parameter() {
     assert!(!parse.has_errors(), "Should parse function with IN (subquery) as parameter");
 }
 
+// Bucket C: full query from user's original bug report.
 #[test]
 fn test_user_full_query_with_empty_params_and_in_subquery() {
     // Full query from user's original message with highlighting issue
@@ -963,6 +1032,7 @@ fn test_user_full_query_with_empty_params_and_in_subquery() {
     );
 }
 
+// Bucket C: fixture-backed regression (see in-body note).
 #[test]
 fn test_complete_user_query_from_fixture() {
     // Bucket C: historical regression from a user report, preserved as a
@@ -987,6 +1057,7 @@ fn test_complete_user_query_from_fixture() {
     );
 }
 
+// Bucket A.
 #[test]
 fn test_debug_in_expression_parsing() {
     // Simplified test to debug IN expression parsing
@@ -1023,6 +1094,7 @@ fn test_debug_in_expression_parsing() {
 // 2. REFS identifier chain
 // 3. Function arguments with empty parameters
 
+// Bucket A.
 #[test]
 fn test_error_recovery_in_empty_value() {
     // IN predicate with empty value: IN (1, , 3)
@@ -1048,6 +1120,7 @@ fn test_error_recovery_in_empty_value() {
     assert!(tree.contains("SDBL_IN_EXPR"), "IN expression should be parsed.\nTree: {}", tree);
 }
 
+// Bucket A.
 #[test]
 fn test_error_recovery_in_leading_empty() {
     // IN predicate with leading empty value: IN (, 2, 3)
@@ -1059,6 +1132,7 @@ fn test_error_recovery_in_leading_empty() {
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 }
 
+// Bucket A.
 #[test]
 fn test_error_recovery_in_trailing_empty() {
     // IN predicate with trailing empty value: IN (1, 2,)
@@ -1074,6 +1148,7 @@ fn test_error_recovery_in_trailing_empty() {
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 }
 
+// Bucket A.
 #[test]
 fn test_error_recovery_function_empty_args() {
     // Function with empty arguments: func(, , value)
@@ -1102,6 +1177,7 @@ fn test_error_recovery_function_empty_args() {
     assert!(tree.contains("SDBL_FIELD_LIST"), "Field list should be parsed.\nTree: {}", tree);
 }
 
+// Bucket A.
 #[test]
 fn test_error_recovery_function_leading_empty() {
     // Function with leading empty argument: func(, value)
@@ -1113,6 +1189,7 @@ fn test_error_recovery_function_leading_empty() {
     assert!(tree.contains("SDBL_FUNCTION_CALL"), "Function call should be parsed.\nTree: {}", tree);
 }
 
+// Bucket A.
 #[test]
 fn test_error_recovery_function_trailing_empty() {
     // Function with trailing empty argument: func(value,)
@@ -1124,6 +1201,7 @@ fn test_error_recovery_function_trailing_empty() {
     assert!(tree.contains("SDBL_FUNCTION_CALL"), "Function call should be parsed.\nTree: {}", tree);
 }
 
+// Bucket A.
 #[test]
 fn test_error_recovery_refs_predicate() {
     // REFS predicate with MDO reference: Field REFS Catalog.Products
@@ -1137,6 +1215,7 @@ fn test_error_recovery_refs_predicate() {
     assert!(tree.contains("SDBL_REFS_EXPR"), "REFS expression should be parsed.\nTree: {}", tree);
 }
 
+// Bucket A.
 #[test]
 fn test_error_recovery_comprehensive() {
     // Comprehensive test: multiple error recovery points in one query
@@ -1164,6 +1243,7 @@ fn test_error_recovery_comprehensive() {
     assert!(tree.contains("SDBL_FIELD_LIST"), "Field list should be parsed.\nTree: {}", tree);
 }
 
+// Bucket A.
 #[test]
 fn test_no_infinite_loop_deeply_nested_dots() {
     // Regression test: ensure parser doesn't loop infinitely on deeply nested dots
@@ -1180,6 +1260,7 @@ fn test_no_infinite_loop_deeply_nested_dots() {
     );
 }
 
+// Bucket A.
 #[test]
 fn test_type_cast_with_recovery() {
     // Test that CAST (ВЫРАЗИТЬ) is properly parsed
@@ -1207,6 +1288,7 @@ fn test_type_cast_with_recovery() {
     assert!(field_count >= 3, "Should parse all 3 fields. Got: {}.\nTree: {}", field_count, tree);
 }
 
+// Bucket C: real-world query from user (comment: "Real-world query from user").
 #[test]
 fn test_real_query_with_type_cast() {
     // Real-world query from user
@@ -1245,6 +1327,7 @@ fn test_real_query_with_type_cast() {
     assert!(tree.contains("article"), "Field after type cast should be parsed.\nTree: {}", tree);
 }
 
+// Bucket C: simplified slice of same user query (ДвиженияПоКлиенту schema).
 #[test]
 fn test_type_cast_without_case() {
     // Simplified version without CASE expression
@@ -1284,6 +1367,7 @@ fn test_type_cast_without_case() {
     );
 }
 
+// Bucket A.
 #[test]
 fn test_case_in_arithmetic_with_recovery() {
     // CASE expression in arithmetic context - NOW SUPPORTED!
@@ -1320,6 +1404,7 @@ fn test_case_in_arithmetic_with_recovery() {
     assert!(tree.contains("alias3"), "Field after CASE should be parsed.\nTree: {}", tree);
 }
 
+// Bucket C: full user query (14 fields, comment: "Real user query with CAST and CASE").
 #[test]
 fn test_full_user_query_with_all_features() {
     // Real user query with CAST and CASE - both now supported
@@ -1371,6 +1456,7 @@ fn test_full_user_query_with_all_features() {
         tree
     );
 }
+// Bucket A.
 #[test]
 fn test_simple_plus_case() {
     use parser::parse_sdbl;
@@ -1385,6 +1471,7 @@ fn test_simple_plus_case() {
     assert!(tree.contains("SDBL_CASE_EXPR"), "Should have CASE expression node.\nTree: {}", tree);
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 }
+// Bucket A.
 #[test]
 fn test_empty_string_literal() {
     use parser::parse_sdbl;
@@ -1396,6 +1483,7 @@ fn test_empty_string_literal() {
     assert!(!parse.has_errors(), "Should parse empty string");
 }
 
+// Bucket A.
 #[test]
 fn test_case_with_string_concat_in_then() {
     use parser::parse_sdbl;
@@ -1420,6 +1508,7 @@ fn test_case_with_string_concat_in_then() {
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "Should parse FROM clause");
 }
 
+// Bucket A.
 #[test]
 fn test_single_string_literal() {
     use parser::parse_sdbl;
@@ -1445,6 +1534,7 @@ fn test_single_string_literal() {
     );
 }
 
+// Bucket A.
 #[test]
 fn test_simple_two_queries_with_semicolon() {
     use parser::parse_sdbl;
@@ -1463,6 +1553,7 @@ fn test_simple_two_queries_with_semicolon() {
     eprintln!("Query count: {}", count);
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
 }
+// Bucket A.
 #[test]
 fn test_unsupported_features() {
     use parser::parse_sdbl;
@@ -1493,6 +1584,7 @@ fn test_unsupported_features() {
     eprintln!("\n=== НАЧАЛОПЕРИОДА function ===");
     eprintln!("Has errors: {}", parse4.has_errors());
 }
+// Bucket A.
 #[test]
 fn test_like_predicate() {
     use parser::parse_sdbl;
@@ -1507,6 +1599,7 @@ fn test_like_predicate() {
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
 }
 
+// Bucket A.
 #[test]
 fn test_between_predicate() {
     use parser::parse_sdbl;
@@ -1521,6 +1614,7 @@ fn test_between_predicate() {
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
 }
 
+// Bucket A.
 #[test]
 fn test_is_null_predicate() {
     use parser::parse_sdbl;
@@ -1534,6 +1628,7 @@ fn test_is_null_predicate() {
     let tree = format!("{:#?}", parse.syntax_node());
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
 }
+// Bucket A.
 #[test]
 fn test_order_by_clause() {
     use parser::parse_sdbl;
@@ -1547,6 +1642,7 @@ fn test_order_by_clause() {
     eprintln!("Has ORDER BY node: {}", tree.contains("SDBL_ORDER_BY"));
 }
 
+// Bucket A.
 #[test]
 fn test_group_by_clause() {
     use parser::parse_sdbl;
@@ -1560,6 +1656,7 @@ fn test_group_by_clause() {
     eprintln!("Has GROUP BY node: {}", tree.contains("SDBL_GROUP_BY"));
 }
 
+// Bucket A.
 #[test]
 fn test_group_by_debug() {
     use parser::parse_sdbl;
@@ -1573,6 +1670,7 @@ fn test_group_by_debug() {
     eprintln!("\nSearching for: SDBL_GROUP_CLAUSE");
     eprintln!("Found: {}", tree.contains("SDBL_GROUP_CLAUSE"));
 }
+// Bucket A.
 #[test]
 fn test_order_by_debug() {
     use parser::parse_sdbl;
@@ -1586,6 +1684,7 @@ fn test_order_by_debug() {
     eprintln!("\nSearching for: SDBL_ORDER_CLAUSE");
     eprintln!("Found: {}", tree.contains("SDBL_ORDER_CLAUSE"));
 }
+// Bucket A.
 #[test]
 fn debug_complex_query() {
     use parser::parse_sdbl;
@@ -1604,6 +1703,7 @@ fn debug_complex_query() {
     eprintln!("\nHas CASE: {}", tree5.contains("SDBL_CASE_EXPR"));
     eprintln!("Has errors: {}", p5.has_errors());
 }
+// Bucket A.
 #[test]
 fn demo_all_features_fixed() {
     use parser::parse_sdbl;
@@ -1645,6 +1745,7 @@ fn demo_all_features_fixed() {
     eprintln!("  ✅ GROUP BY (СГРУППИРОВАТЬ ПО)");
     eprintln!("  ✅ ORDER BY (УПОРЯДОЧИТЬ ПО)");
 }
+// Bucket A.
 #[test]
 fn test_view_presentation() {
     use parser::parse_sdbl;
@@ -1671,6 +1772,7 @@ fn test_view_presentation() {
     eprintln!("\n=== Test 3: Multiple VIEWs with JOIN ===");
     eprintln!("Has errors: {}", p3.has_errors());
 }
+// Bucket A.
 #[test]
 fn test_view_presentation_detailed() {
     use parser::parse_sdbl;
@@ -1686,6 +1788,7 @@ fn test_view_presentation_detailed() {
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "Should have FROM clause");
     assert!(tree.contains("SDBL_TABLE_REF"), "Should have table reference");
 }
+// Bucket A.
 #[test]
 fn test_virtual_table_debug() {
     use parser::parse_sdbl;
@@ -1703,6 +1806,7 @@ fn test_virtual_table_debug() {
     eprintln!("Has SDBL_TABLE_REF: {}", tree.contains("SDBL_TABLE_REF"));
     eprintln!("Has SDBL_FUNCTION_CALL: {}", tree.contains("SDBL_FUNCTION_CALL"));
 }
+// Bucket A.
 #[test]
 fn test_advanced_sdbl_constructs() {
     use parser::parse_sdbl;
@@ -1754,6 +1858,7 @@ fn test_advanced_sdbl_constructs() {
     let tree6 = format!("{:#?}", p6.syntax_node());
     eprintln!("Has DISTINCT: {}", tree6.contains("РАЗЛИЧНЫЕ") || tree6.contains("DISTINCT"));
 }
+// Bucket A.
 #[test]
 fn test_having_clause() {
     use parser::parse_sdbl;
@@ -1770,6 +1875,7 @@ fn test_having_clause() {
     assert!(tree.contains("SDBL_HAVING_CLAUSE"), "Should have HAVING clause node");
 }
 
+// Bucket A.
 #[test]
 fn test_for_update_clause() {
     use parser::parse_sdbl;
@@ -1796,6 +1902,7 @@ fn test_for_update_clause() {
     assert!(!p2.has_errors(), "FOR UPDATE with MDO should parse");
 }
 
+// Bucket A.
 #[test]
 fn test_index_by_clause() {
     use parser::parse_sdbl;
@@ -1812,6 +1919,7 @@ fn test_index_by_clause() {
     assert!(tree.contains("SDBL_INDEX_BY"), "Should have INDEX BY node");
 }
 
+// Bucket A.
 #[test]
 fn test_autoorder_clause() {
     use parser::parse_sdbl;
@@ -1828,6 +1936,7 @@ fn test_autoorder_clause() {
     assert!(tree.contains("SDBL_AUTOORDER"), "Should have AUTOORDER node");
 }
 
+// Bucket A.
 #[test]
 fn test_totals_by_clause() {
     use parser::parse_sdbl;
@@ -1844,6 +1953,7 @@ fn test_totals_by_clause() {
     assert!(tree.contains("SDBL_TOTALS_BY"), "Should have TOTALS BY node");
 }
 
+// Bucket A.
 #[test]
 fn test_phase2_combined() {
     use parser::parse_sdbl;
@@ -1880,6 +1990,7 @@ fn test_phase2_combined() {
     // Should parse without errors or with minimal errors
     // SDBL spec allows flexible ordering of these clauses
 }
+// Bucket A.
 #[test]
 fn test_simple_is_null() {
     use parser::parse_sdbl;
@@ -1892,6 +2003,7 @@ fn test_simple_is_null() {
     eprintln!("Has errors: {}", parse.has_errors());
     eprintln!("\n{}", tree);
 }
+// Bucket B: dotted IS NULL using specific user schema name (ДокЗаказКлиента.Ссылка).
 #[test]
 fn test_dotted_is_null() {
     use parser::parse_sdbl;
@@ -1911,6 +2023,7 @@ fn test_dotted_is_null() {
         eprintln!("✗ ЕСТЬ incorrectly parsed (not IS NULL)");
     }
 }
+// Bucket C: user's CASE/IS NULL repro using lifted schema (ДокЗаказКлиента).
 #[test]
 fn test_case_with_is_null_no_newline() {
     use parser::parse_sdbl;
@@ -1938,6 +2051,7 @@ fn test_case_with_is_null_no_newline() {
         }
     }
 }
+// Bucket C: user-extracted multiline query with CASE/REFS/IS NULL.
 #[test]
 fn test_full_user_query() {
     use parser::parse_sdbl;
@@ -1983,6 +2097,7 @@ fn test_full_user_query() {
         eprintln!("✓ Query parsed successfully");
     }
 }
+// Bucket B: ЕСТЬNULL function vs IS NULL predicate disambiguation using lifted schema name.
 #[test]
 fn test_estnull_function_vs_predicate() {
     use parser::parse_sdbl;
@@ -2021,6 +2136,7 @@ fn test_estnull_function_vs_predicate() {
         }
     }
 }
+// Bucket C: user's exact case (comment: "User's exact case").
 #[test]
 fn test_estnull_no_space_issue() {
     use parser::parse_sdbl;
@@ -2059,6 +2175,7 @@ fn test_estnull_no_space_issue() {
     }
 }
 
+// Bucket A.
 #[test]
 fn test_parameter_as_data_source() {
     // &Parameter as a table reference in FROM clause (e.g., ValueTable passed as param)
@@ -2066,6 +2183,7 @@ fn test_parameter_as_data_source() {
     check_no_errors("ВЫБРАТЬ Поле ИЗ &ТаблицаЗначений КАК Т");
 }
 
+// Bucket A.
 #[test]
 fn test_parameter_as_data_source_in_batch() {
     // Batch query with &Parameter data sources and comment separator
@@ -2082,6 +2200,7 @@ fn test_parameter_as_data_source_in_batch() {
     assert_eq!(package.queries().count(), 2, "Expected 2 queries");
 }
 
+// Bucket A.
 #[test]
 fn test_sdbl_constructs_for_false_positive() {
     use syntax::SyntaxKind;
@@ -2134,6 +2253,7 @@ fn test_sdbl_constructs_for_false_positive() {
     }
 }
 
+// Bucket A.
 #[test]
 fn test_error_node_analysis() {
     use syntax::SyntaxKind;
@@ -2166,16 +2286,19 @@ fn test_error_node_analysis() {
     }
 }
 
+// Bucket A.
 #[test]
 fn test_drop_table_russian() {
     check_no_errors("УНИЧТОЖИТЬ ВременнаяТаблица");
 }
 
+// Bucket A.
 #[test]
 fn test_drop_table_english() {
     check_no_errors("DROP TempTable");
 }
 
+// Bucket A.
 #[test]
 fn test_batch_with_drop() {
     check_no_errors("ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ; УНИЧТОЖИТЬ ВТ");
