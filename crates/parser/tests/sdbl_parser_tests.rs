@@ -6,6 +6,24 @@
 //! - UNION queries
 //! - Subqueries in FROM
 //! - Error recovery
+//!
+//! # Provenance and bucket policy
+//!
+//! Tests in this file follow the A/B/C classification defined in
+//! `docs/legal/sdbl-test-corpus-slice0.md`:
+//!
+//! - Bucket A — generic language-acceptance coverage: keep as-is; example
+//!   queries are owned and may be rewritten freely from official 1C docs.
+//! - Bucket B — valuable behavioral coverage whose current query text is
+//!   bulky or historically shaped: keep the behavioral assertion, rewrite
+//!   the query text from the minimal local scenario needed to prove it.
+//! - Bucket C — historical regression archives kept for compatibility: do
+//!   not treat as specification input for clean-room work. Marked inline
+//!   with `// Bucket C:` comments.
+//!
+//! New SDBL tests should be written from 1C query-language documentation
+//! (https://its.1c.ru/db/pubqlang) without consulting third-party grammar
+//! files. See `docs/legal/sdbl-clean-room-slices.md` for the full policy.
 
 use expect_test::{expect, Expect};
 use parser::parse_sdbl;
@@ -380,7 +398,7 @@ fn test_debug_semicolon_tokens() {
 
 #[test]
 fn test_union_with_semicolon_separator() {
-    // Test pattern from reference test: SELECT with UNION, semicolon, comment, SELECT with UNION
+    // Pattern: SELECT … ОБЪЕДИНИТЬ ВСЕ … ; <comment line> SELECT … ОБЪЕДИНИТЬ ВСЕ …
     let query = r#"ВЫБРАТЬ
 	Валюты.Ссылка
 ИЗ
@@ -418,8 +436,10 @@ fn test_union_with_semicolon_separator() {
 }
 
 #[test]
-fn test_exact_java_query_structure() {
-    // Exact query from reference test (first string, 857 chars)
+fn test_double_union_all_queries_with_aliases() {
+    // Bucket C: historical regression. Two 3-column SELECT ... ОБЪЕДИНИТЬ ВСЕ
+    // packages, each using implicit and AS-style aliases, separated by a
+    // semicolon and a banner comment. See docs/legal/sdbl-test-corpus-slice0.md.
     let query = r#"ВЫБРАТЬ
 	Валюты.Ссылка,
 	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
@@ -945,7 +965,9 @@ fn test_user_full_query_with_empty_params_and_in_subquery() {
 
 #[test]
 fn test_complete_user_query_from_fixture() {
-    // Complete query from user (first message) - saved as fixture
+    // Bucket C: historical regression from a user report, preserved as a
+    // fixture (ПОМЕСТИТЬ, ОБЪЕДИНИТЬ, empty params, IN subqueries). Not a
+    // specification input. See docs/legal/sdbl-test-corpus-slice0.md.
     let query = include_str!("fixtures/user_query_with_highlighting_issue.sdbl");
 
     let parse = parse_sdbl(query);
