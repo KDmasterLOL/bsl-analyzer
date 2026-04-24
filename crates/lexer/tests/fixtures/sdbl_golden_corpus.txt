@@ -98,3 +98,17 @@ AccumulationRegister.Stock.Balance AccumulationRegister.Stock.Turnovers Accumula
 TYPE(Boolean) TYPE(Number) TYPE(String) TYPE(Date) TRUE FALSE ИСТИНА ЛОЖЬ NULL Неопределено VALUE(Enum.Status.Done)
 ---- 050 logical operators and period types
 A AND B OR NOT C; ДЕКАДА ПОЛУГОДИЕ
+---- 051 russian alias keyword
+ВЫБРАТЬ П.Наименование КАК Наименование ИЗ Справочник.Продукты КАК П
+---- 052 english join on
+SELECT t1.id FROM Catalog.Products AS t1 INNER JOIN Catalog.Prices AS t2 ON t2.product = t1.ref
+---- 053 russian clause keywords
+ВЫБРАТЬ РАЗЛИЧНЫЕ ПЕРВЫЕ 5 Имя ГДЕ X > 0 СГРУППИРОВАТЬ ПО Y ИМЕЮЩИЕ СУММА(Y) > 0 УПОРЯДОЧИТЬ ПО Y ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ 2
+---- 054 russian predicates and case
+ГДЕ X МЕЖДУ 1 И 10 ИЛИ НЕ Y ЕСТЬ NULL И Z ПОДОБНО "%x%" И W В (&P) ВЫБОР КОГДА A > 0 ТОГДА 1 ИНАЧЕ 0 КОНЕЦ
+---- 055 english totals
+TOTALS SUM(X)
+---- 056 russian join family
+ВНУТРЕННЕЕ ПРАВОЕ ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ
+---- 057 english left join
+SELECT 1 FROM T LEFT JOIN U ON T.id = U.id
