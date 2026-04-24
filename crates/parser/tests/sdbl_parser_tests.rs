@@ -2424,3 +2424,147 @@ fn test_drop_mid_package_after_union() {
     let drop_count = root.children().filter(|n| n.kind() == SyntaxKind::SDBL_DROP_QUERY).count();
     assert_eq!(drop_count, 1, "Exactly one DROP statement in the package");
 }
+
+// ============================================================================
+// Slice 8 surface coverage — added by C0 audit to close gaps before the
+// clean-room rewrite of is_data_source_start / from_clause / data_source /
+// table_ref / source_alias in C2. Authored from 1C query-language docs
+// (pubqlang/10 §query-body, /12 identifier + ampersand lexis) and the local
+// mini-spec at docs/legal/sdbl-select-mini-spec.md §FROM clause.
+// ============================================================================
+
+// Bucket A: multi-source FROM with commas and a bare implicit alias on the
+// second source — locks the data_source list shape, the comma separator, and
+// the bare-alias branch of source_alias (no AS / КАК keyword between `Т2`
+// and `А`). Asserts two SdblDataSource nodes AND that the second one carries
+// an SdblAlias whose name is `А` with has_as_keyword() == false, so a
+// regression that drops bare-identifier consumption cannot silently pass.
+#[test]
+fn test_slice8_from_multi_source_with_bare_alias() {
+    use syntax::{
+        ast::{AstNode, SdblFromClause},
+        SyntaxKind,
+    };
+    let input = "ВЫБРАТЬ * ИЗ Т1, Т2 А";
+    let parse = parse_sdbl(input);
+    assert!(
+        !parse.has_errors(),
+        "Multi-source FROM with bare alias should parse: {:?}",
+        parse.errors()
+    );
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input (no trailing drop)");
+    let from = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE)
+        .and_then(SdblFromClause::cast)
+        .expect("SdblFromClause");
+    let sources: Vec<_> = from.data_sources().collect();
+    assert_eq!(sources.len(), 2, "Expected two SdblDataSource nodes in the FROM list");
+    let second_alias = sources[1].alias().expect("Second data source must carry SdblAlias");
+    assert_eq!(second_alias.name().as_deref(), Some("А"), "Bare alias name mismatch");
+    assert!(
+        !second_alias.has_as_keyword(),
+        "Bare alias must not carry AS/КАК keyword (implicit-alias branch of source_alias)",
+    );
+}
+
+// Bucket A: subquery as a data source with the Russian КАК alias form. The
+// English subquery-in-FROM shape is already exercised by test_subquery_in_from
+// (:202); this gap covers the bilingual alias site of data_source. Asserts
+// the SdblSubquery sits directly under SdblDataSource and that the alias is
+// attached at the data-source level with has_as_keyword() == true.
+#[test]
+fn test_slice8_russian_subquery_source_with_alias() {
+    use syntax::{
+        ast::{AstNode, SdblFromClause},
+        SyntaxKind,
+    };
+    let input = "ВЫБРАТЬ * ИЗ (ВЫБРАТЬ 1) КАК С";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Russian subquery source should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input (no trailing drop)");
+    let from = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE)
+        .and_then(SdblFromClause::cast)
+        .expect("SdblFromClause");
+    let source = from.data_sources().next().expect("single SdblDataSource");
+    assert!(
+        source.subquery().is_some(),
+        "SdblSubquery must sit as a direct child of SdblDataSource",
+    );
+    let alias = source.alias().expect("data source must carry SdblAlias");
+    assert!(alias.has_as_keyword(), "КАК alias must set has_as_keyword() = true");
+    assert_eq!(alias.name().as_deref(), Some("С"));
+}
+
+// Bucket A: temporary-table source crossing a package boundary — the first
+// statement creates ВТ via ПОМЕСТИТЬ (INTO), the second statement consumes
+// it as a table_ref. Exercises the identifier-only table_ref path (no MDO
+// prefix, no VT args) and its interaction with the SdblQueryPackage
+// statement loop. Asserts the second query's FROM data source is a single
+// SdblTableRef whose text is `ВремТаблица`.
+#[test]
+fn test_slice8_temp_table_source_across_package_boundary() {
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let input = "ВЫБРАТЬ Поле ПОМЕСТИТЬ ВремТаблица ИЗ Товары; \
+                 ВЫБРАТЬ Поле ИЗ ВремТаблица";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Temp-table package should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input (no trailing drop)");
+    let package = SdblQueryPackage::cast(root).expect("query package");
+    let queries: Vec<_> = package.queries().collect();
+    assert_eq!(queries.len(), 2, "Two SELECT statements around the temp table");
+    let second_from = queries[1]
+        .subquery()
+        .and_then(|sq| sq.main_query())
+        .and_then(|q| q.from_clause())
+        .expect("second query must have FROM clause");
+    let sources: Vec<_> = second_from.data_sources().collect();
+    assert_eq!(sources.len(), 1, "Second query FROM must have a single data source");
+    let table_ref = sources[0].table_ref().expect("identifier-only table_ref");
+    assert_eq!(
+        table_ref.syntax().text().to_string().trim(),
+        "ВремТаблица",
+        "Second query must reference the temp table created by the first",
+    );
+}
+
+// Bucket A: parameter source without an alias — existing
+// test_parameter_as_data_source (:2205) always pairs &Parameter with КАК;
+// this gap locks the alias?-optional branch of data_source on the parameter
+// path. Asserts SdblParameter sits inside SdblTableRef inside SdblDataSource
+// and that the data source carries NO SdblAlias.
+#[test]
+fn test_slice8_parameter_source_without_alias() {
+    use syntax::{
+        ast::{AstNode, SdblFromClause},
+        SyntaxKind,
+    };
+    let input = "ВЫБРАТЬ * ИЗ &ТЗ";
+    let parse = parse_sdbl(input);
+    assert!(
+        !parse.has_errors(),
+        "Parameter source without alias should parse: {:?}",
+        parse.errors()
+    );
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input (no trailing drop)");
+    let from = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE)
+        .and_then(SdblFromClause::cast)
+        .expect("SdblFromClause");
+    let source = from.data_sources().next().expect("single SdblDataSource");
+    assert!(source.alias().is_none(), "Parameter source without alias must carry no SdblAlias");
+    let table_ref = source.table_ref().expect("SdblTableRef for parameter source");
+    let has_parameter =
+        table_ref.syntax().children().any(|n| n.kind() == SyntaxKind::SDBL_PARAMETER);
+    assert!(
+        has_parameter,
+        "SdblParameter must be a direct child of SdblTableRef on the &Ident path"
+    );
+}
