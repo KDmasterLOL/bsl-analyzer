@@ -228,6 +228,11 @@ Isolate the trickiest vocabulary/context subsystem.
 
 ## Slice 6: parser root and package skeleton
 
+**Status: complete (2026-04-24).** See
+[`sdbl-clean-room-slice6.md`](sdbl-clean-room-slice6.md) for the full
+attestation. Commit trail: C0 `cd709cac`, C1 `1acb9875`, C2
+`66a210a1`, C3 landed with the attestation.
+
 ### Goal
 
 Rebuild the top-level SDBL parse shape with minimum grammar content.
@@ -243,8 +248,16 @@ Rebuild the top-level SDBL parse shape with minimum grammar content.
 
 ### Files
 
-- `crates/parser/src/grammar/sdbl.rs`
-- top-level parts of `crates/parser/src/grammar/sdbl/select.rs`
+- `crates/parser/src/grammar/sdbl.rs` (the `CLEAN-ROOM Slice 6`
+  section — `query_package`, `queries`, `drop_table_query`, plus the
+  module-level `## Provenance` docstring)
+- `crates/parser/src/grammar/sdbl/select.rs` (the `CLEAN-ROOM Slice 6`
+  section — `select_query` wrapper, `subquery`, `union_clause`)
+- `crates/parser/tests/sdbl_parser_tests.rs` (C0 Bucket audit: two
+  Slice 6 Bucket-C tests rewritten and promoted to Bucket B; three
+  Slice 6 gap tests added)
+- `crates/parser/tests/sdbl_slice6_package.rs`
+- `docs/legal/sdbl-clean-room-slice6.md`
 
 ## Slice 7: SELECT field list, aliases, and INTO
 
