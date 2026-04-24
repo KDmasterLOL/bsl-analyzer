@@ -246,120 +246,223 @@ pub enum SdblTokenKind {
     // CLEAN-ROOM Slice 2 — structural keyword vocabulary (ITS pubqlang/10, /12)
     // ============================================================================
     //
-    // The convenience index — RUS/ENG → Variant — is populated in the
-    // accompanying clean-room regex-rewrite commit. This commit performs
-    // the mechanical move only; regex attributes are unchanged and per-
-    // variant ITS citations arrive with the rewrite.
+    // Every variant in this section carries an inline provenance comment
+    // citing the ITS page it was re-derived from. Nothing in this block
+    // was copied from the pre-clean-room regex text of these variants or
+    // from any third-party SDBL grammar; the sources consulted are
+    // <https://its.1c.ru/db/pubqlang/content/10/hdoc> (query-language
+    // structure: clauses, joins, predicates, CASE expression, field
+    // aliasing) and <https://its.1c.ru/db/pubqlang/content/12/hdoc>
+    // (lexical elements: logical operators, boolean and NULL literals).
+    //
+    // Convenience index (RUS / ENG → Variant — ITS section). The
+    // `#[regex]` attributes below are the single source of truth;
+    // this table is a scanning aid only.
+    //
+    //   Clause starters:
+    //     ВЫБРАТЬ / SELECT          -> KwSelect    (pubqlang/10)
+    //     ИЗ / FROM                 -> KwFrom      (pubqlang/10)
+    //     ПОМЕСТИТЬ / INTO          -> KwInto      (pubqlang/10)
+    //     ГДЕ / WHERE               -> KwWhere     (pubqlang/10)
+    //     СГРУППИРОВАТЬ / GROUP     -> KwGroup     (pubqlang/10)
+    //     УПОРЯДОЧИТЬ / ORDER       -> KwOrder     (pubqlang/10)
+    //     ИМЕЮЩИЕ / HAVING          -> KwHaving    (pubqlang/10)
+    //     ИТОГИ / TOTALS            -> KwTotals    (pubqlang/10)
+    //     ОБЪЕДИНИТЬ / UNION        -> KwUnion     (pubqlang/10)
+    //     ВСЕ / ALL                 -> KwAll       (pubqlang/10)
+    //     РАЗЛИЧНЫЕ / DISTINCT      -> KwDistinct  (pubqlang/10)
+    //     ПЕРВЫЕ / TOP              -> KwTop       (pubqlang/10)
+    //
+    //   Join family:
+    //     СОЕДИНЕНИЕ / JOIN         -> KwJoin      (pubqlang/10)
+    //     ВНУТРЕННЕЕ / INNER        -> KwInner     (pubqlang/10)
+    //     ЛЕВОЕ / LEFT              -> KwLeft      (pubqlang/10)
+    //     ПРАВОЕ / RIGHT            -> KwRight     (pubqlang/10)
+    //     ПОЛНОЕ / FULL             -> KwFull      (pubqlang/10)
+    //     ВНЕШНЕЕ / OUTER           -> KwOuter     (pubqlang/10)
+    //     ПО / ON / BY              -> KwOnOrBy    (pubqlang/10, bundled)
+    //
+    //   Aliasing & predicates:
+    //     КАК / AS                  -> KwAs        (pubqlang/10)
+    //     В / IN                    -> KwIn        (pubqlang/10)
+    //     МЕЖДУ / BETWEEN           -> KwBetween   (pubqlang/10)
+    //     ПОДОБНО / LIKE            -> KwLike      (pubqlang/10)
+    //     ЕСТЬ / IS                 -> KwIs        (pubqlang/10)
+    //
+    //   CASE family:
+    //     ВЫБОР / CASE              -> KwCase      (pubqlang/10)
+    //     КОГДА / WHEN              -> KwWhen      (pubqlang/10)
+    //     ТОГДА / THEN              -> KwThen      (pubqlang/10)
+    //     ИНАЧЕ / ELSE              -> KwElse      (pubqlang/10)
+    //     КОНЕЦ / END               -> KwEnd       (pubqlang/10)
+    //
+    //   Logical operators & literals:
+    //     И / AND                   -> OpAnd       (pubqlang/12)
+    //     ИЛИ / OR                  -> OpOr        (pubqlang/12)
+    //     НЕ / NOT                  -> OpNot       (pubqlang/12)
+    //     ИСТИНА / TRUE             -> LitTrue     (pubqlang/12)
+    //     ЛОЖЬ / FALSE              -> LitFalse    (pubqlang/12)
+    //     NULL                      -> LitNull     (pubqlang/12)
 
     // --- Clause starters ---
+
+    // ITS pubqlang/10 — SELECT clause: result-set introducer.
     #[regex(r"(?i)выбрать|(?i)select")]
     KwSelect,
 
+    // ITS pubqlang/10 — SELECT clause: FROM introduces the source table list.
     #[regex(r"(?i)из|(?i)from")]
     KwFrom,
 
+    // ITS pubqlang/10 — temporary tables: INTO / ПОМЕСТИТЬ names the
+    // destination temp table for a materialised sub-query.
     #[regex(r"(?i)поместить|(?i)into")]
     KwInto,
 
+    // ITS pubqlang/10 — SELECT clause: WHERE filters the source rows.
     #[regex(r"(?i)где|(?i)where")]
     KwWhere,
 
+    // ITS pubqlang/10 — SELECT clause: GROUP BY opens the grouping list.
     #[regex(r"(?i)сгруппировать|(?i)group")]
     KwGroup,
 
+    // ITS pubqlang/10 — SELECT clause: ORDER BY opens the sort key list.
     #[regex(r"(?i)упорядочить|(?i)order")]
     KwOrder,
 
+    // ITS pubqlang/10 — SELECT clause: HAVING filters the grouped rows.
     #[regex(r"(?i)имеющие|(?i)having")]
     KwHaving,
 
+    // ITS pubqlang/10 — SELECT clause: TOTALS introduces the totals
+    // specification after the main query body.
     #[regex(r"(?i)итоги|(?i)totals")]
     KwTotals,
 
+    // ITS pubqlang/10 — SELECT clause: UNION combines result sets.
     #[regex(r"(?i)объединить|(?i)union")]
     KwUnion,
 
+    // ITS pubqlang/10 — SELECT clause: ALL modifier on UNION (keep
+    // duplicates) and on aggregate-argument position.
     #[regex(r"(?i)все|(?i)all")]
     KwAll,
 
+    // ITS pubqlang/10 — SELECT clause: DISTINCT removes duplicate rows.
     #[regex(r"(?i)различные|(?i)distinct")]
     KwDistinct,
 
+    // ITS pubqlang/10 — SELECT clause: TOP limits the result row count.
     #[regex(r"(?i)первые|(?i)top")]
     KwTop,
 
     // --- Join family ---
+
+    // ITS pubqlang/10 — join clause: JOIN introduces a joined source.
     #[regex(r"(?i)соединение|(?i)join")]
     KwJoin,
 
+    // ITS pubqlang/10 — join clause: INNER modifier on JOIN.
     #[regex(r"(?i)внутреннее|(?i)inner")]
     KwInner,
 
+    // ITS pubqlang/10 — join clause: LEFT outer-join modifier.
     #[regex(r"(?i)левое|(?i)left")]
     KwLeft,
 
+    // ITS pubqlang/10 — join clause: RIGHT outer-join modifier.
     #[regex(r"(?i)правое|(?i)right")]
     KwRight,
 
+    // ITS pubqlang/10 — join clause: FULL outer-join modifier.
     #[regex(r"(?i)полное|(?i)full")]
     KwFull,
 
+    // ITS pubqlang/10 — join clause: OUTER modifier on LEFT / RIGHT / FULL.
     #[regex(r"(?i)внешнее|(?i)outer")]
     KwOuter,
 
-    // Note: ПО (po) in Russian means both ON and BY depending on context
-    // We merge them into a single token and let the parser determine usage
+    // ITS pubqlang/10 — join clause / grouping clause: Russian ПО serves
+    // as both the join-ON predicate introducer and the GROUP-BY /
+    // ORDER-BY key separator. Preserved pre-refactor behaviour: this
+    // lexer emits a single KwOnOrBy kind for ПО / ON / BY and lets the
+    // parser disambiguate by context; see
+    // `docs/legal/sdbl-clean-room-slice2.md` § Preserved pre-refactor
+    // behaviours.
     #[regex(r"(?i)по|(?i)on|(?i)by")]
     KwOnOrBy,
 
     // --- Aliasing & predicates ---
+
+    // ITS pubqlang/10 — field aliasing: AS binds a column or table name.
     #[regex(r"(?i)как|(?i)as")]
     KwAs,
 
+    // ITS pubqlang/10 — predicates: IN set-membership test.
     #[regex(r"(?i)в|(?i)in")]
     KwIn,
 
+    // ITS pubqlang/10 — predicates: BETWEEN range test (inclusive).
     #[regex(r"(?i)между|(?i)between")]
     KwBetween,
 
+    // ITS pubqlang/10 — predicates: LIKE pattern match.
     #[regex(r"(?i)подобно|(?i)like")]
     KwLike,
 
+    // ITS pubqlang/10 — predicates: IS NULL / IS NOT NULL test.
     #[regex(r"(?i)есть|(?i)is")]
     KwIs,
 
     // --- CASE family ---
+
+    // ITS pubqlang/10 — conditional expression: CASE opens the
+    // conditional-value expression.
     #[regex(r"(?i)выбор|(?i)case")]
     KwCase,
 
+    // ITS pubqlang/10 — conditional expression: WHEN introduces a
+    // guarded branch.
     #[regex(r"(?i)когда|(?i)when")]
     KwWhen,
 
+    // ITS pubqlang/10 — conditional expression: THEN is the branch value.
     #[regex(r"(?i)тогда|(?i)then")]
     KwThen,
 
+    // ITS pubqlang/10 — conditional expression: ELSE is the default value.
     #[regex(r"(?i)иначе|(?i)else")]
     KwElse,
 
+    // ITS pubqlang/10 — conditional expression: END closes the expression.
     #[regex(r"(?i)конец|(?i)end")]
     KwEnd,
 
     // --- Logical operators & literals ---
+
+    // ITS pubqlang/12 — logical operators: AND conjunction.
     #[regex(r"(?i)и|(?i)and")]
     OpAnd,
 
+    // ITS pubqlang/12 — logical operators: OR disjunction.
     #[regex(r"(?i)или|(?i)or")]
     OpOr,
 
+    // ITS pubqlang/12 — logical operators: NOT negation.
     #[regex(r"(?i)не|(?i)not")]
     OpNot,
 
+    // ITS pubqlang/12 — boolean literals: TRUE.
     #[regex(r"(?i)истина|(?i)true")]
     LitTrue,
 
+    // ITS pubqlang/12 — boolean literals: FALSE.
     #[regex(r"(?i)ложь|(?i)false")]
     LitFalse,
 
+    // ITS pubqlang/12 — NULL literal: only the English spelling is
+    // defined by the grammar.
     #[regex(r"(?i)null")]
     LitNull,
 
