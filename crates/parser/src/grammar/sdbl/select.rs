@@ -222,56 +222,25 @@ fn is_field_start(p: &Parser) -> bool {
     super::expressions::is_expression_start(p)
 }
 
+// ============================================================================
+// CLEAN-ROOM Slice 6 — select entry wrapper, subquery, UNION clause
+// ============================================================================
+//
+// See `docs/legal/sdbl-clean-room-slice6.md` for authorship and source
+// citations. Per-function provenance comments are attached at C2.
+
 /// Parse a SELECT query
-///
-/// Grammar: `selectQuery: subquery (autoorder | orderBy | totalBy)?`
-///
-/// Phase 1: Only basic SELECT...FROM...WHERE
-/// Parse SELECT query (subquery + optional AUTOORDER/ORDER BY/TOTALS BY)
 ///
 /// Grammar: `selectQuery: subquery (AUTOORDER | ORDER BY | TOTALS BY)*`
 ///
-/// Note: AUTOORDER, ORDER BY, and TOTALS BY can appear in any order (per SDBL spec)
+/// Opens the `SdblSelectQuery` marker around the `subquery` body and the
+/// AUTOORDER / ORDER BY / TOTALS BY tail-clause loop. The tail-clause loop
+/// itself lives under the LEGACY banner in `select_tail_clauses` because its
+/// clean-room rewrite belongs to Slice 11 (clauses after FROM).
 pub fn select_query(p: &mut Parser) {
     let m = p.start();
-
     subquery(p);
-
-    // Parse AUTOORDER, ORDER BY, and TOTALS BY in any order
-    // These clauses are all optional and can appear in any combination
-    let mut parsed_autoorder = false;
-    let mut parsed_order_by = false;
-    let mut parsed_totals_by = false;
-
-    loop {
-        p.skip_trivia();
-
-        // Check for AUTOORDER
-        if !parsed_autoorder && at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
-        {
-            autoorder_clause(p);
-            parsed_autoorder = true;
-            continue;
-        }
-
-        // Check for ORDER BY
-        if !parsed_order_by && at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
-            order_by_clause(p);
-            parsed_order_by = true;
-            continue;
-        }
-
-        // Check for TOTALS BY
-        if !parsed_totals_by && at_sdbl_keyword(p, "TOTALS", "ИТОГИ") {
-            totals_by_clause(p);
-            parsed_totals_by = true;
-            continue;
-        }
-
-        // No more clauses to parse
-        break;
-    }
-
+    select_tail_clauses(p);
     m.complete(p, NodeKind::SdblSelectQuery);
 }
 
@@ -325,6 +294,58 @@ fn union_clause(p: &mut Parser) {
     // if p.at_keyword("ORDER") { order_by(p); }
 
     m.complete(p, NodeKind::SdblUnionClause);
+}
+
+// ============================================================================
+// LEGACY (Slices 7–11 pending)
+// ============================================================================
+//
+// Everything below this banner — `select_tail_clauses`, `query` body, FROM,
+// JOIN, WHERE, GROUP, ORDER, TOTALS, FOR UPDATE, INDEX BY, expression glue —
+// remains Tier B pre-refactor code until the corresponding clean-room slice
+// rewrites it. No per-function provenance comments here.
+
+/// Parse the optional AUTOORDER / ORDER BY / TOTALS BY tail-clause loop.
+///
+/// Extracted verbatim from the pre-C1 `select_query` body as a pure refactor
+/// so the `select_query` wrapper above can be attested under the Slice 6
+/// clean-room banner without dragging clause-body scope in. Rewrite of this
+/// helper is deferred to Slice 11 (clauses after FROM).
+fn select_tail_clauses(p: &mut Parser) {
+    // Parse AUTOORDER, ORDER BY, and TOTALS BY in any order
+    // These clauses are all optional and can appear in any combination
+    let mut parsed_autoorder = false;
+    let mut parsed_order_by = false;
+    let mut parsed_totals_by = false;
+
+    loop {
+        p.skip_trivia();
+
+        // Check for AUTOORDER
+        if !parsed_autoorder && at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
+        {
+            autoorder_clause(p);
+            parsed_autoorder = true;
+            continue;
+        }
+
+        // Check for ORDER BY
+        if !parsed_order_by && at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
+            order_by_clause(p);
+            parsed_order_by = true;
+            continue;
+        }
+
+        // Check for TOTALS BY
+        if !parsed_totals_by && at_sdbl_keyword(p, "TOTALS", "ИТОГИ") {
+            totals_by_clause(p);
+            parsed_totals_by = true;
+            continue;
+        }
+
+        // No more clauses to parse
+        break;
+    }
 }
 
 /// Parse a single SELECT query

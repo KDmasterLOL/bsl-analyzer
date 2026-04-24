@@ -9,6 +9,18 @@
 //! SDBL tokens are converted to BSL TokenKind via sdbl_token_converter.
 //! Most SDBL keywords are mapped to TokenKind::Ident, so we check token text
 //! to identify keywords.
+//!
+//! ## Provenance
+//!
+//! Slice 6 — clean-room: `query_package`, `queries`, `drop_table_query`
+//! (this file) and `select_query` wrapper, `subquery`, `union_clause`
+//! (in submodule `select`) are authored from ITS pubqlang/10 and /12
+//! grammar-shape rules. See `docs/legal/sdbl-clean-room-slice6.md` for the
+//! attestation (landed with C3).
+//!
+//! Slices 7–11 pending: `query` body and all clause bodies (SELECT fields,
+//! FROM, WHERE, GROUP, ORDER, TOTALS, JOIN, FOR UPDATE, INDEX BY) remain
+//! Tier B until their respective clean-room slices.
 
 pub mod expressions;
 pub mod select;
@@ -40,6 +52,13 @@ pub(super) const LIST_RECOVERY: TokenSet = TokenSet::new(&[
     TokenKind::RParen,    // End of parenthesized expression/list
     TokenKind::Semicolon, // End of query/statement
 ]);
+
+// ============================================================================
+// CLEAN-ROOM Slice 6 — query package, DROP, select entry
+// ============================================================================
+//
+// See `docs/legal/sdbl-clean-room-slice6.md` for authorship and source
+// citations. Per-function provenance comments are attached at C2.
 
 /// Entry point for SDBL parsing
 ///
