@@ -15,11 +15,21 @@
 //!   1C:Enterprise query language (<https://its.1c.ru/db/pubqlang>)
 //!   and are attested in `docs/legal/sdbl-clean-room-slice1.md`.
 //!
-//! - **Slices 2–5 — pending.** SDBL keywords, built-in functions,
-//!   metadata-object tokens, virtual-table tokens, type literals,
-//!   boolean/null literals, logical operators, period-type tokens,
-//!   and the logos error fallback. These remain as carried over from
-//!   the pre-clean-room implementation and will be re-derived by
+//! - **Slice 2 — clean-room.** Structural keyword vocabulary: core
+//!   clause starters (SELECT / FROM / WHERE / GROUP / ORDER / HAVING /
+//!   TOTALS / UNION / ALL / DISTINCT / TOP / INTO), the join family
+//!   (JOIN / INNER / LEFT / RIGHT / FULL / OUTER / ON-or-BY),
+//!   field aliasing (AS), basic predicates (IN / BETWEEN / LIKE / IS),
+//!   the CASE family (CASE / WHEN / THEN / ELSE / END), the logical
+//!   operators (AND / OR / NOT), and the boolean and NULL literals
+//!   (TRUE / FALSE / NULL). Attested in
+//!   `docs/legal/sdbl-clean-room-slice2.md`.
+//!
+//! - **Slices 3–5 — pending.** Remaining long-tail keywords,
+//!   built-in functions, metadata-object tokens, virtual-table tokens,
+//!   type literals, the UNDEFINED literal, period-type tokens, and
+//!   the logos error fallback. These remain as carried over from the
+//!   pre-clean-room implementation and will be re-derived by
 //!   subsequent slices.
 //!
 //! All variants share a single longest-match precedence space — the
@@ -233,29 +243,52 @@ pub enum SdblTokenKind {
     Parameter,
 
     // ============================================================================
-    // LEGACY (Slices 2–5 pending — not part of the clean-room claim)
+    // CLEAN-ROOM Slice 2 — structural keyword vocabulary (ITS pubqlang/10, /12)
     // ============================================================================
     //
-    // The variants below are carried over unchanged from the
-    // pre-clean-room implementation. They remain Tier B material for
-    // the duration of the staged migration; each subsequent slice
-    // will re-derive one group from ITS documentation and move it up
-    // into the clean-room section above.
+    // The convenience index — RUS/ENG → Variant — is populated in the
+    // accompanying clean-room regex-rewrite commit. This commit performs
+    // the mechanical move only; regex attributes are unchanged and per-
+    // variant ITS citations arrive with the rewrite.
+
+    // --- Clause starters ---
     #[regex(r"(?i)выбрать|(?i)select")]
     KwSelect,
 
     #[regex(r"(?i)из|(?i)from")]
     KwFrom,
 
-    #[regex(r"(?i)где|(?i)where")]
-    KwWhere,
-
     #[regex(r"(?i)поместить|(?i)into")]
     KwInto,
 
-    #[regex(r"(?i)уничтожить|(?i)drop")]
-    KwDrop,
+    #[regex(r"(?i)где|(?i)where")]
+    KwWhere,
 
+    #[regex(r"(?i)сгруппировать|(?i)group")]
+    KwGroup,
+
+    #[regex(r"(?i)упорядочить|(?i)order")]
+    KwOrder,
+
+    #[regex(r"(?i)имеющие|(?i)having")]
+    KwHaving,
+
+    #[regex(r"(?i)итоги|(?i)totals")]
+    KwTotals,
+
+    #[regex(r"(?i)объединить|(?i)union")]
+    KwUnion,
+
+    #[regex(r"(?i)все|(?i)all")]
+    KwAll,
+
+    #[regex(r"(?i)различные|(?i)distinct")]
+    KwDistinct,
+
+    #[regex(r"(?i)первые|(?i)top")]
+    KwTop,
+
+    // --- Join family ---
     #[regex(r"(?i)соединение|(?i)join")]
     KwJoin,
 
@@ -279,17 +312,69 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)по|(?i)on|(?i)by")]
     KwOnOrBy,
 
-    #[regex(r"(?i)сгруппировать|(?i)group")]
-    KwGroup,
+    // --- Aliasing & predicates ---
+    #[regex(r"(?i)как|(?i)as")]
+    KwAs,
 
-    #[regex(r"(?i)упорядочить|(?i)order")]
-    KwOrder,
+    #[regex(r"(?i)в|(?i)in")]
+    KwIn,
 
-    #[regex(r"(?i)имеющие|(?i)having")]
-    KwHaving,
+    #[regex(r"(?i)между|(?i)between")]
+    KwBetween,
 
-    #[regex(r"(?i)итоги|(?i)totals")]
-    KwTotals,
+    #[regex(r"(?i)подобно|(?i)like")]
+    KwLike,
+
+    #[regex(r"(?i)есть|(?i)is")]
+    KwIs,
+
+    // --- CASE family ---
+    #[regex(r"(?i)выбор|(?i)case")]
+    KwCase,
+
+    #[regex(r"(?i)когда|(?i)when")]
+    KwWhen,
+
+    #[regex(r"(?i)тогда|(?i)then")]
+    KwThen,
+
+    #[regex(r"(?i)иначе|(?i)else")]
+    KwElse,
+
+    #[regex(r"(?i)конец|(?i)end")]
+    KwEnd,
+
+    // --- Logical operators & literals ---
+    #[regex(r"(?i)и|(?i)and")]
+    OpAnd,
+
+    #[regex(r"(?i)или|(?i)or")]
+    OpOr,
+
+    #[regex(r"(?i)не|(?i)not")]
+    OpNot,
+
+    #[regex(r"(?i)истина|(?i)true")]
+    LitTrue,
+
+    #[regex(r"(?i)ложь|(?i)false")]
+    LitFalse,
+
+    #[regex(r"(?i)null")]
+    LitNull,
+
+    // ============================================================================
+    // LEGACY (Slices 3–5 pending — not part of the clean-room claim)
+    // ============================================================================
+    //
+    // The variants below are carried over unchanged from the
+    // pre-clean-room implementation. They remain Tier B material for
+    // the duration of the staged migration; the next slices will
+    // re-derive remaining long-tail keywords, built-in functions,
+    // metadata-object tokens, virtual tables, type literals, and
+    // period-type tokens from ITS documentation.
+    #[regex(r"(?i)уничтожить|(?i)drop")]
+    KwDrop,
 
     #[regex(r"(?i)автоупорядочивание|(?i)autoorder")]
     KwAutoOrder,
@@ -303,20 +388,8 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)иерархия|(?i)hierarchy")]
     KwHierarchy,
 
-    #[regex(r"(?i)различные|(?i)distinct")]
-    KwDistinct,
-
-    #[regex(r"(?i)первые|(?i)top")]
-    KwTop,
-
     #[regex(r"(?i)разрешенные|(?i)allowed")]
     KwAllowed,
-
-    #[regex(r"(?i)объединить|(?i)union")]
-    KwUnion,
-
-    #[regex(r"(?i)все|(?i)all")]
-    KwAll,
 
     #[regex(r"(?i)для|(?i)for")]
     KwFor,
@@ -336,44 +409,14 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)периоды|(?i)periods")]
     KwPeriods,
 
-    #[regex(r"(?i)в|(?i)in")]
-    KwIn,
-
-    #[regex(r"(?i)между|(?i)between")]
-    KwBetween,
-
-    #[regex(r"(?i)подобно|(?i)like")]
-    KwLike,
-
     #[regex(r"(?i)спецсимвол|(?i)escape")]
     KwEscape,
-
-    #[regex(r"(?i)есть|(?i)is")]
-    KwIs,
 
     #[regex(r"(?i)ссылка|(?i)refs")]
     KwRefs,
 
-    #[regex(r"(?i)выбор|(?i)case")]
-    KwCase,
-
-    #[regex(r"(?i)когда|(?i)when")]
-    KwWhen,
-
-    #[regex(r"(?i)тогда|(?i)then")]
-    KwThen,
-
-    #[regex(r"(?i)иначе|(?i)else")]
-    KwElse,
-
-    #[regex(r"(?i)конец|(?i)end")]
-    KwEnd,
-
     #[regex(r"(?i)выразить|(?i)cast")]
     KwCast,
-
-    #[regex(r"(?i)как|(?i)as")]
-    KwAs,
 
     #[regex(r"(?i)тип|(?i)type")]
     KwType,
@@ -584,26 +627,8 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)дата|(?i)date")]
     TypeDate,
 
-    #[regex(r"(?i)истина|(?i)true")]
-    LitTrue,
-
-    #[regex(r"(?i)ложь|(?i)false")]
-    LitFalse,
-
-    #[regex(r"(?i)null")]
-    LitNull,
-
     #[regex(r"(?i)неопределено|(?i)undefined")]
     LitUndefined,
-
-    #[regex(r"(?i)и|(?i)and")]
-    OpAnd,
-
-    #[regex(r"(?i)или|(?i)or")]
-    OpOr,
-
-    #[regex(r"(?i)не|(?i)not")]
-    OpNot,
 
     // Note: Most period types are the same as date functions above.
     // Only unique period types are listed here.
