@@ -588,7 +588,7 @@ section).
   `sdbl-expressions-mini-spec.md` with verified-yes /
   verified-no outcomes, and unignores the two C0b regression-
   gate tests in the same atomic commit. No fixup commits.
-- **C3 — this commit (2026-04-25)**: this attestation (initial
+- **C3 — `66dca2ae` (2026-04-25)**: this attestation (initial
   draft) + 40 spec-driven acceptance tests in
   `crates/parser/tests/sdbl_slice10b_predicates.rs` (including
   the 2 mandatory clause-keyword recovery tests and the 5
@@ -596,9 +596,9 @@ section).
   master-doc flip in `docs/legal/sdbl-clean-room-slices.md` +
   module Provenance docstring flip to "complete (2026-04-25)"
   with attestation citation in `crates/parser/src/grammar/sdbl.rs`.
-  Fixup commits, if any, will be enumerated by the
-  attestation-amend follow-up under the Anti-Hilbert disclosure
-  protocol below.
+  No fixup commits; the absolute-last trailing commit on this
+  branch is the one that names this C3 hash here under the
+  Anti-Hilbert disclosure protocol below.
 
 **Anti-Hilbert disclosure.** The very last commit on this branch
 — the one that authors / amends this attestation §Commit trail
