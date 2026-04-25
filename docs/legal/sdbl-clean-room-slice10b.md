@@ -605,7 +605,7 @@ section).
   master-doc flip in `docs/legal/sdbl-clean-room-slices.md` +
   module Provenance docstring flip to "complete (2026-04-25)"
   with attestation citation in `crates/parser/src/grammar/sdbl.rs`.
-  Two fixup commits:
+  Four fixup commits:
   - `ef85b028` — Anti-Hilbert close-out: replace the "C3 — this
     commit" placeholder in this §Commit trail (and in the
     `docs/legal/sdbl-clean-room-slices.md` §Slice 10b commit-
@@ -619,6 +619,29 @@ section).
     `comparison_expr → comparison_expr` rename description
     introduced by the C1 bulk-rename). Codex stop-time review
     finding.
+  - `ecb26896` — Anti-Hilbert close-out for `ef85b028` and
+    `7f5e1cbc`: name them in this §Commit trail and in the
+    master-doc commit-trail line.
+  - `9943d47a` — address codex adversarial-review findings
+    (running `/codex:adversarial-review --base 1635be4b`):
+    (1) split `predicate_expr` per-function provenance into a
+    verified-yes block (BETWEEN/22, LIKE/23, IS NULL/27,
+    IN HIERARCHY/32, REFS/40) and a verified-no `// local: …`
+    block (IN value-list, IN-with-subquery, comparison
+    operators, ESCAPE) so the comment is internally consistent
+    with the §ITS coverage verification table;
+    (2) flip the master-doc §Slice 10b §Files block from stale
+    "to-be-authored" / "8 functions to re-author" wording to
+    final-state language naming the landed clean-room functions,
+    attestation, mini-spec extension, and test files;
+    (3) add three named acceptance tests in
+    `sdbl_slice10b_predicates.rs`
+    (`test_slice10b_not_between_captures_kwnot`,
+    `test_slice10b_not_like_captures_kwnot`,
+    `test_slice10b_orphan_not_no_predicate_wrapper`) so
+    Preserved behaviour #2 is pinned by named tests for every
+    NOT-prefix predicate plus the orphan-NOT recovery case
+    (was: implicit "absence of failures").
 
 **Anti-Hilbert disclosure.** The very last commit on this branch
 — the one that authors / amends this attestation §Commit trail
@@ -633,10 +656,10 @@ hash: that commit is the one that landed this attestation in its
 current state, and it is the natural endpoint of the trail.
 
 The phase totals (named hashes in the trail above): C0a 1,
-C0b 1, C1 1, C2 1, C3 1 anchor + 2 fixups (`ef85b028`,
-`7f5e1cbc`) = 7 commits enumerated. The branch HEAD adds one
-trailing commit (the one editing this trail to name the two
-fixups), per the Anti-Hilbert disclosure above.
+C0b 1, C1 1, C2 1, C3 1 anchor + 4 fixups (`ef85b028`,
+`7f5e1cbc`, `ecb26896`, `9943d47a`) = 9 commits enumerated. The
+branch HEAD adds one trailing commit (the one editing this trail
+to name the four fixups), per the Anti-Hilbert disclosure above.
 
 ## Licensing note
 
