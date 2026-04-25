@@ -3015,3 +3015,451 @@ fn test_slice10a_select_field_null_emits_literal() {
         "Bare NULL at SELECT-field position must emit SdblLiteral",
     );
 }
+
+// ============================================================================
+// Slice 10b C0b Bucket-A gap additions
+// ============================================================================
+//
+// Pre-rewrite regression gate for the Slice 10b clean-room rewrite of
+// predicates / comparison / column-or-function / CAST / CASE.
+// Authored from `docs/legal/sdbl-expressions-mini-spec.md`
+// (C0a-extended) and ITS pubqlang chapters 22, 23, 27, 32, 40 via the
+// local dump at `/home/itrous/src/tools_migration/its/dump/`. See
+// `docs/legal/sdbl-clean-room-slices.md` §Slice 10b for the slice
+// scope.
+//
+// Tests (a)-(l) and (n.1)-(n.5) MUST pass on the pre-Slice-10b parser:
+// they document existing behaviour that the C2 clean-room rewrite
+// preserves bit-for-bit. Tests (m) EN/RU are `#[ignore]`-ed in C0b —
+// they are the regression gate for the C2 fix to
+// `column_or_function`'s clause-keyword recovery (codex Round-1
+// finding 2). Slice 10b C2 unignores them in the same atomic commit
+// as the fix.
+
+// (a) Empty IN list recovery — `IN ()` accepted as a recoverable
+// parse. Mini-spec §Predicates §SdblInExpr + §IDE-recovery
+// allowances #10. ITS pubqlang/22 documents IN with a non-empty
+// value-list; the empty form is preserved as IDE-recovery for
+// mid-typing.
+#[test]
+fn test_slice10b_empty_in_list_recovery() {
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле В ()";
+    let parse = parse_sdbl(input);
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_IN_EXPR"),
+        "Empty `IN ()` must still emit SdblInExpr (recoverable parse).\nTree: {}",
+        tree
+    );
+    assert!(
+        tree.contains("SDBL_WHERE_CLAUSE"),
+        "WHERE clause must be parsed despite empty IN.\nTree: {}",
+        tree
+    );
+}
+
+// (b) NOT IN with subquery — `НЕ В (ВЫБРАТЬ ...)` emits SdblInExpr
+// with KwNot before KwIn, and SdblSubquery inside the parens.
+// Mini-spec §Predicates §SdblInExpr.
+#[test]
+fn test_slice10b_not_in_subquery() {
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле НЕ В (ВЫБРАТЬ Х ИЗ С)";
+    let parse = parse_sdbl(input);
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_IN_EXPR"),
+        "NOT IN with subquery must emit SdblInExpr.\nTree: {}",
+        tree
+    );
+    assert!(
+        tree.contains("SDBL_SUBQUERY"),
+        "IN-subquery must produce SdblSubquery inside the parens.\nTree: {}",
+        tree
+    );
+}
+
+// (c) IN HIERARCHY Russian variant — `В ИЕРАРХИИ (...)` emits
+// SdblInHierarchyExpr. Mini-spec §Predicates §SdblInHierarchyExpr +
+// ITS pubqlang/32 canonical example.
+#[test]
+fn test_slice10b_in_hierarchy_russian() {
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле В ИЕРАРХИИ (&Корень)";
+    let parse = parse_sdbl(input);
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_IN_HIERARCHY_EXPR"),
+        "В ИЕРАРХИИ must emit SdblInHierarchyExpr.\nTree: {}",
+        tree
+    );
+}
+
+// (d) IS NOT NULL shape — `ЕСТЬ НЕ NULL` emits SdblIsNullExpr with
+// KwNot between IS and NULL. Mini-spec §Predicates §SdblIsNullExpr
+// + ITS pubqlang/27 canonical example.
+#[test]
+fn test_slice10b_is_not_null_russian() {
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле ЕСТЬ НЕ NULL";
+    let parse = parse_sdbl(input);
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_IS_NULL_EXPR"),
+        "ЕСТЬ НЕ NULL must emit SdblIsNullExpr.\nTree: {}",
+        tree
+    );
+}
+
+// (e) BETWEEN missing AND recovery — `МЕЖДУ 1` (no AND high-bound)
+// emits SdblBetweenExpr with only the low bound. Mini-spec
+// §Predicates §SdblBetweenExpr + §IDE-recovery allowances #12.
+#[test]
+fn test_slice10b_between_missing_and_recovery() {
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле МЕЖДУ 1";
+    let parse = parse_sdbl(input);
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_BETWEEN_EXPR"),
+        "МЕЖДУ without AND must still emit SdblBetweenExpr (recovery).\nTree: {}",
+        tree
+    );
+}
+
+// (f) LIKE pattern ESCAPE char — `ПОДОБНО "..." СПЕЦСИМВОЛ "\"`
+// emits SdblLikeExpr. ESCAPE/СПЕЦСИМВОЛ is a local IDE-recovery
+// allowance (mini-spec §IDE-recovery allowances #13 — not in dumped
+// ITS chapters).
+#[test]
+fn test_slice10b_like_with_escape() {
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле ПОДОБНО \"abc%\" СПЕЦСИМВОЛ \"!\"";
+    let parse = parse_sdbl(input);
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_LIKE_EXPR"),
+        "ПОДОБНО ... СПЕЦСИМВОЛ must emit SdblLikeExpr.\nTree: {}",
+        tree
+    );
+}
+
+// (g) REFS MDO chain — `ССЫЛКА Документ.ПриходнаяНакладная` emits
+// SdblRefsExpr with the MDO chain as direct token children.
+// Mini-spec §Predicates §SdblRefsExpr + ITS pubqlang/40 canonical
+// example.
+#[test]
+fn test_slice10b_refs_mdo_chain_russian() {
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Регистратор ССЫЛКА Документ.ПриходнаяНакладная";
+    let parse = parse_sdbl(input);
+    assert!(
+        !parse.has_errors(),
+        "REFS with MDO chain must parse without errors: {:?}",
+        parse.errors()
+    );
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_REFS_EXPR"),
+        "ССЫЛКА Документ.ПриходнаяНакладная must emit SdblRefsExpr.\nTree: {}",
+        tree
+    );
+}
+
+// (h) CASE simple form — `ВЫБОР Т.Х КОГДА ... КОНЕЦ` emits
+// SdblCaseExpr whose first child node is the operand expression
+// (NOT SdblWhenClause). Mini-spec §CASE expressions
+// §Child-order invariant + HIR consumer
+// `crates/sdbl-hir/src/lower/expr/case_expr.rs:40-45`.
+#[test]
+fn test_slice10b_case_simple_form_operand_first() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ ВЫБОР Т.Х КОГДА 1 ТОГДА \"А\" ИНАЧЕ \"Б\" КОНЕЦ ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Simple CASE must parse: {:?}", parse.errors());
+
+    let case = parse
+        .syntax_node()
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_CASE_EXPR)
+        .expect("Tree must contain SdblCaseExpr");
+
+    let first_child_kind = case.children().next().map(|n| n.kind());
+    assert_ne!(
+        first_child_kind,
+        Some(SyntaxKind::SDBL_WHEN_CLAUSE),
+        "Simple CASE first child node must be the operand expression, not SdblWhenClause. Got: {:?}",
+        first_child_kind
+    );
+}
+
+// (i) CASE searched form — `ВЫБОР КОГДА ... КОНЕЦ` (no operand)
+// emits SdblCaseExpr whose first child node is SdblWhenClause.
+// Mini-spec §CASE expressions §Child-order invariant.
+#[test]
+fn test_slice10b_case_searched_form_when_first() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ ВЫБОР КОГДА Т.Х = 1 ТОГДА \"А\" КОНЕЦ ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Searched CASE must parse: {:?}", parse.errors());
+
+    let case = parse
+        .syntax_node()
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_CASE_EXPR)
+        .expect("Tree must contain SdblCaseExpr");
+
+    let first_child_kind = case.children().next().map(|n| n.kind());
+    assert_eq!(
+        first_child_kind,
+        Some(SyntaxKind::SDBL_WHEN_CLAUSE),
+        "Searched CASE first child node must be SdblWhenClause (no operand). Got: {:?}",
+        first_child_kind
+    );
+}
+
+// (j) CAST primitive parameterised type — `ВЫРАЗИТЬ(Поле КАК
+// СТРОКА(200))` emits SdblFunctionCall containing SdblType with the
+// primitive type Ident plus the (decimal) parameter list. Mini-spec
+// §CAST type specification + ITS pubqlang/40 canonical example.
+#[test]
+fn test_slice10b_cast_primitive_parameterised() {
+    let input = "ВЫБРАТЬ ВЫРАЗИТЬ(Поле КАК СТРОКА(200)) ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "CAST(... AS STRING(200)) must parse: {:?}", parse.errors());
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_FUNCTION_CALL"),
+        "CAST is dispatched as SdblFunctionCall.\nTree: {}",
+        tree
+    );
+    assert!(tree.contains("SDBL_TYPE"), "CAST type spec must emit SdblType.\nTree: {}", tree);
+}
+
+// (k) CAST MDO type and member access — `ВЫРАЗИТЬ(Регистратор КАК
+// Документ.ПриходнаяНакладная).Поставщик` emits SdblFunctionCall
+// containing SdblType (MDO chain) AND a post-RParen Dot/Ident chain
+// (member access). Mini-spec §CAST type specification +
+// §SdblFunctionCall member access + ITS pubqlang/40.
+#[test]
+fn test_slice10b_cast_mdo_with_member_access() {
+    let input = "ВЫБРАТЬ ВЫРАЗИТЬ(Регистратор КАК Документ.ПриходнаяНакладная).Поставщик ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "CAST(MDO).Поле must parse: {:?}", parse.errors());
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_FUNCTION_CALL"),
+        "CAST is dispatched as SdblFunctionCall.\nTree: {}",
+        tree
+    );
+    assert!(tree.contains("SDBL_TYPE"), "MDO CAST type must emit SdblType.\nTree: {}", tree);
+    assert!(
+        tree.contains("Поставщик"),
+        "Member access on CAST result must be preserved in the tree.\nTree: {}",
+        tree
+    );
+}
+
+// (l) Inline tabular field syntax — `Т.ТабЧасть.(Поле1, Поле2)`
+// emits SdblColumnRef containing SdblInlineTableFields wrapping
+// SdblSelectedField children. Mini-spec §Inline tabular field
+// syntax. The Slice-10b → Slice-7 dispatch boundary.
+#[test]
+fn test_slice10b_inline_tabular_field_syntax() {
+    let input = "ВЫБРАТЬ Т.ТабЧасть.(Поле1, Поле2) ИЗ Т";
+    let parse = parse_sdbl(input);
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_INLINE_TABLE_FIELDS"),
+        "Inline tabular fields must emit SdblInlineTableFields.\nTree: {}",
+        tree
+    );
+    assert!(
+        tree.contains("SDBL_SELECTED_FIELD"),
+        "Inline tabular fields must wrap SdblSelectedField children.\nTree: {}",
+        tree
+    );
+}
+
+// (m) Function-call clause-keyword recovery — `func(x, FROM T)`
+// must NOT consume FROM as an Ident-shaped argument; the FROM
+// clause must remain detectable for the outer SELECT. Codex
+// Round-1 finding 2 → Slice 10b C2 FIX. The C2 commit lands a
+// `&& !is_clause_keyword` clause at both arg-start probes in
+// `column_or_function`. Mini-spec §Column references and function
+// calls §SdblFunctionCall + §IDE-recovery allowances #15.
+//
+// `#[ignore]`-ed in C0b: the pre-C2 parser hijacks FROM as an
+// Ident-shaped argument, so this test FAILS on the pre-rewrite
+// parser. Slice 10b C2 unignores it in the same atomic commit as
+// the fix.
+#[test]
+#[ignore = "Slice 10b C2 unignores after column_or_function clause-keyword fix lands"]
+fn test_func_call_clause_keyword_recovery() {
+    use syntax::SyntaxKind;
+    let input = "SELECT func(x, FROM T)";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    // Outer SELECT must still recognise FROM T as the FROM clause —
+    // i.e. SDBL_FROM_CLAUSE must appear in the tree.
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer SELECT must keep its FROM clause despite the unbalanced func call.\nTree: {:#?}",
+        root
+    );
+
+    // The function call must NOT contain FROM as a direct
+    // argument-position Ident — the keyword filter at the
+    // arg-start probe should reject FROM.
+    let func_call = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_FUNCTION_CALL)
+        .expect("Tree must contain SdblFunctionCall");
+    let func_text = func_call.text().to_string();
+    assert!(
+        !func_text.to_uppercase().contains("FROM"),
+        "Function call must NOT consume FROM as an argument: got `{}`",
+        func_text
+    );
+}
+
+// (m, RU) Russian variant of the function-call clause-keyword
+// recovery regression gate. Same contract as
+// `test_func_call_clause_keyword_recovery` for ИЗ.
+#[test]
+#[ignore = "Slice 10b C2 unignores after column_or_function clause-keyword fix lands"]
+fn test_russian_func_call_clause_keyword_recovery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ функ(х, ИЗ Т)";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer ВЫБРАТЬ must keep its ИЗ clause despite the unbalanced func call.\nTree: {:#?}",
+        root
+    );
+
+    let func_call = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_FUNCTION_CALL)
+        .expect("Tree must contain SdblFunctionCall");
+    let func_text = func_call.text().to_string();
+    assert!(
+        !func_text.to_uppercase().contains("ИЗ"),
+        "Function call must NOT consume ИЗ as an argument: got `{}`",
+        func_text
+    );
+}
+
+// ----------------------------------------------------------------------------
+// (n.1)-(n.5) SELECT-field predicate descendant guards.
+//
+// Producer-side invariant: `expression(p)` always wraps in
+// `logical_or_expr` (Slice 10a) so consumer-side
+// `SdblSelectedField::expression()` (which directly matches only 3
+// of the 13 Slice-10b kinds — COLUMN_REF, FUNCTION_CALL,
+// COMPARISON_EXPR) reaches the predicate / CASE node via
+// descendant traversal. Codex Round-1 finding 3 + Round-3 expansion.
+//
+// Each guard test asserts:
+//  1. SdblSelectedField direct child is SdblLogicalOrExpr;
+//  2. SdblSelectedField direct child is NOT a bare predicate /
+//     CASE / comparison node.
+// ----------------------------------------------------------------------------
+
+fn first_selected_field_direct_child_kinds(input: &str) -> Vec<syntax::SyntaxKind> {
+    use syntax::SyntaxKind;
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+    let field = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_SELECTED_FIELD)
+        .expect("Tree must contain SdblSelectedField");
+    field.children().map(|n| n.kind()).collect()
+}
+
+// (n.1) SELECT-field comparison descendant guard.
+#[test]
+fn test_select_field_comparison_descendant_guard() {
+    use syntax::SyntaxKind;
+    let kinds = first_selected_field_direct_child_kinds("ВЫБРАТЬ Поле = 1 ИЗ Т");
+    assert!(
+        kinds.contains(&SyntaxKind::SDBL_LOGICAL_OR_EXPR),
+        "SelectedField must have SdblLogicalOrExpr as direct child. Got: {:?}",
+        kinds
+    );
+    assert!(
+        !kinds.contains(&SyntaxKind::SDBL_COMPARISON_EXPR),
+        "SelectedField must NOT have bare SdblComparisonExpr — it must be wrapped in LogicalOrExpr. Got: {:?}",
+        kinds
+    );
+}
+
+// (n.2) SELECT-field IN descendant guard.
+#[test]
+fn test_select_field_in_descendant_guard() {
+    use syntax::SyntaxKind;
+    let kinds = first_selected_field_direct_child_kinds("ВЫБРАТЬ Поле В (1, 2) ИЗ Т");
+    assert!(
+        kinds.contains(&SyntaxKind::SDBL_LOGICAL_OR_EXPR),
+        "SelectedField must have SdblLogicalOrExpr as direct child. Got: {:?}",
+        kinds
+    );
+    assert!(
+        !kinds.contains(&SyntaxKind::SDBL_IN_EXPR),
+        "SelectedField must NOT have bare SdblInExpr — it must be wrapped in LogicalOrExpr. Got: {:?}",
+        kinds
+    );
+}
+
+// (n.3) SELECT-field BETWEEN descendant guard.
+#[test]
+fn test_select_field_between_descendant_guard() {
+    use syntax::SyntaxKind;
+    let kinds = first_selected_field_direct_child_kinds("ВЫБРАТЬ Поле МЕЖДУ 1 И 5 ИЗ Т");
+    assert!(
+        kinds.contains(&SyntaxKind::SDBL_LOGICAL_OR_EXPR),
+        "SelectedField must have SdblLogicalOrExpr as direct child. Got: {:?}",
+        kinds
+    );
+    assert!(
+        !kinds.contains(&SyntaxKind::SDBL_BETWEEN_EXPR),
+        "SelectedField must NOT have bare SdblBetweenExpr — it must be wrapped in LogicalOrExpr. Got: {:?}",
+        kinds
+    );
+}
+
+// (n.4) SELECT-field IS NULL descendant guard.
+#[test]
+fn test_select_field_is_null_descendant_guard() {
+    use syntax::SyntaxKind;
+    let kinds = first_selected_field_direct_child_kinds("ВЫБРАТЬ Поле ЕСТЬ NULL ИЗ Т");
+    assert!(
+        kinds.contains(&SyntaxKind::SDBL_LOGICAL_OR_EXPR),
+        "SelectedField must have SdblLogicalOrExpr as direct child. Got: {:?}",
+        kinds
+    );
+    assert!(
+        !kinds.contains(&SyntaxKind::SDBL_IS_NULL_EXPR),
+        "SelectedField must NOT have bare SdblIsNullExpr — it must be wrapped in LogicalOrExpr. Got: {:?}",
+        kinds
+    );
+}
+
+// (n.5) SELECT-field CASE descendant guard.
+#[test]
+fn test_select_field_case_descendant_guard() {
+    use syntax::SyntaxKind;
+    let kinds =
+        first_selected_field_direct_child_kinds("ВЫБРАТЬ ВЫБОР КОГДА 1 = 1 ТОГДА \"А\" КОНЕЦ ИЗ Т");
+    assert!(
+        kinds.contains(&SyntaxKind::SDBL_LOGICAL_OR_EXPR),
+        "SelectedField must have SdblLogicalOrExpr as direct child. Got: {:?}",
+        kinds
+    );
+    assert!(
+        !kinds.contains(&SyntaxKind::SDBL_CASE_EXPR),
+        "SelectedField must NOT have bare SdblCaseExpr — it must be wrapped in LogicalOrExpr. Got: {:?}",
+        kinds
+    );
+}
