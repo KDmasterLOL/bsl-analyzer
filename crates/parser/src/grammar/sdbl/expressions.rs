@@ -8,12 +8,43 @@
 //! - Function calls
 //! - Literals and parameters
 //!
-//! Phase 1 (MVP): Basic expression support for SELECT fields and WHERE clauses
-//! Phase 2-3: Complete expression grammar (CASE, predicates, complex operators)
+//! ## Provenance
+//!
+//! Slice 10a — clean-room (in progress): expression backbone (atoms +
+//! operator precedence chain + parens / tuple / subquery). Authored from
+//! `docs/legal/sdbl-expressions-mini-spec.md` and ITS pubqlang/10 + /12.
+//! See `docs/legal/sdbl-clean-room-slice10a.md` for the attestation
+//! (landed with C3).
+//!
+//! Slice 10b — pending: predicates, comparison, column-or-function, CAST,
+//! CASE. Bodies remain Tier B under the LEGACY banner; the
+//! `comparison_expr_legacy` / `predicate_expr_legacy` shims preserve the
+//! Slice 10a → Slice 10b dispatch boundary.
 
 use crate::event::NodeKind;
 use crate::parser::Parser;
 use lexer::TokenKind;
+
+// ============================================================================
+// CLEAN-ROOM Slice 10a — expression backbone
+// ============================================================================
+//
+// See `docs/legal/sdbl-clean-room-slice10a.md` for authorship and source
+// citations (landed with C3). Per-function provenance comments are
+// attached at C2.
+//
+// The 17 functions below cover the Slice 10a surface:
+//   - Helpers: is_expression_start, is_recovery_point,
+//     recover_to_delimiter, parse_delimited_list
+//   - Entries: logical_expression, expression
+//   - Operator chain: logical_or_expr, logical_and_expr, not_expr,
+//     additive_expr, multiplicative_expr, unary_expr
+//   - Primary dispatch + atoms: primary_expr, literal_expr,
+//     string_literal_or_multi, parameter_expr, paren_or_subquery_expr
+//
+// Slice 10a's `not_expr` calls into `comparison_expr_legacy` (Slice 10b
+// territory, defined under the LEGACY banner below) — that is the only
+// Slice-10a → Slice-10b dispatch boundary in this file.
 
 // ============================================================================
 // Helper Functions for Error Recovery
@@ -268,10 +299,11 @@ pub fn logical_expression(p: &mut Parser) {
 
 /// Entry point for general expressions (used in SELECT fields, etc.)
 ///
-/// Grammar: `expression: logicalExpression | caseExpression | ...`
+/// Grammar: `expression := logicalExpression`
 ///
-/// Phase 1: Same as logical_expression
-/// Phase 2: Add CASE expressions, type casts
+/// Currently identical to `logical_expression`. Slice 12 may merge the
+/// two entries; Slice 10a preserves the split for scope discipline (the
+/// 14+ call sites in `select.rs` are Slice 7/8/11 territory).
 pub fn expression(p: &mut Parser) {
     logical_or_expr(p);
 }
@@ -333,9 +365,253 @@ fn not_expr(p: &mut Parser) {
         not_expr(p); // Recursive for multiple NOTs
         m.complete(p, NodeKind::SdblNotExpr);
     } else {
-        comparison_expr(p);
+        comparison_expr_legacy(p);
     }
 }
+
+/// Parse additive expression (+ and -)
+///
+/// Grammar: `additiveExpression: multiplicativeExpression ((PLUS | MINUS) multiplicativeExpression)*`
+fn additive_expr(p: &mut Parser) {
+    let m = p.start();
+
+    multiplicative_expr(p);
+
+    loop {
+        p.skip_trivia(); // CRITICAL: Skip trivia BEFORE checking for operator!
+        if !matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
+            break;
+        }
+        p.check_iteration_limit();
+        p.bump(); // + or -
+        p.skip_trivia();
+        multiplicative_expr(p);
+    }
+
+    m.complete(p, NodeKind::SdblAdditiveExpr);
+}
+
+/// Parse multiplicative expression (* and /)
+///
+/// Grammar: `multiplicativeExpression: unaryExpression ((MUL | DIV | MOD) unaryExpression)*`
+fn multiplicative_expr(p: &mut Parser) {
+    let m = p.start();
+
+    unary_expr(p);
+
+    loop {
+        p.skip_trivia(); // CRITICAL: Skip trivia BEFORE checking for operator!
+        if !matches!(
+            p.current(),
+            Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
+        ) {
+            break;
+        }
+        p.check_iteration_limit();
+        p.bump(); // *, /, %
+        p.skip_trivia();
+        unary_expr(p);
+    }
+
+    m.complete(p, NodeKind::SdblMultiplicativeExpr);
+}
+
+/// Parse unary expression (+, -, NOT prefix)
+///
+/// Grammar: `unaryExpression: (PLUS | MINUS | NOT)? primaryExpression`
+fn unary_expr(p: &mut Parser) {
+    if matches!(
+        p.current(),
+        Some(TokenKind::Plus) | Some(TokenKind::Minus) | Some(TokenKind::KwNot)
+    ) {
+        let m = p.start();
+        p.bump(); // unary operator
+        p.skip_trivia();
+        unary_expr(p); // Recursive for multiple unary operators
+        m.complete(p, NodeKind::SdblUnaryExpr);
+    } else {
+        primary_expr(p);
+    }
+}
+
+/// Parse primary expression (literals, columns, functions, parenthesized expressions, CASE)
+///
+/// Grammar: `primaryExpression: literal | column | functionCall | parameter | LPAREN expression RPAREN | caseExpression | STAR`
+///
+/// NOTE: `STAR` is included for special syntax like `COUNT(*)` in SDBL.
+fn primary_expr(p: &mut Parser) {
+    // Check for CASE keyword first (using at_keyword since CASE might be IDENT token)
+    if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
+        case_expr(p);
+        return;
+    }
+
+    match p.current() {
+        Some(TokenKind::LParen) => paren_or_subquery_expr(p),
+        Some(TokenKind::Ident) => column_or_function(p),
+        Some(TokenKind::Decimal) | Some(TokenKind::Float) => literal_expr(p),
+        Some(TokenKind::String) => literal_expr(p),
+        Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => literal_expr(p),
+        Some(TokenKind::KwNull) | Some(TokenKind::KwUndefined) => literal_expr(p),
+        Some(TokenKind::Ampersand) => parameter_expr(p),
+
+        // Special case: Star token for COUNT(*) syntax
+        // In SDBL, asterisk can appear as a standalone argument in aggregate functions
+        Some(TokenKind::Star) => {
+            let m = p.start();
+            p.bump(); // Consume Star
+            m.complete(p, NodeKind::SdblLiteral);
+        }
+
+        _ => {
+            // Error recovery: unexpected token
+            let m = p.start();
+            p.error();
+            m.complete(p, NodeKind::SdblError);
+        }
+    }
+}
+
+/// Parse literal expression (numbers, strings, booleans, null)
+fn literal_expr(p: &mut Parser) {
+    // Special handling for String tokens to detect multiString
+    if p.at(TokenKind::String) {
+        string_literal_or_multi(p);
+    } else {
+        // Other literals (numbers, booleans, null)
+        let m = p.start();
+        p.bump();
+        m.complete(p, NodeKind::SdblLiteral);
+    }
+}
+
+/// Parse string literal or multiString
+///
+/// Grammar: `multiString: STR+`
+///
+/// Creates SDBL_MULTI_STRING if multiple consecutive String tokens.
+/// For single String token, creates SDBL_LITERAL (even if it contains newlines).
+///
+/// NOTE: The diagnostic handler will check BOTH:
+/// 1. SDBL_MULTI_STRING nodes (multiple strings)
+/// 2. SDBL_LITERAL nodes with String tokens containing newlines
+fn string_literal_or_multi(p: &mut Parser) {
+    let m = p.start();
+
+    // Bump first String token
+    p.bump();
+
+    // Check for consecutive String tokens (multiString: STR+)
+    let mut count = 1;
+    while p.at(TokenKind::String) {
+        p.bump();
+        count += 1;
+    }
+
+    // Create SDBL_MULTI_STRING only if multiple consecutive strings
+    if count > 1 {
+        m.complete(p, NodeKind::SdblMultiString);
+    } else {
+        m.complete(p, NodeKind::SdblLiteral);
+    }
+}
+
+/// Parse parameter expression (&Parameter)
+///
+/// Grammar: `parameter: AMPERSAND identifier`
+///
+/// SDBL &Parameter may be lexed as one token or two (Ampersand + Ident). Handle both.
+/// NOTE: Do NOT skip trivia between & and identifier - parameters must be written
+/// without whitespace: `&Param`, not `& Param`. Skipping trivia causes parser to
+/// consume following keywords (like ON/ПО) as part of parameter name.
+fn parameter_expr(p: &mut Parser) {
+    let m = p.start();
+    p.bump(); // Consume AMPERSAND
+
+    // Only consume identifier if it immediately follows & (no whitespace)
+    if p.at(TokenKind::Ident) {
+        p.bump();
+    }
+
+    m.complete(p, NodeKind::SdblParameter);
+}
+
+/// Parse parenthesized expression, tuple, or subquery
+///
+/// Grammar:
+/// ```text
+/// LPAREN (subquery | tupleExpr | expression) RPAREN
+/// tupleExpr: expression (COMMA expression)+
+/// ```
+///
+/// Lookahead:
+/// - SELECT keyword → subquery
+/// - After first expression, COMMA → tuple
+/// - Otherwise → parenthesized expression
+///
+/// Tuples are used for row-wise comparison in IN predicates:
+/// `(field1, field2, field3) IN (SELECT col1, col2, col3 FROM ...)`
+fn paren_or_subquery_expr(p: &mut Parser) {
+    let m = p.start();
+
+    p.bump(); // (
+    p.skip_trivia();
+
+    // Lookahead: if SELECT keyword, it's a subquery
+    if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
+        // Parse subquery
+        super::select::subquery(p);
+        p.skip_trivia();
+        p.expect(TokenKind::RParen);
+        m.complete(p, NodeKind::SdblSubqueryExpr);
+    } else {
+        // Parse first expression
+        expression(p);
+        p.skip_trivia();
+
+        // Check for comma → tuple expression (expr1, expr2, ...)
+        if p.at(TokenKind::Comma) {
+            // It's a tuple - parse remaining expressions
+            while p.eat(TokenKind::Comma) {
+                p.check_iteration_limit();
+                p.skip_trivia();
+
+                // Handle trailing comma or empty element
+                if p.at(TokenKind::RParen) || !is_expression_start(p) {
+                    break;
+                }
+
+                expression(p);
+                p.skip_trivia();
+            }
+
+            p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::SdblTupleExpr);
+        } else {
+            // Single expression in parentheses
+            p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::SdblParenExpr);
+        }
+    }
+}
+
+// ============================================================================
+// LEGACY (Slice 10b pending)
+// ============================================================================
+//
+// The functions below are pre-clean-room helpers that the Slice 10a rewrite
+// does NOT re-author. Slice 10b (predicates + comparison + column-or-function
+// + CAST + CASE) will clean-room-rewrite them. Until then they live under
+// the LEGACY banner with the `_legacy` suffix where renamed (`comparison_expr`
+// → `comparison_expr_legacy`, `predicate_expr` → `predicate_expr_legacy`).
+//
+// Slice 10a's `not_expr` calls into `comparison_expr_legacy`; the dispatch
+// from `not_expr` is the only Slice-10a → Slice-10b call boundary that this
+// rename touches. All NodeKinds emitted by these helpers (SdblComparisonExpr,
+// SdblInExpr, SdblInHierarchyExpr, SdblIsNullExpr, SdblBetweenExpr,
+// SdblLikeExpr, SdblRefsExpr, SdblColumnRef, SdblFunctionCall, SdblType,
+// SdblInlineTableFields, SdblCaseExpr, SdblWhenClause) are preserved
+// bit-for-bit until Slice 10b lands.
 
 /// Parse comparison expression
 ///
@@ -345,8 +621,8 @@ fn not_expr(p: &mut Parser) {
 ///     additiveExpression ((= | <> | < | <= | > | >=) additiveExpression)?
 ///   | predicateExpression
 /// ```
-fn comparison_expr(p: &mut Parser) {
-    predicate_expr(p);
+fn comparison_expr_legacy(p: &mut Parser) {
+    predicate_expr_legacy(p);
 }
 
 /// Parse predicate expression (IN, BETWEEN, IS NULL, etc.)
@@ -361,7 +637,7 @@ fn comparison_expr(p: &mut Parser) {
 ///       | (= | <> | < | <= | > | >=) additiveExpression
 ///       )?
 /// ```
-fn predicate_expr(p: &mut Parser) {
+fn predicate_expr_legacy(p: &mut Parser) {
     let m = p.start();
 
     additive_expr(p);
@@ -533,235 +809,6 @@ fn predicate_expr(p: &mut Parser) {
         m.complete(p, NodeKind::SdblComparisonExpr);
     } else {
         m.abandon(p);
-    }
-}
-
-/// Parse additive expression (+ and -)
-///
-/// Grammar: `additiveExpression: multiplicativeExpression ((PLUS | MINUS) multiplicativeExpression)*`
-fn additive_expr(p: &mut Parser) {
-    let m = p.start();
-
-    multiplicative_expr(p);
-
-    loop {
-        p.skip_trivia(); // CRITICAL: Skip trivia BEFORE checking for operator!
-        if !matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
-            break;
-        }
-        p.check_iteration_limit();
-        p.bump(); // + or -
-        p.skip_trivia();
-        multiplicative_expr(p);
-    }
-
-    m.complete(p, NodeKind::SdblAdditiveExpr);
-}
-
-/// Parse multiplicative expression (* and /)
-///
-/// Grammar: `multiplicativeExpression: unaryExpression ((MUL | DIV | MOD) unaryExpression)*`
-fn multiplicative_expr(p: &mut Parser) {
-    let m = p.start();
-
-    unary_expr(p);
-
-    loop {
-        p.skip_trivia(); // CRITICAL: Skip trivia BEFORE checking for operator!
-        if !matches!(
-            p.current(),
-            Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
-        ) {
-            break;
-        }
-        p.check_iteration_limit();
-        p.bump(); // *, /, %
-        p.skip_trivia();
-        unary_expr(p);
-    }
-
-    m.complete(p, NodeKind::SdblMultiplicativeExpr);
-}
-
-/// Parse unary expression (+, -, NOT prefix)
-///
-/// Grammar: `unaryExpression: (PLUS | MINUS | NOT)? primaryExpression`
-fn unary_expr(p: &mut Parser) {
-    if matches!(
-        p.current(),
-        Some(TokenKind::Plus) | Some(TokenKind::Minus) | Some(TokenKind::KwNot)
-    ) {
-        let m = p.start();
-        p.bump(); // unary operator
-        p.skip_trivia();
-        unary_expr(p); // Recursive for multiple unary operators
-        m.complete(p, NodeKind::SdblUnaryExpr);
-    } else {
-        primary_expr(p);
-    }
-}
-
-/// Parse primary expression (literals, columns, functions, parenthesized expressions, CASE)
-///
-/// Grammar: `primaryExpression: literal | column | functionCall | parameter | LPAREN expression RPAREN | caseExpression | STAR`
-///
-/// NOTE: `STAR` is included for special syntax like `COUNT(*)` in SDBL.
-///
-/// TODO: Add support for type cast syntax: `ВЫРАЗИТЬ(expr КАК type(size))`
-/// Currently КАК inside expressions creates ERROR node which breaks parsing.
-fn primary_expr(p: &mut Parser) {
-    // Check for CASE keyword first (using at_keyword since CASE might be IDENT token)
-    if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
-        case_expr(p);
-        return;
-    }
-
-    match p.current() {
-        Some(TokenKind::LParen) => paren_or_subquery_expr(p),
-        Some(TokenKind::Ident) => column_or_function(p),
-        Some(TokenKind::Decimal) | Some(TokenKind::Float) => literal_expr(p),
-        Some(TokenKind::String) => literal_expr(p),
-        Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => literal_expr(p),
-        Some(TokenKind::KwNull) | Some(TokenKind::KwUndefined) => literal_expr(p),
-        Some(TokenKind::Ampersand) => parameter_expr(p),
-
-        // Special case: Star token for COUNT(*) syntax
-        // In SDBL, asterisk can appear as a standalone argument in aggregate functions
-        Some(TokenKind::Star) => {
-            let m = p.start();
-            p.bump(); // Consume Star
-            m.complete(p, NodeKind::SdblLiteral);
-        }
-
-        _ => {
-            // Error recovery: unexpected token
-            let m = p.start();
-            p.error();
-            m.complete(p, NodeKind::SdblError);
-        }
-    }
-}
-
-/// Parse literal expression (numbers, strings, booleans, null)
-fn literal_expr(p: &mut Parser) {
-    // Special handling for String tokens to detect multiString
-    if p.at(TokenKind::String) {
-        string_literal_or_multi(p);
-    } else {
-        // Other literals (numbers, booleans, null)
-        let m = p.start();
-        p.bump();
-        m.complete(p, NodeKind::SdblLiteral);
-    }
-}
-
-/// Parse string literal or multiString
-///
-/// Grammar: `multiString: STR+`
-///
-/// Creates SDBL_MULTI_STRING if multiple consecutive String tokens.
-/// For single String token, creates SDBL_LITERAL (even if it contains newlines).
-///
-/// NOTE: The diagnostic handler will check BOTH:
-/// 1. SDBL_MULTI_STRING nodes (multiple strings)
-/// 2. SDBL_LITERAL nodes with String tokens containing newlines
-fn string_literal_or_multi(p: &mut Parser) {
-    let m = p.start();
-
-    // Bump first String token
-    p.bump();
-
-    // Check for consecutive String tokens (multiString: STR+)
-    let mut count = 1;
-    while p.at(TokenKind::String) {
-        p.bump();
-        count += 1;
-    }
-
-    // Create SDBL_MULTI_STRING only if multiple consecutive strings
-    if count > 1 {
-        m.complete(p, NodeKind::SdblMultiString);
-    } else {
-        m.complete(p, NodeKind::SdblLiteral);
-    }
-}
-
-/// Parse parameter expression (&Parameter)
-///
-/// Grammar: `parameter: AMPERSAND identifier`
-///
-/// SDBL &Parameter may be lexed as one token or two (Ampersand + Ident). Handle both.
-/// NOTE: Do NOT skip trivia between & and identifier - parameters must be written
-/// without whitespace: `&Param`, not `& Param`. Skipping trivia causes parser to
-/// consume following keywords (like ON/ПО) as part of parameter name.
-fn parameter_expr(p: &mut Parser) {
-    let m = p.start();
-    p.bump(); // Consume AMPERSAND
-
-    // Only consume identifier if it immediately follows & (no whitespace)
-    if p.at(TokenKind::Ident) {
-        p.bump();
-    }
-
-    m.complete(p, NodeKind::SdblParameter);
-}
-
-/// Parse parenthesized expression, tuple, or subquery
-///
-/// Grammar:
-/// ```text
-/// LPAREN (subquery | tupleExpr | expression) RPAREN
-/// tupleExpr: expression (COMMA expression)+
-/// ```
-///
-/// Lookahead:
-/// - SELECT keyword → subquery
-/// - After first expression, COMMA → tuple
-/// - Otherwise → parenthesized expression
-///
-/// Tuples are used for row-wise comparison in IN predicates:
-/// `(field1, field2, field3) IN (SELECT col1, col2, col3 FROM ...)`
-fn paren_or_subquery_expr(p: &mut Parser) {
-    let m = p.start();
-
-    p.bump(); // (
-    p.skip_trivia();
-
-    // Lookahead: if SELECT keyword, it's a subquery
-    if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
-        // Parse subquery
-        super::select::subquery(p);
-        p.skip_trivia();
-        p.expect(TokenKind::RParen);
-        m.complete(p, NodeKind::SdblSubqueryExpr);
-    } else {
-        // Parse first expression
-        expression(p);
-        p.skip_trivia();
-
-        // Check for comma → tuple expression (expr1, expr2, ...)
-        if p.at(TokenKind::Comma) {
-            // It's a tuple - parse remaining expressions
-            while p.eat(TokenKind::Comma) {
-                p.check_iteration_limit();
-                p.skip_trivia();
-
-                // Handle trailing comma or empty element
-                if p.at(TokenKind::RParen) || !is_expression_start(p) {
-                    break;
-                }
-
-                expression(p);
-                p.skip_trivia();
-            }
-
-            p.expect(TokenKind::RParen);
-            m.complete(p, NodeKind::SdblTupleExpr);
-        } else {
-            // Single expression in parentheses
-            p.expect(TokenKind::RParen);
-            m.complete(p, NodeKind::SdblParenExpr);
-        }
     }
 }
 

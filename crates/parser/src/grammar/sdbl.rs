@@ -48,13 +48,36 @@
 //! handling). See `docs/legal/sdbl-clean-room-slice8.md` for the
 //! attestation.
 //!
-//! Slices 9–11 pending: JOIN family (`is_join_keyword`, `join_clause` —
-//! Slice 9), WHERE / GROUP / HAVING / ORDER / TOTALS / FOR UPDATE /
+//! Slice 10a — clean-room (in progress): the expression backbone in
+//! submodule `expressions` covering atoms (literals, parameters,
+//! parens/tuples/subqueries, Star) plus the operator precedence chain
+//! (logical OR / AND / NOT / additive / multiplicative / unary). The
+//! 17 functions live under the `CLEAN-ROOM Slice 10a` banner:
+//! `is_expression_start`, `is_recovery_point`, `recover_to_delimiter`,
+//! `parse_delimited_list`, `logical_expression`, `expression`,
+//! `logical_or_expr`, `logical_and_expr`, `not_expr`, `additive_expr`,
+//! `multiplicative_expr`, `unary_expr`, `primary_expr`, `literal_expr`,
+//! `string_literal_or_multi`, `parameter_expr`, `paren_or_subquery_expr`.
+//! Authored from ITS pubqlang/10 + /12 and the local mini-spec at
+//! `docs/legal/sdbl-expressions-mini-spec.md`. The C1 commit performed
+//! pure-refactor renames `comparison_expr` → `comparison_expr_legacy`
+//! and `predicate_expr` → `predicate_expr_legacy` and moved the
+//! deferred bodies under the LEGACY banner; per-function provenance
+//! comments are attached at C2. See
+//! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation
+//! (landed with C3).
+//!
+//! Slices 9, 10b, 11 pending: JOIN family (`is_join_keyword`,
+//! `join_clause` — Slice 9), expression predicates / column-or-function
+//! dispatch / CAST / CASE (`comparison_expr_legacy`,
+//! `predicate_expr_legacy`, `column_or_function`, `inline_table_fields`,
+//! `is_cast_function`, `parse_cast_type`, `case_expr`, `when_clause` —
+//! Slice 10b), WHERE / GROUP / HAVING / ORDER / TOTALS / FOR UPDATE /
 //! INDEX BY clause bodies and the clause-body dispatchers
-//! `query_body_clauses` and `select_tail_clauses` (Slice 11) remain Tier B
-//! until their respective clean-room slices. Virtual-table method-call
-//! arguments (`virtual_table_args_legacy`) remain Tier B under the Slice 5
-//! banner.
+//! `query_body_clauses` and `select_tail_clauses` (Slice 11) remain
+//! Tier B until their respective clean-room slices. Virtual-table
+//! method-call arguments (`virtual_table_args_legacy`) remain Tier B
+//! under the Slice 5 banner.
 
 pub mod expressions;
 pub mod select;
