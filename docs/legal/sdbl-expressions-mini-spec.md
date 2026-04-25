@@ -203,18 +203,43 @@ operator tail land.
 
 ## Atoms
 
-`primaryExpression` dispatches by leading token:
+`primaryExpression` dispatches by leading token. Order is significant
+— literal-keyword probes (`CASE/ВЫБОР`, bare `NULL`) **must** run
+before generic `Ident` dispatch into `columnOrFunctionCall`, because
+those tokens arrive as `Ident` from the converter and would otherwise
+be consumed as column references:
 
 ```text
 primaryExpression
-  := caseExpression                         (CASE  / ВЫБОР keyword)
+  := caseExpression                         (at_keyword "CASE" / "ВЫБОР")        ← keyword probe FIRST
+   | nullLiteral                            (at_keyword "NULL")                  ← keyword probe FIRST
    | parenOrSubqueryExpression              (LPAREN)
-   | columnOrFunctionCall                   (Ident, NOT a clause keyword)
-   | parameterExpression                    (& Ident)
-   | literalExpression                      (Decimal | Float | String | KwTrue | KwFalse | KwUndefined | Ident-at-keyword "NULL")
+   | parameterExpression                    (Ampersand + Ident)
+   | literalExpression                      (Decimal | Float | String | KwTrue | KwFalse | KwUndefined)
    | starLiteral                            (Star — emits SdblLiteral)
+   | columnOrFunctionCall                   (generic Ident — must NOT match the keyword probes above)
    | error-fallback (SdblError)             (anything else)
 ```
+
+The current implementation at `expressions.rs:612-643` performs the
+`CASE/ВЫБОР` probe before the `match p.current()`, then routes the
+generic `Ident` arm directly to `column_or_function` — which is
+**buggy** because bare `NULL` (delivered as `Ident` per the
+converter contract) is swallowed as an `SdblColumnRef` instead of
+emitting `SdblLiteral`. Slice 10a C2 must add the
+`at_keyword("NULL")` probe before the `Ident → column_or_function`
+arm and route bare `NULL` to `nullLiteral` (emitting `SdblLiteral`
+with the `Ident` token as a direct child). The Slice 10a acceptance
+suite includes a regression gate for this — see `test_null_literal_*`
+in `sdbl_slice10a_backbone.rs`.
+
+Pre-C2 empirical verification: the C2 author runs the parser on
+`SELECT NULL`, `WHERE А = NULL`, and `Аргумент(NULL)` (the last via
+function-call args, Slice 10b territory but exercises the dispatch
+gate) before pinning the post-rewrite tree shape in the C3
+acceptance tests. Tests that asserted the pre-C2 bug shape
+(`SdblColumnRef` for bare `NULL`) must be rewritten to assert the
+post-rewrite `SdblLiteral` shape.
 
 ### Literals
 
