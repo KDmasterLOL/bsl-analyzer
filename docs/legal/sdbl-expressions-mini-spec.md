@@ -142,23 +142,26 @@ inspects is:
 
 Two boundary notes:
 
-- **`NULL` is NOT a dedicated parser TokenKind.** The converter
-  maps `LitNull → TokenKind::Ident` (with the comment "FIXED
-  (treated as keyword in SDBL)" at
-  `crates/parser/src/sdbl_token_converter.rs:57`). The
-  `is_expression_start` predicate currently lists
-  `Some(TokenKind::KwNull) => true` at expressions.rs:47, but that
-  arm is unreachable — the converter never produces `KwNull` and
-  the parser recognises `NULL` only via `p.at_keyword("NULL")` at
-  predicate-tail dispatch. Slice 10a's clean-room rewrite of
-  `is_expression_start` MUST drop the `KwNull` arm (it is dead code)
-  AND add an explicit `p.at_keyword("NULL")` branch so a bare
-  `NULL` literal at the head of an expression position is accepted
-  as an expression start. The Slice 10a acceptance suite includes
-  a regression gate for this — see `test_null_literal_*`.
+- **`NULL` is NOT a dedicated parser TokenKind.** The converter at
+  `crates/parser/src/sdbl_token_converter.rs` maps
+  `LitNull → TokenKind::Ident` (the converter source carries the
+  comment "FIXED (treated as keyword in SDBL)" on that mapping). A
+  pre-Slice-10a-C2 `is_expression_start` listed
+  `Some(TokenKind::KwNull) => true`, but that arm was unreachable
+  dead code — the converter never produces `KwNull`. Slice 10a C2
+  dropped the dead arm from `is_expression_start` and added an
+  `at_keyword("NULL")` probe both there and in `primary_expr`
+  (before the generic `Ident → column_or_function` dispatch) so a
+  bare `NULL` literal at the head of an expression position emits
+  `SdblLiteral`. The landed regression gates are
+  `test_slice10a_bare_null_emits_literal_not_column_ref` and
+  `test_slice10a_select_field_null_emits_literal` in
+  `crates/parser/tests/sdbl_parser_tests.rs`.
 - **`IN` IS a dedicated parser TokenKind.** The converter maps
-  `KwIn → TokenKind::KwIn`. `predicate_expr` at expressions.rs:379
-  probes via `p.at(TokenKind::KwIn)`, which is correct.
+  `KwIn → TokenKind::KwIn`. The Slice 10b legacy
+  `predicate_expr_legacy` (under the LEGACY banner in
+  `expressions.rs`) probes via `p.at(TokenKind::KwIn)`, which is
+  the correct dedicated-TokenKind contract.
 
 Other `TokenKind` variants the expression parser inspects:
 
@@ -414,12 +417,13 @@ Accept set: `Decimal`, `Float`, `String`, `KwTrue`, `KwFalse`,
 `TokenKind`, including all clause keywords gated by
 `select::is_clause_keyword`.
 
-The `KwNull` `TokenKind` arm currently present at
-expressions.rs:47 is **dead code** (the converter at
-sdbl_token_converter.rs:57 maps `LitNull → Ident`, not `KwNull`)
-and Slice 10a C2 must drop it; the `at_keyword("NULL")` branch is
+The historical `KwNull` `TokenKind` arm in `is_expression_start`
+was **dead code** (the converter at `sdbl_token_converter.rs` maps
+`LitNull → Ident`, not `KwNull`). Slice 10a C2 dropped that arm and
 the live recognition path for bare `NULL` at expression-head
-positions.
+positions is the `at_keyword("NULL")` branch in both
+`is_expression_start` and `primary_expr` (the latter before the
+generic `Ident → column_or_function` dispatch).
 
 ### `is_recovery_point`
 
