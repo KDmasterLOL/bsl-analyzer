@@ -559,9 +559,12 @@ Slice 10b landed across 5 logical phases. Each anchor commit is
 followed by zero or more codex-adversarial-review fixup commits
 that are pure refinements of the canonical commit's intent. The
 trail enumerated below names every commit reachable from
-`git log --oneline --reverse 1635be4b..HEAD` *except* the
+`git log --oneline --reverse 6d7053bf..HEAD` *except* the
 absolute-last one (see Anti-Hilbert disclosure at the end of this
-section).
+section). The base ref `6d7053bf` is the last commit on the
+prior Slice 10a tail (a fix-up to the Slice 10a `sdbl_parser_tests`
+multi-string test docstring); the immediate Slice 10b boundary is
+the C0a anchor `77c75e29`.
 
 - **C0a — `77c75e29` (2026-04-25)**: extend SDBL expressions
   mini-spec with §Predicates / §Comparison / §Column references
@@ -661,7 +664,7 @@ commit cannot reference its own future hash at write time. This
 anti-Hilbert property applies to every legal/clean-room
 attestation that records its own commit trail, and is shared with
 the prior Slice 1, 2, 6, 7, 8, 10a attestations in this project.
-A reviewer running `git log --oneline --reverse 1635be4b..HEAD`
+A reviewer running `git log --oneline --reverse 6d7053bf..HEAD`
 will always see exactly one commit beyond the trail's last named
 hash: that commit is the one that landed this attestation in its
 current state, and it is the natural endpoint of the trail.
