@@ -48,24 +48,28 @@
 //! handling). See `docs/legal/sdbl-clean-room-slice8.md` for the
 //! attestation.
 //!
-//! Slice 10a — clean-room (in progress): the expression backbone in
-//! submodule `expressions` covering atoms (literals, parameters,
-//! parens/tuples/subqueries, Star) plus the operator precedence chain
-//! (logical OR / AND / NOT / additive / multiplicative / unary). The
-//! 17 functions live under the `CLEAN-ROOM Slice 10a` banner:
-//! `is_expression_start`, `is_recovery_point`, `recover_to_delimiter`,
-//! `parse_delimited_list`, `logical_expression`, `expression`,
-//! `logical_or_expr`, `logical_and_expr`, `not_expr`, `additive_expr`,
+//! Slice 10a — clean-room (in progress, attestation pending): the
+//! expression backbone in submodule `expressions` covering atoms
+//! (literals, parameters, parens/tuples/subqueries, Star) plus the
+//! operator precedence chain (logical OR / AND / NOT / additive /
+//! multiplicative / unary). The 17 functions live under the
+//! `CLEAN-ROOM Slice 10a` banner: `is_expression_start`,
+//! `is_recovery_point`, `recover_to_delimiter`, `parse_delimited_list`,
+//! `logical_expression`, `expression`, `logical_or_expr`,
+//! `logical_and_expr`, `not_expr`, `additive_expr`,
 //! `multiplicative_expr`, `unary_expr`, `primary_expr`, `literal_expr`,
-//! `string_literal_or_multi`, `parameter_expr`, `paren_or_subquery_expr`.
-//! Authored from ITS pubqlang/10 + /12 and the local mini-spec at
-//! `docs/legal/sdbl-expressions-mini-spec.md`. The C1 commit performed
-//! pure-refactor renames `comparison_expr` → `comparison_expr_legacy`
-//! and `predicate_expr` → `predicate_expr_legacy` and moved the
-//! deferred bodies under the LEGACY banner; per-function provenance
-//! comments are attached at C2. See
-//! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation
-//! (landed with C3).
+//! `string_literal_or_multi`, `parameter_expr`,
+//! `paren_or_subquery_expr`. Authored from ITS pubqlang/10 + /12 and
+//! the local mini-spec at `docs/legal/sdbl-expressions-mini-spec.md`.
+//! The C1 commit performed pure-refactor renames
+//! `comparison_expr` → `comparison_expr_legacy` and
+//! `predicate_expr` → `predicate_expr_legacy` and moved the deferred
+//! bodies under the LEGACY banner; per-function provenance comments
+//! are attached at C2. The Slice 10a attestation
+//! (`sdbl-clean-room-slice10a.md`) is authored at C3 and is not yet
+//! present in tree — until C3 lands, the C0a mini-spec at
+//! `docs/legal/sdbl-expressions-mini-spec.md` is the live clean-room
+//! reference document.
 //!
 //! Slices 9, 10b, 11 pending: JOIN family (`is_join_keyword`,
 //! `join_clause` — Slice 9), expression predicates / column-or-function

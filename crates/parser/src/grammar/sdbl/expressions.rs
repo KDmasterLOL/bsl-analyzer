@@ -10,11 +10,12 @@
 //!
 //! ## Provenance
 //!
-//! Slice 10a — clean-room (in progress): expression backbone (atoms +
-//! operator precedence chain + parens / tuple / subquery). Authored from
+//! Slice 10a — clean-room (in progress, attestation pending):
+//! expression backbone (atoms + operator precedence chain + parens /
+//! tuple / subquery). Authored from
 //! `docs/legal/sdbl-expressions-mini-spec.md` and ITS pubqlang/10 + /12.
-//! See `docs/legal/sdbl-clean-room-slice10a.md` for the attestation
-//! (landed with C3).
+//! The Slice 10a attestation (`sdbl-clean-room-slice10a.md`) is
+//! authored at C3 and is not yet present in tree.
 //!
 //! Slice 10b — pending: predicates, comparison, column-or-function, CAST,
 //! CASE. Bodies remain Tier B under the LEGACY banner; the
@@ -29,8 +30,10 @@ use lexer::TokenKind;
 // CLEAN-ROOM Slice 10a — expression backbone
 // ============================================================================
 //
-// See `docs/legal/sdbl-clean-room-slice10a.md` for authorship and source
-// citations (landed with C3). Per-function provenance comments are
+// Authored from `docs/legal/sdbl-expressions-mini-spec.md` (the C0a
+// clean-room reference) and ITS pubqlang/10 + /12. The Slice 10a
+// attestation (`sdbl-clean-room-slice10a.md`) is authored at C3 and is
+// not yet present in tree. Per-function provenance comments are
 // attached at C2.
 //
 // The 17 functions below cover the Slice 10a surface:
