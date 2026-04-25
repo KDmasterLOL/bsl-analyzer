@@ -605,7 +605,7 @@ section).
   master-doc flip in `docs/legal/sdbl-clean-room-slices.md` +
   module Provenance docstring flip to "complete (2026-04-25)"
   with attestation citation in `crates/parser/src/grammar/sdbl.rs`.
-  Four fixup commits:
+  Six fixup commits:
   - `ef85b028` — Anti-Hilbert close-out: replace the "C3 — this
     commit" placeholder in this §Commit trail (and in the
     `docs/legal/sdbl-clean-room-slices.md` §Slice 10b commit-
@@ -642,6 +642,17 @@ section).
     Preserved behaviour #2 is pinned by named tests for every
     NOT-prefix predicate plus the orphan-NOT recovery case
     (was: implicit "absence of failures").
+  - `8e0ca19c` — Anti-Hilbert close-out for `ecb26896` and
+    `9943d47a`: name them in this §Commit trail and in the
+    master-doc commit-trail line.
+  - `82e09e3a` — bump the master-doc §Slice 10b §Files block
+    acceptance-test count from "40 spec-driven acceptance tests"
+    to "43 spec-driven acceptance tests" matching the
+    attestation, with explicit mention of the three NOT-boundary
+    tests added in `9943d47a` so a future reader of the master
+    doc can navigate directly to the relevant preserved-
+    behaviour pin without first reading the attestation. Codex
+    stop-time review finding.
 
 **Anti-Hilbert disclosure.** The very last commit on this branch
 — the one that authors / amends this attestation §Commit trail
@@ -656,10 +667,11 @@ hash: that commit is the one that landed this attestation in its
 current state, and it is the natural endpoint of the trail.
 
 The phase totals (named hashes in the trail above): C0a 1,
-C0b 1, C1 1, C2 1, C3 1 anchor + 4 fixups (`ef85b028`,
-`7f5e1cbc`, `ecb26896`, `9943d47a`) = 9 commits enumerated. The
-branch HEAD adds one trailing commit (the one editing this trail
-to name the four fixups), per the Anti-Hilbert disclosure above.
+C0b 1, C1 1, C2 1, C3 1 anchor + 6 fixups (`ef85b028`,
+`7f5e1cbc`, `ecb26896`, `9943d47a`, `8e0ca19c`, `82e09e3a`) =
+11 commits enumerated. The branch HEAD adds one trailing commit
+(the one editing this trail to name the six fixups), per the
+Anti-Hilbert disclosure above.
 
 ## Licensing note
 
