@@ -149,11 +149,15 @@ Two boundary notes:
   pre-Slice-10a-C2 `is_expression_start` listed
   `Some(TokenKind::KwNull) => true`, but that arm was unreachable
   dead code — the converter never produces `KwNull`. Slice 10a C2
-  dropped the dead arm from `is_expression_start` and added an
-  `at_keyword("NULL")` probe both there and in `primary_expr`
-  (before the generic `Ident → column_or_function` dispatch) so a
-  bare `NULL` literal at the head of an expression position emits
-  `SdblLiteral`. The landed regression gates are
+  dropped the dead arm. After C2 the recognition paths are:
+  `is_expression_start` accepts `NULL` through the generic
+  non-clause-keyword `Ident` arm (with a defensive
+  `at_keyword("NULL")` in the `_` fallback for hypothetical future
+  converter changes); `primary_expr` performs the **decisive**
+  dispatch with an `at_keyword("NULL")` probe **before** the
+  generic `Ident → column_or_function` match arm so a bare `NULL`
+  literal emits `SdblLiteral` rather than `SdblColumnRef`. The
+  landed regression gates are
   `test_slice10a_bare_null_emits_literal_not_column_ref` and
   `test_slice10a_select_field_null_emits_literal` in
   `crates/parser/tests/sdbl_parser_tests.rs`.
@@ -419,11 +423,28 @@ Accept set: `Decimal`, `Float`, `String`, `KwTrue`, `KwFalse`,
 
 The historical `KwNull` `TokenKind` arm in `is_expression_start`
 was **dead code** (the converter at `sdbl_token_converter.rs` maps
-`LitNull → Ident`, not `KwNull`). Slice 10a C2 dropped that arm and
-the live recognition path for bare `NULL` at expression-head
-positions is the `at_keyword("NULL")` branch in both
-`is_expression_start` and `primary_expr` (the latter before the
-generic `Ident → column_or_function` dispatch).
+`LitNull → Ident`, not `KwNull`). Slice 10a C2 dropped that arm.
+The live recognition paths for bare `NULL` are split across two
+sites:
+
+- `is_expression_start` accepts `NULL` through the generic
+  non-clause `Some(TokenKind::Ident) => !is_clause_keyword(p)`
+  arm (the `_ => p.at_keyword("NULL") | …` fallback is defensive
+  only — it is unreachable when the token is `Ident`, but the
+  fallback would catch a future converter change that produces
+  some other `TokenKind` for `NULL`). The predicate's job is
+  just to say "yes, this can start an expression"; the
+  Ident-route accept is the right answer.
+- `primary_expr` performs the **decisive** dispatch: the
+  `p.at_keyword("NULL")` probe runs **before** the generic
+  `Some(TokenKind::Ident) => column_or_function(p)` match arm,
+  so a bare `NULL` at the head of a primary position emits
+  `SdblLiteral` rather than being routed into
+  `column_or_function`.
+
+The two-site split is by design: `is_expression_start` is a
+permissive "could this start an expression?" predicate;
+`primary_expr` is the canonical NodeKind-emitting dispatcher.
 
 ### `is_recovery_point`
 
