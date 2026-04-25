@@ -3461,3 +3461,333 @@ fn test_select_field_case_descendant_guard() {
         kinds
     );
 }
+
+// ----------------------------------------------------------------------------
+// Slice 9 (JOIN family) Bucket-A gap tests — parser-side AST-shape guards.
+//
+// Pin parser-side invariants that downstream consumers (sdbl-hir,
+// ide-diagnostics) read. Per `sdbl-clean-room-slice9` plan v9, all 15
+// pass on the pre-rewrite parser. Tier classification per test:
+//   #1-#4  Tier A1 — ITS chapters 44/45/46/47 listings (RU canonical).
+//   #5-#6  Tier A2 OR Tier D candidates — bare ПОЛНОЕ/ЛЕВОЕ without
+//          ВНЕШНЕЕ; final tier set by C2 author after chapter prose
+//          verification.
+//   #7-#8  Tier C — SELECT mini-spec §JOIN clauses + chapter 44
+//          standalone СОЕДИНЕНИЕ.
+//   #9-#10 Tier A1 — chapter 48 chained / nested JOINs.
+//   #11-#13 Parser-side AST-shape guards for the three HIR diagnostics
+//          (JoinWithSubQuery / JoinWithVirtualTable / LogicalOrInJoin).
+//   #14-#15 Audit-gate tests for the two `Parser::error()`-bumps in
+//          `join_clause`. Locked to current behavior so C2 can either
+//          flip them (Option A FIX) or preserve them (Option B).
+// ----------------------------------------------------------------------------
+
+/// Assert a clean parse: both the parser-error list AND the syntax tree
+/// must be free of `ERROR` recovery nodes. `Parser::error()` inserts
+/// `SyntaxKind::ERROR` into the tree without populating `Parse::errors()`,
+/// so checking only `has_errors()` would let recovered parses slip through.
+fn assert_clean_parse(parse: &syntax::Parse<syntax::SyntaxNode>, input: &str) {
+    use syntax::SyntaxKind;
+    assert!(
+        !parse.has_errors(),
+        "Expected clean parse for `{}`; got errors: {:#?}",
+        input,
+        parse.errors(),
+    );
+    let error_nodes: Vec<_> =
+        parse.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::ERROR).collect();
+    assert!(
+        error_nodes.is_empty(),
+        "Expected clean parse for `{}` — but tree contains {} ERROR recovery node(s): {:#?}",
+        input,
+        error_nodes.len(),
+        error_nodes,
+    );
+}
+
+fn find_first_join_clause(input: &str) -> syntax::SyntaxNode {
+    use syntax::SyntaxKind;
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    parse
+        .syntax_node()
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_JOIN_CLAUSE)
+        .expect("Tree must contain SdblJoinClause")
+}
+
+// (1) Tier A1 — chapter 44 ВНУТРЕННЕЕ СОЕДИНЕНИЕ canonical RU listing.
+#[test]
+fn test_slice9_canonical_inner_join_ru() {
+    use syntax::ast::{AstNode, JoinType, SdblJoinClause};
+    let join_node =
+        find_first_join_clause("ВЫБРАТЬ * ИЗ Т1 ВНУТРЕННЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = Т2.А");
+    let join = SdblJoinClause::cast(join_node).expect("must cast to SdblJoinClause");
+    assert_eq!(join.join_type(), JoinType::Inner);
+    assert!(join.data_source().is_some(), "JOIN must carry a joined SdblDataSource child");
+}
+
+// (2) Tier A1 — chapter 45 ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ canonical RU listing.
+#[test]
+fn test_slice9_canonical_left_outer_join_ru() {
+    use syntax::ast::{AstNode, JoinType, SdblJoinClause};
+    let join_node =
+        find_first_join_clause("ВЫБРАТЬ * ИЗ Т1 ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = Т2.А");
+    let join = SdblJoinClause::cast(join_node).expect("must cast to SdblJoinClause");
+    assert_eq!(join.join_type(), JoinType::Left);
+}
+
+// (3) Tier A1 — chapter 46 ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ canonical RU listing.
+#[test]
+fn test_slice9_canonical_right_outer_join_ru() {
+    use syntax::ast::{AstNode, JoinType, SdblJoinClause};
+    let join_node =
+        find_first_join_clause("ВЫБРАТЬ * ИЗ Т1 ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = Т2.А");
+    let join = SdblJoinClause::cast(join_node).expect("must cast to SdblJoinClause");
+    assert_eq!(join.join_type(), JoinType::Right);
+}
+
+// (4) Tier A1 — chapter 47 ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ canonical RU listing.
+#[test]
+fn test_slice9_canonical_full_outer_join_ru() {
+    use syntax::ast::{AstNode, JoinType, SdblJoinClause};
+    let join_node =
+        find_first_join_clause("ВЫБРАТЬ * ИЗ Т1 ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = Т2.А");
+    let join = SdblJoinClause::cast(join_node).expect("must cast to SdblJoinClause");
+    assert_eq!(join.join_type(), JoinType::Full);
+}
+
+// (5) Bare ПОЛНОЕ — FULL without ВНЕШНЕЕ. Tier classification by C2
+// author (Tier A2 if chapter 47 prose attests OUTER optionality, else
+// Tier D local-allowance guard). Locks current parser behavior:
+// `is_join_keyword` accepts ПОЛНОЕ as a starter and `join_type()`
+// substring-matches it back to JoinType::Full.
+#[test]
+fn test_slice9_bare_full_join_ru() {
+    use syntax::ast::{AstNode, JoinType, SdblJoinClause};
+    let join_node = find_first_join_clause("ВЫБРАТЬ * ИЗ Т1 ПОЛНОЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = Т2.А");
+    let join = SdblJoinClause::cast(join_node).expect("must cast to SdblJoinClause");
+    assert_eq!(join.join_type(), JoinType::Full);
+}
+
+// (6) Bare ЛЕВОЕ — LEFT without ВНЕШНЕЕ. Tier classification by C2
+// author (Tier A2 if chapter 45 prose-note attests ВНЕШНЕЕ optionality,
+// else Tier D).
+#[test]
+fn test_slice9_bare_left_join_ru() {
+    use syntax::ast::{AstNode, JoinType, SdblJoinClause};
+    let join_node = find_first_join_clause("ВЫБРАТЬ * ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО Т1.А = Т2.А");
+    let join = SdblJoinClause::cast(join_node).expect("must cast to SdblJoinClause");
+    assert_eq!(join.join_type(), JoinType::Left);
+}
+
+// (7) Bare JOIN (implicit INNER, EN). Tier C SELECT mini-spec §JOIN
+// clauses (line 318).
+#[test]
+fn test_slice9_bare_join_en() {
+    use syntax::ast::{AstNode, JoinType, SdblJoinClause};
+    let join_node = find_first_join_clause("SELECT * FROM T1 JOIN T2 ON T1.A = T2.A");
+    let join = SdblJoinClause::cast(join_node).expect("must cast to SdblJoinClause");
+    assert_eq!(join.join_type(), JoinType::Inner);
+}
+
+// (8) Bare СОЕДИНЕНИЕ (implicit INNER, RU). Tier C / chapter 44
+// standalone (final classification at C2 author time).
+#[test]
+fn test_slice9_bare_join_ru() {
+    use syntax::ast::{AstNode, JoinType, SdblJoinClause};
+    let join_node = find_first_join_clause("ВЫБРАТЬ * ИЗ Т1 СОЕДИНЕНИЕ Т2 ПО Т1.А = Т2.А");
+    let join = SdblJoinClause::cast(join_node).expect("must cast to SdblJoinClause");
+    assert_eq!(join.join_type(), JoinType::Inner);
+}
+
+// (9) Chained JOINs at the same data source — chapter 48 listing.
+// Both JOIN clauses attach as direct children of T1's SdblDataSource.
+#[test]
+fn test_slice9_chained_joins_same_source() {
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let input = "SELECT * FROM T1 JOIN T2 ON T1.A = T2.A JOIN T3 ON T1.B = T3.B";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("query package");
+    let select_query = package.queries().next().expect("query");
+    let main = select_query.subquery().and_then(|s| s.main_query()).expect("main query");
+    let from = main.from_clause().expect("FROM clause");
+    let t1_source = from.data_sources().next().expect("first data source");
+    let join_count = t1_source.join_clauses().count();
+    assert_eq!(
+        join_count, 2,
+        "Both chained JOINs must attach as direct children of T1's SdblDataSource",
+    );
+}
+
+// (10) Nested JOIN inside JOIN'ed source — chapter 48 nested example.
+// Asserts the placement invariant: outer LEFT JOIN attaches to T1's
+// SdblDataSource; the inner bare JOIN attaches to the OUTER JOIN's
+// data_source (i.e. T2's SdblDataSource), NOT to T1's. The inner
+// `join_type()` walks up to T2's data source for parent-tokens
+// fallback — that source does NOT carry LEFT, so the default
+// JoinType::Inner fires (Invariant #6).
+#[test]
+fn test_slice9_nested_join_inside_join() {
+    use syntax::ast::{AstNode, JoinType, SdblQueryPackage};
+    let input = "SELECT * FROM T1 LEFT JOIN T2 JOIN T3 ON T2.B = T3.B ON T1.A = T2.A";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("query package");
+    let select_query = package.queries().next().expect("query");
+    let main = select_query.subquery().and_then(|s| s.main_query()).expect("main query");
+    let from = main.from_clause().expect("FROM clause");
+    let t1_source = from.data_sources().next().expect("T1 source");
+    let outer_join = t1_source.join_clauses().next().expect("outer LEFT JOIN");
+    assert_eq!(outer_join.join_type(), JoinType::Left);
+    let t2_source = outer_join.data_source().expect("T2 source under outer JOIN");
+    let inner_join =
+        t2_source.join_clauses().next().expect("inner JOIN attached to T2's data source");
+    assert_eq!(
+        inner_join.join_type(),
+        JoinType::Inner,
+        "Inner bare JOIN must default to Inner via parent-tokens fallback over T2's data source",
+    );
+}
+
+// (11) FROM-side subquery + JOIN AST-shape guard.
+// Pins Invariant #7: outer SdblDataSource carries BOTH subquery() Some
+// AND join_clauses().next() Some. The JoinWithSubQuery HIR diagnostic
+// (`crates/ide-diagnostics/src/handlers/join_with_sub_query.rs`)
+// reads exactly this shape.
+#[test]
+fn test_slice9_from_subquery_with_join_ast_shape() {
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let input = "SELECT * FROM (SELECT * FROM T1) AS S LEFT JOIN T2 ON S.A = T2.A";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("query package");
+    let select_query = package.queries().next().expect("query");
+    let main = select_query.subquery().and_then(|s| s.main_query()).expect("main query");
+    let from = main.from_clause().expect("FROM clause");
+    let s_source = from.data_sources().next().expect("subquery data source");
+    assert!(
+        s_source.subquery().is_some(),
+        "Outer SdblDataSource must carry SdblSubquery as direct child",
+    );
+    assert!(
+        s_source.join_clauses().next().is_some(),
+        "Outer SdblDataSource must also carry the LEFT JOIN as direct child",
+    );
+}
+
+// (12) FROM-side virtual-table + JOIN AST-shape guard.
+// Pins Invariant #7 for the JoinWithVirtualTable HIR diagnostic
+// (`crates/ide-diagnostics/src/handlers/join_with_virtual_table.rs`).
+#[test]
+fn test_slice9_from_virtual_table_with_join_ast_shape() {
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let input = "ВЫБРАТЬ * ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки(&Дата) КАК Р \
+                 ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО Р.Х = Т2.Х";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("query package");
+    let select_query = package.queries().next().expect("query");
+    let main = select_query.subquery().and_then(|s| s.main_query()).expect("main query");
+    let from = main.from_clause().expect("FROM clause");
+    let r_source = from.data_sources().next().expect("virtual-table data source");
+    assert!(
+        r_source.table_ref().is_some(),
+        "Outer SdblDataSource must carry SdblTableRef (virtual table) as direct child",
+    );
+    assert!(
+        r_source.join_clauses().next().is_some(),
+        "Outer SdblDataSource must also carry the JOIN as direct child",
+    );
+}
+
+// (13) OR-in-ON parser-side AST-shape guard.
+// Pins the AST shape that LogicalOrInJoin reads
+// (`crates/sdbl-hir/src/lower/join_clause.rs:188`): SdblJoinClause's
+// ON-condition is wrapped in SdblLogicalOrExpr (Slice 10a), which then
+// holds the OR.
+#[test]
+fn test_slice9_or_in_on_ast_shape() {
+    use syntax::SyntaxKind;
+    let input = "SELECT * FROM T1 JOIN T2 ON T1.A = T2.A OR T1.B = T2.B";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let join = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_JOIN_CLAUSE)
+        .expect("Tree must contain SdblJoinClause");
+    let direct_kinds: Vec<SyntaxKind> = join.children().map(|c| c.kind()).collect();
+    assert!(
+        direct_kinds.contains(&SyntaxKind::SDBL_LOGICAL_OR_EXPR),
+        "ON-condition must wrap in SdblLogicalOrExpr direct child of SdblJoinClause. Got: {:?}",
+        direct_kinds,
+    );
+}
+
+// (14) Audit-gate: missing JOIN keyword after LEFT.
+// Locks pre-rewrite behavior — `Parser::error()` at select.rs:984
+// BUMPS the next token (T2) into an ERROR node attached as a direct
+// child of SdblJoinClause, then `m.complete()` runs anyway. The
+// outer parse does NOT raise `has_errors()` (the error lives only as
+// a syntax-tree ERROR node). At C2 the author chooses Option A FIX
+// (mirror Slice 10b column_or_function: zero-width ERROR, do NOT
+// bump T2 — flip this test in the same atomic commit) or Option B
+// PRESERVE (this test stays).
+#[test]
+fn test_slice9_missing_join_keyword_current_behavior() {
+    use syntax::SyntaxKind;
+    let parse = parse_sdbl("SELECT * FROM T1 LEFT T2 ON A = B");
+    let root = parse.syntax_node();
+    let join = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_JOIN_CLAUSE)
+        .expect("SdblJoinClause marker must still be completed on missing JOIN keyword");
+    let error_children: Vec<_> =
+        join.children().filter(|c| c.kind() == SyntaxKind::ERROR).collect();
+    assert_eq!(
+        error_children.len(),
+        1,
+        "Current behavior: exactly one ERROR node attaches as direct child of SdblJoinClause",
+    );
+    let error_text = error_children[0].text().to_string();
+    assert!(
+        error_text.contains("T2"),
+        "Current behavior: `p.error()` BUMPS T2 into the ERROR node. Got: `{}`",
+        error_text,
+    );
+}
+
+// (15) Audit-gate: missing ON keyword between JOIN'ed source and
+// condition. Same locking pattern as #14 (`Parser::error()` at
+// select.rs:997). Bumps the `=` token into an ERROR node that
+// attaches as a direct child of SdblJoinClause (after the joined
+// SdblDataSource).
+#[test]
+fn test_slice9_missing_on_current_behavior() {
+    use syntax::SyntaxKind;
+    let parse = parse_sdbl("SELECT * FROM T1 JOIN T2 A = B");
+    let root = parse.syntax_node();
+    let join = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_JOIN_CLAUSE)
+        .expect("SdblJoinClause marker must still be completed on missing ON keyword");
+    let error_children: Vec<_> =
+        join.children().filter(|c| c.kind() == SyntaxKind::ERROR).collect();
+    assert_eq!(
+        error_children.len(),
+        1,
+        "Current behavior: exactly one ERROR node attaches as direct child of SdblJoinClause",
+    );
+    let error_text = error_children[0].text().to_string();
+    assert!(
+        error_text.contains('='),
+        "Current behavior: `p.error()` BUMPS the `=` token (after T2's alias `A` was consumed) into the ERROR node. Got: `{}`",
+        error_text,
+    );
+}
