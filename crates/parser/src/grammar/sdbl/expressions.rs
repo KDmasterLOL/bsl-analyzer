@@ -26,17 +26,23 @@
 //! of pre-C1 bodies during authorship. See
 //! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation.
 //!
-//! Slice 10b — clean-room (rewrite in progress): predicates,
-//! comparison, column-or-function dispatch, CAST type spec, CASE
-//! expressions. The 8 functions under the `CLEAN-ROOM Slice 10b`
-//! banner — `comparison_expr`, `predicate_expr`,
-//! `column_or_function`, `inline_table_fields`, `is_cast_function`,
-//! `parse_cast_type`, `case_expr`, `when_clause` — currently carry
-//! C1 placeholder provenance comments and pre-clean-room bodies.
-//! C2 will rewrite the bodies and replace the placeholders with
-//! ITS-cited per-function provenance comments. The two `_legacy`
-//! suffixes used during the Slice 10a authorship period have been
-//! retired in C1; `not_expr` now calls `comparison_expr` directly.
+//! Slice 10b — clean-room (complete, landed with C3 2026-04-25):
+//! predicates, comparison, column-or-function dispatch, CAST type
+//! spec, CASE expressions. The 8 functions under the
+//! `CLEAN-ROOM Slice 10b` banner — `comparison_expr`,
+//! `predicate_expr`, `column_or_function`, `inline_table_fields`,
+//! `is_cast_function`, `parse_cast_type`, `case_expr`,
+//! `when_clause` — were re-authored in C2 from ITS pubqlang
+//! chapters 21, 22, 23, 27, 32, 40 and the C0a-extended
+//! `docs/legal/sdbl-expressions-mini-spec.md`; each function body
+//! carries an ITS-cited or `// local: …` per-function provenance
+//! comment. The two `_legacy` suffixes used during the Slice 10a
+//! authorship period (`comparison_expr_legacy`,
+//! `predicate_expr_legacy`) were retired in C1; `not_expr` now
+//! calls `comparison_expr` directly. The C2 commit also landed
+//! the `column_or_function` clause-keyword recovery fix
+//! (codex Round-1 finding 2). See
+//! `docs/legal/sdbl-clean-room-slice10b.md` for the attestation.
 
 use crate::event::NodeKind;
 use crate::parser::Parser;
@@ -780,20 +786,20 @@ fn paren_or_subquery_expr(p: &mut Parser) {
 //
 // The 8 functions below — `comparison_expr`, `predicate_expr`,
 // `is_cast_function`, `parse_cast_type`, `column_or_function`,
-// `inline_table_fields`, `case_expr`, `when_clause` — are the
-// Slice 10b clean-room rewrite surface. Each function body is
-// scheduled for re-authoring against ITS pubqlang chapters 22, 23,
-// 27, 32, 40 (via the local dump at
+// `inline_table_fields`, `case_expr`, `when_clause` — were
+// authored as a clean-room re-derivation against ITS pubqlang
+// chapters 21, 22, 23, 27, 32, 40 (via the local dump at
 // `/home/itrous/src/tools_migration/its/dump/`) and the
 // C0a-extended `docs/legal/sdbl-expressions-mini-spec.md`. C1
-// performs the pre-refactor renames (`comparison_expr` →
-// `comparison_expr`, `predicate_expr` → `predicate_expr`)
-// and replaces the previous LEGACY banner with this clean-room
-// banner; the function bodies still carry their pre-clean-room
-// shape and a `// C1 placeholder — clean-room rewrite in C2`
-// marker. C2 will re-author each body from the cited sources and
-// replace the placeholders with per-function ITS / mini-spec
-// provenance comments.
+// performed the pre-refactor renames
+// (`comparison_expr_legacy` → `comparison_expr`,
+// `predicate_expr_legacy` → `predicate_expr`) and replaced the
+// previous LEGACY banner with this clean-room banner; C2
+// re-authored each function body from the cited sources, attached
+// per-function ITS / mini-spec provenance comments, and landed
+// the `column_or_function` clause-keyword recovery fix
+// (codex Round-1 finding 2). See
+// `docs/legal/sdbl-clean-room-slice10b.md` for the attestation.
 //
 // Slice 10a's `not_expr` calls `comparison_expr` directly — that
 // is the only Slice-10a → Slice-10b dispatch boundary in this
@@ -801,10 +807,12 @@ fn paren_or_subquery_expr(p: &mut Parser) {
 // (SdblComparisonExpr, SdblInExpr, SdblInHierarchyExpr,
 // SdblIsNullExpr, SdblBetweenExpr, SdblLikeExpr, SdblRefsExpr,
 // SdblColumnRef, SdblFunctionCall, SdblType,
-// SdblInlineTableFields, SdblCaseExpr, SdblWhenClause) are
-// preserved bit-for-bit through C1 and are locked by the C0b
+// SdblInlineTableFields, SdblCaseExpr, SdblWhenClause) retain
+// their pre-C1 child-attachment shapes and are locked by the C0b
 // Bucket-A regression-gate tests in
-// `crates/parser/tests/sdbl_parser_tests.rs`.
+// `crates/parser/tests/sdbl_parser_tests.rs` plus the C3
+// spec-driven acceptance suite in
+// `crates/parser/tests/sdbl_slice10b_predicates.rs`.
 
 /// Parse comparison expression
 ///
