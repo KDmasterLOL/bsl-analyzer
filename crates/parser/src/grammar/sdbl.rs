@@ -115,13 +115,36 @@
 //! deferred to Slice 12). See
 //! `docs/legal/sdbl-clean-room-slice9.md` for the attestation.
 //!
-//! Slice 11 pending: WHERE / GROUP / HAVING / ORDER / TOTALS /
-//! FOR UPDATE / INDEX BY clause bodies plus the clause-body
-//! dispatchers `query_body_clauses` and `select_tail_clauses`
-//! remain Tier B until their respective clean-room slices.
-//! Virtual-table method-call arguments
+//! Slice 11 — clean-room (rewrite in progress): WHERE / GROUP /
+//! HAVING / ORDER / TOTALS / FOR UPDATE / INDEX BY / AUTOORDER
+//! clause bodies plus the two dispatchers `query_body_clauses`
+//! and `select_tail_clauses` and the `is_clause_keyword`
+//! predicate are physically relocated into a new `CLEAN-ROOM
+//! Slice 11 — clauses after FROM` banner in `select.rs` at C1.
+//! C1 is a pure refactor — the 12 function bodies are unchanged
+//! from their pre-C1 LEGACY shapes; per-function provenance
+//! comments and the MANDATORY HIERARCHY consumption fix in
+//! `order_by_item` (per ITS chapter 27 — `chapter_027.html:39,
+//! 51` `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`) land in C2 along
+//! with unignoring the C0b regression-gate test (g)
+//! `test_slice11_order_by_hierarchy_consumed`. C0a extends
+//! `docs/legal/sdbl-select-mini-spec.md` with the §WHERE /
+//! §GROUP BY / §HAVING / §ORDER BY / §AUTOORDER / §TOTALS BY /
+//! §FOR UPDATE / §INDEX BY clause-body sections, the §IDE-
+//! recovery allowances block (4 entries), and the §ITS coverage
+//! verification table.
+//!
+//! Slice 5 pending: virtual-table method-call arguments
 //! (`virtual_table_args_legacy`) remain Tier B under the Slice 5
 //! banner.
+//!
+//! SELECT limitation helpers pending: `is_limitation_keyword` /
+//! `limitations` / `top_clause` (DISTINCT/РАЗЛИЧНЫЕ,
+//! TOP/ПЕРВЫЕ, ALLOWED/РАЗРЕШЕННЫЕ) plus the `is_identifier_token`
+//! alias-scan helper remain Tier B in the residual
+//! `LEGACY (Slice 5 + SELECT limitation helpers pending)` block
+//! pending a future Slice-7-addendum or 6/7-shaped mini-slice
+//! that owns the SELECT prefix qualifiers.
 
 pub mod expressions;
 pub mod select;
