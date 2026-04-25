@@ -2568,3 +2568,297 @@ fn test_slice8_parameter_source_without_alias() {
         "SdblParameter must be a direct child of SdblTableRef on the &Ident path"
     );
 }
+
+// ============================================================================
+// Slice 10a surface coverage — added by C0b audit to close gaps before the
+// clean-room rewrite of the expression backbone (operator chain + atoms +
+// parens/tuple/subquery) at expressions.rs. Authored from
+// docs/legal/sdbl-expressions-mini-spec.md (the C0a deliverable for Slice
+// 10a + 10b) and 1C ITS docs (pubqlang/12 §Operators, §Literals,
+// §Parameters; pubqlang/10 §query-body). Each test below carries a
+// per-test source citation.
+//
+// These tests exercise the PRE-rewrite parser shapes. Tests that depend on
+// behaviour the C2 rewrite is expected to change (e.g. bare NULL routing
+// to columnOrFunctionCall instead of nullLiteral, per the mini-spec
+// §Atoms primary dispatch — pre-existing parser bug at expressions.rs:
+// 612-643) are explicitly NOT included here; they will be added in C3
+// against the rewritten parser. The tests below pin behaviours the C2
+// rewrite is expected to PRESERVE bit-for-bit.
+// ============================================================================
+
+// Bucket A: nested NOT — tests right-recursive multi-NOT body of
+// `not_expr`. Mini-spec §Operator-binding pin list item 1 + AST-shape
+// invariant for SdblNotExpr (operator token first child, single operand
+// second child). ITS pubqlang/12 §Logical operators.
+#[test]
+fn test_slice10a_nested_not() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ НЕ НЕ А";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Nested NOT should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+    let outer_not = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_NOT_EXPR)
+        .expect("outer SdblNotExpr");
+    let inner_not = outer_not
+        .children()
+        .find(|n| n.kind() == SyntaxKind::SDBL_NOT_EXPR)
+        .expect("inner SdblNotExpr nested directly inside outer (right-recursive shape)");
+    assert!(
+        inner_not.text().to_string().contains("НЕ"),
+        "Inner SdblNotExpr text must include the second НЕ token",
+    );
+}
+
+// Bucket A: NOT-AND binding — `НЕ А И Б` parses as
+// `LogicalAndExpr( NotExpr(А), AND, Б )`, NOT as `NotExpr( А И Б )`.
+// Mini-spec §Operator-binding pin list item 3 (NOT binds tightest under
+// AND because not_expr is the logical_and_expr operand).
+#[test]
+fn test_slice10a_not_and_binding() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ НЕ А И Б";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "NOT-AND binding should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+    let and_expr = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_LOGICAL_AND_EXPR)
+        .expect("SdblLogicalAndExpr at the top");
+    let not_descendants_under_and: Vec<_> =
+        and_expr.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_NOT_EXPR).collect();
+    assert_eq!(
+        not_descendants_under_and.len(),
+        1,
+        "Exactly one SdblNotExpr nested under the SdblLogicalAndExpr (NOT binds А, not the AND-pair)",
+    );
+    let not_text = not_descendants_under_and[0].text().to_string();
+    assert!(
+        not_text.contains('А') && !not_text.contains('Б'),
+        "SdblNotExpr must wrap А alone — not include Б; got {not_text:?}",
+    );
+}
+
+// Bucket A: nested unary minus — `- - А` parses as
+// `UnaryExpr( - , UnaryExpr( - , А ) )` per mini-spec §Operator-binding
+// pin list item 2 (right-recursive multi-unary at expressions.rs:589-602).
+#[test]
+fn test_slice10a_nested_unary_minus() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ - - А ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Nested unary minus should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+    let outer_unary = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_UNARY_EXPR)
+        .expect("outer SdblUnaryExpr");
+    let inner_unary = outer_unary
+        .children()
+        .find(|n| n.kind() == SyntaxKind::SDBL_UNARY_EXPR)
+        .expect("inner SdblUnaryExpr nested directly inside outer");
+    assert!(
+        inner_unary.text().to_string().contains('-'),
+        "Inner SdblUnaryExpr text must include the second minus token",
+    );
+}
+
+// Bucket A: unary minus inside additive right operand — `А + - Б` parses
+// as `AdditiveExpr( А, +, UnaryExpr( -, Б ) )` per mini-spec §Operator-
+// binding pin list item 4. Verifies that unary nests cleanly under the
+// flat-additive wrapper.
+#[test]
+fn test_slice10a_unary_inside_additive_right_operand() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ А + - Б ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Unary in additive right operand: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+    let additive = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_ADDITIVE_EXPR)
+        .expect("SdblAdditiveExpr");
+    let unary_under_additive =
+        additive.descendants().find(|n| n.kind() == SyntaxKind::SDBL_UNARY_EXPR);
+    assert!(
+        unary_under_additive.is_some(),
+        "SdblUnaryExpr must appear under SdblAdditiveExpr — got tree {additive:#?}",
+    );
+}
+
+// Bucket A: Russian NOT with nested AND inside parens — `НЕ (А И Б)`
+// parses as `NotExpr( НЕ, ParenExpr( LogicalAndExpr( А, И, Б ) ) )`.
+// Mini-spec §Atoms paren dispatch + §Operator-binding pin list item 1.
+#[test]
+fn test_slice10a_russian_not_with_paren_and() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ НЕ (А И Б)";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "НЕ (А И Б) should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+    let not_expr =
+        root.descendants().find(|n| n.kind() == SyntaxKind::SDBL_NOT_EXPR).expect("SdblNotExpr");
+    let paren_in_not = not_expr.descendants().find(|n| n.kind() == SyntaxKind::SDBL_PAREN_EXPR);
+    assert!(paren_in_not.is_some(), "SdblParenExpr must sit inside SdblNotExpr for `НЕ (А И Б)`",);
+    let and_in_paren =
+        paren_in_not.unwrap().descendants().find(|n| n.kind() == SyntaxKind::SDBL_LOGICAL_AND_EXPR);
+    assert!(and_in_paren.is_some(), "SdblLogicalAndExpr must sit inside the SdblParenExpr",);
+}
+
+// Bucket A: multi-string concatenation across 3 consecutive String tokens.
+// Mini-spec §Atoms — string literal multi-part IDE recovery: 2+ consecutive
+// String tokens emit SdblMultiString. ITS pubqlang/12 §Literals string
+// lexical shape. Asserts SdblMultiString contains exactly 3 STRING token
+// children.
+#[test]
+fn test_slice10a_multi_string_three_tokens() {
+    use syntax::SyntaxKind;
+    let input = r#"ВЫБРАТЬ "a" "b" "c" ИЗ Т"#;
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "3-string concatenation should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+    let multi = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_MULTI_STRING)
+        .expect("SdblMultiString for 3 consecutive string tokens");
+    let string_token_count = multi
+        .children_with_tokens()
+        .filter_map(|c| c.into_token())
+        .filter(|t| t.kind() == SyntaxKind::STRING)
+        .count();
+    assert_eq!(
+        string_token_count, 3,
+        "SdblMultiString must wrap exactly 3 STRING tokens as direct token children",
+    );
+}
+
+// Bucket A: precedence with newline trivia between operator and operand.
+// Mini-spec §Trivia handling convention: `p.skip_trivia()` BEFORE the
+// operator probe (CRITICAL invariant at expressions.rs:548/570). Verifies
+// `1\n+\n2 * 3` parses as `AdditiveExpr( 1, +, MultiplicativeExpr( 2, *, 3 ) )`
+// even when newlines separate operator from operand.
+#[test]
+fn test_slice10a_precedence_with_newline_trivia() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ 1\n+\n2 * 3 ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Newline trivia in precedence: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+    let additive = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_ADDITIVE_EXPR)
+        .expect("SdblAdditiveExpr at the top of arithmetic chain");
+    let mul_in_additive =
+        additive.descendants().find(|n| n.kind() == SyntaxKind::SDBL_MULTIPLICATIVE_EXPR);
+    assert!(
+        mul_in_additive.is_some(),
+        "SdblMultiplicativeExpr must sit under SdblAdditiveExpr (precedence ordering preserved across newline trivia)",
+    );
+    assert!(
+        additive.text().to_string().contains('+'),
+        "SdblAdditiveExpr text must contain '+' so HIR text-based operator detection still hits",
+    );
+}
+
+// Bucket A: flat-associativity guard — `А + Б + В` parses as a SINGLE
+// SdblAdditiveExpr with 3 expression children + 2 `+` tokens, NOT a
+// nested left-associative tree. Mini-spec §AST-shape invariant #1
+// (FLAT operator wrappers) and §Operator-binding pin list item
+// "flat-wrapper rule".
+#[test]
+fn test_slice10a_flat_additive_associativity() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ А + Б + В ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Flat additive should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+    let additives: Vec<_> =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_ADDITIVE_EXPR).collect();
+    assert_eq!(additives.len(), 1, "Exactly one SdblAdditiveExpr — wrapper is FLAT, not nested",);
+    let additive = &additives[0];
+    let plus_tokens = additive
+        .children_with_tokens()
+        .filter_map(|c| c.into_token())
+        .filter(|t| t.kind() == SyntaxKind::PLUS)
+        .count();
+    assert_eq!(
+        plus_tokens, 2,
+        "FLAT SdblAdditiveExpr must have exactly 2 `+` direct token children for `А + Б + В`",
+    );
+}
+
+// Bucket A: tuple vs paren distinction at expression level — single
+// expression in parens emits SdblParenExpr; 2+ comma-separated
+// expressions emit SdblTupleExpr. Mini-spec §Atoms paren dispatch +
+// §AST-shape invariant #5.
+#[test]
+fn test_slice10a_paren_single_vs_tuple_two() {
+    use syntax::SyntaxKind;
+    let single_input = "ВЫБРАТЬ (1) ИЗ Т";
+    let single_parse = parse_sdbl(single_input);
+    assert!(
+        !single_parse.has_errors(),
+        "Single-element paren should parse: {:?}",
+        single_parse.errors()
+    );
+    let single_root = single_parse.syntax_node();
+    assert_eq!(single_root.text().to_string(), single_input, "Single root coverage");
+    let single_paren = single_root.descendants().find(|n| n.kind() == SyntaxKind::SDBL_PAREN_EXPR);
+    let single_tuple = single_root.descendants().find(|n| n.kind() == SyntaxKind::SDBL_TUPLE_EXPR);
+    assert!(single_paren.is_some(), "(1) must emit SdblParenExpr");
+    assert!(single_tuple.is_none(), "(1) must NOT emit SdblTupleExpr");
+
+    let tuple_input = "ВЫБРАТЬ (1, 2) ИЗ Т";
+    let tuple_parse = parse_sdbl(tuple_input);
+    assert!(
+        !tuple_parse.has_errors(),
+        "Two-element tuple should parse: {:?}",
+        tuple_parse.errors()
+    );
+    let tuple_root = tuple_parse.syntax_node();
+    assert_eq!(tuple_root.text().to_string(), tuple_input, "Tuple root coverage");
+    let tuple = tuple_root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TUPLE_EXPR)
+        .expect("(1, 2) must emit SdblTupleExpr");
+    let comma_count = tuple
+        .children_with_tokens()
+        .filter_map(|c| c.into_token())
+        .filter(|t| t.kind() == SyntaxKind::COMMA)
+        .count();
+    assert_eq!(comma_count, 1, "SdblTupleExpr for (1, 2) must have 1 COMMA direct token child");
+}
+
+// Bucket A: newline-separated logical operators — `А\nИ\nБ` still parses
+// as SdblLogicalAndExpr at the parser level (mini-spec §AST-shape
+// invariant #2 + §IDE-recovery allowances #8). Note: HIR text-based
+// operator detection at sdbl-hir/src/lower/expr/ops.rs:64-67 looks for
+// " И " (with surrounding spaces) and may fall back to default
+// BinaryOp::Eq when newlines replace spaces; that's a Slice 13 follow-up
+// and out of Slice 10a scope. This test only locks the parser-side
+// wrapper shape.
+#[test]
+fn test_slice10a_newline_separated_logical_and() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ А\nИ\nБ";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Newline-separated AND should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input including newlines");
+    let and_count =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_LOGICAL_AND_EXPR).count();
+    assert!(
+        and_count >= 1,
+        "At least one SdblLogicalAndExpr must be produced even with newline-separated operator",
+    );
+}
