@@ -185,11 +185,26 @@ unaryExpression           + − NOT (prefix, right-recursive)
 primaryExpression         atoms                       (highest binding)
 ```
 
-This precedence ladder is **declared by this mini-spec**, not derived
-from ITS pubqlang/12, and not derived from any third-party SQL
-grammar. The operator inventory at each level is taken from ITS
-pubqlang/12 §Operators. The binding strengths between levels are
-chosen so that:
+**Source attribution.** The logical-operator precedence
+`NOT > AND > OR` is **ITS-derived from pubqlang/22 §Условие отбора**,
+which states verbatim: «В условиях сначала вычисляются простые
+логические выражения, затем операции НЕ, затем операции И, в
+последнюю очередь – операции ИЛИ. Для того чтобы обеспечить другой
+порядок вычислений, можно использовать круглые скобки.» This
+sentence specifies both the binding order (NOT tightest, OR loosest)
+and the parens-override rule. The arithmetic operator inventory
+`+ − × ÷` and the `+`-as-string-concatenation operator are
+**ITS-derived from pubqlang/40 §Арифметические операции**. The
+relative binding strength between the comparison/predicate slot and
+the arithmetic chain (multiplicative tighter than additive tighter
+than comparison) is the standard SQL convention universally used in
+SDBL-flavored query implementations and is not in itself ITS-quoted;
+this mini-spec adopts the standard convention. The clean-room rule
+holds: the source record above does not consult any third-party SQL
+grammar text or `../bsl-parser/*` — only ITS chapters and the
+project's own event-parser conventions.
+
+The chosen binding strengths produce the following intuitions:
 
 - `a OR b AND c` parses as `a OR (b AND c)`;
 - `a AND b = c` parses as `a AND (b = c)`;
@@ -626,7 +641,7 @@ each claim.
 | Bilingual keyword principle | YES — pubqlang/12 | "все ключевые слова имеют два варианта написания: на русском и английском языках" |
 | Logical operator inventory `И` / `ИЛИ` / `НЕ` (Russian) | YES — pubqlang/22 | "простые логические выражения соединяются между собой логическими операторами И, ИЛИ, НЕ" |
 | Logical operator bilingual EN equivalents `AND` / `OR` / `NOT` | YES — pubqlang/12 by general bilingual rule + project lexer Slice 2 attestation §Scope which enumerates the EN spellings | bilingual rule applies; specific EN keywords are not literally quoted in the dumped pages but follow the universal RU/EN principle |
-| Operator precedence ladder NOT > AND > OR | YES — pubqlang/22 | **"В условиях сначала вычисляются простые логические выражения, затем операции НЕ, затем операции И, в последнюю очередь – операции ИЛИ. Для того чтобы обеспечить другой порядок вычислений, можно использовать круглые скобки."** Note: the §Operator precedence section above wrongly says "declared by this mini-spec, not derived from ITS pubqlang/12"; the precedence is in fact **ITS-derived from pubqlang/22**. C2 follow-up TODO: revise §Operator precedence wording to credit pubqlang/22 instead of attributing the ladder to local declaration. |
+| Operator precedence ladder NOT > AND > OR | YES — pubqlang/22 | **"В условиях сначала вычисляются простые логические выражения, затем операции НЕ, затем операции И, в последнюю очередь – операции ИЛИ. Для того чтобы обеспечить другой порядок вычислений, можно использовать круглые скобки."** §Operator precedence section above credits pubqlang/22 with this verbatim quote. |
 | Arithmetic operators `+` `-` `*` `/` | YES — pubqlang/40 | "Арифметические операции (+, -, /, *)" |
 | Modulo `%` operator | NO — pubqlang/40 | **"Операция получения остатка % в языке запросов не поддерживается."** The current parser at `multiplicative_expr` accepts `TokenKind::Percent`; this is preserved as an IDE-recovery / local allowance NOT ITS-spec'd. The clean-room rewrite continues to accept `Percent` in `multiplicative_expr` to avoid regressing existing tests, but `%` is documented as a local extension under §IDE-recovery allowances. |
 | String concatenation via `+` | YES — pubqlang/40 | "Операцию конкатенации строк (+). Операцию конкатенации нельзя использовать для виртуальных полей." |
