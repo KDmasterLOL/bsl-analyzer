@@ -717,17 +717,44 @@ fn source_alias(p: &mut Parser) {
 // ============================================================================
 //
 // `is_join_keyword` and `join_clause` are the JOIN-family surface reached
-// by Slice 8's `data_source` join-attachment loop. The C1 commit splits
-// them out of the previous `LEGACY (Slices 9–11 pending)` block (no logic
-// change inside any function body); the C2 commit re-authors them
-// clean-room from ITS pubqlang chapters 44–48 and the SELECT mini-spec
-// §JOIN clauses, with per-function tiered provenance comments. The C3
-// commit lands the attestation at `docs/legal/sdbl-clean-room-slice9.md`.
+// by Slice 8's `data_source` join-attachment loop. They were re-authored
+// in C2 from ITS pubqlang chapters 44–48 (RU listings + chapter 48
+// chained / nested examples) and the SELECT mini-spec §JOIN clauses
+// (lines 297–319) + §Recovery requirements item #6 (line 410); each
+// function body carries a tiered provenance comment. Bilingual EN/RU
+// keyword pairs are recognised per the lexer's Slice 2 attestation.
+// See `docs/legal/sdbl-clean-room-slice9.md` for the attestation
+// (landed with C3).
 
-/// Check if current position starts a JOIN clause
+/// Predicate: does the current token open a JOIN clause?
 ///
-/// Looks for: LEFT/RIGHT/FULL/INNER/OUTER/JOIN keywords
-// C1 placeholder — clean-room rewrite in C2.
+/// Consulted by Slice 8's `data_source` join-attachment loop to decide
+/// whether the next position should be parsed as a `SdblJoinClause`.
+/// Returns true for any of the five JOIN-clause starters in EN or RU:
+///
+/// - `LEFT` / `ЛЕВОЕ`     — chapter 45 outer-join family;
+/// - `RIGHT` / `ПРАВОЕ`   — chapter 46 outer-join family;
+/// - `FULL` / `ПОЛНОЕ`    — chapter 47 outer-join family;
+/// - `INNER` / `ВНУТРЕННЕЕ` — chapter 44 inner-join family;
+/// - `JOIN` / `СОЕДИНЕНИЕ` — chapter 44 standalone reference (bare
+///   `СОЕДИНЕНИЕ` is implicit INNER per mini-spec §JOIN clauses
+///   behavioural note line 318).
+///
+/// `OUTER` / `ВНЕШНЕЕ` is **not** a starter — it is only consumed
+/// inside `join_clause` after the optional join-type Ident. Adding
+/// it to the starter set would change Slice 8's join-attachment
+/// boundary and the alias-/recovery boundary in `is_clause_keyword`.
+//
+// Provenance:
+//   Tier A1 — ITS pubqlang chapters 44 (`ВНУТРЕННЕЕ СОЕДИНЕНИЕ` +
+//             standalone `СОЕДИНЕНИЕ`), 45 (`ЛЕВОЕ ВНЕШНЕЕ
+//             СОЕДИНЕНИЕ`), 46 (`ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ`),
+//             47 (`ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ`); chapter 48
+//             chained / nested examples.
+//   Tier B  — bilingual EN/RU keyword pairs per the lexer's
+//             Slice 2 attestation
+//             (`docs/legal/sdbl-clean-room-slice2.md`).
+//   Tier C  — mini-spec §JOIN clauses §Shape line 302 ff.
 fn is_join_keyword(p: &Parser) -> bool {
     p.at_keyword("LEFT")
         || p.at_keyword("ЛЕВОЕ")
@@ -741,21 +768,71 @@ fn is_join_keyword(p: &Parser) -> bool {
         || p.at_keyword("СОЕДИНЕНИЕ")
 }
 
-/// Parse a JOIN clause
+/// Parse a single `SdblJoinClause` attached to the preceding data source.
 ///
-/// Grammar:
+/// Grammar (mini-spec §JOIN clauses §Shape, lines 301–307):
+///
 /// ```text
-/// joinPart:
-///     (LEFT | RIGHT | FULL | INNER)? OUTER? JOIN
-///     source=dataSource (ON | ПО) condition=logicalExpression
+/// join-clause :=
+///     [LEFT|RIGHT|FULL|INNER|ЛЕВОЕ|ПРАВОЕ|ПОЛНОЕ|ВНУТРЕННЕЕ]
+///     [OUTER|ВНЕШНЕЕ]
+///     (JOIN|СОЕДИНЕНИЕ)
+///     data-source
+///     (ON|ПО)
+///     logical-expression
 /// ```
-// C1 placeholder — clean-room rewrite in C2.
+///
+/// Bare `JOIN` / `СОЕДИНЕНИЕ` without an explicit type is accepted
+/// and treated as implicit INNER (mini-spec §JOIN clauses behavioural
+/// note line 318; chapter 44 standalone `СОЕДИНЕНИЕ` example).
+///
+/// `data_source` (Slice 8) and `logical_expression` (Slice 10a) are
+/// the cross-slice dispatch boundaries reached from this function.
+//
+// Provenance:
+//   Tier A1 — ITS pubqlang chapters 44/45/46/47 RU canonical
+//             listings (ВНУТРЕННЕЕ / ЛЕВОЕ ВНЕШНЕЕ / ПРАВОЕ
+//             ВНЕШНЕЕ / ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ); chapter 44
+//             standalone `СОЕДИНЕНИЕ`; chapter 48 chained /
+//             nested example listings.
+//   Tier B  — bilingual EN/RU keyword pairs (LEFT/ЛЕВОЕ,
+//             RIGHT/ПРАВОЕ, FULL/ПОЛНОЕ, INNER/ВНУТРЕННЕЕ,
+//             JOIN/СОЕДИНЕНИЕ, OUTER/ВНЕШНЕЕ, ON/ПО) per
+//             the lexer's Slice 2 attestation.
+//   Tier C  — mini-spec §JOIN clauses (lines 297–319) +
+//             §Recovery requirements item #6 (line 410, the
+//             incomplete-join-condition-after-ON recovery
+//             policy); §Behavioral note line 318 (bare JOIN
+//             without explicit type is implicit INNER).
+//   Tier D  — local IDE-recovery allowances:
+//             (a) bare LEFT/RIGHT/FULL/INNER (or RU
+//                 equivalents) without OUTER/ВНЕШНЕЕ — accepted
+//                 because the type-Ident bump is unconditional;
+//                 no ITS prose-note attests OUTER optionality
+//                 in chapters 45/46/47, so this is a parser-
+//                 accepted local allowance;
+//             (b) `Parser::error()`-bumps for missing JOIN
+//                 keyword (after type Ident) and missing ON/ПО
+//                 keyword (after data_source). Preserved
+//                 behaviour locked by audit-gate tests
+//                 `test_slice9_missing_join_keyword_current_behavior`
+//                 and `test_slice9_missing_on_current_behavior`
+//                 in `crates/parser/tests/sdbl_parser_tests.rs`.
+//                 Recovery improvement (zero-width error,
+//                 mirroring Slice 10b `column_or_function`) is
+//                 deferred to the Slice 12 IDE-recovery rewrite
+//                 — both options leave bad recovery trees in
+//                 error cases, and Slice 9's clean-room scope
+//                 is the happy-path grammar.
 fn join_clause(p: &mut Parser) {
     let m = p.start();
 
-    // Parse join type (LEFT, RIGHT, FULL, INNER).
-    // Bare JOIN without an explicit type is accepted as implicit INNER JOIN.
-    let has_join_type = p.at_keyword("LEFT")
+    // Optional join-type Ident: LEFT/ЛЕВОЕ, RIGHT/ПРАВОЕ,
+    // FULL/ПОЛНОЕ, INNER/ВНУТРЕННЕЕ. Tier A1 chapters 44/45/46/47.
+    // The Ident is bumped into SdblJoinClause direct tokens so
+    // SdblJoinClause::join_type() can substring-match it back
+    // (consumer-side AST-shape invariant #1).
+    let has_type = p.at_keyword("LEFT")
         || p.at_keyword("ЛЕВОЕ")
         || p.at_keyword("RIGHT")
         || p.at_keyword("ПРАВОЕ")
@@ -763,38 +840,57 @@ fn join_clause(p: &mut Parser) {
         || p.at_keyword("ПОЛНОЕ")
         || p.at_keyword("INNER")
         || p.at_keyword("ВНУТРЕННЕЕ");
-
-    if has_join_type {
+    if has_type {
         p.bump();
         p.skip_trivia();
     }
 
-    // Optional OUTER keyword (for LEFT OUTER JOIN, RIGHT OUTER JOIN, FULL OUTER JOIN)
+    // Optional OUTER/ВНЕШНЕЕ. Tier A1 chapters 45/46/47 each
+    // list a single OUTER form (`ЛЕВОЕ/ПРАВОЕ/ПОЛНОЕ ВНЕШНЕЕ
+    // СОЕДИНЕНИЕ`); chapter 44 INNER does not. The parser
+    // accepts OUTER after any preceding type Ident.
     if p.at_keyword("OUTER") || p.at_keyword("ВНЕШНЕЕ") {
         p.bump();
         p.skip_trivia();
     }
 
-    // JOIN/СОЕДИНЕНИЕ keyword (mandatory)
+    // Mandatory JOIN/СОЕДИНЕНИЕ keyword. Tier A1 anchors all
+    // join forms on this keyword; chapter 44 standalone
+    // `СОЕДИНЕНИЕ` is the bare-JOIN implicit-INNER form. On
+    // miss: Tier D allowance — `p.error()` bumps the offending
+    // token into an ERROR child and the marker still completes
+    // (audit-gate `test_slice9_missing_join_keyword_current_behavior`).
     if !p.at_keyword("JOIN") && !p.at_keyword("СОЕДИНЕНИЕ") {
-        p.error(); // Expected JOIN keyword
+        p.error();
         m.complete(p, NodeKind::SdblJoinClause);
         return;
     }
-    p.bump(); // Consume JOIN
+    p.bump();
     p.skip_trivia();
 
-    // Parse joined data source (table or subquery with alias)
+    // Joined data source — table reference, parameter source,
+    // or subquery; alias is optional. Slice 8 owns this helper.
     data_source(p);
     p.skip_trivia();
 
-    // ON/ПО keyword (mandatory)
+    // Mandatory ON/ПО keyword. Tier A1 chapters 44–47 + 48 all
+    // gate the join condition on this keyword. On miss: Tier D
+    // allowance — `p.error()` bumps the offending token into an
+    // ERROR child of SdblJoinClause and parsing falls through
+    // to the logical-expression body so the user's typed
+    // condition still lands inside the JOIN node (audit-gate
+    // `test_slice9_missing_on_current_behavior`; mini-spec
+    // §Recovery requirement #6).
     if !eat_sdbl_keyword(p, "ON", "ПО") {
-        p.error(); // Expected ON/ПО
+        p.error();
     }
     p.skip_trivia();
 
-    // Parse join condition (logical expression)
+    // Join condition — full logical expression (Slice 10a/10b
+    // surface: OR / AND / NOT / comparison / additive). Chapter
+    // 48 chained example uses a single equality
+    // (`ПО Т1.А = Т2.А`); chapter 47 example shows arithmetic
+    // and parenthesised compounds.
     expressions::logical_expression(p);
 
     m.complete(p, NodeKind::SdblJoinClause);
