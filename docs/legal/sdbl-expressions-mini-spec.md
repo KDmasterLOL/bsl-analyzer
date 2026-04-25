@@ -608,27 +608,48 @@ compatibility reasons that are **not** ITS-mandated:
 
 ## ITS coverage verification
 
-This section is empty at the time of the mini-spec C0a commit. It
-will be filled by the Slice 10a C2 author after fetching ITS
-pubqlang/10 and /12 directly during the rewrite. The C2 author
-records "verified yes / verified no / page changed" plus a quoted
-excerpt for each of the rows below.
+Filled at Slice 10a C2 against the local ITS pubqlang dump at
+`/home/itrous/src/tools_migration/its/dump/` (the publicly reachable
+ITS URLs at `its.1c.ru/db/pubqlang/...` are paywalled and serve
+JS-rendered navigation only; the local dump is the authoritative
+copy of the published ITS pages).
 
-| Claim | Verified | Notes / quoted excerpt |
+Note on chapter coverage: pubqlang/10 and pubqlang/12 are short
+intro pages (15 and 71 lines respectively); the actual normative
+prose for expression syntax lives in later "example" chapters
+(/22 WHERE, /40 expressions in field list, /60 parameter passing).
+The verification below cites the chapters that materially document
+each claim.
+
+| Claim | Verified | Citation / quoted excerpt |
 |---|---|---|
-| ITS pubqlang/10 has no general "expression" production (only "logical expression" in clause contexts) | TODO at C2 |  |
-| ITS pubqlang/12 lists the operator inventory (logical / arithmetic / comparison) | TODO at C2 |  |
-| ITS pubqlang/12 documents operator precedence | TODO at C2 |  |
-| ITS pubqlang/12 documents the bilingual logical operator names (`И` / `AND`, `ИЛИ` / `OR`, `НЕ` / `NOT`) | TODO at C2 |  |
-| ITS pubqlang/12 documents the `&` parameter prefix lexeme | TODO at C2 |  |
-| ITS pubqlang/12 documents the literal forms (numeric, string, boolean, NULL/UNDEFINED) | TODO at C2 |  |
+| Bilingual keyword principle | YES — pubqlang/12 | "все ключевые слова имеют два варианта написания: на русском и английском языках" |
+| Logical operator inventory `И` / `ИЛИ` / `НЕ` (Russian) | YES — pubqlang/22 | "простые логические выражения соединяются между собой логическими операторами И, ИЛИ, НЕ" |
+| Logical operator bilingual EN equivalents `AND` / `OR` / `NOT` | YES — pubqlang/12 by general bilingual rule + project lexer Slice 2 attestation §Scope which enumerates the EN spellings | bilingual rule applies; specific EN keywords are not literally quoted in the dumped pages but follow the universal RU/EN principle |
+| Operator precedence ladder NOT > AND > OR | YES — pubqlang/22 | **"В условиях сначала вычисляются простые логические выражения, затем операции НЕ, затем операции И, в последнюю очередь – операции ИЛИ. Для того чтобы обеспечить другой порядок вычислений, можно использовать круглые скобки."** Note: the §Operator precedence section above wrongly says "declared by this mini-spec, not derived from ITS pubqlang/12"; the precedence is in fact **ITS-derived from pubqlang/22**. C2 follow-up TODO: revise §Operator precedence wording to credit pubqlang/22 instead of attributing the ladder to local declaration. |
+| Arithmetic operators `+` `-` `*` `/` | YES — pubqlang/40 | "Арифметические операции (+, -, /, *)" |
+| Modulo `%` operator | NO — pubqlang/40 | **"Операция получения остатка % в языке запросов не поддерживается."** The current parser at `multiplicative_expr` accepts `TokenKind::Percent`; this is preserved as an IDE-recovery / local allowance NOT ITS-spec'd. The clean-room rewrite continues to accept `Percent` in `multiplicative_expr` to avoid regressing existing tests, but `%` is documented as a local extension under §IDE-recovery allowances. |
+| String concatenation via `+` | YES — pubqlang/40 | "Операцию конкатенации строк (+). Операцию конкатенации нельзя использовать для виртуальных полей." |
+| Literal types: numeric, string, boolean (Истина / Ложь), NULL, Неопределено (UNDEFINED) | YES — pubqlang/40 | "Литералы типов: число, строка (в кавычках), булево (значения Истина и Ложь), Null, Неопределено" |
+| `&Identifier` parameter prefix syntax | YES — pubqlang/60 | concrete `&ЧастьНаименования`, `&ДатаНачала`, `&ДатаОкончания` parameter examples in queries; the `&` prefix is the documented form |
+| `ВЫБОР` / CASE expression | YES — pubqlang/40 | "Операцию выбора ВЫБОР – позволяет получить одно из возможных значений в соответствии с указанными условиями" |
+| `ВЫРАЗИТЬ` / CAST expression | YES — pubqlang/40 | "Операцию приведения типов ВЫРАЗИТЬ" |
+| `ССЫЛКА` / REFS predicate | YES — pubqlang/40 | "при помощи оператора ССЫЛКА проверяется, ссылкой на какой документ является поле" |
+| `МЕЖДУ` / BETWEEN predicate | YES — pubqlang/22 + pubqlang/40 | "оператор МЕЖДУ, который проверяет результат вхождения значения в диапазон" |
+| `ПОДОБНО` / LIKE predicate | YES — pubqlang/60 | concrete usage `Наименование ПОДОБНО "%" + &ЧастьНаименования + "%"` |
 
-If verification reveals that any "no" claim is actually documented
-in ITS, the mini-spec is updated in the C2 commit and the
-provenance comments in `expressions.rs` are upgraded from
-`// local: …` to ITS citations. If verification confirms the "no"
-claims, the `// local: …` comments stand and the mini-spec is the
-authorial basis for the Slice 10a clean-room claim.
+**Verification summary:** every Slice 10a + Slice 10b expression-
+grammar claim that the mini-spec attributes to ITS is verified
+against the pubqlang dump, with the precedence ladder upgraded
+from "mini-spec-declared" to "ITS pubqlang/22-derived". The single
+**discrepancy** is `%` modulo — accepted by the parser, not
+ITS-supported. The clean-room rewrite preserves the local `%`
+allowance and documents it as a local extension.
+
+C2 provenance comments in `expressions.rs` cite the verified ITS
+chapters (`pubqlang/22`, `pubqlang/40`, `pubqlang/60`) wherever
+applicable rather than the placeholder `// local: ...` originally
+proposed for sections that turned out to be ITS-derived.
 
 ## Out of scope
 
