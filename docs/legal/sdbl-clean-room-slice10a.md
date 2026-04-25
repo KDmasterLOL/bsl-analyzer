@@ -499,34 +499,66 @@ considered live:
 
 ## Commit trail
 
-Slice 10a landed as 19 commits across 5 logical phases. Below the
-canonical anchor commits per phase; the `*-fixup-N` commits
-within each phase address codex adversarial-review findings and
-are pure refinements of the canonical commit's intent.
+Slice 10a landed as 19 commits across 5 logical phases (18 from
+the original C0a–C3 sequence reproduced from
+`git log --oneline --reverse develop..HEAD`, plus a C3 fixup
+landing alongside this corrected attestation). Each anchor commit
+is followed by zero or more codex-adversarial-review fixup commits
+that are pure refinements of the canonical commit's intent.
 
 - **C0a — `820f5984` (2026-04-25)**: publish SDBL expressions
-  mini-spec (`docs/legal/sdbl-expressions-mini-spec.md`). Five
-  fixup commits: `6d398d4a`, `8c50977d`, `90b1e061`, `a184935f`,
-  `ca75ffb6` (extending VT-arg filter, lexical assumptions, KwNull
-  scrub, NULL dispatch order, primary-source attribution).
+  mini-spec (`docs/legal/sdbl-expressions-mini-spec.md`). Four
+  fixup commits: `6d398d4a` (VT-arg filter + parameter shape +
+  non-consultation tightening), `8c50977d` (lexical-assumptions
+  table correction), `90b1e061` (residual KwNull scrub),
+  `a184935f` (NULL-before-column dispatch order locked in
+  mini-spec).
 - **C0b — `3eaddae2` (2026-04-25)**: audit SDBL Slice 10a tests
   and extend operator chain / atom coverage with 10 Bucket-A gap
   tests (a–j) in `sdbl_parser_tests.rs`. One fixup: `53111d0b`
-  (strengthen weak structural assertions).
+  (strengthen weak structural assertions in the precedence and
+  newline-AND tests).
 - **C1 — `422851fd` (2026-04-25)**: rename Slice 10b legacy
   helpers (`comparison_expr` → `comparison_expr_legacy`,
   `predicate_expr` → `predicate_expr_legacy`) and move 17 Slice
   10a functions under the `CLEAN-ROOM Slice 10a` banner. One
-  fixup: `0c8a8de7` (drop forward attestation references).
+  fixup: `0c8a8de7` (drop forward C3-attestation references).
 - **C2 — `dd4777db` (2026-04-25)**: rewrite SDBL Slice 10a
   expression backbone clean-room from ITS pubqlang/22, /40, /60
   + the C0a mini-spec, with per-function provenance comments and
-  the NULL bug fix. Six fixup commits: `9038e9eb`, `ca75ffb6`,
-  `56583a32`, `b199eb90`, `84840228`, `e7aed40a`, `8e14d843`
-  (clean-room independence note, Primary sources extension, `%`
-  allowance, test banner update, NULL note past-tense, two-site
-  NULL split clarification, unreachable-fallback wording).
-- **C3 — landed with this attestation (2026-04-25)**.
+  the NULL bug fix. Seven fixup commits:
+  - `9038e9eb` — clean-room independence note + NULL regression
+    gates;
+  - `ca75ffb6` — credit pubqlang/22 for operator precedence;
+  - `56583a32` — extend Primary sources + add `%` IDE-recovery
+    allowance;
+  - `b199eb90` — align test banner provenance with the verified
+    ITS chapters (`/22`, `/40`, `/60`);
+  - `84840228` — rewrite remaining mini-spec NULL/Ident notes in
+    final-state form;
+  - `e7aed40a` — clarify two-site NULL recognition split
+    (`is_expression_start` Ident-arm + `primary_expr` decisive
+    keyword probe);
+  - `8e14d843` — mark NULL fallback unreachable under current
+    `Parser::at_keyword` API.
+- **C3 — `9fc55462` (2026-04-25)**: this attestation (initial
+  draft) + 28 spec-driven acceptance tests in
+  `crates/parser/tests/sdbl_slice10a_backbone.rs` + master-doc
+  flip in `docs/legal/sdbl-clean-room-slices.md`. One fixup
+  (this commit, landed alongside the corrected attestation):
+  flip Slice 10a provenance docstrings in `sdbl.rs` and
+  `expressions.rs` to "complete (2026-04-25)" final-state
+  wording, and correct the commit-trail count to match the
+  reproducible `git log` output (Slice 10a is 5 + 2 + 2 + 8 + 2
+  = 19 commits, originally claimed as 18 + a duplicated entry).
+
+The phase totals are: C0a 5, C0b 2, C1 2, C2 8, C3 2 — 19
+commits in total. The original attestation (commit `9fc55462`)
+miscounted: it claimed 19 commits but the figure was reached by
+listing `ca75ffb6` under both C0a and C2, and the actual
+`develop..HEAD` distance at C3-anchor time was 18 commits with
+each commit counted exactly once. This corrected attestation
+restores phase membership to exactly one phase per commit.
 
 ## Licensing note
 

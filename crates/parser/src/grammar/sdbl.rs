@@ -48,7 +48,7 @@
 //! handling). See `docs/legal/sdbl-clean-room-slice8.md` for the
 //! attestation.
 //!
-//! Slice 10a — clean-room (in progress, attestation pending): the
+//! Slice 10a — clean-room (complete, landed with C3 2026-04-25): the
 //! expression backbone in submodule `expressions` covering atoms
 //! (literals, parameters, parens/tuples/subqueries, Star) plus the
 //! operator precedence chain (logical OR / AND / NOT / additive /
@@ -59,17 +59,17 @@
 //! `logical_and_expr`, `not_expr`, `additive_expr`,
 //! `multiplicative_expr`, `unary_expr`, `primary_expr`, `literal_expr`,
 //! `string_literal_or_multi`, `parameter_expr`,
-//! `paren_or_subquery_expr`. Authored from ITS pubqlang/10 + /12 and
-//! the local mini-spec at `docs/legal/sdbl-expressions-mini-spec.md`.
-//! The C1 commit performed pure-refactor renames
-//! `comparison_expr` → `comparison_expr_legacy` and
-//! `predicate_expr` → `predicate_expr_legacy` and moved the deferred
-//! bodies under the LEGACY banner; per-function provenance comments
-//! were attached at C2. The C0a mini-spec at
-//! `docs/legal/sdbl-expressions-mini-spec.md` is the live clean-room
-//! reference document; the formal attestation under
-//! `docs/legal/sdbl-clean-room-slice{1,2,6,7,8}.md` convention is a
-//! C3 deliverable that has not yet landed in this branch.
+//! `paren_or_subquery_expr`. Authored from ITS pubqlang/10, /12, /22,
+//! /40, /60 (via the local dump at
+//! `/home/itrous/src/tools_migration/its/dump/`) and the local
+//! mini-spec at `docs/legal/sdbl-expressions-mini-spec.md`. The C1
+//! commit performed pure-refactor renames `comparison_expr` →
+//! `comparison_expr_legacy` and `predicate_expr` →
+//! `predicate_expr_legacy` and moved the deferred bodies under the
+//! LEGACY banner; per-function provenance comments were attached at
+//! C2; the C2 commit also fixed a pre-existing bug routing bare
+//! `NULL` through `column_or_function`. See
+//! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation.
 //!
 //! Slices 9, 10b, 11 pending: JOIN family (`is_join_keyword`,
 //! `join_clause` — Slice 9), expression predicates / column-or-function

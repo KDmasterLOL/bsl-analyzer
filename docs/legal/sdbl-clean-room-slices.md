@@ -358,14 +358,18 @@ full attestation. Authored from
 [`sdbl-expressions-mini-spec.md`](sdbl-expressions-mini-spec.md) (the
 C0a clean-room reference) and ITS pubqlang chapters 10, 12, 22, 40,
 60. Commit trail (5 phases, 19 commits including codex-review
-fixups):
-- C0a `820f5984` (mini-spec) + 5 fixup commits;
-- C0b `3eaddae2` (10 Bucket-A gap tests) + 1 fixup;
+fixups; per-phase totals: C0a 5, C0b 2, C1 2, C2 8, C3 2):
+- C0a `820f5984` (mini-spec) + 4 fixup commits (`6d398d4a`,
+  `8c50977d`, `90b1e061`, `a184935f`);
+- C0b `3eaddae2` (10 Bucket-A gap tests) + 1 fixup (`53111d0b`);
 - C1 `422851fd` (renames + reorder under clean-room banner) + 1
-  fixup;
-- C2 `dd4777db` (clean-room rewrite of 17 functions + NULL bug fix)
-  + 7 fixup commits;
-- C3 landed with the attestation.
+  fixup (`0c8a8de7`);
+- C2 `dd4777db` (clean-room rewrite of 17 functions + NULL bug
+  fix) + 7 fixup commits (`9038e9eb`, `ca75ffb6`, `56583a32`,
+  `b199eb90`, `84840228`, `e7aed40a`, `8e14d843`);
+- C3 `9fc55462` (attestation + 28 spec-driven acceptance tests +
+  master-doc flip) + 1 fixup (final-state provenance +
+  commit-trail correction).
 
 #### Goal
 

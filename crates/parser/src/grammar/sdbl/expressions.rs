@@ -10,7 +10,7 @@
 //!
 //! ## Provenance
 //!
-//! Slice 10a — clean-room (in progress; attestation lands at C3):
+//! Slice 10a — clean-room (complete, landed with C3 2026-04-25):
 //! expression backbone (atoms + operator precedence chain + parens /
 //! tuple / subquery). Authored from
 //! `docs/legal/sdbl-expressions-mini-spec.md` and the local 1C ITS
@@ -23,7 +23,8 @@
 //! textual novelty**. Where the resulting event-parser shape closely
 //! matches the pre-clean-room implementation, that is the natural
 //! convergence on a single ITS-derived grammar shape, not consultation
-//! of pre-C1 bodies during authorship.
+//! of pre-C1 bodies during authorship. See
+//! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation.
 //!
 //! Slice 10b — pending: predicates, comparison, column-or-function, CAST,
 //! CASE. Bodies remain Tier B under the LEGACY banner; the
