@@ -4096,12 +4096,12 @@ fn test_slice11_totals_missing_by_recovery() {
 // attestation `chapter_027.html:39, 51` —
 // `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`).
 //
-// LANDS `#[ignore]`-ED IN C0b. C2 atomically (a) extends
+// LANDED `#[ignore]`-ED IN C0b. C2 atomically (a) extended
 // `order_by_item` to consume the optional HIERARCHY/ИЕРАРХИЯ
-// modifier after ASC/DESC, AND (b) removes this `#[ignore]`. The
-// test must PASS in C2's `cargo test` run, proving the fix works.
+// modifier after ASC/DESC (per ITS chapter 27 mandatory fix —
+// `chapter_027.html:39, 51`), AND (b) removed the `#[ignore]`.
+// This test is now an ACTIVE regression gate.
 #[test]
-#[ignore = "Slice 11 C2 will land HIERARCHY consumption in order_by_item and unignore this gate"]
 fn test_slice11_order_by_hierarchy_consumed() {
     use syntax::SyntaxKind;
     let input = "ВЫБРАТЬ A ИЗ Т УПОРЯДОЧИТЬ ПО A ИЕРАРХИЯ";

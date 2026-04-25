@@ -420,15 +420,14 @@ order-by-clause := (ORDER|УПОРЯДОЧИТЬ) (BY|ПО) order-item (',' orde
 order-item := expression [ASC|DESC|ВОЗР|УБЫВ] [HIERARCHY|ИЕРАРХИЯ]
 ```
 
-The optional `[HIERARCHY|ИЕРАРХИЯ]` modifier in this BNF describes the
-**post-Slice-11-C2 target grammar**, NOT the pre-Slice-11 parser shape. As of
-C0a (this commit), `order_by_item` at
-`crates/parser/src/grammar/sdbl/select.rs:1235-1246` only consumes the
-ASC/DESC/ВОЗР/УБЫВ modifiers and leaves HIERARCHY in the token stream. The
-HIERARCHY consumption ships in Slice 11 C2 as a structured modifier-token
-extension to `order_by_item`, atomic with unignoring the C0b regression-gate
-test `test_slice11_order_by_hierarchy_consumed` (test (g)). See the
-§HIERARCHY modifier subsection below.
+The optional `[HIERARCHY|ИЕРАРХИЯ]` modifier is the **active Slice 11 C2
+parser grammar**: `order_by_item` consumes the optional ASC/ВОЗР/DESC/УБЫВ
+modifier followed by the optional HIERARCHY/ИЕРАРХИЯ modifier and emits
+both as flat IDENT siblings of `SdblOrderClause` (no per-item wrapper).
+The C0b regression-gate test `test_slice11_order_by_hierarchy_consumed`
+(test (g)) is now an active gate and PASSES. Only the **HIR semantic
+interpretation** of the HIERARCHY modifier remains deferred — see the
+§HIR semantic-interpretation scope subsection below.
 
 ### AST-shape contract (Slice 11 extension)
 
@@ -461,6 +460,20 @@ the expression node and the ASC/DESC token, all flat at the
 Bilingual ASC/ВОЗР, DESC/УБЫВ, HIERARCHY/ИЕРАРХИЯ pairs are attested in the
 lexer Slice 2 LEGACY block at `crates/lexer/src/sdbl/mod.rs:485-489, 491-492`
 (KwAsc, KwDesc, KwHierarchy variants).
+
+**HIR semantic-interpretation scope.** The Slice 11 C2 HIERARCHY consumption
+fix is **parser-only acceptance**: HIERARCHY/ИЕРАРХИЯ is reachable from
+`SdblOrderClause` as a flat sibling IDENT token, but the HIR consumer at
+`crates/sdbl-hir/src/lower/clauses.rs:114-156` and the HIR `OrderByItem`
+struct at `crates/sdbl-hir/src/hir.rs` do NOT yet recognise it (`OrderByItem`
+has no hierarchy field; the `SortDirection` lowering only reads
+ASC/ВОЗР/DESC/УБЫВ). Therefore `ORDER BY A ИЕРАРХИЯ` lowers identically to
+`ORDER BY A` from the IDE/semantic layer's perspective. Extending HIR is
+**out of Slice 11 scope** (per plan §Constraints — `crates/sdbl-hir/**` is
+read-only) and is owned by Slice 13 (sdbl-hir reattachment), which will add
+a hierarchy field to `OrderByItem` and a HIR regression test. Slice 11's
+contribution is the syntax-tree contract that Slice 13's reader will
+consume.
 
 ### Recovery policy
 
@@ -700,19 +713,19 @@ is deferred to Slice 12.
 
 | Clause / form | ITS chapter | Verification status |
 |---|---|---|
-| WHERE / ГДЕ — primary | 22 §Условие отбора | TODO at C2 |
-| WHERE — pattern matching integration | 23 §LIKE+WHERE | TODO at C2 |
-| WHERE — additional examples | 24 §WHERE+subqueries | TODO at C2 |
-| ORDER BY — primary | 16 §Сортировка результата запроса | TODO at C2 |
-| ORDER BY — multi-level / variants | 17 §Многоуровневая сортировка | TODO at C2 |
+| WHERE / ГДЕ — primary | 22 §Условие отбора | verified yes (C2 — `chapter_022.html:15, 26, 35` — `Условие отбора данных из таблицы задается после ключевого слова ГДЕ`) |
+| WHERE — pattern matching integration | 23 §LIKE+WHERE | verified yes (C2 — `chapter_023.html:13, 15, 25-27, 45-46` — `ГДЕ Наименование ПОДОБНО "%Иван%"` + `НЕ … ПОДОБНО` form) |
+| WHERE — additional examples | 24 §WHERE+parameters | verified yes (C2 — `chapter_024.html:15, 16` — параметры запроса `&Клиент` в условии отбора `ГДЕ`) |
+| ORDER BY — primary | 16 §Сортировка результата запроса | verified yes (C2 — `chapter_016.html:19, 31, 33, 37, 49` — `УПОРЯДОЧИТЬ ПО ... ВОЗР` canonical sort form) |
+| ORDER BY — multi-level / variants | 16 §Многоуровневая сортировка + 17 §Сортировка по реквизитам | verified yes (C2 — `chapter_016.html:63, 64, 75-76` — `УПОРЯДОЧИТЬ ПО Период УБЫВ, ...` multi-field; `chapter_017.html:29, 49` — sort by ссылочное поле; chapter 16 also references HIERARCHY at `chapter_016.html:63` "Можно также упорядочивать иерархические данные по иерархии") |
 | ORDER BY HIERARCHY / ИЕРАРХИЯ | 27 §Иерархическая упорядоченная выборка | verified yes (C0a — `chapter_027.html:39, 51` — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`); ITS Tier A2 / Slice 11 C2 MANDATORY FIX |
 | AUTOORDER / АВТОУПОРЯДОЧИВАНИЕ | 17 §АВТОУПОРЯДОЧИВАНИЕ | verified yes (C0a — `chapter_017.html:17, 32, 52`) |
-| GROUP BY — primary | 34 §Группировка результата запроса | TODO at C2 |
-| GROUP BY — variants / HAVING examples | 35 §Расчет агрегатов | TODO at C2 |
-| HAVING — primary | 34 §Группировка с фильтрацией по агрегатам | TODO at C2 |
+| GROUP BY — primary | 34 §Группировка результата запроса | verified yes (C2 — `chapter_034.html:14, 33, 44, 46, 51, 52` — `СГРУППИРОВАТЬ ПО` canonical with агрегатные функции СУММА/МИНИМУМ/МАКСИМУМ/СРЕДНЕЕ/КОЛИЧЕСТВО) |
+| GROUP BY — variants / multi-field | 35 §Расчет агрегатов | verified yes (C2 — `chapter_035.html:23, 29, 41, 44, 45` — multi-field `СГРУППИРОВАТЬ ПО` example) |
+| HAVING — primary | 35 §Условие на агрегаты | verified yes (C2 — `chapter_035.html:49` — `с помощью ключевого слова ИМЕЮЩИЕ ... условие отбора аналогично условию в предложении ГДЕ, но только оно накладывается ... на записи, получившиеся в результате группировки`) |
 | TOTALS BY — primary (incl. OVERALL / ОБЩИЕ) | 39 §Расчет общих итогов | verified yes (C0a — `chapter_039.html:13, 25, 29, 48, 49, 51` — canonical `ИТОГИ ПО ОБЩИЕ`); structured PERIODS form NOT verified |
-| FOR UPDATE / ДЛЯ ИЗМЕНЕНИЯ | (not in ITS chapters 16–39) | verified-no — local IDE-recovery allowance (Tier D) |
-| INDEX BY / ИНДЕКСИРОВАТЬ ПО | (not in ITS chapters 16–39) | verified-no — local IDE-recovery allowance (Tier D) |
+| FOR UPDATE / ДЛЯ ИЗМЕНЕНИЯ | (not in ITS chapters 16–39) | verified-no (C2 — direct `rg` of dumped chapters 16–39 found no `ДЛЯ ИЗМЕНЕНИЯ` / `FOR UPDATE` form) — local IDE-recovery allowance (Tier D) |
+| INDEX BY / ИНДЕКСИРОВАТЬ ПО | (not in ITS chapters 16–39) | verified-no (C2 — direct `rg` of dumped chapters 16–39 found no `ИНДЕКСИРОВАТЬ` form) — local IDE-recovery allowance (Tier D) |
 
 C2 fills in the remaining "TODO at C2" rows after directly reading the dump
 pages at `/home/itrous/src/tools_migration/its/dump/html/`, mirroring the
@@ -727,19 +740,20 @@ the Slice 11 clean-room slice were authored from:
 
 - the previously-existing mini-spec sketches (which were authored under the
   same clean-room discipline);
-- the three targeted ITS pubqlang chapter regions that were directly read
-  at C0a time via the local dump path
-  `/home/itrous/src/tools_migration/its/dump/html/`: chapter 17 lines
-  17/32/52 (AUTOORDER provenance only — the multi-level / variants ORDER BY
-  material elsewhere in chapter 17 was NOT read at C0a and remains a TODO
-  row in the §ITS coverage verification table); chapter 27 lines 39/51
-  (ORDER BY HIERARCHY provenance); chapter 39 lines 13/25/29/48/49/51
-  (TOTALS BY canonical OVERALL form provenance). These three regions
-  underpin the three "verified yes (C0a)" rows in the §ITS coverage
-  verification table. The remaining table rows (chapters 16, 22, 23, 24,
-  34, 35, plus the chapter 17 ORDER BY variants row) carry "TODO at C2"
-  and were NOT directly read during C0a authoring — their verification is
-  C2's responsibility per the §ITS coverage verification table footer;
+- ITS pubqlang chapter regions read directly via the local dump path
+  `/home/itrous/src/tools_migration/its/dump/html/`. C0a authoring read
+  three targeted regions only — chapter 17 lines 17/32/52 (AUTOORDER
+  provenance), chapter 27 lines 39/51 (ORDER BY HIERARCHY provenance),
+  chapter 39 lines 13/25/29/48/49/51 (TOTALS BY canonical OVERALL form
+  provenance). The C2 verification pass extended this with direct
+  reads of chapter 16 (ORDER BY primary + multi-level variants),
+  chapter 17 sort-by-ссылочное-поле lines, chapter 22 (WHERE primary),
+  chapter 23 (LIKE+WHERE integration), chapter 24 (WHERE+parameters),
+  chapter 34 (GROUP BY primary), chapter 35 (GROUP BY variants +
+  HAVING) — see the §ITS coverage verification table for the full
+  verified-yes citations with line numbers. The FOR UPDATE / INDEX BY
+  "verified-no" rows reflect a direct `rg` of the dumped chapters
+  16–39 confirming absence of those forms;
 - the lexer Slice 2 attestation (`docs/legal/sdbl-clean-room-slice2.md`) for
   bilingual keyword pairs;
 - the Slice 1/2/6/7/8/9/10a/10b clean-room attestations for event-parser

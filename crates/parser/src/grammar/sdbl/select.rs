@@ -916,10 +916,24 @@ fn join_clause(p: &mut Parser) {
 // entries), and the §ITS coverage verification table.
 
 /// Parse the optional AUTOORDER / ORDER BY / TOTALS BY tail-clause loop.
+///
+/// Provenance:
+/// - ITS pubqlang/16 §Сортировка результата запроса (ORDER BY tail —
+///   `chapter_016.html:19, 31`).
+/// - ITS pubqlang/17 §АВТОУПОРЯДОЧИВАНИЕ (AUTOORDER tail —
+///   `chapter_017.html:17, 32, 52`; corrected per Slice 11 plan
+///   codex Round-2 finding 5: chapter 17 owns AUTOORDER, NOT
+///   chapter 27).
+/// - ITS pubqlang/27 §Иерархическая упорядоченная выборка (HIERARCHY
+///   modifier on ORDER BY items, consumed by `order_by_item` —
+///   `chapter_027.html:39, 51`).
+/// - ITS pubqlang/39 §Расчет общих итогов (TOTALS tail —
+///   `chapter_039.html:13, 25, 29, 48, 49, 51`).
+/// - SELECT mini-spec §SELECT query, §AUTOORDER, §ORDER BY, §TOTALS BY.
+/// - Local: any-order looping is parser-side ergonomics convention
+///   (preserved pre-refactor behaviour per mini-spec §Behavioral
+///   contract from current parser).
 fn select_tail_clauses(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
-    // Parse AUTOORDER, ORDER BY, and TOTALS BY in any order
-    // These clauses are all optional and can appear in any combination
     let mut parsed_autoorder = false;
     let mut parsed_order_by = false;
     let mut parsed_totals_by = false;
@@ -927,7 +941,6 @@ fn select_tail_clauses(p: &mut Parser) {
     loop {
         p.skip_trivia();
 
-        // Check for AUTOORDER
         if !parsed_autoorder && at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
         {
             autoorder_clause(p);
@@ -935,94 +948,127 @@ fn select_tail_clauses(p: &mut Parser) {
             continue;
         }
 
-        // Check for ORDER BY
         if !parsed_order_by && at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
             order_by_clause(p);
             parsed_order_by = true;
             continue;
         }
 
-        // Check for TOTALS BY
         if !parsed_totals_by && at_sdbl_keyword(p, "TOTALS", "ИТОГИ") {
             totals_by_clause(p);
             parsed_totals_by = true;
             continue;
         }
 
-        // No more clauses to parse
         break;
     }
 }
 
 /// Parse the optional FROM → ORDER BY clause tail of a single query.
+///
+/// Provenance:
+/// - SELECT mini-spec §SELECT query / §clause-tail dispatcher
+///   (FROM → WHERE → GROUP → HAVING → FOR UPDATE → INDEX BY → ORDER BY
+///   body-tail order).
+/// - ITS pubqlang/12 §Структура запроса (body-clause ordering anchor —
+///   the canonical SELECT-query structure).
+/// - Body-tail ORDER BY accept point at the end of this dispatcher
+///   coexists with the post-`query` ORDER BY accept in
+///   `select_tail_clauses` (preserved pre-refactor behaviour per mini-
+///   spec §AUTOORDER's coexistence note + Slice 11 plan §AST-shape
+///   invariant #1).
 fn query_body_clauses(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
-    // FROM clause (optional)
-    p.skip_trivia(); // CRITICAL: Must skip trivia before checking for FROM
+    p.skip_trivia();
     if at_sdbl_keyword(p, "FROM", "ИЗ") {
         from_clause(p);
     }
 
-    // WHERE clause (optional)
-    p.skip_trivia(); // CRITICAL: Must skip trivia before checking for WHERE
+    p.skip_trivia();
     if at_sdbl_keyword(p, "WHERE", "ГДЕ") {
         where_clause(p);
     }
 
-    // GROUP BY clause (optional)
     p.skip_trivia();
     if at_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ") {
         group_by_clause(p);
     }
 
-    // HAVING clause (optional)
     p.skip_trivia();
     if at_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ") {
         having_clause(p);
     }
 
-    // FOR UPDATE clause (optional)
-    // Note: We check for FOR UPDATE in one place
-    // The function will handle cases where UPDATE is missing
     p.skip_trivia();
     if at_sdbl_keyword(p, "FOR", "ДЛЯ") {
         for_update_clause(p);
     }
 
-    // INDEX BY clause (optional)
     p.skip_trivia();
     if at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ") {
         index_by_clause(p);
     }
 
-    // ORDER BY clause (optional) - can appear in query()
     p.skip_trivia();
     if at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
         order_by_clause(p);
     }
 }
 
-/// Parse WHERE clause
+/// Parse WHERE clause.
 ///
-/// Grammar: `WHERE logicalExpression`
+/// Grammar: `(WHERE|ГДЕ) logical-expression`.
+///
+/// Provenance:
+/// - ITS pubqlang/22 §Условие отбора — `chapter_022.html:15, 26, 35`
+///   (`Условие отбора данных из таблицы задается после ключевого
+///   слова ГДЕ`); chapter 23 §LIKE+WHERE — `chapter_023.html:13, 25-27`
+///   (`ГДЕ Наименование ПОДОБНО "%Иван%"`); chapter 24 §WHERE+
+///   parameters — `chapter_024.html:15, 16` (`&Клиент` parameter
+///   substitution).
+/// - SELECT mini-spec §WHERE (single-expression-direct-child contract;
+///   recursive-walk reachability invariant for KW_OR tokens).
+/// - Bilingual WHERE/ГДЕ via lexer Slice 2 attestation §clause
+///   starters.
 fn where_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
     eat_sdbl_keyword(p, "WHERE", "ГДЕ");
     p.skip_trivia();
 
-    // Parse logical expression (AND, OR, NOT, predicates)
     expressions::logical_expression(p);
 
     m.complete(p, NodeKind::SdblWhereClause);
 }
 
-/// Check if current token is a clause keyword (FROM, WHERE, GROUP, etc.)
+/// Predicate: current token is a clause-keyword starter.
 ///
-/// Used to avoid consuming keywords when parsing aliases and for error recovery.
+/// Returns true when `p` is at one of:
+/// - SELECT-query starters (`SELECT/ВЫБРАТЬ`, `FROM/ИЗ`, `INTO/ПОМЕСТИТЬ`,
+///   `UNION/ОБЪЕДИНИТЬ`);
+/// - clauses-after-FROM starters (`WHERE/ГДЕ`, `GROUP/СГРУППИРОВАТЬ`,
+///   `HAVING/ИМЕЮЩИЕ`, `ORDER/УПОРЯДОЧИТЬ`, `FOR/ДЛЯ`,
+///   `INDEX/ИНДЕКСИРОВАТЬ`, `AUTOORDER/АВТОУПОРЯДОЧИВАНИЕ`,
+///   `TOTALS/ИТОГИ`);
+/// - join-condition delimiter `ON/ПО`;
+/// - any JOIN-family starter via delegation to `is_join_keyword`
+///   (LEFT/RIGHT/FULL/INNER/JOIN/OUTER per Slice 9 attestation).
+///
+/// Consumed across slice boundaries by Slice 7 (alias scan), Slice 8
+/// (source / data-source scan), Slice 9 (JOIN delegation), Slice 10b
+/// (`column_or_function` clause-keyword recovery fix), and Slice 11
+/// (`for_update_clause` MDO-chain guard, `totals_by_clause` pre-BY
+/// loop guard).
+///
+/// Provenance:
+/// - SELECT mini-spec §SELECT query — union of clauses-after-FROM
+///   starters from the body-clause ordering and the AUTOORDER /
+///   ORDER / TOTALS tail-clause set.
+/// - Every keyword pair is Slice 2-attested (structural keywords) or
+///   Slice 2 LEGACY-attested (e.g. KwAutoOrder, KwFor, KwUpdate,
+///   KwIndex). See `docs/legal/sdbl-clean-room-slice2.md`.
+/// - Delegation to `is_join_keyword` is Slice 9-attested (see
+///   `docs/legal/sdbl-clean-room-slice9.md`).
 pub(super) fn is_clause_keyword(p: &Parser) -> bool {
-    // C1 placeholder — clean-room rewrite in C2.
     at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ")
         || at_sdbl_keyword(p, "FROM", "ИЗ")
         || at_sdbl_keyword(p, "WHERE", "ГДЕ")
@@ -1032,34 +1078,46 @@ pub(super) fn is_clause_keyword(p: &Parser) -> bool {
         || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
         || at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ")
         || at_sdbl_keyword(p, "ON", "ПО")
-        || at_sdbl_keyword(p, "FOR", "ДЛЯ") // FOR UPDATE
-        || at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ") // INDEX BY
+        || at_sdbl_keyword(p, "FOR", "ДЛЯ")
+        || at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ")
         || at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
         || at_sdbl_keyword(p, "TOTALS", "ИТОГИ")
         || is_join_keyword(p)
 }
 
-/// Parse GROUP BY clause
+/// Parse GROUP BY clause.
 ///
-/// Grammar: `GROUP BY expression (, expression)*`
+/// Grammar: `(GROUP|СГРУППИРОВАТЬ) (BY|ПО) expression (',' expression)*`.
+///
+/// Provenance:
+/// - ITS pubqlang/34 §Группировка результата запроса —
+///   `chapter_034.html:14, 33, 44, 46, 51, 52` (`СГРУППИРОВАТЬ ПО`
+///   canonical form with агрегатные функции
+///   СУММА/МИНИМУМ/МАКСИМУМ/СРЕДНЕЕ/КОЛИЧЕСТВО).
+/// - ITS pubqlang/35 §Расчет агрегатов — `chapter_035.html:23, 29, 41,
+///   44, 45` (multi-field grouping example).
+/// - SELECT mini-spec §GROUP BY (multiple-direct-children contract;
+///   no per-item wrapper).
+/// - Bilingual GROUP/СГРУППИРОВАТЬ via Slice 2 attestation; bilingual
+///   BY/ПО via Slice 2 KwOnOrBy bundle.
+/// - Missing-BY recovery follows §IDE-recovery allowance #3
+///   (bare-keyword shape; the leading СГРУППИРОВАТЬ is consumed
+///   before the BY check, so the early-return emits a bare clause
+///   with no expression children).
 fn group_by_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
-    // GROUP/СГРУППИРОВАТЬ keyword
     eat_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ");
     p.skip_trivia();
 
-    // BY/ПО keyword
     if !at_sdbl_keyword(p, "BY", "ПО") {
-        // Error recovery: expected BY after GROUP
+        // §IDE-recovery allowance #3: bare-keyword recovery.
         m.complete(p, NodeKind::SdblGroupClause);
         return;
     }
     eat_sdbl_keyword(p, "BY", "ПО");
     p.skip_trivia();
 
-    // Parse expressions (comma-separated list)
     super::expressions::expression(p);
 
     while p.eat(TokenKind::Comma) {
@@ -1071,28 +1129,38 @@ fn group_by_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblGroupClause);
 }
 
-/// Parse ORDER BY clause
+/// Parse ORDER BY clause.
 ///
-/// Grammar: `ORDER BY orderByItem (, orderByItem)*`
-/// orderByItem: expression (ASC | DESC)?
+/// Grammar: `(ORDER|УПОРЯДОЧИТЬ) (BY|ПО) order-item (',' order-item)*`
+/// where each order-item is parsed by `order_by_item`.
+///
+/// Provenance:
+/// - ITS pubqlang/16 §Сортировка результата запроса —
+///   `chapter_016.html:19, 31, 33, 37, 49` (`УПОРЯДОЧИТЬ ПО ... ВОЗР`
+///   canonical sort form); multi-field example at `chapter_016.html:
+///   75-76` (`УПОРЯДОЧИТЬ ПО Период УБЫВ, ...`).
+/// - ITS pubqlang/17 §Сортировка по реквизитам — `chapter_017.html:29,
+///   49` (sort-by-ссылочное-поле variant).
+/// - SELECT mini-spec §ORDER BY (flat interleaved layout, no
+///   per-item wrapper).
+/// - Bilingual ORDER/УПОРЯДОЧИТЬ via Slice 2 attestation; bilingual
+///   BY/ПО via Slice 2 KwOnOrBy bundle.
+/// - Missing-BY recovery follows §IDE-recovery allowance #3
+///   (bare-keyword shape).
 fn order_by_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
-    // ORDER/УПОРЯДОЧИТЬ keyword
     eat_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ");
     p.skip_trivia();
 
-    // BY/ПО keyword
     if !at_sdbl_keyword(p, "BY", "ПО") {
-        // Error recovery: expected BY after ORDER
+        // §IDE-recovery allowance #3: bare-keyword recovery.
         m.complete(p, NodeKind::SdblOrderClause);
         return;
     }
     eat_sdbl_keyword(p, "BY", "ПО");
     p.skip_trivia();
 
-    // Parse order by items (comma-separated list)
     order_by_item(p);
 
     while p.eat(TokenKind::Comma) {
@@ -1104,66 +1172,149 @@ fn order_by_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblOrderClause);
 }
 
-/// Parse single ORDER BY item
+/// Parse a single ORDER BY item: an expression followed by an optional
+/// `ASC|DESC|ВОЗР|УБЫВ` modifier and an optional `HIERARCHY|ИЕРАРХИЯ`
+/// modifier.
 ///
-/// Grammar: `expression (ASC | DESC | ВОЗР | УБЫВ)?`
+/// Grammar: `expression [ASC|DESC|ВОЗР|УБЫВ] [HIERARCHY|ИЕРАРХИЯ]`.
+///
+/// AST shape: this helper does NOT wrap the item in a per-item NodeKind
+/// — the expression node and the modifier IDENT tokens end up as flat
+/// siblings of the parent `SdblOrderClause`. The HIR consumer at
+/// `crates/sdbl-hir/src/lower/clauses.rs:114-156` walks
+/// `children_with_tokens()` alternately picking expression-node
+/// children and direction IDENT tokens.
+///
+/// Provenance:
+/// - ITS pubqlang/16 §Сортировка результата запроса —
+///   `chapter_016.html:37, 49, 63, 64` (per-item ASC/ВОЗР and
+///   DESC/УБЫВ modifiers; chapter 16 also references HIERARCHY at
+///   line 63: `Можно также упорядочивать иерархические данные по
+///   иерархии`).
+/// - ITS pubqlang/27 §Иерархическая упорядоченная выборка —
+///   `chapter_027.html:39, 51` (`УПОРЯДОЧИТЬ ПО Наименование
+///   ИЕРАРХИЯ` canonical hierarchical-ordering syntax). **Slice 11
+///   C2 MANDATORY FIX** per Slice 11 plan codex Round-1 finding 2:
+///   the optional HIERARCHY/ИЕРАРХИЯ modifier is consumed as a third
+///   position after the ASC/DESC modifier, preserving the
+///   flat-sibling layout. The C0b regression-gate test (g)
+///   `test_slice11_order_by_hierarchy_consumed` is unignored
+///   atomically with this fix landing.
+/// - SELECT mini-spec §ORDER BY (post-Slice-11-C2 BNF includes the
+///   optional HIERARCHY modifier).
+/// - Bilingual ASC/ВОЗР, DESC/УБЫВ, HIERARCHY/ИЕРАРХИЯ via lexer
+///   Slice 2 LEGACY block (KwAsc, KwDesc, KwHierarchy variants).
+/// - Local IDE-recovery allowance #2: ASC/DESC consumed via
+///   `p.at_keyword` directly (preserved stylistic shape; routing
+///   through `at_sdbl_keyword` is a Slice 12 candidate).
+///
+/// HIR semantic-interpretation scope. The HIERARCHY consumption
+/// here is **parser-only acceptance** — the consumer at
+/// `crates/sdbl-hir/src/lower/clauses.rs:114-156` and the HIR
+/// `OrderByItem` struct at `crates/sdbl-hir/src/hir.rs` do NOT
+/// yet recognise the HIERARCHY/ИЕРАРХИЯ token (`OrderByItem` has
+/// no hierarchy field; the `SortDirection` lowering only reads
+/// ASC/ВОЗР/DESC/УБЫВ). Therefore `ORDER BY A ИЕРАРХИЯ` lowers
+/// identically to `ORDER BY A` from the IDE/semantic layer's
+/// perspective. Extending HIR is **out of Slice 11 scope** (per
+/// plan §Constraints — `crates/sdbl-hir/**` is read-only) and is
+/// owned by Slice 13 (sdbl-hir reattachment), which will add a
+/// hierarchy field to `OrderByItem` and a HIR regression test.
+/// Slice 11's contribution is the syntax-tree contract: HIERARCHY
+/// MUST be reachable from `SdblOrderClause` as a flat sibling
+/// IDENT token, so Slice 13's reader can pick it up without
+/// further parser changes.
 fn order_by_item(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2 (will also add the
-    // MANDATORY HIERARCHY/ИЕРАРХИЯ consumption per ITS chapter 27 and
-    // unignore the C0b regression-gate test (g)).
-    // Parse expression
     super::expressions::expression(p);
     p.skip_trivia();
 
-    // Optional ASC/DESC/ВОЗР/УБЫВ modifier
     if p.at_keyword("ASC") || p.at_keyword("ВОЗР") || p.at_keyword("DESC") || p.at_keyword("УБЫВ")
     {
-        p.bump(); // Consume ASC/DESC
+        p.bump();
+        p.skip_trivia();
+    }
+
+    // C2 MANDATORY FIX (codex Round-1 finding 2 / ITS chapter 27):
+    // consume the optional HIERARCHY/ИЕРАРХИЯ modifier as a flat
+    // sibling token of the parent SdblOrderClause, preserving the
+    // no-per-item-wrapper shape.
+    if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИЯ") {
+        p.bump();
         p.skip_trivia();
     }
 }
 
-/// Parse HAVING clause
+/// Parse HAVING clause.
 ///
-/// Grammar: `HAVING logicalExpression`
+/// Grammar: `(HAVING|ИМЕЮЩИЕ) expression`.
+///
+/// Provenance:
+/// - ITS pubqlang/35 §Условие на агрегаты — `chapter_035.html:49`
+///   (`с помощью ключевого слова ИМЕЮЩИЕ ... условие отбора аналогично
+///   условию в предложении ГДЕ, но только оно накладывается ... на
+///   записи, получившиеся в результате группировки`).
+/// - SELECT mini-spec §HAVING (single-expression-direct-child contract
+///   parallel to WHERE).
+/// - Bilingual HAVING/ИМЕЮЩИЕ via Slice 2 attestation §clause starters.
+/// - Calls `expression(p)` (NOT `logical_expression(p)`) — preserved
+///   pre-refactor entry-point asymmetry. Both entry points wrap the
+///   result in `SdblLogicalOrExpr` per Slice 10a §AST-shape #1, so the
+///   consumer-side filter receives the same NodeKind shape.
 fn having_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
-    // HAVING/ИМЕЮЩИЕ keyword
     eat_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ");
     p.skip_trivia();
 
-    // Parse logical expression
     super::expressions::expression(p);
 
     m.complete(p, NodeKind::SdblHavingClause);
 }
 
-/// Parse FOR UPDATE clause
+/// Parse FOR UPDATE clause.
 ///
-/// Grammar: `FOR UPDATE [mdo]`
+/// Grammar: `(FOR|ДЛЯ) (UPDATE|ИЗМЕНЕНИЯ) [mdo-ref]`.
+///
+/// AST shape: flat token-level direct children — FOR token, UPDATE
+/// token, then optionally a bare `Ident` token followed by zero or
+/// more `Dot Ident` token pairs (the optional MDO chain). No wrapper
+/// node for the MDO chain.
+///
+/// Provenance:
+/// - Local IDE-recovery allowance (Tier D) — the FOR UPDATE / ДЛЯ
+///   ИЗМЕНЕНИЯ clause does NOT appear in dumped ITS chapters 16–39
+///   (verified at C2 by direct `rg` of the local dump path
+///   `/home/itrous/src/tools_migration/its/dump/html/`); see
+///   §ITS coverage verification table.
+/// - Bilingual FOR/ДЛЯ + UPDATE/ИЗМЕНЕНИЯ via lexer Slice 2 LEGACY
+///   block (KwFor, KwUpdate variants; future Slice 3/4 promotion
+///   target).
+/// - SELECT mini-spec §FOR UPDATE (post-Slice-11 AST-shape contract).
+/// - Greedy MDO chain mirrors Slice 10b's REFS §preserved behaviour
+///   #7 pattern.
+/// - The `is_clause_keyword(p)` guard on the optional Ident
+///   (§IDE-recovery allowance #4) terminates the MDO chain on a
+///   following clause keyword; without it, the chain would consume
+///   the next clause's starter as a chain segment.
+/// - Missing-UPDATE recovery: `eat_sdbl_keyword` returns false on
+///   missing UPDATE, the function continues to the optional-MDO
+///   branch — `FOR` alone (without UPDATE) emits SdblForUpdate with
+///   just the FOR token plus whatever MDO-like Idents follow, for
+///   mid-typing IDE recovery.
 fn for_update_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
-    // FOR/ДЛЯ keyword
     eat_sdbl_keyword(p, "FOR", "ДЛЯ");
     p.skip_trivia();
 
-    // UPDATE/ИЗМЕНЕНИЯ keyword
     eat_sdbl_keyword(p, "UPDATE", "ИЗМЕНЕНИЯ");
     p.skip_trivia();
 
-    // Optional MDO reference
-    // If we see an identifier, it might be an MDO reference
     if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
-        // Parse MDO reference (Справочник.Контрагенты)
-        // This is a simple dot-separated identifier chain
-        p.bump(); // First part
+        p.bump();
         while p.at(TokenKind::Dot) {
             p.check_iteration_limit();
-            p.bump(); // Dot
+            p.bump();
             if p.at(TokenKind::Ident) {
                 p.bump();
             } else {
@@ -1175,28 +1326,41 @@ fn for_update_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblForUpdate);
 }
 
-/// Parse INDEX BY clause
+/// Parse INDEX BY clause.
 ///
-/// Grammar: `INDEX BY indexingItem (, indexingItem)*`
-/// indexingItem: expression
+/// Grammar: `(INDEX|ИНДЕКСИРОВАТЬ) (BY|ПО) expression (',' expression)*`.
+///
+/// AST shape: multiple direct expression-node children, parallel to
+/// `SdblGroupClause` (no per-item wrapper). The clause is purely
+/// syntactic — the parser does NOT enforce that indexed expressions
+/// correspond to selected fields (semantic checking is Slice 13's
+/// territory).
+///
+/// Provenance:
+/// - Local IDE-recovery allowance (Tier D) — the INDEX BY /
+///   ИНДЕКСИРОВАТЬ ПО clause does NOT appear in dumped ITS chapters
+///   16–39 (verified at C2 by direct `rg`); see §ITS coverage
+///   verification table.
+/// - Bilingual INDEX/ИНДЕКСИРОВАТЬ via lexer Slice 2 LEGACY block
+///   (KwIndex variant); BY/ПО via Slice 2 KwOnOrBy bundle.
+/// - SELECT mini-spec §INDEX BY (multiple-direct-children contract
+///   parallel to GROUP BY).
+/// - Missing-BY recovery follows §IDE-recovery allowance #3
+///   (bare-keyword shape).
 fn index_by_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
-    // INDEX/ИНДЕКСИРОВАТЬ keyword
     eat_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ");
     p.skip_trivia();
 
-    // BY/ПО keyword
     if !at_sdbl_keyword(p, "BY", "ПО") {
-        // Error recovery: expected BY after INDEX
+        // §IDE-recovery allowance #3: bare-keyword recovery.
         m.complete(p, NodeKind::SdblIndexBy);
         return;
     }
     eat_sdbl_keyword(p, "BY", "ПО");
     p.skip_trivia();
 
-    // Parse indexing items (comma-separated expressions)
     super::expressions::expression(p);
 
     while p.eat(TokenKind::Comma) {
@@ -1208,81 +1372,119 @@ fn index_by_clause(p: &mut Parser) {
     m.complete(p, NodeKind::SdblIndexBy);
 }
 
-/// Parse AUTOORDER clause
+/// Parse AUTOORDER clause — a bare-keyword wrapper with no expression
+/// children.
 ///
-/// Grammar: `AUTOORDER`
+/// Grammar: `AUTOORDER|АВТОУПОРЯДОЧИВАНИЕ`.
+///
+/// Provenance:
+/// - ITS pubqlang/17 §АВТОУПОРЯДОЧИВАНИЕ — `chapter_017.html:17, 32,
+///   52` (canonical bare-keyword form: `АВТОУПОРЯДОЧИВАНИЕ`). Per
+///   Slice 11 plan codex Round-2 finding 5: AUTOORDER provenance
+///   belongs to chapter 17, NOT chapter 27 (chapter 27 owns ORDER BY
+///   HIERARCHY material instead).
+/// - SELECT mini-spec §AUTOORDER (bare-keyword wrapper contract; no
+///   expression children; coexists with ORDER BY in
+///   `select_tail_clauses` any-order loop).
+/// - Bilingual AUTOORDER/АВТОУПОРЯДОЧИВАНИЕ via lexer Slice 2 LEGACY
+///   block (KwAutoOrder variant).
 fn autoorder_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
-    // AUTOORDER/АВТОУПОРЯДОЧИВАНИЕ keyword
     eat_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ");
 
     m.complete(p, NodeKind::SdblAutoorder);
 }
 
-/// Parse TOTALS BY clause
+/// Parse TOTALS BY clause as a flat-list of pre-BY aggregate
+/// expressions, the BY token, and a flat list of post-BY group
+/// expressions.
 ///
-/// Grammar: `TOTALS [selectedFields] BY totalsGroup (, totalsGroup)*`
-/// totalsGroup: `OVERALL | expression [ONLY? HIERARCHY] [alias]`
+/// Grammar (Slice 11 narrowed scope per plan §IDE-recovery split,
+/// codex Round-1 finding 3):
+/// ```text
+/// totals-by-clause :=
+///   (TOTALS|ИТОГИ) totals-aggregate-list?
+///   (BY|ПО) totals-group-list
+/// totals-aggregate-list := expression (',' expression)*
+/// totals-group-list     := totals-group (',' totals-group)*
+/// totals-group          := expression
+/// ```
 ///
-/// Simplified implementation: parse as comma-separated expressions
+/// Provenance:
+/// - ITS pubqlang/39 §Расчет общих итогов — `chapter_039.html:13, 25,
+///   29, 48, 49, 51` (canonical `ИТОГИ ... ПО ОБЩИЕ` example; chapter
+///   39 line 51 explicitly notes that ИТОГИ may have no aggregate
+///   list when the SELECT field list already contains aggregate
+///   functions).
+/// - SELECT mini-spec §TOTALS BY (narrowed flat-list shape per Slice
+///   11 plan codex Round-1 finding 3: structured ONLY/HIERARCHY-in-
+///   TOTALS/PERIODS modifier forms are NOT supported under Slice 11;
+///   their promotion is deferred to Slice 12).
+/// - Bilingual TOTALS/ИТОГИ via Slice 2 attestation; OVERALL/ОБЩИЕ via
+///   lexer Slice 2 LEGACY block (KwOverall variant).
+/// - Local IDE-recovery allowance #1: OVERALL falls through
+///   `is_expression_start` — the lexer's KwOverall converts to
+///   `TokenKind::Ident` via the bilingual-ident path, the post-BY
+///   `expression(p)` call dispatches through `column_or_function`,
+///   and OVERALL is consumed as a bare `SdblColumnRef` expression.
+///   Slice 13 will own the semantic interpretation as a TOTALS-group
+///   marker.
+/// - Pre-BY clause-keyword guard preserves §AST-shape invariant #4:
+///   without it, `ИТОГИ ИЗ T` would consume `ИЗ` as a pre-BY
+///   aggregate expression.
+/// - Missing-BY recovery follows §IDE-recovery allowance #3 (TOTALS
+///   variant): the pre-BY aggregate-expression loop runs FIRST so
+///   `ИТОГИ A` (no BY) produces a SdblTotalsBy with TOTALS+A
+///   expression child (NOT a bare-keyword node like GROUP/ORDER/
+///   INDEX).
 fn totals_by_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2 (narrows the mini-spec
-    // to the actually-supported flat-list shape per Slice 11 plan §IDE-
-    // recovery split; structured ONLY/HIERARCHY-in-TOTALS/PERIODS
-    // modifier promotion deferred to Slice 12).
     let m = p.start();
 
-    // TOTALS/ИТОГИ keyword
     eat_sdbl_keyword(p, "TOTALS", "ИТОГИ");
     p.skip_trivia();
 
-    // Check if we have selected fields before BY
-    // If we see identifiers/expressions before BY, parse them as fields
-    // This is a simplified approach - we parse everything as expressions
-    // until we hit BY keyword
+    // Pre-BY aggregate-expression loop. Breaks on BY/ПО, on any
+    // clause-keyword starter (§AST-shape invariant #4 guard), or on
+    // a non-expression-start lookahead. Triple-guarded against
+    // malformed input.
     while !p.at_end() {
         p.skip_trivia();
 
-        // Check for BY keyword
         if at_sdbl_keyword(p, "BY", "ПО") {
             break;
         }
 
-        // Check for clause keywords (stop parsing if we hit another clause)
         if is_clause_keyword(p) {
             break;
         }
 
-        // Parse expression/field
         if super::expressions::is_expression_start(p) {
             super::expressions::expression(p);
 
-            // Check for comma
             p.skip_trivia();
             if !p.at(TokenKind::Comma) {
-                // No comma, check for BY
                 continue;
             }
-            p.bump(); // Comma
+            p.bump();
         } else {
             break;
         }
     }
 
-    // BY/ПО keyword (required)
     if !at_sdbl_keyword(p, "BY", "ПО") {
-        // Error recovery: expected BY
+        // §IDE-recovery allowance #3 (TOTALS variant): the pre-BY
+        // aggregates already consumed remain as direct children;
+        // we close the clause without consuming further tokens.
         m.complete(p, NodeKind::SdblTotalsBy);
         return;
     }
     eat_sdbl_keyword(p, "BY", "ПО");
     p.skip_trivia();
 
-    // Parse totals groups (comma-separated)
-    // For now, we parse as expressions
-    // TODO: Add proper support for OVERALL, HIERARCHY, PERIODS
+    // Post-BY group list — comma-separated expressions. OVERALL/ОБЩИЕ
+    // is consumed here as a flat Ident expression per §IDE-recovery
+    // allowance #1.
     super::expressions::expression(p);
 
     while p.eat(TokenKind::Comma) {
