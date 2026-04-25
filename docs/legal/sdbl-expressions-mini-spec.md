@@ -16,13 +16,34 @@ the Slice 10a + 10b clean-room rewrites.
 
 ## Primary sources
 
-Authoritative sources for this mini-spec:
+Authoritative sources for this mini-spec — 1C ITS pubqlang chapters
+(in canonical English / Russian title order). The publicly reachable
+URLs at `its.1c.ru/db/pubqlang/...` are paywalled and serve
+JS-rendered navigation only; the working copy used for verification
+is the local dump at `/home/itrous/src/tools_migration/its/dump/`
+(file `index.json` maps each URL to a `chapter_NNN.html` snapshot).
 
-- 1C query language documentation:
-  - `Синтаксис текста запросов`
-  - `https://its.1c.ru/db/pubqlang/content/12/hdoc`
-  - `Структура запроса`
+- `Язык запросов «1С:Предприятия»` — short overview chapter:
   - `https://its.1c.ru/db/pubqlang/content/10/hdoc`
+- `Синтаксис текста запросов` — bilingual-keywords mention,
+  list of query sections (описание / объединение / упорядочивание /
+  автоупорядочивание / итоги):
+  - `https://its.1c.ru/db/pubqlang/content/12/hdoc`
+- `Как получить записи из таблицы, отобранные по некоторому
+  условию` — WHERE clause; **logical operator precedence ladder
+  (NOT > AND > OR) verbatim**; `И` / `ИЛИ` / `НЕ` operator
+  inventory; `МЕЖДУ` (BETWEEN); parens-override-precedence rule:
+  - `https://its.1c.ru/db/pubqlang/content/22/hdoc`
+- `Примеры использования выражений в списке полей выборки запроса`
+  — literal forms (число, строка, Истина/Ложь, Null, Неопределено);
+  arithmetic operators (+, −, /, *) with explicit exclusion of `%`;
+  string concatenation `+`; ВЫБОР (CASE), ВЫРАЗИТЬ (CAST),
+  ССЫЛКА (REFS), built-in functions (ДЕНЬ / МЕСЯЦ / ГОД / etc.),
+  aggregates (СУММА / МИНИМУМ / МАКСИМУМ / СРЕДНЕЕ / КОЛИЧЕСТВО):
+  - `https://its.1c.ru/db/pubqlang/content/40/hdoc`
+- `Передача параметров в запрос` — `&Identifier` parameter prefix
+  syntax; ПОДОБНО (LIKE):
+  - `https://its.1c.ru/db/pubqlang/content/60/hdoc`
 
 Secondary sources:
 
@@ -620,6 +641,22 @@ compatibility reasons that are **not** ITS-mandated:
    falls back to the default operator arm. This is a known
    HIR-side bug to be addressed in Slice 13; the parser-side
    wrapper shape is preserved.
+
+9. **Modulo `%` operator accepted in `multiplicative_expr`.** ITS
+   pubqlang/40 explicitly states «Операция получения остатка % в
+   языке запросов не поддерживается» — `%` is **not** an
+   ITS-supported SDBL operator. The pre-clean-room parser nonetheless
+   accepted `TokenKind::Percent` in the multiplicative chain, and
+   the Slice 10a C2 rewrite preserves that acceptance as a *local
+   IDE-recovery allowance*: a query containing `a % b` produces a
+   recoverable parse tree (`SdblMultiplicativeExpr` containing the
+   `%` token between two operands) rather than an immediate parse
+   error, so the IDE can report the misuse via diagnostics rather
+   than aborting the whole query. This is the only ITS-mandated
+   negative claim that the parser deliberately violates; all other
+   accepted operators / atoms / forms are ITS-supported. The
+   §ITS coverage verification table row "Modulo `%` operator"
+   records the discrepancy verbatim.
 
 ## ITS coverage verification
 
