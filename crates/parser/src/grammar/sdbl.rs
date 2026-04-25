@@ -92,11 +92,28 @@
 //! (codex Round-1 finding 2 → C2 FIX). See
 //! `docs/legal/sdbl-clean-room-slice10b.md` for the attestation.
 //!
-//! Slice 9 — clean-room (rewrite in progress): the JOIN family
-//! surface — `is_join_keyword` and `join_clause` (in submodule
-//! `select` under the `CLEAN-ROOM Slice 9 — JOIN family` banner) —
-//! is split out of the LEGACY block in C1; the clean-room rewrite
-//! of both function bodies lands in C2.
+//! Slice 9 — clean-room (complete, landed with C3 2026-04-25):
+//! the JOIN family surface — `is_join_keyword` and `join_clause`
+//! (in submodule `select` under the `CLEAN-ROOM Slice 9 — JOIN
+//! family` banner) — was re-authored in C2 from ITS pubqlang
+//! chapters 44 (`ВНУТРЕННЕЕ СОЕДИНЕНИЕ` listing + standalone
+//! `СОЕДИНЕНИЕ` reference), 45 (`ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ`),
+//! 46 (`ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ`), 47 (`ПОЛНОЕ ВНЕШНЕЕ
+//! СОЕДИНЕНИЕ`), 48 (chained / nested examples) via the local
+//! dump at `/home/itrous/src/tools_migration/its/dump/`,
+//! `docs/legal/sdbl-select-mini-spec.md` §JOIN clauses (lines
+//! 297–319) + §Recovery requirements item #6 (line 410), and
+//! the lexer's Slice 2 attestation for bilingual EN/RU keyword
+//! pairs (LEFT/ЛЕВОЕ, RIGHT/ПРАВОЕ, FULL/ПОЛНОЕ,
+//! INNER/ВНУТРЕННЕЕ, JOIN/СОЕДИНЕНИЕ, OUTER/ВНЕШНЕЕ, ON/ПО).
+//! The C1 commit physically split the two functions out of the
+//! previous `LEGACY (Slices 9–11 pending)` block (banner header
+//! shrunk to `LEGACY (Slices 5, 11 pending)`); C2 attached
+//! tiered (A1/B/C/D) per-function provenance comments. The
+//! audit-gate decision was **Option B PRESERVE** for both
+//! `Parser::error()`-bumps in `join_clause` (recovery hardening
+//! deferred to Slice 12). See
+//! `docs/legal/sdbl-clean-room-slice9.md` for the attestation.
 //!
 //! Slice 11 pending: WHERE / GROUP / HAVING / ORDER / TOTALS /
 //! FOR UPDATE / INDEX BY clause bodies plus the clause-body

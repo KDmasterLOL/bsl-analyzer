@@ -328,20 +328,97 @@ Rebuild source parsing independently from full expression complexity.
 
 ## Slice 9: JOIN family
 
-### Goal
+**Status: complete (2026-04-25).** See
+[`sdbl-clean-room-slice9.md`](sdbl-clean-room-slice9.md) for the
+attestation. The 2 functions `is_join_keyword` and `join_clause`
+were re-authored under the `CLEAN-ROOM Slice 9 — JOIN family`
+banner in `crates/parser/src/grammar/sdbl/select.rs`. The single
+NodeKind emitted by these functions (`SdblJoinClause`) retains
+its pre-C1 child-attachment shape; the seven parser-side AST-shape
+invariants in the attestation §Preserved invariants section pin
+the contract that downstream consumers
+(`SdblJoinClause::join_type()` substring matcher in
+`crates/syntax/src/ast.rs:1403-1437`, HIR ON-condition reader at
+`crates/sdbl-hir/src/lower/join_clause.rs:142-153`, FROM-side
+`JoinWithSubQuery`/`JoinWithVirtualTable` shape readers at
+`crates/sdbl-hir/src/lower/from_clause.rs:36-72`,
+`LogicalOrInJoin` shape reader at
+`crates/sdbl-hir/src/lower/join_clause.rs:188`, recursive
+`lower_join_clause_recursive` at
+`crates/sdbl-hir/src/lower/join_clause.rs:35-51`) read.
 
-Rebuild join parsing as a dedicated isolated subsystem.
+Authored from ITS pubqlang chapters 44 (`ВНУТРЕННЕЕ
+СОЕДИНЕНИЕ` listing + standalone `СОЕДИНЕНИЕ` reference),
+45 (`ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing), 46 (`ПРАВОЕ ВНЕШНЕЕ
+СОЕДИНЕНИЕ` listing), 47 (`ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing),
+48 (chained / nested examples) via the local dump at
+`/home/itrous/src/tools_migration/its/dump/`; SELECT mini-spec
+§JOIN clauses (lines 297–319) and §Recovery requirements item
+#6 (line 410); the lexer's Slice 2 attestation for bilingual
+EN/RU keyword pairs (LEFT/ЛЕВОЕ, RIGHT/ПРАВОЕ, FULL/ПОЛНОЕ,
+INNER/ВНУТРЕННЕЕ, JOIN/СОЕДИНЕНИЕ, OUTER/ВНЕШНЕЕ, ON/ПО).
 
-### Scope
+Commit trail (4 phases, each a single anchor commit):
 
-- join modifiers
-- join chaining
-- `ON` / `ПО`
-- join-source attachment rules
+- C0 `de6820f8` (audit + 15 Bucket-A gap tests in
+  `sdbl_parser_tests.rs` — 4 Tier A1 RU listings + 4 EN
+  bilinguals + 2 Tier A2/D candidates + 2 Tier C/A1
+  bare-JOIN + 2 chapter 48 chained/nested + 3 invariant-7
+  AST-shape pins + 2 audit-gate `Parser::error()`-bump
+  tests; codex P2 fix to harden `assert_clean_parse` helper
+  to reject `SyntaxKind::ERROR` recovery nodes);
+- C1 `dc10cd6c` (split out of LEGACY into clean-room
+  banner; pure refactor — function bodies move byte-for-
+  byte, only banner header / placeholder provenance comments
+  / Slice 8 `data_source` cross-reference / `sdbl.rs`
+  Provenance docstring change);
+- C2 `5b8168a6` (clean-room rewrite + tiered A1/B/C/D
+  per-function provenance; audit-gate decision **Option B
+  PRESERVE** for both `Parser::error()`-bumps with
+  recovery hardening deferred to Slice 12);
+- C3 (this commit, 2026-04-25): attestation +
+  `crates/parser/tests/sdbl_slice9_joins.rs` (17 spec-
+  driven AST-shape acceptance tests organised into
+  Tier A1 RU + Tier B EN + Tier C bare-JOIN + Tier D
+  local-allowance + chapter 48 + invariant-7 sub-suites)
+  + master-doc flip + `sdbl.rs` Provenance docstring flip
+  to "complete (2026-04-25)" with attestation citation.
+
+The attestation's §Commit trail records an "anti-Hilbert
+disclosure" noting that the absolute-last commit on the
+branch — the one editing the trail itself — is necessarily
+not named in the enumeration; this is shared with the prior
+Slice 1, 2, 6, 7, 8, 10a, 10b attestations.
+
+### Notes
+
+The C2 author chose **Option B PRESERVE** for the two
+`Parser::error()`-bumps in `join_clause` (missing JOIN
+keyword after type Ident; missing ON/ПО after data source).
+Rationale: both options leave bad recovery trees in the
+error case (the recovery-quality gap is marginal, not a
+production-correctness bug like Slice 10b's `column_or_function`
+clause-keyword hijack); Slice 9's clean-room scope is the
+happy-path JOIN grammar; recovery hardening lives naturally
+under Slice 12's IDE-recovery rewrite. The audit-gate tests
+`test_slice9_missing_join_keyword_current_behavior` and
+`test_slice9_missing_on_current_behavior` (added in C0) flip
+roles from "pre-rewrite regression gate" to "post-rewrite
+preservation gate" without any test edits.
 
 ### Files
 
-- `crates/parser/src/grammar/sdbl/select.rs`
+- `crates/parser/src/grammar/sdbl/select.rs` (the
+  `CLEAN-ROOM Slice 9 — JOIN family` section — 2 functions);
+- `crates/parser/src/grammar/sdbl.rs` (module-level
+  `## Provenance` docstring Slice 9 entry, flipped to
+  complete-state final-form in C3);
+- `crates/parser/tests/sdbl_parser_tests.rs` (15 Bucket-A
+  gap tests added in C0);
+- `crates/parser/tests/sdbl_slice9_joins.rs` — the new
+  spec-driven acceptance suite (17 tests);
+- `docs/legal/sdbl-clean-room-slice9.md` — the C3
+  attestation.
 
 ## Slice 10: expression minimum
 
