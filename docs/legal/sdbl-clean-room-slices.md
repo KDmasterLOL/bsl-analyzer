@@ -357,8 +357,9 @@ the §Slice 10a + 10b sub-slices below.
 full attestation. Authored from
 [`sdbl-expressions-mini-spec.md`](sdbl-expressions-mini-spec.md) (the
 C0a clean-room reference) and ITS pubqlang chapters 10, 12, 22, 40,
-60. Commit trail (5 phases, 19 commits including codex-review
-fixups; per-phase totals: C0a 5, C0b 2, C1 2, C2 8, C3 2):
+60. Commit trail (5 phases, 20 named commits + 1 absolute-last
+trailing commit per the attestation's anti-Hilbert disclosure;
+per-phase totals named in trail: C0a 5, C0b 2, C1 2, C2 8, C3 3):
 - C0a `820f5984` (mini-spec) + 4 fixup commits (`6d398d4a`,
   `8c50977d`, `90b1e061`, `a184935f`);
 - C0b `3eaddae2` (10 Bucket-A gap tests) + 1 fixup (`53111d0b`);
@@ -368,8 +369,14 @@ fixups; per-phase totals: C0a 5, C0b 2, C1 2, C2 8, C3 2):
   fix) + 7 fixup commits (`9038e9eb`, `ca75ffb6`, `56583a32`,
   `b199eb90`, `84840228`, `e7aed40a`, `8e14d843`);
 - C3 `9fc55462` (attestation + 28 spec-driven acceptance tests +
-  master-doc flip) + 1 fixup (`7718ae6d` — final-state
-  provenance + commit-trail correction).
+  master-doc flip) + 2 fixups: `7718ae6d` (final-state
+  provenance + commit-trail correction); `ba88c05f` (named the
+  `7718ae6d` fixup hash explicitly in the attestation). The
+  attestation's §Commit trail records an "anti-Hilbert
+  disclosure" noting that the absolute-last commit on the
+  branch — the one editing the trail itself — is necessarily
+  not named in the enumeration; this is shared with the prior
+  Slice 1, 2, 6, 7, 8 attestations.
 
 #### Goal
 

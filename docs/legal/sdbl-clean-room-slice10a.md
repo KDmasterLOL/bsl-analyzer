@@ -499,12 +499,13 @@ considered live:
 
 ## Commit trail
 
-Slice 10a landed as 19 commits across 5 logical phases (18 from
-the original C0a–C3 sequence reproduced from
-`git log --oneline --reverse develop..HEAD`, plus a C3 fixup
-landing alongside this corrected attestation). Each anchor commit
-is followed by zero or more codex-adversarial-review fixup commits
-that are pure refinements of the canonical commit's intent.
+Slice 10a landed across 5 logical phases. Each anchor commit is
+followed by zero or more codex-adversarial-review fixup commits
+that are pure refinements of the canonical commit's intent. The
+trail enumerated below names every commit reachable from
+`git log --oneline --reverse develop..HEAD` *except* the
+absolute-last one (see Anti-Hilbert disclosure at the end of this
+section).
 
 - **C0a — `820f5984` (2026-04-25)**: publish SDBL expressions
   mini-spec (`docs/legal/sdbl-expressions-mini-spec.md`). Four
@@ -544,20 +545,36 @@ that are pure refinements of the canonical commit's intent.
 - **C3 — `9fc55462` (2026-04-25)**: this attestation (initial
   draft) + 28 spec-driven acceptance tests in
   `crates/parser/tests/sdbl_slice10a_backbone.rs` + master-doc
-  flip in `docs/legal/sdbl-clean-room-slices.md`. One fixup:
+  flip in `docs/legal/sdbl-clean-room-slices.md`. Fixups:
   - `7718ae6d` — flip Slice 10a provenance docstrings in
     `sdbl.rs` and `expressions.rs` to "complete (2026-04-25)"
     final-state wording, and correct the commit-trail count
     here and in the master doc to match the reproducible
     `git log --oneline --reverse develop..HEAD` output.
+  - `ba88c05f` — name the `7718ae6d` fixup hash explicitly in
+    the attestation §Commit trail (was "this commit").
 
-The phase totals are: C0a 5, C0b 2, C1 2, C2 8, C3 2 — 19
-commits in total. The original attestation (commit `9fc55462`)
-miscounted: it claimed 19 commits but the figure was reached by
-listing `ca75ffb6` under both C0a and C2, and the actual
-`develop..HEAD` distance at C3-anchor time was 18 commits with
-each commit counted exactly once. This corrected attestation
-restores phase membership to exactly one phase per commit.
+**Anti-Hilbert disclosure.** The very last commit on this branch
+— the one that authors / amends the attestation §Commit trail
+itself — is necessarily not named in this enumeration: a Git
+commit cannot reference its own future hash at write time. This
+anti-Hilbert property applies to every legal/clean-room
+attestation that records its own commit trail and is shared with
+the prior Slice 1, 2, 6, 7, 8 attestations in this project. A
+reviewer running `git log --oneline --reverse develop..HEAD` will
+always see exactly one commit beyond the trail's last named hash:
+that commit is the one that landed this attestation in its
+current state, and it is the natural endpoint of the trail.
+
+The phase totals (named hashes in the trail above): C0a 5, C0b 2,
+C1 2, C2 8, C3 3 — 20 commits in total enumerated. The branch
+HEAD adds one trailing commit (the one editing this trail), per
+the Anti-Hilbert disclosure above. The original attestation
+(commit `9fc55462`) miscounted: it claimed 19 commits but the
+figure was reached by listing `ca75ffb6` under both C0a and C2;
+each subsequent fixup commit (`7718ae6d`, `ba88c05f`, and the
+absolute-last edit not named here) progressively closed the
+trail until each commit is counted in exactly one phase.
 
 ## Licensing note
 
