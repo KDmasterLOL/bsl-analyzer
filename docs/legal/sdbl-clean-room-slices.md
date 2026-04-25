@@ -376,7 +376,7 @@ Commit trail (4 phases, each a single anchor commit):
   per-function provenance; audit-gate decision **Option B
   PRESERVE** for both `Parser::error()`-bumps with
   recovery hardening deferred to Slice 12);
-- C3 (this commit, 2026-04-25): attestation +
+- C3 `9af02c0b` (2026-04-25): attestation +
   `crates/parser/tests/sdbl_slice9_joins.rs` (17 spec-
   driven AST-shape acceptance tests organised into
   Tier A1 RU + Tier B EN + Tier C bare-JOIN + Tier D

@@ -464,7 +464,7 @@ Anti-Hilbert disclosure at the end of this section).
   gate decision: **Option B PRESERVE** for both
   `Parser::error()`-bumps (rationale in §Behaviour change).
   No fixup commits.
-- **C3 — this commit (2026-04-25)**: this attestation +
+- **C3 — `9af02c0b` (2026-04-25)**: this attestation +
   17 spec-driven acceptance tests in
   `crates/parser/tests/sdbl_slice9_joins.rs` + master-doc
   flip in `docs/legal/sdbl-clean-room-slices.md` + module
