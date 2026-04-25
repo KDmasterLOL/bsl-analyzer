@@ -99,30 +99,57 @@ It does **not** cover (Slice 10b inherits and extends):
 
 ## Lexical assumptions
 
-The expression parser must assume:
+The expression parser must assume the post-conversion token stream
+emitted by `crates/parser/src/sdbl_token_converter.rs` (the SDBL
+`SdblTokenKind` lexer variants → BSL `TokenKind` mapping). The
+canonical conversion table for keywords the expression parser
+inspects is:
 
-- the lexer is the Slice 1 + 2 clean-room reach defined in
-  `crates/lexer/src/sdbl/mod.rs`;
-- keyword acceptance is bilingual (`И` ↔ `AND`, `ИЛИ` ↔ `OR`,
-  `НЕ` ↔ `NOT`, `ИСТИНА` ↔ `TRUE`, `ЛОЖЬ` ↔ `FALSE`,
-  `NULL` ↔ `NULL`, `УНДЕФИНЕД` ↔ `UNDEFINED`, etc.);
-- keyword matching is case-insensitive at the lexer-token level —
-  the parser sees the canonicalised `TokenKind::KwAnd` /
-  `TokenKind::KwOr` / `TokenKind::KwNot` / `TokenKind::KwTrue` /
-  `TokenKind::KwFalse` / `TokenKind::KwNull` /
-  `TokenKind::KwUndefined` regardless of source-text spelling;
-- bilingual keywords for which no dedicated `TokenKind` exists
-  (e.g. `CASE` / `ВЫБОР`, `WHEN` / `КОГДА`, `THEN` / `ТОГДА`,
-  `ELSE` / `ИНАЧЕ`, `END` / `КОНЕЦ`, `BETWEEN` / `МЕЖДУ`,
-  `LIKE` / `ПОДОБНО`, `IS` / `ЕСТЬ`, `IN` / `В`,
-  `HIERARCHY` / `ИЕРАРХИИ`, `REFS` / `ССЫЛКА`, `ESCAPE` /
-  `СПЕЦСИМВОЛ`) arrive as `TokenKind::Ident` and are recognised
-  via `p.at_keyword("…")`;
-- `+`, `−`, `×`, `÷`, `%`, `(`, `)`, `,`, `=`, `<>`, `<`, `<=`,
-  `>`, `>=`, `&`, `*`, identifier, decimal, float, string, date are
-  separate `TokenKind` variants;
-- trivia (`whitespace`, `newlines`, `comments`) is preserved in the
-  lossless tree but skipped for structural decisions.
+| Source SDBL token (RU/EN) | `SdblTokenKind` | Parser-visible `TokenKind` | How the parser probes it |
+|---|---|---|---|
+| `И` / `AND` | `OpAnd` | `KwAnd` | `p.at(TokenKind::KwAnd)` |
+| `ИЛИ` / `OR` | `OpOr` | `KwOr` | `p.at(TokenKind::KwOr)` |
+| `НЕ` / `NOT` | `OpNot` | `KwNot` | `p.at(TokenKind::KwNot)` |
+| `В` / `IN` | `KwIn` | `KwIn` | `p.at(TokenKind::KwIn)` |
+| `ИСТИНА` / `TRUE` | `LitTrue` | `KwTrue` | `p.at(TokenKind::KwTrue)` |
+| `ЛОЖЬ` / `FALSE` | `LitFalse` | `KwFalse` | `p.at(TokenKind::KwFalse)` |
+| `УНДЕФИНЕД` / `UNDEFINED` | `LitUndefined` | `KwUndefined` | `p.at(TokenKind::KwUndefined)` |
+| `NULL` (single spelling) | `LitNull` | `Ident` | `p.at_keyword("NULL")` |
+| `CASE` / `ВЫБОР` | (`Ident` family) | `Ident` | `p.at_keyword("CASE")` / `p.at_keyword("ВЫБОР")` |
+| `WHEN` / `КОГДА`, `THEN` / `ТОГДА`, `ELSE` / `ИНАЧЕ`, `END` / `КОНЕЦ` | (`Ident` family) | `Ident` | `p.at_keyword("…")` |
+| `BETWEEN` / `МЕЖДУ`, `LIKE` / `ПОДОБНО`, `IS` / `ЕСТЬ`, `HIERARCHY` / `ИЕРАРХИИ`, `REFS` / `ССЫЛКА`, `ESCAPE` / `СПЕЦСИМВОЛ` | (`Ident` family) | `Ident` | `p.at_keyword("…")` |
+
+Two boundary notes:
+
+- **`NULL` is NOT a dedicated parser TokenKind.** The converter
+  maps `LitNull → TokenKind::Ident` (with the comment "FIXED
+  (treated as keyword in SDBL)" at
+  `crates/parser/src/sdbl_token_converter.rs:57`). The
+  `is_expression_start` predicate currently lists
+  `Some(TokenKind::KwNull) => true` at expressions.rs:47, but that
+  arm is unreachable — the converter never produces `KwNull` and
+  the parser recognises `NULL` only via `p.at_keyword("NULL")` at
+  predicate-tail dispatch. Slice 10a's clean-room rewrite of
+  `is_expression_start` MUST drop the `KwNull` arm (it is dead code)
+  AND add an explicit `p.at_keyword("NULL")` branch so a bare
+  `NULL` literal at the head of an expression position is accepted
+  as an expression start. The Slice 10a acceptance suite includes
+  a regression gate for this — see `test_null_literal_*`.
+- **`IN` IS a dedicated parser TokenKind.** The converter maps
+  `KwIn → TokenKind::KwIn`. `predicate_expr` at expressions.rs:379
+  probes via `p.at(TokenKind::KwIn)`, which is correct.
+
+Other `TokenKind` variants the expression parser inspects:
+
+- numerical / lexical: `Decimal`, `Float`, `String`, `Ident`,
+  `Whitespace`, `Newline`, `Comment`;
+- punctuation: `LParen`, `RParen`, `Comma`, `Dot`, `Semicolon`;
+- arithmetic / comparison: `Plus`, `Minus`, `Star`, `Slash`,
+  `Percent`, `Eq`, `Neq`, `Lt`, `Le`, `Gt`, `Ge`;
+- parameter prefix: `Ampersand`.
+
+Trivia (`Whitespace`, `Newline`, `Comment`) is preserved in the
+lossless tree but skipped for structural decisions.
 
 ## Expression entry points
 
