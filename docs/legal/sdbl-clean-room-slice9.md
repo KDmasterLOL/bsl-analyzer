@@ -464,12 +464,29 @@ Anti-Hilbert disclosure at the end of this section).
   gate decision: **Option B PRESERVE** for both
   `Parser::error()`-bumps (rationale in §Behaviour change).
   No fixup commits.
-- **C3 — `9af02c0b` (2026-04-25)**: this attestation +
-  17 spec-driven acceptance tests in
+- **C3 — `9af02c0b` (2026-04-25)**: this attestation (initial
+  draft) + 17 spec-driven acceptance tests in
   `crates/parser/tests/sdbl_slice9_joins.rs` + master-doc
   flip in `docs/legal/sdbl-clean-room-slices.md` + module
   Provenance docstring flip to "complete (2026-04-25)" with
   attestation citation in `crates/parser/src/grammar/sdbl.rs`.
+  Two fixup commits:
+  - `aa420478` — Anti-Hilbert close-out: replace the
+    "C3 — this commit (2026-04-25)" placeholder in this
+    §Commit trail (and in the
+    `docs/legal/sdbl-clean-room-slices.md` §Slice 9
+    commit-trail line) with the named hash `9af02c0b`.
+  - `7cda9bfc` — codex stop-time review fix: the master-
+    doc §Slice 9 commit-trail entry for C0 had drifted
+    from the attestation, miscategorising the 15
+    Bucket-A gap tests as "4 Tier A1 RU listings + 4 EN
+    bilinguals + 2 A2/D + 2 C/A1 + 2 ch48 + 3 inv7 + 2
+    audit-gate" (which sums to 19 not 15 — the "4 EN
+    bilinguals" line was a leakage from the C3 acceptance
+    suite, where the Tier B EN bilingual canonical-form
+    tests live). The corrected master-doc bullet now
+    enumerates each C0 test function explicitly, mirroring
+    the Slice 10b master-doc fixup `82e09e3a` practice.
 
 **Anti-Hilbert disclosure.** The very last commit on this
 branch — the one that authors / amends this attestation
@@ -485,10 +502,10 @@ commit is the one that landed this attestation in its
 current state, and it is the natural endpoint of the trail.
 
 The phase totals (named hashes in the trail above): C0 1,
-C1 1, C2 1, C3 1 anchor = 4 commits enumerated. The branch
-HEAD adds one trailing commit (the one editing this trail to
-name the C3 anchor + any subsequent fixups), per the Anti-
-Hilbert disclosure above.
+C1 1, C2 1, C3 1 anchor + 2 fixups (`aa420478`,
+`7cda9bfc`) = 6 commits enumerated. The branch HEAD adds one
+trailing commit (the one editing this trail to name the two
+fixups above), per the Anti-Hilbert disclosure above.
 
 ## Licensing note
 
