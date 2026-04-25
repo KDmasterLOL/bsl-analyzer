@@ -71,17 +71,33 @@
 //! `NULL` through `column_or_function`. See
 //! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation.
 //!
-//! Slices 9, 10b, 11 pending: JOIN family (`is_join_keyword`,
-//! `join_clause` — Slice 9), expression predicates / column-or-function
-//! dispatch / CAST / CASE (`comparison_expr_legacy`,
-//! `predicate_expr_legacy`, `column_or_function`, `inline_table_fields`,
-//! `is_cast_function`, `parse_cast_type`, `case_expr`, `when_clause` —
-//! Slice 10b), WHERE / GROUP / HAVING / ORDER / TOTALS / FOR UPDATE /
-//! INDEX BY clause bodies and the clause-body dispatchers
-//! `query_body_clauses` and `select_tail_clauses` (Slice 11) remain
-//! Tier B until their respective clean-room slices. Virtual-table
-//! method-call arguments (`virtual_table_args_legacy`) remain Tier B
-//! under the Slice 5 banner.
+//! Slice 10b — clean-room (rewrite in progress): the 8 functions
+//! `comparison_expr`, `predicate_expr`, `column_or_function`,
+//! `inline_table_fields`, `is_cast_function`, `parse_cast_type`,
+//! `case_expr`, `when_clause` (all in submodule `expressions` under
+//! the `CLEAN-ROOM Slice 10b` banner) cover predicates / comparison
+//! / column-or-function dispatch / CAST type spec / CASE
+//! expressions. The C1 commit performed pure-refactor renames
+//! `comparison_expr_legacy` → `comparison_expr` and
+//! `predicate_expr_legacy` → `predicate_expr`, replaced the
+//! previous LEGACY banner with the clean-room banner, and attached
+//! per-function placeholder provenance comments
+//! (`// C1 placeholder — clean-room rewrite in C2`). C2 will
+//! re-author each function body from ITS pubqlang chapters 22, 23,
+//! 27, 32, 40 (via the local dump at
+//! `/home/itrous/src/tools_migration/its/dump/`) and the
+//! C0a-extended `docs/legal/sdbl-expressions-mini-spec.md`, and
+//! replace the placeholders with per-function ITS / mini-spec
+//! provenance comments.
+//!
+//! Slices 9, 11 pending: JOIN family (`is_join_keyword`,
+//! `join_clause` — Slice 9) and WHERE / GROUP / HAVING / ORDER /
+//! TOTALS / FOR UPDATE / INDEX BY clause bodies plus the
+//! clause-body dispatchers `query_body_clauses` and
+//! `select_tail_clauses` (Slice 11) remain Tier B until their
+//! respective clean-room slices. Virtual-table method-call
+//! arguments (`virtual_table_args_legacy`) remain Tier B under the
+//! Slice 5 banner.
 
 pub mod expressions;
 pub mod select;

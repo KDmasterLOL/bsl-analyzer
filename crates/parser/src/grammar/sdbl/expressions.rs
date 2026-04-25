@@ -26,10 +26,17 @@
 //! of pre-C1 bodies during authorship. See
 //! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation.
 //!
-//! Slice 10b — pending: predicates, comparison, column-or-function, CAST,
-//! CASE. Bodies remain Tier B under the LEGACY banner; the
-//! `comparison_expr_legacy` / `predicate_expr_legacy` shims preserve the
-//! Slice 10a → Slice 10b dispatch boundary.
+//! Slice 10b — clean-room (rewrite in progress): predicates,
+//! comparison, column-or-function dispatch, CAST type spec, CASE
+//! expressions. The 8 functions under the `CLEAN-ROOM Slice 10b`
+//! banner — `comparison_expr`, `predicate_expr`,
+//! `column_or_function`, `inline_table_fields`, `is_cast_function`,
+//! `parse_cast_type`, `case_expr`, `when_clause` — currently carry
+//! C1 placeholder provenance comments and pre-clean-room bodies.
+//! C2 will rewrite the bodies and replace the placeholders with
+//! ITS-cited per-function provenance comments. The two `_legacy`
+//! suffixes used during the Slice 10a authorship period have been
+//! retired in C1; `not_expr` now calls `comparison_expr` directly.
 
 use crate::event::NodeKind;
 use crate::parser::Parser;
@@ -58,9 +65,10 @@ use lexer::TokenKind;
 //   - Primary dispatch + atoms: primary_expr, literal_expr,
 //     string_literal_or_multi, parameter_expr, paren_or_subquery_expr
 //
-// Slice 10a's `not_expr` calls into `comparison_expr_legacy` (Slice 10b
-// territory, defined under the LEGACY banner below) — that is the only
-// Slice-10a → Slice-10b dispatch boundary in this file.
+// Slice 10a's `not_expr` calls into `comparison_expr` (Slice 10b
+// territory, defined under the `CLEAN-ROOM Slice 10b` banner below)
+// — that is the only Slice-10a → Slice-10b dispatch boundary in
+// this file.
 
 // ============================================================================
 // Helper Functions for Error Recovery
@@ -428,7 +436,7 @@ fn not_expr(p: &mut Parser) {
         not_expr(p); // Right-recursive for chained `НЕ НЕ A`.
         m.complete(p, NodeKind::SdblNotExpr);
     } else {
-        comparison_expr_legacy(p);
+        comparison_expr(p);
     }
 }
 
@@ -767,22 +775,36 @@ fn paren_or_subquery_expr(p: &mut Parser) {
 }
 
 // ============================================================================
-// LEGACY (Slice 10b pending)
+// CLEAN-ROOM Slice 10b — predicates, comparison, function calls, CAST, CASE
 // ============================================================================
 //
-// The functions below are pre-clean-room helpers that the Slice 10a rewrite
-// does NOT re-author. Slice 10b (predicates + comparison + column-or-function
-// + CAST + CASE) will clean-room-rewrite them. Until then they live under
-// the LEGACY banner with the `_legacy` suffix where renamed (`comparison_expr`
-// → `comparison_expr_legacy`, `predicate_expr` → `predicate_expr_legacy`).
+// The 8 functions below — `comparison_expr`, `predicate_expr`,
+// `is_cast_function`, `parse_cast_type`, `column_or_function`,
+// `inline_table_fields`, `case_expr`, `when_clause` — are the
+// Slice 10b clean-room rewrite surface. Each function body is
+// scheduled for re-authoring against ITS pubqlang chapters 22, 23,
+// 27, 32, 40 (via the local dump at
+// `/home/itrous/src/tools_migration/its/dump/`) and the
+// C0a-extended `docs/legal/sdbl-expressions-mini-spec.md`. C1
+// performs the pre-refactor renames (`comparison_expr` →
+// `comparison_expr`, `predicate_expr` → `predicate_expr`)
+// and replaces the previous LEGACY banner with this clean-room
+// banner; the function bodies still carry their pre-clean-room
+// shape and a `// C1 placeholder — clean-room rewrite in C2`
+// marker. C2 will re-author each body from the cited sources and
+// replace the placeholders with per-function ITS / mini-spec
+// provenance comments.
 //
-// Slice 10a's `not_expr` calls into `comparison_expr_legacy`; the dispatch
-// from `not_expr` is the only Slice-10a → Slice-10b call boundary that this
-// rename touches. All NodeKinds emitted by these helpers (SdblComparisonExpr,
-// SdblInExpr, SdblInHierarchyExpr, SdblIsNullExpr, SdblBetweenExpr,
-// SdblLikeExpr, SdblRefsExpr, SdblColumnRef, SdblFunctionCall, SdblType,
-// SdblInlineTableFields, SdblCaseExpr, SdblWhenClause) are preserved
-// bit-for-bit until Slice 10b lands.
+// Slice 10a's `not_expr` calls `comparison_expr` directly — that
+// is the only Slice-10a → Slice-10b dispatch boundary in this
+// file. All 13 NodeKinds emitted by these functions
+// (SdblComparisonExpr, SdblInExpr, SdblInHierarchyExpr,
+// SdblIsNullExpr, SdblBetweenExpr, SdblLikeExpr, SdblRefsExpr,
+// SdblColumnRef, SdblFunctionCall, SdblType,
+// SdblInlineTableFields, SdblCaseExpr, SdblWhenClause) are
+// preserved bit-for-bit through C1 and are locked by the C0b
+// Bucket-A regression-gate tests in
+// `crates/parser/tests/sdbl_parser_tests.rs`.
 
 /// Parse comparison expression
 ///
@@ -792,8 +814,9 @@ fn paren_or_subquery_expr(p: &mut Parser) {
 ///     additiveExpression ((= | <> | < | <= | > | >=) additiveExpression)?
 ///   | predicateExpression
 /// ```
-fn comparison_expr_legacy(p: &mut Parser) {
-    predicate_expr_legacy(p);
+fn comparison_expr(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2.
+    predicate_expr(p);
 }
 
 /// Parse predicate expression (IN, BETWEEN, IS NULL, etc.)
@@ -808,7 +831,8 @@ fn comparison_expr_legacy(p: &mut Parser) {
 ///       | (= | <> | < | <= | > | >=) additiveExpression
 ///       )?
 /// ```
-fn predicate_expr_legacy(p: &mut Parser) {
+fn predicate_expr(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
     additive_expr(p);
@@ -997,6 +1021,7 @@ fn predicate_expr_legacy(p: &mut Parser) {
 /// ```
 /// Check if identifier is CAST/ВЫРАЗИТЬ function
 fn is_cast_function(p: &Parser) -> bool {
+    // C1 placeholder — clean-room rewrite in C2.
     p.at_keyword("CAST") || p.at_keyword("ВЫРАЗИТЬ")
 }
 
@@ -1006,6 +1031,7 @@ fn is_cast_function(p: &Parser) -> bool {
 ///
 /// MDO types: `Справочник.Склады`, `Документ.РеализацияТоваровУслуг`, etc.
 fn parse_cast_type(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
     // Type can be Ident (for STRING, NUMBER, DATE, BOOLEAN) or MDO reference (Справочник.Склады)
@@ -1063,6 +1089,7 @@ fn parse_cast_type(p: &mut Parser) {
 }
 
 fn column_or_function(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
     // Check if this is CAST/ВЫРАЗИТЬ function before consuming
@@ -1222,6 +1249,7 @@ fn column_or_function(p: &mut Parser) {
 /// Used for selecting multiple fields from a tabular part:
 /// `Table.TabularPart.(Field1, Field2, Ref)`
 fn inline_table_fields(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
     p.bump(); // LParen
@@ -1250,6 +1278,7 @@ fn inline_table_fields(p: &mut Parser) {
 /// - Simple CASE: `CASE operand WHEN value THEN result ...`
 /// - Searched CASE: `CASE WHEN condition THEN result ...`
 fn case_expr(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
     p.bump(); // CASE / ВЫБОР
@@ -1301,6 +1330,7 @@ fn case_expr(p: &mut Parser) {
 ///
 /// Grammar: `WHEN condition THEN result`
 fn when_clause(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2.
     let m = p.start();
 
     p.bump(); // WHEN / КОГДА
