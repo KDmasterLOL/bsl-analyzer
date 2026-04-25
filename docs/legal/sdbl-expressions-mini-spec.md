@@ -257,25 +257,27 @@ primaryExpression
    | error-fallback (SdblError)             (anything else)
 ```
 
-The current implementation at `expressions.rs:612-643` performs the
-`CASE/ВЫБОР` probe before the `match p.current()`, then routes the
-generic `Ident` arm directly to `column_or_function` — which is
-**buggy** because bare `NULL` (delivered as `Ident` per the
-converter contract) is swallowed as an `SdblColumnRef` instead of
-emitting `SdblLiteral`. Slice 10a C2 must add the
-`at_keyword("NULL")` probe before the `Ident → column_or_function`
-arm and route bare `NULL` to `nullLiteral` (emitting `SdblLiteral`
-with the `Ident` token as a direct child). The Slice 10a acceptance
-suite includes a regression gate for this — see `test_null_literal_*`
-in `sdbl_slice10a_backbone.rs`.
-
-Pre-C2 empirical verification: the C2 author runs the parser on
-`SELECT NULL`, `WHERE А = NULL`, and `Аргумент(NULL)` (the last via
-function-call args, Slice 10b territory but exercises the dispatch
-gate) before pinning the post-rewrite tree shape in the C3
-acceptance tests. Tests that asserted the pre-C2 bug shape
-(`SdblColumnRef` for bare `NULL`) must be rewritten to assert the
-post-rewrite `SdblLiteral` shape.
+**Historical note (pre-Slice-10a-C2 bug, fixed in C2).** Before
+Slice 10a C2 the implementation only probed for `CASE` / `ВЫБОР`
+before the generic `Ident` arm and then routed the `Ident` match to
+`column_or_function`. Because the converter at
+`sdbl_token_converter.rs:57` maps `LitNull → TokenKind::Ident`, the
+historical `Some(TokenKind::KwNull)` arm in `is_expression_start`
+and `primary_expr` was unreachable dead code, and bare `NULL` at
+expression-head positions was silently consumed as an
+`SdblColumnRef` rather than an `SdblLiteral`. Slice 10a C2 fixed
+this by adding the `at_keyword("NULL")` probe to `primary_expr`
+before the `Ident → column_or_function` arm and dropping the dead
+`KwNull` arm from `is_expression_start`. Regression gates live in
+`crates/parser/tests/sdbl_parser_tests.rs`:
+`test_slice10a_bare_null_emits_literal_not_column_ref` (WHERE side,
+`ВЫБРАТЬ * ИЗ Т ГДЕ Поле = NULL`) and
+`test_slice10a_select_field_null_emits_literal` (SELECT side,
+`ВЫБРАТЬ NULL ИЗ Т`); both assert the NULL token's direct parent
+kind is `SDBL_LITERAL` and that no `SdblColumnRef` in the tree
+contains the NULL token. A function-call-args case
+(`Аргумент(NULL)`) is Slice 10b territory and is deferred to the
+Slice 10b acceptance suite.
 
 ### Literals
 

@@ -2573,26 +2573,27 @@ fn test_slice8_parameter_source_without_alias() {
 // Slice 10a surface coverage — added by C0b audit to close gaps in the
 // operator-chain + atoms + parens/tuple/subquery surface that the Slice
 // 10a clean-room rewrite must satisfy. Authored from
-// docs/legal/sdbl-expressions-mini-spec.md (the C0a clean-room reference
-// for Slice 10a + 10b) and 1C ITS docs (pubqlang/12 §Operators,
-// §Literals, §Parameters; pubqlang/10 §query-body).
+// docs/legal/sdbl-expressions-mini-spec.md (the C0a clean-room
+// reference for Slice 10a + 10b) and the local 1C ITS pubqlang dump
+// at /home/itrous/src/tools_migration/its/dump/, specifically chapters
+// 22 (WHERE / logical-operator precedence ladder), 40 (literal forms,
+// arithmetic operators, ВЫБОР / ВЫРАЗИТЬ / ССЫЛКА / МЕЖДУ), and 60
+// (`&Identifier` parameter prefix, ПОДОБНО). The companion overview
+// chapters /10 and /12 (intro paragraph + bilingual-keywords
+// principle) are referenced for surrounding context.
 //
 // **Oracle:** the assertions below derive from the mini-spec §AST-shape
-// invariants and §Operator-binding pin list, NOT from the pre-rewrite
+// invariants and §Operator-binding pin list, NOT from any pre-rewrite
 // parser implementation. Each per-test comment cites the relevant
-// mini-spec section so the C2 rewrite can be validated against the
-// mini-spec contract rather than against accidental implementation
-// shape. Tests for behaviours the C2 rewrite is expected to CHANGE
-// (e.g. bare NULL routing to nullLiteral instead of columnOrFunctionCall
-// per the mini-spec §Atoms primary dispatch — current implementation has
-// a known dispatch-order bug) are deferred to C3 acceptance, where the
-// rewritten parser is observable.
+// mini-spec section / ITS chapter so the post-rewrite parser is
+// validated against the mini-spec contract rather than against
+// accidental implementation shape.
 // ============================================================================
 
 // Bucket A: nested NOT — tests right-recursive multi-NOT body of
 // `not_expr`. Mini-spec §Operator-binding pin list item 1 + AST-shape
 // invariant for SdblNotExpr (operator token first child, single operand
-// second child). ITS pubqlang/12 §Logical operators.
+// second child). ITS pubqlang/22 §Условие отбора (`И`, `ИЛИ`, `НЕ`).
 #[test]
 fn test_slice10a_nested_not() {
     use syntax::SyntaxKind;
@@ -2716,7 +2717,7 @@ fn test_slice10a_russian_not_with_paren_and() {
 
 // Bucket A: multi-string concatenation across 3 consecutive String tokens.
 // Mini-spec §Atoms — string literal multi-part IDE recovery: 2+ consecutive
-// String tokens emit SdblMultiString. ITS pubqlang/12 §Literals string
+// String tokens emit SdblMultiString. ITS pubqlang/40 §Литералы string
 // lexical shape. Asserts SdblMultiString contains exactly 3 STRING token
 // children.
 #[test]
