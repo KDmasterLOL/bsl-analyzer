@@ -516,9 +516,11 @@ comparison, column / function call dispatch, CAST type spec, CASE.
   unignored in C2 + 5 n.1-n.5 SELECT-field predicate descendant
   guards).
 - `crates/parser/tests/sdbl_slice10b_predicates.rs` — new in C3,
-  40 spec-driven acceptance tests including the 2 mandatory
-  clause-keyword recovery regression-gates and the 5 mandatory
-  SELECT-field descendant guards.
+  43 spec-driven acceptance tests including the 2 mandatory
+  clause-keyword recovery regression-gates, the 5 mandatory
+  SELECT-field descendant guards, and the 3 NOT-boundary tests
+  added in fixup `9943d47a` (NOT BETWEEN, NOT LIKE, orphan-NOT
+  no-predicate-wrapper) per codex adversarial-review finding 3.
 
 #### Notes
 
