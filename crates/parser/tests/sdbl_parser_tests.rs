@@ -3791,3 +3791,798 @@ fn test_slice9_missing_on_current_behavior() {
         error_text,
     );
 }
+
+// ============================================================
+// Slice 11 (clauses-after-FROM) C0b Bucket-A gap tests.
+//
+// These 14 tests pin pre-Slice-11-C2 parser behaviour for the
+// post-FROM clause family (WHERE / GROUP BY / HAVING / ORDER BY /
+// AUTOORDER / TOTALS BY / FOR UPDATE / INDEX BY plus the two
+// dispatchers and `is_clause_keyword`). All but test (g) pass on
+// the pre-rewrite parser; test (g) is the regression-gate for the
+// MANDATORY C2 FIX (HIERARCHY consumption per ITS chapter 27 —
+// `chapter_027.html:39, 51` `УПОРЯДОЧИТЬ ПО Наименование
+// ИЕРАРХИЯ`) and lands `#[ignore]`-ed at C0b. C2 unignores it
+// atomically with the `order_by_item` HIERARCHY consumption fix.
+//
+// Coverage maps onto the four §IDE-recovery allowances and the
+// AST-shape invariants enumerated in the Slice 11 plan
+// (serialized-moseying-orbit.md).
+// ============================================================
+
+/// Recursive-walk replica of
+/// `crates/sdbl-hir/src/lower/clauses.rs:170-192`
+/// `collect_or_tokens_excluding_subqueries` — counts KW_OR tokens
+/// reachable from `node` via `children_with_tokens()` recursion,
+/// skipping `SDBL_SUBQUERY` / `SDBL_SUBQUERY_EXPR` /
+/// `SDBL_SELECT_QUERY` descendants. Pins the consumer-side
+/// recursive-walk reachability invariant for the
+/// `LogicalOrInWhere` IDE diagnostic.
+fn count_kw_or_excluding_subqueries(node: &syntax::SyntaxNode) -> usize {
+    use syntax::{NodeOrToken, SyntaxKind};
+    let mut total = 0usize;
+    for child in node.children_with_tokens() {
+        match child {
+            NodeOrToken::Token(t) if t.kind() == SyntaxKind::KW_OR => {
+                total += 1;
+            }
+            NodeOrToken::Node(n)
+                if !matches!(
+                    n.kind(),
+                    SyntaxKind::SDBL_SUBQUERY
+                        | SyntaxKind::SDBL_SUBQUERY_EXPR
+                        | SyntaxKind::SDBL_SELECT_QUERY,
+                ) =>
+            {
+                total += count_kw_or_excluding_subqueries(&n);
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
+// (a) Slice 11 — WHERE with KW_OR token reachable via recursive
+// walk from SdblWhereClause (LogicalOrInWhere producer-side gate;
+// the token sits as a direct child of the inner SdblLogicalOrExpr
+// wrapper, NOT as a direct token child of SdblWhereClause).
+#[test]
+fn test_slice11_where_kw_or_recursive_walk_reachable() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ A = 1 ИЛИ B = 2";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let where_clause = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE)
+        .expect("Tree must contain SdblWhereClause");
+
+    let direct_kw_or: Vec<_> = where_clause
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().filter(|t| t.kind() == SyntaxKind::KW_OR).cloned())
+        .collect();
+    assert_eq!(
+        direct_kw_or.len(),
+        0,
+        "KW_OR must NOT be a direct token child of SdblWhereClause — \
+         it sits inside the SdblLogicalOrExpr wrapper. Got direct KW_OR tokens: {:?}",
+        direct_kw_or,
+    );
+
+    let recursive_count = count_kw_or_excluding_subqueries(&where_clause);
+    assert_eq!(
+        recursive_count, 1,
+        "Recursive walk (mirroring \
+         collect_or_tokens_excluding_subqueries) must find exactly one \
+         KW_OR token reachable from SdblWhereClause through non-subquery \
+         descendants. Got: {}",
+        recursive_count,
+    );
+}
+
+// (b) Slice 11 — WHERE with subquery: outer recursive walk does
+// NOT descend through SDBL_SUBQUERY to count inner KW_OR tokens.
+// The outer walk finds zero, the inner subquery's own SdblWhereClause
+// recursive walk finds exactly one.
+#[test]
+fn test_slice11_where_recursive_walk_skips_subquery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ A В (ВЫБРАТЬ X ИЗ С ГДЕ X = 1 ИЛИ X = 2)";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+
+    let where_clauses: Vec<_> =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE).collect();
+    assert_eq!(
+        where_clauses.len(),
+        2,
+        "Expected outer + inner SdblWhereClause; got {}",
+        where_clauses.len(),
+    );
+
+    // Sort by subquery-ancestor depth: the outer WHERE has zero
+    // subquery ancestors, the inner WHERE has at least one.
+    let mut sorted = where_clauses.clone();
+    sorted.sort_by_key(|w| {
+        w.ancestors()
+            .filter(|a| {
+                matches!(
+                    a.kind(),
+                    SyntaxKind::SDBL_SUBQUERY
+                        | SyntaxKind::SDBL_SUBQUERY_EXPR
+                        | SyntaxKind::SDBL_SELECT_QUERY,
+                )
+            })
+            .count()
+    });
+    let outer = &sorted[0];
+    let inner = &sorted[1];
+
+    let outer_count = count_kw_or_excluding_subqueries(outer);
+    let inner_count = count_kw_or_excluding_subqueries(inner);
+    assert_eq!(
+        outer_count, 0,
+        "Outer SdblWhereClause recursive walk (skipping subquery kinds) \
+         must find zero KW_OR — the only OR is inside the subquery. Got: {}",
+        outer_count,
+    );
+    assert_eq!(
+        inner_count, 1,
+        "Inner subquery's SdblWhereClause recursive walk must find \
+         exactly one KW_OR (the inner OR). Got: {}",
+        inner_count,
+    );
+}
+
+/// Strong bare-keyword recovery assertion: a missing-BY clause
+/// must contain ONLY the leading keyword token, no direct child
+/// nodes at all, and no other non-trivia tokens. Used by tests
+/// (c), (d), and (e) to lock the strict bare-keyword recovery
+/// shape — a regression that bumps the trailing `A` as a raw
+/// IDENT token, or wraps it in any other node, would fail this
+/// assertion.
+fn assert_bare_keyword_clause(clause: &syntax::SyntaxNode, expected_keyword: &str) {
+    use syntax::{NodeOrToken, SyntaxKind};
+    assert_eq!(
+        clause.children().count(),
+        0,
+        "Bare-keyword shape: `{}` clause must have zero direct child \
+         nodes; got: {:?}",
+        expected_keyword,
+        clause.children().map(|c| c.kind()).collect::<Vec<_>>(),
+    );
+    let non_trivia_tokens: Vec<(SyntaxKind, String)> = clause
+        .children_with_tokens()
+        .filter_map(|c| match c {
+            NodeOrToken::Token(t)
+                if !matches!(
+                    t.kind(),
+                    SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+                ) =>
+            {
+                Some((t.kind(), t.text().to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        non_trivia_tokens.len(),
+        1,
+        "Bare-keyword shape: `{}` clause must contain exactly one \
+         non-trivia token (the leading keyword). Got: {:?}",
+        expected_keyword,
+        non_trivia_tokens,
+    );
+    let leading = &non_trivia_tokens[0].1.to_uppercase();
+    assert_eq!(
+        leading,
+        &expected_keyword.to_uppercase(),
+        "Bare-keyword shape: leading keyword text mismatch",
+    );
+    assert!(
+        clause.descendants().all(|n| n == *clause || n.kind() != SyntaxKind::ERROR),
+        "Bare-keyword shape: `{}` clause must contain no ERROR descendants",
+        expected_keyword,
+    );
+}
+
+// (c) Slice 11 — GROUP BY missing-BY recovery (§IDE-recovery
+// allowance #3). The leading СГРУППИРОВАТЬ keyword is consumed
+// via eat_sdbl_keyword BEFORE the BY check; the early-return
+// emits a bare SdblGroupClause containing only the leading
+// keyword (NO direct child nodes, NO non-trivia tokens beyond
+// the keyword — the trailing `A` falls through outside the
+// clause).
+#[test]
+fn test_slice11_group_missing_by_recovery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т СГРУППИРОВАТЬ A";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+    let group = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_GROUP_CLAUSE)
+        .expect("Tree must contain SdblGroupClause even when BY is missing");
+
+    assert_bare_keyword_clause(&group, "СГРУППИРОВАТЬ");
+}
+
+// (d) Slice 11 — ORDER BY missing-BY recovery (§IDE-recovery
+// allowance #3, parallel shape to GROUP — strict bare-keyword
+// node).
+#[test]
+fn test_slice11_order_missing_by_recovery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т УПОРЯДОЧИТЬ A";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+    let order = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_ORDER_CLAUSE)
+        .expect("Tree must contain SdblOrderClause even when BY is missing");
+    assert_bare_keyword_clause(&order, "УПОРЯДОЧИТЬ");
+}
+
+// (e) Slice 11 — INDEX BY missing-BY recovery (§IDE-recovery
+// allowance #3 — strict bare-keyword node).
+#[test]
+fn test_slice11_index_missing_by_recovery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т ИНДЕКСИРОВАТЬ A";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+    let index = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_INDEX_BY)
+        .expect("Tree must contain SdblIndexBy even when BY is missing");
+    assert_bare_keyword_clause(&index, "ИНДЕКСИРОВАТЬ");
+}
+
+// (f) Slice 11 — TOTALS missing-BY recovery (§IDE-recovery
+// allowance #3, TOTALS variant). Unlike GROUP/ORDER/INDEX, the
+// pre-BY aggregate-expression loop runs FIRST at
+// select.rs:1359-1386, so `ИТОГИ A` (no BY) produces a
+// SdblTotalsBy containing the leading ИТОГИ token PLUS A as a
+// pre-BY expression child.
+#[test]
+fn test_slice11_totals_missing_by_recovery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т ИТОГИ A";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+    let totals = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TOTALS_BY)
+        .expect("Tree must contain SdblTotalsBy even when BY is missing");
+
+    let has_by_token = totals.children_with_tokens().any(|c| {
+        c.as_token().is_some_and(|t| {
+            let s = t.text().to_uppercase();
+            s == "BY" || s == "ПО"
+        })
+    });
+    assert!(
+        !has_by_token,
+        "Missing-BY recovery: SdblTotalsBy must NOT contain a BY/ПО token \
+         when BY is absent in the input",
+    );
+    // Pre-BY aggregate loop consumed `A` before the BY check failed.
+    let pre_by_expr_kinds: Vec<_> = totals
+        .children()
+        .map(|c| c.kind())
+        .filter(|k| {
+            matches!(
+                k,
+                SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                    | SyntaxKind::SDBL_COLUMN_REF
+                    | SyntaxKind::SDBL_FUNCTION_CALL,
+            )
+        })
+        .collect();
+    assert!(
+        !pre_by_expr_kinds.is_empty(),
+        "Pre-BY aggregate-expression loop must consume `A` BEFORE the \
+         missing-BY check; SdblTotalsBy direct children should include \
+         at least one expression kind. Got direct child kinds: {:?}",
+        totals.children().map(|c| c.kind()).collect::<Vec<_>>(),
+    );
+}
+
+// (g) Slice 11 — ORDER BY with HIERARCHY modifier consumed as an
+// order-by-item modifier (regression gate for the MANDATORY C2
+// FIX promoted per codex Round-1 finding 2; ITS chapter 27
+// attestation `chapter_027.html:39, 51` —
+// `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`).
+//
+// LANDS `#[ignore]`-ED IN C0b. C2 atomically (a) extends
+// `order_by_item` to consume the optional HIERARCHY/ИЕРАРХИЯ
+// modifier after ASC/DESC, AND (b) removes this `#[ignore]`. The
+// test must PASS in C2's `cargo test` run, proving the fix works.
+#[test]
+#[ignore = "Slice 11 C2 will land HIERARCHY consumption in order_by_item and unignore this gate"]
+fn test_slice11_order_by_hierarchy_consumed() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т УПОРЯДОЧИТЬ ПО A ИЕРАРХИЯ";
+    let parse = parse_sdbl(input);
+    // Once C2 unignores this gate, the canonical ITS-attested
+    // input must parse cleanly with no ERROR descendants and
+    // no parser errors anywhere in the tree.
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let order = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_ORDER_CLAUSE)
+        .expect("Tree must contain SdblOrderClause");
+
+    // The ИЕРАРХИЯ token must end up INSIDE SdblOrderClause as a
+    // flat sibling token (no per-item wrapper), NOT left in the
+    // outer token stream after the clause.
+    let has_hierarchy_token = order.children_with_tokens().any(|c| {
+        c.as_token().is_some_and(|t| {
+            let s = t.text().to_uppercase();
+            s == "HIERARCHY" || s == "ИЕРАРХИЯ"
+        })
+    });
+    assert!(
+        has_hierarchy_token,
+        "C2 fix: ИЕРАРХИЯ must be consumed by order_by_item as a flat \
+         sibling token of SdblOrderClause. Direct children/tokens: {:?}",
+        order
+            .children_with_tokens()
+            .map(|c| match c {
+                syntax::NodeOrToken::Node(n) => format!("Node({:?})", n.kind()),
+                syntax::NodeOrToken::Token(t) => format!("Token({:?}: {:?})", t.kind(), t.text()),
+            })
+            .collect::<Vec<_>>(),
+    );
+}
+
+// (h) Slice 11 — order_by_item flat children: no per-item
+// wrapper. SdblOrderClause direct children include the
+// expression nodes and ASC/DESC IDENT tokens as flat siblings,
+// NOT wrapped in any SdblOrderByItem-style node (which does not
+// exist as a NodeKind anyway). The HIR consumer at
+// sdbl-hir/src/lower/clauses.rs:114-156 reads ВОЗР/УБЫВ direction
+// tokens as direct children of SdblOrderClause to derive sort
+// direction — both tokens MUST appear as flat siblings.
+#[test]
+fn test_slice11_order_by_flat_children_no_wrapper() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A, B ИЗ Т УПОРЯДОЧИТЬ ПО A ВОЗР, B УБЫВ";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let order = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_ORDER_CLAUSE)
+        .expect("Tree must contain SdblOrderClause");
+
+    // Both expression-node children must be DIRECT (not wrapped).
+    let direct_expr_kinds: Vec<_> = order
+        .children()
+        .map(|c| c.kind())
+        .filter(|k| {
+            matches!(
+                k,
+                SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                    | SyntaxKind::SDBL_COLUMN_REF
+                    | SyntaxKind::SDBL_FUNCTION_CALL,
+            )
+        })
+        .collect();
+    assert_eq!(
+        direct_expr_kinds.len(),
+        2,
+        "Two flat direct expression children expected (no per-item \
+         wrapper). Got: {:?}",
+        direct_expr_kinds,
+    );
+
+    // Both ВОЗР and УБЫВ direction tokens must appear as flat
+    // direct-child IDENT tokens — not buried inside a wrapper.
+    let direct_ident_texts: Vec<String> = order
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().cloned())
+        .filter(|t| t.kind() == SyntaxKind::IDENT)
+        .map(|t| t.text().to_uppercase())
+        .collect();
+    assert!(
+        direct_ident_texts.iter().any(|s| s == "ВОЗР" || s == "ASC"),
+        "Direction token ВОЗР must be a flat IDENT direct token of \
+         SdblOrderClause. Got direct IDENT texts: {:?}",
+        direct_ident_texts,
+    );
+    assert!(
+        direct_ident_texts.iter().any(|s| s == "УБЫВ" || s == "DESC"),
+        "Direction token УБЫВ must be a flat IDENT direct token of \
+         SdblOrderClause. Got direct IDENT texts: {:?}",
+        direct_ident_texts,
+    );
+
+    // No per-item wrapper node may sit between the expressions
+    // and the ORDER BY clause — i.e. no unknown direct-child
+    // node kinds beyond the expression kinds and trivia.
+    let unexpected_node_kinds: Vec<_> = order
+        .children()
+        .map(|c| c.kind())
+        .filter(|k| {
+            !matches!(
+                k,
+                SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                    | SyntaxKind::SDBL_COLUMN_REF
+                    | SyntaxKind::SDBL_FUNCTION_CALL,
+            )
+        })
+        .collect();
+    assert!(
+        unexpected_node_kinds.is_empty(),
+        "Flat-children invariant: SdblOrderClause must have only \
+         expression-node direct children — no per-item wrapper node. \
+         Got unexpected direct node kinds: {:?}",
+        unexpected_node_kinds,
+    );
+}
+
+// (i) Slice 11 — HAVING calls expression(p) (NOT
+// logical_expression(p)), but the consumer-side wrapper is still
+// SdblLogicalOrExpr because Slice 10a wraps both entry points.
+#[test]
+fn test_slice11_having_logical_expression_wrapping() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т СГРУППИРОВАТЬ ПО A ИМЕЮЩИЕ A > 0";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let having = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_HAVING_CLAUSE)
+        .expect("Tree must contain SdblHavingClause");
+
+    let direct_expr_kinds: Vec<_> = having.children().map(|c| c.kind()).collect();
+    assert!(
+        direct_expr_kinds.contains(&SyntaxKind::SDBL_LOGICAL_OR_EXPR),
+        "HAVING calls expression(p) but Slice 10a wraps the result in \
+         SdblLogicalOrExpr — the consumer-side wrapper kind must still \
+         appear as a direct child of SdblHavingClause. Got: {:?}",
+        direct_expr_kinds,
+    );
+}
+
+// (j) Slice 11 — FOR UPDATE without UPDATE keyword recovery: the
+// FOR token alone (without UPDATE/ИЗМЕНЕНИЯ) emits SdblForUpdate,
+// the MDO chain follows.
+#[test]
+fn test_slice11_for_without_update_recovery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т ДЛЯ Справочник.X";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+    let for_update = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_FOR_UPDATE)
+        .expect("Tree must contain SdblForUpdate even when UPDATE keyword is missing");
+
+    let has_update_token = for_update.children_with_tokens().any(|c| {
+        c.as_token().is_some_and(|t| {
+            let s = t.text().to_uppercase();
+            s == "UPDATE" || s == "ИЗМЕНЕНИЯ"
+        })
+    });
+    assert!(
+        !has_update_token,
+        "Missing-UPDATE recovery: SdblForUpdate must NOT contain an \
+         UPDATE/ИЗМЕНЕНИЯ token when input has just `ДЛЯ <MDO>`",
+    );
+}
+
+// (k) Slice 11 — FOR UPDATE deep MDO chain (greedy until the
+// post-Dot lookahead fails to be an Ident).
+#[test]
+fn test_slice11_for_update_deep_mdo_chain() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т ДЛЯ ИЗМЕНЕНИЯ Справочник.X.Y.Z";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let for_update = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_FOR_UPDATE)
+        .expect("Tree must contain SdblForUpdate");
+
+    // Count Dot tokens at the FLAT direct-child token level —
+    // there should be 3 dots for `Справочник.X.Y.Z`.
+    let dot_count = for_update
+        .children_with_tokens()
+        .filter(|c| c.as_token().is_some_and(|t| t.text() == "."))
+        .count();
+    assert_eq!(
+        dot_count, 3,
+        "Greedy MDO chain expected to flatten `Справочник.X.Y.Z` into \
+         3 Dot tokens at SdblForUpdate's direct-child level. Got: {}",
+        dot_count,
+    );
+}
+
+// (l) Slice 11 — TOTALS BY OVERALL fallthrough (§IDE-recovery
+// allowance #1 — flat-Ident parser shape; OVERALL/ОБЩИЕ falls
+// through is_expression_start and is consumed as a bare
+// SdblColumnRef expression).
+#[test]
+fn test_slice11_totals_overall_fallthrough_shape() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ СУММА(A) ИЗ Т ИТОГИ ПО ОБЩИЕ";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let totals = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TOTALS_BY)
+        .expect("Tree must contain SdblTotalsBy");
+
+    // OVERALL/ОБЩИЕ must end up as a direct expression-node child
+    // of SdblTotalsBy (NOT a structured TOTALS-marker NodeKind).
+    let has_expr_child = totals.children().any(|c| {
+        matches!(
+            c.kind(),
+            SyntaxKind::SDBL_COLUMN_REF
+                | SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                | SyntaxKind::SDBL_FUNCTION_CALL,
+        )
+    });
+    assert!(
+        has_expr_child,
+        "OVERALL/ОБЩИЕ must fall through is_expression_start and be \
+         consumed as a bare-expression direct child of SdblTotalsBy. \
+         Direct child kinds: {:?}",
+        totals.children().map(|c| c.kind()).collect::<Vec<_>>(),
+    );
+}
+
+// (m) Slice 11 — tail-clause any-order across a multi-query
+// package: each query's tail clauses must attach within that
+// query's SdblSelectQuery scope, with no leakage across `;`
+// boundaries (§AST-shape invariant #2). Query 1 has TOTALS BY +
+// AUTOORDER (any-order acceptance); query 2 has ORDER BY; query 3
+// has AUTOORDER. The test asserts each tail-clause node's
+// nearest SdblSelectQuery ancestor is the correct query.
+#[test]
+fn test_slice11_tail_any_order_no_cross_query_leak() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т1 ИТОГИ ПО A АВТОУПОРЯДОЧИВАНИЕ; \
+                 SELECT B FROM T2 ORDER BY B; \
+                 SELECT C FROM T3 АВТОУПОРЯДОЧИВАНИЕ";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+
+    // Walk the root's package structure and collect ONLY top-level
+    // SdblSelectQuery nodes — i.e. SdblSelectQuery nodes that are
+    // NOT nested inside another SdblSelectQuery. This catches a
+    // regression where one query's range incorrectly spans across
+    // a semicolon boundary and ends up containing the other queries
+    // as descendants.
+    let all_select_queries: Vec<_> =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_SELECT_QUERY).collect();
+    let top_level_queries: Vec<_> = all_select_queries
+        .iter()
+        .filter(|q| !q.ancestors().skip(1).any(|a| a.kind() == SyntaxKind::SDBL_SELECT_QUERY))
+        .cloned()
+        .collect();
+    assert_eq!(
+        top_level_queries.len(),
+        3,
+        "Three top-level SdblSelectQuery nodes expected (one per `;` \
+         segment, not nested inside another query); got {} top-level \
+         out of {} total SdblSelectQuery nodes",
+        top_level_queries.len(),
+        all_select_queries.len(),
+    );
+    // No SdblSelectQuery may contain another SdblSelectQuery as a
+    // descendant — package segments are disjoint.
+    for q in &all_select_queries {
+        let nested_count =
+            q.descendants().filter(|d| d != q && d.kind() == SyntaxKind::SDBL_SELECT_QUERY).count();
+        assert_eq!(
+            nested_count,
+            0,
+            "SdblSelectQuery at offset {:?} must NOT contain another \
+             SdblSelectQuery as a descendant (semicolon boundary \
+             violation). Nested count: {}",
+            q.text_range().start(),
+            nested_count,
+        );
+    }
+
+    // Identify each top-level query by its source-text identifier.
+    // ALL three identification predicates require the marker to be
+    // present AND the other two markers to be absent — this catches
+    // any single-query span that crosses a semicolon boundary.
+    let q_t1 = top_level_queries
+        .iter()
+        .find(|q| {
+            let s = q.text().to_string();
+            s.contains("Т1") && !s.contains("T2") && !s.contains("T3")
+        })
+        .expect(
+            "Query 1 (Т1) top-level SdblSelectQuery must exist and not span across `;` boundaries",
+        );
+    let q_t2 = top_level_queries
+        .iter()
+        .find(|q| {
+            let s = q.text().to_string();
+            s.contains("T2") && !s.contains("Т1") && !s.contains("T3")
+        })
+        .expect(
+            "Query 2 (T2) top-level SdblSelectQuery must exist and not span across `;` boundaries",
+        );
+    let q_t3 = top_level_queries
+        .iter()
+        .find(|q| {
+            let s = q.text().to_string();
+            s.contains("T3") && !s.contains("T2") && !s.contains("Т1")
+        })
+        .expect(
+            "Query 3 (T3) top-level SdblSelectQuery must exist and not span across `;` boundaries",
+        );
+
+    // Fail-closed owner attribution: collect raw tail-clause nodes
+    // first; for each, assert it has a SdblSelectQuery ancestor
+    // (no root/package-level leak) AND return that ancestor by
+    // identity (text_range), NOT by text substring. A regression
+    // where one query node's range incorrectly spans across a
+    // semicolon would make the wrong owner match by substring but
+    // would be caught here because `text_range()` is unique per
+    // node identity.
+    fn owners_or_fail(
+        root: &syntax::SyntaxNode,
+        kind: SyntaxKind,
+        kind_label: &str,
+    ) -> Vec<syntax::SyntaxNode> {
+        let nodes: Vec<_> = root.descendants().filter(|n| n.kind() == kind).collect();
+        nodes
+            .iter()
+            .map(|n| {
+                let ancestor = n.ancestors().find(|a| a.kind() == SyntaxKind::SDBL_SELECT_QUERY);
+                assert!(
+                    ancestor.is_some(),
+                    "{} node at offset {:?} has no SdblSelectQuery \
+                     ancestor — that is a cross-query leak at the \
+                     package/root level. Node text: `{}`",
+                    kind_label,
+                    n.text_range().start(),
+                    n.text(),
+                );
+                ancestor.unwrap()
+            })
+            .collect()
+    }
+
+    fn ranges_eq(a: &syntax::SyntaxNode, b: &syntax::SyntaxNode) -> bool {
+        a.text_range() == b.text_range()
+    }
+
+    let totals_owners = owners_or_fail(&root, SyntaxKind::SDBL_TOTALS_BY, "SdblTotalsBy");
+    assert_eq!(
+        totals_owners.len(),
+        1,
+        "Exactly one SdblTotalsBy node expected across the package; got {}",
+        totals_owners.len(),
+    );
+    assert!(
+        ranges_eq(&totals_owners[0], q_t1),
+        "The single SdblTotalsBy must attach inside the Т1 query \
+         (matched by text_range identity, not substring). Got \
+         owner range {:?}, expected Т1 range {:?}",
+        totals_owners[0].text_range(),
+        q_t1.text_range(),
+    );
+
+    let order_owners = owners_or_fail(&root, SyntaxKind::SDBL_ORDER_CLAUSE, "SdblOrderClause");
+    assert_eq!(
+        order_owners.len(),
+        1,
+        "Exactly one SdblOrderClause node expected across the package; got {}",
+        order_owners.len(),
+    );
+    assert!(
+        ranges_eq(&order_owners[0], q_t2),
+        "The single SdblOrderClause must attach inside the T2 query \
+         (matched by text_range identity). Got owner range {:?}, \
+         expected T2 range {:?}",
+        order_owners[0].text_range(),
+        q_t2.text_range(),
+    );
+
+    // Exactly two AUTOORDER nodes — query 1 (Т1) and query 3 (T3),
+    // no extras. Match by text_range identity, not text substring.
+    let autoorder_owners = owners_or_fail(&root, SyntaxKind::SDBL_AUTOORDER, "SdblAutoorder");
+    assert_eq!(
+        autoorder_owners.len(),
+        2,
+        "Exactly two SdblAutoorder nodes expected (Т1 + T3); got {}",
+        autoorder_owners.len(),
+    );
+    let t1_count = autoorder_owners.iter().filter(|o| ranges_eq(o, q_t1)).count();
+    let t3_count = autoorder_owners.iter().filter(|o| ranges_eq(o, q_t3)).count();
+    assert_eq!(
+        t1_count, 1,
+        "Exactly one SdblAutoorder must attach inside the Т1 query \
+         (any-order after TOTALS) — matched by text_range identity",
+    );
+    assert_eq!(
+        t3_count, 1,
+        "Exactly one SdblAutoorder must attach inside the T3 query \
+         — matched by text_range identity",
+    );
+}
+
+// (n) Slice 11 — is_clause_keyword preserves the JOIN family
+// delegation (§Child-attachment invariant #10). The
+// `is_clause_keyword` predicate delegates to `is_join_keyword`
+// (LEFT/RIGHT/FULL/INNER/JOIN/ON family) so JOIN starters
+// terminate alias / source / clause-body scans. The observable
+// signal: after the FROM data source `Т1`, the source-alias scan
+// must NOT consume `ВНУТРЕННЕЕ` (an INNER JOIN type keyword)
+// as a source alias — instead, the source completes alias-less
+// and the JOIN clause attaches as a sibling. Without the
+// `is_join_keyword` delegation, alias scan would swallow
+// `ВНУТРЕННЕЕ` as an alias and the JOIN would never form.
+#[test]
+fn test_slice11_is_clause_keyword_join_delegation() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ A ИЗ Т1 ВНУТРЕННЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.X = Т2.Y ГДЕ Т1.X > 0";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+
+    // (a) The JOIN-family delegation guarantees the JOIN actually
+    // forms: ВНУТРЕННЕЕ СОЕДИНЕНИЕ is recognised as a JOIN keyword
+    // boundary, so the parser builds an SdblJoinClause attached to
+    // the Т1 SdblDataSource as a sibling/child relationship.
+    let join_clauses: Vec<_> =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_JOIN_CLAUSE).collect();
+    assert_eq!(
+        join_clauses.len(),
+        1,
+        "is_join_keyword delegation must let alias scan terminate at \
+         ВНУТРЕННЕЕ so the JOIN clause forms; expected exactly one \
+         SdblJoinClause, got {}",
+        join_clauses.len(),
+    );
+
+    // (b) The first SdblDataSource (Т1) must NOT carry an alias —
+    // ВНУТРЕННЕЕ must not have been consumed as Т1's alias. Without
+    // is_join_keyword delegation, the parser would consume
+    // ВНУТРЕННЕЕ as an alias for Т1 and the test would fail.
+    let first_data_source = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_DATA_SOURCE)
+        .expect("Tree must contain SdblDataSource for Т1");
+    let has_alias = first_data_source.children().any(|c| c.kind() == SyntaxKind::SDBL_ALIAS);
+    assert!(
+        !has_alias,
+        "is_join_keyword delegation must terminate Т1's alias scan \
+         at ВНУТРЕННЕЕ — first SdblDataSource must have NO SdblAlias \
+         direct child. Direct children: {:?}",
+        first_data_source.children().map(|c| c.kind()).collect::<Vec<_>>(),
+    );
+
+    // (c) After the JOIN ON-condition, ГДЕ is recognised as a
+    // clause boundary by is_clause_keyword's direct
+    // at_sdbl_keyword(p, "WHERE", "ГДЕ") branch, so the WHERE
+    // clause attaches at the SdblQuery level above the JOIN, NOT
+    // as a descendant of the JOIN.
+    let has_where = root.descendants().any(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE);
+    assert!(has_where, "SdblWhereClause must appear in the tree");
+    let where_inside_join = root
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE)
+        .any(|w| w.ancestors().skip(1).any(|a| a.kind() == SyntaxKind::SDBL_JOIN_CLAUSE));
+    assert!(
+        !where_inside_join,
+        "is_clause_keyword must terminate JOIN parsing at ГДЕ — \
+         SdblWhereClause must NOT be a descendant of SdblJoinClause",
+    );
+}
