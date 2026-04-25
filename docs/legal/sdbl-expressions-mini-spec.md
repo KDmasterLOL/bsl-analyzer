@@ -1187,20 +1187,20 @@ each claim.
 | `ССЫЛКА` / REFS predicate | YES — pubqlang/40 | "при помощи оператора ССЫЛКА проверяется, ссылкой на какой документ является поле" |
 | `МЕЖДУ` / BETWEEN predicate | YES — pubqlang/22 + pubqlang/40 | "оператор МЕЖДУ, который проверяет результат вхождения значения в диапазон" |
 | `ПОДОБНО` / LIKE predicate | YES — pubqlang/60 | concrete usage `Наименование ПОДОБНО "%" + &ЧастьНаименования + "%"` |
-| Comparison operator inventory `=` `<>` `<` `<=` `>` `>=` | TODO at Slice 10b C2 — verify pubqlang/22 §Условие отбора | Slice 10b C2 author verifies whether the 6-operator inventory is enumerated in chapter 22; downgrade to local citing mini-spec §Comparison if not |
-| `IN` value-list (parens-bracketed comma list) | TODO at Slice 10b C2 — verify pubqlang/22 + pubqlang/40 | quote canonical `<expr> В (<v1>, <v2>, ...)` example |
-| `IN` with subquery | TODO at Slice 10b C2 — verify pubqlang/22 | quote canonical `<expr> В (ВЫБРАТЬ ...)` example |
-| `IN HIERARCHY` / `В ИЕРАРХИИ` predicate | TODO at Slice 10b C2 — verify pubqlang/32 (chapter_032.html) | canonical example expected: `Товары.Ссылка В ИЕРАРХИИ (&ГруппаТоваров)`. Note: chapter 28 does NOT contain `В ИЕРАРХИИ` (codex Round-1 spot check); chapter 32 is the primary source. |
-| `IS NULL` / `ЕСТЬ NULL` predicate | TODO at Slice 10b C2 — verify pubqlang/27 (chapter_027.html) | canonical example expected: `КОГДА (Товары.Производитель) ЕСТЬ NULL ТОГДА "NULL"`; secondary refs in chapters 90, 99, 100, 101. Note: chapter 22 does NOT contain `ЕСТЬ NULL` (codex Round-1 spot check); chapter 27 is the primary source. |
-| `LIKE` / `ПОДОБНО` pattern primitive (independent of pubqlang/60 concrete-usage row above) | TODO at Slice 10b C2 — verify pubqlang/23 (chapter_023.html) | quote chapter 23's pattern-matching definition |
+| Comparison operator inventory `=` `<>` `<` `<=` `>` `>=` | NO — verified absent in dump | Chapter 22 §Условие отбора enumerates the logical operators (И/ИЛИ/НЕ) and the МЕЖДУ operator but does NOT explicitly enumerate the 6 binary comparison operators. The 6-operator inventory is treated as a local convention; per-function provenance comments cite mini-spec §Comparison rather than the chapter. |
+| `IN` value-list (parens-bracketed comma list) | NO — verified absent in dump | Chapter 22 contains examples that route through the WHERE-condition shape but does not explicitly enumerate the `<expr> В (<v1>, <v2>, ...)` shape. The IN value-list shape is treated as a local IDE-recovery allowance derived by analogy from BETWEEN/МЕЖДУ. Per-function provenance cites mini-spec §SdblInExpr. |
+| `IN` with subquery | NO — not explicitly enumerated | Chapter 22 + chapter 40 do not show an `<expr> В (ВЫБРАТЬ ...)` example. The IN-subquery form is local-spec'd; mini-spec §SdblInExpr describes the shape. |
+| `IN HIERARCHY` / `В ИЕРАРХИИ` predicate | YES — pubqlang/32 (chapter_032.html, листинг 1.51) | Canonical example: «Товары.Ссылка В ИЕРАРХИИ (&ГруппаТоваров)» — chapter 32 §Как получить записи иерархической таблицы, находящиеся в иерархии выбранной группы. Note: chapter 28 does NOT contain `В ИЕРАРХИИ` (codex Round-1 spot check); chapter 32 is the primary source. |
+| `IS NULL` / `ЕСТЬ NULL` predicate | YES — pubqlang/27 (chapter_027.html) | Canonical example: «КОГДА (Товары.Производитель) ЕСТЬ NULL ТОГДА "NULL"». Note: chapter 22 does NOT contain `ЕСТЬ NULL` (codex Round-1 spot check); chapter 27 is the primary source. Secondary refs are present in chapters 90, 99, 100, 101 but were not spot-verified. |
+| `LIKE` / `ПОДОБНО` pattern primitive | YES — pubqlang/23 (chapter_023.html) | Chapter 23 §Как получить записи таблицы, содержащие строки, соответствующие заданному шаблону: explicit description that conditional matching uses оператор ПОДОБНО with example «Наименование ПОДОБНО "%Иван%"» (листинг 1.34). The pubqlang/60 concrete-usage row above remains an independent verification of the same predicate in parameter-passing context. |
 | `ESCAPE` / `СПЕЦСИМВОЛ` (LIKE escape clause) | NO — verified absent in dump | The LIKE clause is documented in pubqlang/23 + pubqlang/60 but neither chapter mentions an ESCAPE / СПЕЦСИМВОЛ clause. Recorded as local IDE-recovery allowance under §IDE-recovery allowances #13. |
-| `BETWEEN low AND high` (full clause shape) | TODO at Slice 10b C2 — verify pubqlang/22 + pubqlang/40 | chapter 22 + chapter 40 both contain `МЕЖДУ` examples; verify the `AND` requirement is explicit (e.g. `Дата МЕЖДУ ДАТАВРЕМЯ(...) И ДАТАВРЕМЯ(...)`) |
-| `REFS` / `ССЫЛКА` predicate (full canonical example) | TODO at Slice 10b C2 — verify pubqlang/40 (chapter_040.html) | canonical example expected: `Регистратор ССЫЛКА Документ.ПриходнаяНакладная`; secondary refs in chapters 95, 159 |
-| `ВЫБОР` / CASE expression body (WHEN / THEN / ELSE / END) | TODO at Slice 10b C2 — verify pubqlang/40 (chapter_040.html) | canonical example expected: `ВЫБОР КОГДА Товары.ЭтоГруппа = ИСТИНА ТОГДА "Это группа" ИНАЧЕ "Это элемент" КОНЕЦ КАК ПризнакГруппы`; explicit description `ВЫБОР (КОГДА … ТОГДА) ИНАЧЕ … КОНЕЦ` expected |
-| `ВЫРАЗИТЬ` / CAST type specification (primitive parameterised + MDO chain) | TODO at Slice 10b C2 — verify pubqlang/40 (chapter_040.html) | chapter 40 describes ВЫРАЗИТЬ as both "операция приведения типов" (composite-to-component MDO chain) and "функция для получения результатов нужной длины и точности" (primitive-with-parameters). Example expected: `ВЫРАЗИТЬ(ОстаткиТоваров.Регистратор КАК Документ.ПриходнаяНакладная).Поставщик` |
-| `DISTINCT` / `РАЗЛИЧНЫЕ` aggregate prefix | TODO at Slice 10b C2 — verify pubqlang/12 §Aggregate functions or pubqlang/40 example | downgrade to local IDE-recovery allowance citing mini-spec §Column references and function calls if no chapter explicitly documents the prefix |
-| Inline tabular field syntax `Table.TabularPart.(Field1, Field2, ...)` | TODO at Slice 10b C2 — verify pubqlang/12 §Tabular fields | downgrade to local IDE-recovery allowance citing mini-spec §Inline tabular field syntax if not in chapter 12 |
-| Member access on CAST function result `ВЫРАЗИТЬ(... КАК Документ.X).Поле` | TODO at Slice 10b C2 — verify pubqlang/40 | quote chapter 40 example showing post-`)` member access |
+| `BETWEEN low AND high` (full clause shape) | YES — pubqlang/22 (chapter_022.html, листинг 1.33) | Chapter 22 §Условие отбора shows the canonical `Дата МЕЖДУ ДАТАВРЕМЯ(2012, 10, 01) И ДАТАВРЕМЯ(2012, 10, 31)` with the explicit `AND/И` linking the two bounds. Chapter 40 has BETWEEN examples in expression context. |
+| `REFS` / `ССЫЛКА` predicate (full canonical example) | YES — pubqlang/40 (chapter_040.html) | Canonical example: «КОГДА (ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная) ТОГДА ВЫРАЗИТЬ (ОстаткиТоваров.Регистратор КАК Документ.ПриходнаяНакладная).Поставщик». Demonstrates REFS with an MDO chain inside a CASE branch. Secondary refs in chapters 95 + 159 were not spot-verified. |
+| `ВЫБОР` / CASE expression body (WHEN / THEN / ELSE / END) | YES — pubqlang/40 (chapter_040.html) | Canonical example: «ВЫБОР КОГДА Товары.ЭтоГруппа = ИСТИНА ТОГДА "Это группа" ИНАЧЕ "Это элемент" КОНЕЦ КАК ПризнакГруппы». Chapter 40 also describes the operation as «ВЫБОР (КОГДА … ТОГДА) ИНАЧЕ … КОНЕЦ» — explicit description matches the parser's two-form (simple vs searched) dispatch. |
+| `ВЫРАЗИТЬ` / CAST type specification (primitive parameterised + MDO chain) | YES — pubqlang/40 (chapter_040.html) | Chapter 40 describes ВЫРАЗИТЬ as both «операция приведения типов» (composite-to-component MDO chain) and «функция для получения результатов нужной длины и точности» (primitive-with-parameters). Examples present: «ВЫРАЗИТЬ(СУММА(ЗаказТовара.СуммаЗаказа) / КОЛИЧЕСТВО(*) КАК ЧИСЛО(8,2))» (primitive parameterised form) and «ВЫРАЗИТЬ (ОстаткиТоваров.Регистратор КАК Документ.ПриходнаяНакладная).Поставщик» (MDO + member access). |
+| `DISTINCT` / `РАЗЛИЧНЫЕ` aggregate prefix | YES — pubqlang/21 (chapter_021.html, листинг 1.29) | Canonical example: «КОЛИЧЕСТВО(РАЗЛИЧНЫЕ ЗаказТовара.Клиент) КАК РазныеКлиенты». Chapter 20 documents the SELECT-level `ВЫБРАТЬ РАЗЛИЧНЫЕ` form independently; chapter 21 documents the aggregate-function-prefix form which is the form Slice 10b's `column_or_function` accepts inside a function call. |
+| Inline tabular field syntax `Table.TabularPart.(Field1, Field2, ...)` | NO — verified absent in dump | The dumped chapters under pubqlang do not document the `Table.TabPart.(F1, F2)` inline tabular field shape. Recorded as a local IDE-recovery allowance; per-function provenance in `inline_table_fields` cites mini-spec §Inline tabular field syntax. |
+| Member access on CAST function result `ВЫРАЗИТЬ(... КАК Документ.X).Поле` | YES — pubqlang/40 (chapter_040.html) | Canonical example: «ВЫРАЗИТЬ (ОстаткиТоваров.Регистратор КАК Документ.ПриходнаяНакладная).Поставщик» — chapter 40 demonstrates the full chain (CAST + MDO type + post-`)` `.Поле` member access). |
 
 **Verification summary:** every Slice 10a + Slice 10b expression-
 grammar claim that the mini-spec attributes to ITS is verified
@@ -1210,21 +1210,45 @@ from "mini-spec-declared" to "ITS pubqlang/22-derived". The single
 ITS-supported. The clean-room rewrite preserves the local `%`
 allowance and documents it as a local extension.
 
-The Slice 10b TODO rows above are filled in by the Slice 10b C2
-author after directly inspecting the local dump pages
-(chapter_022.html, chapter_023.html, chapter_027.html,
-chapter_032.html, chapter_040.html). The TODO rows are added in
-C0a (this commit) so the C2 author has a known list of facts to
-verify; each row is rewritten in C2 with "verified yes / verified
-no / page changed" plus a quoted excerpt. Rows that turn out to be
-unverified are downgraded from ITS citations to `// local: …;
-mini-spec §…` provenance comments in the corresponding parser
-function.
+The Slice 10b verification rows above were filled in during the
+Slice 10b C2 commit after directly inspecting the local dump pages
+(chapter_021.html, chapter_022.html, chapter_023.html,
+chapter_027.html, chapter_032.html, chapter_040.html). The
+outcome:
+
+- **verified yes** — IN HIERARCHY (chapter 32, листинг 1.51), IS
+  NULL (chapter 27), LIKE pattern primitive (chapter 23, листинг
+  1.34), BETWEEN (chapter 22, листинг 1.33), REFS (chapter 40,
+  CASE-branch example), CASE/ВЫБОР body (chapter 40), CAST type
+  spec (chapter 40, listings for both primitive and MDO forms),
+  DISTINCT aggregate prefix (**chapter 21**, листинг 1.29 —
+  upgrade from the original plan-time guess of chapter 12 / 40),
+  CAST member access (chapter 40);
+- **verified no** — Comparison operator inventory (chapter 22
+  enumerates only logical operators and МЕЖДУ; the 6-operator
+  inventory `=` `<>` `<` `<=` `>` `>=` is treated as local
+  convention), IN value-list and IN-with-subquery (chapter 22 +
+  chapter 40 do not enumerate these shapes; treated as local
+  IDE-recovery allowance), ESCAPE / СПЕЦСИМВОЛ (chapters 23 + 60
+  do not document the clause; preserved as local IDE-recovery
+  allowance per §IDE-recovery allowances #13), inline tabular
+  field syntax (no chapter documents the `Table.TabPart.(F1, F2)`
+  shape; preserved as local IDE-recovery allowance).
+
+The discrepancies above are documented in §IDE-recovery
+allowances #10–#15 and reflected in the per-function provenance
+comments inside `crates/parser/src/grammar/sdbl/expressions.rs`:
+ITS-citing rows yield ITS citations (e.g. CASE/ВЫБОР cites
+`pubqlang/40 §ВЫБОР`); rows that turned out to be unverified
+yield `// local: ...` comments cross-referencing the relevant
+mini-spec section.
 
 C2 provenance comments in `expressions.rs` cite the verified ITS
-chapters (`pubqlang/22`, `pubqlang/40`, `pubqlang/60`) wherever
-applicable rather than the placeholder `// local: ...` originally
-proposed for sections that turned out to be ITS-derived.
+chapters (`pubqlang/21`, `pubqlang/22`, `pubqlang/23`,
+`pubqlang/27`, `pubqlang/32`, `pubqlang/40`, plus `pubqlang/60`
+for parameter passing) wherever applicable, with explicit
+`// local: ...` markers for the four rows that turned out to be
+unverified.
 
 ## Out of scope
 

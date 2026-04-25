@@ -3288,7 +3288,6 @@ fn test_slice10b_inline_tabular_field_syntax() {
 // parser. Slice 10b C2 unignores it in the same atomic commit as
 // the fix.
 #[test]
-#[ignore = "Slice 10b C2 unignores after column_or_function clause-keyword fix lands"]
 fn test_func_call_clause_keyword_recovery() {
     use syntax::SyntaxKind;
     let input = "SELECT func(x, FROM T)";
@@ -3324,7 +3323,6 @@ fn test_func_call_clause_keyword_recovery() {
 // recovery regression gate. Same contract as
 // `test_func_call_clause_keyword_recovery` for ИЗ.
 #[test]
-#[ignore = "Slice 10b C2 unignores after column_or_function clause-keyword fix lands"]
 fn test_russian_func_call_clause_keyword_recovery() {
     use syntax::SyntaxKind;
     let input = "ВЫБРАТЬ функ(х, ИЗ Т)";

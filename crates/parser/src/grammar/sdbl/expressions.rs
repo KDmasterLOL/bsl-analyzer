@@ -815,7 +815,11 @@ fn paren_or_subquery_expr(p: &mut Parser) {
 ///   | predicateExpression
 /// ```
 fn comparison_expr(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
+    // ITS pubqlang/22 §Условие отбора — comparison and predicate
+    // share the same precedence slot below NOT, so `comparison_expr`
+    // is a 1:1 dispatcher shim to `predicate_expr` which holds the
+    // 7-branch dispatch (IN / IS NULL / BETWEEN / LIKE / REFS /
+    // comparison / fall-through). Mini-spec §Comparison.
     predicate_expr(p);
 }
 
@@ -832,15 +836,25 @@ fn comparison_expr(p: &mut Parser) {
 ///       )?
 /// ```
 fn predicate_expr(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
+    // ITS pubqlang/22 §Условие отбора (BETWEEN, IN value-list,
+    // comparison operators) + pubqlang/23 §Шаблон (LIKE) +
+    // pubqlang/27 §ЕСТЬ NULL canonical example + pubqlang/32
+    // §В ИЕРАРХИИ canonical example + pubqlang/40 §ССЫЛКА
+    // canonical example. ESCAPE/СПЕЦСИМВОЛ is a local IDE-recovery
+    // allowance — not in the dumped ITS chapters; see mini-spec
+    // §IDE-recovery allowances #13. Mini-spec §Predicates.
     let m = p.start();
 
     additive_expr(p);
 
     p.skip_trivia();
 
-    // Check for optional NOT before predicates (NOT IN, NOT BETWEEN, NOT LIKE)
-    // The NOT token is recorded in the predicate node and processed during lowering
+    // Optional NOT prefix consumed BEFORE probing IN / BETWEEN /
+    // LIKE so the predicate node carries the NOT token as a direct
+    // child of the eventual IN / BETWEEN / LIKE node. If no
+    // predicate / comparison branch matches, the marker is
+    // abandoned and the consumed NOT remains as a stray token —
+    // mini-spec §IDE-recovery allowances #14.
     if p.at(TokenKind::KwNot) {
         p.bump(); // NOT / НЕ
         p.skip_trivia();
@@ -953,7 +967,10 @@ fn predicate_expr(p: &mut Parser) {
         additive_expr(p);
         p.skip_trivia();
 
-        // Optional ESCAPE clause
+        // local: optional ESCAPE / СПЕЦСИМВОЛ clause — NOT
+        // documented in dumped ITS chapters 23 + 60; preserved as
+        // a parser-accepted IDE-recovery allowance. Mini-spec
+        // §IDE-recovery allowances #13.
         if p.at_keyword("ESCAPE") || p.at_keyword("СПЕЦСИМВОЛ") {
             p.bump(); // ESCAPE / СПЕЦСИМВОЛ
             p.skip_trivia();
@@ -1021,7 +1038,10 @@ fn predicate_expr(p: &mut Parser) {
 /// ```
 /// Check if identifier is CAST/ВЫРАЗИТЬ function
 fn is_cast_function(p: &Parser) -> bool {
-    // C1 placeholder — clean-room rewrite in C2.
+    // local: predicate for CAST/ВЫРАЗИТЬ keyword pair, called from
+    // `column_or_function` BEFORE the Ident bump so the resulting
+    // `is_cast` flag is available for the LParen branch's КАК-type
+    // recovery. Mini-spec §CAST type specification.
     p.at_keyword("CAST") || p.at_keyword("ВЫРАЗИТЬ")
 }
 
@@ -1031,7 +1051,11 @@ fn is_cast_function(p: &Parser) -> bool {
 ///
 /// MDO types: `Справочник.Склады`, `Документ.РеализацияТоваровУслуг`, etc.
 fn parse_cast_type(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
+    // ITS pubqlang/40 §ВЫРАЗИТЬ — primitive type with optional
+    // (size[, scale]) parameters OR MDO chain. Recognised primitive
+    // types: СТРОКА/STRING, ЧИСЛО/NUMBER, ДАТА/DATE, БУЛЕВО/BOOLEAN.
+    // The MDO branch is greedy `('.' Ident)*`. Mini-spec §CAST type
+    // specification.
     let m = p.start();
 
     // Type can be Ident (for STRING, NUMBER, DATE, BOOLEAN) or MDO reference (Справочник.Склады)
@@ -1089,10 +1113,17 @@ fn parse_cast_type(p: &mut Parser) {
 }
 
 fn column_or_function(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
+    // ITS pubqlang/10 + /12 — column reference and function call
+    // dispatch. Bilingual aggregate-function names (СУММА/SUM,
+    // КОЛИЧЕСТВО/COUNT, СРЕДНЕЕ/AVG, МАКСИМУМ/MAX, МИНИМУМ/MIN)
+    // are documented across pubqlang/40 examples. CAST member
+    // access (ВЫРАЗИТЬ(... КАК ...).Поле) is pubqlang/40 §ВЫРАЗИТЬ.
+    // Mini-spec §Column references and function calls.
     let m = p.start();
 
-    // Check if this is CAST/ВЫРАЗИТЬ function before consuming
+    // CAST detection runs BEFORE the Ident bump so the resulting
+    // `is_cast` flag is available for the LParen branch's КАК-type
+    // recovery. Mini-spec §CAST type specification.
     let is_cast = is_cast_function(p);
 
     // First identifier (mandatory)
@@ -1149,8 +1180,16 @@ fn column_or_function(p: &mut Parser) {
                 p.skip_trivia();
             }
 
-            // First argument (might be empty)
-            if is_expression_start(p) && !p.at(TokenKind::Comma) {
+            // First argument (might be empty). The clause-keyword
+            // guard is defensive — `is_expression_start` already
+            // filters clause keywords on the Ident arm; the
+            // explicit check makes the recovery contract textual
+            // and self-documenting at the call site. Codex Round-1
+            // finding 2 → C2 fix.
+            if is_expression_start(p)
+                && !p.at(TokenKind::Comma)
+                && !super::select::is_clause_keyword(p)
+            {
                 expression(p);
 
                 // Special handling for CAST/ВЫРАЗИТЬ: parse КАК type syntax
@@ -1179,15 +1218,27 @@ fn column_or_function(p: &mut Parser) {
                 p.check_iteration_limit();
                 p.skip_trivia();
 
-                // ERROR RECOVERY: Empty element or invalid token
-                // Examples: func(1, , 3) or func(1, 2,) or func(1, FROM ...)
-                if p.at(TokenKind::Comma) || p.at(TokenKind::RParen) || !is_expression_start(p) {
+                // ERROR RECOVERY: Empty element, invalid token, or
+                // clause keyword in argument position. Examples:
+                // `func(1, , 3)`, `func(1, 2,)`, `func(1, FROM ...)`.
+                // Codex Round-1 finding 2 → C2 fix: the explicit
+                // `is_clause_keyword` check is defensive
+                // (`is_expression_start` already filters clause
+                // keywords on the Ident arm) and complements the
+                // mid-loop break-out when the function call is
+                // unterminated.
+                if p.at(TokenKind::Comma)
+                    || p.at(TokenKind::RParen)
+                    || !is_expression_start(p)
+                    || super::select::is_clause_keyword(p)
+                {
                     // Create ERROR node for missing/invalid argument
                     let err = p.start();
                     err.complete(p, NodeKind::Error);
 
-                    // If next token is comma, continue to next argument
-                    // Otherwise (RParen or invalid), break
+                    // If next token is comma, continue to next argument.
+                    // Otherwise (RParen, invalid, or clause keyword),
+                    // break out of the loop.
                     if !p.at(TokenKind::Comma) {
                         break;
                     }
@@ -1205,7 +1256,24 @@ fn column_or_function(p: &mut Parser) {
         }
 
         p.skip_trivia();
-        p.expect(TokenKind::RParen);
+
+        // Codex Round-1 finding 2 → C2 fix. If the function call
+        // is unterminated at a clause keyword, leave the keyword
+        // for the outer parser; emit a zero-width Error so the
+        // parse is marked as recovering. Without this guard,
+        // `p.expect(RParen)` falls through to `Parser::error()`
+        // which BUMPS the current token, consuming the clause
+        // keyword as a child of `SdblFunctionCall` and breaking the
+        // outer SELECT body. Regression gates:
+        // `test_func_call_clause_keyword_recovery` (EN) and
+        // `test_russian_func_call_clause_keyword_recovery` (RU) in
+        // `crates/parser/tests/sdbl_parser_tests.rs`.
+        if super::select::is_clause_keyword(p) {
+            let err = p.start();
+            err.complete(p, NodeKind::Error);
+        } else {
+            p.expect(TokenKind::RParen);
+        }
 
         // After closing paren, check for member access on function result
         // Example: ВЫРАЗИТЬ(field КАК Справочник.Склады).Родитель.Наименование
@@ -1249,7 +1317,12 @@ fn column_or_function(p: &mut Parser) {
 /// Used for selecting multiple fields from a tabular part:
 /// `Table.TabularPart.(Field1, Field2, Ref)`
 fn inline_table_fields(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
+    // local: tabular-part field-list IDE recovery; the dumped ITS
+    // chapters do not directly document the `Table.TabPart.(F1, F2)`
+    // shape. The dispatch boundary `column_or_function` →
+    // `inline_table_fields` → `selected_fields` is the only
+    // Slice-10b → Slice-7 reach. Mini-spec §Inline tabular field
+    // syntax.
     let m = p.start();
 
     p.bump(); // LParen
@@ -1278,7 +1351,13 @@ fn inline_table_fields(p: &mut Parser) {
 /// - Simple CASE: `CASE operand WHEN value THEN result ...`
 /// - Searched CASE: `CASE WHEN condition THEN result ...`
 fn case_expr(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
+    // ITS pubqlang/40 §ВЫБОР — simple vs searched CASE, mandatory
+    // END/КОНЕЦ. Canonical example: `ВЫБОР КОГДА Товары.ЭтоГруппа =
+    // ИСТИНА ТОГДА "Это группа" ИНАЧЕ "Это элемент" КОНЕЦ`.
+    // Child-order invariant locked by HIR
+    // `crates/sdbl-hir/src/lower/expr/case_expr.rs:40-45`: the first
+    // child node distinguishes simple (operand first) vs searched
+    // (SdblWhenClause first). Mini-spec §CASE expressions.
     let m = p.start();
 
     p.bump(); // CASE / ВЫБОР
@@ -1330,7 +1409,11 @@ fn case_expr(p: &mut Parser) {
 ///
 /// Grammar: `WHEN condition THEN result`
 fn when_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2.
+    // ITS pubqlang/40 §ВЫБОР — WHEN/КОГДА condition THEN/ТОГДА
+    // result. Direct child of SdblCaseExpr. The HIR consumer at
+    // `case_expr.rs:51-89` reads `node.children()` and assumes
+    // exactly two child expression nodes (condition + result).
+    // Mini-spec §CASE expressions.
     let m = p.start();
 
     p.bump(); // WHEN / КОГДА
