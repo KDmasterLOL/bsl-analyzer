@@ -628,25 +628,107 @@ and empties the `LEGACY (Slice 10b pending)` banner in
 
 ## Slice 11: clauses after FROM
 
-### Goal
+**Status: complete (2026-04-26).** See
+[`sdbl-clean-room-slice11.md`](sdbl-clean-room-slice11.md) for the
+attestation. The 12 functions `select_tail_clauses`,
+`query_body_clauses`, `where_clause`, `is_clause_keyword`,
+`group_by_clause`, `order_by_clause`, `order_by_item`,
+`having_clause`, `for_update_clause`, `index_by_clause`,
+`autoorder_clause`, `totals_by_clause` were re-authored under the
+`CLEAN-ROOM Slice 11 — clauses after FROM` banner in
+`crates/parser/src/grammar/sdbl/select.rs`. The 8 NodeKinds
+emitted by these functions (`SdblWhereClause`, `SdblGroupClause`,
+`SdblOrderClause`, `SdblHavingClause`, `SdblForUpdate`,
+`SdblIndexBy`, `SdblAutoorder`, `SdblTotalsBy`) retain their
+pre-C1 child-attachment shapes; the ten parser-side AST-shape
+invariants and ten child-attachment invariants in the attestation
+pin the contracts that downstream consumers
+(`crates/sdbl-hir/src/lower/clauses.rs:28-156` for WHERE / GROUP /
+ORDER readers, `LogicalOrInWhere` recursive-walk reachability at
+`clauses.rs:170-192`) read.
 
-Rebuild trailing query clauses once field/source/expression foundations are in
-place.
+Authored from ITS pubqlang chapters 12 (§Структура запроса), 16
+(§Сортировка результата запроса — `chapter_016.html:19, 31, 33,
+37, 49, 63, 64, 75-76`), 17 (§АВТОУПОРЯДОЧИВАНИЕ —
+`chapter_017.html:17, 32, 52` plus sort-by-ссылочное-поле lines
+29, 49), 22 (§Условие отбора — `chapter_022.html:15, 26, 35`), 23
+(§LIKE+WHERE — `chapter_023.html:13, 25-27, 45-46`), 24
+(§WHERE+parameters — `chapter_024.html:15, 16`), 27
+(§Иерархическая упорядоченная выборка —
+`chapter_027.html:39, 51`), 34 (§Группировка результата запроса —
+`chapter_034.html:14, 33, 44, 46, 51, 52`), 35 (§Расчет агрегатов
++ §Условие на агрегаты — `chapter_035.html:23, 29, 41, 44, 45,
+49`), 39 (§Расчет общих итогов — `chapter_039.html:13, 25, 29,
+48, 49, 51`) via the local dump at
+`/home/itrous/src/tools_migration/its/dump/`; the C0a-extended
+SELECT mini-spec §WHERE / §GROUP BY / §HAVING / §ORDER BY /
+§AUTOORDER / §TOTALS BY / §FOR UPDATE / §INDEX BY clause-body
+sections, §IDE-recovery allowances block (4 entries), §ITS
+coverage verification table, and §Non-consultation statement
+(Slice 11 reaffirmation); the lexer's Slice 2 attestation for
+bilingual EN/RU keyword pairs (WHERE/ГДЕ, GROUP/СГРУППИРОВАТЬ,
+HAVING/ИМЕЮЩИЕ, ORDER/УПОРЯДОЧИТЬ, BY/ПО, FOR/ДЛЯ,
+UPDATE/ИЗМЕНЕНИЯ, INDEX/ИНДЕКСИРОВАТЬ,
+AUTOORDER/АВТОУПОРЯДОЧИВАНИЕ, TOTALS/ИТОГИ, OVERALL/ОБЩИЕ,
+ASC/ВОЗР, DESC/УБЫВ, HIERARCHY/ИЕРАРХИЯ).
+
+The C2 commit landed one MANDATORY behaviour-change fix:
+`order_by_item` now consumes the optional HIERARCHY/ИЕРАРХИЯ
+modifier as a flat sibling IDENT token of `SdblOrderClause` (per
+ITS chapter 27 attestation — `chapter_027.html:39, 51` —
+`УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`), atomic with unignoring
+the C0b regression-gate test
+`test_slice11_order_by_hierarchy_consumed`. Parser-only
+acceptance: HIR semantic interpretation (adding hierarchy field
+to `OrderByItem` + HIR regression test) is owned by Slice 13 since
+`crates/sdbl-hir/**` is read-only per Slice 11's parser-only
+scope. The remaining audit-gate decisions defaulted to
+**Option B PRESERVE** per Slice 9 pattern (recovery hardening
+deferred to Slice 12).
+
+After Slice 11 lands, the residual `LEGACY` banner in
+`select.rs` shrinks from `LEGACY (Slices 5, 11 pending)` to
+`LEGACY (Slice 5 + SELECT limitation helpers pending)` and
+contains 4 functions: `virtual_table_args_legacy` (Slice 5
+target) plus `is_limitation_keyword` / `limitations` /
+`top_clause` (SELECT prefix qualifiers pending future
+Slice-7-addendum or 6/7-shaped mini-slice; the small
+`is_identifier_token` helper consumed by Slice 7 / Slice 8 also
+remains in the residual block under the same future addendum
+scope).
 
 ### Scope
 
 - `WHERE`
 - `GROUP BY`
 - `HAVING`
-- `ORDER BY`
+- `ORDER BY` (with HIERARCHY modifier per ITS chapter 27 —
+  C2 MANDATORY FIX)
 - `AUTOORDER`
-- `TOTALS ... BY`
+- `TOTALS ... BY` (narrowed flat-list shape; structured
+  ONLY/HIERARCHY-in-TOTALS/PERIODS modifier promotion deferred
+  to Slice 12)
 - `FOR UPDATE`
 - `INDEX BY`
 
 ### Files
 
-- `crates/parser/src/grammar/sdbl/select.rs`
+- `crates/parser/src/grammar/sdbl/select.rs` — the new
+  `CLEAN-ROOM Slice 11 — clauses after FROM` section — 12
+  functions.
+- `crates/parser/src/grammar/sdbl.rs` — module-level
+  `## Provenance` docstring Slice 11 entry, flipped to
+  "complete (landed with C3 2026-04-26)" with attestation
+  citation.
+- `docs/legal/sdbl-select-mini-spec.md` — extended C0a +
+  ITS verification rows filled C2 + post-C2 wording.
+- `docs/legal/sdbl-clean-room-slice11.md` — Slice 11
+  clean-room attestation (this slice's anchor document).
+- `crates/parser/tests/sdbl_parser_tests.rs` — 14 Bucket-A
+  gap-test functions added in C0b; test (g) flipped from
+  `#[ignore]` to active in C2.
+- `crates/parser/tests/sdbl_slice11_clauses.rs` — 35
+  spec-driven acceptance tests added in C3.
 
 ## Slice 12: recovery and IDE allowances
 

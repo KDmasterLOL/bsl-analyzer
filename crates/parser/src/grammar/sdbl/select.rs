@@ -903,17 +903,23 @@ fn join_clause(p: &mut Parser) {
 // AUTOORDER / TOTALS BY / FOR UPDATE / INDEX BY clause family plus the two
 // dispatchers `query_body_clauses` (FROM-tail dispatcher inside `query`)
 // and `select_tail_clauses` (post-`query` AUTOORDER/ORDER/TOTALS loop
-// inside `select_query`) and the `is_clause_keyword` predicate. C1 is a
-// pure refactor — the 12 function bodies are unchanged from their pre-C1
-// LEGACY shapes; per-function provenance comments and the MANDATORY
-// HIERARCHY consumption fix in `order_by_item` (per ITS chapter 27 —
-// `chapter_027.html:39, 51` `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`) land
-// in C2. Each function carries a `// C1 placeholder — clean-room rewrite
-// in C2` marker until C2 replaces it with provenance-tier comments. See
-// `docs/legal/sdbl-select-mini-spec.md` §WHERE / §GROUP BY / §HAVING /
-// §ORDER BY / §AUTOORDER / §TOTALS BY / §FOR UPDATE / §INDEX BY for the
-// extended grammar contracts, the §IDE-recovery allowances block (4
-// entries), and the §ITS coverage verification table.
+// inside `select_query`) and the `is_clause_keyword` predicate. The 12
+// function bodies were re-authored in C2 from ITS pubqlang chapters 16,
+// 17, 22, 23, 24, 27, 34, 35, 39, the C0a-extended SELECT mini-spec,
+// and the lexer Slice 2 attestation (see each function's per-function
+// provenance comment for the tiered A1/A2/B/C/D citation). C2 also
+// landed one MANDATORY behaviour-change fix: `order_by_item` consumes
+// the optional HIERARCHY/ИЕРАРХИЯ modifier as a flat sibling IDENT
+// token of `SdblOrderClause` (per ITS chapter 27 —
+// `chapter_027.html:39, 51` `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`),
+// atomic with unignoring the C0b regression-gate test
+// `test_slice11_order_by_hierarchy_consumed`. See
+// `docs/legal/sdbl-clean-room-slice11.md` for the full attestation,
+// and `docs/legal/sdbl-select-mini-spec.md` §WHERE / §GROUP BY /
+// §HAVING / §ORDER BY / §AUTOORDER / §TOTALS BY / §FOR UPDATE /
+// §INDEX BY for the extended grammar contracts, the §IDE-recovery
+// allowances block (4 entries), and the §ITS coverage verification
+// table.
 
 /// Parse the optional AUTOORDER / ORDER BY / TOTALS BY tail-clause loop.
 ///
