@@ -345,29 +345,129 @@ Rebuild join parsing as a dedicated isolated subsystem.
 
 ## Slice 10: expression minimum
 
-### Goal
+The expression surface (1108 LOC, 26 functions, 26 NodeKinds) is split
+into two sub-slices for review-surface manageability. See the planning
+doc at `~/.claude/plans/serialized-moseying-orbit.md` (Slice 10a) and
+the §Slice 10a + 10b sub-slices below.
 
-Rebuild only the expression surface needed for practical query parsing.
+### Slice 10a: expression backbone
 
-### Scope
+**Status: complete (2026-04-25).** See
+[`sdbl-clean-room-slice10a.md`](sdbl-clean-room-slice10a.md) for the
+full attestation. Authored from
+[`sdbl-expressions-mini-spec.md`](sdbl-expressions-mini-spec.md) (the
+C0a clean-room reference) and ITS pubqlang chapters 10, 12, 22, 40,
+60. Commit trail (5 phases, 19 commits including codex-review
+fixups):
+- C0a `820f5984` (mini-spec) + 5 fixup commits;
+- C0b `3eaddae2` (10 Bucket-A gap tests) + 1 fixup;
+- C1 `422851fd` (renames + reorder under clean-room banner) + 1
+  fixup;
+- C2 `dd4777db` (clean-room rewrite of 17 functions + NULL bug fix)
+  + 7 fixup commits;
+- C3 landed with the attestation.
 
-- literals
-- identifiers
-- qualified names
-- unary operators
-- binary operator precedence
-- function calls
-- parenthesized expressions
-- CASE expression
+#### Goal
 
-### Files
+Rebuild the expression backbone — atoms (literals, parameters,
+parens / tuples / subqueries, the bare `*` for `COUNT(*)`) plus the
+operator precedence chain (logical OR / AND / NOT / additive /
+multiplicative / unary).
 
-- `crates/parser/src/grammar/sdbl/expressions.rs`
+#### Scope
 
-### Notes
+- literals (numeric, string, boolean Истина/Ложь, NULL, Неопределено);
+- string literal multi-part IDE-recovery (multi-line BSL queries);
+- parameters (`&Identifier`);
+- parens / tuples / subqueries dispatch (SELECT-keyword lookahead
+  routes to subquery; otherwise expression(s) → `SdblParenExpr` or
+  `SdblTupleExpr`);
+- the bare `*` for `COUNT(*)`;
+- operator precedence ladder NOT > AND > OR (ITS pubqlang/22) +
+  arithmetic +/-/*/(local-allowance %) (ITS pubqlang/40);
+- error-recovery helpers (`is_expression_start`, `is_recovery_point`,
+  `recover_to_delimiter`, `parse_delimited_list`).
 
-This slice should intentionally target a local precedence parser or another
-explicit local shape, not an ANTLR-style reproduction.
+#### Files
+
+- `crates/parser/src/grammar/sdbl/expressions.rs` (the
+  `CLEAN-ROOM Slice 10a` section — 17 functions);
+- `crates/parser/src/grammar/sdbl.rs` (module-level `## Provenance`
+  docstring Slice 10a addition);
+- `crates/parser/tests/sdbl_parser_tests.rs` (12 Bucket-A tests:
+  10 C0b gap tests + 2 NULL-bug-fix regression gates);
+- `crates/parser/tests/sdbl_slice10a_backbone.rs` — the new
+  spec-driven acceptance suite;
+- `docs/legal/sdbl-expressions-mini-spec.md` — the C0a clean-room
+  reference;
+- `docs/legal/sdbl-clean-room-slice10a.md` — the C3 attestation.
+
+#### Notes
+
+The Slice 10a precedence ladder NOT > AND > OR is **ITS-derived**
+from pubqlang/22 §Условие отбора (verbatim quote in the
+attestation). The arithmetic operator inventory and string-`+`
+concatenation are ITS-derived from pubqlang/40. The relative
+binding strength between the comparison/predicate slot and the
+arithmetic chain (multiplicative tighter than additive tighter
+than comparison) is the standard SQL convention adopted by the
+mini-spec without consulting third-party SQL grammar text.
+
+The Slice 10a C2 commit fixed a pre-existing parser bug: bare
+`NULL` at expression-head positions was routed through
+`column_or_function` because the converter at
+`sdbl_token_converter.rs:57` maps `LitNull → TokenKind::Ident` and
+the historical `Some(TokenKind::KwNull)` arm was unreachable dead
+code. Slice 10a C2 added an `at_keyword("NULL")` probe in
+`primary_expr` before the generic `Ident → column_or_function`
+match arm so bare `NULL` now correctly emits `SdblLiteral`.
+
+Modulo `%` is preserved as a local IDE-recovery allowance —
+ITS pubqlang/40 explicitly states «Операция получения остатка %
+в языке запросов не поддерживается» but the parser accepts it
+to produce a recoverable parse tree (one `SdblMultiplicativeExpr`
+containing the `%` token between two operands) so the IDE can
+report the misuse via diagnostics.
+
+### Slice 10b: predicates, comparison, function calls, CAST, CASE
+
+**Status: planned.** Slice 10b inherits and extends the Slice 10a
+mini-spec (`sdbl-expressions-mini-spec.md`) with §Predicates,
+§Function calls, §CAST type specification, §CASE.
+
+#### Goal
+
+Rebuild the remaining expression sub-grammar — predicates,
+comparison, column / function call dispatch, CAST type spec, CASE.
+
+#### Scope
+
+- predicate bodies: IN, IN HIERARCHY, IS NULL, BETWEEN, LIKE, REFS;
+- comparison operator tail (`=`, `<>`, `<`, `<=`, `>`, `>=`);
+- column references and function call argument shape;
+- CAST type specification (`ВЫРАЗИТЬ(... КАК type)`);
+- CASE expression body (WHEN / THEN / ELSE / END);
+- inline tabular field syntax (`.(Field1, Field2, …)`).
+
+#### Files
+
+- `crates/parser/src/grammar/sdbl/expressions.rs` (the LEGACY
+  `comparison_expr_legacy`, `predicate_expr_legacy`,
+  `column_or_function`, `inline_table_fields`, `is_cast_function`,
+  `parse_cast_type`, `case_expr`, `when_clause` — 8 functions to
+  re-author);
+- to-be-authored: `docs/legal/sdbl-clean-room-slice10b.md`
+  attestation;
+- to-be-authored: extension of
+  `docs/legal/sdbl-expressions-mini-spec.md` with §Predicates,
+  §Function calls, §CAST, §CASE.
+
+#### Notes
+
+Slice 10b retires the two `_legacy`-suffixed shims born during
+Slice 10a C1 (`comparison_expr_legacy`, `predicate_expr_legacy`)
+and empties the `LEGACY (Slice 10b pending)` banner in
+`expressions.rs`.
 
 ## Slice 11: clauses after FROM
 
