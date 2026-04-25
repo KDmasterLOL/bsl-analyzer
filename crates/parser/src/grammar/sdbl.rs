@@ -71,24 +71,26 @@
 //! `NULL` through `column_or_function`. See
 //! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation.
 //!
-//! Slice 10b — clean-room (rewrite in progress): the 8 functions
-//! `comparison_expr`, `predicate_expr`, `column_or_function`,
-//! `inline_table_fields`, `is_cast_function`, `parse_cast_type`,
-//! `case_expr`, `when_clause` (all in submodule `expressions` under
-//! the `CLEAN-ROOM Slice 10b` banner) cover predicates / comparison
-//! / column-or-function dispatch / CAST type spec / CASE
-//! expressions. The C1 commit performed pure-refactor renames
+//! Slice 10b — clean-room (complete, landed with C3 2026-04-25):
+//! the 8 functions `comparison_expr`, `predicate_expr`,
+//! `column_or_function`, `inline_table_fields`, `is_cast_function`,
+//! `parse_cast_type`, `case_expr`, `when_clause` (all in submodule
+//! `expressions` under the `CLEAN-ROOM Slice 10b` banner) cover
+//! predicates / comparison / column-or-function dispatch / CAST
+//! type spec / CASE expressions. Authored from ITS pubqlang
+//! chapters 21, 22, 23, 27, 32, 40 (via the local dump at
+//! `/home/itrous/src/tools_migration/its/dump/`) and the
+//! C0a-extended `docs/legal/sdbl-expressions-mini-spec.md`. The C1
+//! commit performed pure-refactor renames
 //! `comparison_expr_legacy` → `comparison_expr` and
 //! `predicate_expr_legacy` → `predicate_expr`, replaced the
 //! previous LEGACY banner with the clean-room banner, and attached
-//! per-function placeholder provenance comments
-//! (`// C1 placeholder — clean-room rewrite in C2`). C2 will
-//! re-author each function body from ITS pubqlang chapters 22, 23,
-//! 27, 32, 40 (via the local dump at
-//! `/home/itrous/src/tools_migration/its/dump/`) and the
-//! C0a-extended `docs/legal/sdbl-expressions-mini-spec.md`, and
-//! replace the placeholders with per-function ITS / mini-spec
-//! provenance comments.
+//! per-function placeholder provenance comments. The C2 commit
+//! re-authored each function body from the cited sources, replaced
+//! the placeholders with ITS / mini-spec provenance comments, and
+//! landed the `column_or_function` clause-keyword recovery fix
+//! (codex Round-1 finding 2 → C2 FIX). See
+//! `docs/legal/sdbl-clean-room-slice10b.md` for the attestation.
 //!
 //! Slices 9, 11 pending: JOIN family (`is_join_keyword`,
 //! `join_clause` — Slice 9) and WHERE / GROUP / HAVING / ORDER /

@@ -442,9 +442,37 @@ report the misuse via diagnostics.
 
 ### Slice 10b: predicates, comparison, function calls, CAST, CASE
 
-**Status: planned.** Slice 10b inherits and extends the Slice 10a
-mini-spec (`sdbl-expressions-mini-spec.md`) with §Predicates,
-§Function calls, §CAST type specification, §CASE.
+**Status: complete (2026-04-25).** See
+[`sdbl-clean-room-slice10b.md`](sdbl-clean-room-slice10b.md) for
+the attestation. The 8 functions `comparison_expr`,
+`predicate_expr`, `column_or_function`, `inline_table_fields`,
+`is_cast_function`, `parse_cast_type`, `case_expr`,
+`when_clause` were re-authored under the `CLEAN-ROOM Slice 10b`
+banner in `crates/parser/src/grammar/sdbl/expressions.rs`. The
+13 NodeKinds emitted by these functions
+(`SdblComparisonExpr`, `SdblInExpr`, `SdblInHierarchyExpr`,
+`SdblIsNullExpr`, `SdblBetweenExpr`, `SdblLikeExpr`,
+`SdblRefsExpr`, `SdblColumnRef`, `SdblFunctionCall`, `SdblType`,
+`SdblInlineTableFields`, `SdblCaseExpr`, `SdblWhenClause`) retain
+their pre-C1 child-attachment shapes; the only intentional
+behaviour change is the `column_or_function` clause-keyword
+recovery fix (codex Round-1 finding 2 → C2 FIX) documented in the
+attestation §Behaviour change. The Slice 10a mini-spec
+(`sdbl-expressions-mini-spec.md`) was extended in C0a with new
+sections §Predicates, §Comparison, §Column references and
+function calls, §CAST type specification, §CASE expressions; the
+§ITS coverage verification table was filled in C2 with verified-
+yes / verified-no outcomes against the local ITS dump (chapters
+21, 22, 23, 27, 32, 40 — chapter 28 deliberately NOT consulted
+per codex Round-1 finding 1). The two `_legacy`-suffixed shims
+born during Slice 10a C1 (`comparison_expr_legacy`,
+`predicate_expr_legacy`) were retired in C1; the
+`LEGACY (Slice 10b pending)` banner is empty.
+
+Commit trail: C0a `77c75e29`, C0b `4c1e8170`, C1 `9899815f`,
+C2 `98a2a6a2`, C3 (this commit, named under Anti-Hilbert
+disclosure in the attestation §Commit trail). See the
+attestation for the full per-phase breakdown.
 
 #### Goal
 
