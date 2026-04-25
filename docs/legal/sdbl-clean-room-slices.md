@@ -361,12 +361,28 @@ INNER/ВНУТРЕННЕЕ, JOIN/СОЕДИНЕНИЕ, OUTER/ВНЕШНЕЕ, ON/
 Commit trail (4 phases, each a single anchor commit):
 
 - C0 `de6820f8` (audit + 15 Bucket-A gap tests in
-  `sdbl_parser_tests.rs` — 4 Tier A1 RU listings + 4 EN
-  bilinguals + 2 Tier A2/D candidates + 2 Tier C/A1
-  bare-JOIN + 2 chapter 48 chained/nested + 3 invariant-7
-  AST-shape pins + 2 audit-gate `Parser::error()`-bump
-  tests; codex P2 fix to harden `assert_clean_parse` helper
-  to reject `SyntaxKind::ERROR` recovery nodes);
+  `sdbl_parser_tests.rs` — 4 Tier A1 RU canonical listings
+  (`test_slice9_canonical_{inner,left_outer,right_outer,
+  full_outer}_join_ru`) + 2 Tier A2/D candidates (bare
+  ПОЛНОЕ / ЛЕВОЕ — resolved at C2 as Tier D local
+  allowances: `test_slice9_bare_{full,left}_join_ru`) + 2
+  Tier C / chapter-44-standalone bare JOIN forms (EN + RU:
+  `test_slice9_bare_join_{en,ru}`) + 2 chapter 48
+  chained/nested (`test_slice9_chained_joins_same_source`,
+  `test_slice9_nested_join_inside_join`) + 3 invariant-7
+  parser-side AST-shape pins for the
+  `JoinWithSubQuery`/`JoinWithVirtualTable`/`LogicalOrInJoin`
+  HIR diagnostics
+  (`test_slice9_from_{subquery,virtual_table}_with_join_ast_shape`,
+  `test_slice9_or_in_on_ast_shape`) + 2 audit-gate
+  `Parser::error()`-bump tests
+  (`test_slice9_missing_{join_keyword,on}_current_behavior`).
+  EN bilingual canonical-form tests live in the C3
+  acceptance suite, not C0. Codex pair-review found one P2
+  (the helper `assert_clean_parse` must reject
+  `SyntaxKind::ERROR` recovery descendants because
+  `Parser::error()` does not populate `Parse::errors()`);
+  fix landed in the same C0 commit);
 - C1 `dc10cd6c` (split out of LEGACY into clean-room
   banner; pure refactor — function bodies move byte-for-
   byte, only banner header / placeholder provenance comments
