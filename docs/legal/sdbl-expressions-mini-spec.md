@@ -151,9 +151,11 @@ Two boundary notes:
   dead code — the converter never produces `KwNull`. Slice 10a C2
   dropped the dead arm. After C2 the recognition paths are:
   `is_expression_start` accepts `NULL` through the generic
-  non-clause-keyword `Ident` arm (with a defensive
-  `at_keyword("NULL")` in the `_` fallback for hypothetical future
-  converter changes); `primary_expr` performs the **decisive**
+  non-clause-keyword `Ident` arm (the `_` fallback's
+  `at_keyword("NULL")` probe is unreachable under the current
+  `Parser::at_keyword` API — see §Recovery contract
+  `is_expression_start` for details); `primary_expr` performs the
+  **decisive**
   dispatch with an `at_keyword("NULL")` probe **before** the
   generic `Ident → column_or_function` match arm so a bare `NULL`
   literal emits `SdblLiteral` rather than `SdblColumnRef`. The
@@ -429,12 +431,18 @@ sites:
 
 - `is_expression_start` accepts `NULL` through the generic
   non-clause `Some(TokenKind::Ident) => !is_clause_keyword(p)`
-  arm (the `_ => p.at_keyword("NULL") | …` fallback is defensive
-  only — it is unreachable when the token is `Ident`, but the
-  fallback would catch a future converter change that produces
-  some other `TokenKind` for `NULL`). The predicate's job is
-  just to say "yes, this can start an expression"; the
-  Ident-route accept is the right answer.
+  arm. The `_ => p.at_keyword("NULL") | …` fallback in the same
+  function is **unreachable** under the current `Parser::at_keyword`
+  API, which only returns true when the current token kind is
+  `TokenKind::Ident` — and the `Ident` arm has already matched
+  before the `_` fallback runs. The fallback is kept as textual
+  symmetry with `primary_expr`'s keyword-probe pattern; it does
+  not provide a defence against hypothetical converter changes
+  that route `NULL` to a non-Ident `TokenKind`. If such a
+  converter change is ever made, both `is_expression_start` and
+  `primary_expr` need to grow an explicit
+  `Some(TokenKind::SomethingElse)` arm, plus a regression test
+  for that shape.
 - `primary_expr` performs the **decisive** dispatch: the
   `p.at_keyword("NULL")` probe runs **before** the generic
   `Some(TokenKind::Ident) => column_or_function(p)` match arm,

@@ -113,9 +113,15 @@ pub(super) fn is_expression_start(p: &Parser) -> bool {
         // CASE / ВЫБОР and bare NULL all arrive as Ident from the
         // converter; the Ident arm above already accepts them as
         // expression starts via the !is_clause_keyword guard. The
-        // explicit at_keyword fallthrough below covers the case where
-        // the converter has produced something other than Ident for
-        // these spellings (defensive — current converter does not).
+        // `_` fallthrough below is **unreachable** under the current
+        // `Parser::at_keyword` API (which only returns true when the
+        // current token is Ident — and the Ident arm has already
+        // matched). It is kept for textual symmetry with
+        // `primary_expr`'s keyword-probe pattern, not as a defence
+        // against future converter changes; if such a change ever
+        // routes one of these keywords to a non-Ident TokenKind,
+        // both this function and `primary_expr` must grow an
+        // explicit `Some(TokenKind::…)` arm.
         _ => p.at_keyword("CASE") || p.at_keyword("ВЫБОР") || p.at_keyword("NULL"),
     }
 }
