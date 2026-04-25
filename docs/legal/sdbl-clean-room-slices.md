@@ -368,8 +368,8 @@ fixups; per-phase totals: C0a 5, C0b 2, C1 2, C2 8, C3 2):
   fix) + 7 fixup commits (`9038e9eb`, `ca75ffb6`, `56583a32`,
   `b199eb90`, `84840228`, `e7aed40a`, `8e14d843`);
 - C3 `9fc55462` (attestation + 28 spec-driven acceptance tests +
-  master-doc flip) + 1 fixup (final-state provenance +
-  commit-trail correction).
+  master-doc flip) + 1 fixup (`7718ae6d` — final-state
+  provenance + commit-trail correction).
 
 #### Goal
 

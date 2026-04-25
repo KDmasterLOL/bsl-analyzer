@@ -544,13 +544,12 @@ that are pure refinements of the canonical commit's intent.
 - **C3 — `9fc55462` (2026-04-25)**: this attestation (initial
   draft) + 28 spec-driven acceptance tests in
   `crates/parser/tests/sdbl_slice10a_backbone.rs` + master-doc
-  flip in `docs/legal/sdbl-clean-room-slices.md`. One fixup
-  (this commit, landed alongside the corrected attestation):
-  flip Slice 10a provenance docstrings in `sdbl.rs` and
-  `expressions.rs` to "complete (2026-04-25)" final-state
-  wording, and correct the commit-trail count to match the
-  reproducible `git log` output (Slice 10a is 5 + 2 + 2 + 8 + 2
-  = 19 commits, originally claimed as 18 + a duplicated entry).
+  flip in `docs/legal/sdbl-clean-room-slices.md`. One fixup:
+  - `7718ae6d` — flip Slice 10a provenance docstrings in
+    `sdbl.rs` and `expressions.rs` to "complete (2026-04-25)"
+    final-state wording, and correct the commit-trail count
+    here and in the master doc to match the reproducible
+    `git log --oneline --reverse develop..HEAD` output.
 
 The phase totals are: C0a 5, C0b 2, C1 2, C2 8, C3 2 — 19
 commits in total. The original attestation (commit `9fc55462`)
