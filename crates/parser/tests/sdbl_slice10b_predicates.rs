@@ -587,3 +587,95 @@ fn test_slice10b_select_field_case_descendant_guard() {
     assert!(kinds.contains(&SyntaxKind::SDBL_LOGICAL_OR_EXPR));
     assert!(!kinds.contains(&SyntaxKind::SDBL_CASE_EXPR));
 }
+
+// ============================================================================
+// 14. Preserved behaviour #2 — leading NOT capture and orphan-NOT
+//     boundary (mini-spec §IDE-recovery allowances #14;
+//     attestation §Preserved pre-refactor behaviours #2)
+//
+// `predicate_expr` consumes a leading `KwNot` BEFORE probing for
+// IN/IS/BETWEEN/LIKE/REFS/comparison. The consumed NOT becomes a
+// direct token child of the eventual predicate wrapper when a
+// branch matches; if no branch matches, the marker is abandoned
+// and the consumed NOT remains as a stray token in the syntax
+// tree (the orphan-NOT boundary).
+// ============================================================================
+
+// NOT BETWEEN — KwNot direct child appears between operand and
+// МЕЖДУ keyword inside SdblBetweenExpr.
+#[test]
+fn test_slice10b_not_between_captures_kwnot() {
+    let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле НЕ МЕЖДУ 1 И 5");
+    let between = first_of_kind(&root, SyntaxKind::SDBL_BETWEEN_EXPR);
+    let between_text = between.text().to_string().to_uppercase();
+    assert!(
+        between_text.contains("НЕ"),
+        "NOT BETWEEN must keep НЕ inside SdblBetweenExpr; got `{}`",
+        between_text
+    );
+    assert!(between_text.contains("МЕЖДУ"));
+}
+
+// NOT LIKE — KwNot direct child appears between operand and
+// ПОДОБНО keyword inside SdblLikeExpr.
+#[test]
+fn test_slice10b_not_like_captures_kwnot() {
+    let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ Поле НЕ ПОДОБНО \"X%\"");
+    let like = first_of_kind(&root, SyntaxKind::SDBL_LIKE_EXPR);
+    let like_text = like.text().to_string().to_uppercase();
+    assert!(
+        like_text.contains("НЕ"),
+        "NOT LIKE must keep НЕ inside SdblLikeExpr; got `{}`",
+        like_text
+    );
+    assert!(like_text.contains("ПОДОБНО"));
+}
+
+// Orphan-NOT no-branch boundary — input `1 НЕ 2` consumes `1` as
+// additive operand, consumes `НЕ` as the leading NOT prefix, then
+// finds neither a predicate keyword nor a comparison operator at
+// `2`. The marker is abandoned and `НЕ` remains as a stray token
+// in the syntax tree. Mini-spec §IDE-recovery allowances #14.
+//
+// The contract pinned here: NO predicate / comparison wrapper is
+// emitted for this input, so a future rewrite that "fixes" the
+// orphan-NOT boundary by emitting a partial wrapper would break
+// this test and trigger an explicit decision in the next slice
+// instead of silently changing the AST shape.
+#[test]
+fn test_slice10b_orphan_not_no_predicate_wrapper() {
+    let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Т ГДЕ 1 НЕ 2");
+    let root = parse.syntax_node();
+    let predicate_wrapper_count = root
+        .descendants()
+        .filter(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::SDBL_IN_EXPR
+                    | SyntaxKind::SDBL_IN_HIERARCHY_EXPR
+                    | SyntaxKind::SDBL_IS_NULL_EXPR
+                    | SyntaxKind::SDBL_BETWEEN_EXPR
+                    | SyntaxKind::SDBL_LIKE_EXPR
+                    | SyntaxKind::SDBL_REFS_EXPR
+                    | SyntaxKind::SDBL_COMPARISON_EXPR
+            )
+        })
+        .count();
+    assert_eq!(
+        predicate_wrapper_count, 0,
+        "Orphan-NOT input `1 НЕ 2` must NOT emit any predicate/comparison wrapper (mini-spec §IDE-recovery allowances #14). Tree:\n{:#?}",
+        root
+    );
+
+    // The НЕ token must still appear in the tree as a stray
+    // (consumed but not wrapped).
+    let has_ne_token = root
+        .descendants_with_tokens()
+        .filter_map(|c| c.into_token())
+        .any(|t| t.text().eq_ignore_ascii_case("НЕ"));
+    assert!(
+        has_ne_token,
+        "Orphan НЕ must remain as a stray token in the syntax tree.\nTree:\n{:#?}",
+        root
+    );
+}

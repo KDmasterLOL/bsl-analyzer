@@ -844,13 +844,28 @@ fn comparison_expr(p: &mut Parser) {
 ///       )?
 /// ```
 fn predicate_expr(p: &mut Parser) {
-    // ITS pubqlang/22 §Условие отбора (BETWEEN, IN value-list,
-    // comparison operators) + pubqlang/23 §Шаблон (LIKE) +
-    // pubqlang/27 §ЕСТЬ NULL canonical example + pubqlang/32
-    // §В ИЕРАРХИИ canonical example + pubqlang/40 §ССЫЛКА
-    // canonical example. ESCAPE/СПЕЦСИМВОЛ is a local IDE-recovery
-    // allowance — not in the dumped ITS chapters; see mini-spec
-    // §IDE-recovery allowances #13. Mini-spec §Predicates.
+    // ITS provenance (verified against the local pubqlang dump in
+    // C2; see mini-spec §ITS coverage verification table):
+    //   - BETWEEN/МЕЖДУ → pubqlang/22 §Условие отбора (листинг
+    //     1.33 канonical `Дата МЕЖДУ ДАТАВРЕМЯ(...) И ДАТАВРЕМЯ(...)`);
+    //   - LIKE/ПОДОБНО → pubqlang/23 §Шаблон (листинг 1.34
+    //     канonical `Наименование ПОДОБНО "%Иван%"`);
+    //   - IS NULL/ЕСТЬ NULL → pubqlang/27 канonical
+    //     `КОГДА (Товары.Производитель) ЕСТЬ NULL ТОГДА "NULL"`;
+    //   - IN HIERARCHY/В ИЕРАРХИИ → pubqlang/32 (листинг 1.51
+    //     канonical `Товары.Ссылка В ИЕРАРХИИ (&ГруппаТоваров)`);
+    //   - REFS/ССЫЛКА → pubqlang/40 канonical
+    //     `(ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная)`.
+    //
+    // local: the IN value-list shape `<expr> В (<v1>, <v2>, ...)`,
+    // the IN-with-subquery form, the six comparison operators
+    // (`= <> < <= > >=`), and the ESCAPE/СПЕЦСИМВОЛ optional
+    // clause are NOT enumerated in the dumped ITS chapters
+    // (verified absent in the §ITS coverage verification rows of
+    // the C0a-extended mini-spec); they are preserved as local
+    // IDE-recovery allowances under mini-spec §IDE-recovery
+    // allowances #10, #13, the §Predicates §SdblInExpr shape, and
+    // the §Comparison section. Mini-spec §Predicates.
     let m = p.start();
 
     additive_expr(p);

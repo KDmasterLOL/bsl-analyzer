@@ -492,16 +492,30 @@ comparison, column / function call dispatch, CAST type spec, CASE.
 
 #### Files
 
-- `crates/parser/src/grammar/sdbl/expressions.rs` (the LEGACY
-  `comparison_expr_legacy`, `predicate_expr_legacy`,
+- `crates/parser/src/grammar/sdbl/expressions.rs` — the 8 Slice
+  10b functions (`comparison_expr`, `predicate_expr`,
   `column_or_function`, `inline_table_fields`, `is_cast_function`,
-  `parse_cast_type`, `case_expr`, `when_clause` — 8 functions to
-  re-author);
-- to-be-authored: `docs/legal/sdbl-clean-room-slice10b.md`
-  attestation;
-- to-be-authored: extension of
-  `docs/legal/sdbl-expressions-mini-spec.md` with §Predicates,
-  §Function calls, §CAST, §CASE.
+  `parse_cast_type`, `case_expr`, `when_clause`) live under the
+  `CLEAN-ROOM Slice 10b — predicates, comparison, function calls,
+  CAST, CASE` banner. C2 re-authored each body and attached
+  per-function ITS / mini-spec / `// local: …` provenance
+  comments; the previous LEGACY banner is empty.
+- `docs/legal/sdbl-clean-room-slice10b.md` — Slice 10b clean-room
+  attestation (landed with C3 `66dca2ae`).
+- `docs/legal/sdbl-expressions-mini-spec.md` — extended in C0a
+  (`77c75e29`) with §Predicates, §Comparison, §Column references
+  and function calls (with §Inline tabular field syntax sub-
+  section), §CAST type specification, §CASE expressions; the §ITS
+  coverage verification table was filled in C2 with verified-yes
+  / verified-no outcomes against the local pubqlang dump.
+- `crates/parser/tests/sdbl_parser_tests.rs` — extended in C0b
+  with 19 Bucket-A gap-test functions (12 a-l + 2 m EN/RU
+  unignored in C2 + 5 n.1-n.5 SELECT-field predicate descendant
+  guards).
+- `crates/parser/tests/sdbl_slice10b_predicates.rs` — new in C3,
+  40 spec-driven acceptance tests including the 2 mandatory
+  clause-keyword recovery regression-gates and the 5 mandatory
+  SELECT-field descendant guards.
 
 #### Notes
 

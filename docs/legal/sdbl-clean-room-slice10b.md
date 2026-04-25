@@ -47,7 +47,7 @@ The paths claimed as clean-room Slice 10b authorship are:
 
 - The 19 Bucket-A gap-test functions in
   `crates/parser/tests/sdbl_parser_tests.rs` added in C0b plus
-  the 40 spec-driven acceptance tests in
+  the 43 spec-driven acceptance tests in
   `crates/parser/tests/sdbl_slice10b_predicates.rs` added in C3.
 
 - The §ITS coverage verification rows for the new mini-spec
@@ -351,11 +351,20 @@ by an acceptance test in
    not match any predicate / comparison branch, the marker is
    abandoned and the consumed `NOT` remains as a stray token in
    the syntax tree — the orphan-NOT boundary
-   (mini-spec §IDE-recovery allowances #14). Acceptance:
-   `sdbl_parser_tests::test_slice10b_not_in_subquery` (NOT
-   prefix on IN), and the absence of IS-NOT-NULL / NOT-BETWEEN /
-   NOT-LIKE failures in the existing 161-test
-   `sdbl_parser_tests` suite.
+   (mini-spec §IDE-recovery allowances #14). Acceptance (named
+   tests in `crates/parser/tests/sdbl_slice10b_predicates.rs`):
+   - `test_slice10b_not_in_with_subquery` — NOT IN prefix
+     captured inside SdblInExpr;
+   - `test_slice10b_is_not_null_english` — IS NOT NULL prefix
+     captured inside SdblIsNullExpr;
+   - `test_slice10b_not_between_captures_kwnot` — NOT BETWEEN
+     prefix captured inside SdblBetweenExpr;
+   - `test_slice10b_not_like_captures_kwnot` — NOT LIKE prefix
+     captured inside SdblLikeExpr;
+   - `test_slice10b_orphan_not_no_predicate_wrapper` — `1 НЕ 2`
+     yields **no** predicate / comparison wrapper, and the
+     consumed `НЕ` remains as a stray token (the orphan-NOT
+     boundary itself).
 
 3. **`IN HIERARCHY` is parsed as `IN`-prefix +
    `HIERARCHY`-suffix, not as a single keyword pair.** The parser
@@ -518,7 +527,7 @@ parentheses for the post-Slice-10b state.
 5. `cargo test -p parser --test sdbl_slice10a_backbone`
    (28 passed).
 6. `cargo test -p parser --test sdbl_slice10b_predicates`
-   (40 passed — the new C3 acceptance suite).
+   (43 passed — the new C3 acceptance suite).
 7. `cargo test -p parser --test sdbl_slice2_keywords`
    (45 passed).
 8. `cargo test -p parser --test sdbl_golden_corpus`
@@ -589,7 +598,7 @@ section).
   verified-no outcomes, and unignores the two C0b regression-
   gate tests in the same atomic commit. No fixup commits.
 - **C3 — `66dca2ae` (2026-04-25)**: this attestation (initial
-  draft) + 40 spec-driven acceptance tests in
+  draft) + 43 spec-driven acceptance tests in
   `crates/parser/tests/sdbl_slice10b_predicates.rs` (including
   the 2 mandatory clause-keyword recovery tests and the 5
   mandatory SELECT-field predicate descendant guards) +
