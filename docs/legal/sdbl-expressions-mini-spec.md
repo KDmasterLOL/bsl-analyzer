@@ -211,7 +211,7 @@ primaryExpression
    | parenOrSubqueryExpression              (LPAREN)
    | columnOrFunctionCall                   (Ident, NOT a clause keyword)
    | parameterExpression                    (& Ident)
-   | literalExpression                      (Decimal | Float | String | KwTrue | KwFalse | KwNull | KwUndefined)
+   | literalExpression                      (Decimal | Float | String | KwTrue | KwFalse | KwUndefined | Ident-at-keyword "NULL")
    | starLiteral                            (Star — emits SdblLiteral)
    | error-fallback (SdblError)             (anything else)
 ```
@@ -223,7 +223,7 @@ literalExpression
   := numericLiteral                         (Decimal | Float)
    | stringLiteralOrMulti
    | booleanLiteral                         (KwTrue | KwFalse — bilingual)
-   | nullLiteral                            (KwNull | KwUndefined)
+   | nullLiteral                            (KwUndefined | Ident-at-keyword "NULL")
 ```
 
 `numericLiteral`, `booleanLiteral`, `nullLiteral` each emit
@@ -345,10 +345,18 @@ is_expression_start(p) := true  iff  next-token can lead an expression
 ```
 
 Accept set: `Decimal`, `Float`, `String`, `KwTrue`, `KwFalse`,
-`KwNull`, `KwUndefined`, non-keyword `Ident`, `Plus`, `Minus`,
-`KwNot`, `Star`, `LParen`, `Ampersand`, `at_keyword("CASE")`,
-`at_keyword("ВЫБОР")`. Reject set: every other `TokenKind`,
-including all clause keywords gated by `select::is_clause_keyword`.
+`KwUndefined`, non-keyword `Ident`, `Plus`, `Minus`, `KwNot`,
+`Star`, `LParen`, `Ampersand`, `at_keyword("CASE")`,
+`at_keyword("ВЫБОР")`, `at_keyword("NULL")`. Reject set: every other
+`TokenKind`, including all clause keywords gated by
+`select::is_clause_keyword`.
+
+The `KwNull` `TokenKind` arm currently present at
+expressions.rs:47 is **dead code** (the converter at
+sdbl_token_converter.rs:57 maps `LitNull → Ident`, not `KwNull`)
+and Slice 10a C2 must drop it; the `at_keyword("NULL")` branch is
+the live recognition path for bare `NULL` at expression-head
+positions.
 
 ### `is_recovery_point`
 
