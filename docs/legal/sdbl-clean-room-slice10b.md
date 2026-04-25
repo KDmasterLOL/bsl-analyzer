@@ -596,9 +596,20 @@ section).
   master-doc flip in `docs/legal/sdbl-clean-room-slices.md` +
   module Provenance docstring flip to "complete (2026-04-25)"
   with attestation citation in `crates/parser/src/grammar/sdbl.rs`.
-  No fixup commits; the absolute-last trailing commit on this
-  branch is the one that names this C3 hash here under the
-  Anti-Hilbert disclosure protocol below.
+  Two fixup commits:
+  - `ef85b028` — Anti-Hilbert close-out: replace the "C3 — this
+    commit" placeholder in this §Commit trail (and in the
+    `docs/legal/sdbl-clean-room-slices.md` §Slice 10b commit-
+    trail line) with the named hash `66dca2ae`.
+  - `7f5e1cbc` — flip the Slice 10b module-level Provenance
+    docstring and the in-file `CLEAN-ROOM Slice 10b` banner
+    block in `crates/parser/src/grammar/sdbl/expressions.rs` to
+    post-C2 final-state wording (replacing leftover "C1
+    placeholder" / "rewrite in progress" / future-tense "C2 will
+    rewrite" language and a self-replacing
+    `comparison_expr → comparison_expr` rename description
+    introduced by the C1 bulk-rename). Codex stop-time review
+    finding.
 
 **Anti-Hilbert disclosure.** The very last commit on this branch
 — the one that authors / amends this attestation §Commit trail
@@ -613,10 +624,10 @@ hash: that commit is the one that landed this attestation in its
 current state, and it is the natural endpoint of the trail.
 
 The phase totals (named hashes in the trail above): C0a 1,
-C0b 1, C1 1, C2 1, C3 1 — 5 commits enumerated (no fixup
-commits at attestation-write time). The branch HEAD adds one
-trailing commit (the one editing this trail), per the
-Anti-Hilbert disclosure above.
+C0b 1, C1 1, C2 1, C3 1 anchor + 2 fixups (`ef85b028`,
+`7f5e1cbc`) = 7 commits enumerated. The branch HEAD adds one
+trailing commit (the one editing this trail to name the two
+fixups), per the Anti-Hilbert disclosure above.
 
 ## Licensing note
 

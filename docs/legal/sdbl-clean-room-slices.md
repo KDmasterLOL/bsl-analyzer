@@ -470,9 +470,11 @@ born during Slice 10a C1 (`comparison_expr_legacy`,
 `LEGACY (Slice 10b pending)` banner is empty.
 
 Commit trail: C0a `77c75e29`, C0b `4c1e8170`, C1 `9899815f`,
-C2 `98a2a6a2`, C3 `66dca2ae`. See the attestation for the full
-per-phase breakdown and the Anti-Hilbert disclosure for the
-trailing fixup that names the C3 hash here.
+C2 `98a2a6a2`, C3 `66dca2ae` + 2 C3 fixups (`ef85b028`
+Anti-Hilbert close-out, `7f5e1cbc` post-C2 docstring/banner
+final-state wording). See the attestation for the full per-phase
+breakdown and the Anti-Hilbert disclosure for the trailing fixup
+that names these hashes here.
 
 #### Goal
 
