@@ -10,12 +10,20 @@
 //!
 //! ## Provenance
 //!
-//! Slice 10a — clean-room (in progress, attestation pending):
+//! Slice 10a — clean-room (in progress; attestation lands at C3):
 //! expression backbone (atoms + operator precedence chain + parens /
 //! tuple / subquery). Authored from
-//! `docs/legal/sdbl-expressions-mini-spec.md` and ITS pubqlang/10 + /12.
-//! The Slice 10a attestation (`sdbl-clean-room-slice10a.md`) is
-//! authored at C3 and is not yet present in tree.
+//! `docs/legal/sdbl-expressions-mini-spec.md` and the local 1C ITS
+//! pubqlang dump (chapters 22 §WHERE / precedence ladder, 40 §Литералы
+//! and §Арифметические операции, 60 §Передача параметров в запрос).
+//! The clean-room claim follows the same convention as Slices 1, 2,
+//! 6, 7, 8 (see their attestations under `docs/legal/sdbl-clean-room-
+//! slice{1,2,6,7,8}.md`): **independent derivation from the cited
+//! sources plus the project's local compatibility constraints, not
+//! textual novelty**. Where the resulting event-parser shape closely
+//! matches the pre-clean-room implementation, that is the natural
+//! convergence on a single ITS-derived grammar shape, not consultation
+//! of pre-C1 bodies during authorship.
 //!
 //! Slice 10b — pending: predicates, comparison, column-or-function, CAST,
 //! CASE. Bodies remain Tier B under the LEGACY banner; the
@@ -31,10 +39,14 @@ use lexer::TokenKind;
 // ============================================================================
 //
 // Authored from `docs/legal/sdbl-expressions-mini-spec.md` (the C0a
-// clean-room reference) and ITS pubqlang/10 + /12. The Slice 10a
-// attestation (`sdbl-clean-room-slice10a.md`) is authored at C3 and is
-// not yet present in tree. Per-function provenance comments are
-// attached at C2.
+// clean-room reference; see its §Non-consultation statement and §ITS
+// coverage verification) and the local 1C ITS pubqlang dump
+// (chapters 22, 40, 60). Per-function provenance comments cite the
+// specific ITS chapter or mini-spec section that authorises each
+// function's grammar shape. The clean-room claim is independent
+// derivation from the cited sources, not textual novelty — see the
+// module-level Provenance docstring above for the project-wide
+// convention.
 //
 // The 17 functions below cover the Slice 10a surface:
 //   - Helpers: is_expression_start, is_recovery_point,

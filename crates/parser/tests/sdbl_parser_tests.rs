@@ -2927,3 +2927,83 @@ fn test_slice10a_newline_separated_logical_and() {
         "SdblLogicalAndExpr text must cover both operands (got {and_text:?})",
     );
 }
+
+// Bucket A — Slice 10a NULL dispatch regression gate (WHERE side).
+//
+// Pre-Slice-10a-C2, bare `NULL` was routed through `column_or_function`
+// because `sdbl_token_converter.rs:57` maps `LitNull → TokenKind::Ident`
+// and the historical `Some(TokenKind::KwNull)` arm in the parser was
+// unreachable dead code — bare `NULL` was silently consumed as
+// `SdblColumnRef`. Slice 10a C2 added an `at_keyword("NULL")` probe
+// before the generic `Ident → column_or_function` arm so bare `NULL`
+// now emits `SdblLiteral` wrapping the `Ident` token.
+//
+// `check_no_errors` alone (as in the existing `test_null_literal` at
+// line 290) cannot detect the buggy shape because the pre-fix shape
+// was a parse-tree shape bug, not a parse-error bug. This test gates
+// the fix structurally. Mini-spec §Atoms primary dispatch + ITS
+// pubqlang/40 §Литералы.
+#[test]
+fn test_slice10a_bare_null_emits_literal_not_column_ref() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Т ГДЕ Поле = NULL";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "WHERE …= NULL should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input, "Root must cover full input");
+
+    let null_token = root
+        .descendants_with_tokens()
+        .filter_map(|c| c.into_token())
+        .find(|t| t.kind() == SyntaxKind::IDENT && t.text().eq_ignore_ascii_case("NULL"))
+        .expect("NULL Ident token must be present");
+
+    let null_parent_kind = null_token.parent().map(|p| p.kind());
+    assert_eq!(
+        null_parent_kind,
+        Some(SyntaxKind::SDBL_LITERAL),
+        "Bare NULL must emit SdblLiteral wrapping the Ident token; got parent {null_parent_kind:?}. Pre-Slice-10a-C2 bug placed NULL inside SdblColumnRef.",
+    );
+
+    // Defensive cross-angle check: no SdblColumnRef in the tree may
+    // contain the NULL text (catches future refactors that change
+    // the wrapper layout in a different direction).
+    let column_refs_with_null = root
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::SDBL_COLUMN_REF)
+        .filter(|n| n.text().to_string().to_uppercase().contains("NULL"))
+        .count();
+    assert_eq!(
+        column_refs_with_null, 0,
+        "No SdblColumnRef may contain the NULL token; got {column_refs_with_null} occurrences.",
+    );
+}
+
+// Bucket A — Slice 10a NULL at SELECT-field-head position.
+//
+// Stronger gate: `SELECT NULL FROM Т` places NULL at the head of an
+// expression position via the SELECT field list (no comparison
+// context). Pre-Slice-10a-C2 this also routed NULL to SdblColumnRef
+// via primary_expr's match arm `Some(TokenKind::Ident) =>
+// column_or_function(p)`. Mini-spec §Atoms primary dispatch + ITS
+// pubqlang/40 §Литералы.
+#[test]
+fn test_slice10a_select_field_null_emits_literal() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ NULL ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "SELECT NULL should parse: {:?}", parse.errors());
+    let root = parse.syntax_node();
+    assert_eq!(root.text().to_string(), input);
+
+    let null_token = root
+        .descendants_with_tokens()
+        .filter_map(|c| c.into_token())
+        .find(|t| t.kind() == SyntaxKind::IDENT && t.text().eq_ignore_ascii_case("NULL"))
+        .expect("NULL Ident token must be present");
+    assert_eq!(
+        null_token.parent().map(|p| p.kind()),
+        Some(SyntaxKind::SDBL_LITERAL),
+        "Bare NULL at SELECT-field position must emit SdblLiteral",
+    );
+}

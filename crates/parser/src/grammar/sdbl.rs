@@ -65,11 +65,11 @@
 //! `comparison_expr` → `comparison_expr_legacy` and
 //! `predicate_expr` → `predicate_expr_legacy` and moved the deferred
 //! bodies under the LEGACY banner; per-function provenance comments
-//! are attached at C2. The Slice 10a attestation
-//! (`sdbl-clean-room-slice10a.md`) is authored at C3 and is not yet
-//! present in tree — until C3 lands, the C0a mini-spec at
+//! were attached at C2. The C0a mini-spec at
 //! `docs/legal/sdbl-expressions-mini-spec.md` is the live clean-room
-//! reference document.
+//! reference document; the formal attestation under
+//! `docs/legal/sdbl-clean-room-slice{1,2,6,7,8}.md` convention is a
+//! C3 deliverable that has not yet landed in this branch.
 //!
 //! Slices 9, 10b, 11 pending: JOIN family (`is_join_keyword`,
 //! `join_clause` — Slice 9), expression predicates / column-or-function
