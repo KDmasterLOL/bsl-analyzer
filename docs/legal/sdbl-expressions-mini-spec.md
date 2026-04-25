@@ -447,20 +447,64 @@ followed by exactly one operand expression as a direct child node.
 
 `SdblParameter` emitted at *any* call site (Slice 10a
 `parameter_expr` for expression-context, Slice 8 `table_ref` for
-parameter-source FROM) has exactly two direct children: the
-`Ampersand` token and the following `Ident` token, with no trivia
-node between them.
+parameter-source FROM) has the following shape:
+
+- **Complete `&Ident`:** two direct children — the `Ampersand`
+  token and the following `Ident` token, with no trivia node
+  between them.
+- **Incomplete bare `&` at EOF or before a clause keyword:** one
+  direct child — the `Ampersand` token alone. The identifier bump
+  is guarded by `if p.at(TokenKind::Ident)` (not required by
+  `p.expect`), so the parameter marker still completes when the
+  user is mid-typing. Slice 8 attestation §Preserved-behaviour #7
+  locks this for FROM-context (`ВЫБРАТЬ * ИЗ &`); Slice 10a
+  preserves the same recovery shape for expression-context
+  (`ВЫБРАТЬ &` and similar). HIR `lower_parameter` at
+  `crates/sdbl-hir/src/lower/expr/mod.rs:453+` reads
+  `node.text()` to derive the parameter name and tolerates the
+  bare `&` shape.
 
 ### VT-arg children direct under SdblTableRef
 
 The HIR consumer at `crates/sdbl-hir/src/lower/from_clause.rs:283-306`
 filters direct children of `SdblTableRef` for VT-arg lowering. The
-filter set includes `SDBL_LOGICAL_OR_EXPR`, `SDBL_LOGICAL_AND_EXPR`,
-`SDBL_ADDITIVE_EXPR`, `SDBL_MULTIPLICATIVE_EXPR`, `SDBL_UNARY_EXPR`,
-`SDBL_PARAMETER`, `SDBL_LITERAL`, `SDBL_TUPLE_EXPR`,
-`SDBL_PAREN_EXPR`. The Slice 10a clean-room rewrite must keep
-emitting these exact NodeKinds (no rename, no removal, no new
-intermediate wrapping) at the VT-arg expression position.
+*full* filter set is:
+
+- `SDBL_LOGICAL_OR_EXPR`
+- `SDBL_LOGICAL_AND_EXPR`
+- `SDBL_COMPARISON_EXPR`
+- `SDBL_ADDITIVE_EXPR`
+- `SDBL_MULTIPLICATIVE_EXPR`
+- `SDBL_UNARY_EXPR`
+- `SDBL_COLUMN_REF`
+- `SDBL_LITERAL`
+- `SDBL_FUNCTION_CALL`
+- `SDBL_PARAMETER`
+- `SDBL_PAREN_EXPR`
+- `SDBL_TUPLE_EXPR`
+- `SDBL_IN_EXPR`
+- `SDBL_MISSING_ARG`
+- `ERROR`
+
+Slice 10a owns the clean-room rewrite of the producers for the
+operator wrappers + `SDBL_PARAMETER` + `SDBL_LITERAL` +
+`SDBL_PAREN_EXPR` + `SDBL_TUPLE_EXPR` subset (8 of the 15 kinds).
+Slice 10b owns `SDBL_COMPARISON_EXPR`, `SDBL_COLUMN_REF`,
+`SDBL_FUNCTION_CALL`, `SDBL_IN_EXPR`. `SDBL_MISSING_ARG` and `ERROR`
+are emitted by the existing VT-arg recovery path (Slice 8 LEGACY
+`virtual_table_args_legacy`, deferred to Slice 5).
+
+For the Slice 10a / 10b clean-room rewrites, the contract is: each
+re-authored producer must continue to emit its respective NodeKind
+as a *direct* child of `SdblTableRef` (no new intermediate wrappers,
+no NodeKind rename). For the deferred kinds (`SDBL_MISSING_ARG`,
+`ERROR`), the C1 extraction-preservation rule already locks them
+bit-for-bit until Slice 5 reauthors them. For the Slice 10b kinds,
+the Slice 10a rewrite *must not* drop them from the VT-arg position
+— `column_or_function`, `predicate_expr`, etc. continue to be
+reachable via `primary_expr` dispatch and continue to land as
+direct `SdblTableRef` children when invoked from the VT-arg call
+site.
 
 ## IDE-recovery allowances (vs ITS)
 
@@ -554,9 +598,13 @@ not used as working text:
   from any external grammar).
 
 The sources actually consulted are listed under §Primary sources
-and §Secondary sources at the top of this document. The resulting
-expression grammar shape is the natural expression of the ITS
-operator inventory plus the project's own event-parser conventions
-established in Slices 1, 2, 6, 7, and 8, and would converge
-regardless of author. The claim made here is **independent
-derivation from the sources above**, not textual novelty.
+and §Secondary sources at the top of this document. The claim made
+here is **independent derivation from those sources plus the
+project's local compatibility constraints** (the AST-shape
+contracts and IDE-recovery allowances enumerated above) — not
+textual novelty, and not a uniqueness claim for the resulting
+grammar shape. Other clean-room authors working from the same
+sources may reach a different but equivalent grammar shape; this
+mini-spec records the specific choices this project made, the
+rationale for each, and the consumer-side compatibility contracts
+that constrained those choices.
