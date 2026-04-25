@@ -608,7 +608,7 @@ the C0a anchor `77c75e29`.
   master-doc flip in `docs/legal/sdbl-clean-room-slices.md` +
   module Provenance docstring flip to "complete (2026-04-25)"
   with attestation citation in `crates/parser/src/grammar/sdbl.rs`.
-  Six fixup commits:
+  Eight fixup commits:
   - `ef85b028` — Anti-Hilbert close-out: replace the "C3 — this
     commit" placeholder in this §Commit trail (and in the
     `docs/legal/sdbl-clean-room-slices.md` §Slice 10b commit-
@@ -656,6 +656,16 @@ the C0a anchor `77c75e29`.
     doc can navigate directly to the relevant preserved-
     behaviour pin without first reading the attestation. Codex
     stop-time review finding.
+  - `79c52f49` — Anti-Hilbert close-out for `8e0ca19c` and
+    `82e09e3a`: name them in this §Commit trail and in the
+    master-doc commit-trail line.
+  - `2b6d2e55` — correct the §Commit trail base ref from
+    `1635be4b` to `6d7053bf` (the Slice 10a tail commit
+    "parser: rewrite C0b multi-string test docstring to match
+    actual contract"). The previous base ref leaked the Slice 10a
+    tail commit into the disclosed range, making the
+    "exactly one commit beyond the last named hash" disclosure
+    off by one. Codex stop-time review finding.
 
 **Anti-Hilbert disclosure.** The very last commit on this branch
 — the one that authors / amends this attestation §Commit trail
@@ -670,11 +680,11 @@ hash: that commit is the one that landed this attestation in its
 current state, and it is the natural endpoint of the trail.
 
 The phase totals (named hashes in the trail above): C0a 1,
-C0b 1, C1 1, C2 1, C3 1 anchor + 6 fixups (`ef85b028`,
-`7f5e1cbc`, `ecb26896`, `9943d47a`, `8e0ca19c`, `82e09e3a`) =
-11 commits enumerated. The branch HEAD adds one trailing commit
-(the one editing this trail to name the six fixups), per the
-Anti-Hilbert disclosure above.
+C0b 1, C1 1, C2 1, C3 1 anchor + 8 fixups (`ef85b028`,
+`7f5e1cbc`, `ecb26896`, `9943d47a`, `8e0ca19c`, `82e09e3a`,
+`79c52f49`, `2b6d2e55`) = 13 commits enumerated. The branch HEAD
+adds one trailing commit (the one editing this trail to name the
+eight fixups), per the Anti-Hilbert disclosure above.
 
 ## Licensing note
 
