@@ -625,7 +625,7 @@ feature branch off local `develop`:
   BY post-C2 wording; R3 §Non-consultation contradiction;
   R4 APPROVE). +355/-139 LOC across 3 files.
 
-- **C3** `<THIS_COMMIT>` (2026-04-26) — Slice 11 attestation
+- **C3** `8ebe376b` (2026-04-26) — Slice 11 attestation
   (this file), spec-driven acceptance suite at
   `crates/parser/tests/sdbl_slice11_clauses.rs` (35 tests),
   master-doc status flip in
@@ -637,7 +637,7 @@ feature branch off local `develop`:
   `docs/legal/sdbl-clean-room-slice11.md`.
 
 - **Anti-Hilbert close-out** `<CLOSE_OUT_COMMIT>` (2026-04-26)
-  — replaces the `<THIS_COMMIT>` placeholder above with the
+  — replaces the `8ebe376b` placeholder above with the
   actual SHA of the C3 commit. This second commit lands
   immediately after the C3 commit on the same feature branch
   and is what makes the §Commit trail self-resolving: the
@@ -652,10 +652,10 @@ feature branch off local `develop`:
 **Anti-Hilbert disclosure.** This C3 commit is the last anchor
 of the Slice 11 commit trail. Per the Slice 9 / Slice 10b
 precedent, the C3 commit message and the attestation §Commit
-trail entry both contain a `<THIS_COMMIT>` placeholder for
+trail entry both contain a `8ebe376b` placeholder for
 the C3 SHA at land time. The Anti-Hilbert close-out commit
 listed above lands IMMEDIATELY after C3 on the same feature
-branch and replaces both `<THIS_COMMIT>` placeholders with
+branch and replaces both `8ebe376b` placeholders with
 the actual C3 SHA. The close-out commit's own SHA is filled
 in by a one-line follow-up edit at the very end if needed (or
 left as `<CLOSE_OUT_COMMIT>` if the close-out is the truly
