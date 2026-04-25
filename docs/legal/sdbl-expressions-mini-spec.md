@@ -44,6 +44,18 @@ is the local dump at `/home/itrous/src/tools_migration/its/dump/`
 - `Передача параметров в запрос` — `&Identifier` parameter prefix
   syntax; ПОДОБНО (LIKE):
   - `https://its.1c.ru/db/pubqlang/content/60/hdoc`
+- `Как получить записи таблицы, содержащие строки, соответствующие
+  заданному шаблону` — ПОДОБНО (LIKE) pattern-matching primitive
+  (Slice 10b primary source):
+  - `https://its.1c.ru/db/pubqlang/content/23/hdoc`
+- `Как получить записи иерархической таблицы и расположить их в
+  порядке иерархии` — ЕСТЬ NULL canonical example
+  (Slice 10b primary source):
+  - `https://its.1c.ru/db/pubqlang/content/27/hdoc`
+- `Как получить записи иерархической таблицы, находящиеся в
+  иерархии выбранной группы` — В ИЕРАРХИИ canonical example
+  (Slice 10b primary source):
+  - `https://its.1c.ru/db/pubqlang/content/32/hdoc`
 
 Secondary sources:
 
@@ -51,7 +63,7 @@ Secondary sources:
   canonical `TokenKind` mapping of operator and keyword lexemes;
 - `crates/parser/src/parser.rs` — for the project's own event-parser
   conventions established in Slices 6 / 7 / 8;
-- the project's own attestations under `docs/legal/sdbl-clean-room-slice{1,2,6,7,8}.md`
+- the project's own attestations under `docs/legal/sdbl-clean-room-slice{1,2,6,7,8,10a}.md`
   — for the per-slice clean-room discipline mirrored here.
 
 ## Clean-room constraints
@@ -111,12 +123,21 @@ This mini-spec covers:
   `crates/ide-diagnostics/src/handlers/query_parse_error.rs`) read
   beyond NodeKind identity.
 
-It does **not** cover (Slice 10b inherits and extends):
+It now also covers (added in the Slice 10b extension):
 
 - predicate bodies (IN, IN HIERARCHY, IS NULL, BETWEEN, LIKE, REFS);
-- column references and function call argument shape;
+- column references, function call argument shape, and inline
+  tabular field syntax;
 - CAST type specification (`ВЫРАЗИТЬ(... КАК ...)`);
-- CASE expression body (WHEN clauses, ELSE branch).
+- CASE expression body (WHEN / THEN / ELSE / END).
+
+It does **not** cover:
+
+- specialised function vocabulary at the lexer / type-checker layer
+  — Slice 4 owns the lexer-level vocabulary for aggregate / date /
+  string / type-helper functions; Slice 13 owns type-level CAST
+  checking (matching `parseCastType` output against the
+  `bsl-metadata` MDO catalog).
 
 ## Lexical assumptions
 
@@ -378,6 +399,399 @@ positions, so the SELECT keyword must appear explicitly.
 The empty tuple `()` and the trailing-comma case `(1, 2,)` are
 handled by the empty-element recovery loop — see §Recovery
 contract.
+
+## Predicates
+
+The Slice 10b predicate body slot sits inside the
+`comparisonExpression` precedence level (between NOT and the
+arithmetic chain). The slot is shared between **comparison
+operators** and **predicate forms**: a single `predicateExpression`
+function reads one `additiveExpression` operand, then dispatches on
+the next keyword/operator to one of seven branches:
+
+```text
+predicateExpression
+  := additiveExpression
+       ( (KwNot)? KwIn (HIERARCHY|ИЕРАРХИИ)? '(' inListBody ')'   ← IN / NOT IN / IN HIERARCHY
+       | (IS|ЕСТЬ) (KwNot)? "NULL"                                ← IS [NOT] NULL
+       | (KwNot)? (BETWEEN|МЕЖДУ) additiveExpression
+                              KwAnd additiveExpression?           ← BETWEEN ... AND ...
+       | (KwNot)? (LIKE|ПОДОБНО) additiveExpression
+                              ((ESCAPE|СПЕЦСИМВОЛ) additiveExpression)?  ← LIKE [ESCAPE]
+       | (REFS|ССЫЛКА) Ident ('.' Ident)*                         ← REFS Mdo.Path
+       | ('=' | '<>' | '<' | '<=' | '>' | '>=') additiveExpression  ← comparison
+       | ε                                                        ← fall-through (no wrapper)
+       )
+```
+
+The leading `(KwNot)?` is consumed **before** probing for the
+predicate keyword so that `NOT IN (...)`, `NOT BETWEEN ... AND ...`,
+and `NOT LIKE ...` all route into the matching predicate branch with
+the `KwNot` token captured as a direct child of the eventual
+predicate node. If the post-`NOT` lookahead does not match any
+predicate / comparison keyword, the marker is `m.abandon`-ed and the
+consumed `NOT` token remains as a stray token in the syntax tree —
+this is a known IDE-recovery boundary documented in
+§IDE-recovery allowances.
+
+### `SdblInExpr` (IN, NOT IN)
+
+Accepted shapes: `expr IN ( v1, v2, ... )` and
+`expr IN ( SELECT ... )`. Direct children of `SdblInExpr`:
+
+- the `additiveExpression` operand (the value being checked);
+- optional `KwNot` token (when the predicate is `NOT IN`);
+- `KwIn` token;
+- `LParen` token;
+- either a `SdblSubquery` child (when the post-`(` lookahead
+  detects `SELECT/ВЫБРАТЬ`) or a sequence of expression children
+  separated by `Comma` tokens (the value list, with `Error`
+  placeholders for empty / missing / trailing-comma elements);
+- `RParen` token.
+
+The empty list form `IN ()` is accepted as a recoverable parse —
+see §IDE-recovery allowances.
+
+### `SdblInHierarchyExpr` (IN HIERARCHY, В ИЕРАРХИИ)
+
+Accepted shape: `expr IN HIERARCHY ( root )`. Direct children:
+
+- the `additiveExpression` operand;
+- optional `KwNot` token;
+- `KwIn` token;
+- `Ident` token (`HIERARCHY` or `ИЕРАРХИИ`);
+- `LParen` token;
+- single expression child (the hierarchy root);
+- `RParen` token.
+
+The `HIERARCHY` / `ИЕРАРХИИ` keyword is parsed as an `Ident`-shaped
+suffix to `IN`, not as a single `IN HIERARCHY` keyword pair (the
+parser bumps `KwIn`, then probes `at_keyword("HIERARCHY")` /
+`at_keyword("ИЕРАРХИИ")`). This is load-bearing for IDE recovery on
+mid-typed `IN HIE` — the HIERARCHY arm fails, falls through to the
+regular IN-list arm, which expects `LParen` and recovers.
+
+### `SdblIsNullExpr` (IS NULL, ЕСТЬ NULL)
+
+Accepted shape: `expr IS [NOT] NULL`. Direct children:
+
+- the `additiveExpression` operand;
+- `Ident` token (`IS` or `ЕСТЬ`);
+- optional `KwNot` token (when the predicate is `IS NOT NULL`);
+- `Ident` token (`NULL`).
+
+The literal `NULL` Ident is required; if it is absent, the marker
+is abandoned and the consumed `IS` (and optional `NOT`) tokens
+remain as stray tokens in the syntax tree. This is a known
+IDE-recovery boundary — see §IDE-recovery allowances.
+
+### `SdblBetweenExpr` (BETWEEN, МЕЖДУ)
+
+Accepted shape: `expr BETWEEN low AND high`. Direct children:
+
+- the `additiveExpression` operand (the test value);
+- optional `KwNot` token;
+- `Ident` token (`BETWEEN` or `МЕЖДУ`);
+- `additiveExpression` (low bound);
+- `KwAnd` token;
+- `additiveExpression` (high bound).
+
+The `KwAnd` is required by ITS pubqlang/22 §МЕЖДУ, but the parser
+emits `SdblBetweenExpr` even if the `AND` is missing — the
+high-bound `additiveExpression` is omitted in that case. This is
+IDE-recovery for mid-typing `BETWEEN 1` and is documented in
+§IDE-recovery allowances.
+
+### `SdblLikeExpr` (LIKE, ПОДОБНО)
+
+Accepted shape: `expr LIKE pattern [ESCAPE char]`. Direct children:
+
+- the `additiveExpression` operand (subject);
+- optional `KwNot` token;
+- `Ident` token (`LIKE` or `ПОДОБНО`);
+- `additiveExpression` (pattern);
+- optional `Ident` token (`ESCAPE` or `СПЕЦСИМВОЛ`);
+- optional `additiveExpression` (escape character).
+
+`ESCAPE` / `СПЕЦСИМВОЛ` is **not documented in the dumped ITS
+chapters**: the LIKE clause itself is ITS-spec'd at pubqlang/23
+(pattern-matching primitive) and pubqlang/60 (concrete usage), but
+neither chapter mentions an ESCAPE clause. The clause is preserved
+as a local IDE-recovery allowance — see §IDE-recovery allowances.
+The single-shot shape (at most one ESCAPE per LIKE) is the
+parser-side contract; it is not contradicted by ITS, but neither
+is it confirmed.
+
+### `SdblRefsExpr` (REFS, ССЫЛКА)
+
+Accepted shape: `expr REFS Mdo.Type [.Subtype]*`. Direct children:
+
+- the `additiveExpression` operand (the value being checked);
+- `Ident` token (`REFS` or `ССЫЛКА`);
+- a chain of `Ident` and `Dot` tokens representing the MDO
+  reference (greedy — eats all subsequent `Dot Ident` pairs).
+
+The MDO chain is greedy; the parser does not enforce a fixed
+two-segment shape. Trailing dot without an Ident is detected by
+`crates/ide-diagnostics/src/handlers/query_parse_error.rs:78` as
+a parse error — the clean-room rewrite preserves the token-level
+shape of the chain.
+
+## Comparison
+
+The comparison branch of `predicateExpression` accepts six binary
+operators sharing a single `SdblComparisonExpr` wrapper:
+
+```text
+comparisonTail
+  :=  ('=' | '<>' | '<' | '<=' | '>' | '>=') additiveExpression
+```
+
+Direct children of `SdblComparisonExpr`:
+
+- left `additiveExpression`;
+- comparison operator token (one of `Eq`, `Neq`, `Lt`, `Le`, `Gt`,
+  `Ge`);
+- right `additiveExpression`.
+
+The comparison tail is single-shot, not a loop — `a = b = c`
+consumes one tail and leaves `= c` as trailing tokens. This matches
+the behaviour of every SDBL comparison example documented in the
+ITS pubqlang dump (no chained-comparison form is shown).
+
+The dispatcher function `comparisonExpression` is a 1:1 delegating
+shim to `predicateExpression`: both predicates and comparison share
+the same precedence slot below NOT, so a single dispatcher reads
+one operand and probes for either a predicate keyword or a
+comparison operator. The shim preserves the dispatcher abstraction
+and clarifies the precedence story.
+
+## Column references and function calls
+
+The `columnOrFunctionCall` dispatcher is reached from
+`primaryExpression` whenever the leading token is a non-clause
+`Ident` (and the `at_keyword` probes for `CASE` / `ВЫБОР` / `NULL`
+have already failed). It performs a single Ident bump, then
+dispatches on the next-token lookahead:
+
+```text
+columnOrFunctionCall
+  := Ident
+       ( '.' columnChainTail                    ← SdblColumnRef
+       | '(' funcCallTail                       ← SdblFunctionCall
+       |  ε                                     ← bare SdblColumnRef
+       )
+```
+
+The three branches are mutually exclusive — a single Ident either
+chains via `Dot`, calls via `LParen`, or stands alone as a bare
+column reference. CAST detection (`is_cast_function`) runs **before**
+the Ident bump so the resulting `is_cast` flag is available inside
+the LParen branch for the `КАК`-type recovery (see §CAST type
+specification).
+
+### `SdblColumnRef`
+
+Accepted shape: `Ident ('.' Ident)*`, optionally terminated by an
+inline tabular field list `'.' '(' selectedFields ')'`. Direct
+children:
+
+- a sequence of `Ident` tokens with `Dot` tokens between them;
+- `Error` nodes at incomplete-chain positions (trailing dot, dot
+  before clause keyword);
+- optional `SdblInlineTableFields` (when the chain terminates in
+  `.(Field1, Field2, ...)` — see §Inline tabular field syntax).
+
+The chain is a flat token sequence — no nested wrappers. Consumer:
+`crates/sdbl-hir/src/lower/expr/mod.rs:lower_column_ref`.
+
+The dot-chain loop terminates when:
+
+- the next token is not `Dot`;
+- the post-`Dot` token is a clause keyword (recovered via
+  `super::select::is_clause_keyword` so `SELECT t.FROM ...` does
+  not consume `FROM` as a column suffix);
+- the post-`Dot` token is `LParen` (which routes to inline tabular
+  fields).
+
+### `SdblFunctionCall`
+
+Accepted shape: `Ident '(' [DISTINCT|РАЗЛИЧНЫЕ]? argList ')' (member chain)?`.
+Direct children:
+
+- the function-name `Ident` token;
+- `LParen` token;
+- optional `DISTINCT` / `РАЗЛИЧНЫЕ` `Ident` token (aggregate-
+  function prefix);
+- a sequence of expression children separated by `Comma` tokens —
+  with `Error` nodes for empty / missing / trailing-comma elements;
+- `RParen` token;
+- optional post-RParen `Dot` / `Ident` chain (member access on the
+  function-call result, e.g. `ВЫРАЗИТЬ(... КАК ...).Поле`).
+
+Argument list error recovery emits `NodeKind::Error` for three
+positions: first-arg empty (`func(, x)`), middle-element empty
+(`func(x, , y)`), trailing comma (`func(x,)`). The argument-start
+probe and the remaining-arg-after-comma probe both filter out
+clause keywords via `super::select::is_clause_keyword` so that
+`func(x, FROM T)` does not hijack `FROM` as an Ident-shaped
+argument — the regression gate is the C2 fix landed in Slice 10b
+(see §IDE-recovery allowances and the Slice 10b attestation
+§Behaviour change).
+
+For aggregate functions a `DISTINCT` / `РАЗЛИЧНЫЕ` Ident-keyword
+prefix is consumed before the first argument (e.g.
+`КОЛИЧЕСТВО(РАЗЛИЧНЫЕ Поле)`). The DISTINCT prefix is consumed as
+a child Ident token of `SdblFunctionCall`; the parser does not
+enforce that the function name is one of the documented aggregate
+names — it accepts the prefix in any function-call position and
+relies on later type-checking to reject misuse.
+
+Member access on the function-call result is a `while p.at(Dot)`
+loop that consumes Dot/Ident pairs (with `Error` nodes for
+incomplete tails) and terminates on clause keywords. The resulting
+chain is a direct token-level child sequence of `SdblFunctionCall`;
+HIR ignores this chain in lowering, but
+`crates/ide-diagnostics/src/handlers/query_parse_error.rs:52` reads
+the trailing chain to detect dot-without-Ident parse errors.
+
+### Inline tabular field syntax
+
+The construction `Table.TabularPart.(Field1, Field2, …)` reads as a
+column-chain that terminates in an inline tabular field list. The
+post-`Dot` `LParen` lookahead routes the column-chain tail loop
+into `inlineTableFields`:
+
+```text
+inlineTableFields
+  := '(' selectedFields ')'                    ← SdblInlineTableFields
+                                                  wraps SdblSelectedField+
+```
+
+Direct children of `SdblInlineTableFields`:
+
+- `LParen` token;
+- the result of `selected_fields` (Slice 7) — multiple
+  `SdblSelectedField` direct children;
+- `RParen` token.
+
+This is the only Slice-10b → Slice-7 dispatch boundary: from
+`column_or_function` → `inline_table_fields` → `selected_fields`.
+The Slice 7 entry is reused as-is; Slice 10b does not extend it.
+HIR's consumer reaches `SdblInlineTableFields` indirectly via
+walking `SdblColumnRef` descendants in
+`crates/sdbl-hir/src/lower/expr/mod.rs`.
+
+## CAST type specification
+
+The `ВЫРАЗИТЬ` (CAST) function takes one argument expression
+followed by the keyword `КАК` (`AS`) and a type specification. The
+type specification is parsed by `parseCastType`:
+
+```text
+castType
+  := Ident                                                   ← primitive type or first MDO segment
+       ( '.' Ident ('.' Ident)*                              ← MDO chain (СПР.Х, ДОК.Х, etc.)
+       | '(' Decimal (',' Decimal)? ')'                      ← primitive parameter list (СТРОКА(200), ЧИСЛО(8, 2))
+       | ε
+       )
+```
+
+Direct children of `SdblType`:
+
+- `Ident` token (the primitive type name OR the first part of an
+  MDO chain);
+- then either:
+  - optional `Dot` / `Ident` pairs (MDO chain), OR
+  - `LParen` + `Decimal` token + optional `Comma` + `Decimal` +
+    `RParen` (primitive type parameter list).
+
+Recognised primitive type names: `СТРОКА` / `STRING`, `ЧИСЛО` /
+`NUMBER`, `ДАТА` / `DATE`, `БУЛЕВО` / `BOOLEAN`. The parser does not
+enforce the primitive-vs-MDO distinction at parse time — it reads
+the first Ident, then enters a `while p.at(Dot)` loop for MDO
+continuation, then checks for `LParen` (primitive parameter list).
+For well-formed input only one continuation branch fires; for mixed
+input the parser consumes the MDO chain *and* the parameter list
+(this is preserved as IDE-recovery behaviour).
+
+The `is_cast_function` predicate
+(`p.at_keyword("CAST") || p.at_keyword("ВЫРАЗИТЬ")`) is called from
+`columnOrFunctionCall` **before** the Ident bump, so the resulting
+`is_cast` boolean is available inside the LParen branch to enable
+the `КАК`-type recovery: after consuming the first argument
+expression and the `КАК` / `AS` keyword, `parseCastType` is invoked
+to parse the type spec and emit `SdblType`.
+
+After the closing `RParen` of a CAST function call, member access
+on the result (`ВЫРАЗИТЬ(... КАК Документ.X).Реквизит`) is consumed
+by the same post-RParen Dot/Ident chain loop as for any other
+function call — see §SdblFunctionCall.
+
+Type-level CAST checking (matching the parsed `SdblType` against
+the `bsl-metadata` MDO catalog) is **out of scope** for Slice 10b
+and is deferred to Slice 13.
+
+## CASE expressions
+
+The `ВЫБОР` (CASE) expression has two forms — simple (with operand)
+and searched (no operand). Both forms terminate with the mandatory
+`КОНЕЦ` (END) keyword. The `ИНАЧЕ` (ELSE) clause is optional.
+
+```text
+caseExpression
+  := (CASE|ВЫБОР)
+       expression?                              ← optional operand (simple form)
+       whenClause+                              ← 1+ WHEN clauses
+       ((ELSE|ИНАЧЕ) expression)?               ← optional ELSE
+       (END|КОНЕЦ)
+
+whenClause
+  := (WHEN|КОГДА) expression
+     (THEN|ТОГДА) expression
+```
+
+Direct children of `SdblCaseExpr`:
+
+- `Ident` token (`CASE` or `ВЫБОР`);
+- **optional operand expression node** — when present (simple
+  form), appears as the first non-token child node *before* any
+  `SdblWhenClause`;
+- 1+ `SdblWhenClause` children;
+- optional `Ident` token (`ELSE` or `ИНАЧЕ`) followed by an optional
+  ELSE expression child node;
+- `Ident` token (`END` or `КОНЕЦ`).
+
+**Child-order invariant.** HIR consumer
+`crates/sdbl-hir/src/lower/expr/case_expr.rs:40-45` distinguishes
+the two forms by inspecting the **first child node**:
+
+```rust
+let has_operand = !when_clauses_nodes.is_empty()
+    && node.children().next()
+        .map(|n| n.kind() != SyntaxKind::SDBL_WHEN_CLAUSE)
+        .unwrap_or(false);
+```
+
+The parser must therefore emit children in source order:
+
+- **Simple CASE:** operand expression as the first child node,
+  *then* 1+ `SdblWhenClause` children, *then* optional ELSE
+  expression child node, *then* the END token.
+- **Searched CASE:** 1+ `SdblWhenClause` as the first child nodes,
+  *then* optional ELSE expression, *then* END.
+
+Direct children of `SdblWhenClause`:
+
+- `Ident` token (`WHEN` or `КОГДА`);
+- expression child (the condition);
+- `Ident` token (`THEN` or `ТОГДА`);
+- expression child (the result).
+
+The HIR `case_expr.rs:51-89` reads `node.children()` and assumes
+exactly two child expression nodes per `SdblWhenClause`
+(condition + result). The clean-room rewrite must preserve this
+two-child shape.
 
 ## Trivia handling convention
 
@@ -693,6 +1107,55 @@ compatibility reasons that are **not** ITS-mandated:
    §ITS coverage verification table row "Modulo `%` operator"
    records the discrepancy verbatim.
 
+10. **Empty `IN ()` value list accepted as a recoverable parse**
+    (Slice 10b). ITS pubqlang/22 documents `IN` with a non-empty
+    value list. The parser accepts the empty form as IDE-recovery
+    for mid-typing — `IN (...)` with no completed values yet emits
+    a recoverable `SdblInExpr` with an empty value-list body so
+    diagnostics can flag the misuse without aborting the query.
+
+11. **`IS [NOT] NULL` falls through `m.abandon` if `NULL` is
+    missing** (Slice 10b). When the post-`IS [NOT]` lookahead does
+    not find `at_keyword("NULL")`, the marker is abandoned and the
+    consumed `IS` and optional `NOT` tokens remain as stray tokens
+    in the syntax tree. This is a known IDE-recovery boundary; a
+    candidate Slice 12 fix would move the consumption inside the
+    NULL-confirmed branch.
+
+12. **`BETWEEN low [AND high]` accepts missing AND** (Slice 10b).
+    The `AND` is required by ITS pubqlang/22 §МЕЖДУ, but the
+    parser emits `SdblBetweenExpr` even when the high-bound `AND`
+    is missing — recovery for mid-typing `BETWEEN 1`. The
+    high-bound `additiveExpression` is then omitted from the
+    direct-child list.
+
+13. **`LIKE pattern [ESCAPE char]` ESCAPE clause is local-spec'd**
+    (Slice 10b). ITS pubqlang/23 §Шаблон documents the LIKE
+    pattern-matching primitive but does not document an ESCAPE /
+    СПЕЦСИМВОЛ clause. The parser accepts the optional ESCAPE
+    clause as a local IDE-recovery allowance; the per-function
+    provenance comment in `predicate_expr` carries
+    `// local: ...` for the ESCAPE branch.
+
+14. **Orphaned-`NOT`-token boundary in `predicate_expr`** (Slice
+    10b). When `NOT` is consumed before predicate / comparison
+    probing and no branch matches, the marker is abandoned and the
+    consumed `NOT` token remains as a stray token in the syntax
+    tree. Documented as preserved-behaviour #2 in the Slice 10b
+    attestation; candidate Slice 12 fix is to move the NOT
+    consumption inside each predicate branch's prefix.
+
+15. **`func(x, FROM ...)` clause-keyword recovery in
+    `column_or_function`** (Slice 10b C2 fix). The pre-Slice-10b
+    parser used `is_expression_start && !p.at(Comma)` at the
+    function-call argument-start probe with no
+    `is_clause_keyword` check, so `func(x, FROM T)` hijacked
+    `FROM` as an Ident-shaped argument. Slice 10b C2 added
+    `&& !super::select::is_clause_keyword(p)` to both the
+    first-argument and the after-comma argument-start probes; the
+    fix is documented under the Slice 10b attestation §Behaviour
+    change.
+
 ## ITS coverage verification
 
 Filled at Slice 10a C2 against the local ITS pubqlang dump at
@@ -724,6 +1187,20 @@ each claim.
 | `ССЫЛКА` / REFS predicate | YES — pubqlang/40 | "при помощи оператора ССЫЛКА проверяется, ссылкой на какой документ является поле" |
 | `МЕЖДУ` / BETWEEN predicate | YES — pubqlang/22 + pubqlang/40 | "оператор МЕЖДУ, который проверяет результат вхождения значения в диапазон" |
 | `ПОДОБНО` / LIKE predicate | YES — pubqlang/60 | concrete usage `Наименование ПОДОБНО "%" + &ЧастьНаименования + "%"` |
+| Comparison operator inventory `=` `<>` `<` `<=` `>` `>=` | TODO at Slice 10b C2 — verify pubqlang/22 §Условие отбора | Slice 10b C2 author verifies whether the 6-operator inventory is enumerated in chapter 22; downgrade to local citing mini-spec §Comparison if not |
+| `IN` value-list (parens-bracketed comma list) | TODO at Slice 10b C2 — verify pubqlang/22 + pubqlang/40 | quote canonical `<expr> В (<v1>, <v2>, ...)` example |
+| `IN` with subquery | TODO at Slice 10b C2 — verify pubqlang/22 | quote canonical `<expr> В (ВЫБРАТЬ ...)` example |
+| `IN HIERARCHY` / `В ИЕРАРХИИ` predicate | TODO at Slice 10b C2 — verify pubqlang/32 (chapter_032.html) | canonical example expected: `Товары.Ссылка В ИЕРАРХИИ (&ГруппаТоваров)`. Note: chapter 28 does NOT contain `В ИЕРАРХИИ` (codex Round-1 spot check); chapter 32 is the primary source. |
+| `IS NULL` / `ЕСТЬ NULL` predicate | TODO at Slice 10b C2 — verify pubqlang/27 (chapter_027.html) | canonical example expected: `КОГДА (Товары.Производитель) ЕСТЬ NULL ТОГДА "NULL"`; secondary refs in chapters 90, 99, 100, 101. Note: chapter 22 does NOT contain `ЕСТЬ NULL` (codex Round-1 spot check); chapter 27 is the primary source. |
+| `LIKE` / `ПОДОБНО` pattern primitive (independent of pubqlang/60 concrete-usage row above) | TODO at Slice 10b C2 — verify pubqlang/23 (chapter_023.html) | quote chapter 23's pattern-matching definition |
+| `ESCAPE` / `СПЕЦСИМВОЛ` (LIKE escape clause) | NO — verified absent in dump | The LIKE clause is documented in pubqlang/23 + pubqlang/60 but neither chapter mentions an ESCAPE / СПЕЦСИМВОЛ clause. Recorded as local IDE-recovery allowance under §IDE-recovery allowances #13. |
+| `BETWEEN low AND high` (full clause shape) | TODO at Slice 10b C2 — verify pubqlang/22 + pubqlang/40 | chapter 22 + chapter 40 both contain `МЕЖДУ` examples; verify the `AND` requirement is explicit (e.g. `Дата МЕЖДУ ДАТАВРЕМЯ(...) И ДАТАВРЕМЯ(...)`) |
+| `REFS` / `ССЫЛКА` predicate (full canonical example) | TODO at Slice 10b C2 — verify pubqlang/40 (chapter_040.html) | canonical example expected: `Регистратор ССЫЛКА Документ.ПриходнаяНакладная`; secondary refs in chapters 95, 159 |
+| `ВЫБОР` / CASE expression body (WHEN / THEN / ELSE / END) | TODO at Slice 10b C2 — verify pubqlang/40 (chapter_040.html) | canonical example expected: `ВЫБОР КОГДА Товары.ЭтоГруппа = ИСТИНА ТОГДА "Это группа" ИНАЧЕ "Это элемент" КОНЕЦ КАК ПризнакГруппы`; explicit description `ВЫБОР (КОГДА … ТОГДА) ИНАЧЕ … КОНЕЦ` expected |
+| `ВЫРАЗИТЬ` / CAST type specification (primitive parameterised + MDO chain) | TODO at Slice 10b C2 — verify pubqlang/40 (chapter_040.html) | chapter 40 describes ВЫРАЗИТЬ as both "операция приведения типов" (composite-to-component MDO chain) and "функция для получения результатов нужной длины и точности" (primitive-with-parameters). Example expected: `ВЫРАЗИТЬ(ОстаткиТоваров.Регистратор КАК Документ.ПриходнаяНакладная).Поставщик` |
+| `DISTINCT` / `РАЗЛИЧНЫЕ` aggregate prefix | TODO at Slice 10b C2 — verify pubqlang/12 §Aggregate functions or pubqlang/40 example | downgrade to local IDE-recovery allowance citing mini-spec §Column references and function calls if no chapter explicitly documents the prefix |
+| Inline tabular field syntax `Table.TabularPart.(Field1, Field2, ...)` | TODO at Slice 10b C2 — verify pubqlang/12 §Tabular fields | downgrade to local IDE-recovery allowance citing mini-spec §Inline tabular field syntax if not in chapter 12 |
+| Member access on CAST function result `ВЫРАЗИТЬ(... КАК Документ.X).Поле` | TODO at Slice 10b C2 — verify pubqlang/40 | quote chapter 40 example showing post-`)` member access |
 
 **Verification summary:** every Slice 10a + Slice 10b expression-
 grammar claim that the mini-spec attributes to ITS is verified
@@ -733,6 +1210,17 @@ from "mini-spec-declared" to "ITS pubqlang/22-derived". The single
 ITS-supported. The clean-room rewrite preserves the local `%`
 allowance and documents it as a local extension.
 
+The Slice 10b TODO rows above are filled in by the Slice 10b C2
+author after directly inspecting the local dump pages
+(chapter_022.html, chapter_023.html, chapter_027.html,
+chapter_032.html, chapter_040.html). The TODO rows are added in
+C0a (this commit) so the C2 author has a known list of facts to
+verify; each row is rewritten in C2 with "verified yes / verified
+no / page changed" plus a quoted excerpt. Rows that turn out to be
+unverified are downgraded from ITS citations to `// local: …;
+mini-spec §…` provenance comments in the corresponding parser
+function.
+
 C2 provenance comments in `expressions.rs` cite the verified ITS
 chapters (`pubqlang/22`, `pubqlang/40`, `pubqlang/60`) wherever
 applicable rather than the placeholder `// local: ...` originally
@@ -740,17 +1228,25 @@ proposed for sections that turned out to be ITS-derived.
 
 ## Out of scope
 
-The following are **not** covered by this mini-spec; they will be
-added in Slice 10b:
+The following are **not** covered by this mini-spec:
 
-- predicate bodies: IN, IN HIERARCHY, IS NULL, BETWEEN, LIKE, REFS;
-- column references and function call argument shape;
-- CAST type specification (`ВЫРАЗИТЬ(... КАК ...)`);
-- CASE expression body (WHEN / THEN / ELSE / END);
-- inline tabular field syntax (`.(Field1, Field2, ...)`);
-- specialised function vocabulary (aggregate, date, string, type
-  helpers — Slice 4 owns the lexer-level vocabulary;
-  Slice 10b owns the parser-level dispatch).
+- specialised function vocabulary at the lexer / type-checker
+  layer — Slice 4 owns the lexer-level vocabulary for aggregate /
+  date / string / type-helper functions
+  (`СУММА` / `SUM`, `КОЛИЧЕСТВО` / `COUNT`, `СРЕДНЕЕ` / `AVG`,
+  `МАКСИМУМ` / `MAX`, `МИНИМУМ` / `MIN`, `ДЕНЬ` / `MONTH` /
+  `ГОД`, `ПОДСТРОКА`, etc.);
+- type-level CAST checking — Slice 13 owns the matching of
+  `parseCastType` output (the parsed `SdblType` node) against the
+  `bsl-metadata` MDO catalog; the parser merely accepts the
+  syntactic shape without enforcing the MDO existence;
+- specialised non-CASE / non-CAST keyword expression forms (e.g.
+  `АВТОНОМЕРЗАПИСИ`, `ПУСТАЯТАБЛИЦА`) — these are deferred to
+  later parser slices and do not affect Slice 10b.
+
+The Slice 10b extension (added in C0a) covers the predicate /
+comparison / column-or-function / CAST / CASE bodies that were
+deferred during the original Slice 10a authorship.
 
 ## Non-consultation statement
 
@@ -776,3 +1272,16 @@ sources may reach a different but equivalent grammar shape; this
 mini-spec records the specific choices this project made, the
 rationale for each, and the consumer-side compatibility contracts
 that constrained those choices.
+
+The Slice 10b extension (sections §Predicates, §Comparison,
+§Column references and function calls, §CAST type specification,
+§CASE expressions — added in C0a of the Slice 10b clean-room
+rewrite) was authored under the same constraints: the local ITS
+pubqlang dump pages (chapters 22, 23, 27, 32, 40) and the
+project's own event-parser conventions established in Slices 1, 2,
+6, 7, 8, and 10a were consulted; the sibling `../bsl-parser`
+project's grammar text and parser implementation were not; the
+pre-C1 function bodies of the eight Slice 10b target functions
+were not consulted during the C0a authorship. The new sections
+inherit the same independent-derivation claim as the Slice 10a
+sections.
