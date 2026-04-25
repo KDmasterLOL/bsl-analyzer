@@ -92,14 +92,19 @@
 //! (codex Round-1 finding 2 → C2 FIX). See
 //! `docs/legal/sdbl-clean-room-slice10b.md` for the attestation.
 //!
-//! Slices 9, 11 pending: JOIN family (`is_join_keyword`,
-//! `join_clause` — Slice 9) and WHERE / GROUP / HAVING / ORDER /
-//! TOTALS / FOR UPDATE / INDEX BY clause bodies plus the
-//! clause-body dispatchers `query_body_clauses` and
-//! `select_tail_clauses` (Slice 11) remain Tier B until their
-//! respective clean-room slices. Virtual-table method-call
-//! arguments (`virtual_table_args_legacy`) remain Tier B under the
-//! Slice 5 banner.
+//! Slice 9 — clean-room (rewrite in progress): the JOIN family
+//! surface — `is_join_keyword` and `join_clause` (in submodule
+//! `select` under the `CLEAN-ROOM Slice 9 — JOIN family` banner) —
+//! is split out of the LEGACY block in C1; the clean-room rewrite
+//! of both function bodies lands in C2.
+//!
+//! Slice 11 pending: WHERE / GROUP / HAVING / ORDER / TOTALS /
+//! FOR UPDATE / INDEX BY clause bodies plus the clause-body
+//! dispatchers `query_body_clauses` and `select_tail_clauses`
+//! remain Tier B until their respective clean-room slices.
+//! Virtual-table method-call arguments
+//! (`virtual_table_args_legacy`) remain Tier B under the Slice 5
+//! banner.
 
 pub mod expressions;
 pub mod select;

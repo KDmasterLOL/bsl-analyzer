@@ -584,7 +584,7 @@ fn data_source(p: &mut Parser) {
     // an immediately following clause keyword (WHERE / GROUP / etc.)
     // from being captured as an implicit bare alias, matching
     // mini-spec §Recovery requirements #3. JOIN attachment delegates
-    // into Tier B `join_clause` (Slice 9 target); the attachment-point
+    // into the Slice 9 `join_clause` helper; the attachment-point
     // loop is owned by Slice 8 per mini-spec §Data source join-clause*.
     let m = p.start();
 
@@ -713,7 +713,95 @@ fn source_alias(p: &mut Parser) {
 }
 
 // ============================================================================
-// LEGACY (Slices 9–11 pending)
+// CLEAN-ROOM Slice 9 — JOIN family
+// ============================================================================
+//
+// `is_join_keyword` and `join_clause` are the JOIN-family surface reached
+// by Slice 8's `data_source` join-attachment loop. The C1 commit splits
+// them out of the previous `LEGACY (Slices 9–11 pending)` block (no logic
+// change inside any function body); the C2 commit re-authors them
+// clean-room from ITS pubqlang chapters 44–48 and the SELECT mini-spec
+// §JOIN clauses, with per-function tiered provenance comments. The C3
+// commit lands the attestation at `docs/legal/sdbl-clean-room-slice9.md`.
+
+/// Check if current position starts a JOIN clause
+///
+/// Looks for: LEFT/RIGHT/FULL/INNER/OUTER/JOIN keywords
+// C1 placeholder — clean-room rewrite in C2.
+fn is_join_keyword(p: &Parser) -> bool {
+    p.at_keyword("LEFT")
+        || p.at_keyword("ЛЕВОЕ")
+        || p.at_keyword("RIGHT")
+        || p.at_keyword("ПРАВОЕ")
+        || p.at_keyword("FULL")
+        || p.at_keyword("ПОЛНОЕ")
+        || p.at_keyword("INNER")
+        || p.at_keyword("ВНУТРЕННЕЕ")
+        || p.at_keyword("JOIN")
+        || p.at_keyword("СОЕДИНЕНИЕ")
+}
+
+/// Parse a JOIN clause
+///
+/// Grammar:
+/// ```text
+/// joinPart:
+///     (LEFT | RIGHT | FULL | INNER)? OUTER? JOIN
+///     source=dataSource (ON | ПО) condition=logicalExpression
+/// ```
+// C1 placeholder — clean-room rewrite in C2.
+fn join_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // Parse join type (LEFT, RIGHT, FULL, INNER).
+    // Bare JOIN without an explicit type is accepted as implicit INNER JOIN.
+    let has_join_type = p.at_keyword("LEFT")
+        || p.at_keyword("ЛЕВОЕ")
+        || p.at_keyword("RIGHT")
+        || p.at_keyword("ПРАВОЕ")
+        || p.at_keyword("FULL")
+        || p.at_keyword("ПОЛНОЕ")
+        || p.at_keyword("INNER")
+        || p.at_keyword("ВНУТРЕННЕЕ");
+
+    if has_join_type {
+        p.bump();
+        p.skip_trivia();
+    }
+
+    // Optional OUTER keyword (for LEFT OUTER JOIN, RIGHT OUTER JOIN, FULL OUTER JOIN)
+    if p.at_keyword("OUTER") || p.at_keyword("ВНЕШНЕЕ") {
+        p.bump();
+        p.skip_trivia();
+    }
+
+    // JOIN/СОЕДИНЕНИЕ keyword (mandatory)
+    if !p.at_keyword("JOIN") && !p.at_keyword("СОЕДИНЕНИЕ") {
+        p.error(); // Expected JOIN keyword
+        m.complete(p, NodeKind::SdblJoinClause);
+        return;
+    }
+    p.bump(); // Consume JOIN
+    p.skip_trivia();
+
+    // Parse joined data source (table or subquery with alias)
+    data_source(p);
+    p.skip_trivia();
+
+    // ON/ПО keyword (mandatory)
+    if !eat_sdbl_keyword(p, "ON", "ПО") {
+        p.error(); // Expected ON/ПО
+    }
+    p.skip_trivia();
+
+    // Parse join condition (logical expression)
+    expressions::logical_expression(p);
+
+    m.complete(p, NodeKind::SdblJoinClause);
+}
+
+// ============================================================================
+// LEGACY (Slices 5, 11 pending)
 // ============================================================================
 //
 // Everything below this banner — `select_tail_clauses` (Slice 11 target),
@@ -722,8 +810,7 @@ fn source_alias(p: &mut Parser) {
 // external-source handling; extracted from `table_ref` during Slice 8 C1 as
 // a pure refactor), `where_clause` / `group_by_clause` / `having_clause` /
 // `order_by_clause` / `for_update_clause` / `index_by_clause` /
-// `autoorder_clause` / `totals_by_clause` (Slice 11), JOIN family and the
-// `is_join_keyword` / `join_clause` helpers (Slice 9), and the
+// `autoorder_clause` / `totals_by_clause` (Slice 11), and the
 // `limitations` / `top_clause` dispatchers remains Tier B pre-refactor code
 // until the corresponding clean-room slice rewrites it. No per-function
 // provenance comments here.
@@ -928,80 +1015,6 @@ pub(super) fn is_clause_keyword(p: &Parser) -> bool {
         || at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
         || at_sdbl_keyword(p, "TOTALS", "ИТОГИ")
         || is_join_keyword(p)
-}
-
-/// Check if current position starts a JOIN clause
-///
-/// Looks for: LEFT/RIGHT/FULL/INNER/OUTER/JOIN keywords
-fn is_join_keyword(p: &Parser) -> bool {
-    p.at_keyword("LEFT")
-        || p.at_keyword("ЛЕВОЕ")
-        || p.at_keyword("RIGHT")
-        || p.at_keyword("ПРАВОЕ")
-        || p.at_keyword("FULL")
-        || p.at_keyword("ПОЛНОЕ")
-        || p.at_keyword("INNER")
-        || p.at_keyword("ВНУТРЕННЕЕ")
-        || p.at_keyword("JOIN")
-        || p.at_keyword("СОЕДИНЕНИЕ")
-}
-
-/// Parse a JOIN clause
-///
-/// Grammar:
-/// ```text
-/// joinPart:
-///     (LEFT | RIGHT | FULL | INNER)? OUTER? JOIN
-///     source=dataSource (ON | ПО) condition=logicalExpression
-/// ```
-fn join_clause(p: &mut Parser) {
-    let m = p.start();
-
-    // Parse join type (LEFT, RIGHT, FULL, INNER).
-    // Bare JOIN without an explicit type is accepted as implicit INNER JOIN.
-    let has_join_type = p.at_keyword("LEFT")
-        || p.at_keyword("ЛЕВОЕ")
-        || p.at_keyword("RIGHT")
-        || p.at_keyword("ПРАВОЕ")
-        || p.at_keyword("FULL")
-        || p.at_keyword("ПОЛНОЕ")
-        || p.at_keyword("INNER")
-        || p.at_keyword("ВНУТРЕННЕЕ");
-
-    if has_join_type {
-        p.bump();
-        p.skip_trivia();
-    }
-
-    // Optional OUTER keyword (for LEFT OUTER JOIN, RIGHT OUTER JOIN, FULL OUTER JOIN)
-    if p.at_keyword("OUTER") || p.at_keyword("ВНЕШНЕЕ") {
-        p.bump();
-        p.skip_trivia();
-    }
-
-    // JOIN/СОЕДИНЕНИЕ keyword (mandatory)
-    if !p.at_keyword("JOIN") && !p.at_keyword("СОЕДИНЕНИЕ") {
-        p.error(); // Expected JOIN keyword
-        m.complete(p, NodeKind::SdblJoinClause);
-        return;
-    }
-    p.bump(); // Consume JOIN
-    p.skip_trivia();
-
-    // Parse joined data source (table or subquery with alias)
-    data_source(p);
-    p.skip_trivia();
-
-    // ON/ПО keyword (mandatory)
-    if !eat_sdbl_keyword(p, "ON", "ПО") {
-        p.error(); // Expected ON/ПО
-    }
-    p.skip_trivia();
-
-    // Parse join condition (logical expression)
-    expressions::logical_expression(p);
-
-    m.complete(p, NodeKind::SdblJoinClause);
 }
 
 /// Check if current position starts a limitation keyword
