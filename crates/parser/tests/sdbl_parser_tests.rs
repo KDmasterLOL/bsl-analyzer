@@ -2570,21 +2570,23 @@ fn test_slice8_parameter_source_without_alias() {
 }
 
 // ============================================================================
-// Slice 10a surface coverage — added by C0b audit to close gaps before the
-// clean-room rewrite of the expression backbone (operator chain + atoms +
-// parens/tuple/subquery) at expressions.rs. Authored from
-// docs/legal/sdbl-expressions-mini-spec.md (the C0a deliverable for Slice
-// 10a + 10b) and 1C ITS docs (pubqlang/12 §Operators, §Literals,
-// §Parameters; pubqlang/10 §query-body). Each test below carries a
-// per-test source citation.
+// Slice 10a surface coverage — added by C0b audit to close gaps in the
+// operator-chain + atoms + parens/tuple/subquery surface that the Slice
+// 10a clean-room rewrite must satisfy. Authored from
+// docs/legal/sdbl-expressions-mini-spec.md (the C0a clean-room reference
+// for Slice 10a + 10b) and 1C ITS docs (pubqlang/12 §Operators,
+// §Literals, §Parameters; pubqlang/10 §query-body).
 //
-// These tests exercise the PRE-rewrite parser shapes. Tests that depend on
-// behaviour the C2 rewrite is expected to change (e.g. bare NULL routing
-// to columnOrFunctionCall instead of nullLiteral, per the mini-spec
-// §Atoms primary dispatch — pre-existing parser bug at expressions.rs:
-// 612-643) are explicitly NOT included here; they will be added in C3
-// against the rewritten parser. The tests below pin behaviours the C2
-// rewrite is expected to PRESERVE bit-for-bit.
+// **Oracle:** the assertions below derive from the mini-spec §AST-shape
+// invariants and §Operator-binding pin list, NOT from the pre-rewrite
+// parser implementation. Each per-test comment cites the relevant
+// mini-spec section so the C2 rewrite can be validated against the
+// mini-spec contract rather than against accidental implementation
+// shape. Tests for behaviours the C2 rewrite is expected to CHANGE
+// (e.g. bare NULL routing to nullLiteral instead of columnOrFunctionCall
+// per the mini-spec §Atoms primary dispatch — current implementation has
+// a known dispatch-order bug) are deferred to C3 acceptance, where the
+// rewritten parser is observable.
 // ============================================================================
 
 // Bucket A: nested NOT — tests right-recursive multi-NOT body of
@@ -2645,7 +2647,7 @@ fn test_slice10a_not_and_binding() {
 
 // Bucket A: nested unary minus — `- - А` parses as
 // `UnaryExpr( - , UnaryExpr( - , А ) )` per mini-spec §Operator-binding
-// pin list item 2 (right-recursive multi-unary at expressions.rs:589-602).
+// pin list item 2 (right-recursive multi-unary).
 #[test]
 fn test_slice10a_nested_unary_minus() {
     use syntax::SyntaxKind;
@@ -2742,9 +2744,13 @@ fn test_slice10a_multi_string_three_tokens() {
 
 // Bucket A: precedence with newline trivia between operator and operand.
 // Mini-spec §Trivia handling convention: `p.skip_trivia()` BEFORE the
-// operator probe (CRITICAL invariant at expressions.rs:548/570). Verifies
-// `1\n+\n2 * 3` parses as `AdditiveExpr( 1, +, MultiplicativeExpr( 2, *, 3 ) )`
-// even when newlines separate operator from operand.
+// operator probe so operator tokens preceded by whitespace / comments /
+// newlines are recognised. Verifies `1\n+\n2 * 3` parses as
+// `AdditiveExpr( 1, +, MultiplicativeExpr( 2, *, 3 ) )` — strong
+// assertion: SdblAdditiveExpr has a DIRECT PLUS token child (not just
+// some descendant), and the SdblMultiplicativeExpr is a DIRECT child of
+// the additive wrapper with a DIRECT STAR token covering `2 * 3`.
+// Mini-spec §AST-shape invariants #1 (FLAT) and #2 (trivia-before-probe).
 #[test]
 fn test_slice10a_precedence_with_newline_trivia() {
     use syntax::SyntaxKind;
@@ -2753,19 +2759,53 @@ fn test_slice10a_precedence_with_newline_trivia() {
     assert!(!parse.has_errors(), "Newline trivia in precedence: {:?}", parse.errors());
     let root = parse.syntax_node();
     assert_eq!(root.text().to_string(), input, "Root must cover full input");
-    let additive = root
+
+    // Find the additive wrapper that has a DIRECT PLUS token child. The
+    // parser opens single-child wrappers unconditionally; only the
+    // wrapper whose direct token children include PLUS owns the operator.
+    let additive_with_plus = root
         .descendants()
-        .find(|n| n.kind() == SyntaxKind::SDBL_ADDITIVE_EXPR)
-        .expect("SdblAdditiveExpr at the top of arithmetic chain");
-    let mul_in_additive =
-        additive.descendants().find(|n| n.kind() == SyntaxKind::SDBL_MULTIPLICATIVE_EXPR);
+        .filter(|n| n.kind() == SyntaxKind::SDBL_ADDITIVE_EXPR)
+        .find(|n| {
+            n.children_with_tokens()
+                .filter_map(|c| c.into_token())
+                .any(|t| t.kind() == SyntaxKind::PLUS)
+        })
+        .expect("SdblAdditiveExpr with a DIRECT PLUS token child — mini-spec §AST-shape #1");
+
+    // The right operand of `+` is a SdblMultiplicativeExpr direct child
+    // with a DIRECT STAR token. Note: the LEFT operand `1` is also wrapped
+    // in an SdblMultiplicativeExpr (single-child empty-operator wrapper —
+    // mini-spec §AST-shape invariant #1 + empty-wrapper unwrapping note).
+    // The wrapper that owns the actual `*` operator is the one whose
+    // direct token children include STAR.
+    let mul_with_star = additive_with_plus
+        .children()
+        .filter(|n| n.kind() == SyntaxKind::SDBL_MULTIPLICATIVE_EXPR)
+        .find(|n| {
+            n.children_with_tokens()
+                .filter_map(|c| c.into_token())
+                .any(|t| t.kind() == SyntaxKind::STAR)
+        })
+        .expect(
+            "SdblMultiplicativeExpr with a DIRECT STAR token child — the `2 * 3` wrapper sits as a direct child of the additive node",
+        );
+    let mul_text = mul_with_star.text().to_string();
     assert!(
-        mul_in_additive.is_some(),
-        "SdblMultiplicativeExpr must sit under SdblAdditiveExpr (precedence ordering preserved across newline trivia)",
+        mul_text.contains('2') && mul_text.contains('3'),
+        "SdblMultiplicativeExpr must cover `2 * 3` (got {mul_text:?})",
     );
-    assert!(
-        additive.text().to_string().contains('+'),
-        "SdblAdditiveExpr text must contain '+' so HIR text-based operator detection still hits",
+
+    // FLAT-shape guard for additive: exactly ONE PLUS direct token child
+    // (mini-spec §AST-shape invariant #1 — flat wrapper for `1 + (2*3)`).
+    let plus_count = additive_with_plus
+        .children_with_tokens()
+        .filter_map(|c| c.into_token())
+        .filter(|t| t.kind() == SyntaxKind::PLUS)
+        .count();
+    assert_eq!(
+        plus_count, 1,
+        "FLAT additive wrapper for `1\\n+\\n2 * 3` must have exactly 1 PLUS direct token child"
     );
 }
 
@@ -2839,14 +2879,14 @@ fn test_slice10a_paren_single_vs_tuple_two() {
     assert_eq!(comma_count, 1, "SdblTupleExpr for (1, 2) must have 1 COMMA direct token child");
 }
 
-// Bucket A: newline-separated logical operators — `А\nИ\nБ` still parses
-// as SdblLogicalAndExpr at the parser level (mini-spec §AST-shape
-// invariant #2 + §IDE-recovery allowances #8). Note: HIR text-based
-// operator detection at sdbl-hir/src/lower/expr/ops.rs:64-67 looks for
-// " И " (with surrounding spaces) and may fall back to default
-// BinaryOp::Eq when newlines replace spaces; that's a Slice 13 follow-up
-// and out of Slice 10a scope. This test only locks the parser-side
-// wrapper shape.
+// Bucket A: newline-separated logical operators — `А\nИ\nБ` parses as a
+// SdblLogicalAndExpr with a DIRECT KW_AND token child and at least two
+// operand subtrees as direct children (mini-spec §AST-shape invariants #1
+// + #2 + §IDE-recovery allowances #8). Note: HIR text-based operator
+// detection at sdbl-hir/src/lower/expr/ops.rs:64-67 looks for " И " (with
+// surrounding spaces) and may fall back to default BinaryOp::Eq when
+// newlines replace spaces; that's a Slice 13 follow-up. This test only
+// locks the parser-side wrapper shape, not HIR's lowering.
 #[test]
 fn test_slice10a_newline_separated_logical_and() {
     use syntax::SyntaxKind;
@@ -2855,10 +2895,35 @@ fn test_slice10a_newline_separated_logical_and() {
     assert!(!parse.has_errors(), "Newline-separated AND should parse: {:?}", parse.errors());
     let root = parse.syntax_node();
     assert_eq!(root.text().to_string(), input, "Root must cover full input including newlines");
-    let and_count =
-        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_LOGICAL_AND_EXPR).count();
+
+    // Find the SdblLogicalAndExpr that has a DIRECT KW_AND token child —
+    // single-atom wrappers exist throughout the chain, only the wrapper
+    // owning the operator has KW_AND as a direct child.
+    let and_with_kw = root
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::SDBL_LOGICAL_AND_EXPR)
+        .find(|n| {
+            n.children_with_tokens()
+                .filter_map(|c| c.into_token())
+                .any(|t| t.kind() == SyntaxKind::KW_AND)
+        })
+        .expect(
+            "SdblLogicalAndExpr with a DIRECT KW_AND token child even when separated by newlines",
+        );
+
+    // The wrapper must contain at least two operand subtrees (one per side
+    // of the AND). Direct children that are nodes — not trivia tokens —
+    // are the operands. Slice 10a's chain wraps every operand, so the
+    // operand-children count is at least 2 (one for А, one for Б).
+    let operand_node_count = and_with_kw.children().count();
     assert!(
-        and_count >= 1,
-        "At least one SdblLogicalAndExpr must be produced even with newline-separated operator",
+        operand_node_count >= 2,
+        "SdblLogicalAndExpr must have at least 2 operand subtrees as direct children; got {operand_node_count}",
+    );
+
+    let and_text = and_with_kw.text().to_string();
+    assert!(
+        and_text.contains('А') && and_text.contains('Б'),
+        "SdblLogicalAndExpr text must cover both operands (got {and_text:?})",
     );
 }
