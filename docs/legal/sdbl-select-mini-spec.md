@@ -167,6 +167,13 @@ Notes:
 
 ## Limitations
 
+```text
+limitations := limitation+
+limitation  := DISTINCT
+             | (TOP|ПЕРВЫЕ) <decimal>
+             | ALLOWED
+```
+
 Supported limitation keywords:
 
 - `DISTINCT` / `РАЗЛИЧНЫЕ`
@@ -178,6 +185,125 @@ Parser requirement:
 - accept each of these before the field list;
 - accept flexible ordering for robustness and recovery;
 - do not require exact permutation reproduction from any existing ANTLR grammar.
+
+### AST-shape contract (Slice 7-addendum extension)
+
+`SdblLimitations` is a single direct child of `SdblQuery`, attached
+between the `SELECT`/`ВЫБРАТЬ` token and the `selected-fields` list when
+at least one limitation keyword is present. Its direct children are a
+flat sequence of:
+
+- bare keyword tokens for `DISTINCT`/`РАЗЛИЧНЫЕ` and
+  `ALLOWED`/`РАЗРЕШЕННЫЕ` (the keywords arrive as `Ident` tokens via
+  the lexer-converter bilingual-ident path; `at_sdbl_keyword` /
+  `eat_sdbl_keyword` text-match against the EN/RU pair); and
+- nested `SdblTopClause` wrapper nodes for each `TOP`/`ПЕРВЫЕ` form,
+  whose direct children are the `TOP`/`ПЕРВЫЕ` keyword token and the
+  count `Decimal` token.
+
+There is no per-keyword wrapper for DISTINCT or ALLOWED. The flat
+ordering of `SdblLimitations` direct children matches the source order
+of the keywords as the parser reads them; the parser does not enforce
+any canonical permutation.
+
+### Deferred semantic constraint (codex Round-4 finding 4)
+
+v8327doc Глава 8 at `page.html:1336` constrains РАЗРЕШЕННЫЕ to the
+top-level `ВЫБРАТЬ` only and propagates the qualifier into nested
+subqueries (paraphrased; see line 1336 for the original prose). The
+current parser's
+`query()` at `crates/parser/src/grammar/sdbl/select.rs:279-307` calls
+`limitations()` for every query body it parses, INCLUDING nested
+subqueries — it does NOT enforce the top-level-only constraint at
+the parser level. The Slice 7-addendum **preserves** this — any
+semantic restriction (HIR-level or IDE-diagnostic-level enforcement
+of "ALLOWED only in top-level SELECT") is deferred to a future slice
+(Slice 13 HIR reattachment, or a dedicated diagnostic).
+
+### IDE-recovery allowances (Slice 7-addendum extension)
+
+The following 3 quirks of the limitations parser are preserved by
+Slice 7-addendum as IDE-recovery allowances. They are documented here
+explicitly so future slices know which behaviours are intentional.
+
+1. **Any-order qualifier acceptance.** DISTINCT, TOP, and ALLOWED are
+   accepted in any order via the `while is_limitation_keyword(p)`
+   loop. The parser does not enforce a canonical permutation.
+   Cross-checked by `crates/ide-diagnostics/src/handlers/assign_alias_fields_in_query.rs:514-528`
+   which labels both `ВЫБРАТЬ РАЗЛИЧНЫЕ ПЕРВЫЕ 10 …` and
+   `SELECT TOP 50 DISTINCT …` as valid input.
+2. **Duplicate-qualifier loop tolerance.** Input
+   `ВЫБРАТЬ РАЗЛИЧНЫЕ РАЗЛИЧНЫЕ A` is accepted (the loop body
+   re-enters on every `is_limitation_keyword` hit without
+   deduplication). Semantic uniqueness is not enforced at parser
+   level; the HIR consumer extracts DISTINCT and TOP without ordering
+   or duplicate-qualifier legality checks.
+3. **Missing-TOP-count recovery.** `top_clause` calls
+   `p.expect(TokenKind::Decimal)` at
+   `crates/parser/src/grammar/sdbl/select.rs:1635`. When the
+   current token is not a Decimal, `Parser::expect` invokes
+   `Parser::error` (`crates/parser/src/parser.rs:160-166`),
+   which bumps the next non-trivia token into an `ERROR`
+   sub-node attached as a direct child of `SdblTopClause`.
+   For input `ВЫБРАТЬ ПЕРВЫЕ A ИЗ Т`, the `A` Ident is
+   absorbed into the ERROR sub-node; the limitations loop
+   then exits because the following `ИЗ` is not a limitation
+   keyword. The remaining tokens are consumed by the outer
+   `selected_fields` parser without identifying `ИЗ` as the
+   FROM keyword (current preserved IDE-recovery boundary;
+   see test
+   `crates/parser/tests/sdbl_parser_tests.rs::test_slice7adn_top_missing_decimal_recovery`).
+   A tighter recovery (recognise FROM/clause-keyword
+   boundary, emit empty error sub-node instead of consuming)
+   is deferred to Slice 12.
+
+### Tier classification (Slice 7-addendum extension)
+
+The **primary** SDBL grammar specification is the v8.3.27 Developer's
+Reference Глава 8 «Работа с запросами» at
+`/home/itrous/src/tools_migration/its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+(downloaded source URL `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`).
+Line 1320 of `page.html` carries the canonical EBNF skeleton
+
+```text
+ВЫБРАТЬ [РАЗРЕШЕННЫЕ] [РАЗЛИЧНЫЕ] [ПЕРВЫЕ <Количество>]
+    <Список полей выборки>
+[ПОМЕСТИТЬ|ДОБАВИТЬ <Имя таблицы>]
+[ИЗ <Список источников>]
+[ИНДЕКСИРОВАТЬ ПО [НАБОРАМ] <Список полей>]
+[ГДЕ <Условие отбора>]
+[СГРУППИРОВАТЬ ПО <Поля группировки>]
+[ИМЕЮЩИЕ <Условие отбора>]
+[ДЛЯ ИЗМЕНЕНИЯ [<Список таблиц верхнего уровня>]]
+```
+
+with all three SELECT-prefix qualifiers (РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ,
+ПЕРВЫЕ) in their canonical first-qualifier slot. Lines 1331-1356
+contain prose semantics for each qualifier.
+
+The pubqlang dump (`its/dump/html/chapter_*.html`) is the
+**secondary** textbook companion — its chapter-19/20/57 examples are
+demonstrative, not specificational. The Slice 7-addendum cites both
+sources, with v8327doc Глава 8 as the primary grammar source.
+
+| Keyword | Tier | Source |
+|---|---|---|
+| `DISTINCT` / `РАЗЛИЧНЫЕ` | **A1** | v8327doc Глава 8 §<Описание запроса> at `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320, 1346-1348` (canonical EBNF + prose). Pubqlang chapter 20 at `chapter_020.html:18, 29, 42` provides the demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ` examples; DISTINCT × ORDER BY interaction at `chapter_020.html:38`. Bilingual word-list at `page.html:1024-1036` (РАЗЛИЧНЫЕ ↔ DISTINCT). |
+| `TOP <decimal>` / `ПЕРВЫЕ <decimal>` | **A1** | v8327doc Глава 8 at `page.html:1320, 1350-1356` (canonical EBNF `ПЕРВЫЕ <Количество>` + prose covering ordering interaction and nested-query support). Pubqlang chapter 19 at `chapter_019.html:19, 28` provides the demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3` example. |
+| `ALLOWED` / `РАЗРЕШЕННЫЕ` | **A1** | v8327doc Глава 8 at `page.html:1320, 1331-1344` — canonical EBNF places РАЗРЕШЕННЫЕ in the first SELECT-prefix slot; prose at lines 1331-1344 covers RLS scope (records visible to current user only), top-level-only constraint, propagation into subqueries, and interaction with ЧТЕНИЕ rights. Bilingual word-list at `page.html:1038-1046` (РАЗРЕШЕННЫЕ ↔ ALLOWED). The pubqlang dump's `chapter_057.html:50` UI-checkbox prose is a corroborating secondary reference only. |
+| `is_identifier_token` predicate | **C/B local parser contract** | Body `p.at(TokenKind::Ident)` is trivially derivable. Load-bearing cross-slice semantics inherited from Slice 7 alias-scan (`selected_field_alias` at `crates/parser/src/grammar/sdbl/select.rs:357, 370`) and Slice 8 source-alias guard (`source_alias` at `crates/parser/src/grammar/sdbl/select.rs:582, 600`); see `docs/legal/sdbl-clean-room-slice8.md:264-269`. |
+
+### ITS coverage
+
+All three SELECT-prefix qualifiers (DISTINCT, TOP, ALLOWED) are Tier
+A1 with canonical EBNF + prose in v8327doc Глава 8 at
+`its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320, 1331-1356`.
+The pubqlang chapters 19 / 20 / 57 are demonstrative (textbook
+companion) and provide additional canonical examples (chapters 19 / 20)
+or UI-prose (chapter 57). The Slice 7-addendum C0 codex review pass
+verified that v8327doc Глава 8 §<Описание запроса> is the primary
+SDBL grammar specification and lists ALLOWED in the canonical
+first-qualifier position alongside DISTINCT and TOP.
 
 ## Selected fields
 
@@ -726,6 +852,9 @@ is deferred to Slice 12.
 | TOTALS BY — primary (incl. OVERALL / ОБЩИЕ) | 39 §Расчет общих итогов | verified yes (C0a — `chapter_039.html:13, 25, 29, 48, 49, 51` — canonical `ИТОГИ ПО ОБЩИЕ`); structured PERIODS form NOT verified |
 | FOR UPDATE / ДЛЯ ИЗМЕНЕНИЯ | (not in ITS chapters 16–39) | verified-no (C2 — direct `rg` of dumped chapters 16–39 found no `ДЛЯ ИЗМЕНЕНИЯ` / `FOR UPDATE` form) — local IDE-recovery allowance (Tier D) |
 | INDEX BY / ИНДЕКСИРОВАТЬ ПО | (not in ITS chapters 16–39) | verified-no (C2 — direct `rg` of dumped chapters 16–39 found no `ИНДЕКСИРОВАТЬ` form) — local IDE-recovery allowance (Tier D) |
+| DISTINCT / РАЗЛИЧНЫЕ — primary | v8327doc Глава 8 §<Описание запроса> + pubqlang 20 §ВЫБРАТЬ РАЗЛИЧНЫЕ | verified yes (C0 of Slice 7-addendum — `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320` canonical EBNF skeleton, `:1346-1348` prose explanation; `its/dump/html/chapter_020.html:18, 29, 42` — demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ`; `chapter_020.html:38` — DISTINCT × ORDER BY validity rule); ITS Tier A1 |
+| TOP / ПЕРВЫЕ — primary | v8327doc Глава 8 §<Описание запроса> + pubqlang 19 §ВЫБРАТЬ ПЕРВЫЕ | verified yes (C0 of Slice 7-addendum — `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320` canonical EBNF skeleton with `[ПЕРВЫЕ <Количество>]`, `:1350-1356` prose covering ordering interaction and nested-query support; `chapter_019.html:19, 28` — demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3`); ITS Tier A1 |
+| ALLOWED / РАЗРЕШЕННЫЕ — primary | v8327doc Глава 8 §<Описание запроса> | verified yes (C0 of Slice 7-addendum — `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320` canonical EBNF places `[РАЗРЕШЕННЫЕ]` in first SELECT-prefix slot; `:1331-1344` prose paraphrased: РАЗРЕШЕННЫЕ scopes the result to records the current user has rights to; constrained to the top-level ВЫБРАТЬ; propagates into subqueries; interaction with ЧТЕНИЕ-table rights documented; bilingual word-list at `:1038-1046` РАЗРЕШЕННЫЕ ↔ ALLOWED). The pubqlang dump's `chapter_057.html:50` UI-checkbox prose is a secondary corroborating reference. ITS Tier A1. |
 
 C2 fills in the remaining "TODO at C2" rows after directly reading the dump
 pages at `/home/itrous/src/tools_migration/its/dump/html/`, mirroring the
@@ -763,6 +892,77 @@ the Slice 11 clean-room slice were authored from:
 
 The author did NOT consult `../bsl-parser/*` or any pre-C1 textual transcription
 of the 12 Slice-11 parser function bodies as working text during C0a authoring.
+
+## Non-consultation statement (Slice 7-addendum reaffirmation)
+
+The §Limitations §AST-shape contract / §IDE-recovery allowances /
+§Tier classification / §ITS coverage subsections, plus the three new
+rows in the §ITS coverage verification table (DISTINCT, TOP, ALLOWED),
+landed in commit C0 of the Slice 7-addendum and were authored from:
+
+- the previously-existing brief §Limitations sketch in this mini-spec
+  (which was authored under the same clean-room discipline);
+- the **primary** SDBL grammar specification: v8.3.27 Developer's
+  Reference Глава 8 «Работа с запросами», downloaded from
+  `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` and saved
+  to
+  `/home/itrous/src/tools_migration/its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`.
+  Per codex Round-4 finding 5 (LOW), citations are line-based and
+  excerpts kept minimal:
+  - `page.html:1320` — canonical EBNF skeleton for `<Описание
+    запроса>` placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, and ПЕРВЫЕ
+    `<Количество>` in the first three optional SELECT-prefix
+    slots (see line for the full skeleton including ПОМЕСТИТЬ |
+    ДОБАВИТЬ, ИЗ, ИНДЕКСИРОВАТЬ ПО НАБОРАМ, ГДЕ, СГРУППИРОВАТЬ ПО,
+    ИМЕЮЩИЕ, ДЛЯ ИЗМЕНЕНИЯ);
+  - `page.html:1331-1344` — RLS-scope prose for РАЗРЕШЕННЫЕ
+    (top-level-only constraint; propagation into subqueries;
+    interaction with ЧТЕНИЕ rights);
+  - `page.html:1346-1348` — duplicate-elimination prose for
+    РАЗЛИЧНЫЕ;
+  - `page.html:1350-1356` — limit / ordering / nested-query prose
+    for ПЕРВЫЕ;
+  - `page.html:1024-1046` — bilingual word-list including the two
+    relevant pairs РАЗЛИЧНЫЕ ↔ DISTINCT and РАЗРЕШЕННЫЕ ↔ ALLOWED;
+- the **secondary** ITS pubqlang dump (textbook companion) at
+  `/home/itrous/src/tools_migration/its/dump/html/` — chapter 19
+  lines 19/28 (TOP / ПЕРВЫЕ canonical demonstrative example),
+  chapter 20 lines 18/29/38/42 (DISTINCT / РАЗЛИЧНЫЕ canonical
+  demonstrative example + DISTINCT × ORDER BY interaction), chapter
+  57 line 50 (UI-checkbox prose listing "Разрешенные" as a query
+  designer GUI flag — corroborating only);
+- the lexer Slice 2 attestation (`docs/legal/sdbl-clean-room-slice2.md`)
+  for bilingual keyword pairs (Slice-2-LEGACY KwAllowed at
+  `crates/lexer/src/sdbl/mod.rs:470, 494`);
+- the Slice 1/2/6/7/8/9/10a/10b/11 clean-room attestations for
+  event-parser conventions and AST-shape contracts (in particular the
+  Slice 8 attestation at
+  `docs/legal/sdbl-clean-room-slice8.md:264-269` for the
+  `is_identifier_token` cross-slice contract);
+- the HIR consumer code at
+  `crates/sdbl-hir/src/lower/select_fields.rs:45-90` for read-only
+  documentation of consumer-side DISTINCT / TOP extraction (no ALLOWED
+  consumer exists at HIR level);
+- the IDE-diagnostics test gates at
+  `crates/ide-diagnostics/src/handlers/assign_alias_fields_in_query.rs:442-491,
+  514-528` for cross-checking any-order acceptance.
+
+The author did NOT consult `../bsl-parser/*` or any pre-C1 textual
+transcription of the 4 Slice-7-addendum parser function bodies
+(`is_limitation_keyword`, `limitations`, `top_clause`,
+`is_identifier_token`) as working text during C0 authoring.
+
+The first-pass codex adversarial review (Rounds 1-3) classified
+ALLOWED as Tier D / B-contested on the strength of the pubqlang dump
+alone (chapter 57:50 UI prose). After the v8327doc Глава 8 download
+landed at `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/`,
+ALLOWED was reclassified to **Tier A1** because the developer's
+reference is the primary SDBL grammar specification and lists
+РАЗРЕШЕННЫЕ in the canonical first-SELECT-prefix-slot at
+`page.html:1320` with full prose at lines 1331-1344. The Round-3
+"Plan is IMPLEMENTATION-READY" verdict was issued before this
+discovery; a Round-4 codex pass verifies the reclassification before
+C0 is committed.
 
 ## Recovery requirements
 

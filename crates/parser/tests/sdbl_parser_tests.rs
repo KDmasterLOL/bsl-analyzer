@@ -4586,3 +4586,330 @@ fn test_slice11_is_clause_keyword_join_delegation() {
          SdblWhereClause must NOT be a descendant of SdblJoinClause",
     );
 }
+
+// ============================================================
+// Slice 7-addendum (SELECT prefix qualifiers) C0 Bucket-A gap
+// tests.
+//
+// These 5 tests pin pre-Slice-7-addendum-C2 parser behaviour
+// for the limitations helper family (DISTINCT / TOP / ALLOWED +
+// `is_identifier_token` predicate). All 5 must pass on the
+// pre-rewrite parser (audit-gate semantics — they pin current
+// behaviour before C2 touches it).
+//
+// Provenance per Slice 7-addendum plan §Tier classification
+// (post-Round-3 v8327doc Глава 8 reclassification):
+//   - DISTINCT — Tier A1. Primary source: v8327doc Глава 8
+//                §<Описание запроса> at
+//                its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320
+//                canonical EBNF + :1346-1348 prose. Secondary
+//                corroborating: pubqlang chapter 20.
+//   - TOP      — Tier A1. Primary source: v8327doc Глава 8 at
+//                page.html:1320 (`[ПЕРВЫЕ <Количество>]` slot)
+//                + :1350-1356 prose. Secondary corroborating:
+//                pubqlang chapter 19.
+//   - ALLOWED  — Tier A1. Primary source: v8327doc Глава 8 at
+//                page.html:1320 (`[РАЗРЕШЕННЫЕ]` first
+//                SELECT-prefix slot in canonical EBNF) +
+//                :1331-1344 prose (RLS scope, top-level-only
+//                constraint, propagation into subqueries,
+//                ЧТЕНИЕ-rights interaction). Bilingual
+//                word-list at :1038-1046 РАЗРЕШЕННЫЕ ↔ ALLOWED.
+//                Secondary corroborating: pubqlang
+//                chapter_057.html:50 UI-checkbox prose. Test
+//                name uses `_canonical_ru` per the post-Round-3
+//                Tier A1 elevation; the codex Round-2 finding 1
+//                "no `_canonical_` for ALLOWED" rule is now
+//                satisfied because the canonical source DOES
+//                exist.
+//
+// Coverage maps onto §IDE-recovery allowances Q1/Q2/Q3:
+//   - Q1 (any-order qualifier acceptance) pinned by test (d).
+//   - Q3 (missing-TOP-count recovery) pinned by test (e).
+//   - Q2 (duplicate-qualifier loop tolerance) is documented in
+//     the mini-spec §IDE-recovery allowances but NOT directly
+//     tested in C0 (test (d)'s input does not contain a
+//     duplicate qualifier). A dedicated duplicate-qualifier
+//     acceptance test lands in C3 alongside the
+//     `sdbl_slice7_addendum_limitations.rs` acceptance suite.
+// ============================================================
+
+// (a) Slice 7-addendum — DISTINCT canonical RU form. **Tier A1
+// per v8327doc Глава 8 §<Описание запроса> at
+// `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`**
+// (canonical EBNF places РАЗЛИЧНЫЕ in the second SELECT-prefix
+// slot) + `:1346-1348` (duplicate-elimination prose). Pubqlang
+// `chapter_020.html:18, 29` provides the demonstrative
+// `ВЫБРАТЬ РАЗЛИЧНЫЕ` example (secondary). Pins SdblLimitations
+// as a direct child of SdblQuery, containing the РАЗЛИЧНЫЕ
+// Ident token.
+#[test]
+fn test_slice7adn_distinct_canonical_ru() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ РАЗЛИЧНЫЕ A ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let query = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_QUERY)
+        .expect("Tree must contain SdblQuery");
+    let limitations: Vec<_> =
+        query.children().filter(|c| c.kind() == SyntaxKind::SDBL_LIMITATIONS).collect();
+    assert_eq!(
+        limitations.len(),
+        1,
+        "SdblQuery must have exactly one SdblLimitations direct child for \
+         `ВЫБРАТЬ РАЗЛИЧНЫЕ A ИЗ Т`. Got: {:?}",
+        query.children().map(|c| c.kind()).collect::<Vec<_>>(),
+    );
+    let kw_text: String = limitations[0]
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().map(|t| t.text().to_string()))
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        kw_text.to_uppercase().contains("РАЗЛИЧНЫЕ"),
+        "SdblLimitations must contain РАЗЛИЧНЫЕ token. Got tokens: {}",
+        kw_text,
+    );
+}
+
+// (b) Slice 7-addendum — TOP canonical RU form. **Tier A1 per
+// v8327doc Глава 8 §<Описание запроса> at
+// `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`**
+// (canonical EBNF `[ПЕРВЫЕ <Количество>]` slot) + `:1350-1356`
+// (limit / ordering / nested-query prose). Pubqlang
+// `chapter_019.html:19, 28` provides the demonstrative
+// `ВЫБРАТЬ ПЕРВЫЕ 3` example (secondary). Pins SdblTopClause as
+// a direct child node of SdblLimitations, containing the
+// ПЕРВЫЕ Ident + Decimal `3` tokens.
+#[test]
+fn test_slice7adn_top_canonical_ru() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ ПЕРВЫЕ 3 A ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let limitations = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_LIMITATIONS)
+        .expect("Tree must contain SdblLimitations");
+    let top_clauses: Vec<_> =
+        limitations.children().filter(|c| c.kind() == SyntaxKind::SDBL_TOP_CLAUSE).collect();
+    assert_eq!(
+        top_clauses.len(),
+        1,
+        "SdblLimitations must have exactly one SdblTopClause direct child \
+         for `ВЫБРАТЬ ПЕРВЫЕ 3 A ИЗ Т`. Got direct children: {:?}",
+        limitations.children().map(|c| c.kind()).collect::<Vec<_>>(),
+    );
+    let token_text: Vec<(SyntaxKind, String)> = top_clauses[0]
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().map(|t| (t.kind(), t.text().to_string())))
+        .filter(|(k, _)| {
+            !matches!(k, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT,)
+        })
+        .collect();
+    let has_top_keyword = token_text
+        .iter()
+        .any(|(_, t)| t.to_uppercase().contains("ПЕРВЫЕ") || t.to_uppercase().contains("TOP"));
+    let has_decimal = token_text.iter().any(|(k, t)| *k == SyntaxKind::DECIMAL && t == "3");
+    assert!(
+        has_top_keyword,
+        "SdblTopClause must contain ПЕРВЫЕ/TOP keyword token. Got non-trivia tokens: {:?}",
+        token_text,
+    );
+    assert!(
+        has_decimal,
+        "SdblTopClause must contain a Decimal `3` token. Got non-trivia tokens: {:?}",
+        token_text,
+    );
+}
+
+// (c) Slice 7-addendum — ALLOWED canonical RU form. **Tier A1
+// per v8327doc Глава 8 §<Описание запроса> at
+// `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`**
+// — the canonical EBNF skeleton
+// `ВЫБРАТЬ [РАЗРЕШЕННЫЕ] [РАЗЛИЧНЫЕ] [ПЕРВЫЕ <Количество>]`
+// places ALLOWED in the canonical first-qualifier slot, with
+// full prose semantics at lines 1331-1344 covering RLS scope
+// (top-level only, propagates into subqueries) and
+// interaction with ЧТЕНИЕ rights. The pubqlang dump's
+// `chapter_057.html:50` UI-checkbox prose is the secondary
+// (textbook-companion) reference; v8327doc Глава 8 is the
+// primary specification.
+#[test]
+fn test_slice7adn_allowed_canonical_ru() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ РАЗРЕШЕННЫЕ A ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let query = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_QUERY)
+        .expect("Tree must contain SdblQuery");
+    let limitations: Vec<_> =
+        query.children().filter(|c| c.kind() == SyntaxKind::SDBL_LIMITATIONS).collect();
+    assert_eq!(
+        limitations.len(),
+        1,
+        "SdblQuery must have exactly one SdblLimitations direct child for \
+         `ВЫБРАТЬ РАЗРЕШЕННЫЕ A ИЗ Т`. Got: {:?}",
+        query.children().map(|c| c.kind()).collect::<Vec<_>>(),
+    );
+    let kw_text: String = limitations[0]
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().map(|t| t.text().to_string()))
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        kw_text.to_uppercase().contains("РАЗРЕШЕННЫЕ"),
+        "SdblLimitations must contain РАЗРЕШЕННЫЕ token (canonical Tier A1 \
+         per v8327doc Глава 8). Got tokens: {}",
+        kw_text,
+    );
+}
+
+// (d) Slice 7-addendum — combined any-order acceptance pinning
+// IDE-recovery allowance Q1. Per codex Round-2 finding 3, the
+// input must include all three qualifiers (TOP + ALLOWED +
+// DISTINCT). The parser must consume all three under a single
+// SdblLimitations wrapper without enforcing canonical
+// permutation. SDBL canonical-order normalisation is a
+// semantic-layer concern, not a parser concern.
+#[test]
+fn test_slice7adn_combined_any_order() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ ПЕРВЫЕ 5 РАЗРЕШЕННЫЕ РАЗЛИЧНЫЕ A ИЗ Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let query = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_QUERY)
+        .expect("Tree must contain SdblQuery");
+    let limitations: Vec<_> =
+        query.children().filter(|c| c.kind() == SyntaxKind::SDBL_LIMITATIONS).collect();
+    assert_eq!(
+        limitations.len(),
+        1,
+        "SdblQuery must have exactly one SdblLimitations wrapper for the \
+         any-order combined input. Got direct children: {:?}",
+        query.children().map(|c| c.kind()).collect::<Vec<_>>(),
+    );
+    let top_count =
+        limitations[0].children().filter(|c| c.kind() == SyntaxKind::SDBL_TOP_CLAUSE).count();
+    assert_eq!(
+        top_count, 1,
+        "SdblLimitations must have exactly one SdblTopClause direct child \
+         (the `ПЕРВЫЕ 5` qualifier). Got: {}",
+        top_count,
+    );
+    let kw_text: String = limitations[0]
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().map(|t| t.text().to_string()))
+        .collect::<Vec<_>>()
+        .join("|")
+        .to_uppercase();
+    assert!(
+        kw_text.contains("РАЗРЕШЕННЫЕ"),
+        "SdblLimitations must contain the РАЗРЕШЕННЫЕ keyword. Tokens: {}",
+        kw_text,
+    );
+    assert!(
+        kw_text.contains("РАЗЛИЧНЫЕ"),
+        "SdblLimitations must contain the РАЗЛИЧНЫЕ keyword. Tokens: {}",
+        kw_text,
+    );
+}
+
+// (e) Slice 7-addendum — TOP missing-decimal recovery pinning
+// IDE-recovery allowance Q3. `top_clause` calls
+// `p.expect(TokenKind::Decimal)` and `Parser::expect` calls
+// `Parser::error` on failure, which BUMPS the next token into
+// an ERROR sub-node. So for input `ВЫБРАТЬ ПЕРВЫЕ A ИЗ Т`:
+//   - SdblTopClause is still emitted (no Decimal child);
+//   - the next Ident `A` is consumed into an ERROR sub-node
+//     attached as a direct child of SdblTopClause;
+//   - the trailing `ИЗ Т` is NOT recognised as a FROM clause:
+//     the SDBL_FROM_CLAUSE node is absent, and `ИЗ` falls
+//     through to `selected_fields` as a bare SdblColumnRef
+//     while `Т` becomes its SdblAlias. This is the **current**
+//     Q3 recovery shape — a known IDE-recovery quality issue
+//     pinned here so any change to the recovery boundary is
+//     visible. Slice 12 owns the recovery-quality fix.
+//
+// The parse-level `Parser::error()` call produces an ERROR
+// NodeKind in the tree, NOT a `Parse::errors()` SyntaxError —
+// `parse.has_errors()` returns false even though there is an
+// ERROR node in the tree. The test asserts on the tree shape,
+// not on `parse.errors()`.
+#[test]
+fn test_slice7adn_top_missing_decimal_recovery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ ПЕРВЫЕ A ИЗ Т";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+    let limitations = root.descendants().find(|n| n.kind() == SyntaxKind::SDBL_LIMITATIONS).expect(
+        "SdblLimitations marker must still be completed when the \
+             Decimal after ПЕРВЫЕ is missing — IDE-recovery allowance Q3",
+    );
+    let top_clauses: Vec<_> =
+        limitations.children().filter(|c| c.kind() == SyntaxKind::SDBL_TOP_CLAUSE).collect();
+    assert_eq!(
+        top_clauses.len(),
+        1,
+        "SdblLimitations must still have exactly one SdblTopClause direct \
+         child even when the Decimal is missing. Got: {}",
+        top_clauses.len(),
+    );
+    let decimal_count = top_clauses[0]
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().filter(|t| t.kind() == SyntaxKind::DECIMAL).cloned())
+        .count();
+    assert_eq!(
+        decimal_count, 0,
+        "SdblTopClause must have NO Decimal token child when the count is \
+         missing — Q3 preserved-parser-support recovery shape (Parser::expect \
+         calls Parser::error which bumps the next token into ERROR sub-node).",
+    );
+    // Pre-rewrite parser shape: Parser::error() bumps the next
+    // token (`A`) into an ERROR sub-node attached as a direct
+    // child of SdblTopClause. The ERROR sub-node contains the
+    // bumped Ident token.
+    let error_children: Vec<_> =
+        top_clauses[0].children().filter(|c| c.kind() == SyntaxKind::ERROR).collect();
+    assert_eq!(
+        error_children.len(),
+        1,
+        "SdblTopClause must have exactly one ERROR sub-node child (the \
+         bumped `A` Ident) per Parser::error() recovery contract. Got: {}",
+        error_children.len(),
+    );
+    let error_text = error_children[0].text().to_string();
+    assert!(
+        error_text.contains('A'),
+        "ERROR sub-node must contain the bumped `A` Ident. Got text: {:?}",
+        error_text,
+    );
+    // Q3 IDE-recovery boundary: the trailing `ИЗ Т` is NOT
+    // recognised as a FROM clause in the current parser. `ИЗ`
+    // falls through to `selected_fields` as a bare
+    // SdblColumnRef and `Т` becomes its SdblAlias. This is a
+    // known recovery-quality issue documented in the Slice
+    // 7-addendum plan §IDE-recovery allowance Q3 and deferred
+    // to Slice 12.
+    let from_clauses_count =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert_eq!(
+        from_clauses_count, 0,
+        "Pre-rewrite parser current shape: NO SdblFromClause emitted for \
+         `ВЫБРАТЬ ПЕРВЫЕ A ИЗ Т` because `ИЗ` falls through to \
+         selected_fields as a bare SdblColumnRef. Got: {} SdblFromClause \
+         nodes (a regression that promotes recovery quality must update \
+         this test plus the §IDE-recovery allowance Q3 documentation).",
+        from_clauses_count,
+    );
+}
