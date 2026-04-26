@@ -686,16 +686,18 @@ scope. The remaining audit-gate decisions defaulted to
 **Option B PRESERVE** per Slice 9 pattern (recovery hardening
 deferred to Slice 12).
 
-After Slice 11 lands, the residual `LEGACY` banner in
-`select.rs` shrinks from `LEGACY (Slices 5, 11 pending)` to
+After Slice 11 landed, the residual `LEGACY` banner in
+`select.rs` shrunk from `LEGACY (Slices 5, 11 pending)` to
 `LEGACY (Slice 5 + SELECT limitation helpers pending)` and
-contains 4 functions: `virtual_table_args_legacy` (Slice 5
+contained 4 functions: `virtual_table_args_legacy` (Slice 5
 target) plus `is_limitation_keyword` / `limitations` /
-`top_clause` (SELECT prefix qualifiers pending future
-Slice-7-addendum or 6/7-shaped mini-slice; the small
-`is_identifier_token` helper consumed by Slice 7 / Slice 8 also
-remains in the residual block under the same future addendum
-scope).
+`top_clause` (SELECT prefix qualifiers, pending Slice-7-addendum)
+plus the small `is_identifier_token` helper consumed by Slice 7
+/ Slice 8 (same future addendum scope). The Slice-7-addendum
+landed 2026-04-26 (see §Slice 7-addendum below); after that
+addendum, the residual block shrinks further to
+`LEGACY (Slice 5 pending)` and contains only
+`virtual_table_args_legacy`.
 
 ### Scope
 
@@ -729,6 +731,80 @@ scope).
   `#[ignore]` to active in C2.
 - `crates/parser/tests/sdbl_slice11_clauses.rs` — 35
   spec-driven acceptance tests added in C3.
+
+## Slice 7-addendum: SELECT prefix qualifiers (DISTINCT / TOP / ALLOWED + helpers)
+
+**Status: complete (2026-04-26).** See
+[`sdbl-clean-room-slice7-addendum.md`](sdbl-clean-room-slice7-addendum.md)
+for the attestation.
+
+The Slice 7-addendum is a deferred follow-up to the Slice 7
+clean-room (which landed 2026-04-25 and explicitly excluded the
+SELECT-prefix qualifier helpers from its scope). The addendum
+re-authors the four limitation-helper functions
+(`is_identifier_token`, `is_limitation_keyword`, `limitations`,
+`top_clause`) under the new
+`CLEAN-ROOM Slice 7-addendum — SELECT prefix qualifiers` banner
+in `crates/parser/src/grammar/sdbl/select.rs`, attaches
+per-function provenance comments, and shrinks the residual
+LEGACY banner in `select.rs` from
+`LEGACY (Slice 5 + SELECT limitation helpers pending)` to
+`LEGACY (Slice 5 pending)` — leaving only
+`virtual_table_args_legacy` in the residual block.
+
+A primary SDBL grammar source — v8.3.27 Developer's Reference
+Глава 8 «Работа с запросами» downloaded to
+`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html` —
+landed during the C0 review window. Line 1320 of `page.html`
+carries the canonical EBNF skeleton for `<Описание запроса>`
+placing all three SELECT-prefix qualifiers (РАЗРЕШЕННЫЕ /
+РАЗЛИЧНЫЕ / ПЕРВЫЕ) in their canonical first three slots; lines
+1331-1356 give full prose semantics for each qualifier. This
+source is **primary**; the pubqlang dump (chapters 19/20/57)
+remains a **secondary** corroborating textbook companion. After
+the addendum lands, ALL three SELECT-prefix qualifiers are
+Tier A1 with v8327doc Глава 8 as the cited primary source.
+
+The addendum carries a §Deferred semantic constraint note
+(codex Round-4 finding 4): the v8327doc-attested top-level-only
+constraint on РАЗРЕШЕННЫЕ (`page.html:1336`) is NOT enforced at
+parser level; HIR-level / IDE-diagnostic-level enforcement is
+deferred to Slice 13 or a dedicated diagnostic.
+
+### Scope
+
+- `is_identifier_token` — Tier C/B local parser contract
+  (Ident predicate; cross-slice consumer of Slice 7 alias-scan
+  + Slice 8 source-alias guard).
+- `is_limitation_keyword` — Tier A1 predicate matching the
+  bilingual SELECT-prefix qualifier vocabulary.
+- `limitations` — Tier A1 main entry; emits `SdblLimitations`.
+- `top_clause` — Tier A1 helper; emits `SdblTopClause`.
+
+### Files
+
+- `crates/parser/src/grammar/sdbl/select.rs` — the new
+  `CLEAN-ROOM Slice 7-addendum — SELECT prefix qualifiers`
+  banner — 4 functions; LEGACY banner shrunk to
+  `LEGACY (Slice 5 pending)`.
+- `crates/parser/src/grammar/sdbl.rs` — module-level
+  `## Provenance` docstring Slice 7-addendum entry, flipped to
+  "complete (landed with C3 2026-04-26)" with attestation
+  citation.
+- `docs/legal/sdbl-select-mini-spec.md` — §Limitations
+  extended at C0 with full AST-shape contract + IDE-recovery
+  allowances Q1/Q2/Q3 + Tier classification + ITS coverage +
+  §Deferred semantic constraint + §Non-consultation statement
+  (Slice 7-addendum reaffirmation); §ITS coverage verification
+  table extended with three new rows for DISTINCT, TOP,
+  ALLOWED.
+- `docs/legal/sdbl-clean-room-slice7-addendum.md` — Slice
+  7-addendum clean-room attestation (this addendum's anchor
+  document).
+- `crates/parser/tests/sdbl_parser_tests.rs` — 5 Bucket-A
+  gap-test functions added in C0 (192 → 197 tests).
+- `crates/parser/tests/sdbl_slice7_addendum_limitations.rs` —
+  13 spec-driven acceptance tests added in C3.
 
 ## Slice 12: recovery and IDE allowances
 

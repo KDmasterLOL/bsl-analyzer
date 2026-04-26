@@ -148,16 +148,22 @@
 //! (`virtual_table_args_legacy`) remain Tier B under the Slice 5
 //! banner.
 //!
-//! Slice 7-addendum — clean-room (rewrite in progress): the
-//! SELECT-prefix qualifier helpers `is_identifier_token`,
-//! `is_limitation_keyword`, `limitations`, `top_clause` (DISTINCT
-//! / РАЗЛИЧНЫЕ, TOP / ПЕРВЫЕ, ALLOWED / РАЗРЕШЕННЫЕ) are
-//! relocated under the
+//! Slice 7-addendum — clean-room (complete, landed with C3
+//! 2026-04-26): the SELECT-prefix qualifier helpers
+//! `is_identifier_token`, `is_limitation_keyword`,
+//! `limitations`, `top_clause` (DISTINCT / РАЗЛИЧНЫЕ, TOP /
+//! ПЕРВЫЕ, ALLOWED / РАЗРЕШЕННЫЕ) live under the
 //! `CLEAN-ROOM Slice 7-addendum — SELECT prefix qualifiers`
-//! banner in `select.rs` at C1; per-function provenance comments
-//! and clean-room body re-derivation land at C2; attestation +
-//! acceptance tests + this docstring flip to "complete" land at
-//! C3.
+//! banner in `select.rs`. All three SELECT-prefix keywords are
+//! Tier A1 per v8327doc Глава 8 «Работа с запросами» at
+//! `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+//! canonical EBNF + `:1331-1356` prose semantics;
+//! `is_identifier_token` is Tier C/B local parser contract per
+//! Slice 8 attestation cross-reference. The residual LEGACY
+//! banner in `select.rs` shrinks to `LEGACY (Slice 5 pending)`
+//! containing only `virtual_table_args_legacy`. See
+//! `docs/legal/sdbl-clean-room-slice7-addendum.md` for the
+//! attestation.
 
 pub mod expressions;
 pub mod select;
