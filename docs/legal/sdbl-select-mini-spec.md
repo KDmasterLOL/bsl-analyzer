@@ -288,9 +288,9 @@ sources, with v8327doc Глава 8 as the primary grammar source.
 
 | Keyword | Tier | Source |
 |---|---|---|
-| `DISTINCT` / `РАЗЛИЧНЫЕ` | **A1** | v8327doc Глава 8 §<Описание запроса> at `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320, 1346-1348` (canonical EBNF + prose). Pubqlang chapter 20 at `chapter_020.html:18, 29, 42` provides the demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ` examples; DISTINCT × ORDER BY interaction at `chapter_020.html:38`. Bilingual word-list at `page.html:1024-1036` (РАЗЛИЧНЫЕ ↔ DISTINCT). |
+| `DISTINCT` / `РАЗЛИЧНЫЕ` | **A1** | v8327doc Глава 8 §<Описание запроса> at `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320, 1346-1348` (canonical EBNF + prose). Pubqlang chapter 20 at `chapter_020.html:18, 29, 42` provides the demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ` examples; DISTINCT × ORDER BY interaction at `chapter_020.html:38`. Bilingual word-list at `page.html:1030-1034` (РАЗЛИЧНЫЕ ↔ DISTINCT). |
 | `TOP <decimal>` / `ПЕРВЫЕ <decimal>` | **A1** | v8327doc Глава 8 at `page.html:1320, 1350-1356` (canonical EBNF `ПЕРВЫЕ <Количество>` + prose covering ordering interaction and nested-query support). Pubqlang chapter 19 at `chapter_019.html:19, 28` provides the demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3` example. |
-| `ALLOWED` / `РАЗРЕШЕННЫЕ` | **A1** | v8327doc Глава 8 at `page.html:1320, 1331-1344` — canonical EBNF places РАЗРЕШЕННЫЕ in the first SELECT-prefix slot; prose at lines 1331-1344 covers RLS scope (records visible to current user only), top-level-only constraint, propagation into subqueries, and interaction with ЧТЕНИЕ rights. Bilingual word-list at `page.html:1038-1046` (РАЗРЕШЕННЫЕ ↔ ALLOWED). The pubqlang dump's `chapter_057.html:50` UI-checkbox prose is a corroborating secondary reference only. |
+| `ALLOWED` / `РАЗРЕШЕННЫЕ` | **A1** | v8327doc Глава 8 at `page.html:1320, 1331-1344` — canonical EBNF places РАЗРЕШЕННЫЕ in the first SELECT-prefix slot; prose at lines 1331-1344 covers RLS scope (records visible to current user only), top-level-only constraint, propagation into subqueries, and interaction with ЧТЕНИЕ rights. Bilingual word-list at `page.html:1040-1044` (РАЗРЕШЕННЫЕ ↔ ALLOWED). The pubqlang dump's `chapter_057.html:50` UI-checkbox prose is a corroborating secondary reference only. |
 | `is_identifier_token` predicate | **C/B local parser contract** | Body `p.at(TokenKind::Ident)` is trivially derivable. Load-bearing cross-slice semantics inherited from Slice 7 alias-scan (`selected_field_alias` at `crates/parser/src/grammar/sdbl/select.rs:357, 370`) and Slice 8 source-alias guard (`source_alias` at `crates/parser/src/grammar/sdbl/select.rs:582, 600`); see `docs/legal/sdbl-clean-room-slice8.md:264-269`. |
 
 ### ITS coverage
@@ -922,8 +922,9 @@ landed in commit C0 of the Slice 7-addendum and were authored from:
     РАЗЛИЧНЫЕ;
   - `page.html:1350-1356` — limit / ordering / nested-query prose
     for ПЕРВЫЕ;
-  - `page.html:1024-1046` — bilingual word-list including the two
-    relevant pairs РАЗЛИЧНЫЕ ↔ DISTINCT and РАЗРЕШЕННЫЕ ↔ ALLOWED;
+  - `page.html:1030-1034` — bilingual pair РАЗЛИЧНЫЕ ↔ DISTINCT;
+    `page.html:1040-1044` — bilingual pair РАЗРЕШЕННЫЕ ↔ ALLOWED;
+    `page.html:920-924` — bilingual pair ПЕРВЫЕ ↔ TOP;
 - the **secondary** ITS pubqlang dump (textbook companion) at
   `/home/itrous/src/tools_migration/its/dump/html/` — chapter 19
   lines 19/28 (TOP / ПЕРВЫЕ canonical demonstrative example),

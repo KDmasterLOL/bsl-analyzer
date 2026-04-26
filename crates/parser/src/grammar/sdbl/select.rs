@@ -1506,10 +1506,9 @@ fn totals_by_clause(p: &mut Parser) {
 // CLEAN-ROOM Slice 7-addendum — SELECT prefix qualifiers
 // ============================================================================
 //
-// Authorship: rewrite-in-progress; per-function provenance comments and
-// clean-room body re-derivation land at C2. C1 is a pure relocation +
-// placeholder commit so the C2 audit-diff is restricted to function-body
-// changes only.
+// See `docs/legal/sdbl-clean-room-slice7-addendum.md` for authorship and
+// source citations (lands with C3). Per-function provenance comments are
+// attached below.
 //
 // The 4 functions below cover the Slice-7-addendum surface:
 //   - `is_identifier_token` — Tier C/B local parser contract: trivial Ident
@@ -1524,45 +1523,100 @@ fn totals_by_clause(p: &mut Parser) {
 // Tier classification authoritative source: v8327doc Глава 8 «Работа с
 // запросами» at
 // `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
-// (canonical EBNF skeleton with all three SELECT-prefix qualifiers in their
-// canonical first three slots) + `:1331-1356` prose semantics +
-// `:1024-1046` bilingual word-list. Pubqlang chapters 19/20/57 are
-// secondary corroborating sources. See
-// `docs/legal/sdbl-clean-room-slice7-addendum.md` (lands with C3) for the
-// attestation.
+// (canonical EBNF skeleton placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ in their
+// canonical first three SELECT-prefix slots) + `:1331-1356` prose semantics
+// + bilingual word-list pairs at `:1030-1034` (РАЗЛИЧНЫЕ ↔ DISTINCT),
+// `:1040-1044` (РАЗРЕШЕННЫЕ ↔ ALLOWED), `:920-924` (ПЕРВЫЕ ↔ TOP).
+// Pubqlang chapters 19/20/57 are secondary corroborating sources.
 
-/// Check if current token is an identifier
+/// Check whether the current token is an Ident accepted by the alias /
+/// source-alias scans as the head of an identifier.
 ///
-/// Note: Some keywords can be used as identifiers in SDBL
+/// Tier C/B local parser contract: the body
+/// `p.at(TokenKind::Ident)` is trivially derivable from the project's
+/// event-parser conventions. The load-bearing semantics live in the
+/// cross-slice consumers, not here:
+///
+/// - Slice 7 alias-scan at `selected_field_alias`
+///   (`select.rs:357, 370`) — accepts a bare Ident as an implicit
+///   field alias when not a clause keyword.
+/// - Slice 8 source-alias guard at `source_alias`
+///   (`select.rs:582, 600`) — same shape for FROM-list source alias
+///   acceptance.
+///
+/// Slice 8 attestation `docs/legal/sdbl-clean-room-slice8.md:264-269`
+/// preserves the alias-scan guard as a behavior contract; this
+/// helper's signature must remain `pub(super) fn(&Parser) -> bool`-
+/// compatible (here `fn` is sufficient because both call sites are
+/// in the same submodule).
 fn is_identifier_token(p: &Parser) -> bool {
-    // C1 placeholder — clean-room rewrite in C2
     p.at(TokenKind::Ident)
 }
 
-/// Check if current position starts a limitation keyword
+/// Check whether the current token starts a SELECT-prefix limitation
+/// qualifier.
 ///
-/// Limitations: DISTINCT, TOP, ALLOWED
+/// Primary source: v8327doc Глава 8 §<Описание запроса> at
+/// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+/// canonical EBNF skeleton places all three SELECT-prefix qualifiers
+/// (РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ) in their canonical first three
+/// slots; prose semantics at `page.html:1331-1356`; bilingual
+/// word-list pairs at `page.html:1030-1034` (РАЗЛИЧНЫЕ ↔ DISTINCT),
+/// `page.html:1040-1044` (РАЗРЕШЕННЫЕ ↔ ALLOWED), and
+/// `page.html:920-924` (ПЕРВЫЕ ↔ TOP). Secondary corroborating
+/// sources (textbook companion in pubqlang dump): chapter 19 at
+/// `chapter_019.html:19, 28` (TOP / ПЕРВЫЕ demonstrative example),
+/// chapter 20 at `chapter_020.html:18, 29` (DISTINCT / РАЗЛИЧНЫЕ
+/// demonstrative example), chapter 57 at `chapter_057.html:50`
+/// (ALLOWED query-designer UI prose). All three keywords ITS
+/// Tier A1.
+///
+/// Bilingual keyword pairs:
+/// - DISTINCT / РАЗЛИЧНЫЕ — Slice 2 attested.
+/// - TOP / ПЕРВЫЕ — Slice 2 LEGACY attested.
+/// - ALLOWED / РАЗРЕШЕННЫЕ — Slice 2 LEGACY attested (KwAllowed at
+///   `crates/lexer/src/sdbl/mod.rs:470, 494`); lexical promotion is
+///   Slice 3 territory.
 fn is_limitation_keyword(p: &Parser) -> bool {
-    // C1 placeholder — clean-room rewrite in C2
     at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ")
         || at_sdbl_keyword(p, "TOP", "ПЕРВЫЕ")
         || at_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ")
 }
 
-/// Parse query limitations (DISTINCT, TOP, ALLOWED)
+/// Parse the SELECT-prefix limitations block.
 ///
-/// Grammar (simplified):
+/// Grammar (mini-spec §Limitations):
 /// ```text
-/// limitations: (DISTINCT | TOP count | ALLOWED)+
+/// limitations := limitation+
+/// limitation  := DISTINCT
+///              | (TOP|ПЕРВЫЕ) <decimal>
+///              | ALLOWED
 /// ```
 ///
-/// Keywords are accepted in any order to keep the parser tolerant; strict
-/// ordering (where required) is enforced by semantic diagnostics, not here.
+/// Primary source: v8327doc Глава 8 §<Описание запроса> at
+/// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+/// canonical EBNF + `page.html:1331-1356` prose semantics for
+/// DISTINCT / TOP / ALLOWED. Secondary corroborating sources
+/// (textbook companion in pubqlang dump): chapters 19 / 20 / 57.
+///
+/// IDE-recovery allowances preserved (mini-spec §Limitations
+/// §IDE-recovery allowances):
+/// - **Q1** any-order qualifier acceptance — the loop accepts the
+///   three qualifiers in any source-order permutation; the parser
+///   does not enforce a canonical permutation. v8327doc EBNF
+///   suggests the canonical order ALLOWED → DISTINCT → TOP; the
+///   parser tolerates any permutation as IDE recovery.
+/// - **Q2** duplicate-qualifier loop tolerance — the loop re-enters
+///   on every `is_limitation_keyword` hit without deduplication, so
+///   `ВЫБРАТЬ РАЗЛИЧНЫЕ РАЗЛИЧНЫЕ A` is accepted (semantic
+///   uniqueness is not enforced at parser level).
+///
+/// Emits `SdblLimitations` with a flat sequence of bare keyword
+/// tokens (DISTINCT, ALLOWED) and `SdblTopClause` wrapper nodes
+/// (one per TOP qualifier) as direct children.
 fn limitations(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2
     let m = p.start();
 
-    // Parse keywords in any order until no more limitation keywords found
     while is_limitation_keyword(p) {
         if at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ") {
             eat_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ");
@@ -1577,20 +1631,40 @@ fn limitations(p: &mut Parser) {
     m.complete(p, NodeKind::SdblLimitations);
 }
 
-/// Parse TOP clause
+/// Parse a single TOP / ПЕРВЫЕ qualifier including its decimal count.
 ///
-/// Grammar: `TOP count=DECIMAL`
+/// Grammar: `(TOP|ПЕРВЫЕ) <decimal>`.
+///
+/// Primary source: v8327doc Глава 8 §<Описание запроса> at
+/// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+/// canonical EBNF `[ПЕРВЫЕ <Количество>]` slot + `page.html:1350-1356`
+/// prose covering limit, ordering interaction with subsequent
+/// ORDER BY, and nested-query support. Secondary corroborating
+/// source: pubqlang `chapter_019.html:19, 28` demonstrative
+/// `ВЫБРАТЬ ПЕРВЫЕ 3`.
+///
+/// IDE-recovery allowance Q3 (mini-spec §Limitations
+/// §IDE-recovery allowances): when the next non-trivia token is
+/// not a Decimal, `Parser::expect` invokes `Parser::error`
+/// (`crates/parser/src/parser.rs:160-166`), which bumps that
+/// token into an `ERROR` sub-node attached as a direct child of
+/// `SdblTopClause`. For input `ВЫБРАТЬ ПЕРВЫЕ A ИЗ Т`, the `A`
+/// Ident is consumed into the ERROR child; the limitations loop
+/// then exits because the following `ИЗ` is not a limitation
+/// keyword. A tighter recovery (recognise FROM / clause-keyword
+/// boundary, emit empty error sub-node instead of consuming) is
+/// deferred to Slice 12.
+///
+/// Emits `SdblTopClause` with the ПЕРВЫЕ / TOP keyword token and
+/// the count Decimal token (or an ERROR sub-node when the count
+/// is missing) as direct children.
 fn top_clause(p: &mut Parser) {
-    // C1 placeholder — clean-room rewrite in C2
     let m = p.start();
 
     eat_sdbl_keyword(p, "TOP", "ПЕРВЫЕ");
     p.skip_trivia();
 
-    // Expect a number (count)
-    if !p.expect(TokenKind::Decimal) {
-        // Error recovery: complete anyway
-    }
+    p.expect(TokenKind::Decimal);
 
     m.complete(p, NodeKind::SdblTopClause);
 }
