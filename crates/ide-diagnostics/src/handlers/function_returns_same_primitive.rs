@@ -1,50 +1,4 @@
-//! FunctionReturnsSamePrimitive diagnostic
-//!
-//! Detects functions that always return the same primitive value in all branches.
-//!
-//!
-//! ## Why?
-//! Functions that always return the same constant value are useless and indicate poor design:
-//! - Should be replaced with a constant or variable
-//! - Wastes performance on function calls
-//! - Misleading - looks like computed value
-//! - Harder to maintain
-//!
-//! ## Bad practice
-//! ```bsl
-//! Функция ПолучитьВерсию()
-//!     Если Условие Тогда
-//!         Возврат "1.0";
-//!     Иначе
-//!         Возврат "1.0";  // Always returns same value!
-//!     КонецЕсли;
-//! КонецФункции
-//!
-//! Функция ПроверкаДанных(Данные)
-//!     Если ЭтоПравильно(Данные) Тогда
-//!         Возврат Истина;
-//!     Иначе
-//!         Возврат Истина;  // Always returns True!
-//!     КонецЕсли;
-//! КонецФункции
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Перем Версия = "1.0";  // Use constant/variable
-//!
-//! Функция ПолучитьВерсию()
-//!     Возврат ВычислитьВерсию();  // Computed value
-//! КонецФункции
-//!
-//! Функция ПроверкаДанных(Данные)
-//!     Если ЭтоПравильно(Данные) Тогда
-//!         Возврат Истина;
-//!     Иначе
-//!         Возврат Ложь;  // Different values
-//!     КонецЕсли;
-//! КонецФункции
-//! ```
+//! Reports functions whose return branches collapse to the same primitive literal.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -65,9 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when FunctionReturnsSamePrimitive diagnostic is emitted during lowering.
+/// Creates a diagnostic from the HIR lowering result.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::FunctionReturnsSamePrimitive,

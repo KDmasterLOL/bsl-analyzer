@@ -1,30 +1,4 @@
-//! SelfInsertion diagnostic.
-//!
-//! Detects insertion of a collection into itself via Insert/Add methods.
-//!
-//! ## Why?
-//! Inserting a collection into itself:
-//! - Creates infinite recursion or corrupted data structures
-//! - Results in undefined behavior
-//! - Indicates a logic error in the code
-//!
-//! ## Bad practice
-//! ```bsl
-//! Товары.Добавить(Товары);           // Error: array into itself
-//! Структура.Вставить("Ключ", Структура);  // Error: structure into itself
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Товары.Добавить(Товар);            // Add different item
-//! Структура.Вставить("Ключ", Значение);   // Insert different value
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Error (MAJOR)
-//!
-//! ## Implementation
+//! Reports collection insertion into itself via local `Add` / `Insert` patterns.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -46,9 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch.rs when `BodyDiagnostic::SelfInsertion` is encountered.
+/// Creates a diagnostic from HIR self-insertion lowering data.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::SelfInsertion,

@@ -1,37 +1,6 @@
 //! MagicDate diagnostic
 //!
 //! Detects hard-coded date literals in BSL code.
-//!
-//!
-//! ## Why?
-//!
-//! Hard-coded dates are problematic:
-//! - `'20250101'` - not self-documenting (what does this date mean?)
-//! - Different developers use different conventions
-//! - Should use named constants or semantic functions
-//! - Makes code hard to maintain
-//!
-//! ## What gets detected?
-//!
-//! 1. Single-quoted date literals: `'20250101'`, `'20250101120000'`
-//! 2. Double-quoted strings in expressions: `Дата("20250101") + Шаг`
-//!
-//! ## What is EXCLUDED?
-//!
-//! 1. Authorized dates (configurable, default: `"00010101,00010101000000,000101010000"`)
-//! 2. Simple assignments: `День = Дата("00020101")`
-//! 3. Return statements: `Возврат '20250101'`
-//! 4. Default parameter values: `Функция Метод(Дата1 = '39990202')`
-//! 5. `Structure.Insert()`: `НоваяСтруктура.Вставить("Поле", '20250101')`
-//! 6. Structure constructors: `Новый Структура("Поле", '20250101')`
-//! 7. `Correspondence.Insert()`: `СоответствиеКодов.Вставить("Код", '20230101')`
-//! 8. Property assignments: `Структура.Поле = '20250101'`
-//!
-//! ## Configuration
-//!
-//! ### `authorizedDates` (String)
-//! Comma-separated list of authorized dates (without quotes).
-//! Default: `"00010101,00010101000000,000101010000"`
 
 use crate::define_metadata;
 use crate::metadata::*;

@@ -1,14 +1,4 @@
-//! SemicolonPresence diagnostic
-//!
-//! Detects statements without trailing semicolon.
-//!
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! The diagnostic is emitted in `hir-def/body/lower/stmt.rs` when a statement
-//! AST node has no SEMICOLON token (excluding EMPTY_STMT, LABEL_STMT, and
-//! statements with parse errors).
+//! Reports statements that omit a trailing semicolon.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -29,9 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch.rs when `BodyDiagnostic::MissingSemicolon` is encountered.
+/// Creates a diagnostic from HIR semicolon-lowering data.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::SemicolonPresence;
 

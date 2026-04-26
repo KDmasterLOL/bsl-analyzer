@@ -3,8 +3,15 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Using double negatives makes the code harder to understand and can lead to errors when the developer mentally computes False instead of True, or vice versa.
-It is recommended to replace double negatives with conditional expressions that directly express the author's intentions.
+Double negatives make expressions harder to read and easier to misinterpret. It is usually better to rewrite them into a direct positive or direct comparison form.
+
+The current implementation reports three structural patterns:
+
+- `Not (Not X)`
+- `Not (X <> Y)`
+- `(Not X) <> Y`
+
+It intentionally skips more complex expressions that contain logical `AND` / `OR` inside the candidate fragment, because such cases are more likely to need manual review than a mechanical rewrite.
 
 ## Examples
 
@@ -25,6 +32,5 @@ EndIf;
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-* Source: [Remove double negative](https://www.refactoring.com/catalog/removeDoubleNegative.html)
+- [Refactoring Catalog: Remove Double Negative](https://www.refactoring.com/catalog/removeDoubleNegative.html)

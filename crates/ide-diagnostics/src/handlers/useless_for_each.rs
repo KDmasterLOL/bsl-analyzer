@@ -1,40 +1,4 @@
-//! UseLessForEach diagnostic.
-//!
-//! Detects unused iterators in "For Each" loops - when the loop iterates over a collection
-//! but the iterator variable is never used in the loop body.
-//!
-//! ## Why?
-//! An unused iterator indicates either:
-//! - Programming error (forgetting to use the variable)
-//! - Unnecessary iteration (should use a different approach)
-//!
-//! ## Bad practice
-//! ```bsl
-//! Для Каждого Итератор Из Коллекция Цикл
-//!     Итератор(); // Calling iterator as a function is NOT valid usage
-//! КонецЦикла;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Для Каждого Элемент Из Коллекция Цикл
-//!     Результат = Элемент.Свойство; // Property access
-//! КонецЦикла;
-//!
-//! Для Каждого А Из Б Цикл
-//!     А = Истина; // Assignment
-//! КонецЦикла;
-//!
-//! Для Каждого Объект Из Б Цикл
-//!     Объект.Метод(); // Method call on iterator
-//! КонецЦикла;
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Error (CRITICAL)
-//! - **Tags:** CLUMSY
-//! - **Minutes to fix:** 2
+//! Reports `Для каждого` / `For Each` loops whose iterator is not meaningfully used.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -56,6 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Creates a diagnostic from HIR lowering data for an unused loop iterator.
 pub fn from_hir(
     iterator_name: &str,
     range: TextRange,

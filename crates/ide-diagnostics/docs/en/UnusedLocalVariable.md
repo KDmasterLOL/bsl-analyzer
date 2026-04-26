@@ -1,8 +1,28 @@
 # Unused local variable (UnusedLocalVariable)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-Unused local variables should be removed
 
-If a local variable is declared but not used, it is dead code and should be removed.
-Doing so will improve maintainability because developers will not wonder what the variable is used for.
+Local variables that are declared or assigned but never read should be removed.
+
+Such variables are dead code. They make the method harder to read and often remain after incomplete refactoring.
+
+The current implementation uses control-flow and liveness analysis, so it is not limited to simple text matching.
+
+## Examples
+
+Incorrect:
+
+```bsl
+Procedure ProcessData()
+    TemporaryValue = 42;
+    DoMainAction();
+EndProcedure
+```
+
+Correct:
+
+```bsl
+Procedure ProcessData()
+    DoMainAction();
+EndProcedure
+```

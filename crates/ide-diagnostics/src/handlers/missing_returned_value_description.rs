@@ -1,49 +1,4 @@
-//! MissingReturnedValueDescription diagnostic.
-//!
-//! **HIR-based implementation** using structured documentation from `method.docs()`.
-//!
-//! Checks that:
-//! 1. Functions have return value descriptions in comments ("Возвращаемое значение:")
-//! 2. Procedures do NOT have return value descriptions
-//! 3. In strict mode, each returned type has a description (not just type name)
-//!
-//! ## Configuration
-//!
-//! - `allowShortDescriptionReturnValues` (boolean, default: true)
-//!   - `true`: Only require return block presence
-//!   - `false`: Require description text for each type
-//!
-//! ## Examples
-//!
-//! ### Bad practice (function without return description)
-//! ```bsl
-//! // Вычисляет сумму
-//! Функция ВычислитьСумму(А, Б)
-//!     Возврат А + Б;
-//! КонецФункции
-//! ```
-//!
-//! ### Good practice
-//! ```bsl
-//! // Вычисляет сумму
-//! //
-//! // Возвращаемое значение:
-//! //  Число - сумма двух чисел
-//! Функция ВычислитьСумму(А, Б)
-//!     Возврат А + Б;
-//! КонецФункции
-//! ```
-//!
-//! ### Bad practice (procedure with return description)
-//! ```bsl
-//! // Выводит сообщение
-//! //
-//! // Возвращаемое значение:
-//! //  Строка
-//! Процедура ВывестиСообщение()
-//!     Сообщить("Привет");
-//! КонецПроцедуры
-//! ```
+//! Reports missing or invalid returned-value documentation.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -65,9 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Run the MissingReturnedValueDescription diagnostic.
-///
-/// Uses HIR-based documentation API (`method.docs()`) instead of ad-hoc comment parsing.
+/// Run the returned-value documentation diagnostic.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingReturnedValueDescription;
 

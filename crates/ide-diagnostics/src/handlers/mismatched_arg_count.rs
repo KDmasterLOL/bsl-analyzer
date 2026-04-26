@@ -41,6 +41,7 @@ mod tests {
 
     #[test]
     fn emits_when_arg_count_differs_from_signature() {
+        // Local fixture: resolved common-module call with too few arguments.
         let fixture = r#"
 //- /CommonModules/ОбщийМодуль/Ext/Module.bsl
 Процедура Сложение(Левый, Правый) Экспорт

@@ -1,15 +1,4 @@
-//! TransferringParametersBetweenClientAndServer diagnostic.
-//!
-//! Detects by-reference parameters in server methods that are not assigned
-//! and are called from client methods.
-//!
-//! ## Why?
-//!
-//! When parameters are passed between client and server boundaries, they are
-//! transmitted as copies. If a parameter is declared without "Знач" (ByValue),
-//! changes made on the server are transmitted back to the client. If the
-//! parameter is NOT modified inside the server method, there's no reason to
-//! transmit it back—this wastes bandwidth and degrades performance.
+//! Detects server parameters that are copied back to the client without need.
 
 use crate::define_metadata;
 use crate::metadata::*;

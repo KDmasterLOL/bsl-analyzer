@@ -2,39 +2,54 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+Do not join a query source with a subquery result.
 
-When writing queries, you should not use subquery joins. Only metadata objects or temporary tables should be joined to each other.
+For SDBL queries, prefer joins between metadata objects or temporary tables.
+If a subquery must be prepared first, move it into a separate batch step and
+store the result in a temporary table.
 
-If the query contains joins with subqueries, then this can lead to negative consequences:
+The public 1C guidance warns that joins with subqueries may lead to:
 
-- Very slow query execution with low load on server hardware
-- Unstable work of the request. Sometimes the query can work fast enough, sometimes very slow
-- Significant difference in query execution time for different DBMS
-- Increased query sensitivity to the relevance and completeness of sql statistics. After a complete update of statistics, the query may work quickly, but after a while it will slow down
+- very slow execution even under light load;
+- unstable performance depending on data distribution and statistics;
+- noticeably different plans on different DBMS;
+- high sensitivity to outdated database statistics.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-
-An example of a potentially dangerous query using a subquery join:
+Invalid:
 
 ```bsl
-SELECT *
-FROM Document.Sales
-LEFT JOIN (
-   SELECT Field1 ИЗ InformationRegister.Limits
-   WHERE Field2 In (&List)
-   GROUP BY
-   Field1
-) BY Refs = Field1
+Запрос.Текст =
+"ВЫБРАТЬ
+|    Продажи.Ссылка
+|ИЗ
+|    Документ.РеализацияТоваровУслуг КАК Продажи
+|    ЛЕВОЕ СОЕДИНЕНИЕ (
+|        ВЫБРАТЬ Остатки.Номенклатура
+|        ИЗ РегистрНакопления.ОстаткиТоваров.Остатки КАК Остатки
+|        ГДЕ Остатки.Склад = &Склад
+|    ) КАК Остатки
+|    ПО Продажи.Товар = Остатки.Номенклатура";
+```
+
+Preferred approach:
+
+```bsl
+Запрос.Текст =
+"ВЫБРАТЬ
+|    Остатки.Номенклатура
+|ПОМЕСТИТЬ ВременныеОстатки
+|ИЗ РегистрНакопления.ОстаткиТоваров.Остатки КАК Остатки
+|ГДЕ Остатки.Склад = &Склад
+|;
+|ВЫБРАТЬ
+|    Продажи.Ссылка
+|ИЗ
+|    Документ.РеализацияТоваровУслуг КАК Продажи
+|    ЛЕВОЕ СОЕДИНЕНИЕ ВременныеОстатки КАК Остатки
+|    ПО Продажи.Товар = Остатки.Номенклатура";
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
-
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-
 * [Standard: Restrictions on SubQuery and Virtual Table Joins (RU)](https://its.1c.ru/db/v8std#content:655:hdoc)
+* [Public mirror: v8std.ru / #std655](https://v8std.ru/std/655/)

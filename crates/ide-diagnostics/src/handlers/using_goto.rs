@@ -1,17 +1,4 @@
-//! UsingGoto diagnostic
-//!
-//! Detects usage of Goto/Перейти statement.
-//!
-//!
-//! Goto is an unstructured control flow statement that makes code less readable
-//! and harder to maintain. Should use structured control flow instead
-//! (If/Если, While/Пока, For/Для, Continue/Продолжить, Break/Прервать).
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! The diagnostic is emitted in `hir-def/body/lower/stmt.rs` when GOTO_STMT
-//! AST node is encountered during statement lowering.
+//! Reports usage of the `Goto` / `Перейти` statement.
 
 use crate::define_metadata;
 use crate::metadata::*;

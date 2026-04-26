@@ -1,44 +1,4 @@
-//! UsingFindElementByString diagnostic.
-//!
-//! Detects usage of FindByName, FindByCode, FindByNumber methods with hardcoded literal arguments.
-//!
-//! ## Severity
-//! MAJOR (CODE_SMELL)
-//!
-//! ## Tags
-//! STANDARD, BADPRACTICE, PERFORMANCE
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! Detection points:
-//! - Qualified calls in `hir-def/body/lower/expr.rs` (lower_call_expr)
-//!
-//! Detected patterns:
-//! - Method.НайтиПоНаименованию("literal") / Method.FindByDescription("literal")
-//! - Method.НайтиПоКоду("literal") / Method.FindByCode("literal")
-//! - Method.НайтиПоКоду(123) / Method.FindByCode(123)
-//! - Method.НайтиПоНомеру("literal") / Method.FindByNumber("literal")
-//! - Method.НайтиПоНаименованию() (empty call)
-//!
-//! ## Examples
-//!
-//! ```bsl
-//! // ❌ Bad: Hardcoded string literals
-//! Должность = Справочники.Должности.НайтиПоНаименованию("Бухгалтер");
-//! Валюта = Справочники.Валюты.НайтиПоКоду("777");
-//! Документ = Документы.Реализация.НайтиПоНомеру("0000-000001", ТекущаяДата());
-//!
-//! // ❌ Bad: Hardcoded numeric literals
-//! Валюта = Справочники.Валюты.НайтиПоКоду(777);
-//! Документ = БизнесПроцессы.БП1.НайтиПоНомеру(333);
-//!
-//! // ✅ OK: Variable argument
-//! Наименование = "Бухгалтер";
-//! Должность = Справочники.Должности.НайтиПоНаименованию(Наименование);
-//! ```
-//!
-//! ## References
+//! Reports `FindByDescription`, `FindByCode`, and `FindByNumber` calls with literal arguments.
 
 use crate::define_metadata;
 use crate::metadata::*;

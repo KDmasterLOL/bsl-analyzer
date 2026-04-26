@@ -1,22 +1,6 @@
-//! OneStatementPerLine diagnostic
+//! OneStatementPerLine diagnostic.
 //!
-//! Detects multiple statements on the same line.
-//!
-//!
-//! Each statement should be on its own line for better readability.
-//! Multiple statements on one line make code harder to read and debug.
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! The diagnostic is emitted in `hir-def/body/lower/stmt.rs` when multiple
-//! statements start on the same line (excluding preprocessor directives,
-//! empty statements, and statements with parse errors).
-//!
-//! ## Exclusions:
-//! - Empty statements (standalone `;`)
-//! - Statements containing preprocessor directives
-//! - Statements with parse errors
+//! Reports multiple statements placed on the same line.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -37,9 +21,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch.rs when `BodyDiagnostic::OneStatementPerLine` is encountered.
+/// Creates a diagnostic from HIR when more than one statement is placed on the
+/// same source line.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::OneStatementPerLine,

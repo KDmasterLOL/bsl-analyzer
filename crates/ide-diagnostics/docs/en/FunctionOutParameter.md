@@ -2,33 +2,37 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+Functions should return results through `Return` instead of modifying by-reference parameters.
 
-The function must have no output parameters. All output must be in the return value. If you need to return multiple values, you should use such types as Structure, Array, etc.
+The current implementation reports only a narrow case:
+
+- the enclosing routine is a `Function`;
+- the parameter is passed by reference, that is, it has no `Val` / `Знач` modifier;
+- the function directly assigns to that parameter name.
+
+It does not report procedures, `Val` parameters, or assignments to fields and properties of a parameter object.
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
 ```bsl
 // Incorrect:
-ServiceURL = "";
-UserName = "";
-UserPassword = "";
-
-FillConnectionParameters(ServiceURL, UserName, UserPassword);
+Function FillConnectionParameters(ServiceURL, UserName, UserPassword)
+    ServiceURL = Settings.ServiceURL;
+    UserName = Settings.UserName;
+    UserPassword = Settings.UserPassword;
+    Return True;
+EndFunction
 
 // Correct:
-ConnectionParameters = NewConnectionParameters();
-// Returned value - Structure:
-//     Service URL  - String
-//     UserName     - String
-//     UserPassword - String
+Function FillConnectionParameters()
+    Result = New Structure;
+    Result.Insert("ServiceURL", Settings.ServiceURL);
+    Result.Insert("UserName", Settings.UserName);
+    Result.Insert("UserPassword", Settings.UserPassword);
+    Return Result;
+EndFunction
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
-
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
+- [v8std.ru: FunctionOutParameter (RU)](https://v8std.ru/diagnostics/bslls/FunctionOutParameter/)

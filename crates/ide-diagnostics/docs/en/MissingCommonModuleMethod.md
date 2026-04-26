@@ -1,23 +1,44 @@
-# Referencing a missing common module method (MissingCommonModuleMethod)
+# Calling a missing common module method (MissingCommonModuleMethod)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-Diagnostics detects erroneous calls to methods of common modules.
-Detects the following errors
-- method does not exist in the specified common module
-- method is in the common module, but it is not exported
-- if a common module has no source code, then all calls to its methods are marked as erroneous
 
-Excluded
-- the variable name is the same as the common module name
+This diagnostic reports calls to common module methods that cannot be resolved
+as exported methods of the referenced module.
+
+Typical cases:
+
+- the common module does not contain the requested method;
+- the method exists, but it is not exported;
+- source code for the target common module is unavailable, so its public API
+  cannot be confirmed.
+
+The diagnostic does not trigger when the left side of the qualified call is a
+local variable or a parameter that shadows the common module name.
+
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+
+Incorrect:
+
+```bsl
+Процедура Тест()
+    ЦеноваяПолитика.РассчитатьСкидку(Сумма);
+КонецПроцедуры
+```
+
+```bsl
+Процедура Тест()
+    ОбщегоНазначения.ВнутреннийМетод();
+КонецПроцедуры
+```
+
+Correct:
+
+```bsl
+Процедура Тест()
+    ЦеноваяПолитика.ПолучитьСкидку(Сумма);
+КонецПроцедуры
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
 
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
+- Secondary reference: [v8std.ru: MissingCommonModuleMethod](https://v8std.ru/diagnostics/bslls/MissingCommonModuleMethod/)

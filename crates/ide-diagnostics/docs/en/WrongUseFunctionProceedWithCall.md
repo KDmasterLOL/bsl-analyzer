@@ -2,24 +2,19 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+`ProceedWithCall` / `ПродолжитьВызов` is intended for extension interception methods. Calling it outside a method marked with `&Around` (`&Вместо`) leads to incorrect extension behavior and usually ends with a runtime error.
 
-Using the `ProceedWithCall` function outside of extension methods with the `&Around` annotation will result in a run-time error.
+The current implementation reports global calls to `ProceedWithCall` / `ПродолжитьВызов` when the enclosing method is not marked with `&Вместо`. It also reports calls from `&Before` / `&After` methods and from ordinary module procedures and functions.
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
 ```bsl
-&AtClient
 Procedure Test()
-
-    // copy-past from extension
-    ProceedWithCall(); // Срабатывание здесь
-
+    ProceedWithCall(); // Reported here
 EndProcedure
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-
-Source: [Extensions. Functionality -> Modules (RU)](https://its.1c.ru/db/pubextensions#content:54:1)
+- [Extensions. Functionality -> Modules (RU)](https://its.1c.ru/db/pubextensions#content:54:1)
+- [v8std.ru: WrongUseFunctionProceedWithCall (RU)](https://v8std.ru/diagnostics/bslls/WrongUseFunctionProceedWithCall/)

@@ -1,57 +1,7 @@
 //! MissingCommonModuleMethod diagnostic.
 //!
-//! Detects erroneous calls to methods of common modules.
-//!
-//! ## What it checks
-//!
-//! 1. **Method does not exist** - Method not defined in the referenced CommonModule
-//! 2. **Non-export method** - Method exists but lacks `Экспорт` (Export) keyword
-//! 3. **Missing source code** - CommonModule has no source code
-//!
-//! ## Why?
-//!
-//! Calling non-existent or private methods of CommonModules leads to runtime errors.
-//! BSL (1C:Enterprise) allows calls to CommonModule methods only if they are exported.
-//!
-//! ## Bad practice
-//!
-//! ```bsl
-//! // Method does not exist
-//! ПервыйОбщийМодуль.МетодНесуществующий(1, 2);  // ERROR
-//!
-//! // Method exists but not exported (private)
-//! ПервыйОбщийМодуль.РегистрацияИзмененийПередУдалением(Источник, Отказ);  // ERROR
-//! ```
-//!
-//! ## Good practice
-//!
-//! ```bsl
-//! // Method exported correctly
-//! Процедура НеУстаревшаяПроцедура() Экспорт
-//!     // implementation
-//! КонецПроцедуры
-//!
-//! // Valid call
-//! ПервыйОбщийМодуль.НеУстаревшаяПроцедура();  // OK
-//! ```
-//!
-//! ## Excluded cases
-//!
-//! - Variable names that coincide with CommonModule names (treated as local variable)
-//! - Internal calls within the same module (private methods OK within their own module)
-//! - Manager module calls (`Справочники.X.Method`) - future scope
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** Yes
-//! - **Severity:** BLOCKER (ERROR)
-//! - **Tags:** ERROR
-//! - **Minutes to fix:** 5
-//! - **No configurable parameters** (strict validator)
-//!
-//! ## Reference
-//!
-//! Ported from:
+//! Reports calls to common-module methods that cannot be resolved as exported
+//! methods of the referenced module.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -73,18 +23,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::MissingCommonModuleMethod` is encountered.
-///
-/// Uses provider-first pattern via `ctx.resolve_qualified_path()` for Clean Architecture
-/// compliance. Domain layer (diagnostics) depends on abstraction (ctx), not implementation (db).
-///
-/// ## Resolution Algorithm
-///
-/// 1. Use `ctx.resolve_qualified_path()` which handles provider-first pattern internally
-/// 2. PathResolution::Method(id) → valid exported method, no diagnostic
-/// 3. PathResolution::Unresolved → method or module doesn't exist, emit diagnostic
+/// Creates a diagnostic from HIR when a qualified common-module call cannot be
+/// resolved to an exported method.
 pub fn from_hir(
     module: &str,
     method: &str,

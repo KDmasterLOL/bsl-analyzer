@@ -2,21 +2,49 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+Do not join a query source with a virtual table.
 
-When writing queries, you should not use virtual tables joins. Only metadata objects or temporary tables should be joined to each other.
+For SDBL queries, prefer joins between metadata objects or temporary tables.
+If data from a virtual table is required, read it in a separate step and save
+the result into a temporary table before the main join.
 
-If the query uses a join to a virtual table (for example, AccumulationRegister.Products.Balance) and the query is slow, then it is recommended to move the data reading from the virtual table into a separate query with the results saved in a temporary table.
+The public 1C guidance warns that joins with virtual tables may lead to
+unstable or slow execution, especially for large datasets.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+Invalid:
+
+```bsl
+Запрос.Текст =
+"ВЫБРАТЬ
+|    Накладные.Ссылка,
+|    Остатки.КоличествоОстаток
+|ИЗ
+|    Документ.РасходнаяНакладная КАК Накладные
+|    ЛЕВОЕ СОЕДИНЕНИЕ РегистрНакопления.ОстаткиТоваров.Остатки КАК Остатки
+|    ПО Накладные.Номенклатура = Остатки.Номенклатура";
+```
+
+Preferred approach:
+
+```bsl
+Запрос.Текст =
+"ВЫБРАТЬ
+|    Номенклатура,
+|    КоличествоОстаток
+|ПОМЕСТИТЬ ВременныеОстатки
+|ИЗ
+|    РегистрНакопления.ОстаткиТоваров.Остатки
+|;
+|ВЫБРАТЬ
+|    Накладные.Ссылка,
+|    Остатки.КоличествоОстаток
+|ИЗ
+|    Документ.РасходнаяНакладная КАК Накладные
+|    ЛЕВОЕ СОЕДИНЕНИЕ ВременныеОстатки КАК Остатки
+|    ПО Накладные.Номенклатура = Остатки.Номенклатура";
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
-
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-
 * [Standard: Restrictions on SubQuery and Virtual Table Joins (RU)](https://its.1c.ru/db/v8std#content:655:hdoc)
+* [Public mirror: v8std.ru / #std655](https://v8std.ru/std/655/)

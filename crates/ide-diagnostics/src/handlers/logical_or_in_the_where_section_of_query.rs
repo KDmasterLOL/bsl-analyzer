@@ -1,37 +1,6 @@
 //! LogicalOrInTheWhereSectionOfQuery diagnostic.
 //!
-//! Detects OR operators in WHERE clauses of SDBL queries.
-//!
-//! ## Why?
-//! OR operators in WHERE clauses prevent the 1C:Enterprise query optimizer from using indexes
-//! effectively. When the optimizer encounters OR conditions, it typically performs full table
-//! scans instead of index seeks, leading to:
-//! - Dramatically slower query execution (10x-100x slower)
-//! - Higher memory consumption for large result sets
-//! - Increased lock contention and blocking
-//! - Poor scalability with large datasets
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query = "SELECT Name, Price
-//!          FROM Products
-//!          WHERE Type = 1 OR Category = 2";
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Use UNION instead to allow index usage on each condition:
-//! Query = "SELECT Name, Price
-//!          FROM Products
-//!          WHERE Type = 1
-//!          UNION
-//!          SELECT Name, Price
-//!          FROM Products
-//!          WHERE Category = 2";
-//! ```
-//!
-//! ## Implementation
-//! Ported from:
+//! Detects `OR` / `ИЛИ` operators in SDBL `WHERE` clauses.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -78,8 +47,8 @@ mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
     #[test]
-    fn test_from_fixture() {
-        // Fixture from test_data/LogicalOrInTheWhereSectionOfQueryDiagnostic.bsl.
+    fn test_multi_case_where_or() {
+        // Large inline regression fixture for OR-in-WHERE coverage.
         // 6 OR diagnostics in WHERE clauses across multiple procedures.
         // Тест7 has no WHERE-clause ORs (OR in CASE/JOIN only) → no diagnostics from it.
         let code = r#"Процедура Тест1()

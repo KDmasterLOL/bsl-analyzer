@@ -1,3 +1,5 @@
+//! Reports usage of `LIKE` / `ПОДОБНО` in query text.
+
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -48,7 +50,7 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
     use crate::DiagnosticCode;
     #[test]
-    fn test_using_like_in_query_from_fixture() {
+    fn test_detects_like_usages_in_query_fixture() {
         let code = r#"Процедура Тест()
     ТекстЗапроса =
     "ВЫБРАТЬ

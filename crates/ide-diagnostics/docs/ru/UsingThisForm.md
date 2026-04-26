@@ -21,3 +21,4 @@
 ## Источники
 
 * [Перевод конфигураций на платформу "1С:Предприятие 8.3" без режима совместимости с версией 8.2](https://its.1c.ru/db/metod8dev#content:5293:hdoc:_top:thisform)
+* [v8std: UsingThisForm](https://v8std.ru/diagnostics/bslls/UsingThisForm/)

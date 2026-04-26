@@ -2,21 +2,43 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+Do not mix Latin and Cyrillic characters inside one identifier.
 
-Do not use identifiers consisting of characters from different languages, вecause it makes it difficult to use them further, forcing to switch the layout.  
-Also, the diagnostics detects the erroneous use of characters from another language, when it was used unintentionally. For exaple: `o`, `c`, `B`, `p` and etc.
+Such names are hard to read, easy to mistype, and unreliable for search,
+review, and refactoring because visually similar letters may belong to
+different alphabets, for example `o` / `о`, `c` / `с`, `B` / `В`.
 
-To reduce "noise" in the names consisting of several words beginning or ending in the word in another language, in the diagnostics option has been added that is included by default.  
-If the parameter is enabled, then **NOT** are considered erroneous names like `ZebraДрайвер`, `КодHTTP`, `SMSШлюз` and the like.
+The diagnostic checks mixed-script identifiers in several places, including:
+
+- procedure and function names;
+- variable declarations and assignment targets;
+- parameters;
+- annotation names and annotation parameters;
+- region names;
+- goto labels.
+
+To reduce noise, the diagnostic allows a common trailing-part pattern by
+default, so names like `HTTPСоединение` or `ВИмениEnglish` are not reported.
+This behavior can be adjusted through the diagnostic configuration.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+Invalid:
+
+```bsl
+Перем КодТовараВcистеме; // Latin `c` inside a Cyrillic word
+Перем Сontрагент;       // Latin `C` inside a Cyrillic word
+```
+
+Correct:
+
+```bsl
+Перем КодТовараВСистеме;
+Перем Контрагент;
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
+This diagnostic has no direct normative 1C standard source.
 
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
+Related public context:
+
+* [v8std.ru / bslls / LatinAndCyrillicSymbolInWord](https://v8std.ru/diagnostics/bslls/LatinAndCyrillicSymbolInWord/)

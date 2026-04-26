@@ -3,7 +3,9 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-The diagnostic finds use of service tags in comments. Tags list:
+The diagnostic reports service tags and placeholder comments left in source code. Such tags usually indicate unfinished work, temporary debugging, merge leftovers, or generated fragments that were not replaced with real logic.
+
+The default tag set includes:
 
 * TODO
 * FIXME
@@ -21,4 +23,8 @@ The diagnostic finds use of service tags in comments. Tags list:
 * Insert handler contents
 * Paste handler content
 
-Tags list can be extended via options.
+The tag list can also be replaced through diagnostic options.
+
+## Sources
+
+* [v8std: UsingServiceTag](https://v8std.ru/diagnostics/bslls/UsingServiceTag/)

@@ -1,10 +1,4 @@
-//! ReadOnlyPropertyAssignment diagnostic.
-//!
-//! Emitted from `hir-ty::infer` when an assignment's left-hand side resolves
-//! to a platform property whose HBK page declares `Использование: Только
-//! чтение.` (e.g. `Запрос.Параметры = …;` — `Параметры` is read-only).
-//! Workspace attributes (MDO fields from XML) are always read-write, so
-//! this never fires on MetadataRef receivers.
+//! Reports assignments to platform properties that are marked read-only.
 
 use crate::define_metadata;
 use crate::metadata::*;

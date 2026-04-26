@@ -1,3 +1,5 @@
+//! Reports usage of platform objects that are unavailable in Unix/Linux environments.
+
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

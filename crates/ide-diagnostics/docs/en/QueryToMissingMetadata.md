@@ -1,38 +1,31 @@
 # Using non-existent metadata in the query (QueryToMissingMetadata)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-Due to frequent changes to the metadata model, queries may appear that refer to renamed or deleted metadata.
-Also, errors can occur when you manually change queries, without checking with the query designer.
+This diagnostic reports query sources that do not resolve to existing metadata objects.
 
-When accessing non-existent metadata in a query, a runtime error will occur.
+Such queries usually appear after metadata was renamed or removed, or after manual query edits were made without verifying the final text.
 
 ## Examples
 
-Query for an already deleted register:
+Reference to a missing catalog:
 ```sdbl
 SELECT
-    Table.Field1 AS Field1
+    Items.Description AS Description
 FROM
-    InformationRegister.InfoRegOld AS Table
+    Catalog.MissingCatalog AS Items
 ```
-Query with a join to the renamed register:
+
+Reference to a missing register in a join:
 ```sdbl
 SELECT
-    Table.Field1 AS Field1
+    Balances.Quantity AS Quantity
 FROM
-     InformationRegister.InfoReg AS Table 
-     INNER JOIN InformationRegister.InfoRegOld AS FilterTable
-     ON FilterTable.Field2 = Table.Field2
+    AccumulationRegister.Balances AS Balances
+    LEFT JOIN InformationRegister.MissingRegister AS Filter
+    ON Filter.Item = Balances.Item
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
 
-* Source: [Standard: Modules (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Useful information: [Refusal to use modal windows (RU)](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-- [Development standards. Working with queries (RU)](https://its.1c.ru/db/v8std#browse:13:-1:26:27)
-- [Development standards. Optimizing queries (RU)](https://its.1c.ru/db/v8std#browse:13:-1:26:28)
+* [v8std: QueryToMissingMetadata](https://v8std.ru/diagnostics/bslls/QueryToMissingMetadata/)

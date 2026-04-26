@@ -8,12 +8,73 @@
 //! - Function calls
 //! - Literals and parameters
 //!
-//! Phase 1 (MVP): Basic expression support for SELECT fields and WHERE clauses
-//! Phase 2-3: Complete expression grammar (CASE, predicates, complex operators)
+//! ## Provenance
+//!
+//! Slice 10a — clean-room (complete, landed with C3 2026-04-25):
+//! expression backbone (atoms + operator precedence chain + parens /
+//! tuple / subquery). Authored from
+//! `docs/legal/sdbl-expressions-mini-spec.md` and the local 1C ITS
+//! pubqlang dump (chapters 22 §WHERE / precedence ladder, 40 §Литералы
+//! and §Арифметические операции, 60 §Передача параметров в запрос).
+//! The clean-room claim follows the same convention as Slices 1, 2,
+//! 6, 7, 8 (see their attestations under `docs/legal/sdbl-clean-room-
+//! slice{1,2,6,7,8}.md`): **independent derivation from the cited
+//! sources plus the project's local compatibility constraints, not
+//! textual novelty**. Where the resulting event-parser shape closely
+//! matches the pre-clean-room implementation, that is the natural
+//! convergence on a single ITS-derived grammar shape, not consultation
+//! of pre-C1 bodies during authorship. See
+//! `docs/legal/sdbl-clean-room-slice10a.md` for the attestation.
+//!
+//! Slice 10b — clean-room (complete, landed with C3 2026-04-25):
+//! predicates, comparison, column-or-function dispatch, CAST type
+//! spec, CASE expressions. The 8 functions under the
+//! `CLEAN-ROOM Slice 10b` banner — `comparison_expr`,
+//! `predicate_expr`, `column_or_function`, `inline_table_fields`,
+//! `is_cast_function`, `parse_cast_type`, `case_expr`,
+//! `when_clause` — were re-authored in C2 from ITS pubqlang
+//! chapters 21, 22, 23, 27, 32, 40 and the C0a-extended
+//! `docs/legal/sdbl-expressions-mini-spec.md`; each function body
+//! carries an ITS-cited or `// local: …` per-function provenance
+//! comment. The two `_legacy` suffixes used during the Slice 10a
+//! authorship period (`comparison_expr_legacy`,
+//! `predicate_expr_legacy`) were retired in C1; `not_expr` now
+//! calls `comparison_expr` directly. The C2 commit also landed
+//! the `column_or_function` clause-keyword recovery fix
+//! (codex Round-1 finding 2). See
+//! `docs/legal/sdbl-clean-room-slice10b.md` for the attestation.
 
 use crate::event::NodeKind;
 use crate::parser::Parser;
 use lexer::TokenKind;
+
+// ============================================================================
+// CLEAN-ROOM Slice 10a — expression backbone
+// ============================================================================
+//
+// Authored from `docs/legal/sdbl-expressions-mini-spec.md` (the C0a
+// clean-room reference; see its §Non-consultation statement and §ITS
+// coverage verification) and the local 1C ITS pubqlang dump
+// (chapters 22, 40, 60). Per-function provenance comments cite the
+// specific ITS chapter or mini-spec section that authorises each
+// function's grammar shape. The clean-room claim is independent
+// derivation from the cited sources, not textual novelty — see the
+// module-level Provenance docstring above for the project-wide
+// convention.
+//
+// The 17 functions below cover the Slice 10a surface:
+//   - Helpers: is_expression_start, is_recovery_point,
+//     recover_to_delimiter, parse_delimited_list
+//   - Entries: logical_expression, expression
+//   - Operator chain: logical_or_expr, logical_and_expr, not_expr,
+//     additive_expr, multiplicative_expr, unary_expr
+//   - Primary dispatch + atoms: primary_expr, literal_expr,
+//     string_literal_or_multi, parameter_expr, paren_or_subquery_expr
+//
+// Slice 10a's `not_expr` calls into `comparison_expr` (Slice 10b
+// territory, defined under the `CLEAN-ROOM Slice 10b` banner below)
+// — that is the only Slice-10a → Slice-10b dispatch boundary in
+// this file.
 
 // ============================================================================
 // Helper Functions for Error Recovery
@@ -21,82 +82,84 @@ use lexer::TokenKind;
 
 /// Check if current token can start an expression.
 ///
-/// Used for error recovery in list parsing - allows detecting empty elements
-/// and clause keywords that shouldn't be consumed as expressions.
+/// Used for error recovery in list parsing — detects empty elements and
+/// clause keywords that should not be consumed as expressions.
 ///
-/// # Returns
-///
-/// `true` if current token can start an expression:
-/// - Literals: numbers, strings, booleans, null
-/// - Identifiers (columns, functions)
-/// - Operators: `+`, `-`, `NOT` (unary), `*` (for COUNT(*))
-/// - Parentheses: `(` (parenthesized expression or subquery)
-/// - Parameters: `&Parameter`
-/// - Keywords: `CASE`
-///
-/// `false` otherwise (including clause keywords like FROM, WHERE, etc.)
+/// Accept set: `Decimal`, `Float`, `String`, `KwTrue`, `KwFalse`,
+/// `KwUndefined`, non-clause-keyword `Ident`, `Plus`, `Minus`, `KwNot`,
+/// `Star`, `LParen`, `Ampersand`, plus the keyword probes
+/// `at_keyword("CASE" | "ВЫБОР" | "NULL")`.
 pub(super) fn is_expression_start(p: &Parser) -> bool {
-    // Check for tokens that can start an expression
+    // Authored from sdbl-expressions-mini-spec.md §Recovery — accept-set
+    // for list-parsing item detection, and §Atoms accept-lead tokens.
+    // ITS pubqlang/40 §Литералы covers numeric, string, boolean
+    // (Истина/Ложь), Null, Неопределено; pubqlang/60 §Передача параметров
+    // в запрос covers the `&Identifier` parameter prefix; pubqlang/22
+    // §Условие отбора covers the `НЕ` (NOT) prefix operator. Note: bare
+    // `NULL` arrives as `Ident` (per `sdbl_token_converter.rs:57`,
+    // `LitNull → TokenKind::Ident`) and must be detected via
+    // `at_keyword("NULL")`; the historical `Some(TokenKind::KwNull)` arm
+    // was unreachable dead code and is dropped here.
     match p.current() {
-        // Literals
         Some(TokenKind::Decimal)
         | Some(TokenKind::Float)
         | Some(TokenKind::String)
         | Some(TokenKind::KwTrue)
         | Some(TokenKind::KwFalse)
-        | Some(TokenKind::KwNull)
         | Some(TokenKind::KwUndefined) => true,
 
-        // Identifiers (column references, function calls)
         Some(TokenKind::Ident) => {
-            // Exclude clause keywords - they're not expressions
+            // Generic identifier may be a column ref / function call /
+            // bare NULL literal. Reject only when it's a clause keyword
+            // (FROM, WHERE, GROUP, ORDER, …) — those terminate the
+            // expression position and must not be consumed.
             !super::select::is_clause_keyword(p)
         }
 
-        // Unary operators and Star (for COUNT(*) special syntax)
         Some(TokenKind::Plus)
         | Some(TokenKind::Minus)
         | Some(TokenKind::KwNot)
         | Some(TokenKind::Star) => true,
 
-        // Parenthesized expressions or subqueries
         Some(TokenKind::LParen) => true,
 
-        // Parameters (&Parameter)
         Some(TokenKind::Ampersand) => true,
 
-        // CASE expression - check via keyword since it's IDENT token
-        _ => p.at_keyword("CASE") || p.at_keyword("ВЫБОР"),
+        // CASE / ВЫБОР and bare NULL all arrive as Ident from the
+        // converter; the Ident arm above already accepts them as
+        // expression starts via the !is_clause_keyword guard. The
+        // `_` fallthrough below is **unreachable** under the current
+        // `Parser::at_keyword` API (which only returns true when the
+        // current token is Ident — and the Ident arm has already
+        // matched). It is kept for textual symmetry with
+        // `primary_expr`'s keyword-probe pattern, not as a defence
+        // against future converter changes; if such a change ever
+        // routes one of these keywords to a non-Ident TokenKind,
+        // both this function and `primary_expr` must grow an
+        // explicit `Some(TokenKind::…)` arm.
+        _ => p.at_keyword("CASE") || p.at_keyword("ВЫБОР") || p.at_keyword("NULL"),
     }
 }
 
 /// Check if current position is a recovery point for list parsing.
 ///
-/// Recovery points are tokens where we should stop parsing the current element
-/// and either continue to the next element or exit the list entirely.
-///
-/// # Parameters
-///
-/// - `recovery_set`: TokenSet of delimiter tokens (Comma, RParen, Semicolon, etc.)
-///
-/// # Returns
-///
-/// `true` if at a recovery point (stop current element), `false` otherwise
+/// Recovery points are positions where the list parser must stop the
+/// current element and either continue to the next element or exit the
+/// list entirely. They are: any token in the caller's `recovery_set`,
+/// any clause keyword (FROM / WHERE / …), or end-of-input.
 fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> bool {
-    // Check if current token is in the recovery set
+    // local: event-parser predicate; mini-spec §Recovery — list-parsing
+    // recovery points. Three independent triggers, OR-combined.
     if let Some(kind) = p.current() {
         if recovery_set.contains(kind) {
             return true;
         }
     }
 
-    // Check for clause keywords (FROM, WHERE, etc.)
-    // These are always recovery points regardless of recovery_set
     if super::select::is_clause_keyword(p) {
         return true;
     }
 
-    // EOF is also a recovery point
     p.at_end()
 }
 
@@ -108,6 +171,11 @@ fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> b
 /// **Important:** Tracks parenthesis balance to handle nested function calls like:
 /// `ВЫРАЗИТЬ(поле КАК СТРОКА(200))` - must consume until outer `)`, not inner one.
 ///
+/// **Clause keywords stop recovery at any paren depth.** An unterminated
+/// nested `(...)` must not gobble a clause keyword (FROM / WHERE / GROUP
+/// BY / ...) that belongs to the outer query — see Slice 12 §Behaviour
+/// change in `docs/legal/sdbl-clean-room-slice10a.md`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -117,8 +185,20 @@ fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> b
 /// // Current position: ) (outer rparen)
 /// ```
 fn recover_to_delimiter(p: &mut Parser) {
+    // local: paren-depth tracking recovery; mini-spec §Recovery —
+    // nested-paren recovery preserves the inner `(...)` depth so that
+    // `ВЫРАЗИТЬ(поле КАК СТРОКА(200))` recovery walks to the outer `)`,
+    // not the inner one. Wraps the consumed run in one Error marker.
     let err = p.start();
     let mut paren_depth = 0i32; // Track nested parentheses
+                                // For each currently-active nested subquery (an open `(`
+                                // immediately followed by `SELECT`/`ВЫБРАТЬ`), the paren_depth at
+                                // which its opening `(` was bumped. While any marker is active,
+                                // hard intra-clause keywords (FROM/WHERE/...) inside that
+                                // subquery's body belong to the nested query, not the outer
+                                // query — recovery must absorb them instead of stopping. Codex
+                                // Round-5b stop-hook fix.
+    let mut nested_query_starts: Vec<i32> = Vec::new();
 
     loop {
         p.check_iteration_limit(); // Prevent infinite loops
@@ -127,12 +207,26 @@ fn recover_to_delimiter(p: &mut Parser) {
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
+            // Detect nested-subquery body: `( SELECT ...`. The
+            // skip_trivia is safe — recovery is already a malformed
+            // path, and skipping trivia mirrors the clean
+            // paren_or_subquery_expr dispatch.
+            p.skip_trivia();
+            if super::select::is_query_starter_or_combiner_keyword(p) {
+                nested_query_starts.push(paren_depth);
+            }
             continue;
         }
 
         if p.at(TokenKind::RParen) {
             if paren_depth > 0 {
-                // This is a closing paren for a nested call - consume it
+                // Pop the nested-subquery marker if this `)` closes
+                // its opening `(`.
+                if let Some(&d) = nested_query_starts.last() {
+                    if d == paren_depth {
+                        nested_query_starts.pop();
+                    }
+                }
                 paren_depth -= 1;
                 p.bump();
                 continue;
@@ -142,16 +236,49 @@ fn recover_to_delimiter(p: &mut Parser) {
             }
         }
 
-        // Stop at top-level delimiters (when not inside nested parens)
-        if paren_depth == 0 {
-            if p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) {
-                break;
-            }
+        let inside_nested_query = !nested_query_starts.is_empty();
 
-            // Stop at clause keywords (FROM, WHERE, etc.)
-            if super::select::is_clause_keyword(p) {
+        // Hard intra-clause keywords (FROM / WHERE / GROUP BY / ...)
+        // terminate recovery at any paren depth UNLESS we are inside
+        // an active nested subquery — in that case the keyword
+        // belongs to the nested query body and must be absorbed.
+        // Statement-starters / combiners (SELECT / UNION) only stop
+        // at depth 0; at depth>0 they likely open a fresh nested
+        // subquery whose body recovery should walk through.
+        // Codex Round-5 stop-hook caught the original any-depth
+        // promotion as overly broad; Codex Round-5b stop-hook caught
+        // the residual inner-FROM misattribution. See
+        // `is_query_starter_or_combiner_keyword`
+        // (`crates/parser/src/grammar/sdbl/select.rs`).
+        if super::select::is_clause_keyword(p) {
+            let stop = if paren_depth == 0 {
+                true
+            } else if inside_nested_query {
+                false
+            } else {
+                !super::select::is_query_starter_or_combiner_keyword(p)
+            };
+            if stop {
                 break;
             }
+        }
+
+        // Comma stops recovery only at depth 0 — at depth>0 it is a
+        // valid continuation token for the nested function-call
+        // argument list (e.g. `СУММА(A, B)` inside an outer recovery
+        // walk). Semicolon is also depth-0-only here, but the
+        // rationale differs: a syntactically valid `;` cannot appear
+        // at depth>0 in an expression-argument stream, so the
+        // depth-0-only stop is the natural choice; on MALFORMED input
+        // (e.g. `СУММА(1 (; ...`) this means a `;` at depth>0 is
+        // bumped into the Error node and the package boundary is
+        // lost — a deliberate divergence from
+        // `recover_field_to_alias_or_delimiter` (Slice 7), which is
+        // invoked at the top-level statement boundary and stops on
+        // `;` at any depth. See Slice 10a / Slice 7 attestations
+        // §Behaviour change for the cross-helper rationale.
+        if paren_depth == 0 && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon)) {
+            break;
         }
 
         // Stop at EOF
@@ -214,7 +341,14 @@ pub(super) fn parse_delimited_list<F>(
 ) where
     F: FnMut(&mut Parser),
 {
-    // Parse first element (mandatory - caller ensures at least one element)
+    // local: generic delimited-list helper; mini-spec §Recovery —
+    // empty-element recovery emits Error for missing items between
+    // delimiters (e.g. `a, , b`) and on trailing delimiters
+    // (e.g. `a, b,`). Used by SELECT field list, FROM source list,
+    // IN value list, INDEX BY items.
+
+    // Parse first element (mandatory — caller ensures at least one
+    // element).
     parse_item(p);
 
     loop {
@@ -259,27 +393,50 @@ pub(super) fn parse_delimited_list<F>(
     }
 }
 
-/// Entry point for logical expressions (used in WHERE, HAVING clauses)
+/// Entry point for logical expressions (used in WHERE, HAVING, ON
+/// clause bodies).
 ///
-/// Grammar: `logicalExpression: predicate ((AND | OR) predicate)*`
+/// Grammar: `logicalExpression := logicalOrExpression`
 pub fn logical_expression(p: &mut Parser) {
+    // ITS pubqlang/22 §Условие отбора — the WHERE / HAVING / JOIN ON
+    // clause body is a logical expression. Delegates to logical_or_expr
+    // which sits at the bottom of the precedence ladder per pubqlang/22
+    // («сначала вычисляются простые логические выражения, затем
+    // операции НЕ, затем операции И, в последнюю очередь – операции
+    // ИЛИ»).
     logical_or_expr(p);
 }
 
-/// Entry point for general expressions (used in SELECT fields, etc.)
+/// Entry point for general expressions (used in SELECT fields, ORDER BY
+/// items, GROUP BY items, function call args, etc.).
 ///
-/// Grammar: `expression: logicalExpression | caseExpression | ...`
+/// Grammar: `expression := logicalExpression`
 ///
-/// Phase 1: Same as logical_expression
-/// Phase 2: Add CASE expressions, type casts
+/// Currently identical to `logical_expression`. Slice 12 may merge the
+/// two entries; Slice 10a preserves the split for scope discipline (the
+/// 14+ call sites in `select.rs` are Slice 7/8/11 territory).
 pub fn expression(p: &mut Parser) {
+    // Mini-spec §Expression entry points — currently identical to
+    // logical_expression; kept distinct for the Slice 12 future split
+    // between general-expression and logical-expression contexts.
     logical_or_expr(p);
 }
 
-/// Parse OR expression (lowest precedence)
+/// Parse OR expression — loosest binding in the logical chain.
 ///
-/// Grammar: `logicalOrExpression: logicalAndExpression (OR logicalAndExpression)*`
+/// Grammar: `logicalOrExpression := logicalAndExpression (OR
+/// logicalAndExpression)*`. Emits a single FLAT `SdblLogicalOrExpr`
+/// wrapper containing all operands and `KwOr` operator tokens (HIR
+/// `lower_binary_expr` collects the flat children list and detects
+/// the operator from `node.text()`).
 fn logical_or_expr(p: &mut Parser) {
+    // ITS pubqlang/22 — OR is the loosest-binding logical operator
+    // («в последнюю очередь – операции ИЛИ»). Mini-spec §AST-shape
+    // invariant #1: FLAT wrapper, one marker before the loop, one
+    // m.complete after; chained `a OR b OR c` produces a single
+    // SdblLogicalOrExpr with 3 operand children + 2 KwOr tokens.
+    // Mini-spec §Trivia handling: skip_trivia BEFORE the operator
+    // probe so `a\nOR\nb` is recognised.
     let m = p.start();
 
     logical_and_expr(p);
@@ -288,7 +445,7 @@ fn logical_or_expr(p: &mut Parser) {
         p.skip_trivia();
         if p.at(TokenKind::KwOr) {
             p.check_iteration_limit();
-            p.bump(); // OR
+            p.bump(); // OR / ИЛИ
             p.skip_trivia();
             logical_and_expr(p);
         } else {
@@ -299,10 +456,14 @@ fn logical_or_expr(p: &mut Parser) {
     m.complete(p, NodeKind::SdblLogicalOrExpr);
 }
 
-/// Parse AND expression
+/// Parse AND expression — tighter than OR, looser than NOT.
 ///
-/// Grammar: `logicalAndExpression: notExpression (AND notExpression)*`
+/// Grammar: `logicalAndExpression := notExpression (AND notExpression)*`.
+/// Emits a single FLAT `SdblLogicalAndExpr` wrapper.
 fn logical_and_expr(p: &mut Parser) {
+    // ITS pubqlang/22 — AND binds tighter than OR, looser than NOT
+    // («затем операции НЕ, затем операции И»). Mini-spec §AST-shape
+    // invariant #1: FLAT wrapper. Mini-spec §Trivia handling.
     let m = p.start();
 
     not_expr(p);
@@ -311,7 +472,7 @@ fn logical_and_expr(p: &mut Parser) {
         p.skip_trivia();
         if p.at(TokenKind::KwAnd) {
             p.check_iteration_limit();
-            p.bump(); // AND
+            p.bump(); // AND / И
             p.skip_trivia();
             not_expr(p);
         } else {
@@ -322,20 +483,396 @@ fn logical_and_expr(p: &mut Parser) {
     m.complete(p, NodeKind::SdblLogicalAndExpr);
 }
 
-/// Parse NOT expression
+/// Parse NOT expression — tightest-binding logical operator.
 ///
-/// Grammar: `notExpression: NOT* predicate`
+/// Grammar: `notExpression := NOT* comparisonExpression`. Right-
+/// recursive for multi-NOT inputs (`НЕ НЕ A` → nested
+/// `SdblNotExpr( SdblNotExpr( A ) )`).
 fn not_expr(p: &mut Parser) {
+    // ITS pubqlang/22 — NOT binds tightest among logical ops («сначала
+    // вычисляются простые логические выражения, затем операции НЕ»).
+    // Mini-spec §Operator-binding pin item 1: right-recursive multi-
+    // NOT produces nested SdblNotExpr wrappers. The non-NOT branch
+    // delegates to Slice 10b legacy comparison/predicate dispatch
+    // (rewritten by Slice 10b at C2).
     if p.at(TokenKind::KwNot) {
         let m = p.start();
-        p.bump(); // NOT
+        p.bump(); // NOT / НЕ
         p.skip_trivia();
-        not_expr(p); // Recursive for multiple NOTs
+        not_expr(p); // Right-recursive for chained `НЕ НЕ A`.
         m.complete(p, NodeKind::SdblNotExpr);
     } else {
         comparison_expr(p);
     }
 }
+
+/// Parse additive expression — `+` and `-` operators.
+///
+/// Grammar: `additiveExpression := multiplicativeExpression ((PLUS |
+/// MINUS) multiplicativeExpression)*`. Emits a single FLAT
+/// `SdblAdditiveExpr` wrapper for chained additions (mini-spec
+/// §AST-shape #1).
+fn additive_expr(p: &mut Parser) {
+    // ITS pubqlang/40 §Арифметические операции — «+, -, /, *»; +/-
+    // operators bind looser than */÷. Mini-spec §AST-shape #1: FLAT
+    // wrapper opens before the loop and closes after; chained
+    // `a + b + c` produces a single SdblAdditiveExpr with 3 operands
+    // and 2 PLUS tokens. Mini-spec §Trivia handling (CRITICAL): the
+    // p.skip_trivia() call MUST precede the operator probe so
+    // `a\n+\nb` is recognised.
+    let m = p.start();
+
+    multiplicative_expr(p);
+
+    loop {
+        p.skip_trivia(); // CRITICAL: skip_trivia BEFORE the operator probe.
+        if !matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
+            break;
+        }
+        p.check_iteration_limit();
+        p.bump(); // + or -
+        p.skip_trivia();
+        multiplicative_expr(p);
+    }
+
+    m.complete(p, NodeKind::SdblAdditiveExpr);
+}
+
+/// Parse multiplicative expression — `*`, `/`, `%`.
+///
+/// Grammar: `multiplicativeExpression := unaryExpression ((STAR | SLASH
+/// | PERCENT) unaryExpression)*`. Emits a single FLAT
+/// `SdblMultiplicativeExpr` wrapper.
+///
+/// **Note on `%`:** ITS pubqlang/40 explicitly states «Операция
+/// получения остатка % в языке запросов не поддерживается» — modulo
+/// is NOT documented as a supported SDBL operator. The current parser
+/// (and this clean-room rewrite) accept `Percent` as a *local
+/// IDE-recovery allowance* so user input containing `%` produces a
+/// recoverable tree rather than an immediate parse error. This is
+/// recorded in `sdbl-expressions-mini-spec.md` §IDE-recovery
+/// allowances and §ITS coverage verification as the single non-ITS
+/// extension in Slice 10a.
+fn multiplicative_expr(p: &mut Parser) {
+    // ITS pubqlang/40 §Арифметические операции — *, /. The Percent
+    // arm is a local IDE allowance, NOT ITS-spec'd. Mini-spec
+    // §AST-shape #1 (FLAT wrapper) + §Trivia handling.
+    let m = p.start();
+
+    unary_expr(p);
+
+    loop {
+        p.skip_trivia(); // CRITICAL: skip_trivia BEFORE the operator probe.
+        if !matches!(
+            p.current(),
+            Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
+        ) {
+            break;
+        }
+        p.check_iteration_limit();
+        p.bump(); // *, /, %
+        p.skip_trivia();
+        unary_expr(p);
+    }
+
+    m.complete(p, NodeKind::SdblMultiplicativeExpr);
+}
+
+/// Parse unary expression — `+`, `-`, `NOT` prefix.
+///
+/// Grammar: `unaryExpression := (PLUS | MINUS | KwNot)?
+/// primaryExpression`. Right-recursive for chained unary operators
+/// (`- - А` → nested `SdblUnaryExpr( SdblUnaryExpr( А ) )`).
+fn unary_expr(p: &mut Parser) {
+    // Mini-spec §Operator precedence — unary +/-/NOT binds tighter
+    // than the multiplicative chain. Mini-spec §Operator-binding pin
+    // item 2: right-recursive nesting via `unary_expr(p)` in the
+    // recursive arm. ITS pubqlang/40 covers unary plus / minus
+    // through the arithmetic-operator inventory; KwNot prefix on
+    // arithmetic operands is a local extension.
+    if matches!(
+        p.current(),
+        Some(TokenKind::Plus) | Some(TokenKind::Minus) | Some(TokenKind::KwNot)
+    ) {
+        let m = p.start();
+        p.bump(); // unary operator
+        p.skip_trivia();
+        unary_expr(p); // Right-recursive for chained `- - А`.
+        m.complete(p, NodeKind::SdblUnaryExpr);
+    } else {
+        primary_expr(p);
+    }
+}
+
+/// Parse primary expression — atoms.
+///
+/// Grammar (mini-spec §Atoms primary dispatch):
+/// ```text
+/// primaryExpression
+///   := caseExpression                  (at_keyword "CASE" / "ВЫБОР")
+///    | nullLiteral                     (at_keyword "NULL")
+///    | parenOrSubqueryExpression       (LPAREN)
+///    | parameterExpression             (Ampersand + Ident)
+///    | literalExpression               (Decimal | Float | String | KwTrue | KwFalse | KwUndefined)
+///    | starLiteral                     (Star — emits SdblLiteral)
+///    | columnOrFunctionCall            (generic Ident, NOT a clause keyword)
+///    | error-fallback (SdblError)      (anything else)
+/// ```
+///
+/// Order is significant: keyword probes (`CASE`, `ВЫБОР`, `NULL`)
+/// MUST run before generic `Ident` dispatch, because all three arrive
+/// as `TokenKind::Ident` from `sdbl_token_converter` and would
+/// otherwise be consumed as column references.
+fn primary_expr(p: &mut Parser) {
+    // ITS pubqlang/40 §Литералы — literal forms include numeric,
+    // string, boolean (Истина/Ложь), Null, Неопределено; pubqlang/40
+    // also documents ВЫБОР (CASE) and ВЫРАЗИТЬ (CAST) operations.
+    // ITS pubqlang/60 §Передача параметров в запрос — `&Identifier`
+    // parameter prefix. Mini-spec §Atoms primary dispatch — keyword
+    // probes (CASE/ВЫБОР, bare NULL) run BEFORE the generic Ident
+    // arm because the converter delivers these spellings as Ident
+    // (per `sdbl_token_converter.rs:57` for NULL); without the
+    // pre-Ident probe bare `NULL` would be consumed as an
+    // SdblColumnRef instead of an SdblLiteral.
+    if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
+        case_expr(p);
+        return;
+    }
+
+    if p.at_keyword("NULL") {
+        // Bare NULL literal (e.g. `SELECT NULL`, `WHERE x = NULL`).
+        // Mini-spec §Atoms literal grammar — nullLiteral emits
+        // SdblLiteral wrapping the single Ident token.
+        let m = p.start();
+        p.bump(); // Consume the NULL Ident token.
+        m.complete(p, NodeKind::SdblLiteral);
+        return;
+    }
+
+    match p.current() {
+        Some(TokenKind::LParen) => paren_or_subquery_expr(p),
+        Some(TokenKind::Decimal) | Some(TokenKind::Float) => literal_expr(p),
+        Some(TokenKind::String) => literal_expr(p),
+        Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => literal_expr(p),
+        Some(TokenKind::KwUndefined) => literal_expr(p),
+        Some(TokenKind::Ampersand) => parameter_expr(p),
+
+        // Star atom for COUNT(*) syntax — emits SdblLiteral wrapping
+        // the single Star token (mini-spec §Atoms — Star).
+        Some(TokenKind::Star) => {
+            let m = p.start();
+            p.bump(); // Consume Star.
+            m.complete(p, NodeKind::SdblLiteral);
+        }
+
+        // Generic Ident (column ref / function call / inline tabular
+        // fields). Slice 10b owns the body via `column_or_function`.
+        Some(TokenKind::Ident) => column_or_function(p),
+
+        _ => {
+            // Error recovery — unexpected token at the head of an
+            // expression position. Emits SdblError (NOT generic
+            // Error) so downstream consumers can filter on the kind.
+            let m = p.start();
+            p.error();
+            m.complete(p, NodeKind::SdblError);
+        }
+    }
+}
+
+/// Parse a literal expression — numeric, string, boolean, or
+/// undefined/null forms.
+///
+/// Grammar (mini-spec §Atoms literal grammar):
+/// ```text
+/// literalExpression
+///   := numericLiteral                  (Decimal | Float)
+///    | stringLiteralOrMulti            (String, possibly chained)
+///    | booleanLiteral                  (KwTrue | KwFalse)
+///    | undefinedLiteral                (KwUndefined)
+/// ```
+fn literal_expr(p: &mut Parser) {
+    // ITS pubqlang/40 §Литералы — «число, строка (в кавычках),
+    // булево (значения Истина и Ложь), Null, Неопределено». Note that
+    // the bare NULL literal is dispatched by `primary_expr` directly
+    // (the keyword probe runs before this function); this dispatcher
+    // handles only the literals delivered as dedicated TokenKinds.
+    if p.at(TokenKind::String) {
+        string_literal_or_multi(p);
+    } else {
+        let m = p.start();
+        p.bump();
+        m.complete(p, NodeKind::SdblLiteral);
+    }
+}
+
+/// Parse a single string literal or a multi-string concatenation.
+///
+/// Grammar (mini-spec §Atoms — string literal multi-part IDE
+/// recovery): `stringLiteralOrMulti := String+`. Emits
+/// `SdblMultiString` for 2+ consecutive `String` tokens (local IDE
+/// allowance for multi-line BSL query strings); emits `SdblLiteral`
+/// wrapping a single `String` token otherwise.
+///
+/// The single-string `SdblLiteral` keeps `String` as a *direct token
+/// child*; the multi-line-string diagnostic at
+/// `crates/ide-diagnostics/src/handlers/multiline_string_in_query.rs`
+/// scans for a `String` direct token of `SdblLiteral` to detect
+/// embedded newlines.
+fn string_literal_or_multi(p: &mut Parser) {
+    // Mini-spec §Atoms string literal — IDE-recovery allowance for
+    // multi-line BSL queries split across consecutive String tokens.
+    // Not ITS-spec'd; documented under §IDE-recovery allowances.
+    let m = p.start();
+
+    p.bump(); // First String token.
+
+    let mut count = 1;
+    while p.at(TokenKind::String) {
+        p.bump();
+        count += 1;
+    }
+
+    if count > 1 {
+        m.complete(p, NodeKind::SdblMultiString);
+    } else {
+        m.complete(p, NodeKind::SdblLiteral);
+    }
+}
+
+/// Parse a parameter expression — `&Identifier`.
+///
+/// Grammar (mini-spec §Atoms — parameter no-trivia contract):
+/// `parameterExpression := Ampersand Ident?`. The `Ident` is
+/// optional to preserve the bare-`&` IDE-recovery allowance (Slice 8
+/// attestation §Preserved-behaviour #7 already locks the same shape
+/// for the FROM-context production).
+fn parameter_expr(p: &mut Parser) {
+    // ITS pubqlang/60 §Передача параметров в запрос — concrete
+    // examples `&ЧастьНаименования`, `&ДатаНачала`. Mini-spec
+    // §Atoms parameter no-trivia contract: NO `p.skip_trivia()`
+    // between the Ampersand bump and the Ident bump — the lexer
+    // is responsible for whether `& T` (with whitespace) yields one
+    // or two tokens; the parser-side guarantee is "no skip_trivia
+    // between the two bumps".
+    let m = p.start();
+    p.bump(); // Consume Ampersand.
+
+    // Identifier guarded by p.at, NOT p.expect — bare `&` at EOF
+    // or before a clause keyword still completes SdblParameter for
+    // IDE recovery (mini-spec §AST-shape invariant #3).
+    if p.at(TokenKind::Ident) {
+        p.bump();
+    }
+
+    m.complete(p, NodeKind::SdblParameter);
+}
+
+/// Parse a parenthesised expression, tuple, or subquery.
+///
+/// Grammar (mini-spec §Atoms paren dispatch):
+/// ```text
+/// parenOrSubqueryExpression
+///   := '(' (subqueryHead | expressionTail) ')'
+/// subqueryHead    := (SELECT | ВЫБРАТЬ) ...    ↦ SdblSubqueryExpr
+/// expressionTail
+///   := expression                              ↦ SdblParenExpr
+///    | expression (COMMA expression)+          ↦ SdblTupleExpr
+/// ```
+///
+/// **SELECT-only lookahead:** the subquery branch is entered only on
+/// the post-`(` keyword `SELECT` / `ВЫБРАТЬ`. Every other input —
+/// including `(&T)`, `(1)`, `(1, 2)`, `(T + 1)` — routes to the
+/// expression branch. This is the **opposite** routing decision from
+/// the FROM-context `data_source` (Slice 8), where any `(` routes to
+/// subquery-source. Tests at
+/// `crates/parser/tests/sdbl_parser_tests.rs:1435-1467` lock the
+/// distinction.
+fn paren_or_subquery_expr(p: &mut Parser) {
+    // ITS pubqlang/40 demonstrates parenthesised expressions and
+    // tuple-style usage in IN predicates («оператор МЕЖДУ … вместе с
+    // границами диапазона»; concrete examples of `(field1, field2)`
+    // tuples appear in the IN-predicate examples). Mini-spec §Atoms
+    // paren dispatch — SELECT-keyword lookahead routes to subquery;
+    // otherwise expression(s) → SdblParenExpr (single) or
+    // SdblTupleExpr (2+).
+    let m = p.start();
+
+    p.bump(); // Consume LParen.
+    p.skip_trivia();
+
+    if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
+        // Subquery in expression context (e.g. `IN (SELECT ...)`).
+        super::select::subquery(p);
+        p.skip_trivia();
+        p.expect(TokenKind::RParen);
+        m.complete(p, NodeKind::SdblSubqueryExpr);
+    } else {
+        // Parse the first expression — single-paren or tuple.
+        expression(p);
+        p.skip_trivia();
+
+        if p.at(TokenKind::Comma) {
+            // Tuple — 2+ comma-separated expressions for row-wise
+            // comparison in IN predicates: `(a, b) IN (SELECT ...)`.
+            while p.eat(TokenKind::Comma) {
+                p.check_iteration_limit();
+                p.skip_trivia();
+
+                // Trailing-comma / empty-middle-element recovery:
+                // bail out without parsing a missing operand to
+                // avoid producing spurious sub-trees.
+                if p.at(TokenKind::RParen) || !is_expression_start(p) {
+                    break;
+                }
+
+                expression(p);
+                p.skip_trivia();
+            }
+
+            p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::SdblTupleExpr);
+        } else {
+            // Single parenthesised expression.
+            p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::SdblParenExpr);
+        }
+    }
+}
+
+// ============================================================================
+// CLEAN-ROOM Slice 10b — predicates, comparison, function calls, CAST, CASE
+// ============================================================================
+//
+// The 8 functions below — `comparison_expr`, `predicate_expr`,
+// `is_cast_function`, `parse_cast_type`, `column_or_function`,
+// `inline_table_fields`, `case_expr`, `when_clause` — were
+// authored as a clean-room re-derivation against ITS pubqlang
+// chapters 21, 22, 23, 27, 32, 40 (via the local dump at
+// `/home/itrous/src/tools_migration/its/dump/`) and the
+// C0a-extended `docs/legal/sdbl-expressions-mini-spec.md`. C1
+// performed the pre-refactor renames
+// (`comparison_expr_legacy` → `comparison_expr`,
+// `predicate_expr_legacy` → `predicate_expr`) and replaced the
+// previous LEGACY banner with this clean-room banner; C2
+// re-authored each function body from the cited sources, attached
+// per-function ITS / mini-spec provenance comments, and landed
+// the `column_or_function` clause-keyword recovery fix
+// (codex Round-1 finding 2). See
+// `docs/legal/sdbl-clean-room-slice10b.md` for the attestation.
+//
+// Slice 10a's `not_expr` calls `comparison_expr` directly — that
+// is the only Slice-10a → Slice-10b dispatch boundary in this
+// file. All 13 NodeKinds emitted by these functions
+// (SdblComparisonExpr, SdblInExpr, SdblInHierarchyExpr,
+// SdblIsNullExpr, SdblBetweenExpr, SdblLikeExpr, SdblRefsExpr,
+// SdblColumnRef, SdblFunctionCall, SdblType,
+// SdblInlineTableFields, SdblCaseExpr, SdblWhenClause) retain
+// their pre-C1 child-attachment shapes and are locked by the C0b
+// Bucket-A regression-gate tests in
+// `crates/parser/tests/sdbl_parser_tests.rs` plus the C3
+// spec-driven acceptance suite in
+// `crates/parser/tests/sdbl_slice10b_predicates.rs`.
 
 /// Parse comparison expression
 ///
@@ -346,6 +883,11 @@ fn not_expr(p: &mut Parser) {
 ///   | predicateExpression
 /// ```
 fn comparison_expr(p: &mut Parser) {
+    // ITS pubqlang/22 §Условие отбора — comparison and predicate
+    // share the same precedence slot below NOT, so `comparison_expr`
+    // is a 1:1 dispatcher shim to `predicate_expr` which holds the
+    // 7-branch dispatch (IN / IS NULL / BETWEEN / LIKE / REFS /
+    // comparison / fall-through). Mini-spec §Comparison.
     predicate_expr(p);
 }
 
@@ -362,14 +904,40 @@ fn comparison_expr(p: &mut Parser) {
 ///       )?
 /// ```
 fn predicate_expr(p: &mut Parser) {
+    // ITS provenance (verified against the local pubqlang dump in
+    // C2; see mini-spec §ITS coverage verification table):
+    //   - BETWEEN/МЕЖДУ → pubqlang/22 §Условие отбора (листинг
+    //     1.33 канonical `Дата МЕЖДУ ДАТАВРЕМЯ(...) И ДАТАВРЕМЯ(...)`);
+    //   - LIKE/ПОДОБНО → pubqlang/23 §Шаблон (листинг 1.34
+    //     канonical `Наименование ПОДОБНО "%Иван%"`);
+    //   - IS NULL/ЕСТЬ NULL → pubqlang/27 канonical
+    //     `КОГДА (Товары.Производитель) ЕСТЬ NULL ТОГДА "NULL"`;
+    //   - IN HIERARCHY/В ИЕРАРХИИ → pubqlang/32 (листинг 1.51
+    //     канonical `Товары.Ссылка В ИЕРАРХИИ (&ГруппаТоваров)`);
+    //   - REFS/ССЫЛКА → pubqlang/40 канonical
+    //     `(ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная)`.
+    //
+    // local: the IN value-list shape `<expr> В (<v1>, <v2>, ...)`,
+    // the IN-with-subquery form, the six comparison operators
+    // (`= <> < <= > >=`), and the ESCAPE/СПЕЦСИМВОЛ optional
+    // clause are NOT enumerated in the dumped ITS chapters
+    // (verified absent in the §ITS coverage verification rows of
+    // the C0a-extended mini-spec); they are preserved as local
+    // IDE-recovery allowances under mini-spec §IDE-recovery
+    // allowances #10, #13, the §Predicates §SdblInExpr shape, and
+    // the §Comparison section. Mini-spec §Predicates.
     let m = p.start();
 
     additive_expr(p);
 
     p.skip_trivia();
 
-    // Check for optional NOT before predicates (NOT IN, NOT BETWEEN, NOT LIKE)
-    // The NOT token is recorded in the predicate node and processed during lowering
+    // Optional NOT prefix consumed BEFORE probing IN / BETWEEN /
+    // LIKE so the predicate node carries the NOT token as a direct
+    // child of the eventual IN / BETWEEN / LIKE node. If no
+    // predicate / comparison branch matches, the marker is
+    // abandoned and the consumed NOT remains as a stray token —
+    // mini-spec §IDE-recovery allowances #14.
     if p.at(TokenKind::KwNot) {
         p.bump(); // NOT / НЕ
         p.skip_trivia();
@@ -482,7 +1050,10 @@ fn predicate_expr(p: &mut Parser) {
         additive_expr(p);
         p.skip_trivia();
 
-        // Optional ESCAPE clause
+        // local: optional ESCAPE / СПЕЦСИМВОЛ clause — NOT
+        // documented in dumped ITS chapters 23 + 60; preserved as
+        // a parser-accepted IDE-recovery allowance. Mini-spec
+        // §IDE-recovery allowances #13.
         if p.at_keyword("ESCAPE") || p.at_keyword("СПЕЦСИМВОЛ") {
             p.bump(); // ESCAPE / СПЕЦСИМВОЛ
             p.skip_trivia();
@@ -536,235 +1107,6 @@ fn predicate_expr(p: &mut Parser) {
     }
 }
 
-/// Parse additive expression (+ and -)
-///
-/// Grammar: `additiveExpression: multiplicativeExpression ((PLUS | MINUS) multiplicativeExpression)*`
-fn additive_expr(p: &mut Parser) {
-    let m = p.start();
-
-    multiplicative_expr(p);
-
-    loop {
-        p.skip_trivia(); // CRITICAL: Skip trivia BEFORE checking for operator!
-        if !matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
-            break;
-        }
-        p.check_iteration_limit();
-        p.bump(); // + or -
-        p.skip_trivia();
-        multiplicative_expr(p);
-    }
-
-    m.complete(p, NodeKind::SdblAdditiveExpr);
-}
-
-/// Parse multiplicative expression (* and /)
-///
-/// Grammar: `multiplicativeExpression: unaryExpression ((MUL | DIV | MOD) unaryExpression)*`
-fn multiplicative_expr(p: &mut Parser) {
-    let m = p.start();
-
-    unary_expr(p);
-
-    loop {
-        p.skip_trivia(); // CRITICAL: Skip trivia BEFORE checking for operator!
-        if !matches!(
-            p.current(),
-            Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
-        ) {
-            break;
-        }
-        p.check_iteration_limit();
-        p.bump(); // *, /, %
-        p.skip_trivia();
-        unary_expr(p);
-    }
-
-    m.complete(p, NodeKind::SdblMultiplicativeExpr);
-}
-
-/// Parse unary expression (+, -, NOT prefix)
-///
-/// Grammar: `unaryExpression: (PLUS | MINUS | NOT)? primaryExpression`
-fn unary_expr(p: &mut Parser) {
-    if matches!(
-        p.current(),
-        Some(TokenKind::Plus) | Some(TokenKind::Minus) | Some(TokenKind::KwNot)
-    ) {
-        let m = p.start();
-        p.bump(); // unary operator
-        p.skip_trivia();
-        unary_expr(p); // Recursive for multiple unary operators
-        m.complete(p, NodeKind::SdblUnaryExpr);
-    } else {
-        primary_expr(p);
-    }
-}
-
-/// Parse primary expression (literals, columns, functions, parenthesized expressions, CASE)
-///
-/// Grammar: `primaryExpression: literal | column | functionCall | parameter | LPAREN expression RPAREN | caseExpression | STAR`
-///
-/// NOTE: `STAR` is included for special syntax like `COUNT(*)` in SDBL.
-///
-/// TODO: Add support for type cast syntax: `ВЫРАЗИТЬ(expr КАК type(size))`
-/// Currently КАК inside expressions creates ERROR node which breaks parsing.
-fn primary_expr(p: &mut Parser) {
-    // Check for CASE keyword first (using at_keyword since CASE might be IDENT token)
-    if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
-        case_expr(p);
-        return;
-    }
-
-    match p.current() {
-        Some(TokenKind::LParen) => paren_or_subquery_expr(p),
-        Some(TokenKind::Ident) => column_or_function(p),
-        Some(TokenKind::Decimal) | Some(TokenKind::Float) => literal_expr(p),
-        Some(TokenKind::String) => literal_expr(p),
-        Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => literal_expr(p),
-        Some(TokenKind::KwNull) | Some(TokenKind::KwUndefined) => literal_expr(p),
-        Some(TokenKind::Ampersand) => parameter_expr(p),
-
-        // Special case: Star token for COUNT(*) syntax
-        // In SDBL, asterisk can appear as a standalone argument in aggregate functions
-        Some(TokenKind::Star) => {
-            let m = p.start();
-            p.bump(); // Consume Star
-            m.complete(p, NodeKind::SdblLiteral);
-        }
-
-        _ => {
-            // Error recovery: unexpected token
-            let m = p.start();
-            p.error();
-            m.complete(p, NodeKind::SdblError);
-        }
-    }
-}
-
-/// Parse literal expression (numbers, strings, booleans, null)
-fn literal_expr(p: &mut Parser) {
-    // Special handling for String tokens to detect multiString
-    if p.at(TokenKind::String) {
-        string_literal_or_multi(p);
-    } else {
-        // Other literals (numbers, booleans, null)
-        let m = p.start();
-        p.bump();
-        m.complete(p, NodeKind::SdblLiteral);
-    }
-}
-
-/// Parse string literal or multiString
-///
-/// Grammar: `multiString: STR+`
-///
-/// Creates SDBL_MULTI_STRING if multiple consecutive String tokens.
-/// For single String token, creates SDBL_LITERAL (even if it contains newlines).
-///
-/// NOTE: The diagnostic handler will check BOTH:
-/// 1. SDBL_MULTI_STRING nodes (multiple strings)
-/// 2. SDBL_LITERAL nodes with String tokens containing newlines
-fn string_literal_or_multi(p: &mut Parser) {
-    let m = p.start();
-
-    // Bump first String token
-    p.bump();
-
-    // Check for consecutive String tokens (multiString: STR+)
-    let mut count = 1;
-    while p.at(TokenKind::String) {
-        p.bump();
-        count += 1;
-    }
-
-    // Create SDBL_MULTI_STRING only if multiple consecutive strings
-    if count > 1 {
-        m.complete(p, NodeKind::SdblMultiString);
-    } else {
-        m.complete(p, NodeKind::SdblLiteral);
-    }
-}
-
-/// Parse parameter expression (&Parameter)
-///
-/// Grammar: `parameter: AMPERSAND identifier`
-///
-/// SDBL &Parameter may be lexed as one token or two (Ampersand + Ident). Handle both.
-/// NOTE: Do NOT skip trivia between & and identifier - parameters must be written
-/// without whitespace: `&Param`, not `& Param`. Skipping trivia causes parser to
-/// consume following keywords (like ON/ПО) as part of parameter name.
-fn parameter_expr(p: &mut Parser) {
-    let m = p.start();
-    p.bump(); // Consume AMPERSAND
-
-    // Only consume identifier if it immediately follows & (no whitespace)
-    if p.at(TokenKind::Ident) {
-        p.bump();
-    }
-
-    m.complete(p, NodeKind::SdblParameter);
-}
-
-/// Parse parenthesized expression, tuple, or subquery
-///
-/// Grammar:
-/// ```text
-/// LPAREN (subquery | tupleExpr | expression) RPAREN
-/// tupleExpr: expression (COMMA expression)+
-/// ```
-///
-/// Lookahead:
-/// - SELECT keyword → subquery
-/// - After first expression, COMMA → tuple
-/// - Otherwise → parenthesized expression
-///
-/// Tuples are used for row-wise comparison in IN predicates:
-/// `(field1, field2, field3) IN (SELECT col1, col2, col3 FROM ...)`
-fn paren_or_subquery_expr(p: &mut Parser) {
-    let m = p.start();
-
-    p.bump(); // (
-    p.skip_trivia();
-
-    // Lookahead: if SELECT keyword, it's a subquery
-    if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
-        // Parse subquery
-        super::select::subquery(p);
-        p.skip_trivia();
-        p.expect(TokenKind::RParen);
-        m.complete(p, NodeKind::SdblSubqueryExpr);
-    } else {
-        // Parse first expression
-        expression(p);
-        p.skip_trivia();
-
-        // Check for comma → tuple expression (expr1, expr2, ...)
-        if p.at(TokenKind::Comma) {
-            // It's a tuple - parse remaining expressions
-            while p.eat(TokenKind::Comma) {
-                p.check_iteration_limit();
-                p.skip_trivia();
-
-                // Handle trailing comma or empty element
-                if p.at(TokenKind::RParen) || !is_expression_start(p) {
-                    break;
-                }
-
-                expression(p);
-                p.skip_trivia();
-            }
-
-            p.expect(TokenKind::RParen);
-            m.complete(p, NodeKind::SdblTupleExpr);
-        } else {
-            // Single expression in parentheses
-            p.expect(TokenKind::RParen);
-            m.complete(p, NodeKind::SdblParenExpr);
-        }
-    }
-}
-
 /// Parse column reference or function call
 ///
 /// Lookahead determines which:
@@ -779,6 +1121,10 @@ fn paren_or_subquery_expr(p: &mut Parser) {
 /// ```
 /// Check if identifier is CAST/ВЫРАЗИТЬ function
 fn is_cast_function(p: &Parser) -> bool {
+    // local: predicate for CAST/ВЫРАЗИТЬ keyword pair, called from
+    // `column_or_function` BEFORE the Ident bump so the resulting
+    // `is_cast` flag is available for the LParen branch's КАК-type
+    // recovery. Mini-spec §CAST type specification.
     p.at_keyword("CAST") || p.at_keyword("ВЫРАЗИТЬ")
 }
 
@@ -788,6 +1134,11 @@ fn is_cast_function(p: &Parser) -> bool {
 ///
 /// MDO types: `Справочник.Склады`, `Документ.РеализацияТоваровУслуг`, etc.
 fn parse_cast_type(p: &mut Parser) {
+    // ITS pubqlang/40 §ВЫРАЗИТЬ — primitive type with optional
+    // (size[, scale]) parameters OR MDO chain. Recognised primitive
+    // types: СТРОКА/STRING, ЧИСЛО/NUMBER, ДАТА/DATE, БУЛЕВО/BOOLEAN.
+    // The MDO branch is greedy `('.' Ident)*`. Mini-spec §CAST type
+    // specification.
     let m = p.start();
 
     // Type can be Ident (for STRING, NUMBER, DATE, BOOLEAN) or MDO reference (Справочник.Склады)
@@ -845,9 +1196,17 @@ fn parse_cast_type(p: &mut Parser) {
 }
 
 fn column_or_function(p: &mut Parser) {
+    // ITS pubqlang/10 + /12 — column reference and function call
+    // dispatch. Bilingual aggregate-function names (СУММА/SUM,
+    // КОЛИЧЕСТВО/COUNT, СРЕДНЕЕ/AVG, МАКСИМУМ/MAX, МИНИМУМ/MIN)
+    // are documented across pubqlang/40 examples. CAST member
+    // access (ВЫРАЗИТЬ(... КАК ...).Поле) is pubqlang/40 §ВЫРАЗИТЬ.
+    // Mini-spec §Column references and function calls.
     let m = p.start();
 
-    // Check if this is CAST/ВЫРАЗИТЬ function before consuming
+    // CAST detection runs BEFORE the Ident bump so the resulting
+    // `is_cast` flag is available for the LParen branch's КАК-type
+    // recovery. Mini-spec §CAST type specification.
     let is_cast = is_cast_function(p);
 
     // First identifier (mandatory)
@@ -904,8 +1263,16 @@ fn column_or_function(p: &mut Parser) {
                 p.skip_trivia();
             }
 
-            // First argument (might be empty)
-            if is_expression_start(p) && !p.at(TokenKind::Comma) {
+            // First argument (might be empty). The clause-keyword
+            // guard is defensive — `is_expression_start` already
+            // filters clause keywords on the Ident arm; the
+            // explicit check makes the recovery contract textual
+            // and self-documenting at the call site. Codex Round-1
+            // finding 2 → C2 fix.
+            if is_expression_start(p)
+                && !p.at(TokenKind::Comma)
+                && !super::select::is_clause_keyword(p)
+            {
                 expression(p);
 
                 // Special handling for CAST/ВЫРАЗИТЬ: parse КАК type syntax
@@ -934,15 +1301,27 @@ fn column_or_function(p: &mut Parser) {
                 p.check_iteration_limit();
                 p.skip_trivia();
 
-                // ERROR RECOVERY: Empty element or invalid token
-                // Examples: func(1, , 3) or func(1, 2,) or func(1, FROM ...)
-                if p.at(TokenKind::Comma) || p.at(TokenKind::RParen) || !is_expression_start(p) {
+                // ERROR RECOVERY: Empty element, invalid token, or
+                // clause keyword in argument position. Examples:
+                // `func(1, , 3)`, `func(1, 2,)`, `func(1, FROM ...)`.
+                // Codex Round-1 finding 2 → C2 fix: the explicit
+                // `is_clause_keyword` check is defensive
+                // (`is_expression_start` already filters clause
+                // keywords on the Ident arm) and complements the
+                // mid-loop break-out when the function call is
+                // unterminated.
+                if p.at(TokenKind::Comma)
+                    || p.at(TokenKind::RParen)
+                    || !is_expression_start(p)
+                    || super::select::is_clause_keyword(p)
+                {
                     // Create ERROR node for missing/invalid argument
                     let err = p.start();
                     err.complete(p, NodeKind::Error);
 
-                    // If next token is comma, continue to next argument
-                    // Otherwise (RParen or invalid), break
+                    // If next token is comma, continue to next argument.
+                    // Otherwise (RParen, invalid, or clause keyword),
+                    // break out of the loop.
                     if !p.at(TokenKind::Comma) {
                         break;
                     }
@@ -960,7 +1339,24 @@ fn column_or_function(p: &mut Parser) {
         }
 
         p.skip_trivia();
-        p.expect(TokenKind::RParen);
+
+        // Codex Round-1 finding 2 → C2 fix. If the function call
+        // is unterminated at a clause keyword, leave the keyword
+        // for the outer parser; emit a zero-width Error so the
+        // parse is marked as recovering. Without this guard,
+        // `p.expect(RParen)` falls through to `Parser::error()`
+        // which BUMPS the current token, consuming the clause
+        // keyword as a child of `SdblFunctionCall` and breaking the
+        // outer SELECT body. Regression gates:
+        // `test_func_call_clause_keyword_recovery` (EN) and
+        // `test_russian_func_call_clause_keyword_recovery` (RU) in
+        // `crates/parser/tests/sdbl_parser_tests.rs`.
+        if super::select::is_clause_keyword(p) {
+            let err = p.start();
+            err.complete(p, NodeKind::Error);
+        } else {
+            p.expect(TokenKind::RParen);
+        }
 
         // After closing paren, check for member access on function result
         // Example: ВЫРАЗИТЬ(field КАК Справочник.Склады).Родитель.Наименование
@@ -1004,6 +1400,12 @@ fn column_or_function(p: &mut Parser) {
 /// Used for selecting multiple fields from a tabular part:
 /// `Table.TabularPart.(Field1, Field2, Ref)`
 fn inline_table_fields(p: &mut Parser) {
+    // local: tabular-part field-list IDE recovery; the dumped ITS
+    // chapters do not directly document the `Table.TabPart.(F1, F2)`
+    // shape. The dispatch boundary `column_or_function` →
+    // `inline_table_fields` → `selected_fields` is the only
+    // Slice-10b → Slice-7 reach. Mini-spec §Inline tabular field
+    // syntax.
     let m = p.start();
 
     p.bump(); // LParen
@@ -1032,6 +1434,13 @@ fn inline_table_fields(p: &mut Parser) {
 /// - Simple CASE: `CASE operand WHEN value THEN result ...`
 /// - Searched CASE: `CASE WHEN condition THEN result ...`
 fn case_expr(p: &mut Parser) {
+    // ITS pubqlang/40 §ВЫБОР — simple vs searched CASE, mandatory
+    // END/КОНЕЦ. Canonical example: `ВЫБОР КОГДА Товары.ЭтоГруппа =
+    // ИСТИНА ТОГДА "Это группа" ИНАЧЕ "Это элемент" КОНЕЦ`.
+    // Child-order invariant locked by HIR
+    // `crates/sdbl-hir/src/lower/expr/case_expr.rs:40-45`: the first
+    // child node distinguishes simple (operand first) vs searched
+    // (SdblWhenClause first). Mini-spec §CASE expressions.
     let m = p.start();
 
     p.bump(); // CASE / ВЫБОР
@@ -1083,6 +1492,11 @@ fn case_expr(p: &mut Parser) {
 ///
 /// Grammar: `WHEN condition THEN result`
 fn when_clause(p: &mut Parser) {
+    // ITS pubqlang/40 §ВЫБОР — WHEN/КОГДА condition THEN/ТОГДА
+    // result. Direct child of SdblCaseExpr. The HIR consumer at
+    // `case_expr.rs:51-89` reads `node.children()` and assumes
+    // exactly two child expression nodes (condition + result).
+    // Mini-spec §CASE expressions.
     let m = p.start();
 
     p.bump(); // WHEN / КОГДА

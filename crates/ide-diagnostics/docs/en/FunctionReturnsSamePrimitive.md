@@ -2,9 +2,15 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+If every return branch of a function yields the same primitive literal, the return value usually carries no useful information. Such code is often clearer as a procedure or as a function with actually distinct return cases.
 
-A function should not return the same primitive value. If the result of the function isn't use into code, then you need the function rewrite to the procedure.
+The current implementation is narrower than that general idea. It reports only functions where:
+
+- there is more than one `Return`;
+- all collected return values are primitive literals of the same kind and value;
+- the function is not treated as an attachable function.
+
+Returning the same variable or expression is not covered by this rule.
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
@@ -28,7 +34,7 @@ EndFunction
 
 Good:
 ```bsl
-Function CheckString(Val RowTable)
+Procedure CheckString(Val RowTable)
 
     If ItsGoodString(RowTable) Then
         ActionGood();
@@ -38,7 +44,7 @@ Function CheckString(Val RowTable)
         ActionElse();
     EndIf;
 
-EndFunction
+EndProcedure
 ```
 
 ## Nuances
@@ -57,4 +63,4 @@ EndFunction
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
+- [v8std.ru: FunctionReturnsSamePrimitive (RU)](https://v8std.ru/diagnostics/bslls/FunctionReturnsSamePrimitive/)

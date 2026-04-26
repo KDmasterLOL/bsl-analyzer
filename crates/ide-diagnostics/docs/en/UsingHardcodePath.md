@@ -1,25 +1,21 @@
 # Using hardcode file paths in code (UsingHardcodePath)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-It's forbidden to store in code:
+Hardcoded file and directory paths should not be stored directly in source code.
 
-* Paths to files and folders (Windows, Unix)
+Such values are environment-specific and make the code harder to configure and reuse. This applies to both Windows and Unix-style absolute paths.
 
-There are several ways to correctly store this information:
+Recommended storage options:
 
-* Store in Constants.
-* Store in Information registers.
-* Store in separate module, where this diagnostic is disabled (not recommended).
-* Store in Catalog, Exchange plan node and etc.
+* constants
+* information registers
+* catalogs, exchange plan nodes, or other metadata objects
+* a dedicated module with this rule disabled as a last resort
 
 ### Nuances
 
-When search for Windows / Unix  paths, also check for URL in a string. URL search keywords:
-* ``http``
-* ``https``
-* ``ftp``
+The current implementation excludes strings that look like URLs with `http`, `https`, or `ftp` schemes to avoid false positives.
 
 ## Examples
 
@@ -40,3 +36,7 @@ or
 ```bsl
 ExchangeFolder = DataExchangeReuse.ExchangeFolder();
 ```
+
+## Sources
+
+* [v8std: UsingHardcodePath](https://v8std.ru/diagnostics/bslls/UsingHardcodePath/)

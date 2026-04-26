@@ -1,3 +1,5 @@
+//! Reports virtual table calls that omit required filtering parameters.
+
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
@@ -53,7 +55,7 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range_multiline, check_sdbl_diagnostic};
     use crate::DiagnosticCode;
     #[test]
-    fn test_from_fixture() {
+    fn test_detects_virtual_table_calls_without_parameters() {
         let code = r#"Процедура Тест1()
 
     Запрос = Новый Запрос;

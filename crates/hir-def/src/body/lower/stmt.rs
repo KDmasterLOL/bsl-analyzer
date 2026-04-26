@@ -149,8 +149,8 @@ fn count_bool_operations(expr_node: &SyntaxNode) -> usize {
 
 /// Get condition range, trimming trailing whitespace.
 ///
-/// ANTLR parser doesn't include trailing whitespace in expression nodes,
-/// but Rowan CST includes all tokens. This trims trailing whitespace.
+/// Rowan CST node ranges include trailing trivia; reported diagnostic ranges
+/// should not. Trim trailing whitespace from the expression range.
 fn get_condition_range(expr_node: &SyntaxNode) -> TextRange {
     let text = expr_node.text().to_string();
     let trimmed = text.trim_end();
@@ -555,8 +555,7 @@ pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stm
         SyntaxKind::ADD_HANDLER_STMT => lower_add_handler_stmt(ctx, node),
         SyntaxKind::REMOVE_HANDLER_STMT => lower_remove_handler_stmt(ctx, node),
         SyntaxKind::EMPTY_STMT => {
-            // Check if parent or siblings contain ERROR nodes
-            // (!Trees.treeContainsErrors(previousNode) in ANTLR)
+            // Suppress the diagnostic when the surrounding context already has ERROR nodes.
             let has_error = node
                 .parent()
                 .map(|p| p.children().any(|c| c.kind() == SyntaxKind::ERROR))

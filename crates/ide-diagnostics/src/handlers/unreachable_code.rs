@@ -1,43 +1,4 @@
-//! UnreachableCode diagnostic.
-//!
-//! Detects code that will never be executed because it follows a control flow
-//! statement like `return`, `raise`, `break`, or `continue`.
-//!
-//! ## Why?
-//! Unreachable code indicates a logic error or dead code that should be removed:
-//! - After `Возврат` / `Return` - function has already exited
-//! - After `ВызватьИсключение` / `Raise` - exception was thrown
-//! - After `Прервать` / `Break` - loop was exited
-//! - After `Продолжить` / `Continue` - jumped to next iteration
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура Пример()
-//!     Возврат;
-//!     Сообщить("Этот код никогда не выполнится"); // ❌ Unreachable
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура Пример()
-//!     Если Условие Тогда
-//!         Сообщить("Условие истинно");
-//!         Возврат;
-//!     КонецЕсли;
-//!     Сообщить("Условие ложно"); // ✅ Reachable
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Minor (potential bug)
-//! - **Tags:** DESIGN, SUSPICIOUS
-//!
-//! ## Implementation
-//! CFG-based diagnostic. Finds vertices with no incoming edges (unreachable blocks).
-//!
-//! Ported from:
+//! Reports code regions that cannot be reached by control flow.
 
 use crate::define_metadata;
 use crate::metadata::*;

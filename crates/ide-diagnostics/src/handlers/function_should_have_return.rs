@@ -1,23 +1,4 @@
-//! Diagnostic: FunctionShouldHaveReturn
-//!
-//! Checks that functions contain at least one return statement.
-//! Procedures don't require return statements.
-//!
-//! ## Severity
-//! Major
-//!
-//! ## Example
-//! ```bsl
-//! // Bad - function without return
-//! Функция БезВозврата()
-//!     Перем Х;
-//! КонецФункции
-//!
-//! // Good - function with return
-//! Функция СВозвратом()
-//!     Возврат 42;
-//! КонецФункции
-//! ```
+//! Reports functions that have no `Возврат` / `Return` at all.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -38,9 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::FunctionShouldHaveReturn` is encountered.
+/// Creates a diagnostic from the HIR lowering result.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::FunctionShouldHaveReturn,
@@ -166,7 +145,7 @@ EndFunction"#;
     }
 
     /// Tests fixture cases.
-    /// reference test: assertThat(diagnostics).hasSize(1); hasRange(0, 8, 0, 26);
+    /// Asserts: one FunctionShouldHaveReturn diagnostic with range (line 0, cols 8..=26).
     #[test]
     fn test_fixture_only_function_without_return_triggers() {
         // Mirrors FunctionShouldHaveReturnDiagnostic.bsl:
@@ -200,12 +179,7 @@ EndFunction"#;
             .collect();
 
         // Only ФункцияБезВозврата triggers — hasRange(0, 8, 0, 26)
-        assert_eq!(
-            return_diags.len(),
-            1,
-            "reference test expects 1 diagnostic, got {}",
-            return_diags.len()
-        );
+        assert_eq!(return_diags.len(), 1, "Expected 1 diagnostic, got {}", return_diags.len());
 
         assert_diagnostic_range(code, return_diags[0], 0, 8, 26);
     }

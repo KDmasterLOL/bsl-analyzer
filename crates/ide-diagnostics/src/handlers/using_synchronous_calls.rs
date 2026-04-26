@@ -1,15 +1,4 @@
-//! UsingSynchronousCalls diagnostic
-//!
-//! Detects usage of synchronous (blocking) calls in client code.
-//!
-//! Synchronous calls are blocking and not compatible with web client.
-//! Each synchronous method has an asynchronous replacement.
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! The diagnostic is emitted in `hir-def/body/lower/expr.rs` when a global
-//! synchronous method call is encountered (not in server context).
+//! Reports usage of synchronous calls that should be replaced with asynchronous alternatives.
 
 use crate::define_metadata;
 use crate::metadata::*;

@@ -25,3 +25,9 @@
 ```
 
 ## Источники
+
+У этой диагностики нет прямого нормативного источника уровня `v8std`.
+
+Связанный публичный контекст:
+
+* [v8std.ru / bslls / LatinAndCyrillicSymbolInWord](https://v8std.ru/diagnostics/bslls/LatinAndCyrillicSymbolInWord/)

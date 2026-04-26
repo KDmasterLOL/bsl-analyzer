@@ -1,27 +1,4 @@
-//! MultilingualStringHasAllDeclaredLanguages diagnostic
-//!
-//! Checks if all NStr() multilingual strings have text for all declared languages.
-//!
-//!
-//! ## Why?
-//! NStr in a multilingual configuration has different fragments for different languages.
-//! If you start a session under a language code that is not in the string passed to NStr,
-//! it will return an empty string.
-//!
-//! ## Bad practice
-//! ```bsl
-//! // Missing English when both ru,en declared
-//! Текст = НСтр("ru='Привет'");
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // All declared languages present
-//! Текст = НСтр("ru='Привет'; en='Hello'");
-//! ```
-//!
-//! ## Configuration
-//! - `declaredLanguages` (String, default: `"ru"`) - comma-separated list of required languages
+//! Reports `НСтр` / `NStr` calls that miss one or more configured languages.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -46,6 +23,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Checks multilingual `НСтр` literals against the configured declared-language list.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MultilingualStringHasAllDeclaredLanguages::check").entered();
 

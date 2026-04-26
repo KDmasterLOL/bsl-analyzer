@@ -1,11 +1,16 @@
 # Using parameter "Cancel" (UsingCancelParameter)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-In event handlers of object's modules, record sets, forms and etc. using parameter "Cancel" (for example BeforeWrite and etc.) it should not be assigned value "false".  
-This is due to the fact, that in code of event handlers the parameter "Cancel" can be set in several consecutive checks (or in several subscriptions on the same event). In this case, by the time the next check is performed, the Cancel parameter may already contain the True value, and you can erroneously reset it back to False.  
-In addition, with configuration improvements, the number of these checks may increase.
+In event handlers that receive the `Cancel` / `Отказ` parameter, you should not overwrite it in a way that can reset a previously set cancellation flag.
+
+The safe forms are:
+
+- `Cancel = True`
+- `Cancel = Cancel Or Check()`
+- `Cancel = Check() Or Cancel`
+
+Assignments such as `Cancel = False`, `Cancel = Check()`, or expressions with `And` are unsafe because they can discard an earlier cancellation decision made by another check or another handler.
 
 ## Examples
 
@@ -39,4 +44,5 @@ Cancel = Cancel or CheckName();
 
 ## Sources
 
-* [Standart: Working with the "Cancel" option in event handlers (RU)](https://its.1c.ru/db/v8std#content:686:hdoc)
+* [Standard: Working with the "Cancel" parameter in event handlers (RU)](https://its.1c.ru/db/v8std#content:686:hdoc)
+* [v8std: UsingCancelParameter](https://v8std.ru/diagnostics/bslls/UsingCancelParameter/)

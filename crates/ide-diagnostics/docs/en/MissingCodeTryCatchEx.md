@@ -18,6 +18,12 @@ EndTry;
 
 As a rule, such a design hides a real problem, which is subsequently impossible to diagnose.
 
+The current implementation reports `Try ... Exception` blocks whose `Exception` branch has no executable statements. By default, a branch that contains only comments is still treated as empty.
+
+There is one configuration nuance:
+
+- `commentAsCode = true` changes the behavior so that a comment-only `Exception` block is not reported.
+
 *Correct*
 
 ```bsl
@@ -37,3 +43,4 @@ EndTry;
 ## Sources
 
 * [Catching Exceptions in Code (RU)](https://its.1c.ru/db/v8std#content:499:hdoc)
+* [v8std.ru: MissingCodeTryCatchEx (RU)](https://v8std.ru/diagnostics/bslls/MissingCodeTryCatchEx/)

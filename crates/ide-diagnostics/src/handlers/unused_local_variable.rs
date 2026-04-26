@@ -1,41 +1,4 @@
-//! Diagnostic: UnusedLocalVariable
-//!
-//! Detects local variables that are declared but never used.
-//!
-//! ## Implementation
-//!
-//! Uses backward liveness dataflow analysis to accurately detect unused variables.
-//! A variable is "unused" if it's never live at any program point (never read).
-//!
-//! **Algorithm:**
-//! 1. Build CFG for each method
-//! 2. Run backward liveness analysis (OUT → IN)
-//! 3. Check if each declared variable is live at entry point
-//! 4. If not live → unused → report diagnostic
-//!
-//! **Why liveness analysis?**
-//! - Handles control flow correctly (loops, branches, etc.)
-//! - Distinguishes read vs write (assignment alone doesn't make variable "used")
-//! - Fixes false positives from simple tracking (e.g., While loop control variables)
-//!
-//! ## Severity
-//! Info (with Unnecessary tag)
-//!
-//! ## Example
-//! ```bsl
-//! // Bad - unused variable
-//! Процедура Тест()
-//!     Перем НеИспользуется;  // Warning: unused
-//!     Сообщить("Привет");
-//! КонецПроцедуры
-//!
-//! // Good - variable is used
-//! Процедура Тест()
-//!     Перем Сообщение;
-//!     Сообщение = "Привет";
-//!     Сообщить(Сообщение);
-//! КонецПроцедуры
-//! ```
+//! Reports local variables that are declared or assigned but never read.
 
 use rustc_hash::FxHashSet;
 
@@ -916,7 +879,7 @@ mod tests {
     /// - We don't handle `&НаКлиенте`/`&НаСервере` annotations (both vars with same name flagged)
     /// - We may detect additional unused variables
     #[test]
-    fn test_java_fixture_full() {
+    fn test_detects_unused_local_variables_in_fixture() {
         let code = r#"&НаКлиенте
 Перем ПеременнаяМодуляНеИспользуемая; // Тут ошибка
 
@@ -1023,7 +986,7 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // Check that we detect the key cases from reference test
+        // Check that all key unused-variable cases are detected
         let messages: Vec<&str> = unused_diags.iter().map(|d| d.message.as_str()).collect();
 
         // These should be detected :
@@ -1056,7 +1019,7 @@ mod tests {
         // Duplicate module variable declarations are skipped (handled in SymbolTreeBuilder.add_variable).
         assert_eq!(unused_diags.len(), 5, "Should detect 5 unused variables ");
 
-        // Verify exact positions (matching reference test)
+        // Verify exact diagnostic positions
         // Sort diagnostics by line number for consistent comparison
         use crate::test_utils::{assert_diagnostic_range, range_to_line_col};
         let mut sorted_diags = unused_diags.clone();

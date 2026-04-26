@@ -2,18 +2,19 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-Events `OnActivateRow` and `OnStartChoice` should not contain server procedure calls. These events should only execute on the client.
+The form events `OnActivateRow` and `OnStartChoice` are triggered during active user interaction. Server-side calls from these handlers can increase network traffic and noticeably slow down the form.
 
-Only server calls to methods of this form are diagnosed; calling MyModuleServer.MyServerMethod will not result in an error.
+The current implementation analyzes call chains starting from these handlers and reports:
 
-According to the [Infostart article](https://infostart.ru/1c/articles/1225834/), calling server procedures from these events can lead to performance issues and form behavior problems.
+- local form methods that eventually switch to server execution with context;
+- immediate qualified common-module calls when the target export method is server-only.
+
+If the path goes through an idle-handler registration, the diagnostic is downgraded to informational severity.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
-### Incorrect
+Incorrect:
 
 ```bsl
 &AtClient
@@ -29,7 +30,7 @@ Procedure TableFormOnActivateRowAtServer()
 EndProcedure
 ```
 
-### Correct
+Correct:
 
 ```bsl
 Procedure OnActivateRow(Element, SelectedRow, Field, NewValue, StandardProcessing)
@@ -39,7 +40,7 @@ EndProcedure
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-* [GitHub Issue #3473](https://github.com/1c-syntax/bsl-language-server/issues/3473)
-* [Infostart: Server calls that should not be called](https://infostart.ru/1c/articles/1225834/)
+- [#std487: Minimizing server calls and traffic (RU)](https://its.1c.ru/db/v8std#content:487:hdoc)
+- [#std630: Form module rules (RU)](https://its.1c.ru/db/v8std#content:630:hdoc)
+- [Infostart: Server calls that should not be called (RU)](https://infostart.ru/1c/articles/1225834/)

@@ -1,17 +1,4 @@
-//! RedundantAccessToObject diagnostic
-//!
-//! Detects redundant access to object via ЭтотОбъект/ThisObject or module name.
-//!
-//! Examples:
-//! - ObjectModule: `ЭтотОбъект.Контрагент` → should be `Контрагент`
-//! - FormModule: `ЭтотОбъект.Элементы` → should be `Элементы`
-//! - CommonModule: `МойМодуль.МояФункция()` → should be `МояФункция()`
-//! - ManagerModule: `Справочники.Справочник1.Метод()` → should be `Метод()`
-//!
-//! Exclusions:
-//! - `ЭтотОбъект["Поле"]` is NOT an error (INDEX_EXPR handled separately)
-//! - CommonModule with ReturnValueReuse != DontUse are NOT checked
-//!
+//! Reports redundant self-access through `ЭтотОбъект` or the current module name.
 
 use crate::define_metadata;
 use crate::metadata::*;

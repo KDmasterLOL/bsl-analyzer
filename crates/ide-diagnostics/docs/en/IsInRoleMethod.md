@@ -2,33 +2,50 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-To check access rights in the code, use the AccessRight method.
+Use `AccessRight` / `ПравоДоступа` for access checks against metadata objects.
 
-When a role does not grant access rights to metadata objects and defines an additional access right only, use the IsInRole method.
+`IsInRole` / `РольДоступна` is appropriate only for additional marker roles
+that do not grant metadata rights directly.
 
-If Standard Subsystems Library is used in a configuration, use the RolesAvailable function of the Users common module, otherwise IsInRole method call must be combined with PrivilegedMode() method call. If Standard Subsystems Library is used in a configuration, use the RolesAvailable() function of the Users common module, otherwise IsInRole() method call must be combined with PrivilegedMode() method call.
+The current implementation reports cases where `IsInRole()` is used in `if` or
+`elsif` conditions without `PrivilegedMode()` protection. It also tracks local
+variables assigned from `IsInRole()` and later used in such conditions.
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-Wrong:
+Invalid: checking metadata access through a role
+
 ```bsl
-If RolesAvailable("AddingChangingCountriesWorld") Then...
-If RolesAvailable("ViewPopularCountriesReport") Then ...
+If IsInRole("EditWorldCountries") Then
+    AllowEdit = True;
+EndIf;
 ```
+
 Correct:
+
 ```bsl
-If AccessRight("Edit", Metadata.Catalogs.WorldCountries) Then ...
-If AccessRight("View", Metadata.Reports.PopularCountries) Then ...
+If AccessRight("Edit", Metadata.Catalogs.WorldCountries) Then
+    AllowEdit = True;
+EndIf;
 ```
-Wrong:
+
+Invalid: additional role check without privileged-mode protection
+
 ```bsl
-If RolesAvailable("Treasurer") Then...
+If IsInRole("Treasurer") Then
+    OpenTreasuryPanel();
+EndIf;
 ```
-Сorrect:
+
+Correct:
+
 ```bsl
-If IsInRole("Treasurer") OR PrivilegedMode() Then ...
+If IsInRole("Treasurer") Or PrivilegedMode() Then
+    OpenTreasuryPanel();
+EndIf;
 ```
 ## Sources
 <!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
 * Standard: [Checking access rights (RU)](https://its.1c.ru/db/v8std#content:737:hdoc)
+* Standard: [Role and access-right setup (RU)](https://its.1c.ru/db/v8std#content:689:hdoc)
+* Public mirror: [v8std.ru / #std737](https://v8std.ru/std/737/)
+* Public mirror: [v8std.ru / #std689](https://v8std.ru/std/689/)

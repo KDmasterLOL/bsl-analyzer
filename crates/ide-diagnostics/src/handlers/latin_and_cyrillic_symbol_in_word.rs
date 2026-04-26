@@ -1,36 +1,6 @@
 //! LatinAndCyrillicSymbolInWord diagnostic
 //!
-//! Detects mixed Latin and Cyrillic characters in identifiers.
-//!
-//! ## Why?
-//!
-//! Mixed Latin/Cyrillic characters in identifiers create serious readability issues:
-//! - Characters like 'e' (Latin) and 'е' (Cyrillic) look identical but are different
-//! - Makes code searching and refactoring unreliable
-//! - Increases cognitive load when reading code
-//! - Often appears when copying code from different sources
-//!
-//! ## What gets checked?
-//!
-//! The diagnostic analyzes 8 types of identifiers:
-//! 1. Function and procedure names
-//! 2. Variable declarations
-//! 3. Parameters
-//! 4. Annotation names
-//! 5. Annotation parameter names
-//! 6. Region names
-//! 7. Goto labels
-//! 8. Assignment left-hand side
-//!
-//! ## Configuration
-//!
-//! ### `excludeWords` (String)
-//! Comma-separated list of words to exclude from checking.
-//! Default: `"ЧтениеXML, ЧтениеJSON, ЗаписьXML, ЗаписьJSON, ComОбъект, ..."`
-//!
-//! ### `allowTrailingPartsInAnotherLanguage` (Boolean)
-//! When `true` (default), allows identifiers that start with one language and end with another,
-//! like `HTTPСоединение` or `ВИмениEnglish` (minimum 2 characters per language, total length ≥ 4).
+//! Detects identifiers that mix Latin and Cyrillic characters in the same word.
 
 use crate::define_metadata;
 use crate::metadata::*;

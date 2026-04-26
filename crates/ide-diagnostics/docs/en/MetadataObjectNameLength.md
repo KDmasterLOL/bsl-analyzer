@@ -2,17 +2,33 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+Metadata object names should not exceed 80 characters.
 
-Metadata object names must not exceed 80 characters.
+Very long names are harder to use in code and may also cause practical problems
+when exporting or processing configuration files.
 
-In addition to problems using these objects, there are problems with uploading the configuration to files.
+The current implementation checks the configured maximum length for:
+
+- common modules;
+- metadata objects with modules;
+- registers;
+- session-module analysis for metadata objects without modules.
 
 ## Examples
 
-LooooooooooooooooooooooooooooooooooooooooooooooooooooooooongVeryLongDocumentName
+Invalid:
+
+```text
+VeryLongCatalogNameThatExceedsTheMaximumAllowedLengthAndCausesExportIssuesInConfiguration
+```
+
+Correct:
+
+```text
+NomenclatureGroup
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-[Standard: Name, synonym, comment (RU)](https://its.1c.ru/db/v8std#content:474:hdoc:2.3)
+* [Standard: Name, synonym, comment (RU)](https://its.1c.ru/db/v8std#content:474:hdoc:2.3)
+* [Public mirror: v8std.ru / #std474](https://v8std.ru/std/474/)

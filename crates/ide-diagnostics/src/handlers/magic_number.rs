@@ -1,49 +1,6 @@
 //! MagicNumber diagnostic
 //!
 //! Detects hard-coded numeric literals in BSL code.
-//!
-//!
-//! ## Why?
-//!
-//! Hard-coded numbers (magic numbers) are problematic:
-//! - `СекундВЧасе = 60 * 60` - not self-documenting (60 is what?)
-//! - Different developers use different values for same concepts
-//! - Should use named constants for clarity
-//! - Makes code hard to maintain
-//!
-//! ## What gets detected?
-//!
-//! 1. Numeric literals (DECIMAL, FLOAT): `6`, `60`, `3.14`
-//! 2. In expressions, comparisons, assignments, method calls
-//! 3. **Return statements are detected** (unlike MagicDate)
-//!
-//! ## What is EXCLUDED?
-//!
-//! 1. Authorized numbers (configurable, default: `"-1,0,1,24,60,3600,86400"`)
-//! 2. Default parameter values: `Функция Метод(Значение = 566)`
-//! 3. `Structure.Insert()`: `НоваяСтруктура.Вставить("Поле", 20)`
-//! 4. Structure constructors: `Новый Структура("Поле", 20)`
-//! 5. `Correspondence.Insert()`: `Соответствие.Вставить("Код", 123)`
-//! 6. Property assignments: `Структура.Поле = 20`
-//! 7. Array index access (when `allowMagicIndexes = true`): `Массив[20]`
-//! 8. Excluded constructors (configurable): `Новый КвалификаторыЧисла(10, 2)`
-//!
-//! ## Configuration
-//!
-//! ### `authorizedNumbers` (String)
-//! Comma-separated list of authorized numbers.
-//! Default: `"-1,0,1,24,60,3600,86400"`
-//!
-//! ### `allowMagicIndexes` (Boolean)
-//! Allow magic numbers in array index access.
-//! Default: `true`
-//!
-//! ### `excludedConstructors` (String)
-//! Comma-separated list of constructor names where numbers are excluded.
-//! Useful for type qualifiers where parameters are self-documenting.
-//! Default: `"КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers,Цвет,Color"`
-//!
-//! Example: `Новый КвалификаторыЧисла(10, 2)` - 10 and 2 are excluded
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -204,7 +161,7 @@ mod tests {
 
     #[test]
     fn test_comprehensive() {
-        // Inline version of MagicNumberDiagnostic.bsl — covers all 10 detected cases.
+        // Large inline regression fixture for magic-number coverage.
         // Uses 4-space indentation to match original column positions exactly.
         let code = r#"Процедура ПроверкаЧисел()
 

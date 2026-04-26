@@ -1,31 +1,6 @@
 //! JoinWithVirtualTable diagnostic.
 //!
-//! Detects usage of virtual tables in JOIN operations in SDBL queries.
-//!
-//! ## Why?
-//! Joins with virtual tables cause performance issues in 1C:Enterprise.
-//! Virtual tables (СрезПоследних, Остатки, Обороты, etc.) are computed on-the-fly
-//! and joining with them creates unpredictable performance characteristics.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query = "SELECT T.Ref FROM Catalog.Items AS Items
-//!          LEFT JOIN InformationRegister.Prices.SliceLast AS T
-//!          ON Items.Ref = T.Item";
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Use temporary tables or separate queries instead:
-//! Query = "SELECT Prices.* INTO TempPrices
-//!          FROM InformationRegister.Prices.SliceLast AS Prices;
-//!
-//!          SELECT T.Ref FROM Catalog.Items AS Items
-//!          LEFT JOIN TempPrices AS T ON Items.Ref = T.Item";
-//! ```
-//!
-//! ## Implementation
-//! Ported from:
+//! Detects SDBL joins that use a virtual table as one of the joined sources.
 
 use crate::define_metadata;
 use crate::metadata::*;

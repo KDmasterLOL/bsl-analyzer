@@ -1,65 +1,4 @@
-//! MissingTempStorageDeletion diagnostic.
-//!
-//! Detects temporary storage data retrieved with GetFromTempStorage() that is not properly deleted.
-//!
-//! ## Why?
-//!
-//! Temporary storage data retrieved with `ПолучитьИзВременногоХранилища()` / `GetFromTempStorage()` must be
-//! explicitly deleted after use with `УдалитьИзВременногоХранилища()` / `DeleteFromTempStorage()`.
-//! Failure to delete temporary storage data can:
-//! - Exhaust memory in temporary storage
-//! - Cause performance degradation in 1C:Enterprise applications
-//! - Leave sensitive data in memory longer than necessary
-//!
-//! ## Bad practice
-//!
-//! ```bsl
-//! Процедура ОбработатьДанные(АдресТоваров)
-//!     Товары = ПолучитьИзВременногоХранилища(АдресТоваров);
-//!     // ... use data ...
-//! КонецПроцедуры  // ❌ Temporary storage not cleaned up!
-//! ```
-//!
-//! ## Good practice
-//!
-//! ```bsl
-//! Процедура ОбработатьДанные(АдресТоваров)
-//!     Товары = ПолучитьИзВременногоХранилища(АдресТоваров);
-//!     Попытка
-//!         // ... use data ...
-//!     Исключение
-//!         УдалитьИзВременногоХранилища(АдресТоваров);  // ✅ Clean up on error
-//!         ВызватьИсключение;
-//!     КонецПопытки;
-//!     УдалитьИзВременногоХранилища(АдресТоваров);  // ✅ Clean up on success
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//!
-//! This diagnostic has NO configuration parameters (unlike MissingTemporaryFileDeletion).
-//! It can only be enabled/disabled:
-//!
-//! ```json
-//! {
-//!   "diagnostics": {
-//!     "MissingTempStorageDeletion": true
-//!   }
-//! }
-//! ```
-//!
-//! - **Enabled by default:** No (false)
-//! - **Severity:** Critical
-//! - **Tags:** STANDARD, PERFORMANCE, BADPRACTICE
-//! - **Minutes to fix:** 3
-//!
-//! ## Implementation
-//!
-//! Ported from:
-//!
-//! Key difference from MissingTemporaryFileDeletion:
-//! - Uses STRUCTURAL HIR EQUALITY for parameter comparison (not string matching)
-//! - This allows matching `Результат.АдресРезультата` correctly
+//! Reports temp-storage reads that have no matching later deletion in the same body.
 
 use hir::{Body, BodySourceMap, Expr, ExprIdx};
 
@@ -81,18 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// HIR-based entry point for MissingTempStorageDeletion diagnostic.
-///
-/// Uses Salsa-cached module_bodies instead of raw AST traversal.
-///
-/// ## Algorithm
-///
-/// For each method in the module:
-/// 1. Walk HIR expressions to find GetFromTempStorage() calls
-/// 2. Extract the address parameter (first argument)
-/// 3. Search for DeleteFromTempStorage() calls AFTER the get call
-/// 4. Check if any deletion uses the SAME address (structural HIR equality)
-/// 5. Create diagnostic if no matching deletion found
+/// HIR-based entry point for temp-storage deletion validation.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingTempStorageDeletion;
 

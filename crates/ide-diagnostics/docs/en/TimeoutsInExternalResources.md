@@ -1,46 +1,52 @@
-# Timeouts working with external resources (TimeoutsInExternalResources)
+# Timeouts when working with external resources (TimeoutsInExternalResources)
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-When working with external resources using the WSDefinitions, WSProxy, HTTPConnection, FTPConnection there should be a time out - the time limit for the operation to be completed. Otherwise, as a result of endless waiting, the program will freeze or some of the functionality of the program will become unavailable.  
-For the InternetMailProfile the platform sets the default timeout value to 30 seconds, but despite this, it is worth explicitly specifying the timeout value when using it.
+When code creates objects for working with external resources, it should explicitly limit the waiting time. Otherwise a network call or remote service operation can hang for too long and make part of the application unavailable.
 
-Setting a timeout protects against external factors:
+This diagnostic reports known constructors when no timeout is passed in the constructor call and no subsequent assignment to the `Timeout` / `Таймаут` property is found for the same simple variable.
 
-* unstable Internet connection, when the connection is interrupted regularly, and the system cannot receive a complete response from the server to which the connection is made;
-* when anti-virus programs are enabled or if the firewall settings are incorrect;
-* incorrect proxy-server settings;
-* unreliable operation of the web server due to increased load or incorrect operation of scripts.
+The current implementation checks these object types:
+
+- `FTPConnection` / `FTPСоединение`
+- `HTTPConnection` / `HTTPСоединение`
+- `WSDefinitions` / `WSОпределения`
+- `WSProxy` / `WSПрокси`
+- `InternetMailProfile` / `ИнтернетПочтовыйПрофиль`
+
+For `InternetMailProfile`, the check can be disabled through configuration because the platform already has a default timeout value.
 
 ## Examples
 
 Incorrect:
 
 ```bsl
-HTTPConnection = New HTTPConnection("zabbix.localhost", 80);
+Connection = New HTTPConnection("api.example.com", 443);
 ```
 
-or
-
 ```bsl
-FTPConnection = New FTPConnection(Server, Port, Login, Password, Proxy, PassiveMode);
+Definitions = New WSDefinitions("http://localhost/test.asmx?WSDL");
 ```
 
 Correct:
 
 ```bsl
-HTTPConnection = New HTTPConnection("zabbix.localhost", 80,,,, 1);
+Connection = New HTTPConnection("api.example.com", 443,,,, 30);
 ```
-
-or
 
 ```bsl
-ConnectiomTimeout = 180;
-HTTPConnection = New HTTPConnection("zabbix.localhost", 80,,,, ConnectiomTimeout);
+Connection = New HTTPConnection("api.example.com", 443);
+Connection.Timeout = 30;
 ```
+
+## Configuration
+
+- `analyzeInternetMailProfileZeroTimeout` (Boolean, default: `true`)  
+  Enables or disables checks for `InternetMailProfile`.
 
 ## Sources
 
-* [Timeouts when working with external resources (RU)](https://its.1c.ru/db/v8std#content:748:hdoc)
-* [InternetMail Profilehas a default timeout (RU)](https://its.1c.ru/db/metod8dev/content/2358/hdoc)
+- [#std748: Timeouts when working with external resources (RU)](https://its.1c.ru/db/v8std#content:748:hdoc)
+- [InternetMailProfile default timeout (RU)](https://its.1c.ru/db/metod8dev/content/2358/hdoc)
+- [v8std.ru: #std748](https://v8std.ru/std/748/)

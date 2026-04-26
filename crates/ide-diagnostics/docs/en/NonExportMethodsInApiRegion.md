@@ -1,12 +1,51 @@
-# Non export methods in API regions (NonExportMethodsInApiRegion)
+# Non-export methods in API regions (NonExportMethodsInApiRegion)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-* The "API Interface" region contains export procedures and functions intended for use by other configuration objects or other programs (for example, via an external connection).
+This diagnostic reports non-export procedures and functions placed inside API
+regions such as `ПрограммныйИнтерфейс`, `СлужебныйПрограммныйИнтерфейс`,
+`Public`, and `Internal`.
 
-* The “Service Programming Interface” region is intended for modules that are part of some functional subsystem. It should contain export procedures and functions that can only be called from other functional subsystems of the same library.
+According to the standard module structure, these regions are intended for the
+module interface. Methods placed there are expected to participate in that
+interface, which means non-export methods do not belong in such regions.
+
+The diagnostic also supports an optional `skipAnnotatedMethods` setting for
+projects that intentionally keep certain built-in annotated methods in API
+regions.
+
+## Examples
+
+Incorrect:
+
+```bsl
+#Область ПрограммныйИнтерфейс
+
+Процедура ВнутренняяОбработка()
+КонецПроцедуры
+
+#КонецОбласти
+```
+
+Correct:
+
+```bsl
+#Область ПрограммныйИнтерфейс
+
+Процедура ОбработатьДанные() Экспорт
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область СлужебныеПроцедурыИФункции
+
+Процедура ВнутренняяОбработка()
+КонецПроцедуры
+
+#КонецОбласти
+```
 
 ## Sources
 
-* Source: [Standard: Module structure (RU)](https://its.1c.ru/db/v8std#content:455:hdoc)
+- Source: [1C standard: Module structure (#std455)](https://its.1c.ru/db/v8std#content:455:hdoc)
+- Secondary reference: [v8std.ru: NonExportMethodsInApiRegion](https://v8std.ru/diagnostics/bslls/NonExportMethodsInApiRegion/)

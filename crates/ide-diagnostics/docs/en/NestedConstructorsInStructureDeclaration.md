@@ -1,33 +1,40 @@
 # Nested constructors with parameters in structure declaration (NestedConstructorsInStructureDeclaration)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-It is not recommended to use constructors of other objects in the structure constructor if these constructors accept parameters. In particular, in the constructor of one structure it is not recommended to create other structures with the declaration of property values.
+This diagnostic reports structure declarations that pass other constructors with
+parameters directly as property values.
+
+Such code is valid, but it quickly becomes hard to read when one `Structure` or
+`FixedStructure` constructor contains several nested constructors. It is usually
+clearer to create nested values separately and then pass ready variables into
+the outer structure.
 
 ## Examples
 
-Incorrect
+Incorrect:
 
 ```bsl
-GoodsServer.MakeGoods(
-  Object.Products,
-  New Structure(
-  "CharacteristicsUsed,
-  |Type, Variant",
-   New Structure("Good", "CharacteristicsUsed"),
-   New Structure("Good", "Type"),
-   New Structure("Good", "Variant")
-  )
- );
+Parameters = New Structure(
+    "CheckMode, UpdateMode",
+    New Structure("Document", "Check"),
+    New Structure("Document", "Update")
+);
 ```
 
-Correct
+Correct:
 
 ```bsl
-Parameters = New Structure;
-Parameters.Вставить("CharacteristicsUsed", New Structure("Good", "CharacteristicsUsed"));
-Parameters.Вставить("Type",                New Structure("Good", "Type"));
-Parameters.Вставить("Variant",             New Structure("Good", "Variant"));
-GoodsServer.MakeGoods(Object.Products,     Parameters);
+CheckSettings = New Structure("Document", "Check");
+UpdateSettings = New Structure("Document", "Update");
+
+Parameters = New Structure(
+    "CheckMode, UpdateMode",
+    CheckSettings,
+    UpdateSettings
+);
 ```
+
+## Sources
+
+- Secondary reference: [v8std.ru: NestedConstructorsInStructureDeclaration](https://v8std.ru/diagnostics/bslls/NestedConstructorsInStructureDeclaration/)

@@ -1,7 +1,4 @@
-//! UsingThisForm diagnostic.
-//!
-//! Detects usage of deprecated `ЭтаФорма` / `ThisForm` property.
-//! Starting from 1C:Enterprise 8.3.3, should use `ЭтотОбъект` / `ThisObject` instead.
+//! Reports usage of the deprecated `ЭтаФорма` / `ThisForm` property.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -140,7 +137,7 @@ EndProcedure
     }
 
     #[test]
-    fn test_from_java_fixture() {
+    fn test_detects_this_form_usages_in_fixture() {
         let input = r#"&НаСервере
 Функция ФункцияСОшибкой()
 

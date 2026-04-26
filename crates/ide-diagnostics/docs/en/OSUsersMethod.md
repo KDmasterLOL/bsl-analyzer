@@ -1,11 +1,20 @@
 # Using method OSUsers (OSUsersMethod)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-Using method may carry a malicious function.
+
+This diagnostic reports calls to the global method `OSUsers()` /
+`ПользователиОС()`.
+
+The method exposes information about operating-system user accounts. In many
+projects such access is treated as a security-sensitive operation because it may
+reveal environment details that are not needed for ordinary business logic and
+should therefore be reviewed explicitly.
+
+This is a security hotspot rather than a syntax or style error: every such call
+deserves manual review.
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
-Source: [Pass-the-hash attack](https://ru.wikipedia.org/wiki/%D0%90%D1%82%D0%B0%D0%BA%D0%B0_Pass-the-hash)
+- Background: Pass-the-hash attack (Wikipedia)  
+  https://ru.wikipedia.org/wiki/Атака_Pass-the-hash
+- Secondary reference: [v8std.ru: OSUsersMethod](https://v8std.ru/diagnostics/bslls/OSUsersMethod/)

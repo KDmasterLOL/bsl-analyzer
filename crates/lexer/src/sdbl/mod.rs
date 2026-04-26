@@ -1,68 +1,483 @@
-//! SDBL (Structured Data Base Language) lexer for 1C:Enterprise query language.
+//! SDBL (Structured Data Base Language) lexer for 1C:Enterprise query
+//! language.
 //!
-//! Supports both Russian and English keywords (case-insensitive).
+//! ## Provenance
 //!
-//! SDBL is the SQL-like query language embedded within BSL code as string literals.
-//! It's used to query the 1C platform's metadata-based database structure.
+//! The `SdblTokenKind` enum below is split by banner comments into two
+//! clearly demarcated provenance sections:
 //!
+//! - **Slice 1 — clean-room.** Whitespace, line terminators, line
+//!   comments, separators, punctuation, comparison and arithmetic
+//!   operators, numeric literals, the string-literal opening quote
+//!   (with content handled by the companion [`strings_mode`] module),
+//!   date literals, identifiers, and parameter references. These
+//!   variants were re-derived from the ITS documentation of the
+//!   1C:Enterprise query language (<https://its.1c.ru/db/pubqlang>)
+//!   and are attested in `docs/legal/sdbl-clean-room-slice1.md`.
+//!
+//! - **Slice 2 — clean-room.** Structural keyword vocabulary: core
+//!   clause starters (SELECT / FROM / WHERE / GROUP / ORDER / HAVING /
+//!   TOTALS / UNION / ALL / DISTINCT / TOP / INTO), the join family
+//!   (JOIN / INNER / LEFT / RIGHT / FULL / OUTER / ON-or-BY),
+//!   field aliasing (AS), basic predicates (IN / BETWEEN / LIKE / IS),
+//!   the CASE family (CASE / WHEN / THEN / ELSE / END), the logical
+//!   operators (AND / OR / NOT), and the boolean and NULL literals
+//!   (TRUE / FALSE / NULL). Attested in
+//!   `docs/legal/sdbl-clean-room-slice2.md`.
+//!
+//! - **Slices 3–5 — pending.** Remaining long-tail keywords,
+//!   built-in functions, metadata-object tokens, virtual-table tokens,
+//!   type literals, the UNDEFINED literal, period-type tokens, and
+//!   the logos error fallback. These remain as carried over from the
+//!   pre-clean-room implementation and will be re-derived by
+//!   subsequent slices.
+//!
+//! All variants share a single longest-match precedence space — the
+//! physical reordering below does not change matching semantics. A
+//! byte-identity golden corpus (`crates/lexer/tests/sdbl_golden_corpus.rs`)
+//! gates any accidental drift.
+
+mod strings_mode;
+
 use logos::Logos;
 use smol_str::SmolStr;
 
-/// Token kinds for SDBL query language.
+/// Token kinds produced by the SDBL lexer.
 ///
-/// Each token represents a lexical element in SDBL queries.
-/// Keywords support both Russian and English variants (case-insensitive).
+/// Variants support bilingual (Russian + English) spelling where the
+/// underlying language does; the regex on each variant is the single
+/// source of truth.
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SdblTokenKind {
+    // ============================================================================
+    // CLEAN-ROOM Slice 1 — ITS-derived
+    // ============================================================================
+    //
+    // Every variant in this section carries an inline provenance
+    // comment pointing at the ITS section (or a local mini-spec) it
+    // was re-derived from. Nothing in this block was copied from the
+    // pre-clean-room regex text or from any third-party SDBL grammar.
+    /// Horizontal whitespace: ASCII space, tab, carriage return.
+    // ITS pubqlang/12 — lexical elements: inter-token whitespace.
+    #[regex(r"[ \t\r]+")]
+    Whitespace,
+
+    /// Line terminator.
+    // ITS pubqlang/12 — lexical elements: newline terminates a line.
+    #[token("\n")]
+    Newline,
+
+    /// Line comment `// ...` up to end-of-line.
+    // Local spec (see `docs/legal/sdbl-clean-room-slice1.md` § Scope —
+    // line comment): the upstream SDBL grammar at
+    // <https://its.1c.ru/db/pubqlang/content/12/hdoc> does not define
+    // comments; this token is a tooling concession so that queries
+    // extracted from BSL source whose bodies happen to contain `//`
+    // tails survive lexing, and so queries can be annotated during
+    // review. The regex accepts `//` followed by any non-newline run.
+    #[regex(r"//[^\n]*")]
+    Comment,
+
+    /// Left parenthesis `(`.
+    // ITS pubqlang/12 — separators: opens a parenthesised expression.
+    #[token("(")]
+    LParen,
+
+    /// Right parenthesis `)`.
+    // ITS pubqlang/12 — separators: closes a parenthesised expression.
+    #[token(")")]
+    RParen,
+
+    /// Dot `.` — member access and dot-path separator.
+    // ITS pubqlang/12 — separators: joins the parts of a metadata or
+    // field path (e.g. `Catalog.Products.Ref`).
+    #[token(".")]
+    Dot,
+
+    /// Comma `,` — argument and list-element separator.
+    // ITS pubqlang/12 — separators: separates select-list columns and
+    // function argument lists.
+    #[token(",")]
+    Comma,
+
+    /// Semicolon `;` — statement / query separator within a batch.
+    // ITS pubqlang/12 — separators: terminates a query in a batch.
+    #[token(";")]
+    Semicolon,
+
+    /// Hash `#` — temporary-table name marker.
+    // ITS pubqlang/10 — temporary tables: a name prefixed with `#`
+    // identifies a temporary table in `INTO`/`DROP` position.
+    #[token("#")]
+    Hash,
+
+    /// Bare ampersand `&`. When followed immediately by an
+    /// identifier, the longer `Parameter` match wins; this variant
+    /// only appears when `&` stands alone.
+    // ITS pubqlang/10 — parameters: parameter references start with `&`.
+    #[token("&")]
+    Ampersand,
+
+    /// Vertical bar `|` — multiline continuation marker used when a
+    /// SDBL query is embedded as a BSL multiline string literal.
+    // Local spec (see `docs/legal/sdbl-clean-room-slice1.md` § Scope —
+    // bar): BSL multiline-string convention, also described in the
+    // mini-spec at the top of `strings_mode`. The bar at the start
+    // of each continuation line is preserved through to the parser
+    // rather than elided, so layout is reconstructible.
+    #[token("|")]
+    Bar,
+
+    /// Equality operator `=`.
+    // ITS pubqlang/10 — comparison operators: equality.
+    #[token("=")]
+    Eq,
+
+    /// Inequality operator `<>`. Declared so longest-match picks it
+    /// over the one-char `<` followed by `>`.
+    // ITS pubqlang/10 — comparison operators: inequality.
+    #[token("<>")]
+    Neq,
+
+    /// Less-or-equal operator `<=`. Longest-match beats `<`.
+    // ITS pubqlang/10 — comparison operators: less-or-equal.
+    #[token("<=")]
+    Le,
+
+    /// Less-than operator `<`.
+    // ITS pubqlang/10 — comparison operators: less-than.
+    #[token("<")]
+    Lt,
+
+    /// Greater-or-equal operator `>=`. Longest-match beats `>`.
+    // ITS pubqlang/10 — comparison operators: greater-or-equal.
+    #[token(">=")]
+    Ge,
+
+    /// Greater-than operator `>`.
+    // ITS pubqlang/10 — comparison operators: greater-than.
+    #[token(">")]
+    Gt,
+
+    /// Addition operator `+`.
+    // ITS pubqlang/10 — arithmetic operators: addition.
+    #[token("+")]
+    Plus,
+
+    /// Subtraction operator `-` (also appears as the unary-minus
+    /// prefix; that distinction is parser-level).
+    // ITS pubqlang/10 — arithmetic operators: subtraction / unary minus.
+    #[token("-")]
+    Minus,
+
+    /// Multiplication operator `*`. The select-all column form is
+    /// parsed as the same token in select-list position.
+    // ITS pubqlang/10 — arithmetic operators: multiplication; doubles
+    // as the `*` select-all wildcard at the parser level.
+    #[token("*")]
+    Star,
+
+    /// Division operator `/`.
+    // ITS pubqlang/10 — arithmetic operators: division.
+    #[token("/")]
+    Slash,
+
+    /// Modulo operator `%`.
+    // ITS pubqlang/10 — arithmetic operators: modulo.
+    #[token("%")]
+    Percent,
+
+    /// Fractional numeric literal (e.g. `3.14`). Declared before the
+    /// integer variant so longest-match picks `3.14` over `3` + `.` +
+    /// `14`.
+    // ITS pubqlang/12 — numeric literals: fractional form is
+    // `DIGITS"."DIGITS`.
+    #[regex(r"[0-9]+\.[0-9]+")]
+    Float,
+
+    /// Integer numeric literal (e.g. `42`).
+    // ITS pubqlang/12 — numeric literals: integer form is `DIGITS`.
+    #[regex(r"[0-9]+")]
+    Decimal,
+
+    /// String-literal opening quote. The string body is not produced
+    /// by logos; the top-level tokeniser detects `"` directly and
+    /// hands off to [`strings_mode::scan`], which emits the full run
+    /// as a sequence of `String` tokens.
+    // ITS pubqlang/12 — string literals: `"`-delimited; see the
+    // mini-spec at the top of the `strings_mode` module for the
+    // multiline convention.
+    #[token("\"")]
+    Quote,
+
+    /// String content or delimiter emitted by the strings-mode
+    /// scanner. Never produced by logos directly.
+    // Local spec: string body structure is defined by the mini-spec
+    // at the top of the `strings_mode` module; see
+    // <https://its.1c.ru/db/pubqlang/content/12/hdoc> for the
+    // upstream `"`-delimited string-literal rule.
+    String,
+
+    /// Date literal: `'YYYYMMDD'` (date only) or `'YYYYMMDDhhmmss'`
+    /// (date + time).
+    // ITS pubqlang/12 — date literals: apostrophe-delimited, 8 or 14
+    // decimal digits for calendar date or date-plus-time.
+    #[regex(r"'[0-9]{8,14}'")]
+    Date,
+
+    /// Identifier: a Unicode letter or underscore followed by any
+    /// number of letters, digits, or underscores. Declared with lower
+    /// priority than keyword variants so reserved words keep their
+    /// specific `Kw*` / `Fn*` kinds.
+    // ITS pubqlang/12 — identifiers: start with a letter or
+    // underscore, continue with letters, digits, or underscores.
+    #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
+    Ident,
+
+    /// Parameter reference `&Name`: a bound query parameter. Matches
+    /// longer than a bare `Ampersand` when an identifier follows the
+    /// `&`, so the longer match wins.
+    // ITS pubqlang/10 — parameters: `&` immediately followed by an
+    // identifier is a named host-bound parameter reference.
+    #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
+    Parameter,
+
+    // ============================================================================
+    // CLEAN-ROOM Slice 2 — structural keyword vocabulary (ITS pubqlang/10, /12)
+    // ============================================================================
+    //
+    // Every variant in this section carries an inline provenance comment
+    // citing the ITS page it was re-derived from. Nothing in this block
+    // was copied from the pre-clean-room regex text of these variants or
+    // from any third-party SDBL grammar; the sources consulted are
+    // <https://its.1c.ru/db/pubqlang/content/10/hdoc> (query-language
+    // structure: clauses, joins, predicates, CASE expression, field
+    // aliasing) and <https://its.1c.ru/db/pubqlang/content/12/hdoc>
+    // (lexical elements: logical operators, boolean and NULL literals).
+    //
+    // Convenience index (RUS / ENG → Variant — ITS section). The
+    // `#[regex]` attributes below are the single source of truth;
+    // this table is a scanning aid only.
+    //
+    //   Clause starters:
+    //     ВЫБРАТЬ / SELECT          -> KwSelect    (pubqlang/10)
+    //     ИЗ / FROM                 -> KwFrom      (pubqlang/10)
+    //     ПОМЕСТИТЬ / INTO          -> KwInto      (pubqlang/10)
+    //     ГДЕ / WHERE               -> KwWhere     (pubqlang/10)
+    //     СГРУППИРОВАТЬ / GROUP     -> KwGroup     (pubqlang/10)
+    //     УПОРЯДОЧИТЬ / ORDER       -> KwOrder     (pubqlang/10)
+    //     ИМЕЮЩИЕ / HAVING          -> KwHaving    (pubqlang/10)
+    //     ИТОГИ / TOTALS            -> KwTotals    (pubqlang/10)
+    //     ОБЪЕДИНИТЬ / UNION        -> KwUnion     (pubqlang/10)
+    //     ВСЕ / ALL                 -> KwAll       (pubqlang/10)
+    //     РАЗЛИЧНЫЕ / DISTINCT      -> KwDistinct  (pubqlang/10)
+    //     ПЕРВЫЕ / TOP              -> KwTop       (pubqlang/10)
+    //
+    //   Join family:
+    //     СОЕДИНЕНИЕ / JOIN         -> KwJoin      (pubqlang/10)
+    //     ВНУТРЕННЕЕ / INNER        -> KwInner     (pubqlang/10)
+    //     ЛЕВОЕ / LEFT              -> KwLeft      (pubqlang/10)
+    //     ПРАВОЕ / RIGHT            -> KwRight     (pubqlang/10)
+    //     ПОЛНОЕ / FULL             -> KwFull      (pubqlang/10)
+    //     ВНЕШНЕЕ / OUTER           -> KwOuter     (pubqlang/10)
+    //     ПО / ON / BY              -> KwOnOrBy    (pubqlang/10, bundled)
+    //
+    //   Aliasing & predicates:
+    //     КАК / AS                  -> KwAs        (pubqlang/10)
+    //     В / IN                    -> KwIn        (pubqlang/10)
+    //     МЕЖДУ / BETWEEN           -> KwBetween   (pubqlang/10)
+    //     ПОДОБНО / LIKE            -> KwLike      (pubqlang/10)
+    //     ЕСТЬ / IS                 -> KwIs        (pubqlang/10)
+    //
+    //   CASE family:
+    //     ВЫБОР / CASE              -> KwCase      (pubqlang/10)
+    //     КОГДА / WHEN              -> KwWhen      (pubqlang/10)
+    //     ТОГДА / THEN              -> KwThen      (pubqlang/10)
+    //     ИНАЧЕ / ELSE              -> KwElse      (pubqlang/10)
+    //     КОНЕЦ / END               -> KwEnd       (pubqlang/10)
+    //
+    //   Logical operators & literals:
+    //     И / AND                   -> OpAnd       (pubqlang/12)
+    //     ИЛИ / OR                  -> OpOr        (pubqlang/12)
+    //     НЕ / NOT                  -> OpNot       (pubqlang/12)
+    //     ИСТИНА / TRUE             -> LitTrue     (pubqlang/12)
+    //     ЛОЖЬ / FALSE              -> LitFalse    (pubqlang/12)
+    //     NULL                      -> LitNull     (pubqlang/12)
+
+    // --- Clause starters ---
+
+    // ITS pubqlang/10 — SELECT clause: result-set introducer.
     #[regex(r"(?i)выбрать|(?i)select")]
     KwSelect,
 
+    // ITS pubqlang/10 — SELECT clause: FROM introduces the source table list.
     #[regex(r"(?i)из|(?i)from")]
     KwFrom,
 
-    #[regex(r"(?i)где|(?i)where")]
-    KwWhere,
-
+    // ITS pubqlang/10 — temporary tables: INTO / ПОМЕСТИТЬ names the
+    // destination temp table for a materialised sub-query.
     #[regex(r"(?i)поместить|(?i)into")]
     KwInto,
 
-    #[regex(r"(?i)уничтожить|(?i)drop")]
-    KwDrop,
+    // ITS pubqlang/10 — SELECT clause: WHERE filters the source rows.
+    #[regex(r"(?i)где|(?i)where")]
+    KwWhere,
 
-    #[regex(r"(?i)соединение|(?i)join")]
-    KwJoin,
-
-    #[regex(r"(?i)внутреннее|(?i)inner")]
-    KwInner,
-
-    #[regex(r"(?i)левое|(?i)left")]
-    KwLeft,
-
-    #[regex(r"(?i)правое|(?i)right")]
-    KwRight,
-
-    #[regex(r"(?i)полное|(?i)full")]
-    KwFull,
-
-    #[regex(r"(?i)внешнее|(?i)outer")]
-    KwOuter,
-
-    // Note: ПО (po) in Russian means both ON and BY depending on context
-    // We merge them into a single token and let the parser determine usage
-    #[regex(r"(?i)по|(?i)on|(?i)by")]
-    KwOnOrBy,
-
+    // ITS pubqlang/10 — SELECT clause: GROUP BY opens the grouping list.
     #[regex(r"(?i)сгруппировать|(?i)group")]
     KwGroup,
 
+    // ITS pubqlang/10 — SELECT clause: ORDER BY opens the sort key list.
     #[regex(r"(?i)упорядочить|(?i)order")]
     KwOrder,
 
+    // ITS pubqlang/10 — SELECT clause: HAVING filters the grouped rows.
     #[regex(r"(?i)имеющие|(?i)having")]
     KwHaving,
 
+    // ITS pubqlang/10 — SELECT clause: TOTALS introduces the totals
+    // specification after the main query body.
     #[regex(r"(?i)итоги|(?i)totals")]
     KwTotals,
+
+    // ITS pubqlang/10 — SELECT clause: UNION combines result sets.
+    #[regex(r"(?i)объединить|(?i)union")]
+    KwUnion,
+
+    // ITS pubqlang/10 — SELECT clause: ALL modifier on UNION (keep
+    // duplicates) and on aggregate-argument position.
+    #[regex(r"(?i)все|(?i)all")]
+    KwAll,
+
+    // ITS pubqlang/10 — SELECT clause: DISTINCT removes duplicate rows.
+    #[regex(r"(?i)различные|(?i)distinct")]
+    KwDistinct,
+
+    // ITS pubqlang/10 — SELECT clause: TOP limits the result row count.
+    #[regex(r"(?i)первые|(?i)top")]
+    KwTop,
+
+    // --- Join family ---
+
+    // ITS pubqlang/10 — join clause: JOIN introduces a joined source.
+    #[regex(r"(?i)соединение|(?i)join")]
+    KwJoin,
+
+    // ITS pubqlang/10 — join clause: INNER modifier on JOIN.
+    #[regex(r"(?i)внутреннее|(?i)inner")]
+    KwInner,
+
+    // ITS pubqlang/10 — join clause: LEFT outer-join modifier.
+    #[regex(r"(?i)левое|(?i)left")]
+    KwLeft,
+
+    // ITS pubqlang/10 — join clause: RIGHT outer-join modifier.
+    #[regex(r"(?i)правое|(?i)right")]
+    KwRight,
+
+    // ITS pubqlang/10 — join clause: FULL outer-join modifier.
+    #[regex(r"(?i)полное|(?i)full")]
+    KwFull,
+
+    // ITS pubqlang/10 — join clause: OUTER modifier on LEFT / RIGHT / FULL.
+    #[regex(r"(?i)внешнее|(?i)outer")]
+    KwOuter,
+
+    // ITS pubqlang/10 — join clause / grouping clause: Russian ПО serves
+    // as both the join-ON predicate introducer and the GROUP-BY /
+    // ORDER-BY key separator. Preserved pre-refactor behaviour: this
+    // lexer emits a single KwOnOrBy kind for ПО / ON / BY and lets the
+    // parser disambiguate by context; see
+    // `docs/legal/sdbl-clean-room-slice2.md` § Preserved pre-refactor
+    // behaviours.
+    #[regex(r"(?i)по|(?i)on|(?i)by")]
+    KwOnOrBy,
+
+    // --- Aliasing & predicates ---
+
+    // ITS pubqlang/10 — field aliasing: AS binds a column or table name.
+    #[regex(r"(?i)как|(?i)as")]
+    KwAs,
+
+    // ITS pubqlang/10 — predicates: IN set-membership test.
+    #[regex(r"(?i)в|(?i)in")]
+    KwIn,
+
+    // ITS pubqlang/10 — predicates: BETWEEN range test (inclusive).
+    #[regex(r"(?i)между|(?i)between")]
+    KwBetween,
+
+    // ITS pubqlang/10 — predicates: LIKE pattern match.
+    #[regex(r"(?i)подобно|(?i)like")]
+    KwLike,
+
+    // ITS pubqlang/10 — predicates: IS NULL / IS NOT NULL test.
+    #[regex(r"(?i)есть|(?i)is")]
+    KwIs,
+
+    // --- CASE family ---
+
+    // ITS pubqlang/10 — conditional expression: CASE opens the
+    // conditional-value expression.
+    #[regex(r"(?i)выбор|(?i)case")]
+    KwCase,
+
+    // ITS pubqlang/10 — conditional expression: WHEN introduces a
+    // guarded branch.
+    #[regex(r"(?i)когда|(?i)when")]
+    KwWhen,
+
+    // ITS pubqlang/10 — conditional expression: THEN is the branch value.
+    #[regex(r"(?i)тогда|(?i)then")]
+    KwThen,
+
+    // ITS pubqlang/10 — conditional expression: ELSE is the default value.
+    #[regex(r"(?i)иначе|(?i)else")]
+    KwElse,
+
+    // ITS pubqlang/10 — conditional expression: END closes the expression.
+    #[regex(r"(?i)конец|(?i)end")]
+    KwEnd,
+
+    // --- Logical operators & literals ---
+
+    // ITS pubqlang/12 — logical operators: AND conjunction.
+    #[regex(r"(?i)и|(?i)and")]
+    OpAnd,
+
+    // ITS pubqlang/12 — logical operators: OR disjunction.
+    #[regex(r"(?i)или|(?i)or")]
+    OpOr,
+
+    // ITS pubqlang/12 — logical operators: NOT negation.
+    #[regex(r"(?i)не|(?i)not")]
+    OpNot,
+
+    // ITS pubqlang/12 — boolean literals: TRUE.
+    #[regex(r"(?i)истина|(?i)true")]
+    LitTrue,
+
+    // ITS pubqlang/12 — boolean literals: FALSE.
+    #[regex(r"(?i)ложь|(?i)false")]
+    LitFalse,
+
+    // ITS pubqlang/12 — NULL literal: only the English spelling is
+    // defined by the grammar.
+    #[regex(r"(?i)null")]
+    LitNull,
+
+    // ============================================================================
+    // LEGACY (Slices 3–5 pending — not part of the clean-room claim)
+    // ============================================================================
+    //
+    // The variants below are carried over unchanged from the
+    // pre-clean-room implementation. They remain Tier B material for
+    // the duration of the staged migration; the next slices will
+    // re-derive remaining long-tail keywords, built-in functions,
+    // metadata-object tokens, virtual tables, type literals, and
+    // period-type tokens from ITS documentation.
+    #[regex(r"(?i)уничтожить|(?i)drop")]
+    KwDrop,
 
     #[regex(r"(?i)автоупорядочивание|(?i)autoorder")]
     KwAutoOrder,
@@ -76,20 +491,8 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)иерархия|(?i)hierarchy")]
     KwHierarchy,
 
-    #[regex(r"(?i)различные|(?i)distinct")]
-    KwDistinct,
-
-    #[regex(r"(?i)первые|(?i)top")]
-    KwTop,
-
     #[regex(r"(?i)разрешенные|(?i)allowed")]
     KwAllowed,
-
-    #[regex(r"(?i)объединить|(?i)union")]
-    KwUnion,
-
-    #[regex(r"(?i)все|(?i)all")]
-    KwAll,
 
     #[regex(r"(?i)для|(?i)for")]
     KwFor,
@@ -109,44 +512,14 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)периоды|(?i)periods")]
     KwPeriods,
 
-    #[regex(r"(?i)в|(?i)in")]
-    KwIn,
-
-    #[regex(r"(?i)между|(?i)between")]
-    KwBetween,
-
-    #[regex(r"(?i)подобно|(?i)like")]
-    KwLike,
-
     #[regex(r"(?i)спецсимвол|(?i)escape")]
     KwEscape,
-
-    #[regex(r"(?i)есть|(?i)is")]
-    KwIs,
 
     #[regex(r"(?i)ссылка|(?i)refs")]
     KwRefs,
 
-    #[regex(r"(?i)выбор|(?i)case")]
-    KwCase,
-
-    #[regex(r"(?i)когда|(?i)when")]
-    KwWhen,
-
-    #[regex(r"(?i)тогда|(?i)then")]
-    KwThen,
-
-    #[regex(r"(?i)иначе|(?i)else")]
-    KwElse,
-
-    #[regex(r"(?i)конец|(?i)end")]
-    KwEnd,
-
     #[regex(r"(?i)выразить|(?i)cast")]
     KwCast,
-
-    #[regex(r"(?i)как|(?i)as")]
-    KwAs,
 
     #[regex(r"(?i)тип|(?i)type")]
     KwType,
@@ -357,26 +730,8 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)дата|(?i)date")]
     TypeDate,
 
-    #[regex(r"(?i)истина|(?i)true")]
-    LitTrue,
-
-    #[regex(r"(?i)ложь|(?i)false")]
-    LitFalse,
-
-    #[regex(r"(?i)null")]
-    LitNull,
-
     #[regex(r"(?i)неопределено|(?i)undefined")]
     LitUndefined,
-
-    #[regex(r"(?i)и|(?i)and")]
-    OpAnd,
-
-    #[regex(r"(?i)или|(?i)or")]
-    OpOr,
-
-    #[regex(r"(?i)не|(?i)not")]
-    OpNot,
 
     // Note: Most period types are the same as date functions above.
     // Only unique period types are listed here.
@@ -386,104 +741,9 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)полугодие|(?i)halfyear")]
     PeriodHalfYear,
 
-    #[token("=")]
-    Eq,
-
-    #[token("<>")]
-    Neq,
-
-    #[token("<=")]
-    Le,
-
-    #[token("<")]
-    Lt,
-
-    #[token(">=")]
-    Ge,
-
-    #[token(">")]
-    Gt,
-
-    #[token("+")]
-    Plus,
-
-    #[token("-")]
-    Minus,
-
-    #[token("*")]
-    Star,
-
-    #[token("/")]
-    Slash,
-
-    #[token("%")]
-    Percent,
-
-    #[token("(")]
-    LParen,
-
-    #[token(")")]
-    RParen,
-
-    #[token(".")]
-    Dot,
-
-    #[token(",")]
-    Comma,
-
-    #[token(";")]
-    Semicolon,
-
-    #[token("#")]
-    Hash, // For temporary table names (#TempTable)
-
-    #[token("&")]
-    Ampersand, // For query parameters (&Parameter)
-
-    #[token("|")]
-    Bar, // For multiline query strings
-
-    // Numbers: floats must come before integers
-    #[regex(r"[0-9]+\.[0-9]+")]
-    Float,
-
-    #[regex(r"[0-9]+")]
-    Decimal,
-
-    #[token("\"")]
-    Quote,
-
-    String,
-
-    // Date literals: '20240101' or '20240101120000'
-    #[regex(r"'[0-9]{8,14}'")]
-    Date,
-
-    // Identifier: Unicode letters, digits, underscore
-    // Lower priority than keywords
-    #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
-    Ident,
-
-    // Parameter reference: &Name
-    #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
-    Parameter,
-
-    // Line comment: // ...
-    // NOTE: SDBL standard does not define comments, but we support them for:
-    // 1. Robustness when parsing queries extracted from BSL strings that may contain "//" text
-    // 2. Developer convenience when testing queries
-    #[regex(r"//[^\n]*")]
-    Comment,
-
-    // Newline
-    #[token("\n")]
-    Newline,
-
-    // Whitespace (spaces, tabs, carriage returns)
-    #[regex(r"[ \t\r]+")]
-    Whitespace,
-
-    // Error token for unrecognized input
+    /// Logos error fallback for any byte sequence that does not match
+    /// a declared token. Retained unchanged pending the full Slice 1
+    /// → Slice 5 migration.
     Error,
 }
 
@@ -516,7 +776,7 @@ pub fn tokenize_sdbl(input: &str) -> Vec<SdblToken> {
         let remaining = &input[pos..];
 
         if remaining.starts_with('"') {
-            let strings = tokenize_strings_mode(input, pos);
+            let strings = strings_mode::scan(input, pos);
             result.extend(strings.tokens);
             pos = strings.end_pos;
         } else {
@@ -537,87 +797,6 @@ pub fn tokenize_sdbl(input: &str) -> Vec<SdblToken> {
     }
 
     result
-}
-
-struct StringsResult {
-    tokens: Vec<SdblToken>,
-    end_pos: usize,
-}
-
-fn tokenize_strings_mode(input: &str, start_pos: usize) -> StringsResult {
-    let mut tokens = Vec::new();
-    let mut pos = start_pos;
-    let bytes = input.as_bytes();
-
-    if pos >= bytes.len() || bytes[pos] != b'"' {
-        return StringsResult { tokens, end_pos: pos };
-    }
-
-    let opening_quote_pos = pos;
-    tokens.push(SdblToken {
-        kind: SdblTokenKind::String,
-        text: SmolStr::new(&input[opening_quote_pos..opening_quote_pos + 1]),
-        offset: opening_quote_pos,
-    });
-    pos += 1;
-
-    loop {
-        let content_start = pos;
-
-        while pos < bytes.len() && bytes[pos] != b'"' && bytes[pos] != b'\n' && bytes[pos] != b'\r'
-        {
-            pos += 1;
-        }
-
-        if pos >= bytes.len() {
-            if content_start < pos {
-                let text = SmolStr::new(&input[content_start..pos]);
-                tokens.push(SdblToken { kind: SdblTokenKind::String, text, offset: content_start });
-            }
-            break;
-        }
-
-        if bytes[pos] == b'"' {
-            if pos + 1 < bytes.len() && bytes[pos + 1] == b'"' {
-                pos += 2;
-                continue;
-            } else {
-                if content_start < pos {
-                    let text = SmolStr::new(&input[content_start..pos]);
-                    tokens.push(SdblToken {
-                        kind: SdblTokenKind::String,
-                        text,
-                        offset: content_start,
-                    });
-                }
-                tokens.push(SdblToken {
-                    kind: SdblTokenKind::String,
-                    text: SmolStr::new(&input[pos..pos + 1]),
-                    offset: pos,
-                });
-                pos += 1;
-                break;
-            }
-        }
-
-        if bytes[pos] == b'\n' || bytes[pos] == b'\r' {
-            if content_start < pos {
-                let text = SmolStr::new(&input[content_start..pos]);
-                tokens.push(SdblToken { kind: SdblTokenKind::String, text, offset: content_start });
-            }
-
-            while pos < bytes.len()
-                && (bytes[pos] == b'\n'
-                    || bytes[pos] == b'\r'
-                    || bytes[pos] == b' '
-                    || bytes[pos] == b'\t')
-            {
-                pos += 1;
-            }
-        }
-    }
-
-    StringsResult { tokens, end_pos: pos }
 }
 
 #[cfg(test)]
@@ -956,8 +1135,7 @@ mod tests {
 
     #[test]
     fn test_string_with_embedded_newline() {
-        // Test a string that has a newline INSIDE it (like ANTLR STR+)
-        // This simulates what ANTLR would create for multiString
+        // Test a string that contains an embedded newline between quotes.
         let input = "\"text\nmore\"";
         let tokens = tokenize_sdbl(input);
 

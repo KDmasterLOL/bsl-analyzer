@@ -1,29 +1,4 @@
-//! QueryParseError diagnostic.
-//!
-//! Detects SDBL queries with parse errors.
-//!
-//! ## Why?
-//! SDBL query text must be syntactically correct and should open in the query builder.
-//! Parse errors indicate incomplete or malformed queries that will fail at runtime.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query.Text = "SELECT Field
-//!              |FROM Table AS";  // Incomplete alias
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Query.Text = "SELECT Field
-//!              |FROM Table AS T";  // Complete query
-//! ```
-//!
-//! ## Implementation
-//!
-//! This diagnostic operates at AST level (not HIR) because:
-//! - SDBL HIR is only built for syntactically correct queries
-//! - Parse errors are already available in `SdblQueryInfo.query_ast`
-//! - Method `SdblQueryInfo.is_valid()` returns `false` when parse errors exist
+//! Reports SDBL query texts that contain parse errors.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -130,7 +105,7 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range_multiline, check_sdbl_diagnostic};
     use crate::{DiagnosticCode, Severity};
     #[test]
-    fn test_query_parse_error_from_fixture() {
+    fn test_detects_parse_errors_in_query_texts() {
         let code = r#"ТекстЗапроса =
 "ВЫБРАТЬ Максимум(ССЫЛКА = &Параметр) КАК УсловиеВАгрегатнойФункции
 |ИЗ Справочник.Контрагенты";

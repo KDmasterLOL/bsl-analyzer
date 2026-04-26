@@ -1,25 +1,4 @@
-//! UseSystemInformation diagnostic.
-//!
-//! Detects instantiation of СистемнаяИнформация / SystemInfo class.
-//!
-//! ## Why?
-//! SystemInformation object provides access to system and configuration data
-//! (computer name, RAM, processor info, etc.) that could be misused for:
-//! - Information disclosure
-//! - Fingerprinting attacks
-//! - Security policy violations
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ПолучитьИнфо()
-//!     СисИнфо = Новый СистемнаяИнформация;
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** No
-//! - **Severity:** Critical
-//! - **Type:** SECURITY_HOTSPOT
+//! Reports instantiation of `СистемнаяИнформация` / `SystemInfo`.
 
 use crate::define_metadata;
 use crate::metadata::*;

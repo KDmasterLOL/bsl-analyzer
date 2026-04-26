@@ -2,19 +2,40 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
+This diagnostic validates handlers referenced by event subscriptions in configuration metadata.
 
-If the handler for the "event subscription" is not filled or does not exist, then an error will occur in the application.
+The current implementation checks:
 
-**Note: Diagnostics attaches notes to the "session module".**
+- the handler is not empty;
+- the handler format is complete and contains a method name;
+- the referenced common module exists;
+- the common module is marked as server-side;
+- the referenced method exists;
+- the method is exported.
+
+The check runs only for the `SessionModule`, and all findings are attached to the beginning of that file because the problem belongs to configuration metadata rather than to a specific BSL source line.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
+
+### Incorrect
+
+```bsl
+// Event subscription metadata references:
+// CommonModule.EventHandlers.BeforeWrite
+//
+// but the module or method is missing, or the method is not exported.
+```
+
+### Correct
+
+```bsl
+Procedure BeforeWriteHandler(Source, Cancel) Export
+    // Handler implementation
+EndProcedure
+
+// Event subscription metadata references:
+// CommonModule.EventHandlers.BeforeWriteHandler
+```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
-
-* Источник: [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Полезная информация: [Отказ от использования модальных окон](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
+- [v8std.ru: MissingEventSubscriptionHandler (RU)](https://v8std.ru/diagnostics/bslls/MissingEventSubscriptionHandler/)

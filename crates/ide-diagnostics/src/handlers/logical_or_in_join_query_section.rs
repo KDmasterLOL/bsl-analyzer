@@ -1,44 +1,7 @@
 //! LogicalOrInJoinQuerySection diagnostic.
 //!
-//! Detects OR operators in SDBL JOIN conditions when used with multiple distinct fields.
-//!
-//! ## Why?
-//! Using OR in JOIN conditions with multiple fields prevents the DBMS from using indexes
-//! effectively, forcing full table scans. This results in:
-//! - Severely degraded query performance
-//! - Higher memory consumption
-//! - Increased likelihood of table locks
-//! - Unpredictable execution times
-//!
-//! **Important:** OR operators on the same field (e.g., `Status = 1 OR Status = 2`) are
-//! **not** flagged, as SQL optimizers can convert these to IN clauses automatically.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query = "SELECT * FROM Orders
-//!          INNER JOIN Products ON Orders.ProductID = Products.ID
-//!              AND (Orders.Amount > 100 OR Products.Price > 500)";  // ❌ Multiple fields
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Option 1: Split into separate queries with UNION
-//! Query = "SELECT * FROM Orders
-//!          INNER JOIN Products ON Orders.ProductID = Products.ID
-//!              AND Orders.Amount > 100
-//!          UNION ALL
-//!          SELECT * FROM Orders
-//!          INNER JOIN Products ON Orders.ProductID = Products.ID
-//!              AND Products.Price > 500";
-//!
-//! // Option 2: Use same field (optimizer handles this)
-//! Query = "SELECT * FROM Orders
-//!          INNER JOIN Products ON Orders.ProductID = Products.ID
-//!              AND (Products.Price > 100 OR Products.Price < 50)";  // ✅ Same field
-//! ```
-//!
-//! ## Implementation
-//! Ported from:
+//! Detects `OR` / `ИЛИ` operators in SDBL join conditions when they compare
+//! different fields.
 //!
 
 use crate::define_metadata;
@@ -96,7 +59,7 @@ mod tests {
     use crate::{DiagnosticCode, Severity};
     #[test]
     fn test_logical_or_in_join_query_section() {
-        // Fixture from test_data/LogicalOrInJoinQuerySectionDiagnostic.bsl.
+        // Large inline regression fixture for OR-in-JOIN coverage.
         // 8 OR diagnostics in JOIN conditions across nested joins.
         let code = r#"Процедура ПолучиттьРеализациюТовара()
 
@@ -142,12 +105,8 @@ mod tests {
 //Итоговое количество срабатываний - 8."#;
         let diagnostics = check_sdbl_diagnostic(code, check);
 
-        // Expect exactly 8 diagnostics matching reference implementation
-        assert_eq!(
-            diagnostics.len(),
-            8,
-            "Expected 8 diagnostics matching reference implementation"
-        );
+        // Expect exactly 8 diagnostics.
+        assert_eq!(diagnostics.len(), 8, "Expected 8 diagnostics");
 
         // Verify all are on correct code
         for diag in &diagnostics {

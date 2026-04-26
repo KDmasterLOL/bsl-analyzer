@@ -1,9 +1,4 @@
-//! SetPrivilegedMode diagnostic.
-//!
-//! Finds calls to УстановитьПривилегированныйРежим/SetPrivilegedMode that enable
-//! privileged mode (security hotspot).
-//!
-//! Calls with argument `Ложь`/`False` are NOT flagged (disabling privileged mode is safe).
+//! Flags enabling `УстановитьПривилегированныйРежим` as a security hotspot.
 
 use crate::define_metadata;
 use crate::metadata::*;

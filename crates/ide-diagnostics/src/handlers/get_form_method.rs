@@ -217,7 +217,7 @@ EndProcedure
         // Expected 4 diagnostics
         assert_eq!(get_form_diags.len(), 4, "Expected 4 diagnostics");
 
-        // reference test expectations (0-based lines):
+        // Expected diagnostic ranges (0-based lines):
 
         assert_diagnostic_range(code, get_form_diags[0], 2, 14, 27);
         assert_diagnostic_range(code, get_form_diags[1], 6, 21, 34);

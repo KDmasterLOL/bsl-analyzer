@@ -1,28 +1,6 @@
 //! QueryNestedFieldsByDot diagnostic.
 //!
-//! Detects nested field dereference by dot in SDBL queries (N+1 problem).
-//!
-//! ## Why?
-//! Accessing reference fields through multiple dots (e.g., `T.Ссылка.Организация`)
-//! causes N+1 query problem - for each row, an additional database query is executed.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query.Text = "SELECT
-//! |   T.Ссылка.Организация AS Organization  // N+1 problem
-//! |FROM Document.Order.Items AS T";
-//! ```
-//!
-//! ## Good practice
-//! Use JOINs to fetch related data in a single query.
-//!
-//! ## Implementation
-//!
-//! Uses SDBL HIR with diagnostics collected during lowering.
-//! Detects:
-//! 1. ColumnRef with 3+ parts (e.g., `T.Ссылка.Организация`)
-//! 2. ColumnRef with 2+ parts inside virtual table parameters (implicit join)
-//! 3. FunctionCall (CAST) with 2+ member_access fields
+//! Reports nested dereference of reference fields through dot in SDBL queries.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -42,7 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Single-pass dispatch for QueryNestedFieldsByDot.
+/// Single-pass dispatch for `QueryNestedFieldsByDot`.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,

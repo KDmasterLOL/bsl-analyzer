@@ -1,28 +1,4 @@
-//! MultilingualStringUsingWithTemplate diagnostic
-//!
-//! Checks if partially localized NStr() strings are used in StrTemplate function.
-//!
-//!
-//! ## Why?
-//! NStr in a multilingual configuration has different fragments for different languages.
-//! If you start a session under a language code that is not in the string passed to NStr,
-//! it will return an empty string. When used with StrTemplate, an empty string returned
-//! from NStr will throw an exception.
-//!
-//! ## Bad practice
-//! ```bsl
-//! // Missing English when both ru,en declared - causes exception in EN session
-//! Сообщение = СтрШаблон(НСтр("ru='Значение: %1'"), Значение);
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // All declared languages present
-//! Сообщение = СтрШаблон(НСтр("ru='Значение: %1'; en='Value: %1'"), Значение);
-//! ```
-//!
-//! ## Configuration
-//! - `declaredLanguages` (String, default: `"ru"`) - comma-separated list of required languages
+//! Reports `НСтр` / `NStr` calls with missing languages when they are used as templates.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -47,6 +23,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Checks multilingual `НСтр` literals used by `СтрШаблон` / `StrTemplate`.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MultilingualStringUsingWithTemplate::check").entered();
 

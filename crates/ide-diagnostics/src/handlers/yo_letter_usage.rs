@@ -1,9 +1,4 @@
-//! YoLetterUsage diagnostic
-//!
-//! Detects usage of Russian letter "ё" (yo) in identifiers.
-//!
-//! In module code it is prohibited to use the letter "ё".
-//! Exception is interface texts displayed to user in messages, forms and help.
+//! Reports identifiers that contain the Russian letter `ё`.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -88,7 +83,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics");
 
-        // Reference test positions:
+        // Expected diagnostic positions:
         assert_diagnostic_range(code, &diagnostics[0], 0, 6, 11);
         assert_diagnostic_range(code, &diagnostics[1], 2, 10, 20);
         assert_diagnostic_range(code, &diagnostics[2], 2, 21, 25);

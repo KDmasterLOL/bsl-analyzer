@@ -1,46 +1,4 @@
-//! TimeoutsInExternalResources diagnostic.
-//!
-//! Checks that timeout parameters are specified when working with external resources.
-//!
-//! ## Why?
-//! Missing timeout can lead to:
-//! - Indefinite waiting and program hangs
-//! - Unavailability of functionality
-//! - Resource blocking
-//!
-//! ## What is detected
-//!
-//! Missing timeout in constructors:
-//! - FTPСоединение/FTPConnection (parameter 6)
-//! - HTTPСоединение/HTTPConnection (parameter 5)
-//! - WSОпределения/WSDefinitions (parameter 4)
-//! - WSПрокси/WSProxy (parameter 4)
-//! - ИнтернетПочтовыйПрофиль/InternetMailProfile (parameter 5) - configurable
-//!
-//! Timeout can be specified either:
-//! 1. In constructor: `Новый HTTPСоединение("server", 80,,,, 1)`
-//! 2. Via property: `HTTPСоединение.Таймаут = 1`
-//!
-//! ## Bad practice
-//! ```bsl
-//! HTTPСоединение = Новый HTTPСоединение("server", 80); // No timeout
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! HTTPСоединение = Новый HTTPСоединение("server", 80,,,, 1);
-//! // OR
-//! HTTPСоединение = Новый HTTPСоединение("server", 80);
-//! HTTPСоединение.Таймаут = 1;
-//! ```
-//!
-//! ## Configuration
-//! - **analyzeInternetMailProfileZeroTimeout** (Boolean, default: true)
-//!   - When true, checks InternetMailProfile for timeout
-//!   - When false, skips InternetMailProfile
-//!
-//! ## Implementation
-//! Ported from:
+//! Checks that known external-resource objects are created with an explicit timeout.
 
 use crate::define_metadata;
 use crate::metadata::*;

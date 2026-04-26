@@ -1,3 +1,5 @@
+//! Reports hardcoded absolute file-system paths in string literals.
+
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};

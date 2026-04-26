@@ -3,7 +3,21 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-To improve code readability to the left and right of operators `+ - * / = % < > <> <= >=` there must be spaces. Also, the space should be to the right of `,` и `;`
+This diagnostic checks spacing around a configurable set of operators, punctuation marks, and keywords. Its goal is purely stylistic: make code easier to read and visually parse.
+
+By default it checks:
+
+- spaces on both sides of `+ - * / = % < > <> <= >=`
+- a space to the right of `,` and `;`
+- spacing around several keywords such as `If`, `ElsIf`, `While`, `For`, `Not`, `Each`, `Or`, `And`, `In`, `To`, `Export`, `Then`, `Do`
+
+The current implementation is token-based and heavily configurable through:
+
+- `listForCheckLeft`
+- `listForCheckRight`
+- `listForCheckLeftAndRight`
+- `checkSpaceToRightOfUnary`
+- `allowMultipleCommas`
 
 ## Examples
 
@@ -62,3 +76,7 @@ If set to `true`
     CommonModuleClientServer.MessageToUser(MessageText,,,, Cancel);        // Correct
 CommonModuleClientServer.MessageToUser(MessageText, , , , Cancel);     // Correct
 ```
+
+## Sources
+
+- [v8std.ru: MissingSpace (RU)](https://v8std.ru/diagnostics/bslls/MissingSpace/)

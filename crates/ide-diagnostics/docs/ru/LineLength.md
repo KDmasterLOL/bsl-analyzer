@@ -23,3 +23,4 @@
 ## Источники
 
 * [Стандарт: Тексты модулей](https://its.1c.ru/db/v8std#content:456:hdoc)
+* [Публичное зеркало: v8std.ru / #std456](https://v8std.ru/std/456/)

@@ -1,20 +1,6 @@
 //! NumberOfValuesInStructureConstructor diagnostic.
 //!
-//! Detects when Structure/FixedStructure constructors have too many values.
-//! The first argument is the key string, subsequent arguments are values.
-//! If the number of values exceeds `maxValuesCount`, a warning is issued.
-//!
-//! ## Configuration
-//! - **maxValuesCount**: Maximum number of values allowed (default: 3)
-//!
-//! ## Example
-//! ```bsl
-//! // Warning (4 values > 3)
-//! Result = New Structure("A, B, C, D", 1, 2, 3, 4);
-//!
-//! // Pass (3 values <= 3)
-//! Result = New Structure("A, B, C", 1, 2, 3);
-//! ```
+//! Reports structure constructors with too many inline property values.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -269,11 +255,7 @@ Result = New FixedStructure("Goods, Property, Count", Goods, Property, 5);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(
-            diagnostics.len(),
-            4,
-            "Should find exactly 4 diagnostics (matching reference implementation)"
-        );
+        assert_eq!(diagnostics.len(), 4, "Should find exactly 4 diagnostics");
 
         // Verify exact positions (uses 0-indexed lines)
         assert_diagnostic_range(code, &diagnostics[0], 18, 12, 119);

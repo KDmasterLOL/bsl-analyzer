@@ -1,60 +1,8 @@
 //! IsInRoleMethod diagnostic.
 //!
-//! Detects incorrect usage of `IsInRole()` / `РольДоступна()` method for access checking
-//! without proper `PrivilegedMode()` / `ПривилегированныйРежим()` protection.
-//!
-//! ## Why?
-//! The `IsInRole()` method should be used ONLY when a role does not grant access rights to
-//! metadata objects and serves only to define an additional access right. When used, it
-//! MUST be combined with a check for `PrivilegedMode()`.
-//!
-//! Using `IsInRole()` without `PrivilegedMode()` check may lead to security vulnerabilities
-//! where access control checks can be bypassed.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Если РольДоступна("ТребуемаяРоль") Тогда
-//!     // Выполнение кода
-//! КонецЕсли;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! // Option 1: Combined check with PrivilegedMode
-//! Если РольДоступна("ТребуемаяРоль") ИЛИ ПривилегированныйРежим() Тогда
-//!     // Выполнение кода
-//! КонецЕсли;
-//!
-//! // Option 2: Use AccessRight instead
-//! Если ПравоДоступа("Добавление", Метаданные.Справочники.Номенклатура) Тогда
-//!     // Выполнение кода
-//! КонецЕсли;
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Major
-//! - **Tags:** ERROR
-//! - **Minutes to fix:** 5
-//!
-//! ## Implementation
-//! Ported from:
-//!
-//! **Architecture:** HIR-based diagnostic (migrated from AST).
-//!
-//! ### HIR approach
-//! - Two-pass analysis per method/module:
-//!   - Pass 1: Track variables containing `IsInRole()` or `PrivilegedMode()` results
-//!   - Pass 2: Check if-statements for unprotected usage
-//! - Uses `Stmt::Assign` for variable tracking
-//! - Uses `Expr::Call` for method call detection
-//! - Uses `Stmt::If` for condition checking
-//!
-//! ### Advantages over AST
-//! - Semantic analysis - operates on lowered HIR representation
-//! - Salsa caching - benefits from automatic invalidation
-//! - Cleaner code - no token-level parsing
-//! - Better error recovery - HIR handles parse errors gracefully
+//! Detects `IsInRole()` / `РольДоступна()` usage in `if` conditions when the
+//! condition is not protected by `PrivilegedMode()` /
+//! `ПривилегированныйРежим()`.
 
 use crate::define_metadata;
 use crate::metadata::*;

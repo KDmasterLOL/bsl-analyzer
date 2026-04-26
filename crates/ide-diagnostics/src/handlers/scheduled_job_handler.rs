@@ -1,40 +1,4 @@
-//! ScheduledJobHandler diagnostic.
-//!
-//! Validates scheduled job handlers in 1C SessionModule files.
-//!
-//! ## What it checks
-//!
-//! This diagnostic validates that all scheduled jobs in the configuration have valid handlers:
-//!
-//! 1. **Handler must not be empty** - Each job must have a handler defined
-//! 2. **CommonModule exists** - The referenced common module must exist in configuration
-//! 3. **Module is server-side** - Common module must have Server flag set to true
-//! 4. **Method exists** - The method must be defined in the common module
-//! 5. **Method is exported** - The method must have Экспорт (Export) keyword
-//! 6. **No parameters for predefined** - Predefined jobs handlers cannot have parameters
-//! 7. **Method body not empty** - Handler method must have code
-//! 8. **No duplicate handlers** - Same handler cannot be used by multiple jobs
-//!
-//! ## Why?
-//!
-//! Scheduled jobs run background tasks on the server. Invalid handlers lead to
-//! runtime errors when jobs are triggered.
-//!
-//! ## Configuration
-//!
-//! - **Enabled by default:** Yes
-//! - **Severity:** CRITICAL (ERROR)
-//! - **Tags:** ERROR
-//! - **Minutes to fix:** 5
-//!
-//! ## Scope
-//!
-//! This diagnostic only runs for **SessionModule** files (Configuration/SessionModule.bsl).
-//! All diagnostics are reported at the beginning of the SessionModule (line 1, columns 1-9).
-//!
-//! ## Reference
-//!
-//! Ported from:
+//! Validates metadata-backed scheduled job handlers from `SessionModule`.
 
 use crate::define_metadata;
 use crate::metadata::*;

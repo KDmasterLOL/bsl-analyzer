@@ -1,20 +1,4 @@
-//! Diagnostic: UnusedParameters
-//!
-//! Detects parameters that are declared but never used in the method body.
-//!
-//! Uses HIR traversal to find any mention of parameter name in the method body.
-//!
-//! ## Exclusions
-//!
-//! - Empty methods (no code in body)
-//! - Platform event handlers (fixed signature defined by 1C platform)
-//! - Form element event/command handlers
-//! - HTTP service handlers
-//! - Attachable methods (configurable prefix, default: подключаемый_, attachable_)
-//! - NotifyDescription callbacks (intra-module, detected by scanning for constructor calls)
-//!
-//! ## Configuration
-//! - **attachableMethodPrefixes** (string, default: "подключаемый_,attachable_") - comma-separated prefixes
+//! Reports method parameters that are declared but never used in the method body.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -314,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn test_java_fixture() {
+    fn test_detects_unused_parameters_in_fixture() {
         let code = r#"Процедура ВсеПлохо(А1, Знач Б1 = Ложь) // Параметр Б
     ВызовМетода(А1);
 КонецПроцедуры

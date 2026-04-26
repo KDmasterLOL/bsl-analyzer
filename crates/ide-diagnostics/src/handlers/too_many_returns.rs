@@ -1,23 +1,4 @@
-//! TooManyReturns diagnostic
-//!
-//! Detects methods with too many return statements.
-//!
-//!
-//! ## Why?
-//!
-//! Excessive return statements increase method complexity and reduce readability.
-//! Multiple exit points make code harder to understand and maintain.
-//!
-//! ## Configuration
-//!
-//! ### `maxReturnsCount` (integer)
-//! Maximum allowed return statements per method.
-//! Default: `3`
-//!
-//! ## Implementation
-//!
-//! **This is a HIR-based diagnostic** - return statements are collected during AST→HIR lowering.
-//! The handler applies configuration filtering (maxReturnsCount).
+//! Reports methods that contain more return statements than allowed by configuration.
 
 use crate::define_metadata;
 use crate::metadata::*;

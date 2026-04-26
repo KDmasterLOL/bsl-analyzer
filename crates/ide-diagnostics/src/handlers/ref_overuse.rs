@@ -1,24 +1,4 @@
-//! RefOveruse diagnostic.
-//!
-//! Detects redundant .Ссылка (Reference) field access in SDBL queries.
-//!
-//! ## Why?
-//! Accessing `.Ссылка` on a reference field causes an implicit LEFT JOIN
-//! with the source table, creating unnecessary database load.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Query.Text = "SELECT
-//! |   T.Файл.Ссылка AS FileRef  // Implicit JOIN
-//! |FROM InformationRegister.ServiceFiles AS T";
-//! ```
-//!
-//! ## Good practice
-//! Remove redundant .Ссылка - the field is already a reference.
-//!
-//! ## Implementation
-//!
-//! Uses SDBL HIR with diagnostics collected during lowering.
+//! Reports redundant `.Ссылка` access on already-reference query fields.
 
 use crate::define_metadata;
 use crate::metadata::*;

@@ -1,53 +1,6 @@
 //! MissedRequiredParameter diagnostic.
 //!
-//! Detects missing required parameters in method calls.
-//!
-//! ## Why?
-//! BSL (1C:Enterprise) allows omitting parameters in method calls, using commas to skip them.
-//! However, parameters without default values are required and must be provided.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Функция Сложение(Левый, Правый) Экспорт
-//!     Возврат Левый + Правый;
-//! КонецФункции
-//!
-//! Результат = Сложение(, 2);      // ERROR: Missing required parameter 'Левый'
-//! Результат = Сложение(5);        // ERROR: Missing required parameter 'Правый'
-//! Результат = Сложение();         // ERROR: Missing 'Левый', 'Правый'
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Результат = Сложение(5, 2);     // OK: All required parameters provided
-//!
-//! // With optional parameters:
-//! Функция Инкремент(Значение, Приращение = 1)  // Приращение is optional
-//!     Возврат Значение + Приращение;
-//! КонецФункции
-//!
-//! Результат = Инкремент(5);       // OK: Optional parameter can be omitted
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** ERROR (MAJOR)
-//! - **Tags:** ERROR
-//! - **Minutes to fix:** 1
-//! - **No configurable parameters**
-//!
-//! ## Reference
-//! Ported from:
-//! - Adapted to use Rowan SyntaxNode and SymbolTree
-//!
-//! ## HIR-based implementation
-//!
-//! This diagnostic is now collected during HIR lowering (AST→HIR conversion).
-//! The `from_hir()` function validates the call and creates the final diagnostic.
-//! This approach is faster because:
-//! 1. No separate AST traversal for this diagnostic
-//! 2. SymbolTree lookups are Salsa-cached
-//! 3. Method resolution happens once during lowering
+//! Detects method calls where required parameters are omitted.
 
 use crate::define_metadata;
 use crate::metadata::*;

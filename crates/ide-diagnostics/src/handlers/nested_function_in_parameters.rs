@@ -1,44 +1,7 @@
 //! NestedFunctionInParameters diagnostic.
 //!
-//! Detects nested function calls and parameterized constructors used as parameters
-//! to methods and constructors.
-//!
-//! ## Why?
-//! Nested function calls in parameters reduce code readability and make debugging harder.
-//! It's better to extract nested calls into separate variables.
-//!
-//! ## Bad practice
-//! ```bsl
-//! СтруктураВложений.Вставить(
-//!     ПрисоединенныйФайл.Наименование,
-//!     Новый Картинка(ПолучитьИзВременногоХранилища(
-//!         ПрисоединенныеФайлы.ПолучитьДанныеФайла(ПрисоединенныйФайл.Ссылка))));
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! ДанныеФайла = ПрисоединенныеФайлы.ПолучитьДанныеФайла(ПрисоединенныйФайл.Ссылка);
-//! АдресХранилища = ДанныеФайла.СсылкаНаДвоичныеДанныеФайла;
-//! ДвоичныеДанные = ПолучитьИзВременногоХранилища(АдресХранилища);
-//! СтруктураВложений.Вставить(ПрисоединенныйФайл.Наименование, Новый Картинка(ДвоичныеДанные));
-//! ```
-//!
-//! ## Configuration
-//! - `allowOneliner` (Boolean, default: true) - Allow nested calls if entire expression is on one line
-//! - `allowedMethodNames` (String, default: "НСтр,NStr,ПредопределенноеЗначение,PredefinedValue") -
-//!   Comma-separated list of method names allowed as nested calls
-//!
-//! ## Implementation
-//! Ported from:
-//!
-//! **HIR-based implementation** using semantic analysis instead of AST traversal.
-//!
-//! Migrated from AST to HIR for:
-//! - Type-safe expression handling via Expr enum
-//! - Automatic distinction between Call, MethodCall, and New expressions
-//! - Simplified recursive checking via ExprId references
-//! - Automatic Salsa caching via module_bodies()
-//! - Module-level code coverage (not just methods)
+//! Reports nested function calls and parameterized constructors used as
+//! arguments of other calls and constructors.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -129,9 +92,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check a single Body for nested function calls in parameters.
-///
-/// HIR-based approach: iterates over expressions and checks calls semantically.
+/// Check a single body for nested function calls in parameters.
 #[allow(clippy::too_many_arguments)]
 fn check_body(
     body: &Body,
@@ -806,10 +767,10 @@ mod tests {
         let diagnostics = check_ast_diagnostic(FIXTURE, check);
 
         // With default config (allowOneliner=true), should find 3 diagnostics
-        // Matching reference test: lines 1, 3, 51 (0-indexed)
+        // Expected diagnostics at lines 1, 3, 51 (0-indexed)
         assert_eq!(diagnostics.len(), 3, "Should find exactly 3 diagnostics with default config");
 
-        // Verify exact positions matching reference implementation
+        // Verify exact diagnostic positions
         // Line 1 (0-indexed), columns 22-30: Вставить
         assert_diagnostic_range(FIXTURE, &diagnostics[0], 1, 22, 30);
         // Line 3 (0-indexed), columns 11-19: Картинка

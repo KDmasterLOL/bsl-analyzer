@@ -1,21 +1,20 @@
 # Using 'LIKE' in query (UsingLikeInQuery)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
 
-In most algorithms, it is possible to do without using the operator `LIKE`, and in the rest, you must use it carefully. The result in some situations can be very different from the expected, for example, when using different DBMS.
+This diagnostic reports any usage of the `LIKE` / `ПОДОБНО` operator in query text.
+
+The rule is conservative: even when pattern matching looks acceptable in a specific case, the behavior of `LIKE` can still depend on DBMS details and query semantics. For that reason, the current implementation flags all occurrences and leaves the final decision to the developer.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 
-### Correct
+Reported:
 
 ```bsl
 Property LIKE "123%"
 ```
 
-### Incorrect:
+Reported:
 
 ```bsl
 Property LIKE Table.Template

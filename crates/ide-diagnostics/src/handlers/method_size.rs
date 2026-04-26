@@ -1,42 +1,6 @@
 //! MethodSize diagnostic.
 //!
 //! Detects functions and procedures with excessive line count.
-//!
-//! ## Why?
-//! Long methods are hard to understand, test, and maintain.
-//! They often indicate lack of proper abstraction and responsibility separation.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ОченьДлиннаяПроцедура()
-//!     // 300 lines of code...
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! Split into smaller, focused methods:
-//! ```bsl
-//! Процедура ВыполнитьОперацию()
-//!     ПодготовитьДанные();
-//!     ВыполнитьОсновнуюЛогику();
-//!     ОбработатьРезультат();
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **maxMethodSize** (default: 200) - Maximum allowed method line count
-//! - **Enabled by default:** Yes
-//! - **Severity:** MAJOR
-//! - **Tags:** BADPRACTICE (concept)
-//! - **Minutes to fix:** 30
-//!
-//! ## Implementation
-//!
-//! Algorithm: Calculates line difference (stop_line - start_line).
-//!
-//! ## Performance
-//! Uses LineIndex for O(1) line number lookups instead of scanning the entire
-//! file text for each method. LineIndex is built once O(n) at the start.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -98,7 +62,7 @@ mod tests {
     use crate::{DiagnosticCode, DiagnosticsConfig, Severity};
 
     fn make_method_size_code() -> String {
-        // Reproduces MethodSizeDiagnostic.bsl structure:
+        // Large inline regression fixture for method-size coverage.
         //   Line 0:   Процедура ПустаяПроцедура()
         //   Line 1:   (empty)
         //   Line 2:   КонецПроцедуры
@@ -111,7 +75,7 @@ mod tests {
         //   ...
         //   Line 419:  Функция Функция201Строка()       <- diagnostic here
         //
-        // Sizes are computed as stop_line - start_line (ANTLR behavior).
+        // Sizes are computed as stop_line - start_line.
         // Процедура201Строка: lines 6-212 → size 206? No — we need size=201.
         // Original has 201 А=0 statements, making the method span 203 lines (start + 201 body + end).
         // Size = stop_line - start_line = 202 lines diff but reports 201.

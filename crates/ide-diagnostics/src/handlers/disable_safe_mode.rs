@@ -1,60 +1,4 @@
-//! DisableSafeMode diagnostic.
-//!
-//! Detects calls that disable safe mode in 1C:Enterprise.
-//!
-//! ## Why?
-//! Disabling safe mode creates serious security vulnerabilities:
-//! - Allows execution of potentially dangerous operations
-//! - Bypasses 1C:Enterprise security restrictions
-//! - May violate security policies
-//! - Creates attack vectors for malicious code
-//!
-//! Safe mode prevents:
-//! - File system access
-//! - External component execution
-//! - COM object creation
-//! - Operating system calls
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура ОпаснаяПроцедура()
-//!     // Disabling safe mode - DANGEROUS!
-//!     УстановитьБезопасныйРежим(Ложь);
-//!     УстановитьОтключениеБезопасногоРежима(Истина);
-//!
-//!     // Cannot verify safety at compile time
-//!     Режим = Ложь;
-//!     УстановитьБезопасныйРежим(Режим);
-//! КонецПроцедуры
-//!
-//! Procedure DangerousProcedure()
-//!     SetSafeMode(False);
-//!     SetSafeModeDisabled(True);
-//! EndProcedure
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура БезопаснаяПроцедура()
-//!     // Enabling safe mode - GOOD!
-//!     УстановитьБезопасныйРежим(Истина);
-//! КонецПроцедуры
-//!
-//! Procedure SafeProcedure()
-//!     SetSafeMode(True);
-//! EndProcedure
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** Warning (MAJOR)
-//! - **Tags:** SUSPICIOUS, BADPRACTICE
-//! - **Minutes to fix:** 15
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! Ported from:
+//! Reports calls that disable or weaken safe mode.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -75,9 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::DisableSafeMode` is encountered.
+/// Creates a diagnostic from the HIR lowering result.
 pub fn from_hir(
     method_name: &str,
     range: TextRange,

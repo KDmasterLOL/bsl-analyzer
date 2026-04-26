@@ -1,27 +1,6 @@
 //! LineLength diagnostic
 //!
-//! Checks that BSL code lines do not exceed maximum length.
-//!
-//! ## Why?
-//! Long lines reduce code readability and make it harder to review changes.
-//! Industry standard is 120 characters per line.
-//!
-//! ## Bad practice
-//! ```bsl
-//! А = "very long string literal that exceeds 120 characters and makes the code hard to read especially when reviewing in version control systems";
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! А = "shorter string literal"
-//!     + " that is split across"
-//!     + " multiple lines";
-//! ```
-//!
-//! ## Configuration
-//! - `maxLineLength` (Integer, default: 120) - Maximum line length in characters
-//! - `checkMethodDescription` (Boolean, default: true) - Include method description comments in check
-//! - `excludeTrailingComments` (Boolean, default: false) - Exclude comments on same line as code
+//! Checks that BSL code lines do not exceed the configured maximum length.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -410,7 +389,7 @@ mod tests {
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
 
-    // Fixture inlined from test_data/LineLengthDiagnostic.bsl.
+    // Large inline regression fixture for line-length coverage.
     // Line count and content must remain stable — position assertions depend on it.
     const FIXTURE: &str = r#"А = 0;
 

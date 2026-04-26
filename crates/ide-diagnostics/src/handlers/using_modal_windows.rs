@@ -1,15 +1,4 @@
-//! UsingModalWindows diagnostic
-//!
-//! Detects usage of modal window methods (Вопрос, Предупреждение, etc.).
-//!
-//! Modal windows block execution and are not allowed when configuration
-//! has modality mode disabled. Each modal method has a non-modal replacement.
-//!
-//! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! The diagnostic is emitted in `hir-def/body/lower/expr.rs` when a global
-//! modal method call is encountered.
+//! Reports usage of modal window methods.
 
 use crate::define_metadata;
 use crate::metadata::*;

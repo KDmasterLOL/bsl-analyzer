@@ -1,51 +1,4 @@
-//! MissingCodeTryCatchEx diagnostic.
-//!
-//! Detects empty exception handlers in try-catch blocks.
-//!
-//! ## Why?
-//! Empty exception handlers silently swallow errors, making debugging difficult:
-//! - Errors are hidden from logs
-//! - Application continues with invalid state
-//! - Root cause analysis becomes impossible
-//!
-//! ## Bad practice
-//! ```bsl
-//! Попытка
-//!     ОпаснаяОперация();
-//! Исключение
-//!     // Empty - error is silently ignored!
-//! КонецПопытки;
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Попытка
-//!     ОпаснаяОперация();
-//! Исключение
-//!     ЗаписатьЛогСобытий("Ошибка", УровеньЛога.Ошибка, ОписаниеОшибки());
-//!     ВызватьИсключение;
-//! КонецПопытки;
-//! ```
-//!
-//! ## Configuration
-//! - `commentAsCode` (boolean, default: false) - If true, exception blocks containing
-//!   only comments are NOT considered empty
-//!
-//! ## Implementation
-//! Ported from:
-//!
-//! **Architecture:** HIR-based diagnostic with AST fallback for commentAsCode.
-//!
-//! ### HIR approach
-//! - Scans `Stmt::Try { body, except }` in method bodies and module-level code
-//! - Empty except detected via `except.is_empty()`
-//! - For commentAsCode option: uses source_map to get range, then checks AST for comments
-//!
-//! ### Advantages over AST
-//! - Semantic analysis - operates on lowered HIR representation
-//! - Salsa caching - benefits from automatic invalidation
-//! - Simpler code - direct check on except array
-//! - Better error recovery - HIR handles parse errors gracefully
+//! Reports empty `Исключение` / `Except` blocks.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -68,9 +21,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-/// Main entry point for MissingCodeTryCatchEx diagnostic.
-///
-/// HIR-based check for empty exception handlers in try-catch blocks.
+/// Main entry point for the empty-except diagnostic.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingCodeTryCatchEx;
 

@@ -2,21 +2,32 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-Using ".Ref" to a field of a reference type will result in an implicit left join with the source table of this field, and it has no value, but only generates excessive load on the DBMS.
-## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-```bsl
-Query.Text = "Select Files.File.Ref, // error
-   | Files.File
-   | From
-   | InternalFiles AS Files";
-```
-## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
 
-* Source: [Standard: Modules (RU)](https://its.1c.ru/db/v8std#content:456:hdoc)
-* Useful information: [Refusal to use modal windows (RU)](https://its.1c.ru/db/metod8dev#content:5272:hdoc)
-* Источник: [Cognitive complexity, ver. 1.4](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) -->
-* Useful Information: [Dereferencing Complex Type Reference Fields in Query Language (RU)](https://its.1c.ru/db/v8std/content/654/hdoc)
+When a query field already has a reference type, an additional `.Ref` / `.Ссылка` access is usually redundant. Such dereferencing may force the platform to build extra implicit joins and can make the query slower.
+
+This diagnostic reports cases where the query accesses `.Ссылка` on a field that is already known as a reference.
+
+## Examples
+
+Incorrect:
+
+```bsl
+Query.Text = "SELECT
+|   Files.File.Ref AS FileRef
+|FROM
+|   InformationRegister.InternalFiles AS Files";
+```
+
+Correct:
+
+```bsl
+Query.Text = "SELECT
+|   Files.File AS FileRef
+|FROM
+|   InformationRegister.InternalFiles AS Files";
+```
+
+## Sources
+
+- [#std654: Dereferencing reference fields of composite type in query language (RU)](https://its.1c.ru/db/v8std#content:654:hdoc)
+- [v8std.ru: #std654](https://v8std.ru/std/654/)

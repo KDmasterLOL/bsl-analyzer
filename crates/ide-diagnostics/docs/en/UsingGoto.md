@@ -33,6 +33,6 @@ EndDo;
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
 
 * [Standard: Using Goto (RU)](https://its.1c.ru/db/v8std/content/547/hdoc/_top/)
+* [v8std: UsingGoto](https://v8std.ru/diagnostics/bslls/UsingGoto/)

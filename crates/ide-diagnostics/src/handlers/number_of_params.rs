@@ -1,33 +1,6 @@
 //! NumberOfParams diagnostic.
 //!
-//! Detects functions and procedures with too many parameters.
-//!
-//! ## Why?
-//! Too many parameters make methods hard to understand and use correctly.
-//! They often indicate that the method is trying to do too much.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура СОченьМногоПараметров(А, Б, В, Г, Д, Е, Ж, З)
-//!     // ...
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! Use parameter structures or split into multiple methods:
-//! ```bsl
-//! Процедура ВыполнитьОперацию(Параметры)
-//!     // Параметры - структура с полями
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Configuration
-//! - **maxParamsCount** (default: 7) - Maximum allowed parameters
-//! - **Enabled by default:** Yes
-//! - **Severity:** MINOR → Warning
-//!
-//! ## Implementation
-//! Uses ItemTree for efficiency (cached by Salsa).
+//! Reports methods with too many parameters.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -49,10 +22,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_PARAMS: i64 = 7;
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::NumberOfParams` is encountered.
-/// Applies configuration filtering (maxParamsCount).
+/// Creates a diagnostic from HIR when the number of parameters exceeds the
+/// configured limit.
 pub fn from_hir(
     _method_name: &str,
     count: u32,

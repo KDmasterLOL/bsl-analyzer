@@ -3,106 +3,50 @@
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
 
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-Не следует использовать `ИЛИ` в секции `ГДЕ` запроса. Это может привести к тому, что СУБД не сможет использовать 
-индексы таблиц и будет выполнять сканирование, что увеличит время работы запроса и вероятность возникновения блокировок. 
-Вместо этого следует разбить один запрос на несколько и объединить результаты.
+This diagnostic reports `OR` operators inside query `WHERE` clauses.
+
+`OR` in filtering conditions often makes index usage worse and can push the DBMS
+toward scan-heavy execution plans. A common rewrite is to split the logic into
+separate query branches and combine them with `UNION ALL`, but only when that
+preserves the original semantics.
+
+Important: the current implementation is intentionally conservative and may
+still report some cases that are acceptable from an optimization perspective.
+It does not fully model the distinction between main indexed conditions and
+additional conditions from the public guidance.
 
 ## Примеры
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-
-For example, query:
+Diagnostic:
 
 ```bsl
-SELECT Goods.Description FROM Catalog.Goods AS Goods 
-WHERE Code = "001" OR Cost = 10
+ВЫБРАТЬ Номенклатура.Наименование
+ИЗ Справочник.Номенклатура КАК Номенклатура
+ГДЕ Номенклатура.Артикул = "А01" ИЛИ Номенклатура.Цена = 500
 ```
 
-should instead of a query:
+One possible rewrite:
 
 ```bsl
-SELECT Goods.Description FROM Catalog.Goods AS Goods 
-WHERE Code = "001" 
+ВЫБРАТЬ Номенклатура.Наименование
+ИЗ Справочник.Номенклатура КАК Номенклатура
+ГДЕ Номенклатура.Артикул = "А01"
 
-UNION ALL
+ОБЪЕДИНИТЬ ВСЕ
 
-SELECT Goods.Description FROM Catalog.Goods AS Goods 
-WHERE Cost = 10
-
+ВЫБРАТЬ Номенклатура.Наименование
+ИЗ Справочник.Номенклатура КАК Номенклатура
+ГДЕ Номенклатура.Цена = 500
 ```
 
->**Important** - the current implementation of the diagnostic triggers on any `OR` in the `WHERE` section and may issue false positives for some conditions.
-
-1) In the main condition, the `OR` operator can only be used for the last used or the only index field, when the `OR` operator can be replaced by the `IN` operator.
-
-Correct:
+No diagnostic in the ideal model: same field, can be normalized to `IN`
 
 ```bsl
-WHERE
-    Table.Filed = &Value1
-    OR Table.Filed = &Value2
-```
-
-because can be rewritten using the `IN` operator (you don’t need to specifically rewrite it, you can leave it as it is):
-
-```bsl
-WHERE
-    Table.Field IN (&Value)
-```
-
-Incorrect:
-
-```bsl
-WHERE
-    Table.Field1 = &Value1
-    OR  Table.Field2 = &Value2
-```
-
-cannot be rewritten with `IN`, but can be rewritten with `UNION ALL` (each Field1 and Field2 must be indexed):
-
-```bsl
-WHERE
-     Table.Field1 = &Value1
-
-UNION ALL
-
-WHERE
-     Table.Field2 = &Value1
-```
-
->Note: it is not always possible to replace `OR` with `UNION ALL`, make sure the result is really the same as with `OR` before applying.
-
-2) Additionally, the 'OR' operator can be used without restriction.
-
-Correct:
-
-```bsl
-WHERE
-    Table.Filed1 = &Value1 // Main condition (use index)
-    AND // Addition condition (can use OR)
-    (Table.Filed2 = &Value2 OR Table.Filed3 = &Value3)
-```
-
-Correct:
-
-```bsl
-WHERE
-    (Table.Filed1 = &Value1 OR Table.Filed1 = &Value2)
-    AND
-    (Table.Filed2 = &Value3 OR Table.Filed2 = &Value4)
-```
-
-because can be rewritten using 'IN' (no special rewriting needed, can be left as is):
-
-```bsl
-WHERE
-    Table.Field1 IN (&Value1)   // Main condition
-    AND Table.Field2 IN (&Value2) // Additional condition (or vice versa)
+ГДЕ
+    Таблица.Статус = &Статус1
+    ИЛИ Таблица.Статус = &Статус2
 ```
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-
 - [Standard: Effective Query Conditions, Clause 2 (RU)](https://its.1c.ru/db/v8std/content/658/hdoc)
 - [Typical Causes of Suboptimal Query Performance and Optimization Techniques: Using Logical OR in Conditions (RU)](https://its.1c.ru/db/content/metod8dev/src/developers/scalability/standards/i8105842.htm#or)
-- [Article on Habr: Interesting analysis of SQL queries in various DBMS (not about 1C) (RU)](https://m.habr.com/ru/company/lsfusion/blog/463095/)
+- [Public mirror: v8std.ru / #std658](https://v8std.ru/std/658/)

@@ -1,27 +1,4 @@
-//! UsageWriteLogEvent diagnostic.
-//!
-//! Validates correct usage of WriteLogEvent / ЗаписьЖурналаРегистрации method.
-//!
-//! ## Checks
-//! 1. Method must have at least 5 parameters
-//! 2. Second parameter (log level) must not be empty
-//! 3. Fifth parameter (comment) must not be empty
-//! 4. Inside exception blocks:
-//!    - Log level must be Error (УровеньЖурналаРегистрации.Ошибка / EventLogLevel.Error)
-//!    - Comment must contain DetailErrorDescription(ErrorInfo()) or have Raise statement
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** INFO
-//! - **Type:** CODE_SMELL
-//! - **Tags:** STANDARD, BADPRACTICE
-//! - **Minutes to fix:** 1
-//!
-//! ## Implementation
-//! **AST-based diagnostic** - requires complex context analysis.
-//! Uses `bsl-platform` crate for method name resolution (bilingual, case-insensitive).
-//!
-//! Ported from:
+//! Reports suspicious usage of `ЗаписьЖурналаРегистрации` / `WriteLogEvent`.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -44,15 +21,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const WRITE_LOG_EVENT_METHOD_PARAMS_COUNT: usize = 5;
 
-/// Creates diagnostic from HIR BodyDiagnostic::UsageWriteLogEvent.
-///
-/// Validates WriteLogEvent calls based on collected flags:
-/// 1. Must have at least 5 parameters
-/// 2. Second parameter (log level) must not be empty
-/// 3. Fifth parameter (comment) must not be empty
-/// 4. Inside exception blocks:
-///    - Log level must be Error
-///    - Comment must contain DetailErrorDescription(ErrorInfo()) or have Raise statement
+/// Creates a diagnostic from HIR BodyDiagnostic::UsageWriteLogEvent.
 #[allow(clippy::too_many_arguments)]
 pub fn from_hir(
     in_except_block: bool,

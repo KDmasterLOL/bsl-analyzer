@@ -1,60 +1,7 @@
 //! NestedTernaryOperator diagnostic.
 //!
-//! Detects nested usage of ternary operator `?(condition, true_value, false_value)`.
-//!
-//! ## Why?
-//! Nested ternary operators are hard to read and understand, especially when:
-//! - Used inside IF/ELSIF conditions (alternative: extract to variable)
-//! - Nested within another ternary operator (alternative: use IF statement)
-//!
-//! ## Bad practice
-//! ```bsl
-//! // Ternary in IF condition - hard to read
-//! Если ?(Условие1, А, Б) = 1 Тогда
-//!     // ...
-//! КонецЕсли;
-//!
-//! // Nested ternary - very confusing
-//! Результат = ?(Условие1, ?(Условие2, 1, 2), ?(Условие3, 3, 4));
-//! ```
-//!
-//! ## Good practice
-//! Extract complex conditions or use explicit IF statements:
-//! ```bsl
-//! // Extract ternary to variable
-//! Значение = ?(Условие1, А, Б);
-//! Если Значение = 1 Тогда
-//!     // ...
-//! КонецЕсли;
-//!
-//! // Replace nested ternary with IF statement
-//! Если Условие1 Тогда
-//!     Если Условие2 Тогда
-//!         Результат = 1;
-//!     Иначе
-//!         Результат = 2;
-//!     КонецЕсли;
-//! Иначе
-//!     Результат = 3;
-//! КонецЕсли;
-//! ```
-//!
-//! ## Configuration
-//! - **Enabled by default:** Yes
-//! - **Severity:** WARNING
-//! - **Tags:** BADPRACTICE (concept)
-//! - **Minutes to fix:** 10
-//!
-//! ## Implementation
-//!
-//! Checks three cases:
-//! 1. `IF_STMT` - finds ternary operators in IF conditions
-//! 2. `ELSIF_CLAUSE` - finds ternary operators in ELSIF conditions
-//! 3. `TERNARY_EXPR` - finds nested ternary operators within another ternary
-//!
-//! ## Note
-//! This diagnostic uses AST (not HIR) because it checks structural properties only.
-//! AST descendant traversal is simpler than HIR arena traversal for pattern matching.
+//! Reports nested or condition-embedded ternary operators that reduce
+//! readability.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -75,13 +22,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Check a single syntax node for nested ternary operators (node-based API).
-///
-/// This is called from collect_syntax_single_pass() for each node in single AST pass.
-/// ## Cases checked
-/// 1. **IF_STMT** - Reports ternary operators in IF conditions
-/// 2. **ELSIF_CLAUSE** - Reports ternary operators in ELSIF conditions
-/// 3. **TERNARY_EXPR** - Reports nested ternary operators within another ternary
+/// Check a single syntax node for nested ternary operators.
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::NestedTernaryOperator;
 
@@ -114,10 +55,7 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-/// Main entry point for NestedTernaryOperator diagnostic.
-///
-/// Traverses AST and calls `check_node()` for each node.
-/// This is the traditional entry point for diagnostics that don't use text-based API yet.
+/// Main entry point for the `NestedTernaryOperator` diagnostic.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("NestedTernaryOperator::check").entered();
 
@@ -223,11 +161,7 @@ mod tests {
 КонецЕсли;"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(
-            diagnostics.len(),
-            4,
-            "Should find exactly 4 diagnostics (matching reference implementation)"
-        );
+        assert_eq!(diagnostics.len(), 4, "Should find exactly 4 diagnostics");
 
         assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 13, 8, 14);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 13, 5, 13, 50);

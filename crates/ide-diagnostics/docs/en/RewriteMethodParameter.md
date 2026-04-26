@@ -1,44 +1,52 @@
 # Rewrite method parameter (RewriteMethodParameter)
 
-<!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-<!-- Описание диагностики заполняется вручную. Необходимо понятным языком описать смысл и схему работу -->
-It is wrong to write methods in which their arguments are overwritten immediately on entry.
 
-It is necessary to correct this deficiency by removing the parameters, converting them to local variables.
+A by-value parameter that is overwritten before any meaningful use is suspicious: the caller passes a value, but the method immediately ignores it.
+
+Usually this means one of two things:
+
+- the parameter should be removed and replaced with a local variable;
+- the parameter name or method contract is misleading.
 
 ## Examples
-<!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
-Suspicious code
+
+### Incorrect
+
 ```bsl
 Procedure Configor(Val ConnectionString, Val User = "", Val Pass = "") Export
-  ConnectionString = "/F""" + DataBaseDir + """"; // Error
-...
+    ConnectionString = "/F""" + DataBaseDir + """";
 EndProcedure
 ```
 
-Сorrected:
-```bsl
-Procedure Configor(Val DataBaseDir, Val User = "", Val Pass = "") Export
-ConnectionString = "/F""" + DataBaseDir + """"; // No error
-...
-EndProcedure
-```
-or
-```bsl
-Procedure Configor(Val DataBaseDir, Val User = "", Val Pass = "") Export
- If Not EmpyString(DataBaseDir) Then
-NewConnectionString = "/F""" + DataBaseDir + """";
-Else
-NewConnectionString = ConnectionString; // Hmm, where is this from?
-EndIf;
+### Correct: use a local variable
 
-...
+```bsl
+Procedure Configor(Val User = "", Val Pass = "") Export
+    ConnectionString = "/F""" + DataBaseDir + """";
 EndProcedure
 ```
+
+### Correct: use the parameter value for its intended purpose
+
+```bsl
+Procedure Configor(Val DataBaseDir, Val User = "", Val Pass = "") Export
+    If Not EmptyString(DataBaseDir) Then
+        NewConnectionString = "/F""" + DataBaseDir + """";
+    Else
+        NewConnectionString = DefaultConnectionString;
+    EndIf;
+EndProcedure
+```
+
+The current implementation is narrower and more precise than a simple textual scan:
+
+- it only checks by-value parameters (`Val` / `Знач`);
+- it uses reaching definitions to verify that the assignment still sees only the original parameter definition;
+- it suppresses diagnostics when the parameter is used in the right-hand side or in an earlier meaningful statement;
+- self-assignments like `Param = Param` are skipped and do not count as meaningful use.
 
 ## Sources
-<!-- Необходимо указывать ссылки на все источники, из которых почерпнута информация для создания диагностики -->
-<!-- Примеры источников
 
-* [PVS-Studio V763. Parameter is always rewritten in function body before being used](https://pvs-studio.com/ru/docs/warnings/v6023)
+- Generic static-analysis rule about overwritten parameters.
+- [PVS-Studio V763. Parameter is always rewritten in function body before being used](https://pvs-studio.com/ru/docs/warnings/v6023)

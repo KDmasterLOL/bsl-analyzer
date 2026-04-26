@@ -1,73 +1,7 @@
 //! NonExportMethodsInApiRegion diagnostic.
 //!
-//! Detects non-export methods inside API regions (ПрограммныйИнтерфейс/Public).
-//!
-//! ## Why?
-//! API regions should contain only exported methods that form the module's public interface.
-//! Non-export methods in API regions:
-//! - Pollute the public API surface
-//! - Create confusion about what's truly public
-//! - Make code organization unclear
-//!
-//! ## Bad practice
-//! ```bsl
-//! #Область ПрограммныйИнтерфейс
-//!
-//! // ❌ Non-export method in API region
-//! Процедура ВнутренняяПроцедура()
-//!     // implementation
-//! КонецПроцедуры
-//!
-//! #КонецОбласти
-//! ```
-//!
-//! ## Good practice
-//! Move non-export methods to service regions:
-//! ```bsl
-//! #Область ПрограммныйИнтерфейс
-//!
-//! // ✅ Export method in API region
-//! Процедура ПубличнаяПроцедура() Экспорт
-//!     ВнутренняяПроцедура();
-//! КонецПроцедуры
-//!
-//! #КонецОбласти
-//!
-//! #Область СлужебныеПроцедурыИФункции
-//!
-//! // ✅ Non-export method in service region
-//! Процедура ВнутренняяПроцедура()
-//!     // implementation
-//! КонецПроцедуры
-//!
-//! #КонецОбласти
-//! ```
-//!
-//! ## Configuration
-//! - **skipAnnotatedMethods** (boolean, default: false) - Skip methods with built-in annotations
-//!   - Built-in: &НаКлиенте, &НаСервере, &Вместо, &До, &После
-//!   - Custom annotations (like &MyAnnotation) are always checked
-//! - **Enabled by default:** Yes
-//! - **Severity:** MAJOR
-//! - **Tags:** STANDARD (concept)
-//! - **Minutes to fix:** 5
-//!
-//! ## Implementation
-//!
-//! Uses HIR infrastructure:
-//! - **ItemTree** - method signatures (is_export, annotations, name_range)
-//! - **RegionTree** - region hierarchy and API region detection
-//! - Both cached via Salsa queries for performance
-//!
-//! ## API Regions
-//! Detected as top-level regions with names:
-//! - Russian: ПрограммныйИнтерфейс, СлужебныйПрограммныйИнтерфейс
-//! - English: Public, Internal
-//!
-//! ## Note on Annotations
-//! ItemTree only stores built-in annotations during lowering. Custom annotations
-//! (like &MyAnnotation) are filtered out in `item_tree::lower::lower_annotations()`.
-//! This allows `has_builtin_annotations()` to work by checking if annotations array is non-empty.
+//! Reports non-export methods placed inside API regions such as
+//! `ПрограммныйИнтерфейс` / `Public`.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -146,7 +80,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Check a single method (procedure or function) for non-export in API region.
+/// Check a single method (procedure or function) for placement in an API region.
 #[allow(clippy::too_many_arguments)]
 fn check_method(
     is_export: bool,
@@ -175,7 +109,6 @@ fn check_method(
         return;
     }
 
-    // Report diagnostic
     diagnostics.push(Diagnostic {
         code,
         message: format!(
@@ -190,22 +123,7 @@ fn check_method(
     });
 }
 
-/// Check if method has any built-in annotations.
-///
-/// **Built-in annotations:**
-/// - Execution context: &НаКлиенте, &НаСервере, &НаКлиентеНаСервере, &НаСервереБезКонтекста
-/// - Extension methods: &До, &После, &Вместо
-///
-/// **Why this works:**
-/// ItemTree only stores built-in annotations during lowering (see `item_tree::lower::lower_annotations()`).
-/// Custom annotations (like &MyAnnotation) are filtered out and don't appear in the annotations array.
-/// Therefore:
-/// - `!annotations.is_empty()` → has built-in annotations
-/// - `annotations.is_empty()` → no built-in annotations (might have custom ones, but we can't detect them)
-///
-/// **skipAnnotatedMethods behavior:**
-/// - `true` → skip methods with built-in annotations (&Вместо, &НаКлиенте, etc.)
-/// - `false` → check all non-export methods regardless of annotations
+/// Check if method has any built-in annotations recognized by ItemTree lowering.
 fn has_builtin_annotations(annotations: &[Annotation]) -> bool {
     !annotations.is_empty()
 }
@@ -245,7 +163,7 @@ mod tests {
 
 #Region SomeRegion
     // внутри региона, вложенная область неэкспортная - должно срабатывать
-    Procedure ShouldSayFuck()
+    Procedure ShouldTrigger()
     EndProcedure
 #EndRegion
 

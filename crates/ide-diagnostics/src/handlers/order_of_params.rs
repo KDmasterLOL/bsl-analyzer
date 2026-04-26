@@ -1,23 +1,6 @@
 //! OrderOfParams diagnostic.
 //!
-//! Detects methods where optional parameters (with default values) appear before required ones.
-//!
-//! ## Why?
-//! Optional parameters should come after required parameters for clarity and consistency.
-//!
-//! ## Bad practice
-//! ```bsl
-//! Процедура Тест(Раз, Два = 2, Три, Четыре)
-//!     // необязательный Два перед обязательными Три и Четыре
-//! КонецПроцедуры
-//! ```
-//!
-//! ## Good practice
-//! ```bsl
-//! Процедура Тест(Раз, Три, Четыре, Два = 2)
-//!     // все обязательные параметры идут первыми
-//! КонецПроцедуры
-//! ```
+//! Reports methods where optional parameters appear before required ones.
 
 use crate::define_metadata;
 use crate::metadata::*;

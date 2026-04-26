@@ -24,4 +24,5 @@ VeryLongCatalogNameThatExceedsTheMaximumAllowedLengthAndCausesExportIssuesInConf
 
 ## Источники
 
-[Стандарт: Имя, синоним, комментарий](https://its.1c.ru/db/v8std#content:474:hdoc:2.3)
+* [Стандарт: Имя, синоним, комментарий](https://its.1c.ru/db/v8std#content:474:hdoc:2.3)
+* [Публичное зеркало: v8std.ru / #std474](https://v8std.ru/std/474/)

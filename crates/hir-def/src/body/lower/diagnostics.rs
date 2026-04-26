@@ -927,9 +927,9 @@ pub(crate) fn is_followed_by_loop_exit(expr_node: &SyntaxNode) -> bool {
 
 /// Extend a text range to include the following semicolon token if present.
 ///
-/// BSL parser (ANTLR).StatementContext includes the SEMICOLON in the statement range.
-/// Our CALL_STMT does not include SEMICOLON (it's a separate token).
-/// We extend the range to include the semicolon.
+/// Diagnostic tooling expects call-statement ranges to include the trailing
+/// semicolon, but our CALL_STMT stops before it. Extend the range when a
+/// semicolon follows.
 pub(crate) fn extend_range_with_semicolon(
     node: &SyntaxNode,
     original_range: TextRange,

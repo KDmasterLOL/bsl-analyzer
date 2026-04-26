@@ -65,3 +65,4 @@
 
 - [Стандарт - Эффективные условия запросов, п.2](https://its.1c.ru/db/v8std/content/658/hdoc)
 - [Использование логического ИЛИ в условиях - Типичные причины неоптимальной работы запросов и методы оптимизации](https://its.1c.ru/db/content/metod8dev/src/developers/scalability/standards/i8105842.htm#or)
+- [Публичное зеркало: v8std.ru / #std658](https://v8std.ru/std/658/)
