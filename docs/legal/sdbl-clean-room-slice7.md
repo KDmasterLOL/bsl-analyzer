@@ -294,11 +294,14 @@ Slice 7 — it is a deliberate post-landing bug fix:
 - **`recover_field_to_alias_or_delimiter` stops at clause keywords,
   Semicolons, and EOF at any nesting depth (Slice 12 post-landing
   fix).** Pre-Slice-12 the helper at
-  `crates/parser/src/grammar/sdbl/select.rs:45-128` wrapped ALL six
-  stop conditions (alias keyword `AS`/`КАК`, Comma, Semicolon,
-  RParen, clause keyword, EOF) inside
-  `if case_depth == 0 && paren_depth == 0`. Two distinct bugs
-  resulted at depth>0 inside an unterminated nested `(...)` or
+  `crates/parser/src/grammar/sdbl/select.rs` (currently lines
+  45-130) wrapped ALL six stop conditions (alias keyword `AS`/`КАК`,
+  Comma, Semicolon, RParen, clause keyword, EOF) inside
+  `if case_depth == 0 && paren_depth == 0`. The Slice-7 attestation
+  scope-out was caught by codex Round-1 plan-critique (BLOCKER 4)
+  during planning of Slice 12: the earlier draft assumed the helper
+  was clean, but the joint depth-0 gate concealed two distinct bugs
+  at depth>0 inside an unterminated nested `(...)` or
   `CASE ... END`:
 
   1. **Clause keyword bug** — the outer query's clause keyword
@@ -328,22 +331,52 @@ Slice 7 — it is a deliberate post-landing bug fix:
   122-127 is preserved unchanged.
 
   Regression gates in
-  `crates/parser/tests/sdbl_slice7_fields.rs`:
+  `crates/parser/tests/sdbl_slice7_fields.rs` (4 tests, post-codex-
+  Round-2 corrections under commit `4a335a82`):
+
   - `test_slice7_field_recovery_stops_on_clause_keyword_at_any_depth_ru`
-    and `_en` use the trigger input `ВЫБРАТЬ A ( ИЗ T2 КАК Т`
-    (and EN equivalent) to assert the outer FROM clause is
-    preserved and no `Error` sub-node contains the clause
-    keyword.
+    and `_en` use the trigger input `ВЫБРАТЬ 1 ( ИЗ T2 КАК Т` (and
+    EN equivalent `SELECT 1 ( FROM T2 AS T`) to assert the outer
+    FROM clause is preserved and no `Error` sub-node contains the
+    clause keyword. The literal `1` is intentional: an Ident
+    would be consumed by `column_or_function`
+    (`expressions.rs:1162`) as a nested function-call start,
+    routing recovery through Slice 10a `recover_to_delimiter`
+    instead of this helper. Codex Round-2 BLOCKERs 1+2 caught the
+    earlier `A`-based trigger as a false-positive gate that did
+    not exercise this helper at all.
+  - `test_slice7_field_recovery_stops_on_clause_keyword_inside_case_and_paren`
+    drives the helper into both `paren_depth = 1` and
+    `case_depth = 1` simultaneously (input
+    `ВЫБРАТЬ 1 ( ВЫБОР ИЗ T2 КАК Т`); ИЗ at depth (1, 1) must
+    still terminate recovery. Added per Codex Round-2 WEAK 5.
   - `test_slice7_field_recovery_breaks_at_eof_inside_unterminated_paren`
     is an audit-gate against the iteration-limit-panic regression:
-    input `ВЫБРАТЬ A (` must not panic.
+    input `ВЫБРАТЬ 1 (` must not panic. Pre-fix, the parser
+    panicked with "Parser exceeded maximum iteration limit (1000000
+    iterations)" — empirically verified at landing time by
+    reverting the F2 helper and re-running the test.
+
+  **Why Semicolon stops at any depth here but only at depth 0 in
+  the sibling `recover_to_delimiter` / `recover_to_delimiter_vt`
+  helpers.** This helper is invoked from `selected_field` at the
+  top-level statement boundary, where a `;` is structurally
+  meaningful: it ends one query and starts the next in a query
+  package. An unterminated nested `(...)` followed by a `;` is a
+  clear signal that the user moved on to a new statement, so
+  recovery must exit immediately at any depth. The other two
+  helpers run inside expression / VT-args contexts where a
+  syntactically-valid `;` cannot appear at depth>0 in a
+  well-formed token stream — the depth-0-only Semicolon stop is a
+  defensive choice consistent with the comma case there.
 
   Companion fix for `recover_to_delimiter` is documented under the
   Slice 10a attestation §Behaviour change (commit `9d418084`).
   All three SDBL recovery helpers
   (`recover_to_delimiter_vt`, `recover_to_delimiter`,
   `recover_field_to_alias_or_delimiter`) now share the same
-  clause-keyword-at-any-depth contract.
+  clause-keyword-at-any-depth contract; Semicolon and EOF stop
+  rules differ across helpers per the rationale above.
 
 ## Verification recipe
 
