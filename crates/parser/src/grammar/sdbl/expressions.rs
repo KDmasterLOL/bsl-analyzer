@@ -223,10 +223,20 @@ fn recover_to_delimiter(p: &mut Parser) {
             break;
         }
 
-        // Comma / Semicolon stop recovery only at depth 0 — at depth>0
-        // they are valid continuation tokens for the nested
-        // function-call argument list (e.g. `СУММА(A, B)` inside an
-        // outer recovery walk).
+        // Comma stops recovery only at depth 0 — at depth>0 it is a
+        // valid continuation token for the nested function-call
+        // argument list (e.g. `СУММА(A, B)` inside an outer recovery
+        // walk). Semicolon is also depth-0-only here, but the
+        // rationale differs: a syntactically valid `;` cannot appear
+        // at depth>0 in an expression-argument stream, so the
+        // depth-0-only stop is the natural choice; on MALFORMED input
+        // (e.g. `СУММА(1 (; ...`) this means a `;` at depth>0 is
+        // bumped into the Error node and the package boundary is
+        // lost — a deliberate divergence from
+        // `recover_field_to_alias_or_delimiter` (Slice 7), which is
+        // invoked at the top-level statement boundary and stops on
+        // `;` at any depth. See Slice 10a / Slice 7 attestations
+        // §Behaviour change for the cross-helper rationale.
         if paren_depth == 0 && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon)) {
             break;
         }

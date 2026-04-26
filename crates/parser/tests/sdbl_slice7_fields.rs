@@ -489,6 +489,47 @@ fn test_slice7_field_recovery_stops_on_clause_keyword_inside_case_and_paren() {
 }
 
 #[test]
+fn test_slice7_field_recovery_stops_on_semicolon_at_any_depth() {
+    // Slice 7 §Behaviour change rationale: field-tail recovery is
+    // invoked at the top-level statement boundary, where `;` is the
+    // query-package separator. An unterminated nested `(...)`
+    // followed by `;` and a new statement (`УНИЧТОЖИТЬ T`) must let
+    // recovery exit at the `;` so the next statement can parse.
+    // Pre-Slice-12, the depth-0 gate suppressed the Semicolon stop
+    // at depth>0 and the second statement was lost.
+    //
+    // Codex Round-4 WEAK 3 — gates the deliberate Semicolon-at-any-
+    // depth divergence between this helper and the sibling
+    // expression-tail / VT-args helpers (which keep Semicolon
+    // depth-0-only by design — see Slice 10a / Slice 7 attestation
+    // cross-references).
+    let input = "ВЫБРАТЬ 1 (; УНИЧТОЖИТЬ T";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    // The DROP statement must be present as a SDBL_DROP_QUERY in the
+    // package, proving recovery exited at `;` and let the package
+    // parser see the second statement.
+    let drop_queries =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_DROP_QUERY).count();
+    assert!(
+        drop_queries >= 1,
+        "Second statement (УНИЧТОЖИТЬ T) must parse as SDBL_DROP_QUERY despite the unterminated nested `(`.\nTree: {:#?}",
+        root
+    );
+
+    // No Error sub-node anywhere contains the `;` token.
+    let bad_error = root.descendants().filter(|n| n.kind() == SyntaxKind::ERROR).any(|err| {
+        err.descendants_with_tokens().filter_map(|nt| nt.into_token()).any(|t| t.text() == ";")
+    });
+    assert!(
+        !bad_error,
+        "; statement separator must not be consumed by recover_field_to_alias_or_delimiter at depth>0.\nTree: {:#?}",
+        root
+    );
+}
+
+#[test]
 fn test_slice7_field_recovery_breaks_at_eof_inside_unterminated_paren() {
     // Pre-Slice-12, the EOF check at depth>0 was inside the depth gate
     // and would not fire; `p.bump()` is a no-op at EOF, so the helper

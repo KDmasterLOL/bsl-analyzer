@@ -1696,10 +1696,15 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             break;
         }
 
-        // Comma and Semicolon, in contrast, are honoured only at
-        // depth 0 — a comma inside a nested function-call argument
-        // list (e.g. `СУММА(A, B)`) is part of the nested call's
-        // grammar and must not terminate recovery.
+        // Comma is honoured only at depth 0 — a comma inside a nested
+        // function-call argument list (e.g. `СУММА(A, B)`) is part of
+        // the nested call's grammar and must not terminate recovery.
+        // Semicolon is also depth-0-only here for parallel reasons to
+        // `recover_to_delimiter`: a syntactically valid `;` cannot
+        // appear at depth>0 in a VT-args stream; on malformed input a
+        // `;` at depth>0 is bumped, losing the package boundary —
+        // deliberate divergence from `recover_field_to_alias_or_delimiter`
+        // (Slice 7).
         if paren_depth == 0 && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon)) {
             break;
         }
