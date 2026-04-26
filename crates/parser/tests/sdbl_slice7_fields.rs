@@ -18,6 +18,7 @@
 //! behaviour is narrower than a strict ITS reading would produce).
 
 use parser::parse_sdbl;
+use syntax::SyntaxKind;
 
 fn tree(input: &str) -> String {
     let parse = parse_sdbl(input);
@@ -372,4 +373,91 @@ fn test_into_drop_package_integration() {
     let t = tree("SELECT Name INTO TmpTable FROM T; DROP TmpTable");
     assert_eq!(count_nodes(&t, "SDBL_INTO_CLAUSE"), 1);
     assert_eq!(count_nodes(&t, "SDBL_DROP_QUERY"), 1);
+}
+
+// =============================================================================
+// Slice 12 — recover_field_to_alias_or_delimiter clause-keyword,
+//            Semicolon, and EOF stops at any nesting depth.
+//
+// Pre-Slice-12, the helper at `crates/parser/src/grammar/sdbl/select.rs:45-128`
+// gated all six stop conditions (alias keyword, Comma, Semicolon,
+// RParen, clause keyword, EOF) inside `if case_depth == 0 && paren_depth == 0`.
+// An unterminated nested `(...)` inside a selected-field expression
+// silently gobbled the outer query's clause keyword (FROM / WHERE /
+// ...) and could spin until the iteration limit when EOF was reached
+// at depth>0. Slice 12 lifted clause-keyword / Semicolon / EOF out of
+// the depth gate so they fire at any nesting depth, mirroring the
+// post-Slice-8-addendum `recover_to_delimiter_vt` contract and the
+// Slice 12 `recover_to_delimiter` alignment.
+//
+// Trigger inputs use a bare `(` after a parsed field so that the
+// helper enters the loop with paren_depth=0 and reaches depth>0 on
+// the very next iteration.
+// =============================================================================
+
+#[test]
+fn test_slice7_field_recovery_stops_on_clause_keyword_at_any_depth_ru() {
+    let input = "ВЫБРАТЬ A ( ИЗ T2 КАК Т";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer ВЫБРАТЬ must keep its ИЗ clause despite the unterminated nested `(`.\nTree: {:#?}",
+        root
+    );
+
+    let bad_error = root.descendants().filter(|n| n.kind() == SyntaxKind::ERROR).any(|err| {
+        err.descendants_with_tokens()
+            .filter_map(|nt| nt.into_token())
+            .any(|t| t.text().eq_ignore_ascii_case("ИЗ"))
+    });
+    assert!(
+        !bad_error,
+        "ИЗ clause keyword must not be consumed by recover_field_to_alias_or_delimiter at depth>0.\nTree: {:#?}",
+        root
+    );
+}
+
+#[test]
+fn test_slice7_field_recovery_stops_on_clause_keyword_at_any_depth_en() {
+    let input = "SELECT A ( FROM T2 AS T";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer SELECT must keep its FROM clause despite the unterminated nested `(`.\nTree: {:#?}",
+        root
+    );
+
+    let bad_error = root.descendants().filter(|n| n.kind() == SyntaxKind::ERROR).any(|err| {
+        err.descendants_with_tokens()
+            .filter_map(|nt| nt.into_token())
+            .any(|t| t.text().eq_ignore_ascii_case("FROM"))
+    });
+    assert!(
+        !bad_error,
+        "FROM clause keyword must not be consumed by recover_field_to_alias_or_delimiter at depth>0.\nTree: {:#?}",
+        root
+    );
+}
+
+#[test]
+fn test_slice7_field_recovery_breaks_at_eof_inside_unterminated_paren() {
+    // Pre-Slice-12, the EOF check at depth>0 was inside the depth gate
+    // and would not fire; `p.bump()` is a no-op at EOF, so the helper
+    // would spin until `Parser::check_iteration_limit` panicked. The
+    // post-fix helper exits the loop cleanly at EOF at any depth.
+    //
+    // The audit-gate property of this test is: the parser does NOT
+    // panic with "iteration limit exceeded" on the unterminated input.
+    // If the regression returns, this test fails by panic, not by
+    // assertion.
+    let input = "ВЫБРАТЬ A (";
+    let _ = parse_sdbl(input);
 }

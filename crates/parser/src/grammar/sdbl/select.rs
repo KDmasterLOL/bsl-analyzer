@@ -81,35 +81,37 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
             continue;
         }
 
-        // Only check delimiters when not inside nested constructs
+        // Top-level structural boundaries — clause keywords, Semicolon,
+        // and EOF — terminate recovery at ANY nesting depth. An
+        // unterminated nested `(...)` or `CASE ... END` must not gobble
+        // a clause keyword that belongs to the outer query, must not
+        // swallow a Semicolon statement terminator, and must always
+        // exit at EOF (otherwise `p.bump()` is a no-op and the loop
+        // spins until the iteration counter trips). Mirrors
+        // `recover_to_delimiter_vt` (Slice 8-addendum post-C3) and
+        // `recover_to_delimiter` (Slice 12).
+        if is_clause_keyword(p) {
+            break;
+        }
+        if p.at(TokenKind::Semicolon) {
+            break;
+        }
+        if p.at_end() {
+            break;
+        }
+
+        // Alias keyword (AS / КАК), field delimiter Comma, and depth-0
+        // RParen stop recovery only at top level — they are legitimate
+        // continuation tokens inside nested CASE branches, function-
+        // call argument lists, and subqueries.
         if case_depth == 0 && paren_depth == 0 {
-            // Stop at alias keyword
             if at_sdbl_keyword(p, "AS", "КАК") {
                 break;
             }
-
-            // Stop at field delimiter (comma)
             if p.at(TokenKind::Comma) {
                 break;
             }
-
-            // Stop at semicolon (end of query)
-            if p.at(TokenKind::Semicolon) {
-                break;
-            }
-
-            // Stop at closing parenthesis (end of subquery in FROM)
             if p.at(TokenKind::RParen) {
-                break;
-            }
-
-            // Stop at clause keywords
-            if is_clause_keyword(p) {
-                break;
-            }
-
-            // Stop at EOF
-            if p.at_end() {
                 break;
             }
         }
