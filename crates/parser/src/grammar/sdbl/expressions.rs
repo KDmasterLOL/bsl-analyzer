@@ -171,6 +171,11 @@ fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> b
 /// **Important:** Tracks parenthesis balance to handle nested function calls like:
 /// `ВЫРАЗИТЬ(поле КАК СТРОКА(200))` - must consume until outer `)`, not inner one.
 ///
+/// **Clause keywords stop recovery at any paren depth.** An unterminated
+/// nested `(...)` must not gobble a clause keyword (FROM / WHERE / GROUP
+/// BY / ...) that belongs to the outer query — see Slice 12 §Behaviour
+/// change in `docs/legal/sdbl-clean-room-slice10a.md`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -209,16 +214,21 @@ fn recover_to_delimiter(p: &mut Parser) {
             }
         }
 
-        // Stop at top-level delimiters (when not inside nested parens)
-        if paren_depth == 0 {
-            if p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) {
-                break;
-            }
+        // Clause keywords (FROM / WHERE / GROUP BY / ...) terminate
+        // recovery at ANY paren depth. An unterminated nested `(...)`
+        // must not gobble a clause keyword that belongs to the outer
+        // query. Mirrors `recover_to_delimiter_vt` (Slice 8-addendum
+        // post-C3 fix `7e4f6a9e`); aligned in Slice 12.
+        if super::select::is_clause_keyword(p) {
+            break;
+        }
 
-            // Stop at clause keywords (FROM, WHERE, etc.)
-            if super::select::is_clause_keyword(p) {
-                break;
-            }
+        // Comma / Semicolon stop recovery only at depth 0 — at depth>0
+        // they are valid continuation tokens for the nested
+        // function-call argument list (e.g. `СУММА(A, B)` inside an
+        // outer recovery walk).
+        if paren_depth == 0 && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon)) {
+            break;
         }
 
         // Stop at EOF

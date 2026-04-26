@@ -1642,12 +1642,11 @@ fn top_clause(p: &mut Parser) {
 /// #5 — safety net for spurious tokens between an expression and the
 /// next comma / close-paren. Sibling of `recover_to_delimiter` in
 /// `expressions.rs` (paren-depth tracking + unconditional `Error`
-/// emit are shared). Per the Slice 8-addendum §Behaviour change,
-/// this helper terminates on a clause keyword at ANY paren depth so
-/// that an unterminated nested `(...)` does not gobble a clause
-/// keyword that belongs to the outer query; the sibling
-/// `recover_to_delimiter` retains the depth-0-only clause-keyword
-/// guard, and aligning the two is deferred to Slice 12.
+/// emit are shared). Both helpers terminate on a clause keyword at
+/// ANY paren depth so that an unterminated nested `(...)` does not
+/// gobble a clause keyword that belongs to the outer query
+/// (`recover_to_delimiter_vt` since Slice 8-addendum post-C3;
+/// `recover_to_delimiter` aligned in Slice 12).
 /// Comma / Semicolon, in contrast, remain depth-0-only terminators
 /// — a comma inside a nested `СУММА(A, B)` is part of that call's
 /// grammar.

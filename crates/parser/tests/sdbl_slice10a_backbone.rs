@@ -591,3 +591,75 @@ fn test_slice10a_null_inside_or_emits_literal() {
         "Bare NULL inside OR expression must still emit SdblLiteral (not SdblColumnRef)",
     );
 }
+
+// ============================================================================
+// 13. Slice 12 recover_to_delimiter clause-keyword-at-any-depth gates.
+//
+// Regression for the Slice 12 fix (commit landing on
+// `legal/sdbl-slice8-addendum-clean-room`). Pre-fix,
+// `recover_to_delimiter` checked `is_clause_keyword` only when
+// `paren_depth == 0`, so an unterminated nested `(...)` inside a
+// function-call argument silently gobbled the outer query's clause
+// keyword. Post-fix, the clause-keyword check fires at any depth,
+// mirroring `recover_to_delimiter_vt` (Slice 8-addendum post-C3
+// fix `7e4f6a9e`).
+//
+// The trigger input uses a literal `1` (NOT an Ident) as the first
+// argument so that `column_or_function` does not consume the
+// following `(` as a nested function-call start; the literal forces
+// `expression(p)` to return, leaving the outer recovery to enter
+// `recover_to_delimiter` at depth 0 and reach depth 1 via the bare
+// `(` token.
+// ============================================================================
+
+#[test]
+fn test_slice10a_recover_to_delimiter_stops_on_clause_keyword_at_any_depth_ru() {
+    let input = "ВЫБРАТЬ СУММА(1 ( ИЗ T2";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer ВЫБРАТЬ must keep its ИЗ clause despite the unterminated nested `(`.\nTree: {:#?}",
+        root
+    );
+
+    let bad_error = root.descendants().filter(|n| n.kind() == SyntaxKind::ERROR).any(|err| {
+        err.descendants_with_tokens()
+            .filter_map(|nt| nt.into_token())
+            .any(|t| t.text().eq_ignore_ascii_case("ИЗ"))
+    });
+    assert!(
+        !bad_error,
+        "ИЗ clause keyword must not be consumed by recover_to_delimiter at depth>0.\nTree: {:#?}",
+        root
+    );
+}
+
+#[test]
+fn test_slice10a_recover_to_delimiter_stops_on_clause_keyword_at_any_depth_en() {
+    let input = "SELECT SUM(1 ( FROM T2";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer SELECT must keep its FROM clause despite the unterminated nested `(`.\nTree: {:#?}",
+        root
+    );
+
+    let bad_error = root.descendants().filter(|n| n.kind() == SyntaxKind::ERROR).any(|err| {
+        err.descendants_with_tokens()
+            .filter_map(|nt| nt.into_token())
+            .any(|t| t.text().eq_ignore_ascii_case("FROM"))
+    });
+    assert!(
+        !bad_error,
+        "FROM clause keyword must not be consumed by recover_to_delimiter at depth>0.\nTree: {:#?}",
+        root
+    );
+}
