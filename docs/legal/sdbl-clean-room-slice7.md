@@ -342,9 +342,12 @@ Slice 7 — it is a deliberate post-landing bug fix:
     would be consumed by `column_or_function`
     (`expressions.rs:1162`) as a nested function-call start,
     routing recovery through Slice 10a `recover_to_delimiter`
-    instead of this helper. Codex Round-2 BLOCKERs 1+2 caught the
-    earlier `A`-based trigger as a false-positive gate that did
-    not exercise this helper at all.
+    instead of this helper. The Ident-followed-by-LParen
+    function-call branch is at
+    `crates/parser/src/grammar/sdbl/expressions.rs:1202`. Codex
+    Round-2 BLOCKERs 1+2 caught the earlier `A`-based trigger as
+    a false-positive gate that did not exercise this helper at
+    all.
   - `test_slice7_field_recovery_stops_on_clause_keyword_inside_case_and_paren`
     drives the helper into both `paren_depth = 1` and
     `case_depth = 1` simultaneously (input
@@ -375,8 +378,10 @@ Slice 7 — it is a deliberate post-landing bug fix:
   All three SDBL recovery helpers
   (`recover_to_delimiter_vt`, `recover_to_delimiter`,
   `recover_field_to_alias_or_delimiter`) now share the same
-  clause-keyword-at-any-depth contract; Semicolon and EOF stop
-  rules differ across helpers per the rationale above.
+  clause-keyword-at-any-depth and EOF-at-any-depth contracts;
+  only the Semicolon stop differs across helpers (any depth in
+  field-tail recovery, depth-0-only in expression-tail and
+  VT-args recovery) per the rationale above.
 
 ## Verification recipe
 
