@@ -663,3 +663,51 @@ fn test_slice10a_recover_to_delimiter_stops_on_clause_keyword_at_any_depth_en() 
         root
     );
 }
+
+// ============================================================================
+// 14. Slice 12 codex Round-5 stop-hook fix —
+//     `recover_to_delimiter` does NOT stop at nested SELECT/UNION
+//     at paren_depth > 0, so the outer query's clause-tail (e.g.
+//     `ИЗ T`) survives an unterminated nested subquery `(`.
+//
+// The original Slice 12 promotion of `is_clause_keyword` to ANY
+// paren depth was overly broad: at depth>0 a `SELECT`/`ВЫБРАТЬ`
+// most likely starts a nested subquery whose body recovery should
+// absorb. The post-stop-hook fix keeps hard intra-clause keywords
+// (FROM/WHERE/GROUP/...) at any-depth stops but reverts statement-
+// starters / combiners (SELECT/UNION) to depth-0-only stops via
+// `is_query_starter_or_combiner_keyword` (Codex Round-5).
+// ============================================================================
+
+#[test]
+fn test_slice10a_recover_to_delimiter_does_not_stop_on_nested_select_at_depth_ru() {
+    let input = "ВЫБРАТЬ СУММА(1 ( ВЫБРАТЬ X )) ИЗ T";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    // The outer ИЗ T must be parsed as a FROM clause; pre-fix the
+    // depth-1 ВЫБРАТЬ stopped recovery prematurely and the outer
+    // FROM was lost.
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer ИЗ T must survive an unterminated nested ВЫБРАТЬ subquery body.\nTree: {:#?}",
+        root
+    );
+}
+
+#[test]
+fn test_slice10a_recover_to_delimiter_does_not_stop_on_nested_select_at_depth_en() {
+    let input = "SELECT SUM(1 ( SELECT X )) FROM T";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer FROM T must survive an unterminated nested SELECT subquery body.\nTree: {:#?}",
+        root
+    );
+}

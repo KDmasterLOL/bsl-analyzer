@@ -548,3 +548,30 @@ fn test_slice7_field_recovery_breaks_at_eof_inside_unterminated_paren() {
     let input = "ВЫБРАТЬ 1 (";
     let _ = parse_sdbl(input);
 }
+
+// =============================================================================
+// Slice 12 codex Round-5 stop-hook fix —
+// `recover_field_to_alias_or_delimiter` does NOT stop at nested
+// SELECT/UNION at paren_depth > 0 or case_depth > 0. See the Slice 7
+// attestation §Behaviour change cross-reference to
+// `is_query_starter_or_combiner_keyword`.
+// =============================================================================
+
+#[test]
+fn test_slice7_field_recovery_does_not_stop_on_nested_select_at_depth() {
+    // Trigger: a literal field followed by an unterminated `(` and a
+    // nested ВЫБРАТЬ X. Pre-fix, the depth-1 ВЫБРАТЬ stopped recovery
+    // so the outer ИЗ T was lost. Post-fix, recovery walks past
+    // ВЫБРАТЬ X and the outer FROM clause survives.
+    let input = "ВЫБРАТЬ 1 ( ВЫБРАТЬ X ) ИЗ T";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer ИЗ T must survive an unterminated nested ВЫБРАТЬ in field recovery.\nTree: {:#?}",
+        root
+    );
+}

@@ -81,16 +81,18 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
             continue;
         }
 
-        // Top-level structural boundaries — clause keywords, Semicolon,
-        // and EOF — terminate recovery at ANY nesting depth. An
-        // unterminated nested `(...)` or `CASE ... END` must not gobble
-        // a clause keyword that belongs to the outer query, must not
-        // swallow a Semicolon statement terminator, and must always
-        // exit at EOF (otherwise `p.bump()` is a no-op and the loop
-        // spins until the iteration counter trips). Mirrors
-        // `recover_to_delimiter_vt` (Slice 8-addendum post-C3) and
-        // `recover_to_delimiter` (Slice 12).
-        if is_clause_keyword(p) {
+        // Top-level structural boundaries — hard clause keywords,
+        // Semicolon, and EOF — terminate recovery at ANY nesting
+        // depth. Statement-starters / combiners (SELECT / UNION)
+        // only stop at the top level (both depths zero); at depth>0
+        // they likely start a nested subquery whose body should be
+        // absorbed by recovery, mirroring the convention in
+        // `recover_to_delimiter` and `recover_to_delimiter_vt`. The
+        // Codex Round-5 stop-hook on the original Slice 12 fix
+        // caught the over-broad promotion — see
+        // `is_query_starter_or_combiner_keyword`.
+        let at_top_level = case_depth == 0 && paren_depth == 0;
+        if is_clause_keyword(p) && (at_top_level || !is_query_starter_or_combiner_keyword(p)) {
             break;
         }
         if p.at(TokenKind::Semicolon) {
@@ -1039,6 +1041,33 @@ pub(super) fn is_clause_keyword(p: &Parser) -> bool {
         || is_join_keyword(p)
 }
 
+/// Subset of `is_clause_keyword`: tokens that start a NEW query
+/// (`SELECT`/`ВЫБРАТЬ`) or combine query packages
+/// (`UNION`/`ОБЪЕДИНИТЬ`).
+///
+/// Used by recovery helpers to distinguish two classes of clause
+/// keyword: at `paren_depth > 0` inside an unterminated nested
+/// `(...)`, a `SELECT`/`UNION` token most likely starts a nested
+/// subquery whose body should be absorbed by recovery (so the outer
+/// query's tail can still parse), whereas a hard intra-clause
+/// keyword (`FROM`/`WHERE`/`GROUP`/...) unambiguously belongs to the
+/// outer query and must immediately terminate recovery.
+///
+/// At `paren_depth == 0` the helpers stop on either class — the
+/// distinction is recovery-quality, not language-grammar.
+///
+/// Codex Round-5 (post-Slice-12 stop-hook): the original Slice 12
+/// fix promoted ALL clause keywords to any-depth stops, which
+/// dropped nested-SELECT recovery on inputs like
+/// `ВЫБРАТЬ СУММА(1 ( ВЫБРАТЬ X )) ИЗ T` — the outer `ИЗ T` was
+/// lost because `query_body_clauses` does not accept `SELECT` as a
+/// clause continuation. This predicate splits the two classes so
+/// recovery preserves nested subquery bodies while still bailing on
+/// hard outer-clause boundaries.
+pub(super) fn is_query_starter_or_combiner_keyword(p: &Parser) -> bool {
+    at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
+}
+
 /// Parse GROUP BY clause.
 ///
 /// Grammar: `(GROUP|СГРУППИРОВАТЬ) (BY|ПО) expression (',' expression)*`.
@@ -1687,12 +1716,15 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             continue;
         }
 
-        // Clause keywords (FROM / WHERE / GROUP BY / ...) terminate
-        // recovery at ANY paren depth: an unterminated nested `(...)`
-        // must not gobble up a clause keyword that belongs to the
-        // outer query. This is the §Behaviour change entry in the
-        // Slice 8-addendum attestation.
-        if is_clause_keyword(p) {
+        // Hard intra-clause keywords (FROM / WHERE / GROUP BY / ...)
+        // terminate recovery at ANY paren depth — they belong to the
+        // outer query. Statement-starters / combiners (SELECT /
+        // UNION) only stop at depth 0; at depth>0 they likely start
+        // a nested subquery body that should be absorbed into the
+        // recovery Error. Codex Round-5 stop-hook (post-Slice-12)
+        // caught the prior any-depth promotion as overly broad —
+        // see `is_query_starter_or_combiner_keyword`.
+        if is_clause_keyword(p) && (paren_depth == 0 || !is_query_starter_or_combiner_keyword(p)) {
             break;
         }
 

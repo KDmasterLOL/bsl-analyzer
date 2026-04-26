@@ -569,3 +569,33 @@ fn test_slice8adn_outer_lparen_guard_no_op() {
         "Outer LParen guard makes virtual_table_args a no-op when the MDO chain has no trailing `(`",
     );
 }
+
+// ----------------------------------------------------------------------------
+// §Slice 12 codex Round-5 stop-hook fix —
+// `recover_to_delimiter_vt` does NOT stop at nested SELECT/UNION at
+// paren_depth > 0, so the outer query's trailing clauses (e.g.
+// `КАК Т ГДЕ Т.A = 1`) survive an unterminated nested ВЫБРАТЬ inside
+// the VT-args list.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_slice8adn_recovery_does_not_stop_on_nested_select_at_depth() {
+    // Trigger: a literal first VT-arg, then an unterminated `(` and
+    // a nested ВЫБРАТЬ X. Pre-fix (Slice 12 over-broad promotion),
+    // depth-1 ВЫБРАТЬ stopped recovery prematurely and the outer
+    // alias / WHERE clause was lost. Post-fix, recovery walks past
+    // ВЫБРАТЬ X to the outer `)`, leaves the outer alias scan to
+    // `source_alias`, and `query_body_clauses` parses the trailing
+    // ГДЕ.
+    let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки(1 ( ВЫБРАТЬ X )) КАК Т ГДЕ Т.A = 1";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let where_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE).count();
+    assert!(
+        where_clauses >= 1,
+        "Outer ГДЕ clause must survive an unterminated nested ВЫБРАТЬ inside VT-args.\nTree: {:#?}",
+        root
+    );
+}

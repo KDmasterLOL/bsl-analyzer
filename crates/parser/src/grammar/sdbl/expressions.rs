@@ -214,12 +214,20 @@ fn recover_to_delimiter(p: &mut Parser) {
             }
         }
 
-        // Clause keywords (FROM / WHERE / GROUP BY / ...) terminate
-        // recovery at ANY paren depth. An unterminated nested `(...)`
-        // must not gobble a clause keyword that belongs to the outer
-        // query. Mirrors `recover_to_delimiter_vt` (Slice 8-addendum
-        // post-C3 fix `7e4f6a9e`); aligned in Slice 12.
-        if super::select::is_clause_keyword(p) {
+        // Hard intra-clause keywords (FROM / WHERE / GROUP BY / ...)
+        // terminate recovery at ANY paren depth: they unambiguously
+        // belong to the outer query, so an unterminated nested `(...)`
+        // must not gobble them. Statement-starters / combiners
+        // (SELECT / UNION) only stop at depth 0; at depth>0 they most
+        // likely start a nested subquery whose body should be
+        // absorbed into the recovery Error so the outer clause-tail
+        // (e.g. `ИЗ T`) still parses. Codex Round-5 stop-hook caught
+        // the original any-depth promotion as overly broad — see
+        // `is_query_starter_or_combiner_keyword`
+        // (`crates/parser/src/grammar/sdbl/select.rs`).
+        if super::select::is_clause_keyword(p)
+            && (paren_depth == 0 || !super::select::is_query_starter_or_combiner_keyword(p))
+        {
             break;
         }
 
