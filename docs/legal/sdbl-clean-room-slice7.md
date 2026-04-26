@@ -436,6 +436,26 @@ Slice 7 — it is a deliberate post-landing bug fix:
   companion entries are documented in the Slice 10a and
   Slice 8-addendum §Behaviour change cross-references.
 
+  **Codex Round-5b stop-hook follow-up (commit `94eb3a6f`).**
+  Round-5 made bare nested SELECT/UNION text-preserving, but
+  did not handle the case where the nested subquery itself
+  contains a hard intra-clause keyword. On
+  `ВЫБРАТЬ 1 ( ВЫБРАТЬ X ИЗ Y ) ИЗ T`, the inner `ИЗ`
+  still stopped recovery at paren_depth = 1 and the outer
+  parser misattributed the inner `ИЗ Y` as the OUTER FROM,
+  losing the real outer `ИЗ T`.
+
+  The Round-5b fix adds `nested_query_starts: Vec<i32>` scope
+  tracking — each entry holds the `paren_depth` at which a
+  `(` followed by SELECT/ВЫБРАТЬ/UNION/ОБЪЕДИНИТЬ was
+  bumped. While any marker is active, hard intra-clause
+  keywords belong to the nested query body and are
+  absorbed by recovery instead of stopping it. The matching
+  `)` pops the marker. See the Slice 10a §Behaviour change
+  for the canonical fix-structure diff and the cross-helper
+  invariant. Regression gate in this slice:
+  `test_slice7_field_recovery_inner_from_misattribution_gate`.
+
 ## Verification recipe
 
 All of the following must be green before this attestation is

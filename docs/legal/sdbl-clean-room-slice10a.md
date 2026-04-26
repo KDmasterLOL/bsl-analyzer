@@ -521,6 +521,64 @@ Slice 10a — both are deliberate bug fixes:
   refined two-class contract; the Slice 8-addendum and
   Slice 7 attestations record the matching post-Round-5
   entries.
+
+  **Codex Round-5b stop-hook follow-up (commit `94eb3a6f`).**
+  Round-5 made bare nested `SELECT`/`UNION` text-preserving,
+  but a residual gap remained: when the nested subquery
+  itself contains a hard intra-clause keyword (e.g.
+  `ВЫБРАТЬ X ИЗ Y`), the inner `ИЗ` still stopped recovery
+  at depth 1 because hard intra-clause keywords are
+  any-depth stops by default. The outer parser then
+  misattributed the inner `ИЗ Y` as the OUTER FROM clause,
+  losing the real outer `ИЗ T`. Empirical pre-fix output:
+  outer FROM clause text was `ИЗ Y` instead of `ИЗ T`.
+
+  The Round-5b fix introduces `nested_query_starts: Vec<i32>`
+  scope tracking in all three helpers. Each entry holds the
+  `paren_depth` at which a `(` followed by `SELECT`/
+  `ВЫБРАТЬ`/`UNION`/`ОБЪЕДИНИТЬ` was bumped. While any
+  marker is active, the helper treats hard intra-clause
+  keywords as belonging to the nested query body and
+  absorbs them rather than stopping. The matching `)`
+  pops the marker (when its `paren_depth` matches the
+  marker's depth at push time).
+
+  The fix structure (applied uniformly to all three helpers):
+
+      let mut nested_query_starts: Vec<i32> = Vec::new();
+      // ... in loop:
+      if p.at(LParen) {
+          paren_depth += 1; p.bump();
+          p.skip_trivia();
+          if is_query_starter_or_combiner_keyword(p) {
+              nested_query_starts.push(paren_depth);
+          }
+          continue;
+      }
+      if p.at(RParen) && paren_depth > 0 {
+          if let Some(&d) = nested_query_starts.last() {
+              if d == paren_depth { nested_query_starts.pop(); }
+          }
+          paren_depth -= 1; p.bump(); continue;
+      }
+      let inside_nested_query = !nested_query_starts.is_empty();
+      if is_clause_keyword(p) {
+          let stop = if at_top_level {
+              true
+          } else if inside_nested_query {
+              false
+          } else {
+              !is_query_starter_or_combiner_keyword(p)
+          };
+          if stop { break; }
+      }
+
+  Regression gate:
+  `test_slice10a_recover_to_delimiter_inner_from_misattribution_gate`
+  asserts the outer FROM clause references `T`, not the
+  inner `Y`, on the Round-5b trigger
+  `ВЫБРАТЬ СУММА(1 ( ВЫБРАТЬ X ИЗ Y )) ИЗ T`. Slice 7 and
+  Slice 8-addendum carry analog gate tests for their helpers.
   Regression gates:
   `test_slice10a_recover_to_delimiter_stops_on_clause_keyword_at_any_depth_ru`
   and `_en` in `crates/parser/tests/sdbl_slice10a_backbone.rs`

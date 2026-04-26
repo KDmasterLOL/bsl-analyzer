@@ -313,6 +313,25 @@ gates the post-Round-5 contract; existing
 (which uses `ГДЕ`, a hard clause keyword) still applies and
 remains green.
 
+**Codex Round-5b stop-hook follow-up (commit `94eb3a6f`).**
+A residual gap remained after Round-5: when the nested
+subquery inside VT-args contains a hard intra-clause keyword
+(e.g. `ВЫБРАТЬ X ИЗ Y` in
+`ВЫБРАТЬ * ИЗ Регистр.Остатки(1 ( ВЫБРАТЬ X ИЗ Y )) КАК Т ГДЕ ...`),
+the inner `ИЗ` would still stop recovery at paren_depth = 1
+because hard intra-clause keywords are any-depth stops by
+default. Round-5b adds `nested_query_starts: Vec<u32>` scope
+tracking to `recover_to_delimiter_vt` — while any marker is
+active, hard intra-clause keywords inside the nested
+subquery body are absorbed instead of stopping recovery.
+This mirrors the fix applied to `recover_to_delimiter` and
+`recover_field_to_alias_or_delimiter` in the same commit
+(see the Slice 10a §Behaviour change for the canonical
+fix-structure diff). Regression gate in this slice:
+`test_slice8adn_recovery_inner_from_does_not_misattribute`
+asserts the outer КАК alias and ГДЕ clause both survive
+when the nested subquery contains an inner FROM clause.
+
 ## Verification recipe
 
 Run end-to-end at C3 commit time. All must pass:
