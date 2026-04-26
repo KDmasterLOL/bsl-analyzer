@@ -433,8 +433,8 @@ and are preserved bit-for-bit in Slice 10a:
 
 ## Behaviour change (NOT preserved)
 
-One pre-refactor behaviour is **not** preserved bit-for-bit by
-Slice 10a — it is a deliberate bug fix:
+Two pre-refactor behaviours are **not** preserved bit-for-bit by
+Slice 10a — both are deliberate bug fixes:
 
 - **Bare `NULL` at expression-head positions emits `SdblLiteral`,
   NOT `SdblColumnRef`.** Pre-Slice-10a-C2 the parser routed bare
@@ -455,10 +455,34 @@ Slice 10a — it is a deliberate bug fix:
   that the NULL token's direct parent kind is `SDBL_LITERAL` and
   that no `SdblColumnRef` in the tree contains the NULL text.
 
-The pre-existing `test_null_literal` at line 290 (which uses
-`check_no_errors`) continues to pass because the new shape
-preserves the surrounding query structure — only the inner NULL
-node kind changes.
+  The pre-existing `test_null_literal` at line 290 (which uses
+  `check_no_errors`) continues to pass because the new shape
+  preserves the surrounding query structure — only the inner NULL
+  node kind changes.
+
+- **`recover_to_delimiter` stops at clause keywords at any paren
+  depth (Slice 12 post-landing fix).** Pre-Slice-12 the helper at
+  `crates/parser/src/grammar/sdbl/expressions.rs:182-234` gated
+  `is_clause_keyword(p)` inside `if paren_depth == 0`, so an
+  unterminated nested `(...)` inside a function-call argument
+  silently gobbled the outer query's clause keyword (FROM /
+  WHERE / GROUP BY / ...). Slice 12 (commit `9d418084`,
+  2026-04-26) lifted the clause-keyword check **out of** the
+  depth gate so it fires at any paren depth; comma / semicolon
+  checks remain depth-0-only because they are valid continuation
+  tokens for nested function-call argument lists. The fix
+  mirrors the post-Slice-8-addendum `recover_to_delimiter_vt`
+  contract (commit `7e4f6a9e`) — all three SDBL recovery helpers
+  now share the same clause-keyword-at-any-depth contract.
+  Regression gates:
+  `test_slice10a_recover_to_delimiter_stops_on_clause_keyword_at_any_depth_ru`
+  and `_en` in `crates/parser/tests/sdbl_slice10a_backbone.rs`
+  pin the corrected behaviour using the trigger input
+  `ВЫБРАТЬ СУММА(1 ( ИЗ T2` (and EN equivalent) — a literal `1`
+  is intentional so `column_or_function` does not consume the
+  bare `(` as a nested function-call start. The companion fix
+  for `recover_field_to_alias_or_delimiter` lands under the
+  Slice 7 attestation (commit `80a3129c`).
 
 ## Verification recipe
 
