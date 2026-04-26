@@ -4925,8 +4925,8 @@ fn test_slice7adn_top_missing_decimal_recovery() {
 // Slice 8-addendum — virtual-table arguments — Bucket-A gap
 // tests (C0b audit-gate). These pin the pre-rewrite parser
 // shape for the 2 functions promoted into the Slice 8-addendum
-// clean-room banner: `virtual_table_args` (renamed from
-// `virtual_table_args_legacy`) and `recover_to_delimiter_vt`.
+// clean-room banner: `virtual_table_args` and
+// `recover_to_delimiter_vt`.
 // All 7 tests must PASS on the pre-rewrite parser; the C2
 // clean-room rewrite must preserve the asserted shapes.
 //

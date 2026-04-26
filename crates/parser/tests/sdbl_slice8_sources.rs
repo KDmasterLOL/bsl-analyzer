@@ -264,8 +264,9 @@ fn test_table_ref_russian_mdo_with_alias() {
 fn test_table_ref_virtual_table_call_is_accepted() {
     // Mini-spec §Virtual table argument behavior — VT calls with
     // parenthesised arguments parse cleanly, including the empty-arg /
-    // trailing-comma forms. The VT body itself is delegated to Tier B
-    // `virtual_table_args_legacy`; Slice 8 only owns the dispatch.
+    // trailing-comma forms. The VT body itself is delegated to the
+    // Slice 8-addendum clean-room helper `virtual_table_args`; Slice 8
+    // only owns the dispatch.
     parse_clean("SELECT * FROM Catalog.Products.SliceLast(&Date)");
     parse_clean("ВЫБРАТЬ * ИЗ Регистр.Остатки(, , Авто, ) КАК Т");
 }

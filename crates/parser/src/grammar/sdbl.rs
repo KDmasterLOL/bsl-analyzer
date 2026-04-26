@@ -43,10 +43,9 @@
 //! `../bsl-parser/*` grammar text was not consulted during authoring;
 //! per-function provenance comments appear on each function body. The
 //! virtual-table method-call argument parser was extracted during Slice 8
-//! C1 into LEGACY helper `virtual_table_args_legacy`; its clean-room
-//! rewrite is deferred to Slice 5 (virtual table and external-source
-//! handling). See `docs/legal/sdbl-clean-room-slice8.md` for the
-//! attestation.
+//! C1 into helper `virtual_table_args`; its clean-room rewrite is the
+//! subject of Slice 8-addendum (rewrite in progress). See
+//! `docs/legal/sdbl-clean-room-slice8.md` for the attestation.
 //!
 //! Slice 10a — clean-room (complete, landed with C3 2026-04-25): the
 //! expression backbone in submodule `expressions` covering atoms
@@ -144,9 +143,21 @@
 //! `docs/legal/sdbl-clean-room-slice11.md` for the
 //! attestation.
 //!
-//! Slice 5 pending: virtual-table method-call arguments
-//! (`virtual_table_args_legacy`) remain Tier B under the Slice 5
-//! banner.
+//! Slice 8-addendum — virtual-table arguments parser body — clean-room
+//! (rewrite in progress, C1 landed). The 2 functions
+//! `virtual_table_args` and `recover_to_delimiter_vt` were physically
+//! relocated from their pre-C1 positions (LEGACY block + stranded
+//! top-of-file helper) into the new `CLEAN-ROOM Slice 8-addendum —
+//! virtual-table arguments` banner in `select.rs`. The LEGACY banner
+//! in `select.rs` is removed entirely. C2 will land the clean-room
+//! rewrite + per-function provenance comments; C3 will land the
+//! attestation, master-doc cross-reference, and spec-driven
+//! acceptance tests.
+//!
+//! Slice 5 pending: lexer-side virtual-table mode handling
+//! (`crates/lexer/src/sdbl/mod.rs` Slice-2 LEGACY block) is the
+//! remaining Slice 5 scope, tied to Slices 3/4 lexer vocabulary
+//! catalogs.
 //!
 //! Slice 7-addendum — clean-room (complete, landed with C3
 //! 2026-04-26): the SELECT-prefix qualifier helpers
@@ -165,8 +176,9 @@
 //! `page.html:1331-1356`;
 //! `is_identifier_token` is Tier C/B local parser contract per
 //! Slice 8 attestation cross-reference. The residual LEGACY
-//! banner in `select.rs` shrinks to `LEGACY (Slice 5 pending)`
-//! containing only `virtual_table_args_legacy`. See
+//! banner in `select.rs` (which at Slice 7-addendum landing
+//! contained only `virtual_table_args`) is removed entirely
+//! in Slice 8-addendum C1. See
 //! `docs/legal/sdbl-clean-room-slice7-addendum.md` for the
 //! attestation.
 

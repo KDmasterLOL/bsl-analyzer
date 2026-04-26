@@ -127,60 +127,6 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
     }
 }
 
-/// Recover to next delimiter by consuming unexpected tokens in virtual table arguments.
-///
-/// Similar to expressions::recover_to_delimiter but for virtual table method args context.
-/// Tracks parenthesis balance to handle nested calls.
-fn recover_to_delimiter_vt(p: &mut Parser) {
-    let err = p.start();
-    let mut paren_depth = 0i32; // Track nested parentheses
-
-    loop {
-        p.check_iteration_limit(); // Prevent infinite loops
-
-        // Track parenthesis nesting
-        if p.at(TokenKind::LParen) {
-            paren_depth += 1;
-            p.bump();
-            continue;
-        }
-
-        if p.at(TokenKind::RParen) {
-            if paren_depth > 0 {
-                // This is a closing paren for a nested call - consume it
-                paren_depth -= 1;
-                p.bump();
-                continue;
-            } else {
-                // This is the closing paren for our function - stop here
-                break;
-            }
-        }
-
-        // Stop at top-level delimiters (when not inside nested parens)
-        if paren_depth == 0 {
-            if p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) {
-                break;
-            }
-
-            // Stop at clause keywords (FROM, WHERE, etc.)
-            if is_clause_keyword(p) {
-                break;
-            }
-        }
-
-        // Stop at EOF
-        if p.at_end() {
-            break;
-        }
-
-        // Consume one token
-        p.bump();
-    }
-
-    err.complete(p, NodeKind::Error);
-}
-
 // ============================================================================
 // CLEAN-ROOM Slice 6 — select entry wrapper, subquery, UNION clause
 // ============================================================================
@@ -615,8 +561,8 @@ fn data_source(p: &mut Parser) {
 /// Grammar: `table-ref := parameter-source | identifier ('.' identifier)*`,
 /// `parameter-source := '&' identifier`. The identifier chain covers the
 /// simple-name, MDO path, and MDO-with-virtual-table-trail forms.
-/// Virtual-table method-call arguments are delegated to the Tier B
-/// [`virtual_table_args_legacy`] helper (Slice 5 target).
+/// Virtual-table method-call arguments are delegated to the Slice
+/// 8-addendum clean-room helper [`virtual_table_args`].
 fn table_ref(p: &mut Parser) {
     // ITS pubqlang/10 + /12 + mini-spec §FROM / primary-source +
     // parameter-source. The body is either a parameter-source
@@ -631,8 +577,8 @@ fn table_ref(p: &mut Parser) {
     // identifier bump is guarded by `if p.at(Ident)`, not required by
     // `p.expect`, so the user can keep typing the parameter name with
     // the SdblParameter marker already open. VT method-call arguments
-    // are delegated to Tier B `virtual_table_args_legacy` (Slice 5
-    // target — virtual-table and external-source handling).
+    // are delegated to the Slice 8-addendum clean-room helper
+    // `virtual_table_args`.
     let m = p.start();
 
     if p.at(TokenKind::Ampersand) {
@@ -671,7 +617,7 @@ fn table_ref(p: &mut Parser) {
     }
 
     p.skip_trivia();
-    virtual_table_args_legacy(p);
+    virtual_table_args(p);
 
     m.complete(p, NodeKind::SdblTableRef);
 }
@@ -1675,22 +1621,85 @@ fn top_clause(p: &mut Parser) {
 }
 
 // ============================================================================
-// LEGACY (Slice 5 pending)
+// CLEAN-ROOM Slice 8-addendum — virtual-table arguments
 // ============================================================================
 //
-// Residual Tier B function until Slice 5 (virtual table and external-source
-// handling) lands its catalog-heavy clean-room rewrite:
-// `virtual_table_args_legacy` (extracted from `table_ref` during Slice 8 C1).
+// See `docs/legal/sdbl-clean-room-slice8-addendum.md` (landed at C3) for
+// authorship and source citations. Per-function provenance comments are
+// attached at C2.
+//
+// Functions in this section:
+// - `recover_to_delimiter_vt` — paren-depth-tracking spurious-token
+//   recovery helper for VT-args context. Sole caller is
+//   `virtual_table_args` below; relocated here in C1 from its prior
+//   stranded position above the Slice 6 banner.
+// - `virtual_table_args` — parses `'(' [vt-arg-list] ')'` after the
+//   `table_ref` MDO chain. Body is on the path to clean-room rewrite
+//   in C2.
+
+/// Recover to next delimiter by consuming unexpected tokens in virtual table arguments.
+///
+/// Similar to expressions::recover_to_delimiter but for virtual table method args context.
+/// Tracks parenthesis balance to handle nested calls.
+// C1 placeholder — clean-room rewrite in C2.
+fn recover_to_delimiter_vt(p: &mut Parser) {
+    let err = p.start();
+    let mut paren_depth = 0i32; // Track nested parentheses
+
+    loop {
+        p.check_iteration_limit(); // Prevent infinite loops
+
+        // Track parenthesis nesting
+        if p.at(TokenKind::LParen) {
+            paren_depth += 1;
+            p.bump();
+            continue;
+        }
+
+        if p.at(TokenKind::RParen) {
+            if paren_depth > 0 {
+                // This is a closing paren for a nested call - consume it
+                paren_depth -= 1;
+                p.bump();
+                continue;
+            } else {
+                // This is the closing paren for our function - stop here
+                break;
+            }
+        }
+
+        // Stop at top-level delimiters (when not inside nested parens)
+        if paren_depth == 0 {
+            if p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) {
+                break;
+            }
+
+            // Stop at clause keywords (FROM, WHERE, etc.)
+            if is_clause_keyword(p) {
+                break;
+            }
+        }
+
+        // Stop at EOF
+        if p.at_end() {
+            break;
+        }
+
+        // Consume one token
+        p.bump();
+    }
+
+    err.complete(p, NodeKind::Error);
+}
 
 /// Parse virtual-table method-call arguments (e.g., `.Обороты(&A, , Авто, )`).
 ///
-/// LEGACY: body extracted verbatim from the pre-C1 `table_ref` virtual-table
-/// block as a pure refactor so the Slice 8 `table_ref` wrapper can be
-/// attested under the Slice 8 clean-room banner without dragging virtual-table
-/// scope in. Owns the leading `if p.at(TokenKind::LParen)` guard so the call
-/// site in `table_ref` is unconditional. Clean-room rewrite deferred to
-/// Slice 5 (virtual table and external-source handling).
-fn virtual_table_args_legacy(p: &mut Parser) {
+/// Owns the leading `if p.at(TokenKind::LParen)` guard so the call site in
+/// `table_ref` is unconditional. Empty arguments and paren-balanced
+/// recovery are documented in the SELECT mini-spec §Virtual table
+/// argument behavior (extended in C0a).
+// C1 placeholder — clean-room rewrite in C2.
+fn virtual_table_args(p: &mut Parser) {
     if p.at(TokenKind::LParen) {
         p.bump(); // (
         p.skip_trivia();
