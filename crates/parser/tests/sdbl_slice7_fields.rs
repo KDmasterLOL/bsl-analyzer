@@ -575,3 +575,23 @@ fn test_slice7_field_recovery_does_not_stop_on_nested_select_at_depth() {
         root
     );
 }
+
+#[test]
+fn test_slice7_field_recovery_inner_from_misattribution_gate() {
+    // Codex Round-5b: when the nested subquery itself has a hard
+    // intra-clause keyword (`ИЗ Y`), recovery must absorb that
+    // inner ИЗ as part of the nested query body, not stop at it
+    // and let the outer parser misattribute it as the OUTER FROM.
+    let input = "ВЫБРАТЬ 1 ( ВЫБРАТЬ X ИЗ Y ) ИЗ T";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses: Vec<_> =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).collect();
+    let outer_from_text = from_clauses.first().map(|fc| fc.text().to_string()).unwrap_or_default();
+    assert!(
+        outer_from_text.contains('T') && !outer_from_text.contains('Y'),
+        "Outer FROM clause must reference T, not the inner Y; got {outer_from_text:?}.\nTree: {:#?}",
+        root
+    );
+}

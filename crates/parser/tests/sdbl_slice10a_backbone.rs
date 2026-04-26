@@ -711,3 +711,36 @@ fn test_slice10a_recover_to_delimiter_does_not_stop_on_nested_select_at_depth_en
         root
     );
 }
+
+// ============================================================================
+// 15. Slice 12 codex Round-5b stop-hook —
+//     inner-FROM misattribution gate.
+//
+// Round-5 made nested SELECT-at-depth recoverable (the outer query's
+// trailing tail survived an unterminated nested ВЫБРАТЬ subquery
+// HEAD), but the residual gap was: when the nested subquery itself
+// contains a hard intra-clause keyword (e.g. ИЗ Y), recovery still
+// stopped at that inner ИЗ, exposing it to the outer parser, which
+// misattributed it as the OUTER FROM clause and lost the real outer
+// `ИЗ T`. Round-5b adds a `nested_query_starts: Vec<i32>` tracker:
+// while inside an active nested subquery body, hard intra-clause
+// keywords belong to the nested query and are absorbed.
+// ============================================================================
+
+#[test]
+fn test_slice10a_recover_to_delimiter_inner_from_misattribution_gate() {
+    let input = "ВЫБРАТЬ СУММА(1 ( ВЫБРАТЬ X ИЗ Y )) ИЗ T";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    // The outer query must reference table T as its FROM clause,
+    // not the inner Y.
+    let from_clauses: Vec<_> =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).collect();
+    let outer_from_text = from_clauses.first().map(|fc| fc.text().to_string()).unwrap_or_default();
+    assert!(
+        outer_from_text.contains('T') && !outer_from_text.contains('Y'),
+        "Outer FROM clause must reference T, not the inner Y; got {outer_from_text:?}.\nTree: {:#?}",
+        root
+    );
+}

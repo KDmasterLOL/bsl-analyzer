@@ -191,6 +191,14 @@ fn recover_to_delimiter(p: &mut Parser) {
     // not the inner one. Wraps the consumed run in one Error marker.
     let err = p.start();
     let mut paren_depth = 0i32; // Track nested parentheses
+                                // For each currently-active nested subquery (an open `(`
+                                // immediately followed by `SELECT`/`ВЫБРАТЬ`), the paren_depth at
+                                // which its opening `(` was bumped. While any marker is active,
+                                // hard intra-clause keywords (FROM/WHERE/...) inside that
+                                // subquery's body belong to the nested query, not the outer
+                                // query — recovery must absorb them instead of stopping. Codex
+                                // Round-5b stop-hook fix.
+    let mut nested_query_starts: Vec<i32> = Vec::new();
 
     loop {
         p.check_iteration_limit(); // Prevent infinite loops
@@ -199,12 +207,26 @@ fn recover_to_delimiter(p: &mut Parser) {
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
+            // Detect nested-subquery body: `( SELECT ...`. The
+            // skip_trivia is safe — recovery is already a malformed
+            // path, and skipping trivia mirrors the clean
+            // paren_or_subquery_expr dispatch.
+            p.skip_trivia();
+            if super::select::is_query_starter_or_combiner_keyword(p) {
+                nested_query_starts.push(paren_depth);
+            }
             continue;
         }
 
         if p.at(TokenKind::RParen) {
             if paren_depth > 0 {
-                // This is a closing paren for a nested call - consume it
+                // Pop the nested-subquery marker if this `)` closes
+                // its opening `(`.
+                if let Some(&d) = nested_query_starts.last() {
+                    if d == paren_depth {
+                        nested_query_starts.pop();
+                    }
+                }
                 paren_depth -= 1;
                 p.bump();
                 continue;
@@ -214,21 +236,31 @@ fn recover_to_delimiter(p: &mut Parser) {
             }
         }
 
+        let inside_nested_query = !nested_query_starts.is_empty();
+
         // Hard intra-clause keywords (FROM / WHERE / GROUP BY / ...)
-        // terminate recovery at ANY paren depth: they unambiguously
-        // belong to the outer query, so an unterminated nested `(...)`
-        // must not gobble them. Statement-starters / combiners
-        // (SELECT / UNION) only stop at depth 0; at depth>0 they most
-        // likely start a nested subquery whose body should be
-        // absorbed into the recovery Error so the outer clause-tail
-        // (e.g. `ИЗ T`) still parses. Codex Round-5 stop-hook caught
-        // the original any-depth promotion as overly broad — see
+        // terminate recovery at any paren depth UNLESS we are inside
+        // an active nested subquery — in that case the keyword
+        // belongs to the nested query body and must be absorbed.
+        // Statement-starters / combiners (SELECT / UNION) only stop
+        // at depth 0; at depth>0 they likely open a fresh nested
+        // subquery whose body recovery should walk through.
+        // Codex Round-5 stop-hook caught the original any-depth
+        // promotion as overly broad; Codex Round-5b stop-hook caught
+        // the residual inner-FROM misattribution. See
         // `is_query_starter_or_combiner_keyword`
         // (`crates/parser/src/grammar/sdbl/select.rs`).
-        if super::select::is_clause_keyword(p)
-            && (paren_depth == 0 || !super::select::is_query_starter_or_combiner_keyword(p))
-        {
-            break;
+        if super::select::is_clause_keyword(p) {
+            let stop = if paren_depth == 0 {
+                true
+            } else if inside_nested_query {
+                false
+            } else {
+                !super::select::is_query_starter_or_combiner_keyword(p)
+            };
+            if stop {
+                break;
+            }
         }
 
         // Comma stops recovery only at depth 0 — at depth>0 it is a

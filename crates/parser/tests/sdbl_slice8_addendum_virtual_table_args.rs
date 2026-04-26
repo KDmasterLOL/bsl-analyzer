@@ -599,3 +599,34 @@ fn test_slice8adn_recovery_does_not_stop_on_nested_select_at_depth() {
         root
     );
 }
+
+#[test]
+fn test_slice8adn_recovery_inner_from_does_not_misattribute() {
+    // Codex Round-5b: when the nested subquery inside VT-args
+    // contains a hard intra-clause keyword (e.g. `ИЗ Y`), the
+    // VT-args recovery must absorb that inner ИЗ as part of the
+    // nested query body rather than stop at it. Otherwise the
+    // outer ИЗ would still parse correctly (it's already inside the
+    // FROM clause) but the alias scan / WHERE attachment can break
+    // because the function call returns at the wrong position.
+    let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки(1 ( ВЫБРАТЬ X ИЗ Y )) КАК Т ГДЕ Т.A = 1";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    // The trailing alias `КАК Т` and `ГДЕ Т.A = 1` must both still
+    // be present; if the inner ИЗ misattributed, both would be
+    // dropped or routed into ERROR.
+    let where_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE).count();
+    assert!(
+        where_clauses >= 1,
+        "Outer ГДЕ must survive a nested ВЫБРАТЬ ... ИЗ inside VT-args.\nTree: {:#?}",
+        root
+    );
+    let aliases = root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_ALIAS).count();
+    assert!(
+        aliases >= 1,
+        "Outer КАК Т alias must survive a nested ВЫБРАТЬ ... ИЗ inside VT-args.\nTree: {:#?}",
+        root
+    );
+}

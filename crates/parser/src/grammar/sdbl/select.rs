@@ -47,6 +47,11 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
     let mut case_depth = 0i32; // Track nested CASE expressions
     let mut paren_depth = 0i32; // Track nested parentheses
     let mut consumed_any = false; // Track if we consumed at least one token
+                                  // Track active nested subqueries (open `(` followed by
+                                  // SELECT/ВЫБРАТЬ). While any marker is active, hard intra-clause
+                                  // keywords inside that subquery's body belong to the nested
+                                  // query and must be absorbed. Codex Round-5b stop-hook fix.
+    let mut nested_query_starts: Vec<i32> = Vec::new();
 
     loop {
         p.check_iteration_limit(); // Prevent infinite loops
@@ -71,10 +76,21 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
             paren_depth += 1;
             p.bump();
             consumed_any = true;
+            // Detect nested-subquery body: `( SELECT ...`.
+            p.skip_trivia();
+            if is_query_starter_or_combiner_keyword(p) {
+                nested_query_starts.push(paren_depth);
+            }
             continue;
         }
 
         if p.at(TokenKind::RParen) && paren_depth > 0 {
+            // Pop nested-subquery marker if this `)` closes its `(`.
+            if let Some(&d) = nested_query_starts.last() {
+                if d == paren_depth {
+                    nested_query_starts.pop();
+                }
+            }
             paren_depth -= 1;
             p.bump();
             consumed_any = true;
@@ -83,17 +99,27 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
 
         // Top-level structural boundaries — hard clause keywords,
         // Semicolon, and EOF — terminate recovery at ANY nesting
-        // depth. Statement-starters / combiners (SELECT / UNION)
-        // only stop at the top level (both depths zero); at depth>0
-        // they likely start a nested subquery whose body should be
-        // absorbed by recovery, mirroring the convention in
-        // `recover_to_delimiter` and `recover_to_delimiter_vt`. The
-        // Codex Round-5 stop-hook on the original Slice 12 fix
-        // caught the over-broad promotion — see
+        // depth UNLESS we are inside an active nested subquery (in
+        // which case the clause keyword belongs to the nested query
+        // body and must be absorbed). Statement-starters / combiners
+        // (SELECT / UNION) only stop at the top level. Codex Round-5
+        // and Round-5b stop-hooks caught the original any-depth
+        // clause-keyword stop as overly broad and the residual
+        // inner-FROM misattribution; see
         // `is_query_starter_or_combiner_keyword`.
         let at_top_level = case_depth == 0 && paren_depth == 0;
-        if is_clause_keyword(p) && (at_top_level || !is_query_starter_or_combiner_keyword(p)) {
-            break;
+        let inside_nested_query = !nested_query_starts.is_empty();
+        if is_clause_keyword(p) {
+            let stop = if at_top_level {
+                true
+            } else if inside_nested_query {
+                false
+            } else {
+                !is_query_starter_or_combiner_keyword(p)
+            };
+            if stop {
+                break;
+            }
         }
         if p.at(TokenKind::Semicolon) {
             break;
@@ -1693,6 +1719,12 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
     // emit).
     let recovery = p.start();
     let mut paren_depth: u32 = 0;
+    // Track active nested subqueries (opening `(` immediately
+    // followed by `SELECT`/`ВЫБРАТЬ`). While any marker is active,
+    // hard intra-clause keywords inside that subquery body belong to
+    // the nested query and must be absorbed by recovery. Codex
+    // Round-5b stop-hook fix.
+    let mut nested_query_starts: Vec<u32> = Vec::new();
 
     loop {
         p.check_iteration_limit();
@@ -1703,6 +1735,11 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
+            // Detect nested-subquery body for the Round-5b fix.
+            p.skip_trivia();
+            if is_query_starter_or_combiner_keyword(p) {
+                nested_query_starts.push(paren_depth);
+            }
             continue;
         }
         if p.at(TokenKind::RParen) {
@@ -1711,21 +1748,38 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
                 // `virtual_table_args` to consume via `expect(RParen)`.
                 break;
             }
+            // Pop nested-subquery marker if this `)` closes its `(`.
+            if let Some(&d) = nested_query_starts.last() {
+                if d == paren_depth {
+                    nested_query_starts.pop();
+                }
+            }
             paren_depth -= 1;
             p.bump();
             continue;
         }
 
+        let inside_nested_query = !nested_query_starts.is_empty();
+
         // Hard intra-clause keywords (FROM / WHERE / GROUP BY / ...)
-        // terminate recovery at ANY paren depth — they belong to the
-        // outer query. Statement-starters / combiners (SELECT /
-        // UNION) only stop at depth 0; at depth>0 they likely start
-        // a nested subquery body that should be absorbed into the
-        // recovery Error. Codex Round-5 stop-hook (post-Slice-12)
-        // caught the prior any-depth promotion as overly broad —
-        // see `is_query_starter_or_combiner_keyword`.
-        if is_clause_keyword(p) && (paren_depth == 0 || !is_query_starter_or_combiner_keyword(p)) {
-            break;
+        // terminate recovery at any paren depth UNLESS we are inside
+        // an active nested subquery — in that case the keyword
+        // belongs to the nested query body and must be absorbed.
+        // Statement-starters / combiners (SELECT / UNION) only stop
+        // at depth 0. Codex Round-5 stop-hook caught the prior
+        // any-depth promotion as overly broad; Round-5b caught the
+        // residual inner-FROM misattribution.
+        if is_clause_keyword(p) {
+            let stop = if paren_depth == 0 {
+                true
+            } else if inside_nested_query {
+                false
+            } else {
+                !is_query_starter_or_combiner_keyword(p)
+            };
+            if stop {
+                break;
+            }
         }
 
         // Comma is honoured only at depth 0 — a comma inside a nested
