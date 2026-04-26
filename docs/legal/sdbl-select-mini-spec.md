@@ -260,9 +260,12 @@ explicitly so future slices know which behaviours are intentional.
 ### Tier classification (Slice 7-addendum extension)
 
 The **primary** SDBL grammar specification is the v8.3.27 Developer's
-Reference Глава 8 «Работа с запросами» at
-`page.html`
-(downloaded source URL `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`).
+Reference Глава 8 «Работа с запросами» —
+`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`. Locally
+saved snapshot at
+`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html` for
+line-numbered reviewer convenience; the canonical citation target
+is the public URL above.
 Line 1320 of `page.html` carries the canonical EBNF skeleton
 
 ```text
@@ -903,12 +906,13 @@ landed in commit C0 of the Slice 7-addendum and were authored from:
 - the previously-existing brief §Limitations sketch in this mini-spec
   (which was authored under the same clean-room discipline);
 - the **primary** SDBL grammar specification: v8.3.27 Developer's
-  Reference Глава 8 «Работа с запросами», downloaded from
-  `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` and saved
-  to
-  `page.html`.
-  Per codex Round-4 finding 5 (LOW), citations are line-based and
-  excerpts kept minimal:
+  Reference Глава 8 «Работа с запросами» —
+  `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`. Locally
+  saved snapshot at
+  `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html` for
+  line-numbered reviewer convenience; the canonical citation target
+  is the public URL above. Per codex Round-4 finding 5 (LOW),
+  citations are line-based and excerpts kept minimal:
   - `page.html:1320` — canonical EBNF skeleton for `<Описание
     запроса>` placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, and ПЕРВЫЕ
     `<Количество>` in the first three optional SELECT-prefix

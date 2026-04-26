@@ -108,8 +108,9 @@ D = local IDE-recovery allowance.
 disclosure** (per codex Round-2 finding 2 + post-Round-3
 reclassification): The user downloaded the v8.3.27 Developer's
 Reference Глава 8 «Работа с запросами» from
-`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` to
-`page.html`
+`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` and
+saved a local snapshot at
+`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
 during the C0 review window. Line 1320 of that page carries
 the canonical EBNF skeleton placing `[РАЗРЕШЕННЫЕ]` in the
 first SELECT-prefix slot; lines 1331-1344 give full prose
@@ -148,11 +149,12 @@ IDE-diagnostic-level enforcement) is deferred to a future slice
 The Slice 7-addendum material was authored from:
 
 1. **Primary** SDBL grammar specification: v8.3.27 Developer's
-   Reference Глава 8 «Работа с запросами», downloaded from
-   `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` and
-   saved to
-   `page.html`.
-   Specifically:
+   Reference Глава 8 «Работа с запросами» —
+   `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`.
+   Locally saved snapshot at
+   `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+   for line-numbered reviewer convenience; the canonical
+   citation target is the public URL above. Specifically:
    - `page.html:1320` — canonical EBNF skeleton for `<Описание
      запроса>` placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ
      `<Количество>` in the first three optional SELECT-prefix
