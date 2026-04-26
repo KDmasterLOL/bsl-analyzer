@@ -423,6 +423,129 @@ Current parser behavior allows empty VT arguments such as:
 
 This behavior is part of the compatibility contract and may be preserved.
 
+#### Grammar (Slice 8-addendum extension)
+
+```text
+virtual-table-args := '(' [vt-arg-list] ')'
+vt-arg-list       := vt-arg (',' vt-arg)*
+vt-arg            := expression | <empty>
+```
+
+Empty `vt-arg` produces an `SdblMissingArg` marker as a direct child of the
+enclosing `SdblTableRef`. The outer `[vt-arg-list]` makes the entire
+argument-list optional, so `()` is a well-formed empty-arg-list form (see
+§IDE-recovery allowance #4 below).
+
+#### AST-shape contract (Slice 8-addendum extension)
+
+`virtual_table_args` does NOT emit a wrapper NodeKind. Its tokens (`LParen`,
+`Comma`, `RParen`), expression-node children (one of 9 expression NodeKinds
+per the Slice 10a / 10b expression-backbone attestations:
+`SDBL_LOGICAL_OR_EXPR`, `SDBL_LOGICAL_AND_EXPR`, `SDBL_NOT_EXPR`,
+`SDBL_COMPARISON_EXPR`, `SDBL_COLUMN_REF`, `SDBL_LITERAL`,
+`SDBL_MULTI_STRING`, `SDBL_FUNCTION_CALL`, `SDBL_PAREN_EXPR`),
+`SdblMissingArg` empty-arg markers, and `Error` sub-nodes from
+`recover_to_delimiter_vt` all attach as **flat direct children** of the
+enclosing `SdblTableRef` (which itself opens at `table_ref` in Slice 8).
+
+The HIR consumer at `crates/sdbl-hir/src/lower/from_clause.rs:246-371` walks
+`SdblTableRef.syntax().children()` directly and lowers each
+expression-NodeKind into `ExprHir` for the
+`virtual_table_params: Vec<ExprHir>` field declared at
+`crates/sdbl-hir/src/hir.rs:172`. The clean-room rewrite must preserve this
+flat direct-child layout so the existing HIR walker continues working
+unchanged. Acceptance tests walk `SdblTableRef.syntax().children()` and
+assert the expected sequence; no per-arg wrapper is introduced.
+
+The outer `if p.at(LParen)` guard at the top of `virtual_table_args` makes
+the call site in `table_ref` unconditional — `virtual_table_args(p)` is a
+no-op when its caller's next token is not `(`. This lets `table_ref` invoke
+the function unconditionally without checking for `(` itself.
+
+#### IDE-recovery allowances (Slice 8-addendum extension)
+
+1. **Empty-leading-arg `(, ...)`** — `SdblMissingArg` is emitted before the
+   first non-empty arg. Used by 1C idiom `.Остатки(, &Период, ...)` (see
+   ITS coverage row for pubqlang chapter 152, which exhibits the
+   leading-empty form).
+2. **Empty-trailing-arg `(..., )`** — `SdblMissingArg` is emitted after the
+   last comma when the parser sees `)`. Used by 1C idiom
+   `.Обороты(&Начало, &Конец, , )` (one or more trailing empty args).
+3. **Consecutive empty args `(, ,)`** — multiple `SdblMissingArg` siblings
+   produced by the comma loop's inner branch when it sees `Comma` /
+   `RParen` / non-expression-start in succession. Used by the 1C idiom
+   `.ОстаткиИОбороты(, , Авто, , )` (canonical v8327doc Глава 8.3 example).
+4. **Empty `()` (no args at all)** — the outer `if !p.at(RParen)` skip
+   means an empty paren pair just emits `LParen` + `RParen` as flat
+   children of `SdblTableRef`, with no `SdblMissingArg`. The grammar
+   `[vt-arg-list]` makes the argument list optional. Mirrors the canonical
+   shape `.Остатки()` for VT methods that take no parameters (see ITS
+   coverage row for pubqlang chapter 152, which exhibits the no-args
+   form).
+5. **Mid-arg paren-balanced recovery via `recover_to_delimiter_vt`** —
+   when an expression is followed by an unexpected token that's neither
+   `,` nor `)`, `recover_to_delimiter_vt` opens an `Error` marker and
+   consumes tokens with **paren-depth tracking**: it descends into nested
+   `(...)` and only stops on top-level `,` / `;` / clause-keyword / outer
+   `)` / EOF. This handles malformed input like `Остатки(СУММА(A) Q, B)`
+   where the spurious `Q` between expression and comma is absorbed into
+   the `Error` node without breaking the outer comma loop. The helper is
+   a **safety net for malformed input only**; clean nested forms like
+   `Остатки(СУММА(A))` and `Остатки(Поле В (ВЫБРАТЬ ...))` are fully
+   consumed by `expression(p)` / `predicate_expr` (Slice 10b territory)
+   without invoking this helper. The `Error` marker is unconditionally
+   completed after the recovery loop; whether it contains token children
+   depends on what the loop consumed before terminating.
+6. **Empty-arg-after-comma fallback to `is_expression_start` guard** —
+   when `is_expression_start(p)` returns false for a non-comma,
+   non-`RParen` token (e.g. the token is a clause keyword like `ИЗ` /
+   `ГДЕ`), the inner branch emits `SdblMissingArg` and breaks the
+   comma loop. This lets `expression(p)`'s clause-keyword fix (Slice
+   10b territory) propagate into VT-args context: e.g. `Остатки(ИЗ T)`
+   does not greedily consume `ИЗ` as an arg.
+
+#### Tier classification (Slice 8-addendum extension)
+
+- **A1** (ITS canonical example):
+  - v8327doc Глава 8.2 «Виртуальные таблицы» + Глава 8.3 «Виртуальные и
+    обычные поля» canonical example
+    `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )` at
+    `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`. Глава 8.3
+    lists 4–5 sibling examples in the same section.
+  - pubqlang chapter 104 — `Обороты` VT call with date-helper function
+    call inside an arg + named-condition arg in trailing slot (primary
+    structural attestation for "expression-as-arg with nested function
+    call" form).
+  - pubqlang chapter 116 — `Обороты()` parameter-order prose
+    (`НачалоПериода`, `КонецПериода`, `Субконто`, `КорСубконто`):
+    confirms positional args are the canonical idiom.
+  - pubqlang chapter 152 — empty `Остатки()` and leading-empty
+    `Остатки( , Номенклатура = &Номенклатура)` (primary attestation for
+    IDE-recovery allowance #4 (no-args) and #1 (leading-empty)).
+  - pubqlang chapter 156 — multi-line VT call with `IN (ВЫБРАТЬ ...)`
+    subquery as a VT param: structural attestation for the
+    IN-subquery-as-VT-param form. **Not** an attestation of recovery-helper
+    behaviour: clean `IN (subquery)` is consumed inside `expression(p)` /
+    `predicate_expr` → `super::select::subquery(p)`, NOT by
+    `recover_to_delimiter_vt` (the helper is a safety net for malformed
+    input only — see §IDE-recovery allowance #5).
+  - pubqlang chapter 9 — `СрезПоследних` virtual-table intro prose
+    (peripheral, prose only, no VT-args structure; corroborating only).
+- **C** (mini-spec): §Table references / §Virtual table argument behavior
+  (this section) — grammar EBNF, AST-shape contract, IDE-recovery
+  allowances, Tier classification, and §ITS coverage verification rows.
+- **D** (local IDE-recovery): empty-arg patterns (`SdblMissingArg` AST
+  shape) and paren-balanced recovery via `recover_to_delimiter_vt`. The
+  empty-arg form IS canonical per Tier A1, but the per-arg
+  `SdblMissingArg` AST shape is a parser-internal recovery node with no
+  ITS source; `recover_to_delimiter_vt` is a parser-internal recovery
+  utility for malformed input.
+
+The Slice 8-addendum extension to §ITS coverage verification (the table at
+the end of this document) adds rows for v8327doc Глава 8.2 / 8.3 and
+pubqlang chapters 9 / 104 / 116 / 152 / 156. C2 of Slice 8-addendum fills
+in the verification status by directly reading the cited material.
+
 ## JOIN clauses
 
 ### Shape
@@ -858,10 +981,26 @@ is deferred to Slice 12.
 | DISTINCT / РАЗЛИЧНЫЕ — primary | v8327doc Глава 8 §<Описание запроса> + pubqlang 20 §ВЫБРАТЬ РАЗЛИЧНЫЕ | verified yes (C0 of Slice 7-addendum — `page.html:1320` canonical EBNF skeleton, `:1346-1348` prose explanation; `its/dump/html/chapter_020.html:18, 29, 42` — demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ`; `chapter_020.html:38` — DISTINCT × ORDER BY validity rule); ITS Tier A1 |
 | TOP / ПЕРВЫЕ — primary | v8327doc Глава 8 §<Описание запроса> + pubqlang 19 §ВЫБРАТЬ ПЕРВЫЕ | verified yes (C0 of Slice 7-addendum — `page.html:1320` canonical EBNF skeleton with `[ПЕРВЫЕ <Количество>]`, `:1350-1356` prose covering ordering interaction and nested-query support; `chapter_019.html:19, 28` — demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3`); ITS Tier A1 |
 | ALLOWED / РАЗРЕШЕННЫЕ — primary | v8327doc Глава 8 §<Описание запроса> | verified yes (C0 of Slice 7-addendum — `page.html:1320` canonical EBNF places `[РАЗРЕШЕННЫЕ]` in first SELECT-prefix slot; `:1331-1344` prose paraphrased: РАЗРЕШЕННЫЕ scopes the result to records the current user has rights to; constrained to the top-level ВЫБРАТЬ; propagates into subqueries; interaction with ЧТЕНИЕ-table rights documented; bilingual word-list at `:1038-1046` РАЗРЕШЕННЫЕ ↔ ALLOWED). The pubqlang dump's `chapter_057.html:50` UI-checkbox prose is a secondary corroborating reference. ITS Tier A1. |
+| Virtual table arguments — primary | v8327doc Глава 8.2 «Виртуальные таблицы» — `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` | TODO at C2 (Slice 8-addendum) — verify VT introduction prose; ITS Tier A1 |
+| Virtual table arguments — canonical example with empty-arg + named-pos slots | v8327doc Глава 8.3 «Виртуальные и обычные поля» — `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` | TODO at C2 (Slice 8-addendum) — verify canonical `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )` example and 4–5 sibling examples in the same section; ITS Tier A1 |
+| Virtual table arguments — `СрезПоследних` intro (peripheral) | pubqlang chapter 9 lines 13, 20 | TODO at C2 (Slice 8-addendum) — verify intro prose; peripheral / corroborating only (Tier A1 corroborator) |
+| Virtual table arguments — nested function call + named-condition trailing arg | pubqlang chapter 104 line 23 | TODO at C2 (Slice 8-addendum) — verify `Обороты(&НачалоПериода, КОНЕЦПЕРИОДА(&КонецПериода, ДЕНЬ), , Номенклатура = &Товар) КАК ПродажиОбороты` form (date-helper function call as arg + named-condition trailing arg); ITS Tier A1 (primary structural for "expression-as-arg with nested function call") |
+| Virtual table arguments — `Обороты()` parameter-order prose | pubqlang chapter 116 lines 13–42 | TODO at C2 (Slice 8-addendum) — verify parameter-order doc (`НачалоПериода`, `КонецПериода`, `Субконто`, `КорСубконто`); ITS Tier A1 (primary positional-args attestation) |
+| Virtual table arguments — empty `Остатки()` and leading-empty `Остатки( , cond)` | pubqlang chapter 152 lines 23, 35 | TODO at C2 (Slice 8-addendum) — verify no-args form (line 23) and leading-empty form (line 35: `Остатки( , Номенклатура = &Номенклатура)`); ITS Tier A1 (primary attestation for IDE-recovery allowances #4 and #1) |
+| Virtual table arguments — IN-subquery as VT param (structural) | pubqlang chapter 156 lines 50–56 | TODO at C2 (Slice 8-addendum) — verify multi-line VT call with `Остатки( , ... В (ВЫБРАТЬ ...))`; ITS Tier A1 (structural — confirms `IN (subquery)` is a canonical VT-arg form; NOT an attestation of `recover_to_delimiter_vt` behaviour — the subquery's `)` is consumed inside `predicate_expr` → `super::select::subquery(p)` per Slice 10b) |
 
 C2 fills in the remaining "TODO at C2" rows after directly reading the dump
 pages at `/home/itrous/src/tools_migration/its/dump/html/`, mirroring the
 Slice 10b C0a → C2 verification handoff.
+
+**Line-number stability check (per D8a, applies to Slice 8-addendum
+pubqlang rows above).** Each cited "pubqlang chapter NNN line MM" row in
+the table above is a line-numbered reference into the pubqlang HTML
+chapters. The C2 author verifies line-number stability across the public
+ITS canonical version and either (a) keeps the line numbers if stable, or
+(b) falls back to "pubqlang chapter NNN §<section name>" form if line
+numbers cannot be confirmed stable. Section-name references are stable by
+definition since they follow ITS heading anchors.
 
 ## Non-consultation statement (Slice 11 reaffirmation)
 
@@ -968,6 +1107,66 @@ reference is the primary SDBL grammar specification and lists
 "Plan is IMPLEMENTATION-READY" verdict was issued before this
 discovery; a Round-4 codex pass verifies the reclassification before
 C0 is committed.
+
+## Non-consultation statement (Slice 8-addendum reaffirmation)
+
+The §Virtual table argument behavior subsection extension (Grammar EBNF,
+AST-shape contract, IDE-recovery allowances 1–6, Tier classification),
+plus the seven new rows in the §ITS coverage verification table for
+v8327doc Глава 8.2 / 8.3 and pubqlang chapters 9 / 104 / 116 / 152 / 156,
+landed in commit C0a of the Slice 8-addendum and were authored from:
+
+- the previously-existing 3-line §Virtual table argument behavior sketch
+  in this mini-spec (which was authored under the same clean-room
+  discipline);
+- the **primary** SDBL grammar specification: v8.3.27 Developer's
+  Reference Глава 8 «Работа с запросами» —
+  `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`. C0a authoring
+  cited the canonical example
+  `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )` from
+  Глава 8.3 «Виртуальные и обычные поля» plus the VT introduction prose
+  in Глава 8.2 «Виртуальные таблицы»; full per-line verification of these
+  citations is performed at C2;
+- the **secondary** ITS pubqlang dump (textbook companion) — chapter 9
+  lines 13/20 (`СрезПоследних` intro prose, peripheral), chapter 104
+  line 23 (`Обороты` with date-helper nested function call + named-
+  condition trailing arg), chapter 116 lines 13–42 (`Обороты()`
+  parameter-order prose: `НачалоПериода` / `КонецПериода` / `Субконто` /
+  `КорСубконто`), chapter 152 lines 23/35 (no-args `Остатки()` and
+  leading-empty `Остатки( , Номенклатура = &Номенклатура)`), chapter 156
+  lines 50–56 (multi-line VT call with `IN (ВЫБРАТЬ ...)` subquery as a
+  VT param — structural attestation only). C0a authoring identified
+  these chapter regions; full per-line verification is performed at C2;
+- the lexer Slice 2 attestation (`docs/legal/sdbl-clean-room-slice2.md`)
+  for cross-checking that VT-args use `Ident` pass-through (`Авто`,
+  `Остатки`, `Обороты`, `СрезПоследних`, `ОстаткиИОбороты` are regular
+  identifiers, NOT lexer keywords);
+- the Slice 1/2/6/7/8/9/10a/10b/11/7-addendum clean-room attestations for
+  event-parser conventions and AST-shape contracts (in particular the
+  Slice 8 attestation for the `table_ref` MDO chain that hosts the
+  `virtual_table_args` call, and the Slice 10a / 10b attestations for the
+  9-NodeKind expression backbone that produces the expression-arg
+  children);
+- the HIR consumer code at `crates/sdbl-hir/src/lower/from_clause.rs:246-371`
+  for read-only documentation of consumer-side AST-shape requirements
+  (the existing `virtual_table_params: Vec<ExprHir>` lowering walks
+  `SdblTableRef.syntax().children()` directly; the parser's flat
+  direct-child layout is what the HIR walker reads).
+
+The author did NOT consult `../bsl-parser/*` or any pre-C1 textual
+transcription of the 2 Slice-8-addendum parser function bodies
+(`virtual_table_args_legacy`, `recover_to_delimiter_vt`) as working text
+during C0a authoring. Per the user's citation-policy directive, this
+§Non-consultation statement and the new §Virtual table argument behavior
+sub-sections (Grammar / AST-shape contract / IDE-recovery allowances /
+Tier classification) cite only the public ITS URL
+(`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`) and pubqlang
+chapter identifiers (e.g. "pubqlang chapter 104 line 23") with optional
+stable line numbers per §D8a; no local mirror paths appear in the new
+content. This is the first SDBL clean-room slice authored under that
+prospective policy; prior slices (Slice 7-addendum and earlier) retain
+their pre-policy citation form by deliberate non-revision (per memory
+`feedback_citation_policy.md` item #7).
 
 ## Recovery requirements
 
