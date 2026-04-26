@@ -367,11 +367,33 @@ Slice 7 — it is a deliberate post-landing bug fix:
   meaningful: it ends one query and starts the next in a query
   package. An unterminated nested `(...)` followed by a `;` is a
   clear signal that the user moved on to a new statement, so
-  recovery must exit immediately at any depth. The other two
-  helpers run inside expression / VT-args contexts where a
-  syntactically-valid `;` cannot appear at depth>0 in a
-  well-formed token stream — the depth-0-only Semicolon stop is a
-  defensive choice consistent with the comma case there.
+  recovery must exit immediately at any depth.
+
+  The other two helpers
+  (`recover_to_delimiter` / `recover_to_delimiter_vt`) keep the
+  depth-0-only Semicolon stop. The reasoning is **two-tier**:
+  - In well-formed input, a syntactically-valid `;` cannot appear
+    at depth>0 in an expression-argument or VT-args stream — the
+    depth-0-only stop is the natural choice, mirroring the comma
+    case.
+  - In **malformed** input, a `;` at depth>0 IS reachable (e.g.
+    `СУММА(1 (; УНИЧТОЖИТЬ T` — the unterminated nested `(`
+    leaves recovery at `paren_depth = 1` when the `;` arrives).
+    Under the depth-0-only stop, that `;` is bumped into the
+    Error node and the package boundary is lost. This is a
+    **deliberate divergence** from field-tail recovery, accepted
+    as the cost of keeping nested-arg-list comma handling clean
+    in the expression-tail / VT-args contexts. Codex Round-4
+    WEAK 1 raised this; the rationale is now explicit at both
+    Slice 7 and Slice 10a §Behaviour change cross-references.
+
+  Regression test
+  `test_slice7_field_recovery_stops_on_semicolon_at_any_depth`
+  (commit `528bc8fd`) gates the field-tail-side of this
+  divergence; the expression-tail / VT-args side is documented
+  as preserved behaviour without a positive test (the
+  malformed-stream input would not be useful as a regression
+  gate since the desired outcome is "Error contains `;`").
 
   Companion fix for `recover_to_delimiter` is documented under the
   Slice 10a attestation §Behaviour change (commit `9d418084`).

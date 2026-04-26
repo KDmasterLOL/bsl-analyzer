@@ -469,15 +469,24 @@ Slice 10a — both are deliberate bug fixes:
   clause keyword (FROM / WHERE / GROUP BY / ...). Slice 12
   (commit `9d418084`, 2026-04-26) lifted the clause-keyword
   check **out of** the depth gate so it fires at any paren
-  depth; comma / semicolon checks remain depth-0-only because
-  they are valid continuation tokens for nested function-call
-  argument lists (a `;` cannot legitimately appear at depth>0 in
-  a well-formed expression argument stream — see the contrast
-  with the field-tail recovery helper documented in the Slice 7
-  attestation §Behaviour change). The fix mirrors the
+  depth. The comma check remains depth-0-only because a comma
+  inside a nested function-call argument list is a valid
+  continuation token. The Semicolon check stays depth-0-only
+  for parallel reasons in well-formed input (`;` cannot
+  syntactically appear at depth>0 in an expression-argument
+  stream), but on **malformed** input — e.g. `СУММА(1 (;` — a
+  Semicolon at depth>0 IS reachable and is bumped into the
+  Error node, deliberately diverging from
+  `recover_field_to_alias_or_delimiter` (Slice 7), which stops
+  on `;` at any depth because it runs at the top-level
+  query-package boundary. See the Slice 7 attestation
+  §Behaviour change for the full two-tier rationale (Codex
+  Round-4 WEAK 1). The fix mirrors the
   post-Slice-8-addendum `recover_to_delimiter_vt` contract
   (commit `7e4f6a9e`) — all three SDBL recovery helpers now
-  share the same clause-keyword-at-any-depth contract.
+  share the same clause-keyword-at-any-depth and
+  EOF-at-any-depth contracts; only the Semicolon stop diverges
+  by design.
   Regression gates:
   `test_slice10a_recover_to_delimiter_stops_on_clause_keyword_at_any_depth_ru`
   and `_en` in `crates/parser/tests/sdbl_slice10a_backbone.rs`
