@@ -379,7 +379,7 @@ fn test_into_drop_package_integration() {
 // Slice 12 — recover_field_to_alias_or_delimiter clause-keyword,
 //            Semicolon, and EOF stops at any nesting depth.
 //
-// Pre-Slice-12, the helper at `crates/parser/src/grammar/sdbl/select.rs:45-128`
+// Pre-Slice-12, the helper at `crates/parser/src/grammar/sdbl/select.rs`
 // gated all six stop conditions (alias keyword, Comma, Semicolon,
 // RParen, clause keyword, EOF) inside `if case_depth == 0 && paren_depth == 0`.
 // An unterminated nested `(...)` inside a selected-field expression
@@ -390,14 +390,22 @@ fn test_into_drop_package_integration() {
 // post-Slice-8-addendum `recover_to_delimiter_vt` contract and the
 // Slice 12 `recover_to_delimiter` alignment.
 //
-// Trigger inputs use a bare `(` after a parsed field so that the
-// helper enters the loop with paren_depth=0 and reaches depth>0 on
-// the very next iteration.
+// Trigger inputs use a literal `1` (NOT an Ident) as the field
+// expression so that `expression(p)` returns cleanly at the bare
+// `(`; an Ident would be consumed by `column_or_function` as a
+// nested function-call start, routing recovery through the Slice
+// 10a `recover_to_delimiter` instead of the field-tail helper.
+// The literal forces the unexpected `(` to reach
+// `selected_field`'s `at_expected_position` check
+// (`select.rs:301-313`), which then invokes
+// `recover_field_to_alias_or_delimiter` — the helper this slice
+// fixes. Codex Round-2 caught the false-positive use of `A` in an
+// earlier draft.
 // =============================================================================
 
 #[test]
 fn test_slice7_field_recovery_stops_on_clause_keyword_at_any_depth_ru() {
-    let input = "ВЫБРАТЬ A ( ИЗ T2 КАК Т";
+    let input = "ВЫБРАТЬ 1 ( ИЗ T2 КАК Т";
     let parse = parse_sdbl(input);
     let root = parse.syntax_node();
 
@@ -423,7 +431,7 @@ fn test_slice7_field_recovery_stops_on_clause_keyword_at_any_depth_ru() {
 
 #[test]
 fn test_slice7_field_recovery_stops_on_clause_keyword_at_any_depth_en() {
-    let input = "SELECT A ( FROM T2 AS T";
+    let input = "SELECT 1 ( FROM T2 AS T";
     let parse = parse_sdbl(input);
     let root = parse.syntax_node();
 
@@ -448,16 +456,54 @@ fn test_slice7_field_recovery_stops_on_clause_keyword_at_any_depth_en() {
 }
 
 #[test]
+fn test_slice7_field_recovery_stops_on_clause_keyword_inside_case_and_paren() {
+    // CASE-depth × paren-depth coverage. Pre-Slice-12, the
+    // clause-keyword check fired only when BOTH case_depth == 0 AND
+    // paren_depth == 0. Post-fix, the check fires at any depth
+    // combination. This input drives the helper into both depths
+    // simultaneously: the unterminated `(` increments paren_depth,
+    // then `ВЫБОР` increments case_depth — `ИЗ` at depth (1, 1)
+    // must still terminate recovery without consuming the keyword.
+    let input = "ВЫБРАТЬ 1 ( ВЫБОР ИЗ T2 КАК Т";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+
+    let from_clauses =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FROM_CLAUSE).count();
+    assert!(
+        from_clauses >= 1,
+        "Outer ВЫБРАТЬ must keep its ИЗ clause even when recovery is at case_depth>0 AND paren_depth>0.\nTree: {:#?}",
+        root
+    );
+
+    let bad_error = root.descendants().filter(|n| n.kind() == SyntaxKind::ERROR).any(|err| {
+        err.descendants_with_tokens()
+            .filter_map(|nt| nt.into_token())
+            .any(|t| t.text().eq_ignore_ascii_case("ИЗ"))
+    });
+    assert!(
+        !bad_error,
+        "ИЗ clause keyword must not be consumed by recover_field_to_alias_or_delimiter at case_depth>0 AND paren_depth>0.\nTree: {:#?}",
+        root
+    );
+}
+
+#[test]
 fn test_slice7_field_recovery_breaks_at_eof_inside_unterminated_paren() {
     // Pre-Slice-12, the EOF check at depth>0 was inside the depth gate
     // and would not fire; `p.bump()` is a no-op at EOF, so the helper
     // would spin until `Parser::check_iteration_limit` panicked. The
     // post-fix helper exits the loop cleanly at EOF at any depth.
     //
+    // Trigger uses a literal `1` (per the same rationale as the
+    // clause-keyword tests above): an Ident would route recovery
+    // through `recover_to_delimiter` instead of the field-tail
+    // helper.
+    //
     // The audit-gate property of this test is: the parser does NOT
     // panic with "iteration limit exceeded" on the unterminated input.
     // If the regression returns, this test fails by panic, not by
     // assertion.
-    let input = "ВЫБРАТЬ A (";
+    let input = "ВЫБРАТЬ 1 (";
     let _ = parse_sdbl(input);
 }
