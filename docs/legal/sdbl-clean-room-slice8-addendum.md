@@ -308,7 +308,7 @@ Run end-to-end at C3 commit time. All must pass:
   sources; per-function provenance comments cite only public
   URL + pubqlang chapter identifiers; fill in the seven §ITS
   coverage verification rows in the mini-spec.
-- **C3** `<C3 SHA at this commit>` 2026-04-26 — this
+- **C3** `7425e1ea` 2026-04-26 — this
   attestation, the new acceptance-test file
   `sdbl_slice8_addendum_virtual_table_args.rs`, the master-doc
   splice (preserve Slice 8 file list, replace the
