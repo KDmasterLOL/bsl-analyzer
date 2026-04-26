@@ -1625,133 +1625,183 @@ fn top_clause(p: &mut Parser) {
 // ============================================================================
 //
 // See `docs/legal/sdbl-clean-room-slice8-addendum.md` (landed at C3) for
-// authorship and source citations. Per-function provenance comments are
-// attached at C2.
+// authorship and source citations. Each function below carries its own
+// per-function provenance comment.
 //
 // Functions in this section:
 // - `recover_to_delimiter_vt` — paren-depth-tracking spurious-token
 //   recovery helper for VT-args context. Sole caller is
-//   `virtual_table_args` below; relocated here in C1 from its prior
-//   stranded position above the Slice 6 banner.
+//   `virtual_table_args` below.
 // - `virtual_table_args` — parses `'(' [vt-arg-list] ')'` after the
-//   `table_ref` MDO chain. Body is on the path to clean-room rewrite
-//   in C2.
+//   `table_ref` MDO chain.
 
-/// Recover to next delimiter by consuming unexpected tokens in virtual table arguments.
+/// Recover from a malformed VT argument by consuming tokens up to the
+/// next top-level delimiter and wrapping them in an `Error` sub-node.
 ///
-/// Similar to expressions::recover_to_delimiter but for virtual table method args context.
-/// Tracks parenthesis balance to handle nested calls.
-// C1 placeholder — clean-room rewrite in C2.
+/// Mini-spec §Virtual table argument behavior §IDE-recovery allowance
+/// #5 — safety net for spurious tokens between an expression and the
+/// next comma / close-paren. Functionally a sibling of
+/// `recover_to_delimiter` in `expressions.rs`; both share paren-depth
+/// tracking, comma / semicolon stop, clause-keyword stop via
+/// `is_clause_keyword`, and unconditional `Error` emit.
+///
+/// Provenance: parser-internal recovery utility; no ITS source. The
+/// helper does NOT fire on clean nested forms — clean
+/// `Остатки(СУММА(A))` and `Остатки(Поле В (ВЫБРАТЬ ...))` are fully
+/// consumed by `expression(p)` / `predicate_expr` (Slice 10b).
 fn recover_to_delimiter_vt(p: &mut Parser) {
-    let err = p.start();
-    let mut paren_depth = 0i32; // Track nested parentheses
+    // Open the Error sub-node *before* any tokens are consumed so the
+    // marker is always present in the tree even when the loop exits
+    // immediately (mini-spec §Preserved behaviour #3 — unconditional
+    // emit).
+    let recovery = p.start();
+    let mut paren_depth: u32 = 0;
 
     loop {
-        p.check_iteration_limit(); // Prevent infinite loops
+        p.check_iteration_limit();
 
-        // Track parenthesis nesting
+        // Descend into nested `(...)` first so an inner function-call
+        // close-paren doesn't mistakenly terminate recovery before we
+        // climb back to depth 0.
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
             continue;
         }
-
         if p.at(TokenKind::RParen) {
-            if paren_depth > 0 {
-                // This is a closing paren for a nested call - consume it
-                paren_depth -= 1;
-                p.bump();
-                continue;
-            } else {
-                // This is the closing paren for our function - stop here
+            if paren_depth == 0 {
+                // Outer VT-args close-paren — leave it for
+                // `virtual_table_args` to consume via `expect(RParen)`.
                 break;
             }
+            paren_depth -= 1;
+            p.bump();
+            continue;
         }
 
-        // Stop at top-level delimiters (when not inside nested parens)
-        if paren_depth == 0 {
-            if p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) {
-                break;
-            }
-
-            // Stop at clause keywords (FROM, WHERE, etc.)
-            if is_clause_keyword(p) {
-                break;
-            }
+        // Top-level termination signals are honoured only at depth 0
+        // so a comma or clause keyword inside a nested `(...)` does
+        // not break recovery prematurely.
+        if paren_depth == 0
+            && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) || is_clause_keyword(p))
+        {
+            break;
         }
 
-        // Stop at EOF
         if p.at_end() {
             break;
         }
 
-        // Consume one token
         p.bump();
     }
 
-    err.complete(p, NodeKind::Error);
+    recovery.complete(p, NodeKind::Error);
 }
 
-/// Parse virtual-table method-call arguments (e.g., `.Обороты(&A, , Авто, )`).
+/// Parse a virtual-table method-call argument list — the trailing
+/// `'(' [vt-arg-list] ')'` after a `table_ref` MDO chain.
 ///
-/// Owns the leading `if p.at(TokenKind::LParen)` guard so the call site in
-/// `table_ref` is unconditional. Empty arguments and paren-balanced
-/// recovery are documented in the SELECT mini-spec §Virtual table
-/// argument behavior (extended in C0a).
-// C1 placeholder — clean-room rewrite in C2.
+/// Provenance: v8327doc Глава 8.2 «Виртуальные таблицы» + Глава 8.3
+/// «Виртуальные и обычные поля» canonical example
+/// `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )`
+/// at <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>; Глава
+/// 8.3 lists 4–5 sibling examples in the same section. Pubqlang
+/// chapter 104 (`Обороты` with date-helper nested function call +
+/// named-condition trailing arg), chapter 116 (`Обороты()`
+/// parameter-order prose), chapter 152 (no-args `Остатки()` and
+/// leading-empty `Остатки( , cond)`), chapter 156 (`IN (subquery)`
+/// as a VT param — structural; the subquery is consumed by
+/// `expression(p)` / `predicate_expr` per Slice 10b, NOT by
+/// `recover_to_delimiter_vt`), peripheral chapter 9 (`СрезПоследних`
+/// prose intro). SELECT mini-spec §Virtual table argument behavior
+/// (extended in C0a) — Grammar EBNF
+/// (`virtual-table-args := '(' [vt-arg-list] ')'`,
+/// `vt-arg-list := vt-arg (',' vt-arg)*`,
+/// `vt-arg := expression | <empty>`), AST-shape contract, and
+/// IDE-recovery allowances #1–#6:
+/// - #1 empty-leading-arg `(, ...)` → SdblMissingArg before the
+///   first non-empty arg;
+/// - #2 empty-trailing-arg `(..., )` → SdblMissingArg after the
+///   last comma;
+/// - #3 consecutive empty args `(, ,)` → multiple SdblMissingArg
+///   siblings;
+/// - #4 empty `()` → no SdblMissingArg (the outer-RParen
+///   short-circuit);
+/// - #5 mid-arg paren-balanced recovery via
+///   `recover_to_delimiter_vt`;
+/// - #6 empty-arg-after-comma fallback to `is_expression_start`
+///   guard so a clause keyword (e.g. `ИЗ` / `ГДЕ`) ends the loop
+///   instead of being greedily consumed as an arg.
+///
+/// The leading `if !p.at(LParen) { return; }` guard makes the call
+/// site in `table_ref` unconditional (mini-spec §AST-shape
+/// invariant #1). All children — tokens, expression NodeKinds,
+/// SdblMissingArg markers, and Error sub-nodes from
+/// `recover_to_delimiter_vt` — attach as flat direct children of
+/// the enclosing `SdblTableRef` (no per-arg wrapper).
 fn virtual_table_args(p: &mut Parser) {
-    if p.at(TokenKind::LParen) {
-        p.bump(); // (
+    // §AST-shape invariant #1 — outer LParen guard (no-op for the
+    // table-ref form without a trailing argument list).
+    if !p.at(TokenKind::LParen) {
+        return;
+    }
+    p.bump();
+    p.skip_trivia();
+
+    // §IDE-recovery allowance #4 — empty `()` short-circuits past
+    // the arg-list without emitting any SdblMissingArg sibling.
+    if p.at(TokenKind::RParen) {
+        p.expect(TokenKind::RParen);
+        return;
+    }
+
+    // First vt-arg: either a parsed expression (with optional
+    // spurious-token recovery, allowance #5) or an SdblMissingArg
+    // marker for the empty-leading-arg form (allowance #1).
+    if super::expressions::is_expression_start(p) && !p.at(TokenKind::Comma) {
+        super::expressions::expression(p);
+        p.skip_trivia();
+        if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+            recover_to_delimiter_vt(p);
+        }
+    } else {
+        let m = p.start();
+        m.complete(p, NodeKind::SdblMissingArg);
+    }
+
+    // Comma loop — each iteration consumes one separator plus either
+    // an expression or an empty-arg marker. The empty-arg branch
+    // covers allowances #2 (empty-trailing), #3 (consecutive-empty),
+    // and #6 (clause-keyword fall-through via the
+    // `!is_expression_start` guard).
+    while p.eat(TokenKind::Comma) {
+        p.check_iteration_limit();
         p.skip_trivia();
 
-        // Parse arguments (comma-separated expressions)
-        // Empty parameters are valid SDBL: .Остатки(, , Авто, ) means "use defaults"
-        if !p.at(TokenKind::RParen) {
-            // First argument (might be empty — valid for VT params)
-            if super::expressions::is_expression_start(p) && !p.at(TokenKind::Comma) {
-                super::expressions::expression(p);
-
-                // ERROR RECOVERY: After expression, consume unexpected tokens
-                p.skip_trivia();
-                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
-                    recover_to_delimiter_vt(p);
-                }
-            } else {
-                let m = p.start();
-                m.complete(p, NodeKind::SdblMissingArg);
+        let empty_slot = p.at(TokenKind::Comma)
+            || p.at(TokenKind::RParen)
+            || !super::expressions::is_expression_start(p);
+        if empty_slot {
+            let m = p.start();
+            m.complete(p, NodeKind::SdblMissingArg);
+            // Stay in the loop only if more consecutive-empty slots
+            // follow (§IDE-recovery allowance #3); otherwise hand
+            // off to the outer `expect(RParen)` below.
+            if !p.at(TokenKind::Comma) {
+                break;
             }
-
-            // Parse remaining arguments with error recovery
-            while p.eat(TokenKind::Comma) {
-                p.check_iteration_limit();
-                p.skip_trivia();
-
-                // Empty or trailing argument — valid for VT params
-                if p.at(TokenKind::Comma)
-                    || p.at(TokenKind::RParen)
-                    || !super::expressions::is_expression_start(p)
-                {
-                    let m = p.start();
-                    m.complete(p, NodeKind::SdblMissingArg);
-                    if !p.at(TokenKind::Comma) {
-                        break;
-                    }
-                    continue;
-                }
-
-                super::expressions::expression(p);
-
-                // ERROR RECOVERY: After each argument expression, check for unexpected tokens
-                p.skip_trivia();
-                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
-                    recover_to_delimiter_vt(p);
-                }
-            }
+            continue;
         }
 
+        super::expressions::expression(p);
         p.skip_trivia();
-        p.expect(TokenKind::RParen);
+        if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+            recover_to_delimiter_vt(p);
+        }
     }
+
+    p.skip_trivia();
+    p.expect(TokenKind::RParen);
 }
 
 #[cfg(test)]
