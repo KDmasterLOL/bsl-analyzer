@@ -400,10 +400,41 @@ Slice 7 — it is a deliberate post-landing bug fix:
   All three SDBL recovery helpers
   (`recover_to_delimiter_vt`, `recover_to_delimiter`,
   `recover_field_to_alias_or_delimiter`) now share the same
-  clause-keyword-at-any-depth and EOF-at-any-depth contracts;
-  only the Semicolon stop differs across helpers (any depth in
-  field-tail recovery, depth-0-only in expression-tail and
-  VT-args recovery) per the rationale above.
+  clause-keyword and EOF-at-any-depth contracts (refined per
+  the Round-5 follow-on below); only the Semicolon stop
+  differs across helpers (any depth in field-tail recovery,
+  depth-0-only in expression-tail and VT-args recovery) per
+  the rationale above.
+
+  **Codex Round-5 stop-hook follow-up (commit `88439afa`).**
+  After F1+F2 landed, codex Round-5 caught the original
+  any-depth clause-keyword promotion as overly broad:
+  `is_clause_keyword` includes `SELECT`/`ВЫБРАТЬ` and
+  `UNION`/`ОБЪЕДИНИТЬ`, which are statement-starters /
+  combiners rather than intra-clause boundaries. At
+  paren_depth>0 inside a malformed nested `(...)`, a
+  `SELECT`/`ВЫБРАТЬ` most likely starts a nested subquery
+  whose body recovery should absorb so the outer query's
+  trailing clauses survive. The over-broad promotion dropped
+  outer FROM clauses on inputs like
+  `ВЫБРАТЬ 1 ( ВЫБРАТЬ X ) ИЗ T`. The Round-5 fix introduces
+  `is_query_starter_or_combiner_keyword` and applies the
+  depth-conditional stop in this helper:
+
+      let at_top_level = case_depth == 0 && paren_depth == 0;
+      if is_clause_keyword(p)
+          && (at_top_level
+              || !is_query_starter_or_combiner_keyword(p)) {
+          break;
+      }
+
+  Hard intra-clause keywords (FROM/WHERE/GROUP/...) still stop
+  at any depth and at any case-depth; SELECT/UNION revert to
+  top-level-only stops. Regression gate:
+  `test_slice7_field_recovery_does_not_stop_on_nested_select_at_depth`
+  in `crates/parser/tests/sdbl_slice7_fields.rs`. The
+  companion entries are documented in the Slice 10a and
+  Slice 8-addendum §Behaviour change cross-references.
 
 ## Verification recipe
 

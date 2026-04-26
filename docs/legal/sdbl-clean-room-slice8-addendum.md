@@ -285,15 +285,33 @@ contains the `ГДЕ` clause keyword.
 
 Note on cross-helper alignment: the parallel helper
 `recover_to_delimiter` in
-`crates/parser/src/grammar/sdbl/expressions.rs:182-233`
-(Slice 10a territory) retains the original depth-0-only
-clause-keyword guard. Aligning that helper with
-`recover_to_delimiter_vt` — by applying the same
-depth-any clause-keyword fix to expression-tail recovery —
-is deferred to Slice 12 (IDE recovery / allowances), which
-owns cross-helper recovery hardening. This Slice 8-addendum
-fix is scoped to the slice's own helpers and the
-`virtual_table_args` body.
+`crates/parser/src/grammar/sdbl/expressions.rs`
+(Slice 10a territory) retained the original depth-0-only
+clause-keyword guard at this slice's landing time. Slice 12
+(commit `9d418084`, 2026-04-26) aligned that helper with the
+same any-depth clause-keyword stop, and a follow-on stop-hook
+fix (commit `88439afa`) further refined the contract for
+**both** helpers: clause keywords are now split into two
+classes via `is_query_starter_or_combiner_keyword`
+(`crates/parser/src/grammar/sdbl/select.rs`):
+
+- **Hard intra-clause keywords** (`FROM`/`WHERE`/`GROUP`/...) —
+  stop recovery at any paren depth (the original Slice
+  8-addendum contract for `recover_to_delimiter_vt`).
+- **Statement-starters / combiners** (`SELECT`/`UNION`) — only
+  at depth 0; at depth>0 they likely start a nested subquery
+  body that recovery should absorb so the outer query's
+  clause-tail (e.g. `КАК Т ГДЕ`) survives.
+
+`recover_to_delimiter_vt` was brought into the new two-class
+contract by the same commit `88439afa`. The
+`test_slice8adn_recovery_does_not_stop_on_nested_select_at_depth`
+regression in
+`crates/parser/tests/sdbl_slice8_addendum_virtual_table_args.rs`
+gates the post-Round-5 contract; existing
+`test_slice8adn_recovery_stops_on_clause_keyword_at_any_depth`
+(which uses `ГДЕ`, a hard clause keyword) still applies and
+remains green.
 
 ## Verification recipe
 

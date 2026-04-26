@@ -483,10 +483,44 @@ Slice 10a — both are deliberate bug fixes:
   §Behaviour change for the full two-tier rationale (Codex
   Round-4 WEAK 1). The fix mirrors the
   post-Slice-8-addendum `recover_to_delimiter_vt` contract
-  (commit `7e4f6a9e`) — all three SDBL recovery helpers now
-  share the same clause-keyword-at-any-depth and
-  EOF-at-any-depth contracts; only the Semicolon stop diverges
-  by design.
+  (commit `7e4f6a9e`).
+
+  **Codex Round-5 stop-hook follow-up (commit `88439afa`).**
+  After landing, codex Round-5 caught the any-depth clause-
+  keyword promotion as overly broad: `is_clause_keyword`
+  (`crates/parser/src/grammar/sdbl/select.rs:1025-1040`)
+  includes `SELECT`/`ВЫБРАТЬ` and `UNION`/`ОБЪЕДИНИТЬ`, which
+  are statement-starters / combiners rather than intra-clause
+  boundaries. On `ВЫБРАТЬ СУММА(1 ( ВЫБРАТЬ X )) ИЗ T` the
+  depth-1 `ВЫБРАТЬ` stopped recovery prematurely; the
+  function-call empty-Error guard left it for the outer
+  parser; `query_body_clauses` does not accept `SELECT` as a
+  clause continuation, so the outer `ИЗ T` was lost. The
+  Round-5 fix introduces
+  `is_query_starter_or_combiner_keyword`
+  (`crates/parser/src/grammar/sdbl/select.rs`) and applies the
+  depth-conditional stop:
+
+      if is_clause_keyword(p)
+          && (paren_depth == 0
+              || !is_query_starter_or_combiner_keyword(p)) {
+          break;
+      }
+
+  Hard intra-clause keywords (FROM/WHERE/GROUP/...) still stop
+  at any depth; SELECT/UNION revert to depth-0-only stops.
+  Empirically verified: pre-Round-5 the outer FROM count was
+  0; post-Round-5 the outer FROM clause survives. Regression
+  gates:
+  `test_slice10a_recover_to_delimiter_does_not_stop_on_nested_select_at_depth_ru`
+  and `_en` in `crates/parser/tests/sdbl_slice10a_backbone.rs`.
+
+  All three SDBL recovery helpers
+  (`recover_to_delimiter`, `recover_to_delimiter_vt`,
+  `recover_field_to_alias_or_delimiter`) now share the
+  refined two-class contract; the Slice 8-addendum and
+  Slice 7 attestations record the matching post-Round-5
+  entries.
   Regression gates:
   `test_slice10a_recover_to_delimiter_stops_on_clause_keyword_at_any_depth_ru`
   and `_en` in `crates/parser/tests/sdbl_slice10a_backbone.rs`
