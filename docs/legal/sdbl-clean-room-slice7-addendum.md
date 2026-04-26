@@ -100,7 +100,7 @@ D = local IDE-recovery allowance.
 | Function | Tier source map |
 |---|---|
 | `is_identifier_token` | **C/B local parser contract** — body `p.at(TokenKind::Ident)` is trivially derivable from the project's event-parser conventions; load-bearing semantics inherited from Slice 7 alias-scan + Slice 8 source-alias guard contracts cross-referenced at `docs/legal/sdbl-clean-room-slice8.md:264-269`. |
-| `is_limitation_keyword` | **A1** + B (lexer Slice 2 / Slice 2 LEGACY-attested keyword pairs DISTINCT / РАЗЛИЧНЫЕ, TOP / ПЕРВЫЕ, ALLOWED / РАЗРЕШЕННЫЕ). Primary Tier A1 source: v8327doc Глава 8 §<Описание запроса> at `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320` canonical EBNF skeleton placing all three qualifiers in their canonical first three SELECT-prefix slots; bilingual word-list at `:1030-1034` (РАЗЛИЧНЫЕ ↔ DISTINCT), `:1040-1044` (РАЗРЕШЕННЫЕ ↔ ALLOWED), `:920-924` (ПЕРВЫЕ ↔ TOP). |
+| `is_limitation_keyword` | **A1** + B (lexer Slice 2 / Slice 2 LEGACY-attested keyword pairs DISTINCT / РАЗЛИЧНЫЕ, TOP / ПЕРВЫЕ, ALLOWED / РАЗРЕШЕННЫЕ). Primary Tier A1 source: v8327doc Глава 8 §<Описание запроса> at `page.html:1320` canonical EBNF skeleton placing all three qualifiers in their canonical first three SELECT-prefix slots; bilingual word-list at `:1030-1034` (РАЗЛИЧНЫЕ ↔ DISTINCT), `:1040-1044` (РАЗРЕШЕННЫЕ ↔ ALLOWED), `:920-924` (ПЕРВЫЕ ↔ TOP). |
 | `limitations` | **A1** + B + C. Primary Tier A1 source: v8327doc Глава 8 at `page.html:1320` canonical EBNF + `:1331-1356` prose semantics for РАЗРЕШЕННЫЕ / РАЗЛИЧНЫЕ / ПЕРВЫЕ. Secondary corroborating sources: pubqlang chapters 19/20/57 (textbook companion). C = mini-spec §Limitations any-order acceptance + duplicate-qualifier loop tolerance contract. |
 | `top_clause` | **A1** + B + C + D. Primary Tier A1 source: v8327doc Глава 8 at `page.html:1320` canonical EBNF `[ПЕРВЫЕ <Количество>]` slot + `:1350-1356` prose covering limit, ordering interaction with subsequent ORDER BY, and nested-query support. Secondary: pubqlang `chapter_019.html:19, 28`. D = §IDE-recovery allowance Q3 (missing-decimal recovery shape; Slice 12 owns the recovery-quality fix). |
 
@@ -109,7 +109,7 @@ disclosure** (per codex Round-2 finding 2 + post-Round-3
 reclassification): The user downloaded the v8.3.27 Developer's
 Reference Глава 8 «Работа с запросами» from
 `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` to
-`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+`page.html`
 during the C0 review window. Line 1320 of that page carries
 the canonical EBNF skeleton placing `[РАЗРЕШЕННЫЕ]` in the
 first SELECT-prefix slot; lines 1331-1344 give full prose
@@ -151,7 +151,7 @@ The Slice 7-addendum material was authored from:
    Reference Глава 8 «Работа с запросами», downloaded from
    `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` and
    saved to
-   `/home/itrous/src/tools_migration/its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`.
+   `page.html`.
    Specifically:
    - `page.html:1320` — canonical EBNF skeleton for `<Описание
      запроса>` placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ

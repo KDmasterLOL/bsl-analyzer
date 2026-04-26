@@ -753,17 +753,20 @@ LEGACY banner in `select.rs` from
 `virtual_table_args_legacy` in the residual block.
 
 A primary SDBL grammar source — v8.3.27 Developer's Reference
-Глава 8 «Работа с запросами» downloaded to
-`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html` —
-landed during the C0 review window. Line 1320 of `page.html`
-carries the canonical EBNF skeleton for `<Описание запроса>`
-placing all three SELECT-prefix qualifiers (РАЗРЕШЕННЫЕ /
-РАЗЛИЧНЫЕ / ПЕРВЫЕ) in their canonical first three slots; lines
-1331-1356 give full prose semantics for each qualifier. This
-source is **primary**; the pubqlang dump (chapters 19/20/57)
-remains a **secondary** corroborating textbook companion. After
-the addendum lands, ALL three SELECT-prefix qualifiers are
-Tier A1 with v8327doc Глава 8 as the cited primary source.
+Глава 8 «Работа с запросами» —
+<https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>
+landed during the C0 review window (locally saved at
+`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+for line-numbered reviewer convenience). Line 1320 of
+`page.html` carries the canonical EBNF skeleton for `<Описание
+запроса>` placing all three SELECT-prefix qualifiers
+(РАЗРЕШЕННЫЕ / РАЗЛИЧНЫЕ / ПЕРВЫЕ) in their canonical first
+three slots; lines 1331-1356 give full prose semantics for
+each qualifier. This source is **primary**; the pubqlang dump
+(chapters 19/20/57) remains a **secondary** corroborating
+textbook companion. After the addendum lands, ALL three
+SELECT-prefix qualifiers are Tier A1 with v8327doc Глава 8 as
+the cited primary source.
 
 The addendum carries a §Deferred semantic constraint note
 (codex Round-4 finding 4): the v8327doc-attested top-level-only

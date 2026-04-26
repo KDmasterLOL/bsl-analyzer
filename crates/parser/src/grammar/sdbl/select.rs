@@ -1520,14 +1520,19 @@ fn totals_by_clause(p: &mut Parser) {
 //   - `limitations` — Tier A1 main entry; emits `SdblLimitations`.
 //   - `top_clause` — Tier A1 helper; emits `SdblTopClause`.
 //
-// Tier classification authoritative source: v8327doc Глава 8 «Работа с
-// запросами» at
-// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
-// (canonical EBNF skeleton placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ in their
-// canonical first three SELECT-prefix slots) + `:1331-1356` prose semantics
-// + bilingual word-list pairs at `:1030-1034` (РАЗЛИЧНЫЕ ↔ DISTINCT),
-// `:1040-1044` (РАЗРЕШЕННЫЕ ↔ ALLOWED), `:920-924` (ПЕРВЫЕ ↔ TOP).
-// Pubqlang chapters 19/20/57 are secondary corroborating sources.
+// Tier classification authoritative source: v8.3.27 Developer's Reference
+// Глава 8 «Работа с запросами» —
+// https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453. Line citations
+// of the form `page.html:NNNN` reference the locally saved snapshot under
+// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html` for
+// reviewer convenience; the canonical citation target is the public URL
+// above. Specifically: `page.html:1320` carries the canonical EBNF
+// skeleton placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ in their canonical first
+// three SELECT-prefix slots; `page.html:1331-1356` carries the prose
+// semantics; bilingual word-list pairs at `page.html:1030-1034`
+// (РАЗЛИЧНЫЕ ↔ DISTINCT), `page.html:1040-1044`
+// (РАЗРЕШЕННЫЕ ↔ ALLOWED), `page.html:920-924` (ПЕРВЫЕ ↔ TOP). Pubqlang
+// chapters 19/20/57 are secondary corroborating sources.
 
 /// Check whether the current token is an Ident accepted by the alias /
 /// source-alias scans as the head of an identifier.
@@ -1557,7 +1562,7 @@ fn is_identifier_token(p: &Parser) -> bool {
 /// qualifier.
 ///
 /// Primary source: v8327doc Глава 8 §<Описание запроса> at
-/// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+/// `page.html:1320`
 /// canonical EBNF skeleton places all three SELECT-prefix qualifiers
 /// (РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ) in their canonical first three
 /// slots; prose semantics at `page.html:1331-1356`; bilingual
@@ -1594,7 +1599,7 @@ fn is_limitation_keyword(p: &Parser) -> bool {
 /// ```
 ///
 /// Primary source: v8327doc Глава 8 §<Описание запроса> at
-/// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+/// `page.html:1320`
 /// canonical EBNF + `page.html:1331-1356` prose semantics for
 /// DISTINCT / TOP / ALLOWED. Secondary corroborating sources
 /// (textbook companion in pubqlang dump): chapters 19 / 20 / 57.
@@ -1636,7 +1641,7 @@ fn limitations(p: &mut Parser) {
 /// Grammar: `(TOP|ПЕРВЫЕ) <decimal>`.
 ///
 /// Primary source: v8327doc Глава 8 §<Описание запроса> at
-/// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+/// `page.html:1320`
 /// canonical EBNF `[ПЕРВЫЕ <Количество>]` slot + `page.html:1350-1356`
 /// prose covering limit, ordering interaction with subsequent
 /// ORDER BY, and nested-query support. Secondary corroborating

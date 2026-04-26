@@ -155,9 +155,14 @@
 //! ПЕРВЫЕ, ALLOWED / РАЗРЕШЕННЫЕ) live under the
 //! `CLEAN-ROOM Slice 7-addendum — SELECT prefix qualifiers`
 //! banner in `select.rs`. All three SELECT-prefix keywords are
-//! Tier A1 per v8327doc Глава 8 «Работа с запросами» at
-//! `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
-//! canonical EBNF + `:1331-1356` prose semantics;
+//! Tier A1 per v8.3.27 Developer's Reference Глава 8 «Работа с
+//! запросами» —
+//! https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453
+//! (locally saved snapshot at
+//! `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+//! for line-numbered reviewer convenience). The canonical EBNF
+//! skeleton lives at `page.html:1320`; prose semantics at
+//! `page.html:1331-1356`;
 //! `is_identifier_token` is Tier C/B local parser contract per
 //! Slice 8 attestation cross-reference. The residual LEGACY
 //! banner in `select.rs` shrinks to `LEGACY (Slice 5 pending)`

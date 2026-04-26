@@ -7,11 +7,14 @@
 //! helpers (`is_identifier_token`, `is_limitation_keyword`,
 //! `limitations`, `top_clause`). Each test cites either:
 //! - the **primary** SDBL grammar specification: v8.3.27 Developer's
-//!   Reference Глава 8 «Работа с запросами» at
-//!   `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+//!   Reference Глава 8 «Работа с запросами» —
+//!   https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453
 //!   (line 1320 canonical EBNF + lines 1331-1356 prose semantics +
 //!   bilingual word-list pairs at lines 1030-1034 / 1040-1044 /
-//!   920-924);
+//!   920-924). `page.html:NNNN` line citations below reference the
+//!   locally saved snapshot under
+//!   `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+//!   for reviewer convenience;
 //! - the **secondary** corroborating ITS pubqlang dump (textbook
 //!   companion): chapter 19 (TOP demonstrative), chapter 20
 //!   (DISTINCT demonstrative + DISTINCT × ORDER BY interaction),
@@ -73,7 +76,7 @@ fn limitations_token_text(limitations: &syntax::SyntaxNode) -> String {
 
 /// Tier A1 canonical Russian form. Primary source: v8327doc
 /// Глава 8 §<Описание запроса> at
-/// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+/// `page.html:1320`
 /// (canonical EBNF places `[РАЗЛИЧНЫЕ]` in the second SELECT-prefix
 /// slot) + `:1346-1348` (duplicate-elimination prose). Secondary
 /// corroborating: pubqlang `chapter_020.html:18, 29` demonstrative

@@ -4598,10 +4598,17 @@ fn test_slice11_is_clause_keyword_join_delegation() {
 // behaviour before C2 touches it).
 //
 // Provenance per Slice 7-addendum plan §Tier classification
-// (post-Round-3 v8327doc Глава 8 reclassification):
+// (post-Round-3 v8327doc Глава 8 reclassification). Primary
+// source: v8.3.27 Developer's Reference Глава 8 «Работа с
+// запросами» —
+// https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453.
+// `page.html:NNNN` line citations below reference the locally
+// saved snapshot at
+// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+// for reviewer convenience.
 //   - DISTINCT — Tier A1. Primary source: v8327doc Глава 8
 //                §<Описание запроса> at
-//                its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320
+//                page.html:1320
 //                canonical EBNF + :1346-1348 prose. Secondary
 //                corroborating: pubqlang chapter 20.
 //   - TOP      — Tier A1. Primary source: v8327doc Глава 8 at
@@ -4636,7 +4643,7 @@ fn test_slice11_is_clause_keyword_join_delegation() {
 
 // (a) Slice 7-addendum — DISTINCT canonical RU form. **Tier A1
 // per v8327doc Глава 8 §<Описание запроса> at
-// `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`**
+// `page.html:1320`**
 // (canonical EBNF places РАЗЛИЧНЫЕ in the second SELECT-prefix
 // slot) + `:1346-1348` (duplicate-elimination prose). Pubqlang
 // `chapter_020.html:18, 29` provides the demonstrative
@@ -4677,7 +4684,7 @@ fn test_slice7adn_distinct_canonical_ru() {
 
 // (b) Slice 7-addendum — TOP canonical RU form. **Tier A1 per
 // v8327doc Глава 8 §<Описание запроса> at
-// `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`**
+// `page.html:1320`**
 // (canonical EBNF `[ПЕРВЫЕ <Количество>]` slot) + `:1350-1356`
 // (limit / ordering / nested-query prose). Pubqlang
 // `chapter_019.html:19, 28` provides the demonstrative
@@ -4729,7 +4736,7 @@ fn test_slice7adn_top_canonical_ru() {
 
 // (c) Slice 7-addendum — ALLOWED canonical RU form. **Tier A1
 // per v8327doc Глава 8 §<Описание запроса> at
-// `its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`**
+// `page.html:1320`**
 // — the canonical EBNF skeleton
 // `ВЫБРАТЬ [РАЗРЕШЕННЫЕ] [РАЗЛИЧНЫЕ] [ПЕРВЫЕ <Количество>]`
 // places ALLOWED in the canonical first-qualifier slot, with
