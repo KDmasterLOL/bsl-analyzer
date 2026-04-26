@@ -29,11 +29,9 @@ pub fn from_hir(
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     let message = match kind {
-        UnresolvedMethodKind::MethodNotFound => format!(
-            "Метод '{}' не найден в модуле '{}'",
-            method_name.as_str(),
-            receiver_name.as_str()
-        ),
+        UnresolvedMethodKind::MethodNotFound => {
+            format!("Метод '{}' не найден у '{}'", method_name.as_str(), receiver_name.as_str())
+        }
         UnresolvedMethodKind::MethodNotExport => {
             format!("Метод '{}.{}' не экспортирован", receiver_name.as_str(), method_name.as_str())
         }

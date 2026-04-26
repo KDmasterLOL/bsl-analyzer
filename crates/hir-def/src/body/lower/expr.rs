@@ -1459,6 +1459,14 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
             return None;
         }
 
+        // Defensive gate: only classify as ThreeLevel when the leading IDENT
+        // really is an MDO plural (Документы / Справочники / …). Any other
+        // identifier that escapes the local-vars / param-names sets — for
+        // example a loop iterator pre-Slice-N, or an identifier injected via
+        // preprocessor — would otherwise be promoted into a QualifiedPath
+        // and mis-resolved as `Документы.<name>.Method()`.
+        bsl_metadata::MdoType::from_plural(&mdo_type)?;
+
         tracing::debug!(
             mdo_type = %mdo_type,
             mdo_name = %mdo_name,
