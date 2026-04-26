@@ -286,6 +286,65 @@ preserved bit-for-bit in Slice 7:
    by Slice 7 (neither C1 nor C2 touched `syntax_kind.rs`, `ast.rs`,
    or any of the consumer crates).
 
+## Behaviour change (NOT preserved)
+
+One pre-refactor behaviour is **not** preserved bit-for-bit by
+Slice 7 — it is a deliberate post-landing bug fix:
+
+- **`recover_field_to_alias_or_delimiter` stops at clause keywords,
+  Semicolons, and EOF at any nesting depth (Slice 12 post-landing
+  fix).** Pre-Slice-12 the helper at
+  `crates/parser/src/grammar/sdbl/select.rs:45-128` wrapped ALL six
+  stop conditions (alias keyword `AS`/`КАК`, Comma, Semicolon,
+  RParen, clause keyword, EOF) inside
+  `if case_depth == 0 && paren_depth == 0`. Two distinct bugs
+  resulted at depth>0 inside an unterminated nested `(...)` or
+  `CASE ... END`:
+
+  1. **Clause keyword bug** — the outer query's clause keyword
+     (FROM / WHERE / ...) was silently bumped into the recovery
+     `Error` node. Analogous to the Slice 8-addendum post-C3 fix
+     `7e4f6a9e` for `recover_to_delimiter_vt` and the Slice 12 F1
+     fix `9d418084` for `recover_to_delimiter`.
+  2. **EOF spin bug** — at depth>0 the gate did not enter, so
+     `p.at_end()` was never checked; `p.bump()` is a no-op at EOF
+     (`crates/parser/src/parser.rs:111-117`), so the helper spun
+     until `Parser::check_iteration_limit` panicked with
+     "iteration limit exceeded". This is a strictly worse failure
+     mode than the clause-keyword consumption — instead of a quiet
+     parse loss it produces a hard panic on certain unterminated
+     inputs.
+
+  Slice 12 (commit `80a3129c`, 2026-04-26) lifted three stop
+  conditions out of the depth gate to fire at any nesting depth:
+  clause keywords, Semicolon, and EOF. Three remain inside the
+  depth gate as legitimate continuation tokens at depth>0:
+  `AS`/`КАК` (nested alias is fine inside `CASE x WHEN ... AS y ...`),
+  Comma (function-call args, CASE branches), and depth-0 RParen
+  (the helper at lines 77-82 already bumps RParen at depth>0, so
+  the top-level RParen check is the depth-0 case only).
+
+  The `consumed_any` / `err.abandon` invariant at lines 49,
+  122-127 is preserved unchanged.
+
+  Regression gates in
+  `crates/parser/tests/sdbl_slice7_fields.rs`:
+  - `test_slice7_field_recovery_stops_on_clause_keyword_at_any_depth_ru`
+    and `_en` use the trigger input `ВЫБРАТЬ A ( ИЗ T2 КАК Т`
+    (and EN equivalent) to assert the outer FROM clause is
+    preserved and no `Error` sub-node contains the clause
+    keyword.
+  - `test_slice7_field_recovery_breaks_at_eof_inside_unterminated_paren`
+    is an audit-gate against the iteration-limit-panic regression:
+    input `ВЫБРАТЬ A (` must not panic.
+
+  Companion fix for `recover_to_delimiter` is documented under the
+  Slice 10a attestation §Behaviour change (commit `9d418084`).
+  All three SDBL recovery helpers
+  (`recover_to_delimiter_vt`, `recover_to_delimiter`,
+  `recover_field_to_alias_or_delimiter`) now share the same
+  clause-keyword-at-any-depth contract.
+
 ## Verification recipe
 
 All of the following must be green before this attestation is
