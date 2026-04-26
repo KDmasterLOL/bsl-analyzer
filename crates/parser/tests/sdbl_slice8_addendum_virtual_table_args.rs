@@ -409,24 +409,24 @@ fn test_slice8adn_recovery_stops_on_clause_keyword_at_any_depth() {
         .descendants()
         .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
         .expect("Tree must contain SdblTableRef");
-    // The recovery helper's Error contains the spurious `(` it
-    // consumed at depth 1; the expect(RParen) failure path may
-    // separately wrap `ГДЕ` in its own Error sub-node (a Slice 12
-    // recovery-quality concern out of scope here). The §Behaviour
-    // change contract pins that NO SINGLE Error sub-node spans
-    // both `(` AND `ГДЕ` — that would mean the recovery helper
-    // gobbled across the clause keyword (the pre-fix bug).
-    for err in table_ref.descendants().filter(|n| n.kind() == SyntaxKind::ERROR) {
+    // After the §Behaviour change fix, NO Error sub-node anywhere
+    // in the tree contains the `ГДЕ` clause keyword: neither the
+    // recovery helper's Error (which stops at any depth on
+    // `is_clause_keyword`) nor the post-helper missing-RParen
+    // Error (which now emits an empty marker rather than bumping
+    // the keyword).
+    for err in parse.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::ERROR) {
         let text = err.text().to_string();
         assert!(
-            !(text.contains('(') && text.contains("ГДЕ")),
-            "No single Error sub-node may contain BOTH `(` AND `ГДЕ` \
-             — that would mean recover_to_delimiter_vt gobbled \
-             across the clause keyword at paren_depth>0 (the pre-fix \
-             bug). Got Error text: {:?}",
+            !text.contains("ГДЕ"),
+            "No Error sub-node may contain the `ГДЕ` clause keyword \
+             — recovery + missing-RParen handling must preserve \
+             clause keywords for the outer query. Got Error text: \
+             {:?}",
             text,
         );
     }
+    let _ = table_ref; // silence unused-binding lint after the assertion shape change
 }
 
 // ============================================================

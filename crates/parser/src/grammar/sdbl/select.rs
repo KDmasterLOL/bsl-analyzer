@@ -1816,7 +1816,23 @@ fn virtual_table_args(p: &mut Parser) {
     }
 
     p.skip_trivia();
-    p.expect(TokenKind::RParen);
+    if p.at(TokenKind::RParen) {
+        p.bump();
+    } else if is_clause_keyword(p) {
+        // Missing `)` followed by a clause keyword — the keyword
+        // belongs to the outer query, not to this VT-args list.
+        // Emit an empty `Error` marker (no bump) so the
+        // missing-RParen is recorded without `Parser::error()`
+        // gobbling the clause keyword. Mirrors the pattern used
+        // in Slice 8 `source_alias` (`select.rs:418-421`,
+        // `:648-651`) for the analogous "expected alias, got
+        // clause keyword" recovery. Slice 8-addendum §Behaviour
+        // change.
+        let err = p.start();
+        err.complete(p, NodeKind::Error);
+    } else {
+        p.expect(TokenKind::RParen);
+    }
 }
 
 #[cfg(test)]

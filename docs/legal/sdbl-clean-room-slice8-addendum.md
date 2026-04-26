@@ -242,48 +242,58 @@ change section below (which is empty by default).
 
 ## Behaviour change
 
-**One regression-free fix landed in the post-C3 close-out:**
-`recover_to_delimiter_vt` now treats clause keywords as
-recovery terminators at **any** paren depth, not just at
-`paren_depth == 0` as the pre-rewrite parser did. The
-practical impact: when an unterminated nested `(...)` inside a
-VT-args list is followed by a clause keyword like
-`ГДЕ` / `СГРУППИРОВАТЬ` / `УПОРЯДОЧИТЬ` / `ИЗ`, the recovery
-helper now stops at the keyword instead of gobbling it (and
-any following tokens) into the `Error` sub-node. This is a
-recovery-quality improvement: the unterminated VT-args list
-no longer destructively consumes content that belongs to the
-outer query. Pinned by the regression test
+**Two coordinated regression-free fixes landed in the post-C3
+close-out, both addressing the same recovery-quality concern
+(clause keywords following an unterminated VT-args list must
+NOT be destructively consumed):**
+
+1. **`recover_to_delimiter_vt` clause-keyword stop at any
+   paren depth.** The helper now treats clause keywords
+   (`ИЗ` / `ГДЕ` / `СГРУППИРОВАТЬ` / `УПОРЯДОЧИТЬ` /
+   `ИМЕЮЩИЕ` / `ИТОГИ` / etc.) as termination signals at
+   **any** paren depth, not just `paren_depth == 0` as the
+   pre-rewrite parser did. Comma and Semicolon, in contrast,
+   remain depth-0-only terminators because a comma inside a
+   nested function-call argument list (e.g. `СУММА(A, B)`)
+   is part of that nested call's grammar.
+
+2. **`virtual_table_args` missing-RParen handling preserves
+   clause keywords.** The post-helper `expect(RParen)` call
+   was the second source of clause-keyword consumption: when
+   `expect` failed at a clause keyword, it would fall through
+   to `Parser::error()` which unconditionally bumps the next
+   token into a fresh `Error` sub-node. The fix branches:
+   if the next token is `)`, bump it normally; if it's a
+   clause keyword, emit an EMPTY `Error` marker (no bump) to
+   record the missing-RParen without consuming the keyword;
+   otherwise, fall back to `expect(RParen)` (which still
+   bumps for non-keyword junk like a stray Ident). This
+   mirrors the empty-Error-marker pattern already used in
+   Slice 8 `source_alias` (`select.rs:418-421`, `:648-651`)
+   for the analogous "expected alias, got clause keyword"
+   recovery.
+
+Together the two fixes ensure that a malformed input like
+`Регистр.Остатки(СУММА(A) ( ГДЕ S = 1` does NOT lose the
+trailing `ГДЕ S = 1` to the recovery `Error` sub-nodes — the
+keyword is preserved for the enclosing query's downstream
+recovery. Pinned by the regression test
 `test_slice8adn_recovery_stops_on_clause_keyword_at_any_depth`
-in `sdbl_slice8_addendum_virtual_table_args.rs`.
+in `sdbl_slice8_addendum_virtual_table_args.rs`, which
+asserts that NO `Error` sub-node anywhere in the tree
+contains the `ГДЕ` clause keyword.
 
-Comma and Semicolon, in contrast, remain depth-0-only
-terminators — a comma inside a nested function-call argument
-list (e.g. `СУММА(A, B)`) is part of the nested call's
-grammar and must not terminate recovery.
-
-Note that the parallel helper `recover_to_delimiter` in
+Note on cross-helper alignment: the parallel helper
+`recover_to_delimiter` in
 `crates/parser/src/grammar/sdbl/expressions.rs:182-233`
 (Slice 10a territory) retains the original depth-0-only
-clause-keyword guard. Aligning the two helpers — by applying
-the same depth-any clause-keyword fix to
-`recover_to_delimiter` — is deferred to Slice 12 (IDE
-recovery / allowances), which owns cross-helper recovery
-hardening across the parser. This Slice 8-addendum fix is
-scoped to the slice's own `recover_to_delimiter_vt`.
-
-Caveat — out of scope for this slice: the deeper recovery
-weakness where `Parser::expect(RParen)` at a clause keyword
-falls through to `Parser::error()` and bumps the keyword into
-its own `Error` sub-node remains. The §Behaviour change above
-addresses only the `recover_to_delimiter_vt` helper's
-gobbling; broader missing-RParen recovery quality is Slice 12
-territory. The Slice 8-addendum regression test pins the
-narrow contract by asserting that no single `Error` sub-node
-under `SdblTableRef` contains BOTH `(` AND `ГДЕ` (which
-would indicate the recovery helper crossed the clause
-keyword), without requiring a downstream `SdblWhereClause` to
-materialise.
+clause-keyword guard. Aligning that helper with
+`recover_to_delimiter_vt` — by applying the same
+depth-any clause-keyword fix to expression-tail recovery —
+is deferred to Slice 12 (IDE recovery / allowances), which
+owns cross-helper recovery hardening. This Slice 8-addendum
+fix is scoped to the slice's own helpers and the
+`virtual_table_args` body.
 
 ## Verification recipe
 
