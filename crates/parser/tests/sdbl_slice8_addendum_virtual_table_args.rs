@@ -380,6 +380,55 @@ fn test_slice8adn_recover_always_emits_error() {
                                  // termination + no panic.
 }
 
+/// Slice 8-addendum §Behaviour change — clause-keyword
+/// termination at ANY paren depth. Pin the new behaviour
+/// where an unterminated nested `(...)` inside VT-args does
+/// NOT gobble up a clause keyword that belongs to the outer
+/// query.
+///
+/// Input simulates a user who forgot to close a nested paren
+/// inside a VT arg and kept typing the WHERE clause. Old
+/// behaviour: `ГДЕ` was consumed inside the recovery `Error`
+/// sub-node at paren_depth=1. New behaviour: recovery stops
+/// on `ГДЕ` at any depth, leaving the keyword for the
+/// enclosing query to recover from. The downstream WHERE-
+/// clause attachment depends on broader missing-RParen
+/// recovery quality (Slice 12 territory), so this test pins
+/// only the core §Behaviour change contract: `ГДЕ` MUST NOT
+/// appear inside any `Error` descendant of `SdblTableRef`.
+#[test]
+fn test_slice8adn_recovery_stops_on_clause_keyword_at_any_depth() {
+    // The bare `(` after `СУММА(A)` is what triggers
+    // recover_to_delimiter_vt at paren_depth that increments to 1
+    // before the loop encounters `ГДЕ`. Without the fix, the
+    // depth-0-only clause-keyword guard would let `ГДЕ S = 1` be
+    // consumed inside the Error sub-node.
+    let parse = parse_sdbl("ВЫБРАТЬ * ИЗ Регистр.Остатки(СУММА(A) ( ГДЕ S = 1");
+    let root = parse.syntax_node();
+    let table_ref = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
+        .expect("Tree must contain SdblTableRef");
+    // The recovery helper's Error contains the spurious `(` it
+    // consumed at depth 1; the expect(RParen) failure path may
+    // separately wrap `ГДЕ` in its own Error sub-node (a Slice 12
+    // recovery-quality concern out of scope here). The §Behaviour
+    // change contract pins that NO SINGLE Error sub-node spans
+    // both `(` AND `ГДЕ` — that would mean the recovery helper
+    // gobbled across the clause keyword (the pre-fix bug).
+    for err in table_ref.descendants().filter(|n| n.kind() == SyntaxKind::ERROR) {
+        let text = err.text().to_string();
+        assert!(
+            !(text.contains('(') && text.contains("ГДЕ")),
+            "No single Error sub-node may contain BOTH `(` AND `ГДЕ` \
+             — that would mean recover_to_delimiter_vt gobbled \
+             across the clause keyword at paren_depth>0 (the pre-fix \
+             bug). Got Error text: {:?}",
+            text,
+        );
+    }
+}
+
 // ============================================================
 // §Cross-slice integration (4 tests).
 //

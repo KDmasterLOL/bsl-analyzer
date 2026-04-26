@@ -1640,10 +1640,17 @@ fn top_clause(p: &mut Parser) {
 ///
 /// Mini-spec §Virtual table argument behavior §IDE-recovery allowance
 /// #5 — safety net for spurious tokens between an expression and the
-/// next comma / close-paren. Functionally a sibling of
-/// `recover_to_delimiter` in `expressions.rs`; both share paren-depth
-/// tracking, comma / semicolon stop, clause-keyword stop via
-/// `is_clause_keyword`, and unconditional `Error` emit.
+/// next comma / close-paren. Sibling of `recover_to_delimiter` in
+/// `expressions.rs` (paren-depth tracking + unconditional `Error`
+/// emit are shared). Per the Slice 8-addendum §Behaviour change,
+/// this helper terminates on a clause keyword at ANY paren depth so
+/// that an unterminated nested `(...)` does not gobble a clause
+/// keyword that belongs to the outer query; the sibling
+/// `recover_to_delimiter` retains the depth-0-only clause-keyword
+/// guard, and aligning the two is deferred to Slice 12.
+/// Comma / Semicolon, in contrast, remain depth-0-only terminators
+/// — a comma inside a nested `СУММА(A, B)` is part of that call's
+/// grammar.
 ///
 /// Provenance: parser-internal recovery utility; no ITS source. The
 /// helper does NOT fire on clean nested forms — clean
@@ -1679,12 +1686,20 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             continue;
         }
 
-        // Top-level termination signals are honoured only at depth 0
-        // so a comma or clause keyword inside a nested `(...)` does
-        // not break recovery prematurely.
-        if paren_depth == 0
-            && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) || is_clause_keyword(p))
-        {
+        // Clause keywords (FROM / WHERE / GROUP BY / ...) terminate
+        // recovery at ANY paren depth: an unterminated nested `(...)`
+        // must not gobble up a clause keyword that belongs to the
+        // outer query. This is the §Behaviour change entry in the
+        // Slice 8-addendum attestation.
+        if is_clause_keyword(p) {
+            break;
+        }
+
+        // Comma and Semicolon, in contrast, are honoured only at
+        // depth 0 — a comma inside a nested function-call argument
+        // list (e.g. `СУММА(A, B)`) is part of the nested call's
+        // grammar and must not terminate recovery.
+        if paren_depth == 0 && (p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon)) {
             break;
         }
 

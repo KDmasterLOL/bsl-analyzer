@@ -242,14 +242,48 @@ change section below (which is empty by default).
 
 ## Behaviour change
 
-**None.** The pre-C1 parser already accepted every documented
-v8327doc / pubqlang VT-args form covered by the canonical
-example, the parameter-order prose, and the IDE-recovery
-allowances. C2 review verified by direct reading of v8327doc
-Глава 8.2 / 8.3 and pubqlang chapters 9 / 104 / 116 / 152 / 156
-that no MANDATORY behaviour-change fix was required. This
-mirrors the Slice 9 "None" precedent (and unlike Slice 11
-which had the HIERARCHY MANDATORY entry per ITS chapter 27).
+**One regression-free fix landed in the post-C3 close-out:**
+`recover_to_delimiter_vt` now treats clause keywords as
+recovery terminators at **any** paren depth, not just at
+`paren_depth == 0` as the pre-rewrite parser did. The
+practical impact: when an unterminated nested `(...)` inside a
+VT-args list is followed by a clause keyword like
+`ГДЕ` / `СГРУППИРОВАТЬ` / `УПОРЯДОЧИТЬ` / `ИЗ`, the recovery
+helper now stops at the keyword instead of gobbling it (and
+any following tokens) into the `Error` sub-node. This is a
+recovery-quality improvement: the unterminated VT-args list
+no longer destructively consumes content that belongs to the
+outer query. Pinned by the regression test
+`test_slice8adn_recovery_stops_on_clause_keyword_at_any_depth`
+in `sdbl_slice8_addendum_virtual_table_args.rs`.
+
+Comma and Semicolon, in contrast, remain depth-0-only
+terminators — a comma inside a nested function-call argument
+list (e.g. `СУММА(A, B)`) is part of the nested call's
+grammar and must not terminate recovery.
+
+Note that the parallel helper `recover_to_delimiter` in
+`crates/parser/src/grammar/sdbl/expressions.rs:182-233`
+(Slice 10a territory) retains the original depth-0-only
+clause-keyword guard. Aligning the two helpers — by applying
+the same depth-any clause-keyword fix to
+`recover_to_delimiter` — is deferred to Slice 12 (IDE
+recovery / allowances), which owns cross-helper recovery
+hardening across the parser. This Slice 8-addendum fix is
+scoped to the slice's own `recover_to_delimiter_vt`.
+
+Caveat — out of scope for this slice: the deeper recovery
+weakness where `Parser::expect(RParen)` at a clause keyword
+falls through to `Parser::error()` and bumps the keyword into
+its own `Error` sub-node remains. The §Behaviour change above
+addresses only the `recover_to_delimiter_vt` helper's
+gobbling; broader missing-RParen recovery quality is Slice 12
+territory. The Slice 8-addendum regression test pins the
+narrow contract by asserting that no single `Error` sub-node
+under `SdblTableRef` contains BOTH `(` AND `ГДЕ` (which
+would indicate the recovery helper crossed the clause
+keyword), without requiring a downstream `SdblWhereClause` to
+materialise.
 
 ## Verification recipe
 
