@@ -389,16 +389,19 @@ C0a/C0b-shaped flow):
   drop the empty `if !p.expect(...) { }` no-op block in
   `top_clause` (within clean-room latitude per codex C2-review
   confirmation).
-- `<THIS_COMMIT>` (2026-04-26) — C3: this attestation, the
+- `cb383521` (2026-04-26) — C3: this attestation, the
   `sdbl_slice7_addendum_limitations.rs` acceptance tests, the
   Slice 7-addendum status block addition in
   [`sdbl-clean-room-slices.md`](sdbl-clean-room-slices.md),
   and the `sdbl.rs` Provenance docstring flip to "complete
   (landed with C3 2026-04-26)" with attestation citation.
-  Anti-Hilbert close-out: this `<THIS_COMMIT>` placeholder is
-  replaced with the actual C3 SHA in a follow-up amendment
-  commit after C3 lands (mirrors Slice 11 attestation
-  pattern).
+- `<HILBERT_COMMIT>` (2026-04-26) — Anti-Hilbert close-out:
+  replaced the `<THIS_COMMIT>` placeholder in the §Commit
+  trail entry above with the actual C3 SHA `cb383521`. This
+  amendment commit is itself self-referential by design (it is
+  the only commit whose own SHA does not appear in the
+  attestation §Commit trail) — mirrors the Slice 11
+  attestation Anti-Hilbert close-out at commit `83267131`.
 
 ## Licensing note
 
