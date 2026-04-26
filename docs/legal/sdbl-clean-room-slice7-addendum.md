@@ -110,7 +110,7 @@ reclassification): The user downloaded the v8.3.27 Developer's
 Reference Глава 8 «Работа с запросами» from
 `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` and
 saved a local snapshot at
-`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+`/home/itrous/src/tools_migration/its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
 during the C0 review window. Line 1320 of that page carries
 the canonical EBNF skeleton placing `[РАЗРЕШЕННЫЕ]` in the
 first SELECT-prefix slot; lines 1331-1344 give full prose
@@ -152,7 +152,7 @@ The Slice 7-addendum material was authored from:
    Reference Глава 8 «Работа с запросами» —
    `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`.
    Locally saved snapshot at
-   `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
+   `/home/itrous/src/tools_migration/its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
    for line-numbered reviewer convenience; the canonical
    citation target is the public URL above. Specifically:
    - `page.html:1320` — canonical EBNF skeleton for `<Описание
