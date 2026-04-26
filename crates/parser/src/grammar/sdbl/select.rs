@@ -1503,18 +1503,105 @@ fn totals_by_clause(p: &mut Parser) {
 }
 
 // ============================================================================
-// LEGACY (Slice 5 + SELECT limitation helpers pending)
+// CLEAN-ROOM Slice 7-addendum — SELECT prefix qualifiers
 // ============================================================================
 //
-// Residual Tier B functions until their respective clean-room slices land:
-// `virtual_table_args_legacy` (Slice 5 — virtual-table and external-source
-// handling; extracted from `table_ref` during Slice 8 C1) plus
-// `is_limitation_keyword` / `limitations` / `top_clause` (SELECT prefix
-// qualifiers — pending future Slice-7-addendum or 6/7-shaped mini-slice).
-// The small `is_identifier_token` predicate is consumed by Slice 7 and
-// Slice 8 alias-scans; ownership of this helper is part of the future
-// SELECT-prefix addendum scope. No per-function provenance comments here
-// until the corresponding clean-room slices.
+// Authorship: rewrite-in-progress; per-function provenance comments and
+// clean-room body re-derivation land at C2. C1 is a pure relocation +
+// placeholder commit so the C2 audit-diff is restricted to function-body
+// changes only.
+//
+// The 4 functions below cover the Slice-7-addendum surface:
+//   - `is_identifier_token` — Tier C/B local parser contract: trivial Ident
+//     predicate consumed cross-slice by Slice 7 alias-scan
+//     (`selected_field_alias` at lines 357, 370) and Slice 8 source-alias
+//     guard (`source_alias` at lines 582, 600).
+//   - `is_limitation_keyword` — Tier A1 predicate matching the bilingual
+//     SELECT-prefix qualifier vocabulary.
+//   - `limitations` — Tier A1 main entry; emits `SdblLimitations`.
+//   - `top_clause` — Tier A1 helper; emits `SdblTopClause`.
+//
+// Tier classification authoritative source: v8327doc Глава 8 «Работа с
+// запросами» at
+// `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html:1320`
+// (canonical EBNF skeleton with all three SELECT-prefix qualifiers in their
+// canonical first three slots) + `:1331-1356` prose semantics +
+// `:1024-1046` bilingual word-list. Pubqlang chapters 19/20/57 are
+// secondary corroborating sources. See
+// `docs/legal/sdbl-clean-room-slice7-addendum.md` (lands with C3) for the
+// attestation.
+
+/// Check if current token is an identifier
+///
+/// Note: Some keywords can be used as identifiers in SDBL
+fn is_identifier_token(p: &Parser) -> bool {
+    // C1 placeholder — clean-room rewrite in C2
+    p.at(TokenKind::Ident)
+}
+
+/// Check if current position starts a limitation keyword
+///
+/// Limitations: DISTINCT, TOP, ALLOWED
+fn is_limitation_keyword(p: &Parser) -> bool {
+    // C1 placeholder — clean-room rewrite in C2
+    at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ")
+        || at_sdbl_keyword(p, "TOP", "ПЕРВЫЕ")
+        || at_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ")
+}
+
+/// Parse query limitations (DISTINCT, TOP, ALLOWED)
+///
+/// Grammar (simplified):
+/// ```text
+/// limitations: (DISTINCT | TOP count | ALLOWED)+
+/// ```
+///
+/// Keywords are accepted in any order to keep the parser tolerant; strict
+/// ordering (where required) is enforced by semantic diagnostics, not here.
+fn limitations(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2
+    let m = p.start();
+
+    // Parse keywords in any order until no more limitation keywords found
+    while is_limitation_keyword(p) {
+        if at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ") {
+            eat_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ");
+        } else if at_sdbl_keyword(p, "TOP", "ПЕРВЫЕ") {
+            top_clause(p);
+        } else if at_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ") {
+            eat_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ");
+        }
+        p.skip_trivia();
+    }
+
+    m.complete(p, NodeKind::SdblLimitations);
+}
+
+/// Parse TOP clause
+///
+/// Grammar: `TOP count=DECIMAL`
+fn top_clause(p: &mut Parser) {
+    // C1 placeholder — clean-room rewrite in C2
+    let m = p.start();
+
+    eat_sdbl_keyword(p, "TOP", "ПЕРВЫЕ");
+    p.skip_trivia();
+
+    // Expect a number (count)
+    if !p.expect(TokenKind::Decimal) {
+        // Error recovery: complete anyway
+    }
+
+    m.complete(p, NodeKind::SdblTopClause);
+}
+
+// ============================================================================
+// LEGACY (Slice 5 pending)
+// ============================================================================
+//
+// Residual Tier B function until Slice 5 (virtual table and external-source
+// handling) lands its catalog-heavy clean-room rewrite:
+// `virtual_table_args_legacy` (extracted from `table_ref` during Slice 8 C1).
 
 /// Parse virtual-table method-call arguments (e.g., `.Обороты(&A, , Авто, )`).
 ///
@@ -1577,66 +1664,6 @@ fn virtual_table_args_legacy(p: &mut Parser) {
         p.skip_trivia();
         p.expect(TokenKind::RParen);
     }
-}
-
-/// Check if current token is an identifier
-///
-/// Note: Some keywords can be used as identifiers in SDBL
-fn is_identifier_token(p: &Parser) -> bool {
-    p.at(TokenKind::Ident)
-}
-
-/// Check if current position starts a limitation keyword
-///
-/// Limitations: DISTINCT, TOP, ALLOWED
-fn is_limitation_keyword(p: &Parser) -> bool {
-    at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ")
-        || at_sdbl_keyword(p, "TOP", "ПЕРВЫЕ")
-        || at_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ")
-}
-
-/// Parse query limitations (DISTINCT, TOP, ALLOWED)
-///
-/// Grammar (simplified):
-/// ```text
-/// limitations: (DISTINCT | TOP count | ALLOWED)+
-/// ```
-///
-/// Keywords are accepted in any order to keep the parser tolerant; strict
-/// ordering (where required) is enforced by semantic diagnostics, not here.
-fn limitations(p: &mut Parser) {
-    let m = p.start();
-
-    // Parse keywords in any order until no more limitation keywords found
-    while is_limitation_keyword(p) {
-        if at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ") {
-            eat_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ");
-        } else if at_sdbl_keyword(p, "TOP", "ПЕРВЫЕ") {
-            top_clause(p);
-        } else if at_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ") {
-            eat_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ");
-        }
-        p.skip_trivia();
-    }
-
-    m.complete(p, NodeKind::SdblLimitations);
-}
-
-/// Parse TOP clause
-///
-/// Grammar: `TOP count=DECIMAL`
-fn top_clause(p: &mut Parser) {
-    let m = p.start();
-
-    eat_sdbl_keyword(p, "TOP", "ПЕРВЫЕ");
-    p.skip_trivia();
-
-    // Expect a number (count)
-    if !p.expect(TokenKind::Decimal) {
-        // Error recovery: complete anyway
-    }
-
-    m.complete(p, NodeKind::SdblTopClause);
 }
 
 #[cfg(test)]

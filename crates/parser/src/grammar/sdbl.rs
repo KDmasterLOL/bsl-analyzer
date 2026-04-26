@@ -148,13 +148,16 @@
 //! (`virtual_table_args_legacy`) remain Tier B under the Slice 5
 //! banner.
 //!
-//! SELECT limitation helpers pending: `is_limitation_keyword` /
-//! `limitations` / `top_clause` (DISTINCT/РАЗЛИЧНЫЕ,
-//! TOP/ПЕРВЫЕ, ALLOWED/РАЗРЕШЕННЫЕ) plus the `is_identifier_token`
-//! alias-scan helper remain Tier B in the residual
-//! `LEGACY (Slice 5 + SELECT limitation helpers pending)` block
-//! pending a future Slice-7-addendum or 6/7-shaped mini-slice
-//! that owns the SELECT prefix qualifiers.
+//! Slice 7-addendum — clean-room (rewrite in progress): the
+//! SELECT-prefix qualifier helpers `is_identifier_token`,
+//! `is_limitation_keyword`, `limitations`, `top_clause` (DISTINCT
+//! / РАЗЛИЧНЫЕ, TOP / ПЕРВЫЕ, ALLOWED / РАЗРЕШЕННЫЕ) are
+//! relocated under the
+//! `CLEAN-ROOM Slice 7-addendum — SELECT prefix qualifiers`
+//! banner in `select.rs` at C1; per-function provenance comments
+//! and clean-room body re-derivation land at C2; attestation +
+//! acceptance tests + this docstring flip to "complete" land at
+//! C3.
 
 pub mod expressions;
 pub mod select;
