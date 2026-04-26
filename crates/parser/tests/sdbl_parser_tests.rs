@@ -4920,3 +4920,295 @@ fn test_slice7adn_top_missing_decimal_recovery() {
         from_clauses_count,
     );
 }
+
+// ============================================================
+// Slice 8-addendum — virtual-table arguments — Bucket-A gap
+// tests (C0b audit-gate). These pin the pre-rewrite parser
+// shape for the 2 functions promoted into the Slice 8-addendum
+// clean-room banner: `virtual_table_args` (renamed from
+// `virtual_table_args_legacy`) and `recover_to_delimiter_vt`.
+// All 7 tests must PASS on the pre-rewrite parser; the C2
+// clean-room rewrite must preserve the asserted shapes.
+//
+// Provenance per Slice 8-addendum plan §Tier classification:
+// - A1: v8327doc Глава 8.2/8.3 canonical example
+//   `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )`
+//   at https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453;
+//   plus pubqlang chapters 9, 104, 116, 152, 156.
+// - C: mini-spec §Virtual table argument behavior (extended in
+//   C0a) — Grammar EBNF, AST-shape contract, IDE-recovery
+//   allowances #1-#6, Tier classification.
+// - D: empty-arg `SdblMissingArg` AST shape and paren-balanced
+//   recovery via `recover_to_delimiter_vt` (parser-internal
+//   recovery utilities; no ITS source).
+//
+// Coverage maps onto §IDE-recovery allowances #1-#6:
+//   - (a) empty `()` no-args         → allowance #4
+//   - (b) single trailing comma      → allowance #2
+//   - (c) canonical 5-arg shape      → allowances #1 + #3
+//   - (d) IN-subquery as VT param    → allowance #5 (indirect:
+//                                       safety net NOT triggered
+//                                       for clean nested forms)
+//   - (e) mid-arg paren-balanced     → allowance #5 (direct)
+//   - (f) nested function call       → allowance #5 (indirect)
+//   - (g) VT-args + clause keyword   → allowance #6 + outer
+//                                       `expect(RParen)` exit
+// ============================================================
+
+// (a) Slice 8-addendum gap — empty `()` no-args. Mini-spec
+// §IDE-recovery allowance #4: outer `if !p.at(RParen)` skip
+// means an empty paren pair emits LParen + RParen as flat
+// children of SdblTableRef with NO SdblMissingArg.
+#[test]
+fn test_slice8adn_gap_empty_paren_pair() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки() КАК Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let table_ref = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
+        .expect("Tree must contain SdblTableRef");
+    let missing = table_ref.children().filter(|c| c.kind() == SyntaxKind::SDBL_MISSING_ARG).count();
+    assert_eq!(
+        missing, 0,
+        "Empty `()` must NOT emit any SdblMissingArg under SdblTableRef \
+         (mini-spec §IDE-recovery allowance #4 — outer `if !p.at(RParen)` \
+         skip). Got: {}",
+        missing,
+    );
+    let lparen = table_ref
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().filter(|t| t.kind() == SyntaxKind::L_PAREN).cloned())
+        .count();
+    let rparen = table_ref
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().filter(|t| t.kind() == SyntaxKind::R_PAREN).cloned())
+        .count();
+    assert_eq!(
+        lparen, 1,
+        "Expected exactly one L_PAREN token child of SdblTableRef. Got: {}",
+        lparen
+    );
+    assert_eq!(
+        rparen, 1,
+        "Expected exactly one R_PAREN token child of SdblTableRef. Got: {}",
+        rparen
+    );
+    let errors = table_ref.children().filter(|c| c.kind() == SyntaxKind::ERROR).count();
+    assert_eq!(errors, 0, "Empty `()` must not emit any ERROR direct child. Got: {}", errors);
+}
+
+// (b) Slice 8-addendum gap — single trailing comma `(&Период,)`.
+// Mini-spec §IDE-recovery allowance #2: empty-trailing-arg
+// produces SdblMissingArg after the last comma.
+#[test]
+fn test_slice8adn_gap_single_trailing_comma() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки(&Период,) КАК Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let table_ref = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
+        .expect("Tree must contain SdblTableRef");
+    let missing = table_ref.children().filter(|c| c.kind() == SyntaxKind::SDBL_MISSING_ARG).count();
+    assert_eq!(
+        missing, 1,
+        "`(&Период,)` must emit exactly one SdblMissingArg direct child of \
+         SdblTableRef (mini-spec §IDE-recovery allowance #2 — \
+         empty-trailing-arg after the last comma). Got: {}",
+        missing,
+    );
+    let comma = table_ref
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().filter(|t| t.kind() == SyntaxKind::COMMA).cloned())
+        .count();
+    assert_eq!(comma, 1, "Expected exactly one COMMA token child. Got: {}", comma);
+    let errors = table_ref.children().filter(|c| c.kind() == SyntaxKind::ERROR).count();
+    assert_eq!(errors, 0, "Clean trailing-comma form must not emit ERROR. Got: {}", errors);
+}
+
+// (c) Slice 8-addendum gap — canonical v8327doc 5-arg shape
+// `(, , Авто, , )` per Глава 8.3 «Виртуальные и обычные поля».
+// Pins allowances #1 (empty-leading) + #3 (consecutive-empty +
+// canonical 5-arg form). Counts only — the strict interleaved
+// child order is locked by the C3 acceptance test
+// `test_slice8adn_canonical_v8327doc_ru`.
+#[test]
+fn test_slice8adn_gap_canonical_v8327doc_5arg() {
+    use syntax::SyntaxKind;
+    let input =
+        "ВЫБРАТЬ * ИЗ РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , ) КАК Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let table_ref = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
+        .expect("Tree must contain SdblTableRef");
+    let missing = table_ref.children().filter(|c| c.kind() == SyntaxKind::SDBL_MISSING_ARG).count();
+    assert_eq!(
+        missing, 4,
+        "Canonical v8327doc shape `(, , Авто, , )` must produce exactly \
+         four SdblMissingArg direct children of SdblTableRef \
+         (allowance #1 + #3: 2 empty-leading + 2 empty-trailing slots \
+         around the single `Авто` Ident). Got: {}",
+        missing,
+    );
+    let comma = table_ref
+        .children_with_tokens()
+        .filter_map(|c| c.as_token().filter(|t| t.kind() == SyntaxKind::COMMA).cloned())
+        .count();
+    assert_eq!(
+        comma, 4,
+        "Canonical 5-arg shape must have exactly 4 COMMA token children. Got: {}",
+        comma
+    );
+    let errors = table_ref.children().filter(|c| c.kind() == SyntaxKind::ERROR).count();
+    assert_eq!(
+        errors, 0,
+        "Canonical v8327doc form must parse cleanly with zero ERROR children. Got: {}",
+        errors
+    );
+}
+
+// (d) Slice 8-addendum gap — paren-balanced subquery as VT
+// param. Mini-spec §IDE-recovery allowance #5 (INDIRECT): the
+// IN-subquery's `)` is consumed inside `expression(p)` →
+// Slice 10b `predicate_expr` → `super::select::subquery(p)`,
+// NOT by `recover_to_delimiter_vt`. The recovery helper is the
+// safety net for malformed input only; clean IN-subquery must
+// not trigger it (zero ERROR direct child of SdblTableRef).
+#[test]
+fn test_slice8adn_gap_paren_balanced_subquery_arg() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Регистр.Обороты(, &Конец, , Поле В (ВЫБРАТЬ X ИЗ Y)) КАК Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let table_ref = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
+        .expect("Tree must contain SdblTableRef");
+    let errors = table_ref.children().filter(|c| c.kind() == SyntaxKind::ERROR).count();
+    assert_eq!(
+        errors, 0,
+        "Clean IN-subquery `Поле В (ВЫБРАТЬ X ИЗ Y)` as a VT arg must NOT \
+         trigger `recover_to_delimiter_vt` — the subquery's `)` is consumed \
+         inside `expression(p)` / `predicate_expr` (Slice 10b territory). \
+         Got: {} ERROR direct children of SdblTableRef.",
+        errors,
+    );
+}
+
+// (e) Slice 8-addendum gap — mid-arg paren-balanced recovery.
+// Mini-spec §IDE-recovery allowance #5 (DIRECT): a spurious
+// token `Q` between expression and comma triggers
+// `recover_to_delimiter_vt`; the helper opens an Error marker
+// and consumes the spurious `Q` with paren-depth tracking.
+#[test]
+fn test_slice8adn_gap_mid_arg_recovery() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки(СУММА(A) Q, B) КАК Т";
+    let parse = parse_sdbl(input);
+    let root = parse.syntax_node();
+    let table_ref = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
+        .expect("Tree must contain SdblTableRef");
+    let errors: Vec<_> = table_ref.children().filter(|c| c.kind() == SyntaxKind::ERROR).collect();
+    assert!(
+        !errors.is_empty(),
+        "Mid-arg spurious-token form must trigger `recover_to_delimiter_vt` \
+         and emit an ERROR direct child of SdblTableRef containing the \
+         spurious `Q` token (mini-spec §IDE-recovery allowance #5). Got: 0 \
+         ERROR direct children. SdblTableRef text: {:?}",
+        table_ref.text().to_string(),
+    );
+    let absorbed_q = errors.iter().any(|e| e.text().to_string().contains('Q'));
+    assert!(
+        absorbed_q,
+        "ERROR direct child of SdblTableRef must contain the spurious `Q` \
+         token consumed by `recover_to_delimiter_vt`. ERROR texts: {:?}",
+        errors.iter().map(|e| e.text().to_string()).collect::<Vec<_>>(),
+    );
+}
+
+// (f) Slice 8-addendum gap — normal nested function call
+// without recovery. Mini-spec §IDE-recovery allowance #5
+// (NEGATIVE): clean `СУММА(A)` as a VT arg is fully consumed
+// inside `expression(p)`'s function-call argument-list handler;
+// `recover_to_delimiter_vt` is NOT triggered (zero ERROR).
+#[test]
+fn test_slice8adn_gap_nested_function_call_arg() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки(СУММА(A)) КАК Т";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let table_ref = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
+        .expect("Tree must contain SdblTableRef");
+    let errors = table_ref.children().filter(|c| c.kind() == SyntaxKind::ERROR).count();
+    assert_eq!(
+        errors, 0,
+        "Clean nested call `СУММА(A)` as a VT arg must NOT trigger \
+         `recover_to_delimiter_vt` (mini-spec §IDE-recovery allowance #5 \
+         — the helper is a safety net for malformed input only). Got: {} \
+         ERROR direct children of SdblTableRef.",
+        errors,
+    );
+    let func_calls =
+        table_ref.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_FUNCTION_CALL).count();
+    assert!(
+        func_calls >= 1,
+        "Expected at least one SdblFunctionCall node somewhere under \
+         SdblTableRef for `СУММА(A)` (typically wrapped in the Slice 10a \
+         expression backbone — a direct child of SdblTableRef would be \
+         e.g. SdblLogicalOrExpr that descends to SdblFunctionCall). Got: \
+         {} SdblFunctionCall descendants. SdblTableRef text: {:?}",
+        func_calls,
+        table_ref.text().to_string(),
+    );
+}
+
+// (g) Slice 8-addendum gap — VT-args followed by clause keyword
+// without alias. Mini-spec §IDE-recovery allowance #6 + outer
+// `expect(RParen)` exit. After the closing `)`, parsing exits
+// `virtual_table_args` cleanly; the subsequent `ГДЕ X = 1`
+// attaches as SdblWhereClause OUTSIDE SdblTableRef (no leak
+// of VT-args state into the WHERE clause).
+#[test]
+fn test_slice8adn_gap_vt_args_then_clause_keyword() {
+    use syntax::SyntaxKind;
+    let input = "ВЫБРАТЬ * ИЗ Регистр.Остатки(&Дата) ГДЕ X = 1";
+    let parse = parse_sdbl(input);
+    assert_clean_parse(&parse, input);
+    let root = parse.syntax_node();
+    let table_ref = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::SDBL_TABLE_REF)
+        .expect("Tree must contain SdblTableRef");
+    let where_inside_table_ref =
+        table_ref.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE).count();
+    assert_eq!(
+        where_inside_table_ref, 0,
+        "SdblWhereClause must NOT be nested inside SdblTableRef — the outer \
+         `expect(RParen)` exit hands off to Slice 8 source_alias / Slice 11 \
+         query_body_clauses cleanly. Got: {} SdblWhereClause descendants \
+         of SdblTableRef.",
+        where_inside_table_ref,
+    );
+    let where_in_tree =
+        root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_WHERE_CLAUSE).count();
+    assert_eq!(
+        where_in_tree, 1,
+        "Expected exactly one SdblWhereClause in the tree (attached \
+         outside SdblTableRef). Got: {}",
+        where_in_tree,
+    );
+}
