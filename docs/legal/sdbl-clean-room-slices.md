@@ -315,9 +315,10 @@ Rebuild source parsing independently from full expression complexity.
   docstring Slice 8 addition)
 - `crates/parser/src/grammar/sdbl/select.rs` (the `CLEAN-ROOM Slice 8`
   section — `is_data_source_start`, `from_clause`, `data_source`,
-  `table_ref`, `source_alias`; plus the C1-born LEGACY helper
-  `virtual_table_args_legacy` extracted from pre-C1 `table_ref` and
-  deferred to Slice 5)
+  `table_ref`, `source_alias`; plus the C1-born helper
+  `virtual_table_args` extracted from pre-C1 `table_ref` —
+  renamed and clean-room rewritten in Slice 8-addendum landed
+  2026-04-26; see `sdbl-clean-room-slice8-addendum.md`)
 - `crates/parser/tests/sdbl_parser_tests.rs` (C0 Bucket-A additions:
   `test_slice8_from_multi_source_with_bare_alias`,
   `test_slice8_russian_subquery_source_with_alias`,
@@ -808,6 +809,96 @@ deferred to Slice 13 or a dedicated diagnostic.
   gap-test functions added in C0 (192 → 197 tests).
 - `crates/parser/tests/sdbl_slice7_addendum_limitations.rs` —
   13 spec-driven acceptance tests added in C3.
+
+## Slice 8-addendum: virtual-table arguments parser body
+
+**Status: complete (2026-04-26).** See
+[`sdbl-clean-room-slice8-addendum.md`](sdbl-clean-room-slice8-addendum.md)
+for the attestation. Commit trail: C0a `a8e262f4`, C0b
+`dd7b4b02`, C1 `228db0b2`, C2 `9267b29e`, C3 landed with the
+attestation.
+
+The Slice 8-addendum is a deferred follow-up to Slice 8 (which
+landed 2026-04-25 and carved the virtual-table argument-list
+parsing out into a Tier B `virtual_table_args_legacy` helper to
+keep its own clean-room scope tight). The addendum re-authors
+the two virtual-table argument helpers
+(`virtual_table_args` — renamed from `virtual_table_args_legacy`
+in C1 — and the paren-depth-tracking recovery utility
+`recover_to_delimiter_vt`) under a new
+`CLEAN-ROOM Slice 8-addendum — virtual-table arguments` banner
+in `crates/parser/src/grammar/sdbl/select.rs`, attaches
+per-function provenance comments citing the public ITS URL +
+pubqlang chapter identifiers, and removes the residual LEGACY
+banner block from `select.rs` entirely. After this slice lands,
+`select.rs` carries zero LEGACY content; the next remaining
+parser-side LEGACY surface is the lexer-side
+`crates/lexer/src/sdbl/mod.rs` Slice-2 LEGACY block, which
+master-doc Slice 5 still owns.
+
+A primary SDBL grammar source — v8.3.27 Developer's Reference
+Глава 8 «Работа с запросами» —
+<https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>
+provides the canonical example
+`РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , )`
+in Глава 8.3 «Виртуальные и обычные поля» plus VT-introduction
+prose in Глава 8.2 «Виртуальные таблицы». Pubqlang chapters
+9 (`СрезПоследних` peripheral intro), 104 (`Обороты` with
+nested function-call arg + named-condition trailing arg),
+116 (`Обороты()` parameter-order prose), 152 (no-args
+`Остатки()` + leading-empty `Остатки( , cond)`), and 156
+(IN-subquery as VT param structural form) provide the
+remaining structural attestations. Per the user's
+citation-policy directive, the Slice 8-addendum attestation,
+mini-spec extension, source-code provenance comments, and
+commit messages cite ONLY the public ITS URL and pubqlang
+chapter identifiers — no local mirror paths. This is the
+first SDBL clean-room slice authored under that prospective
+policy; prior slices retain their pre-policy citation form.
+
+### Scope
+
+- `virtual_table_args` — Tier A1. Parses
+  `'(' [vt-arg-list] ')'` per the SELECT mini-spec
+  §Virtual table argument behavior Grammar EBNF; emits
+  `SdblMissingArg` markers for empty slots and (via
+  `recover_to_delimiter_vt`) `Error` sub-nodes for
+  spurious-token recovery.
+- `recover_to_delimiter_vt` — Tier D. Parser-internal
+  paren-depth-tracking recovery utility for VT-args context;
+  functionally equivalent to `recover_to_delimiter` in
+  `expressions.rs` (both share paren-depth tracking,
+  comma/semicolon stop, `is_clause_keyword` stop, and
+  unconditional `Error` emit).
+
+### Files
+
+- `crates/parser/src/grammar/sdbl/select.rs` — the new
+  `CLEAN-ROOM Slice 8-addendum — virtual-table arguments`
+  banner — 2 functions; the residual LEGACY banner block
+  (`LEGACY (Slice 5 pending)`) is removed entirely.
+- `crates/parser/src/grammar/sdbl.rs` — module-level
+  `## Provenance` docstring Slice 8-addendum entry, flipped
+  to "complete (landed with C3 2026-04-26)" with attestation
+  citation.
+- `docs/legal/sdbl-select-mini-spec.md` — §Virtual table
+  argument behavior extended at C0a with Grammar EBNF +
+  AST-shape contract + IDE-recovery allowances #1–#6 + Tier
+  classification + §ITS coverage verification rows for
+  v8327doc Глава 8.2 / 8.3 + pubqlang chapters 9 / 104 /
+  116 / 152 / 156 (filled in at C2); §Non-consultation
+  statement (Slice 8-addendum reaffirmation).
+- `docs/legal/sdbl-clean-room-slice8-addendum.md` — Slice
+  8-addendum clean-room attestation (this addendum's anchor
+  document).
+- `crates/parser/tests/sdbl_parser_tests.rs` — 7 Bucket-A
+  gap-test functions added in C0b (197 → 204 tests). C1
+  also touches the C0b header comment to drop the
+  pre-rename function name.
+- `crates/parser/tests/sdbl_slice8_sources.rs` — comment-
+  only update at C1 (test-side rename).
+- `crates/parser/tests/sdbl_slice8_addendum_virtual_table_args.rs`
+  — 16 spec-driven acceptance tests added in C3.
 
 ## Slice 12: recovery and IDE allowances
 

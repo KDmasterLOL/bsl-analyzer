@@ -144,15 +144,17 @@
 //! attestation.
 //!
 //! Slice 8-addendum — virtual-table arguments parser body — clean-room
-//! (rewrite in progress, C1 landed). The 2 functions
-//! `virtual_table_args` and `recover_to_delimiter_vt` were physically
-//! relocated from their pre-C1 positions (LEGACY block + stranded
-//! top-of-file helper) into the new `CLEAN-ROOM Slice 8-addendum —
-//! virtual-table arguments` banner in `select.rs`. The LEGACY banner
-//! in `select.rs` is removed entirely. C2 will land the clean-room
-//! rewrite + per-function provenance comments; C3 will land the
-//! attestation, master-doc cross-reference, and spec-driven
-//! acceptance tests.
+//! (complete, landed with C3 2026-04-26). The 2 functions
+//! `virtual_table_args` and `recover_to_delimiter_vt` were
+//! re-authored at C2 from v8327doc
+//! Глава 8.2 + 8.3 + pubqlang chapters 9 / 104 / 116 / 152 / 156
+//! and the C0a-extended SELECT mini-spec §Virtual table argument
+//! behavior. The new
+//! `CLEAN-ROOM Slice 8-addendum — virtual-table arguments` banner
+//! in `select.rs` hosts both functions; the previous LEGACY banner
+//! block in `select.rs` is removed entirely. See
+//! `docs/legal/sdbl-clean-room-slice8-addendum.md` for the
+//! attestation.
 //!
 //! Slice 5 pending: lexer-side virtual-table mode handling
 //! (`crates/lexer/src/sdbl/mod.rs` Slice-2 LEGACY block) is the
