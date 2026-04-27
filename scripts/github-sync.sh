@@ -237,6 +237,20 @@ compose_release_body() {
     fi
 }
 
+# Сохраняет release notes в постоянный файл (target/ в gitignore) и печатает
+# готовую команду для ручной публикации. Файл переживает EXIT-trap скрипта,
+# в отличие от $RELEASE_BODY_FILE (mktemp).
+persist_notes_for_manual_publish() {
+    local tag="$1"
+    local body_file="$2"
+    local persisted="$PROJECT_ROOT/target/release-notes-${tag}.md"
+
+    mkdir -p "$(dirname "$persisted")"
+    cp "$body_file" "$persisted"
+    log_warn "Notes сохранены: $persisted"
+    log_warn "Опубликовать вручную: gh release edit $tag --repo $GITHUB_REPO_SLUG --notes-file '$persisted'"
+}
+
 # Публикует release notes на GitHub.
 #
 # Стратегия: единственный writer — этот скрипт. Релиз создаёт release.yml
@@ -248,18 +262,19 @@ publish_release_notes() {
     local tag="$1"
     local body_file="$2"
 
-    if ! command -v gh >/dev/null 2>&1; then
-        log_warn "gh CLI не найден — release notes не опубликованы"
-        return
-    fi
     if [[ ! -s "$body_file" ]]; then
         log_info "Тело релиза пустое — пропускаем публикацию notes"
+        return
+    fi
+    if ! command -v gh >/dev/null 2>&1; then
+        log_warn "gh CLI не найден — release notes не опубликованы"
+        persist_notes_for_manual_publish "$tag" "$body_file"
         return
     fi
 
     log_info "Ожидаем появления релиза $tag на GitHub (CI собирает артефакты)..."
     local attempt=0
-    local max_attempts=30   # ~15 минут при sleep 30
+    local max_attempts=60   # ~30 минут при sleep 30
     while (( attempt < max_attempts )); do
         if gh release view "$tag" --repo "$GITHUB_REPO_SLUG" >/dev/null 2>&1; then
             log_info "Релиз $tag найден, обновляем описание..."
@@ -276,7 +291,7 @@ publish_release_notes() {
     done
 
     log_warn "Релиз $tag не появился за ${max_attempts} попыток — release notes не обновлены"
-    log_warn "Можно опубликовать вручную: gh release edit $tag --repo $GITHUB_REPO_SLUG --notes-file <file>"
+    persist_notes_for_manual_publish "$tag" "$body_file"
 }
 
 build_rsync_excludes() {

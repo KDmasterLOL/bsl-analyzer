@@ -15,6 +15,13 @@ use std::sync::Arc;
 
 static PLATFORM_DATA_SINGLETON: OnceCell<PlatformDataInner> = OnceCell::new();
 
+/// Sentinel `type_name` used in `properties` records that originate from
+/// `objects/Global context/properties/` in HBK. Top-level identifiers like
+/// `ОбработкаОшибок`, `Метаданные`, `Справочники` are emitted with this
+/// owner so they can be filtered out into the dedicated global-scope index
+/// without colliding with regular type members.
+pub const GLOBAL_CONTEXT_OWNER: &str = "Global context";
+
 /// Internal platform data implementation.
 ///
 /// This struct is not public API. Access it through:
@@ -53,6 +60,12 @@ pub struct PlatformDataInner {
     properties_by_name: FxHashMap<(SmolStr, SmolStr), usize>,
     /// Property documentation indexed by property ID.
     property_docs_by_id: FxHashMap<u32, usize>,
+    /// Global-scope identifiers from `objects/Global context/properties/`
+    /// (e.g. `ОбработкаОшибок` → `МенеджерОбработкиОшибок`). Indexed by
+    /// lowercased name, both Russian and English. Values are indices into
+    /// `properties` so the declared type and documentation are reached
+    /// through the same record as regular type members.
+    global_properties_by_name: FxHashMap<SmolStr, usize>,
 }
 
 impl PlatformDataInner {
@@ -189,6 +202,22 @@ impl PlatformDataInner {
             property_docs_by_id.insert(docs.property_id, idx);
         }
 
+        // Build the global-scope index from properties whose owner is the
+        // sentinel `Global context` type. Both Russian and English names are
+        // mapped to the same property index so callers can look up either.
+        // Unlike regular properties, we do NOT key by `(owner, name)` — the
+        // global namespace is flat and the owner is implicit.
+        let mut global_properties_by_name = FxHashMap::default();
+        for (idx, prop) in properties.iter().enumerate() {
+            if prop.type_name.as_str() != GLOBAL_CONTEXT_OWNER {
+                continue;
+            }
+            let ru_key: SmolStr = prop.name.to_lowercase().into();
+            let en_key: SmolStr = prop.english_name.to_lowercase().into();
+            global_properties_by_name.insert(ru_key, idx);
+            global_properties_by_name.insert(en_key, idx);
+        }
+
         Self {
             types,
             types_by_name,
@@ -204,6 +233,7 @@ impl PlatformDataInner {
             properties,
             properties_by_name,
             property_docs_by_id,
+            global_properties_by_name,
         }
     }
 
@@ -347,6 +377,49 @@ impl PlatformDataInner {
     /// Get all platform properties.
     pub fn all_properties(&self) -> &[PlatformProperty] {
         &self.properties
+    }
+
+    /// Resolve a top-level identifier to its global-scope property record.
+    ///
+    /// Returns `Some` for built-in platform globals like `ОбработкаОшибок`,
+    /// `Метаданные`, `Справочники`. Bilingual and case-insensitive. Used by
+    /// the IDE-facing context wrapper and by `hir-ty` to type-tag a bare
+    /// `Path` expression that names a platform global.
+    pub fn get_global_property(&self, name: &str) -> Option<&PlatformProperty> {
+        let key: SmolStr = name.to_lowercase().into();
+        let idx = *self.global_properties_by_name.get(&key)?;
+        self.properties.get(idx)
+    }
+
+    /// Iterate every global-scope property record. Used for top-level
+    /// completion (`Обработ|`) where the candidate set must include all
+    /// global identifiers alongside global functions and user CommonModules.
+    pub fn all_global_properties(&self) -> Vec<&PlatformProperty> {
+        let mut seen: Vec<usize> = self.global_properties_by_name.values().copied().collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen.into_iter().filter_map(|i| self.properties.get(i)).collect()
+    }
+
+    /// Resolve `(global_name, member_name)` to a method on the declared type
+    /// of the global identifier. This is the centralised lookup that
+    /// suppresses the false-positive `MissingCommonModuleMethod` for
+    /// `ОбработкаОшибок.КраткоеПредставлениеОшибки(...)`-shaped calls.
+    ///
+    /// Returns `None` when the global is unknown, when its declared
+    /// `property_types` is empty, or when no method with that name exists on
+    /// the declared type. We pick the FIRST declared type — global properties
+    /// in HBK are scalar (single-element `property_types`), so this is
+    /// unambiguous in practice. Union-typed globals would need a different
+    /// resolution strategy and currently do not occur.
+    pub fn resolve_global_member(
+        &self,
+        global_name: &str,
+        member_name: &str,
+    ) -> Option<&PlatformMethod> {
+        let prop = self.get_global_property(global_name)?;
+        let declared_type = prop.property_types.first()?;
+        self.get_method(declared_type.as_str(), member_name)
     }
 
     /// Get property documentation by property id.
@@ -628,6 +701,36 @@ pub fn type_properties_query<'db>(
     let type_name = input.name(db);
     let data = PlatformDataInner::instance();
     Arc::new(data.get_type_properties(&type_name).into_iter().cloned().collect())
+}
+
+/// Lookup a global-scope identifier by name (case-insensitive, bilingual).
+///
+/// Salsa wrapper around [`PlatformDataInner::get_global_property`]. Reuses
+/// [`TypeNameInput`] — the interned string keyspace is the same as for type
+/// lookups, so no second interner is needed.
+#[salsa::tracked(lru = 256)]
+pub fn global_property_query<'db>(
+    db: &'db dyn salsa::Database,
+    input: TypeNameInput<'db>,
+) -> Option<PlatformProperty> {
+    let name = input.name(db);
+    let data = PlatformDataInner::instance();
+    data.get_global_property(&name).cloned()
+}
+
+/// Resolve `(global_name, member_name)` to a method on the global's declared
+/// type. Salsa wrapper around [`PlatformDataInner::resolve_global_member`].
+/// Reuses [`MethodLookupInput`] for the same `(name, member)` interner used
+/// by regular method/property lookups.
+#[salsa::tracked(lru = 256)]
+pub fn global_member_method_query<'db>(
+    db: &'db dyn salsa::Database,
+    input: MethodLookupInput<'db>,
+) -> Option<PlatformMethod> {
+    let global_name = input.type_name(db);
+    let member_name = input.method_name(db);
+    let data = PlatformDataInner::instance();
+    data.resolve_global_member(&global_name, &member_name).cloned()
 }
 
 #[cfg(test)]
@@ -956,6 +1059,79 @@ mod tests {
             ),
         );
         assert!(got.is_none());
+    }
+
+    #[test]
+    fn test_global_property_lookup_bilingual() {
+        let data = PlatformDataInner::instance();
+        if data.all_global_properties().is_empty() {
+            println!("Skipping test: no global properties available");
+            return;
+        }
+
+        // ОбработкаОшибок is the headline case (bsl-analyzer issue): platform
+        // global of type МенеджерОбработкиОшибок introduced in 8.3.17.
+        let ru = data.get_global_property("ОбработкаОшибок").expect("ru name must resolve");
+        let en = data.get_global_property("ErrorProcessing").expect("en name must resolve");
+        assert_eq!(ru.id, en.id);
+        assert_eq!(ru.property_types, vec![smol_str::SmolStr::new("МенеджерОбработкиОшибок")]);
+        // Case-insensitivity contract.
+        assert!(data.get_global_property("ОБРАБОТКАОШИБОК").is_some());
+        assert!(data.get_global_property("errorprocessing").is_some());
+    }
+
+    #[test]
+    fn test_global_member_resolution_bilingual() {
+        let data = PlatformDataInner::instance();
+        if data.all_global_properties().is_empty() {
+            println!("Skipping test: no global properties available");
+            return;
+        }
+
+        // ОбработкаОшибок.КраткоеПредставлениеОшибки → method on
+        // МенеджерОбработкиОшибок returning Строка.
+        let m = data
+            .resolve_global_member("ОбработкаОшибок", "КраткоеПредставлениеОшибки")
+            .expect("ru.ru must resolve");
+        assert_eq!(m.name.as_str(), "КраткоеПредставлениеОшибки");
+        assert_eq!(m.english_name.as_str(), "BriefErrorDescription");
+
+        // English on either side must also resolve.
+        let m_en = data
+            .resolve_global_member("ErrorProcessing", "BriefErrorDescription")
+            .expect("en.en must resolve");
+        assert_eq!(m_en.id, m.id);
+
+        // Negative: unknown member.
+        assert!(data.resolve_global_member("ОбработкаОшибок", "ЗаведомоНеТакогоМетода").is_none());
+        // Negative: unknown global.
+        assert!(data.resolve_global_member("ЗаведомоНеТакогоГлобала", "X").is_none());
+    }
+
+    #[test]
+    fn test_global_property_query_salsa() {
+        let db = TestDatabase::default();
+        let data = PlatformDataInner::instance();
+        if data.all_global_properties().is_empty() {
+            println!("Skipping test: no global properties available");
+            return;
+        }
+
+        let got =
+            global_property_query(&db, TypeNameInput::new(&db, "ОбработкаОшибок".to_string()))
+                .expect("global must resolve");
+        assert_eq!(got.english_name.as_str(), "ErrorProcessing");
+
+        let got_member = global_member_method_query(
+            &db,
+            MethodLookupInput::new(
+                &db,
+                "ОбработкаОшибок".to_string(),
+                "КраткоеПредставлениеОшибки".to_string(),
+            ),
+        )
+        .expect("member must resolve");
+        assert_eq!(got_member.english_name.as_str(), "BriefErrorDescription");
     }
 
     #[test]
