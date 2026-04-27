@@ -7,7 +7,7 @@
 //! - Metadata cache warming
 //! - File ↔ URL resolution
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 use anyhow::{anyhow, Result};
 use lsp_types::Url;
@@ -37,6 +37,7 @@ impl GlobalState {
 
     /// Sets the workspace root and loads project configuration.
     pub fn set_workspace_root(&mut self, root: PathBuf) {
+        let start = Instant::now();
         tracing::info!(?root, "setting workspace root");
 
         let project = project_model::Project::new(&root);
@@ -113,6 +114,11 @@ impl GlobalState {
             watch,
             version: self.vfs_progress_config_version,
         });
+
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "set_workspace_root complete (loader running async)",
+        );
     }
 
     /// Process VFS changes and sync to Salsa database.
@@ -125,12 +131,17 @@ impl GlobalState {
     pub fn process_changes(&mut self) -> (bool, bool) {
         use base_db::SourceDatabase;
 
+        let start = Instant::now();
+        let take_start = Instant::now();
         let changed_files = self.vfs.write().take_changes();
+        let vfs_take_elapsed_ms = take_start.elapsed().as_millis() as u64;
         if changed_files.is_empty() {
+            tracing::debug!(vfs_take_elapsed_ms, "process_changes: no VFS changes");
             return (false, false);
         }
 
-        tracing::info!(file_count = changed_files.len(), "processing VFS changes");
+        let file_count = changed_files.len();
+        tracing::info!(file_count, vfs_take_elapsed_ms, "processing VFS changes");
 
         // Wake outstanding Salsa snapshots before invoking any setter. Pairs
         // with the short-lock pattern in `base_db::Files::set_*` to prevent
@@ -215,6 +226,13 @@ impl GlobalState {
             self.analysis_host.raw_database_mut().bump_metadata_version();
         }
 
+        tracing::info!(
+            file_count,
+            vfs_take_elapsed_ms,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "process_changes complete",
+        );
+
         (true, config_file_changed)
     }
 
@@ -244,6 +262,7 @@ impl GlobalState {
     pub fn init_source_root(&mut self) {
         use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 
+        let start = Instant::now();
         let source_root_id = SourceRootId(0);
         let vfs = self.vfs.read();
 
@@ -269,7 +288,10 @@ impl GlobalState {
         drop(vfs);
 
         if total_files == 0 {
-            tracing::warn!("no files in VFS during init_source_root");
+            tracing::warn!(
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "no files in VFS during init_source_root",
+            );
             return;
         }
 
@@ -283,7 +305,12 @@ impl GlobalState {
             db.set_file_source_root(file_id, source_root_id);
         }
 
-        tracing::info!(total_files, vfs_files_added, "updated SourceRoot with VFS files (merged)");
+        tracing::info!(
+            total_files,
+            vfs_files_added,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "updated SourceRoot with VFS files (merged)",
+        );
     }
 
     /// Eagerly load metadata to warm Salsa cache.
@@ -299,6 +326,7 @@ impl GlobalState {
         };
 
         let _span = tracing::info_span!("warm_metadata_cache", ?config_path).entered();
+        let start = Instant::now();
 
         let db = self.analysis_host.raw_database();
         let path_input = ide_db::metadata::ConfigurationPathInput::new(
@@ -331,6 +359,11 @@ impl GlobalState {
                 "extension metadata cache warmed"
             );
         }
+
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "warm_metadata_cache complete",
+        );
     }
 
     /// Gets or creates a FileId for the given URL.

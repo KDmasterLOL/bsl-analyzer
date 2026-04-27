@@ -108,6 +108,7 @@ struct LoadedMetadata {
 
 /// Load all metadata types in parallel using rayon::scope.
 fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
+    let start = std::time::Instant::now();
     let common_modules = Mutex::new(Vec::new());
     let catalogs = Mutex::new(Vec::new());
     let documents = Mutex::new(Vec::new());
@@ -206,7 +207,7 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
         });
     });
 
-    LoadedMetadata {
+    let result = LoadedMetadata {
         common_modules: common_modules.into_inner().unwrap(),
         catalogs: catalogs.into_inner().unwrap(),
         documents: documents.into_inner().unwrap(),
@@ -229,7 +230,18 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
         external_data_sources: external_data_sources.into_inner().unwrap(),
         http_services: http_services.into_inner().unwrap(),
         web_services: web_services.into_inner().unwrap(),
-    }
+    };
+
+    tracing::info!(
+        path = %path.display(),
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        common_modules = result.common_modules.len(),
+        catalogs = result.catalogs.len(),
+        documents = result.documents.len(),
+        "load_all_metadata_parallel complete",
+    );
+
+    result
 }
 
 /// Build Configuration from loaded metadata.

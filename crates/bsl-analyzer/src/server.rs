@@ -171,14 +171,16 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             use vfs::loader::LoadingProgress;
             match n_done {
                 LoadingProgress::Finished => {
+                    let finalize_start = std::time::Instant::now();
                     state.vfs_done = true;
                     tracing::info!("VFS loading complete");
 
                     // Process all buffered VFS files (accumulated during loading)
                     let pending_files = std::mem::take(&mut state.pending_vfs_files);
+                    let pending_count = pending_files.len();
                     if !pending_files.is_empty() {
                         tracing::debug!(
-                            file_count = pending_files.len(),
+                            file_count = pending_count,
                             "processing buffered VFS files"
                         );
                         handle_vfs_msg(state, pending_files, false)?;
@@ -207,6 +209,12 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
 
                     // Request client to refresh semantic tokens for all open files
                     state.request_semantic_tokens_refresh();
+
+                    tracing::info!(
+                        pending_files = pending_count,
+                        elapsed_ms = finalize_start.elapsed().as_millis() as u64,
+                        "vfs_done finalize complete (process_changes + init_source_root + warm_metadata)",
+                    );
                 }
                 LoadingProgress::Scanning => {
                     tracing::info!("VFS scanning workspace...");
