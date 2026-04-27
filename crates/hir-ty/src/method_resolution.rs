@@ -190,6 +190,112 @@ pub fn resolve_three_level_call(
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
+/// Strict map from a [`MetadataKind`] to its parent [`MdoType`] for
+/// the [`resolve_object_module_call`] gate.
+///
+/// Returns `Some(MdoType)` only for `*Object` kinds — the only HIR
+/// receiver shapes for which `<MDO>/Ext/ObjectModule.bsl` is the
+/// authoritative call surface. `*Ref` kinds (`CatalogRef`,
+/// `DocumentRef`, …) NEVER consult ObjectModule: a reference value
+/// can only access exported predefined items / attributes, not the
+/// `Экспорт`-method surface declared inside the object module.
+/// Register kinds, register-part kinds and tabular sections also
+/// return `None` — no ObjectModule analogue today.
+///
+/// Deliberately *not* reusing
+/// [`crate::field_lookup::mdo_type_for_kind`]: that helper accepts
+/// both `*Object` and `*Ref` to drive attribute lookup, which is the
+/// opposite of what the method-resolution gate needs.
+///
+/// The match is **exhaustive on every [`MetadataKind`] variant** (no
+/// wildcard arm) so adding a new `*Object` variant — e.g. a future
+/// `BusinessProcessObject` — surfaces as a compiler error here, not a
+/// silent fall-through to `None`. The mirror direction
+/// ([`MetadataKind::object_kind_for`]) is the canonical
+/// `MdoType → *Object` map; this entry inverts it.
+fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::MdoType> {
+    use bsl_metadata::MdoType;
+    use hir_def::ty::MetadataKind;
+    Some(match kind {
+        MetadataKind::CatalogObject => MdoType::Catalog,
+        MetadataKind::DocumentObject => MdoType::Document,
+        MetadataKind::ExchangePlanObject => MdoType::ExchangePlan,
+        MetadataKind::ChartOfAccountsObject => MdoType::ChartOfAccounts,
+        // `*Ref` kinds — reference values, no ObjectModule.bsl call surface.
+        MetadataKind::CatalogRef
+        | MetadataKind::DocumentRef
+        | MetadataKind::EnumRef
+        | MetadataKind::TaskRef
+        | MetadataKind::BusinessProcessRef
+        | MetadataKind::ExchangePlanRef
+        | MetadataKind::ChartOfAccountsRef
+        | MetadataKind::InformationRegisterRef
+        | MetadataKind::AccumulationRegisterRef
+        | MetadataKind::AccountingRegisterRef
+        | MetadataKind::CalculationRegisterRef => return None,
+        // Register record managers / record sets — RecordSetModule.bsl
+        // resolution is Phase C scope, not Phase B.
+        MetadataKind::InformationRegisterRecordManager
+        | MetadataKind::AccumulationRegisterRecordSet => return None,
+        // Register parts and tabular sections — no module.
+        MetadataKind::RegisterDimension { .. }
+        | MetadataKind::RegisterResource { .. }
+        | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::TabularSection { .. }
+        | MetadataKind::TabularSectionRow { .. } => return None,
+    })
+}
+
+/// Resolve a 2-shape ObjectModule method call like
+/// `Об = Справочники.X.СоздатьЭлемент(); Об.МойМетод()` where `Об`
+/// carries [`Ty::MetadataRef { *Object, .. }`][MetadataRef].
+///
+/// Mirrors [`resolve_aliased_manager_call`] but routes the workspace
+/// lookup to [`Resolver::resolve_object_module_method`]. The strict
+/// `*Object` filter ([`object_kind_to_mdo`]) is applied **inside**
+/// the wrapper so the call site can pass any [`MetadataKind`] without
+/// guarding against `*Ref`/register receivers — a non-`*Object` kind
+/// returns `Err(MethodNotFound)` immediately, which the call site's
+/// platform-fallback path then takes.
+///
+/// # Returns
+///
+/// - `Ok(MethodResolution)` when the method exists in the workspace
+///   `ObjectModule.bsl` (may be non-exported).
+/// - `Err(UnresolvedMethodKind::MethodNotFound)` for any of:
+///   - `kind` is not a `*Object` flavour (strict-filter reject).
+///   - MDO not declared in any visible configuration.
+///   - No `<MDO>/Ext/ObjectModule.bsl` for `(MdoType, name)`.
+///   - Object module exists but does not contain `method_name`.
+///
+/// [MetadataRef]: hir_def::ty::Ty::MetadataRef
+pub fn resolve_object_module_call(
+    db: &dyn ConfigsDatabase,
+    kind: hir_def::ty::MetadataKind,
+    mdo_name: &Name,
+    method_name: &Name,
+    resolver: &Resolver,
+) -> Result<MethodResolution, UnresolvedMethodKind> {
+    let mdo_type = object_kind_to_mdo(kind).ok_or(UnresolvedMethodKind::MethodNotFound)?;
+
+    let resolution = resolver
+        .resolve_object_module_method(db, mdo_type, mdo_name, method_name)
+        .map_err(|e| match e {
+            QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
+                UnresolvedMethodKind::MethodNotFound
+            }
+        })?;
+
+    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in symbol_tree — \
+         symbol_tree / Resolver are out of sync",
+    );
+
+    let signature = materialise_signature(method_symbol);
+    Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
+}
+
 /// Resolve a 2-shape aliased manager method call like
 /// `М = Справочники.X; М.МойМетод()` where `М` carries
 /// [`Ty::ObjectManager`].

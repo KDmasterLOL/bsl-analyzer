@@ -76,6 +76,61 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
         .collect()
 }
 
+/// Variant of [`setup`] for tests that need the inference target to
+/// be a file *other than* `test.bsl` — typically an inline
+/// `ObjectModule.bsl` whose own body contains `ЭтотОбъект` calls.
+///
+/// `Resolver::resolve_this_object` reads `db.module_metadata(...)`,
+/// which is keyed off the file's path: the file path must walk up to a
+/// configuration root (designer fixture) for `ModuleType::ObjectModule`
+/// + `ModuleMetadata.mdo` to be populated.
+///
+/// This helper rewrites each inline fixture path
+/// (`//- /Catalogs/Справочник1/Ext/ObjectModule.bsl`) to its absolute
+/// counterpart under the designer fixture root, so the path-based
+/// metadata detection mirrors a real workspace. File *content* is the
+/// inline test text — the on-disk file is overlaid via
+/// `set_file_text`.
+fn setup_with_target_path(
+    fixture_text: &str,
+    target_path_suffix: &str,
+) -> (RootDatabaseImpl, FileId) {
+    let designer = designer_fixture_path();
+    let fixture = Fixture::parse(fixture_text);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = vfs::FileSet::default();
+    let mapped: Vec<(FileId, vfs::VfsPath)> = fixture
+        .files
+        .iter()
+        .map(|(id, f)| {
+            let virt = f.path.as_path().to_string_lossy();
+            let suffix = virt.trim_start_matches('/');
+            let abs = designer.join(suffix);
+            (*id, vfs::VfsPath::new(abs.to_string_lossy().to_string()))
+        })
+        .collect();
+    for (file_id, vfs_path) in &mapped {
+        file_set.insert(*file_id, vfs_path.clone());
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for (file_id, file) in &fixture.files {
+        db.set_file_source_root(*file_id, SourceRootId(0));
+        db.set_file_text(*file_id, &file.content);
+    }
+    db.set_all_config_paths(vec![(None, designer)]);
+    // Normalize separators so the suffix match works on Windows too —
+    // `VfsPath` keeps native separators on disk (`\\` on Windows), but
+    // tests author the suffix with forward slashes (`/`).
+    let needle = target_path_suffix.replace('\\', "/");
+    let target = mapped
+        .iter()
+        .find(|(_, p)| p.as_path().to_string_lossy().replace('\\', "/").ends_with(&needle))
+        .map(|(id, _)| *id)
+        .unwrap_or_else(|| panic!("fixture must contain {target_path_suffix}"));
+    let _ = db.module_bodies(ModuleId::new(target));
+    (db, target)
+}
+
 fn unresolved_method_names(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String> {
     db.infer(file_id)
         .diagnostics
@@ -607,6 +662,258 @@ fn register_recordset_unknown_method_stays_silent() {
             .any(|n| n.eq_ignore_ascii_case("НесуществующийМетод")),
         "register `MetadataRef` lookup is platform-only and unwired (None) — diagnostic must \
          stay silent until Phase C wires up workspace `RecordSetModule.bsl`; got {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+}
+
+#[test]
+fn metadata_ref_object_module_workspace_method_resolves() {
+    // Phase B primary scenario:
+    //   Об = Справочники.Справочник1.СоздатьЭлемент();
+    //   Об.МойОбъектныйМетод()
+    // `СоздатьЭлемент` returns `Ty::MetadataRef { CatalogObject, .. }`
+    // (platform fallback). The chained call's receiver enters the
+    // workspace `ObjectModule.bsl` resolver before `lookup_method`
+    // (which is platform-only); without the Phase B wiring this would
+    // emit a false-positive `MethodNotFound`.
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ObjectModule.bsl
+Процедура МойОбъектныйМетод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Об = Справочники.Справочник1.СоздатьЭлемент();
+    Об.МойОбъектныйМетод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        !unresolved_method_names(&db, file_id)
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("МойОбъектныйМетод")),
+        "exported workspace ObjectModule method must resolve through Phase B resolver; got {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+    assert!(
+        unresolved_field_names(&db, file_id).is_empty(),
+        "method-call site must not emit UnresolvedField; got {:?}",
+        unresolved_field_names(&db, file_id),
+    );
+}
+
+#[test]
+fn metadata_ref_object_module_non_exported_emits_method_not_export() {
+    // `НеЭкспортный` is declared in the inline `ObjectModule.bsl` but
+    // lacks `Экспорт`. BSL semantics: `Об.НеЭкспортный()` is external
+    // access through an object reference, which only sees `Экспорт`
+    // methods. So the workspace resolver finds the method but the
+    // call site must surface `MethodNotExport`.
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ObjectModule.bsl
+Процедура НеЭкспортный()
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Об = Справочники.Справочник1.СоздатьЭлемент();
+    Об.НеЭкспортный();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let kinds: Vec<_> = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall { method_name, kind, .. }
+                if method_name.as_str().eq_ignore_ascii_case("НеЭкспортный") =>
+            {
+                Some(*kind)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![UnresolvedMethodKind::MethodNotExport],
+        "non-exported workspace ObjectModule method must surface MethodNotExport, got {kinds:?}",
+    );
+}
+
+#[test]
+fn metadata_ref_workspace_then_platform_fallback() {
+    // Workspace resolver misses (the inline `ObjectModule.bsl` does
+    // not define `Записать`) but `Записать` is a platform method on
+    // `CatalogObject`. The platform fallback must run after the
+    // workspace miss — this pins the precedence so a future
+    // workspace-only treatment doesn't break stock platform
+    // resolution.
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ObjectModule.bsl
+Процедура НикакЗаписатьНеНазывается() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Об = Справочники.Справочник1.СоздатьЭлемент();
+    Об.Записать();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        !unresolved_method_names(&db, file_id).iter().any(|n| n.eq_ignore_ascii_case("Записать")),
+        "platform `Записать` must resolve after workspace miss; got {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+}
+
+#[test]
+fn metadata_ref_total_miss_emits_method_not_found() {
+    // Both workspace `ObjectModule.bsl` AND platform
+    // `CatalogObject` table miss `НетТакогоМетода`. With Phase B the
+    // workspace+platform pair is fully consulted, so the diagnostic
+    // is now authoritative.
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ObjectModule.bsl
+Процедура ЕстьВсего() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Об = Справочники.Справочник1.СоздатьЭлемент();
+    Об.НетТакогоМетода();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let entries: Vec<_> = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall {
+                receiver_name, method_name, kind, ..
+            } if method_name.as_str().eq_ignore_ascii_case("НетТакогоМетода") => {
+                Some((receiver_name.as_str().to_string(), *kind))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        vec![("Справочники.Справочник1".to_string(), UnresolvedMethodKind::MethodNotFound)],
+        "MetadataRef.*Object miss is now authoritative; got {entries:?}",
+    );
+}
+
+#[test]
+fn catalog_ref_does_not_consult_object_module() {
+    // `Сс` carries `Ty::MetadataRef { CatalogRef, .. }`. The strict
+    // `*Object` filter inside `resolve_object_module_call` must
+    // reject `*Ref` kinds — a reference value's surface is
+    // attributes / predefined items, NOT exported `ObjectModule.bsl`
+    // methods. The inline ObjectModule.bsl defines `НеЭкспортный`,
+    // but a `*Ref` receiver must not see it (workspace skipped) AND
+    // must not surface a workspace-flavour `MethodNotExport` — the
+    // diagnostic, if any, comes from the platform `CatalogRef` table
+    // (which doesn't have `НеЭкспортный` either, so authoritative
+    // miss).
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ObjectModule.bsl
+Процедура НеЭкспортный()
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Сс = Справочники.Справочник1.НайтиПоКоду("001");
+    Сс.НеЭкспортный();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let kinds: Vec<_> = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall { method_name, kind, .. }
+                if method_name.as_str().eq_ignore_ascii_case("НеЭкспортный") =>
+            {
+                Some(*kind)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![UnresolvedMethodKind::MethodNotFound],
+        "*Ref must NOT consult ObjectModule.bsl — diagnostic, if any, is the platform-side \
+         MethodNotFound, never a workspace-flavour MethodNotExport; got {kinds:?}",
+    );
+}
+
+#[test]
+fn this_object_non_exported_method_emits_method_not_export() {
+    // BSL semantics pinned by the user: `ЭтотОбъект.НеЭкспортный()`
+    // inside the same `ObjectModule.bsl` is **not** legal — even
+    // though the method lives in the same file, going through the
+    // `ЭтотОбъект` reference is an external-style access that
+    // requires `Экспорт`. `Ty::ThisObject` is coerced to
+    // `Ty::MetadataRef { CatalogObject, .. }` at the workspace
+    // branch entry, finds the method without `Экспорт`, and surfaces
+    // `MethodNotExport`.
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ObjectModule.bsl
+Процедура НеЭкспортный()
+КонецПроцедуры
+Процедура Тест()
+    ЭтотОбъект.НеЭкспортный();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_target_path(fixture, "/Catalogs/Справочник1/Ext/ObjectModule.bsl");
+    let kinds: Vec<_> = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall { method_name, kind, .. }
+                if method_name.as_str().eq_ignore_ascii_case("НеЭкспортный") =>
+            {
+                Some(*kind)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![UnresolvedMethodKind::MethodNotExport],
+        "ЭтотОбъект.НеЭкспортный() is external-style access requiring Экспорт; got {kinds:?}",
+    );
+}
+
+#[test]
+fn this_object_direct_non_exported_call_resolves() {
+    // Sanity check / counter-example for the previous test. A
+    // *direct* `НеЭкспортный()` call without `ЭтотОбъект.` prefix is
+    // a local-scope call (`Expr::Path`, not `Expr::Field`), so it is
+    // legal even on a non-exported method in the same module. The
+    // workspace ObjectModule branch must NOT misfire here — local
+    // calls don't go through the `Expr::Field` callee path.
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ObjectModule.bsl
+Процедура НеЭкспортный()
+КонецПроцедуры
+Процедура Тест()
+    НеЭкспортный();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_target_path(fixture, "/Catalogs/Справочник1/Ext/ObjectModule.bsl");
+    assert!(
+        !unresolved_method_names(&db, file_id)
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("НеЭкспортный")),
+        "direct `НеЭкспортный()` is a local-scope call, must resolve cleanly; got {:?}",
         unresolved_method_names(&db, file_id),
     );
 }

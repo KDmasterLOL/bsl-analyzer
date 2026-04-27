@@ -767,6 +767,92 @@ impl Resolver {
         })
     }
 
+    /// Phase B counterpart to
+    /// [`Self::resolve_aliased_manager_method`]: resolves
+    /// `<Ty::MetadataRef { *Object, name }>.method()` against
+    /// `<MDO>/Ext/ObjectModule.bsl`.
+    ///
+    /// Same shape as the Phase A entry — visibility gate, then
+    /// [`crate::module_index::ModuleIndex::resolve_object_module`] for
+    /// the file id, then `symbol_tree.find_method`. Returns
+    /// non-exported methods so the call site can pick
+    /// `MethodNotExport` vs `MethodNotFound`.
+    ///
+    /// The caller is responsible for filtering `MetadataKind` to the
+    /// `*Object` family (`CatalogObject`, `DocumentObject`,
+    /// `ExchangePlanObject`, `ChartOfAccountsObject`); this entry
+    /// trusts that gate and only consults [`MdoType`]. `*Ref` and
+    /// register receivers must NOT reach this entry — their HIR types
+    /// have no ObjectModule call surface today.
+    pub fn resolve_object_module_method(
+        &self,
+        db: &dyn ConfigsDatabase,
+        mdo_type: bsl_metadata::MdoType,
+        mdo_name: &Name,
+        method_name: &Name,
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+        let _span = tracing::info_span!(
+            "resolve_object_module_method",
+            ?mdo_type,
+            mdo_name = %mdo_name,
+            method = %method_name
+        )
+        .entered();
+
+        let current_module_id = self.module_id().ok_or_else(|| {
+            tracing::warn!("resolve_object_module_method called without module scope");
+            QualifiedMethodError::NotFound
+        })?;
+
+        let current_file_id = current_module_id.file_id;
+        let configurations = db.configurations(current_file_id);
+        if !configurations.is_empty()
+            && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
+        {
+            tracing::debug!(
+                "resolve_object_module_method: {:?} '{}' not declared in any visible config",
+                mdo_type,
+                mdo_name
+            );
+            return Err(QualifiedMethodError::NotVisibleInConfigs);
+        }
+
+        let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
+        let module_index = db.module_index(source_root_id);
+
+        let target_file_id =
+            module_index.resolve_object_module(mdo_type, mdo_name).ok_or_else(|| {
+                tracing::debug!("Object module not found: {:?} / {}", mdo_type, mdo_name);
+                QualifiedMethodError::NotFound
+            })?;
+
+        let target_module_id = crate::ModuleId::new(target_file_id);
+        let symbol_tree = db.symbol_tree(target_module_id);
+
+        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
+            tracing::debug!(
+                "Object module '{:?}/{}' found but method '{}' NOT found",
+                mdo_type,
+                mdo_name,
+                method_name
+            );
+            QualifiedMethodError::NotFound
+        })?;
+
+        tracing::info!(
+            "SUCCESS - object module method '{}' in '{:?}/{}' (is_export={})",
+            method_name,
+            mdo_type,
+            mdo_name,
+            method_symbol.is_export
+        );
+
+        Ok(QualifiedMethodResolution {
+            method_id: method_symbol.id,
+            is_export: method_symbol.is_export,
+        })
+    }
+
     /// Legacy [`PathResolution`] adapter over [`Self::resolve_three_level_method`].
     ///
     /// Used by [`Self::resolve_path`] (Definition layer). Non-exported

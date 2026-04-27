@@ -881,6 +881,85 @@ impl<'db> InferenceContext<'db> {
                 self.infer_expr(*arg);
             }
 
+            // Workspace-first lookup for `Ty::MetadataRef { *Object, .. }`
+            // and `Ty::ThisObject` (which coerces to a matching
+            // `*Object` `MetadataRef`). Phase B counterpart to the
+            // `Ty::ObjectManager` branch below: methods declared in
+            // `<MDO>/Ext/ObjectModule.bsl` are invisible to
+            // `lookup_method` (platform-only via
+            // `platform_manager_lookup::resolve_platform_metadata_ref_method`)
+            // — without this branch every workspace object-module
+            // method would slip through and surface a false-positive
+            // `MethodNotFound`. Same precedence as Phase A: workspace
+            // first, platform fallback on `MethodNotFound`,
+            // authoritative miss otherwise.
+            //
+            // The strict `*Object` filter lives inside
+            // `resolve_object_module_call`, so `*Ref` and register
+            // kinds short-circuit to `MethodNotFound` and immediately
+            // fall through to `lookup_method` (their platform path).
+            //
+            // `ThisObject` is coerced upfront — `lookup_method` does
+            // the same coercion (`crate::this_object::coerce_to_metadata_ref`),
+            // so doing it here mirrors that contract. After coercion
+            // `ЭтотОбъект.МойМетод()` enters the workspace resolver
+            // through the same `(MdoType, name)` pair the platform
+            // path would see.
+            let workspace_receiver_ty = crate::this_object::coerce_to_metadata_ref(&receiver_ty)
+                .unwrap_or_else(|| receiver_ty.clone());
+            if let Ty::MetadataRef { kind, name: mdo_name } = &workspace_receiver_ty {
+                let resolver = self.get_resolver();
+                match crate::method_resolution::resolve_object_module_call(
+                    self.db,
+                    *kind,
+                    mdo_name,
+                    &method_name,
+                    &resolver,
+                ) {
+                    Ok(resolution) => {
+                        let receiver_name = receiver_display_name(&workspace_receiver_ty)
+                            .unwrap_or_else(|| mdo_name.clone());
+                        if !resolution.is_export {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::UnresolvedMethodCall {
+                                    expr: callee,
+                                    receiver_name: receiver_name.clone(),
+                                    method_name: method_name.clone(),
+                                    kind: UnresolvedMethodKind::MethodNotExport,
+                                },
+                            );
+                        }
+                        if args.len() != resolution.signature.params.len() {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::MismatchedArgCount {
+                                    call_expr: callee,
+                                    expected: resolution.signature.params.len(),
+                                    found: args.len(),
+                                },
+                            );
+                        }
+                        self.emit_arg_type_mismatches(args, &resolution.signature.params);
+                        self.expr_types.insert(callee, Ty::Unknown);
+                        return resolution.return_type;
+                    }
+                    Err(UnresolvedMethodKind::MethodNotFound) => {
+                        // Workspace exhausted (or strict-filter reject
+                        // for `*Ref`/register kinds) → fall through to
+                        // platform.
+                    }
+                    Err(
+                        kind @ (UnresolvedMethodKind::MethodNotExport
+                        | UnresolvedMethodKind::CommonModuleNoSource
+                        | UnresolvedMethodKind::ReceiverNotResolved),
+                    ) => {
+                        unreachable!(
+                            "resolve_object_module_call returned unexpected kind: {:?}",
+                            kind
+                        )
+                    }
+                }
+            }
+
             // Workspace-first lookup for `Ty::ObjectManager`. Methods
             // declared in `<MDO>/Ext/ManagerModule.bsl` are invisible to
             // `lookup_method` (platform-only via
