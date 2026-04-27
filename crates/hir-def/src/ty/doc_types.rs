@@ -58,6 +58,10 @@ pub fn parse_method_doc_types(doc_comment: &str) -> Option<MethodTypeHints> {
     let mut hints = MethodTypeHints::default();
     let mut in_params_section = false;
     let mut in_return_section = false;
+    // Index of the most recent param accepted in the params section. Set
+    // when a `Имя - Тип …` line lands; used to fold БСП-style multi-line
+    // alternatives (`- Тип2 - desc`) into that param's TypeRef as a Union.
+    let mut last_param_idx: Option<usize> = None;
 
     for line in doc_comment.lines() {
         // Strip comment markers and whitespace
@@ -71,20 +75,51 @@ pub fn parse_method_doc_types(doc_comment: &str) -> Option<MethodTypeHints> {
         if is_params_header(&line_lower) {
             in_params_section = true;
             in_return_section = false;
+            last_param_idx = None;
             continue;
         }
 
         if is_return_header(&line_lower) {
             in_params_section = false;
             in_return_section = true;
+            last_param_idx = None;
             continue;
         }
 
         // Parse parameter line
         if in_params_section {
+            // Continuation of the previous param's type — БСП writes union
+            // alternatives on follow-on lines that start with `- `. Must be
+            // checked *before* `parse_param_line` because that helper would
+            // misparse such a line by treating the leading `-` as part of a
+            // bogus parameter name. `*`-bullets (Structure field
+            // descriptions) do not match `is_continuation_line` and fall
+            // through; they are then handled (or dropped) by
+            // `parse_param_line` exactly as before this fix.
+            if is_continuation_line(line) {
+                if let Some(idx) = last_param_idx {
+                    if let Some(addition) = parse_continuation_line(line) {
+                        fold_into_union(&mut hints.params[idx].1, addition);
+                    }
+                }
+                // Orphan continuation (no preceding param to fold into)
+                // is silently dropped. Falling through to
+                // `parse_param_line` would let the leading `-` slip into a
+                // bogus parameter name — a pre-existing latent bug we
+                // foreclose here.
+                continue;
+            }
+
             if let Some((name, type_ref)) = parse_param_line(line) {
                 hints.params.push((name, type_ref));
+                last_param_idx = Some(hints.params.len() - 1);
+                continue;
             }
+            // Description-only continuation lines (no leading `-`, free
+            // prose) are silently dropped. We keep `last_param_idx` set so
+            // a later `- Тип2` continuation still folds into the right
+            // param — matches BSP style where description and union
+            // alternatives can interleave inside one param block.
         }
 
         // Parse return type line
@@ -158,6 +193,70 @@ fn parse_param_line(line: &str) -> Option<(Name, TypeRef)> {
     Some((Name::new(param_name), parse_type_name(type_name)))
 }
 
+/// True if `line` is a multi-line union continuation marker — a line of
+/// the form `- <тип>[- описание]`, used by BSP to add an alternative type
+/// to the previous parameter.
+///
+/// Excludes `*`-bullets (Structure field descriptions inside Параметры:),
+/// double-`--` prose dashes, and any line that does not start with the
+/// `- ` token. The caller must already be in the params section *and*
+/// have a previous param to fold into; this helper is purely a syntactic
+/// shape check.
+fn is_continuation_line(line: &str) -> bool {
+    line.strip_prefix('-').is_some_and(|rest| rest.starts_with(' '))
+}
+
+/// Parse a continuation line into the type alternative it carries.
+///
+/// `line` is expected to start with `- ` (caller guards via
+/// [`is_continuation_line`]). Strips the leading dash, peels off an
+/// optional ` - <описание>` tail, and runs the type fragment through
+/// [`parse_type_name`].
+///
+/// Returns `None` only when the type fragment is empty (caller should
+/// drop the line). [`TypeRef::Unknown`] is **kept** — `parse_type_name`
+/// only returns it for the explicit `Произвольный` / `Any` / `Arbitrary`
+/// gradual-top opt-in (or for syntactically empty input, which we filter
+/// here). Dropping it would silently erase an author's deliberate "or
+/// anything else" alternative; [`crate::Ty::union`] preserves `Unknown`
+/// inside unions on purpose, see its doc comment.
+fn parse_continuation_line(line: &str) -> Option<TypeRef> {
+    let after_dash = line.strip_prefix("- ")?.trim();
+    if after_dash.is_empty() {
+        return None;
+    }
+
+    // Type fragment ends at the first " - " separator (which introduces
+    // the optional description). The fragment itself can contain spaces
+    // (e.g. `ФиксированныйМассив из Строка`) — that's fine because the
+    // separator is a *spaced* dash, not a bare `-`.
+    let type_name = match after_dash.split_once(" - ") {
+        Some((ty, _desc)) => ty.trim(),
+        None => after_dash,
+    };
+    if type_name.is_empty() {
+        return None;
+    }
+
+    Some(parse_type_name(type_name))
+}
+
+/// Fold `addition` into `existing` as an additional union alternative.
+///
+/// Preserves the smart-constructor invariant for unions at the syntactic
+/// layer: nesting and dedup happen at lowering time via [`crate::Ty::union`].
+/// Here we just append.
+fn fold_into_union(existing: &mut TypeRef, addition: TypeRef) {
+    let prev = std::mem::replace(existing, TypeRef::Unknown);
+    *existing = match prev {
+        TypeRef::Union(mut parts) => {
+            parts.push(addition);
+            TypeRef::Union(parts)
+        }
+        other => TypeRef::Union(vec![other, addition]),
+    };
+}
+
 /// Parse a return type line: "Булево - описание"
 ///
 /// Expected format:
@@ -189,14 +288,21 @@ fn parse_return_line(line: &str) -> Option<TypeRef> {
 ///    downstream lowering hand back a `Ty::Union([Number, String])`. Empty
 ///    commas (trailing, double) are dropped; a single surviving member
 ///    collapses back to a bare `TypeRef`.
-/// 2. [`TypeRef::from_bare_name`] (primitives + Array/Map collections).
-/// 3. `Произвольный` / `Any` / `Arbitrary` → [`TypeRef::Unknown`]
+/// 2. **Parameterised collection** — `Массив из X` / `Array of X`,
+///    `ФиксированныйМассив из X` / `FixedArray of X` (folded into
+///    `TypeRef::Array(Some(_))` until a dedicated `Ty::FixedArray`
+///    variant exists), and `Соответствие из X` / `Map of X` (collapses to
+///    `TypeRef::Map(None)` because `Ty::Map` is not parameterised yet).
+///    Must run before [`TypeRef::from_bare_name`] — the bare-name table
+///    only handles the unqualified head.
+/// 3. [`TypeRef::from_bare_name`] (primitives + Array/Map collections).
+/// 4. `Произвольный` / `Any` / `Arbitrary` → [`TypeRef::Unknown`]
 ///    (authors write this when they don't want to commit to a type).
-/// 4. Dotted form like `СправочникСсылка.Номенклатура` →
+/// 5. Dotted form like `СправочникСсылка.Номенклатура` →
 ///    [`TypeRef::Name`] with all segments preserved. Lowering
 ///    (`TyLoweringContext::lower_qualified`) then decides whether it
 ///    becomes `Ty::MetadataRef`, `Ty::Unknown`, or something else.
-/// 5. Any other single token → [`TypeRef::Name`] of one segment. Lowering
+/// 6. Any other single token → [`TypeRef::Name`] of one segment. Lowering
 ///    takes this through the manager/platform-object cascade.
 fn parse_type_name(name: &str) -> TypeRef {
     let trimmed = name.trim();
@@ -219,18 +325,26 @@ fn parse_type_name(name: &str) -> TypeRef {
         };
     }
 
-    // 2. Primitive / collection builtins.
+    // 2. Parameterised collection forms (`Массив из Строка`,
+    //    `Соответствие из КлючИЗначение`, …) — БСП-idiom written in
+    //    documentation prose. Must run *before* `from_bare_name` because the
+    //    bare-name table only recognises the unqualified head.
+    if let Some(tref) = parse_collection_of(trimmed) {
+        return tref;
+    }
+
+    // 3. Primitive / collection builtins.
     if let Some(tref) = TypeRef::from_bare_name(trimmed) {
         return tref;
     }
 
-    // 3. Explicit "any" fallbacks.
+    // 4. Explicit "any" fallbacks.
     match trimmed.to_lowercase().as_str() {
         "произвольный" | "any" | "arbitrary" => return TypeRef::Unknown,
         _ => {}
     }
 
-    // 4. Qualified names (`СправочникСсылка.Номенклатура`, `ОпределяемыйТип.Х`).
+    // 5. Qualified names (`СправочникСсылка.Номенклатура`, `ОпределяемыйТип.Х`).
     if trimmed.contains('.') {
         let segments: Vec<Name> = trimmed
             .split('.')
@@ -242,9 +356,77 @@ fn parse_type_name(name: &str) -> TypeRef {
         }
     }
 
-    // 5. Any other token — keep as a single-segment Name so the lowering
+    // 6. Any other token — keep as a single-segment Name so the lowering
     //    cascade can decide (manager collective, platform object, …).
     TypeRef::Name(QualifiedName::from_segments([Name::new(trimmed)]))
+}
+
+/// Strip `prefix` from `s` case-insensitively, returning a slice of the
+/// **original** `s` (preserving the author's casing of the tail).
+///
+/// # Domain invariant
+///
+/// Every char in BSL JSDoc collection keywords (`Массив`, `Array`,
+/// `ФиксированныйМассив`, `FixedArray`, `Соответствие`, `Map`, `из`, `of`)
+/// belongs to ASCII or Russian Cyrillic `а-яА-ЯёЁ`. For these chars,
+/// `char::to_lowercase` always emits exactly one codepoint, so the
+/// lowercase-form char count equals the original char count and we can
+/// recover the tail by skipping `prefix.chars().count()` chars in `s`.
+///
+/// Outside that domain (e.g. Turkish `İ` → `i + ◌̇`) this trick is unsafe;
+/// the helper is therefore deliberately scoped to private use inside the
+/// JSDoc parser.
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let s_lower = s.to_lowercase();
+    let prefix_lower = prefix.to_lowercase();
+
+    if !s_lower.starts_with(&prefix_lower) {
+        return None;
+    }
+
+    let prefix_chars = prefix.chars().count();
+    let tail_start = s.char_indices().nth(prefix_chars).map(|(idx, _)| idx).unwrap_or(s.len());
+
+    Some(&s[tail_start..])
+}
+
+/// Recognise the БСП-idiomatic `<коллекция> из <T>` documentation prose
+/// (and its English `<collection> of <T>` form).
+///
+/// Returns `None` when `name` is not one of the supported collection
+/// prefixes — the caller then falls through to the generic name-parsing
+/// cascade.
+///
+/// Supported shapes:
+/// - `Массив из <T>` / `Array of <T>` →
+///   `TypeRef::Array(Some(parse_type_name(<T>)))`.
+/// - `ФиксированныйМассив из <T>` / `FixedArray of <T>` → same as above
+///   (folded into `TypeRef::Array` because `Ty` does not yet distinguish
+///   `FixedArray`; this is enough to unblock assignability against
+///   `Новый Массив` callers without inventing a dead variant). TODO:
+///   introduce a dedicated `TypeRef::FixedArray` once `Ty` carries it.
+/// - `Соответствие из <X>` / `Map of <X>` → `TypeRef::Map(None)`. The
+///   parameter is dropped because `Ty::Map` is not parameterised yet, and
+///   the typical БСП usage is `Соответствие из КлючИЗначение` followed by
+///   `*`-bullet sub-fields, which the line-based parser cannot consume
+///   into key/value types reliably.
+fn parse_collection_of(name: &str) -> Option<TypeRef> {
+    for prefix in ["Массив из ", "Array of "] {
+        if let Some(tail) = strip_prefix_ci(name, prefix) {
+            return Some(TypeRef::Array(Some(Box::new(parse_type_name(tail)))));
+        }
+    }
+    for prefix in ["ФиксированныйМассив из ", "FixedArray of "] {
+        if let Some(tail) = strip_prefix_ci(name, prefix) {
+            return Some(TypeRef::Array(Some(Box::new(parse_type_name(tail)))));
+        }
+    }
+    for prefix in ["Соответствие из ", "Map of "] {
+        if strip_prefix_ci(name, prefix).is_some() {
+            return Some(TypeRef::Map(None));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -485,5 +667,267 @@ mod tests {
         assert_eq!(hints.params[0].1, builtin(BuiltinTypeRef::String));
         assert_eq!(hints.params[1].1, builtin(BuiltinTypeRef::Number));
         assert_eq!(hints.ret, builtin(BuiltinTypeRef::Boolean));
+    }
+
+    #[test]
+    fn parse_type_name_recognises_array_of_t_russian() {
+        // `Массив из Строка` is the canonical БСП way of writing a string
+        // array. Before the fix the whole literal degenerated into a
+        // single-segment `TypeRef::Name`, which lowering then turned into
+        // `Ty::PlatformObject("Массив из Строка")` — the source of the
+        // false-positive `TypeMismatch` against `Новый Массив` callers.
+        let parsed = parse_type_name("Массив из Строка");
+        assert_eq!(
+            parsed,
+            TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::String))))
+        );
+    }
+
+    #[test]
+    fn parse_type_name_recognises_array_of_t_english() {
+        let parsed = parse_type_name("Array of Number");
+        assert_eq!(
+            parsed,
+            TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::Number))))
+        );
+    }
+
+    #[test]
+    fn parse_type_name_array_of_t_is_case_insensitive() {
+        // Case-insensitive prefix match must hold for both Russian and
+        // English forms — pins the Cyrillic side of the
+        // `strip_prefix_ci` helper's domain invariant.
+        let lower = parse_type_name("массив из число");
+        let mixed = parse_type_name("МаСсИв ИЗ Дата");
+        let english = parse_type_name("ARRAY OF Boolean");
+        assert_eq!(lower, TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::Number)))));
+        assert_eq!(mixed, TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::Date)))));
+        assert_eq!(
+            english,
+            TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::Boolean))))
+        );
+    }
+
+    #[test]
+    fn parse_type_name_fixed_array_folds_into_array() {
+        // `ФиксированныйМассив` has no dedicated `Ty` variant yet — fold
+        // it into `TypeRef::Array(Some(_))` so callers passing a plain
+        // `Новый Массив` still satisfy the expected type. When the type
+        // system gains `Ty::FixedArray` this test will need to flip to
+        // assert the dedicated variant; today the assignability gain
+        // is the win.
+        let parsed = parse_type_name("ФиксированныйМассив из Строка");
+        assert_eq!(
+            parsed,
+            TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::String))))
+        );
+        let english = parse_type_name("FixedArray of Number");
+        assert_eq!(
+            english,
+            TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::Number))))
+        );
+    }
+
+    #[test]
+    fn parse_type_name_map_of_x_collapses_to_map_none() {
+        // `Соответствие из КлючИЗначение` is the БСП idiom that introduces
+        // a Structure-of-fields description. Until `Ty::Map` carries
+        // key/value parameters there's nothing useful to keep from the
+        // tail — collapse to `TypeRef::Map(None)` so it lowers to
+        // `Ty::Map` and stays compatible with `Новый Соответствие`.
+        let parsed = parse_type_name("Соответствие из КлючИЗначение");
+        assert_eq!(parsed, TypeRef::Map(None));
+        let english = parse_type_name("Map of KeyValue");
+        assert_eq!(english, TypeRef::Map(None));
+    }
+
+    #[test]
+    fn parse_type_name_array_of_t_keeps_unresolved_tail() {
+        // `Массив из ЛюбаяСсылка` has a tail that's not a builtin —
+        // it falls through to `TypeRef::Name` at lowering time. The
+        // important thing here is that the wrapper survives intact and
+        // the tail is *not* lowercased (would damage `Name` Eq/Hash and
+        // hover rendering).
+        let parsed = parse_type_name("Массив из ЛюбаяСсылка");
+        match parsed {
+            TypeRef::Array(Some(inner)) => match *inner {
+                TypeRef::Name(qname) => {
+                    assert_eq!(qname.len(), 1);
+                    assert_eq!(qname.first().as_str(), "ЛюбаяСсылка");
+                }
+                other => panic!("expected inner TypeRef::Name, got {other:?}"),
+            },
+            other => panic!("expected TypeRef::Array(Some(_)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_doc_types_folds_multiline_union() {
+        // The exact shape from the BSP `ЗначенияРеквизитовОбъектовЕслиСуществуют`
+        // signature that triggered the bug report. After the fix the
+        // continuation lines must collapse into a `TypeRef::Union`
+        // covering both array forms and the bare-string fallback — this
+        // is what stops the false-positive `TypeMismatch` against a
+        // `Новый Массив` argument.
+        let doc = r#"
+// Параметры:
+//  Ссылки - Массив из ЛюбаяСсылка
+//         - ФиксированныйМассив из ЛюбаяСсылка - ссылки на объекты.
+//           Если массив пуст, то результатом будет пустое соответствие.
+//  Реквизиты - Массив из Строка
+//            - ФиксированныйМассив из Строка - имена реквизитов в формате требований к свойствам структуры.
+//            - Строка - имена реквизитов через запятую
+"#;
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.params.len(), 2, "Ссылки + Реквизиты");
+
+        // Ссылки: Массив из ЛюбаяСсылка | ФиксированныйМассив из ЛюбаяСсылка
+        // (the description-only "Если массив пуст" line must not show up
+        // as an alternative).
+        match &hints.params[0].1 {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 2, "two ref-array alternatives, no description leakage");
+                assert!(matches!(parts[0], TypeRef::Array(Some(_))));
+                assert!(matches!(parts[1], TypeRef::Array(Some(_))));
+            }
+            other => panic!("Ссылки: expected TypeRef::Union, got {other:?}"),
+        }
+
+        // Реквизиты: Массив из Строка | ФиксированныйМассив из Строка | Строка
+        match &hints.params[1].1 {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(
+                    parts[0],
+                    TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::String))))
+                );
+                assert_eq!(
+                    parts[1],
+                    TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::String))))
+                );
+                assert_eq!(parts[2], TypeRef::Builtin(BuiltinTypeRef::String));
+            }
+            other => panic!("Реквизиты: expected TypeRef::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_doc_types_ignores_star_bullets_in_params() {
+        // `*`-bullets describe Structure fields — they must NOT be folded
+        // into the parent param's type as union alternatives. Only `- `
+        // continuations count.
+        let doc = r#"
+// Параметры:
+//  ВложеннаяСтруктура - Структура:
+//     * Поле1 - Строка - описание
+//     * Поле2 - Число - описание
+//  ВтороеПоле - Булево - флаг
+"#;
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        // The `*`-bullets currently parse through `parse_param_line`
+        // (pre-existing behaviour, orthogonal to this fix) so the param
+        // count may include them — what matters here is that
+        // `ВложеннаяСтруктура` does NOT become a union folded with
+        // `Поле1`/`Поле2`.
+        let nested = hints.params.iter().find(|(n, _)| n.as_str() == "ВложеннаяСтруктура");
+        assert!(nested.is_some(), "ВложеннаяСтруктура must be present");
+        // Whatever it parses to, it must not be a union containing the
+        // nested fields' types — the field-bullet logic stays untouched.
+        assert!(
+            !matches!(&nested.unwrap().1, TypeRef::Union(_)),
+            "`*`-bullets must not be folded into the parent union"
+        );
+    }
+
+    #[test]
+    fn parse_method_doc_types_orphan_continuation_is_dropped() {
+        // A `- Тип` line that appears before any param line has no anchor
+        // to fold into. It must be silently dropped — both the
+        // continuation logic (no `last_param_idx`) and `parse_param_line`
+        // (no name segment) refuse it. Pinning this so a future
+        // refactor doesn't accidentally treat it as a degenerate param.
+        let doc = r#"
+// Параметры:
+//   - СтройноеЧисло - сирота
+//   Param1 - Строка - текст
+"#;
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.params.len(), 1);
+        assert_eq!(hints.params[0].0.as_str(), "Param1");
+        assert_eq!(hints.params[0].1, builtin(BuiltinTypeRef::String));
+    }
+
+    #[test]
+    fn parse_method_doc_types_continuation_with_only_description_is_skipped() {
+        // A free-prose description line between the param header and a
+        // following continuation must not break the continuation chain —
+        // we keep `last_param_idx` set across description lines so the
+        // later `- Тип2` still folds into the right param.
+        let doc = r#"
+// Параметры:
+//   Реквизиты - Массив из Строка
+//            Описание длинное и многословное.
+//            - Строка - запасной вариант
+"#;
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.params.len(), 1);
+        match &hints.params[0].1 {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(
+                    parts[0],
+                    TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::String))))
+                );
+                assert_eq!(parts[1], TypeRef::Builtin(BuiltinTypeRef::String));
+            }
+            other => panic!("expected TypeRef::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_doc_types_preserves_explicit_any_continuation() {
+        // `Произвольный` / `Any` is the author's deliberate gradual-top
+        // opt-in: "this param accepts the listed types OR anything else".
+        // The continuation parser must keep it as `TypeRef::Unknown`
+        // inside the union so `Ty::union` (which preserves Unknown by
+        // design) propagates the gradual-top semantics to assignability.
+        // Dropping it would silently narrow the contract to the explicit
+        // alternatives only.
+        let doc = r#"
+// Параметры:
+//   Значение - Строка
+//            - Произвольный - любой другой тип
+"#;
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.params.len(), 1);
+        match &hints.params[0].1 {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], TypeRef::Builtin(BuiltinTypeRef::String));
+                assert_eq!(parts[1], TypeRef::Unknown);
+            }
+            other => panic!("expected TypeRef::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_prefix_ci_handles_cyrillic_round_trip() {
+        // Pins the helper's domain invariant: a successfully stripped
+        // tail is a slice of the *original* input, with the original
+        // casing preserved (critical because downstream `Name::new` is
+        // case-sensitive and hover renders the raw author casing).
+        let tail = strip_prefix_ci("Массив из Строка", "Массив из ").unwrap();
+        assert_eq!(tail, "Строка");
+
+        let tail_mixed = strip_prefix_ci("маССив ИЗ Число", "Массив из ").unwrap();
+        assert_eq!(tail_mixed, "Число");
+
+        // No match — the prefix differs in non-case ways.
+        assert!(strip_prefix_ci("Соответствие из X", "Массив из ").is_none());
     }
 }
