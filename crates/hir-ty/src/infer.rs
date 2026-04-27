@@ -115,13 +115,22 @@ impl InferenceResult {
 /// in ide-diagnostics layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InferenceDiagnostic {
-    /// Unresolved method call (CommonModule.Method not found).
+    /// Unresolved method call.
     ///
     /// Emitted when:
-    /// - CommonModule doesn't exist in workspace
-    /// - Method doesn't exist in CommonModule
-    /// - Method exists but is not exported
-    /// - CommonModule source file is missing
+    /// - 2-segment `Module.Method()` — CommonModule doesn't exist in
+    ///   workspace, the method doesn't exist in it, or exists but is
+    ///   not exported.
+    /// - 3-segment `Plural.MDO.Method()` — workspace `ManagerModule`
+    ///   miss with no platform fallback, or non-exported workspace
+    ///   method.
+    /// - 2-shape `receiver.method()` on a typed receiver
+    ///   (`MetadataRef` / `ThisObject`) — `lookup_method` returned
+    ///   `None` for an authoritative receiver. `Ty::ObjectManager` is
+    ///   intentionally excluded: workspace `ManagerModule.bsl` methods
+    ///   are not visible to `lookup_method`, so a miss there is
+    ///   inconclusive.
+    /// - CommonModule source file is missing.
     UnresolvedMethodCall {
         expr: ExprId,
         receiver_name: Name,
@@ -868,7 +877,7 @@ impl<'db> InferenceContext<'db> {
             for arg in args {
                 self.infer_expr(*arg);
             }
-            return match crate::method_lookup::lookup_method(&receiver_ty, &method_name) {
+            let result = match crate::method_lookup::lookup_method(&receiver_ty, &method_name) {
                 Some(info) => {
                     // Argument type check (M4 Task 7 follow-up): the
                     // fluent-chain path historically skipped both arg-
@@ -878,8 +887,48 @@ impl<'db> InferenceContext<'db> {
                     self.emit_arg_type_mismatches(args, &info.params);
                     info.return_ty
                 }
-                None => Ty::Unknown,
+                None => {
+                    // Authoritative-receiver gate: only `MetadataRef` and
+                    // `ThisObject` get the new `UnresolvedMethodCall`.
+                    // Pre-fix the standalone `Expr::Field` arm already
+                    // fired `UnresolvedField` (mis-labeled) on those
+                    // shapes, so renaming to `UnresolvedMethodCall` does
+                    // not introduce new false positives.
+                    //
+                    // Crucially `Ty::ObjectManager` is **excluded**:
+                    // `lookup_method` for managers consults platform data
+                    // only (`platform_manager_lookup::resolve_platform_manager_method`)
+                    // and does not see workspace `ManagerModule.bsl`
+                    // methods. A miss on
+                    // `М = Справочники.X; М.УсерМетод()` is therefore
+                    // inconclusive — `УсерМетод` may genuinely exist as
+                    // an exported manager-module method that this 2-shape
+                    // path never resolves. Until the workspace resolver
+                    // is wired into `lookup_method`, silence is the
+                    // honest answer for `ObjectManager`. Other receivers
+                    // (`Unknown`, `Union`, primitives, `PlatformObject`,
+                    // `ManagerCollection`) stay silent for the same
+                    // partial-table reason that pre-dates this fix.
+                    if let Some(receiver_name) = receiver_display_name(&receiver_ty) {
+                        self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                            expr: callee,
+                            receiver_name,
+                            method_name: method_name.clone(),
+                            kind: UnresolvedMethodKind::MethodNotFound,
+                        });
+                    }
+                    Ty::Unknown
+                }
             };
+            // Cache the callee `Expr::Field`'s type so `infer_all`'s
+            // second pass (which iterates every expression in the body)
+            // does not re-visit it through the `Expr::Field` arm of
+            // `infer_expr` and emit a spurious `UnresolvedField` on a
+            // method name. BSL has no first-class method references —
+            // the meaningful value type belongs to the surrounding
+            // `Expr::Call`, which is cached at the call site.
+            self.expr_types.insert(callee, Ty::Unknown);
+            return result;
         }
 
         // Infer callee type for non-qualified calls
@@ -1168,6 +1217,101 @@ impl<'db> InferenceContext<'db> {
             }
         }
     }
+}
+
+/// Build the qualified `Plural.MDO` receiver-name string used in
+/// `UnresolvedMethodCall` diagnostics for a 2-shape `receiver.method()`
+/// call site.
+///
+/// Returns `Some` only for **authoritative** receivers (`MetadataRef`,
+/// `ThisObject`) where pre-fix the standalone `Expr::Field` arm already
+/// emitted `UnresolvedField` for the same miss — this fix just renames
+/// the diagnostic to the correct kind. Returns `None` for everything
+/// else, in particular `Ty::ObjectManager`: its method table in
+/// `lookup_method` is platform-only and does not see workspace
+/// `ManagerModule.bsl` methods, so a miss is inconclusive and silence
+/// is the honest answer until the workspace resolver is wired in.
+///
+/// The user-visible form matches the 3-segment path's `<Plural>.<MDO>`
+/// convention rendered by `unresolved_method_call::from_hir`.
+fn receiver_display_name(receiver_ty: &Ty) -> Option<hir_def::Name> {
+    match receiver_ty {
+        Ty::MetadataRef { kind, name } => {
+            let plural = mdo_kind_to_plural(*kind)?;
+            Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
+        }
+        Ty::ThisObject { owner: (mdo_type, name) } => {
+            let plural = mdo_type_to_plural(*mdo_type)?;
+            Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
+        }
+        _ => None,
+    }
+}
+
+/// Russian plural form for an [`MdoType`] — the inverse of
+/// [`bsl_metadata::MdoType::from_plural`]. Mirrors only those flavours
+/// that have a stable public-call surface (`Документы.X.Метод()` etc.);
+/// flavours without a manager-style call surface (`Constant`, `Cube`,
+/// `DimensionTable`, `CommonModule`, `ExternalDataSource`) return `None`.
+fn mdo_type_to_plural(mdo_type: bsl_metadata::MdoType) -> Option<&'static str> {
+    use bsl_metadata::MdoType;
+    Some(match mdo_type {
+        MdoType::Document => "Документы",
+        MdoType::Catalog => "Справочники",
+        MdoType::InformationRegister => "РегистрыСведений",
+        MdoType::AccumulationRegister => "РегистрыНакопления",
+        MdoType::AccountingRegister => "РегистрыБухгалтерии",
+        MdoType::CalculationRegister => "РегистрыРасчета",
+        MdoType::ChartOfCharacteristicTypes => "ПланыВидовХарактеристик",
+        MdoType::ChartOfAccounts => "ПланыСчетов",
+        MdoType::ChartOfCalculationTypes => "ПланыВидовРасчета",
+        MdoType::BusinessProcess => "БизнесПроцессы",
+        MdoType::Task => "Задачи",
+        MdoType::Enum => "Перечисления",
+        MdoType::ExchangePlan => "ПланыОбмена",
+        MdoType::DataProcessor => "Обработки",
+        MdoType::Report => "Отчеты",
+        _ => return None,
+    })
+}
+
+/// Map a [`MetadataKind`] to its parent MDO plural for diagnostic
+/// display, covering object/ref/manager kinds whose owner family is
+/// uniquely determined.
+fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
+    use hir_def::ty::MetadataKind;
+    let mdo = match kind {
+        MetadataKind::CatalogObject | MetadataKind::CatalogRef => bsl_metadata::MdoType::Catalog,
+        MetadataKind::DocumentObject | MetadataKind::DocumentRef => bsl_metadata::MdoType::Document,
+        MetadataKind::EnumRef => bsl_metadata::MdoType::Enum,
+        MetadataKind::TaskRef => bsl_metadata::MdoType::Task,
+        MetadataKind::BusinessProcessRef => bsl_metadata::MdoType::BusinessProcess,
+        MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
+            bsl_metadata::MdoType::ExchangePlan
+        }
+        MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
+            bsl_metadata::MdoType::ChartOfAccounts
+        }
+        MetadataKind::InformationRegisterRecordManager | MetadataKind::InformationRegisterRef => {
+            bsl_metadata::MdoType::InformationRegister
+        }
+        MetadataKind::AccumulationRegisterRecordSet | MetadataKind::AccumulationRegisterRef => {
+            bsl_metadata::MdoType::AccumulationRegister
+        }
+        MetadataKind::AccountingRegisterRef => bsl_metadata::MdoType::AccountingRegister,
+        MetadataKind::CalculationRegisterRef => bsl_metadata::MdoType::CalculationRegister,
+        // Register-part / tabular-section kinds carry a parent payload but
+        // no manager-style call surface. Returning `None` keeps the
+        // diagnostic silent on these — consistent with `lookup_method`'s
+        // behaviour (it returns `None` for these kinds), so we never
+        // construct a misleading `Регистры…/<Раздел>` receiver name.
+        MetadataKind::RegisterDimension { .. }
+        | MetadataKind::RegisterResource { .. }
+        | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::TabularSection { .. }
+        | MetadataKind::TabularSectionRow { .. } => return None,
+    };
+    mdo_type_to_plural(mdo)
 }
 
 /// Salsa query: Infer types for all expressions in a file.

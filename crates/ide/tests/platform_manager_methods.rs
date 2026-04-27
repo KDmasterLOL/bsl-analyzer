@@ -336,3 +336,130 @@ fn catalog_object_chained_unknown_method_still_emits_diagnostic() {
         "Спр must still be MetadataRef — chained-call failure on it must not poison the prior assignment",
     );
 }
+
+fn unresolved_field_names(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String> {
+    db.infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedField { field_name, .. } => {
+                Some(field_name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn document_object_chained_write_resolves_through_metadata_ref_lookup() {
+    // User-reported: `Док = Документы.X.СоздатьДокумент(); Док.Записать();`
+    // must resolve via `MetadataRef { DocumentObject, .. }` lookup. Pre-fix
+    // the inner callee `Expr::Field { Док, Записать }` was re-walked by
+    // `infer_all`'s second pass and emitted a spurious `UnresolvedField`
+    // (the field arm doesn't know callees are method references).
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    Док = Документы.Документ1.СоздатьДокумент();
+    Док.Записать();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+
+    assert!(
+        !unresolved_method_names(&db, file_id).iter().any(|n| n.eq_ignore_ascii_case("Записать")),
+        "DocumentObject.Записать must resolve via MetadataRef adapter; got unresolved {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+    assert!(
+        !unresolved_field_names(&db, file_id).iter().any(|n| n.eq_ignore_ascii_case("Записать")),
+        "DocumentObject.Записать must NOT emit UnresolvedField — it is a method, not a field; got {:?}",
+        unresolved_field_names(&db, file_id),
+    );
+}
+
+#[test]
+fn document_object_chained_unknown_method_emits_unresolved_method_call() {
+    // Sibling of the catalog-object unknown-method test: a bogus method
+    // name on a `MetadataRef { DocumentObject, .. }` receiver must surface
+    // as `UnresolvedMethodCall(MethodNotFound)` — NOT silently swallowed
+    // and NOT mis-labeled as `UnresolvedField`.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    Док = Документы.Документ1.СоздатьДокумент();
+    Док.НетТакогоМетода();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let inf = db.infer(file_id);
+    let unresolved: Vec<_> = inf
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall {
+                receiver_name, method_name, kind, ..
+            } => Some((receiver_name.clone(), method_name.clone(), *kind)),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        unresolved_field_names(&db, file_id).is_empty(),
+        "method-call site must not emit UnresolvedField; got {:?}",
+        unresolved_field_names(&db, file_id),
+    );
+    assert!(
+        unresolved.iter().any(|(rcv, m, kind)| {
+            m.as_str().eq_ignore_ascii_case("НетТакогоМетода")
+                && *kind == UnresolvedMethodKind::MethodNotFound
+                && rcv.as_str() == "Документы.Документ1"
+        }),
+        "DocumentObject.НетТакогоМетода must emit UnresolvedMethodCall(MethodNotFound) \
+         with `Plural.MDO` receiver-name; got {unresolved:?}",
+    );
+}
+
+#[test]
+fn aliased_object_manager_unknown_method_stays_silent() {
+    // `М = Справочники.X; М.УсерМетод()` — the 2-shape on an
+    // `ObjectManager` receiver. `method_lookup` consults only
+    // `platform_manager_lookup::resolve_platform_manager_method`, which
+    // is platform-data-only and does NOT see workspace
+    // `ManagerModule.bsl` methods. A miss therefore is inconclusive —
+    // `УсерМетод` may legitimately exist as an exported manager-module
+    // method that this 2-shape lookup never resolves. Until the
+    // workspace resolver is wired into `lookup_method`, silence is the
+    // honest answer for `ObjectManager`. Diagnostic must not fire.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    М = Справочники.Справочник1;
+    М.УсерМетод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let inf = db.infer(file_id);
+    let unresolved_method: Vec<_> = inf
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall { method_name, .. } => {
+                Some(method_name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        unresolved_field_names(&db, file_id).is_empty(),
+        "method-call site on aliased ObjectManager must not emit UnresolvedField; got {:?}",
+        unresolved_field_names(&db, file_id),
+    );
+    assert!(
+        !unresolved_method.iter().any(|n| n.eq_ignore_ascii_case("УсерМетод")),
+        "ObjectManager miss is not authoritative — workspace ManagerModule methods are not \
+         visible to method_lookup, so the diagnostic must stay silent until the resolver is \
+         wired in; got {unresolved_method:?}",
+    );
+}
