@@ -1192,12 +1192,24 @@ impl<'db> InferenceContext<'db> {
             }
 
             let result = match crate::method_lookup::lookup_method(&receiver_ty, &method_name) {
-                Some(info) => {
+                Some(mut info) => {
                     // Argument type check (M4 Task 7 follow-up): the
                     // fluent-chain path historically skipped both arg-
                     // count and arg-type diagnostics. Emit the type
                     // check here — count-check stays deferred so this
                     // patch stays scoped to the TypeMismatch emitter.
+                    if let Ty::ObjectManager {
+                        kind: bsl_metadata::MdoType::Constant,
+                        name: mdo_name,
+                    } = &receiver_ty
+                    {
+                        self.refine_constant_method(
+                            mdo_name,
+                            &method_name,
+                            &mut info.return_ty,
+                            &mut info.params,
+                        );
+                    }
                     self.emit_arg_type_mismatches(args, &info.params);
                     info.return_ty
                 }
@@ -1497,13 +1509,21 @@ impl<'db> InferenceContext<'db> {
                 // that never register a configuration — they pre-date
                 // the platform fallback and rely on the diagnostic
                 // firing.
-                let plat_res: Option<PlatformMethodResolution> =
-                    bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str())
-                        .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
-                        .and_then(|mdo_type| {
-                            resolve_platform_manager_method(mdo_type, mdo_name, method_name)
-                        });
-                if let Some(res) = plat_res {
+                let mdo_type_opt = bsl_metadata::MdoType::from_plural(mdo_type_plural.as_str());
+                let plat_res: Option<PlatformMethodResolution> = mdo_type_opt
+                    .filter(|mdo_type| self.mdo_declared(*mdo_type, mdo_name))
+                    .and_then(|mdo_type| {
+                        resolve_platform_manager_method(mdo_type, mdo_name, method_name)
+                    });
+                if let Some(mut res) = plat_res {
+                    if mdo_type_opt == Some(bsl_metadata::MdoType::Constant) {
+                        self.refine_constant_method(
+                            mdo_name,
+                            method_name,
+                            &mut res.return_ty,
+                            &mut res.signature.params,
+                        );
+                    }
                     let total = res.signature.params.len();
                     let required = res.signature.required_count();
                     if args.len() < required || args.len() > total {
@@ -1580,6 +1600,97 @@ impl<'db> InferenceContext<'db> {
             vc.configuration.find_metadata_object(mdo_type, needle).is_some()
                 || vc.configuration.find_register_by_type_and_name(mdo_type, needle).is_some()
         })
+    }
+
+    /// Look up a constant's declared value type in the visible
+    /// configurations.
+    ///
+    /// Iterates `configurations(file_id)` in reverse so a CFE extension
+    /// declaration of the constant wins over the main configuration —
+    /// matches the override-wins policy already in place for
+    /// field/manager lookups (`crates/hir-ty/src/field_lookup.rs`,
+    /// `crates/hir-ty/src/manager_lookup.rs`).
+    ///
+    /// Returns `None` when the constant is not declared in any visible
+    /// configuration **or** is declared without a `<Type>` element. The
+    /// caller treats `None` as "fall back to whatever the platform
+    /// lookup produced" — for `Получить` / `Установить` that is
+    /// `Ty::Unknown` after the M4 `Произвольный` fix in
+    /// [`crate::method_lookup::resolve_platform_type_name`], which the
+    /// gradual rule then accepts in any typed slot.
+    fn resolve_constant_value_type(&self, mdo_name: &Name) -> Option<Ty> {
+        let configs = self.db.configurations(self.file_id);
+        if configs.is_empty() {
+            return None;
+        }
+        let needle = mdo_name.as_str();
+        for vc in configs.iter().rev() {
+            // Lookup the *constant declaration* (not the type) — an
+            // extension that declares the constant without a `<Type>`
+            // element shadows the base configuration's declaration. If
+            // we keyed on `find_constant_type` (which returns `None`
+            // for both "no constant" and "constant without type"),
+            // the iteration would fall through to the base and serve
+            // the wrong type for an explicit untyped override.
+            let Some(mdo) =
+                vc.configuration.find_metadata_object(bsl_metadata::MdoType::Constant, needle)
+            else {
+                continue;
+            };
+            return mdo.constant_type.as_ref().map(|attr| {
+                let type_ref = hir_def::TypeRef::from_attribute_type(attr);
+                TyLoweringContext::new().lower_type_ref(&type_ref)
+            });
+        }
+        None
+    }
+
+    /// Refine the `Получить` / `Установить` slot of a `Константы.<Имя>`
+    /// method resolution with the constant's configuration-declared
+    /// value type.
+    ///
+    /// Whitelisted methods only:
+    /// - `Получить` / `Get` — overrides `return_ty` when the platform
+    ///   lookup yielded `Ty::Unknown` (the post-fix-#1 lowering of
+    ///   `"Произвольный"`).
+    /// - `Установить` / `Set` — overrides the first parameter type
+    ///   when it is `Ty::Unknown`.
+    ///
+    /// All other constant-manager methods (`Метаданные`,
+    /// `СоздатьМенеджерЗначения`, `SetDataHistoryVersion*`, …) pass
+    /// through untouched. The `== Ty::Unknown` guard preserves any
+    /// future generic-metadata refinement that lands in
+    /// [`crate::platform_manager_lookup::map_generic_metadata_return_type`].
+    ///
+    /// `to_lowercase()` is used because `eq_ignore_ascii_case` does
+    /// not fold Cyrillic; `infer.rs` does not currently expose a
+    /// reusable bilingual matcher, so the comparison stays inline.
+    fn refine_constant_method(
+        &self,
+        mdo_name: &Name,
+        method_name: &Name,
+        return_ty: &mut Ty,
+        params: &mut [Ty],
+    ) {
+        let lc = method_name.as_str().to_lowercase();
+        let is_get = lc == "получить" || lc == "get";
+        let is_set = lc == "установить" || lc == "set";
+        if !is_get && !is_set {
+            return;
+        }
+        let needs_override = (is_get && matches!(return_ty, Ty::Unknown))
+            || (is_set && matches!(params.first(), Some(Ty::Unknown)));
+        if !needs_override {
+            return;
+        }
+        let Some(value_ty) = self.resolve_constant_value_type(mdo_name) else {
+            return;
+        };
+        if is_get {
+            *return_ty = value_ty;
+        } else if is_set {
+            params[0] = value_ty;
+        }
     }
 
     fn emit_arg_type_mismatches(&mut self, args: &[ExprId], params: &[Ty]) {
