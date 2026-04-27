@@ -305,7 +305,13 @@ fn parse_return_line(line: &str) -> Option<TypeRef> {
 /// 6. Any other single token → [`TypeRef::Name`] of one segment. Lowering
 ///    takes this through the manager/platform-object cascade.
 fn parse_type_name(name: &str) -> TypeRef {
-    let trimmed = name.trim();
+    // The trailing `:` is a JSDoc structured-form marker (`Структура:`,
+    // `Соответствие:`, `Массив:` introducing a `* Поле - Тип` field list).
+    // It is never part of a BSL type name, so strip it before classification —
+    // otherwise the bare-name table misses and the token degenerates into
+    // `Ty::PlatformObject("Структура:")`, fabricating a `TypeMismatch` against
+    // any real `Ty::Structure` argument.
+    let trimmed = name.trim().trim_end_matches(':').trim_end();
     if trimmed.is_empty() {
         return TypeRef::Unknown;
     }
@@ -833,12 +839,24 @@ mod tests {
         // `Поле1`/`Поле2`.
         let nested = hints.params.iter().find(|(n, _)| n.as_str() == "ВложеннаяСтруктура");
         assert!(nested.is_some(), "ВложеннаяСтруктура must be present");
-        // Whatever it parses to, it must not be a union containing the
-        // nested fields' types — the field-bullet logic stays untouched.
-        assert!(
-            !matches!(&nested.unwrap().1, TypeRef::Union(_)),
-            "`*`-bullets must not be folded into the parent union"
-        );
+        // The structured-form marker `:` is JSDoc syntax, not part of the
+        // type name — `Структура:` must classify as the builtin Structure,
+        // not degenerate into `TypeRef::Name([Структура:])` (which would
+        // lower to `Ty::PlatformObject("Структура:")` and fabricate a
+        // `TypeMismatch` against any real `Ty::Structure` argument).
+        assert_eq!(nested.unwrap().1, builtin(BuiltinTypeRef::Structure));
+    }
+
+    #[test]
+    fn parse_type_name_strips_structured_form_colon_marker() {
+        // The trailing `:` is JSDoc syntax that introduces a `* Поле - Тип`
+        // field list — it is never part of a BSL type name. All three
+        // structured-form markers must classify to their bare-name builtin.
+        assert_eq!(parse_type_name("Структура:"), TypeRef::Builtin(BuiltinTypeRef::Structure));
+        assert_eq!(parse_type_name("Соответствие:"), TypeRef::Map(None));
+        assert_eq!(parse_type_name("Массив:"), TypeRef::Array(None));
+        // Whitespace between the name and the colon must also be tolerated.
+        assert_eq!(parse_type_name("Структура :"), TypeRef::Builtin(BuiltinTypeRef::Structure));
     }
 
     #[test]
