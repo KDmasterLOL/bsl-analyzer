@@ -752,7 +752,12 @@ impl<'db> InferenceContext<'db> {
         if resolver_says_builtin || hir_sig.is_some() {
             if let Some(sig) = hir_sig {
                 trace!("resolved {} as builtin via hir-ty signature table", name);
-                return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
+                return Ty::Function {
+                    params: sig.params.clone(),
+                    defaults: sig.defaults.clone(),
+                    is_variadic: sig.is_variadic,
+                    ret: sig.ret.clone(),
+                };
             }
             // Resolver classifies the name as a platform global but the
             // hir-ty signature table has no typed entry for it. Leave
@@ -1245,17 +1250,11 @@ impl<'db> InferenceContext<'db> {
 
         // Check if callee is a function type
         match callee_ty {
-            Ty::Function { ref params, ref ret } => {
-                // `Ty::Function` does not carry per-parameter
-                // optional-ness today (it is built from
-                // `FunctionSignature::params` only — see `infer.rs:732`
-                // for the builtin path). Treat every param as required
-                // so that fluent-typed function values keep the strict
-                // arity behaviour they had before the optional-aware
-                // `MismatchedArgCount` change. Builtin signatures with
-                // optional tails should be promoted to a richer carrier
-                // (e.g. an overload variant or a Ty::Function variant
-                // with defaults) before relaxing the bound here.
+            Ty::Function { ref params, ref ret, .. } => {
+                // Slice 3 will replace this strict equality with a
+                // defaults-aware bound; for now the arity rule is
+                // unchanged so that the variant-shape change in Slice 2
+                // is purely structural and doesn't shift any diagnostic.
                 let total = params.len();
                 if args.len() != total {
                     self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
@@ -1984,9 +1983,14 @@ mod tests {
         // When Expr::Path("СтрДлина") is inferred, it should return:
         // Ty::Function { params: [Ty::String], ret: Ty::Number }
         if let Some(sig) = builtins.get("стрдлина") {
-            let ty = Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
+            let ty = Ty::Function {
+                params: sig.params.clone(),
+                defaults: sig.defaults.clone(),
+                is_variadic: sig.is_variadic,
+                ret: sig.ret.clone(),
+            };
             match ty {
-                Ty::Function { params, ret } => {
+                Ty::Function { params, ret, .. } => {
                     assert_eq!(params.len(), 1);
                     assert_eq!(*ret, Ty::Number);
                 }

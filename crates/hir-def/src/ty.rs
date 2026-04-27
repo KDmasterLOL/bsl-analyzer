@@ -115,8 +115,16 @@ pub enum Ty {
     /// Function or procedure type.
     ///
     /// In BSL, functions and procedures are first-class values.
-    /// params: parameter types, ret: return type (Undefined for procedures).
-    Function { params: Box<[Ty]>, ret: Box<Ty> },
+    /// `params` are the declared parameter types (positional), `defaults` is
+    /// a parallel mask where `true` at index `i` means parameter `i` has a
+    /// default value (i.e. is optional at the call site), `is_variadic` is
+    /// `true` for functions whose last parameter accepts an unbounded tail
+    /// of trailing arguments (e.g. `СтрШаблон`), and `ret` is the return
+    /// type (`Undefined` for procedures).
+    ///
+    /// `defaults.len() == params.len()` is an invariant on the constructor
+    /// path; consumers may rely on it.
+    Function { params: Box<[Ty]>, defaults: Box<[bool]>, is_variadic: bool, ret: Box<Ty> },
 
     /// Platform object type not covered by specific Ty variants.
     ///
@@ -704,7 +712,13 @@ mod tests {
         assert_eq!(Ty::Unknown.display_name(), "Unknown");
         assert_eq!(Ty::Array.display_name(), "Array");
         assert_eq!(
-            Ty::Function { params: Box::new([]), ret: Box::new(Ty::Undefined) }.display_name(),
+            Ty::Function {
+                params: Box::new([]),
+                defaults: Box::new([]),
+                is_variadic: false,
+                ret: Box::new(Ty::Undefined),
+            }
+            .display_name(),
             "Function"
         );
     }
@@ -718,7 +732,13 @@ mod tests {
 
     #[test]
     fn test_is_function() {
-        assert!(Ty::Function { params: Box::new([]), ret: Box::new(Ty::Undefined) }.is_function());
+        assert!(Ty::Function {
+            params: Box::new([]),
+            defaults: Box::new([]),
+            is_variadic: false,
+            ret: Box::new(Ty::Undefined),
+        }
+        .is_function());
         assert!(!Ty::Number.is_function());
         assert!(!Ty::Unknown.is_function());
     }
