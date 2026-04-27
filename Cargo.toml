@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.137"
+version = "0.1.138"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]

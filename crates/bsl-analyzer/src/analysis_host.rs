@@ -52,6 +52,20 @@ impl AnalysisHost {
     /// `AnalysisHost::trigger_cancellation`, which bumps a revision as a
     /// reset marker to clear fixpoint poisoning.
     pub fn request_cancellation(&mut self) {
+        // Anything above WARN_MS is the suspected Windows stall: zalsa_mut()
+        // spinning on a live snapshot held by a background worker.
+        const NOTABLE_MS: u64 = 50;
+        const WARN_MS: u64 = 200;
+
+        let start = std::time::Instant::now();
         self.db.trigger_cancellation();
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        if elapsed_ms >= WARN_MS {
+            tracing::warn!(elapsed_ms, "trigger_cancellation slow — live Salsa snapshots");
+        } else if elapsed_ms >= NOTABLE_MS {
+            tracing::info!(elapsed_ms, "trigger_cancellation notable");
+        } else {
+            tracing::debug!(elapsed_ms, "trigger_cancellation");
+        }
     }
 }

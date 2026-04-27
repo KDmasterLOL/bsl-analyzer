@@ -3,7 +3,7 @@
 //! This module implements handlers for LSP notifications like
 //! textDocument/didOpen, didChange, didClose, and didSave.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use anyhow::Result;
 use base_db::FileIdInput;
@@ -53,8 +53,11 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     state.diagnostics_tokens.insert(uri.clone(), db.cancellation_token());
     let config = state.diagnostics_config().clone();
     let uri = uri.clone();
+    let queued_at = Instant::now();
 
     state.task_pool.pool.spawn(move || {
+        let started_at = Instant::now();
+        let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
         let result = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
             let file_id_input = FileIdInput::new(&db, file_id);
             let config_id = base_db::DiagnosticsConfigId::new(&db, config);
@@ -62,10 +65,23 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
             let line_index = LineIndex::new(&text);
             crate::lsp::diagnostics(&line_index, &text, &ide_diagnostics)
         }));
+        let compute_ms = started_at.elapsed().as_millis() as u64;
 
         match result {
-            Ok(diagnostics) => Task::DiagnosticsReady { uri, diagnostics, generation },
-            Err(_) => Task::DiagnosticsCancelled { generation },
+            Ok(diagnostics) => {
+                tracing::info!(
+                    %uri,
+                    queue_wait_ms,
+                    compute_ms,
+                    diagnostic_count = diagnostics.len(),
+                    "diagnostics ready",
+                );
+                Task::DiagnosticsReady { uri, diagnostics, generation }
+            }
+            Err(_) => {
+                tracing::debug!(%uri, queue_wait_ms, compute_ms, "diagnostics cancelled");
+                Task::DiagnosticsCancelled { generation }
+            }
         }
     });
 }
@@ -79,6 +95,8 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
 /// 4. Preload dependencies in background for fast GoToDefinition
 pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_open", uri = %params.text_document.uri).entered();
+    let start = Instant::now();
+    let vfs_done = state.vfs_done;
 
     let uri = params.text_document.uri;
     let text = params.text_document.text;
@@ -102,15 +120,26 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     }
 
     // Process VFS changes and sync to Salsa database
+    let process_start = Instant::now();
     state.process_changes();
-
-    tracing::debug!("Document opened successfully: {}", uri);
+    let process_changes_ms = process_start.elapsed().as_millis() as u64;
 
     // Preload dependencies in background for fast GoToDefinition
+    let preload_start = Instant::now();
     preload_dependencies(state, file_id);
+    let preload_dispatch_ms = preload_start.elapsed().as_millis() as u64;
 
     // Schedule diagnostics in background (didOpen runs immediately, no batching benefit)
     schedule_diagnostics(state, &uri);
+
+    tracing::info!(
+        %uri,
+        vfs_done,
+        process_changes_ms,
+        preload_dispatch_ms,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "handle_did_open complete",
+    );
 
     Ok(())
 }
@@ -126,17 +155,25 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 /// via its Salsa `CancellationToken`, so repeated `didOpen` does not pile up
 /// stale warming tasks. Cancellation is also triggered from `handle_did_close`.
 fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
+    let discover_start = Instant::now();
     let analysis = state.analysis_host.analysis();
     let deps = analysis.file_dependencies(file_id);
+    let discover_ms = discover_start.elapsed().as_millis() as u64;
 
     if deps.is_empty() {
-        tracing::debug!(file_id = file_id.0, "preload: no dependencies found");
+        tracing::debug!(file_id = file_id.0, discover_ms, "preload: no dependencies found",);
         return;
     }
 
     let dep_count = deps.len();
     let dep_ids: Vec<u32> = deps.iter().map(|f| f.0).collect();
-    tracing::debug!(file_id = file_id.0, dep_count, ?dep_ids, "preload: starting background task");
+    tracing::info!(
+        file_id = file_id.0,
+        dep_count,
+        discover_ms,
+        ?dep_ids,
+        "preload: dispatching warm-cache task",
+    );
 
     if let Some(prev) = state.preload_tokens.remove(&file_id) {
         prev.cancel();
@@ -144,16 +181,29 @@ fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
 
     let task = analysis.warm_caches_task(&deps, state.diagnostics_config().clone());
     state.preload_tokens.insert(file_id, task.cancellation_token());
+    let queued_at = Instant::now();
 
     state.task_pool.pool.spawn(move || {
-        tracing::debug!(dep_count, "preload: background task started");
+        let started_at = Instant::now();
+        let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
         let count = match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| task.run())) {
             Ok(count) => {
-                tracing::debug!(dep_count = count, "preload: background task completed");
+                tracing::info!(
+                    file_id = file_id.0,
+                    dep_count = count,
+                    queue_wait_ms,
+                    run_ms = started_at.elapsed().as_millis() as u64,
+                    "preload: warm-cache complete",
+                );
                 count
             }
             Err(_) => {
-                tracing::debug!(file_id = file_id.0, "preload: background task cancelled");
+                tracing::debug!(
+                    file_id = file_id.0,
+                    queue_wait_ms,
+                    run_ms = started_at.elapsed().as_millis() as u64,
+                    "preload: warm-cache cancelled",
+                );
                 0
             }
         };

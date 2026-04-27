@@ -11,6 +11,7 @@ use std::{
     fs,
     path::{Component, Path},
     sync::atomic::AtomicUsize,
+    time::Instant,
 };
 
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
@@ -129,8 +130,14 @@ impl NotifyActor {
                         });
 
                         // First pass: count total files (uses WalkDir, may take time on large projects)
+                        let count_start = Instant::now();
                         let n_total: usize =
                             config.load.iter().map(Self::count_files_in_entry).sum();
+                        tracing::info!(
+                            n_total,
+                            elapsed_ms = count_start.elapsed().as_millis() as u64,
+                            "vfs: count pass complete",
+                        );
 
                         self.send(loader::Message::Progress {
                             n_total,
@@ -145,6 +152,7 @@ impl NotifyActor {
                         let last_reported = AtomicUsize::new(0);
                         const PROGRESS_BATCH_SIZE: usize = 50; // Report every 50 files
 
+                        let load_start = Instant::now();
                         config.load.into_par_iter().enumerate().for_each(|(i, entry)| {
                             let do_watch = config.watch.contains(&i);
                             if do_watch {
@@ -198,7 +206,11 @@ impl NotifyActor {
                         });
 
                         // Files loaded - send Finished immediately so UI updates
-                        tracing::info!("All files loaded, sending LoadingProgress::Finished");
+                        tracing::info!(
+                            n_total,
+                            elapsed_ms = load_start.elapsed().as_millis() as u64,
+                            "vfs: parallel read pass complete, sending LoadingProgress::Finished",
+                        );
                         self.send(loader::Message::Progress {
                             n_total,
                             n_done: LoadingProgress::Finished,
