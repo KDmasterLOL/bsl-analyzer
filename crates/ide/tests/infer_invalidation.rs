@@ -81,14 +81,14 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
         .collect()
 }
 
-fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize)> {
+fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize, usize)> {
     db.infer(file_id)
         .diagnostics
         .iter()
         .filter_map(|(_, d)| match d {
-            InferenceDiagnostic::MismatchedArgCount { expected, found, .. } => {
-                Some((*expected, *found))
-            }
+            InferenceDiagnostic::MismatchedArgCount {
+                required_count, total_count, found, ..
+            } => Some((*required_count, *total_count, *found)),
             _ => None,
         })
         .collect()
@@ -103,7 +103,7 @@ fn infer_invalidates_when_config_set_changes() {
     // succeeds and inference emits MismatchedArgCount as positive evidence.
     assert_eq!(
         mismatched_arg_counts(&db, file_id),
-        vec![(2, 0)],
+        vec![(2, 2, 0)],
         "baseline: without configs, resolution must succeed and emit \
          MismatchedArgCount — if this fails, the regression is outside the \
          invalidation path (likely module_index or symbol_tree)"
@@ -145,7 +145,7 @@ fn infer_invalidates_when_config_set_changes() {
 
     assert_eq!(
         mismatched_arg_counts(&db, file_id),
-        vec![(2, 0)],
+        vec![(2, 2, 0)],
         "after resetting configs to empty: baseline resolution must be \
          restored — proves invalidation fires on input removal too"
     );

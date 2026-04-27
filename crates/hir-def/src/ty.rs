@@ -575,24 +575,64 @@ pub struct FunctionSignature {
     /// Parameter types in declaration order.
     pub params: Box<[Ty]>,
 
+    /// Per-parameter "has default value" flag (parallel to `params`).
+    ///
+    /// `true` at index `i` means parameter `i` is optional (declared with
+    /// `= <expr>` in BSL source, or `IsOptional=true` in platform data).
+    /// BSL does not require optional params to be trailing — a non-standard
+    /// `Функция Foo(А, Б = ..., В)` is legal — so this is a per-index flag,
+    /// not a single "first optional index".
+    ///
+    /// Length always equals `params.len()`. Defaults to all-`false`
+    /// (everything required) for callers that don't know.
+    pub defaults: Box<[bool]>,
+
     /// Return type (`Undefined` for procedures).
     pub ret: Box<Ty>,
 }
 
 impl FunctionSignature {
-    /// Create a new function signature.
+    /// Create a new function signature with all parameters required.
     pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
-        Self { params: params.into_boxed_slice(), ret: Box::new(ret) }
+        let defaults = vec![false; params.len()].into_boxed_slice();
+        Self { params: params.into_boxed_slice(), defaults, ret: Box::new(ret) }
     }
 
-    /// Create a procedure signature (returns Undefined).
+    /// Create a new function signature with explicit per-parameter defaults.
+    ///
+    /// Panics in debug if `params.len() != defaults.len()`.
+    pub fn new_with_defaults(params: Vec<Ty>, defaults: Vec<bool>, ret: Ty) -> Self {
+        debug_assert_eq!(
+            params.len(),
+            defaults.len(),
+            "FunctionSignature::new_with_defaults: params/defaults length mismatch"
+        );
+        Self {
+            params: params.into_boxed_slice(),
+            defaults: defaults.into_boxed_slice(),
+            ret: Box::new(ret),
+        }
+    }
+
+    /// Create a procedure signature (returns Undefined). All params required.
     pub fn procedure(params: Vec<Ty>) -> Self {
         Self::new(params, Ty::Undefined)
     }
 
-    /// Create a function signature with known return type.
+    /// Create a function signature with known return type. All params required.
     pub fn function(params: Vec<Ty>, ret: Ty) -> Self {
         Self::new(params, ret)
+    }
+
+    /// Number of arguments that the caller MUST supply.
+    ///
+    /// Computed as `last_required_index + 1` — the position of the last
+    /// non-default parameter plus one. For all-required signatures this
+    /// equals `params.len()`; for all-optional signatures it is `0`.
+    /// Non-standard mixed orders (e.g. `(А, Б = ..., В)`) yield the
+    /// strictly-correct `3`, not `1`.
+    pub fn required_count(&self) -> usize {
+        self.defaults.iter().rposition(|has_default| !has_default).map_or(0, |i| i + 1)
     }
 }
 

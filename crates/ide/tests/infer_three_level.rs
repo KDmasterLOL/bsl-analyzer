@@ -49,14 +49,14 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
         .collect()
 }
 
-fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize)> {
+fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize, usize)> {
     db.infer(file_id)
         .diagnostics
         .iter()
         .filter_map(|(_, d)| match d {
-            InferenceDiagnostic::MismatchedArgCount { expected, found, .. } => {
-                Some((*expected, *found))
-            }
+            InferenceDiagnostic::MismatchedArgCount {
+                required_count, total_count, found, ..
+            } => Some((*required_count, *total_count, *found)),
             _ => None,
         })
         .collect()
@@ -111,8 +111,8 @@ fn three_level_arity_mismatch_emits_diagnostic() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         mismatched_arg_counts(&db, file_id),
-        vec![(2, 0)],
-        "expected a single MismatchedArgCount(2, 0) for the 3-level call"
+        vec![(2, 2, 0)],
+        "expected a single MismatchedArgCount(required=2, total=2, found=0) for the 3-level call"
     );
     assert!(
         unresolved_kinds(&db, file_id).is_empty(),

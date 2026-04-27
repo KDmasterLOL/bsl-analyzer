@@ -49,23 +49,23 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
         .collect()
 }
 
-/// Returns `(expected, found)` pairs for every `MismatchedArgCount` in the
-/// file's inference result.
+/// Returns `(required_count, total_count, found)` triples for every
+/// `MismatchedArgCount` in the file's inference result.
 ///
 /// `MismatchedArgCount` is emitted by `infer_qualified_call` *after*
 /// `resolve_qualified_call` succeeds, which is the positive signal we want:
 /// firing the diagnostic proves the module + method actually resolved
 /// through `module_index` + `symbol_tree` and the looked-up method's
 /// parameter count was compared against the call.
-fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize)> {
+fn mismatched_arg_counts(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(usize, usize, usize)> {
     let infer = db.infer(file_id);
     infer
         .diagnostics
         .iter()
         .filter_map(|(_, diag)| match diag {
-            InferenceDiagnostic::MismatchedArgCount { expected, found, .. } => {
-                Some((*expected, *found))
-            }
+            InferenceDiagnostic::MismatchedArgCount {
+                required_count, total_count, found, ..
+            } => Some((*required_count, *total_count, *found)),
             _ => None,
         })
         .collect()
@@ -116,8 +116,8 @@ fn successful_resolution_triggers_arg_count_check() {
     let mismatches = mismatched_arg_counts(&db, file_id);
     assert_eq!(
         mismatches,
-        vec![(2, 0)],
-        "Expected MismatchedArgCount(expected=2, found=0) as positive proof of resolution"
+        vec![(2, 2, 0)],
+        "Expected MismatchedArgCount(required=2, total=2, found=0) as positive proof of resolution"
     );
 }
 
@@ -319,7 +319,7 @@ fn case_insensitive_module_name_resolves() {
     let mismatches = mismatched_arg_counts(&db, file_id);
     assert_eq!(
         mismatches,
-        vec![(1, 0)],
+        vec![(1, 1, 0)],
         "Case-insensitive lookup must reach arg-count check; got: {:?}",
         mismatches
     );
@@ -349,7 +349,7 @@ fn russian_layout_resolves() {
     let mismatches = mismatched_arg_counts(&db, file_id);
     assert_eq!(
         mismatches,
-        vec![(1, 0)],
+        vec![(1, 1, 0)],
         "Russian-layout lookup must reach arg-count check; got: {:?}",
         mismatches
     );
