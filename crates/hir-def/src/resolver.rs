@@ -126,16 +126,25 @@ impl Resolver {
     /// Is `mdo_name` a metadata object of `mdo_type` in any visible
     /// configuration? Same reverse-iteration rule as
     /// [`Self::module_visible_in_configs`].
+    ///
+    /// Probes both [`bsl_metadata::Configuration::find_metadata_object`]
+    /// (objects: `Catalog`, `Document`, `Enum`, `Task`, …) and
+    /// [`bsl_metadata::Configuration::find_register_by_type_and_name`]
+    /// (registers: `InformationRegister`, `AccumulationRegister`, …).
+    /// Without the register branch the gate would falsely reject any
+    /// register MDO that lives in `registers` rather than
+    /// `metadata_objects`, blocking workspace `ManagerModule.bsl`
+    /// resolution for register kinds (Phase A).
     fn mdo_visible_in_configs(
         configs: &[VisibleConfig],
         mdo_type: bsl_metadata::MdoType,
         mdo_name: &Name,
     ) -> bool {
         let needle = mdo_name.as_str();
-        configs
-            .iter()
-            .rev()
-            .any(|cfg| cfg.configuration.find_metadata_object(mdo_type, needle).is_some())
+        configs.iter().rev().any(|cfg| {
+            cfg.configuration.find_metadata_object(mdo_type, needle).is_some()
+                || cfg.configuration.find_register_by_type_and_name(mdo_type, needle).is_some()
+        })
     }
 
     /// Add an expression scope to the resolver.
@@ -647,6 +656,105 @@ impl Resolver {
 
         tracing::info!(
             "SUCCESS - found method '{}' in manager module '{:?}/{}' (is_export={})",
+            method_name,
+            manager_type,
+            mdo_name,
+            method_symbol.is_export
+        );
+
+        Ok(QualifiedMethodResolution {
+            method_id: method_symbol.id,
+            is_export: method_symbol.is_export,
+        })
+    }
+
+    /// 2-shape variant of [`Self::resolve_three_level_method`]:
+    /// `М = Справочники.X; М.МойМетод()` where `М` carries
+    /// [`crate::ty::Ty::ObjectManager { kind, name }`][ObjectManager] —
+    /// the manager-collection plural has already been consumed by type
+    /// inference, so this entry skips the `MdoType::from_plural` step.
+    ///
+    /// Otherwise identical to [`Self::resolve_three_level_method`]:
+    ///
+    /// 1. `MdoType` → `ManagerType` (gates out `Cube`,
+    ///    `DimensionTable`, `CommonModule`).
+    /// 2. Visibility gate via [`Self::mdo_visible_in_configs`] (objects
+    ///    *and* registers).
+    /// 3. `module_index.resolve_manager(...)` for the manager-module
+    ///    `FileId`.
+    /// 4. `symbol_tree.find_method(...)` returns the method even when
+    ///    not exported, so the caller can pick `MethodNotExport` vs
+    ///    `MethodNotFound`.
+    ///
+    /// `Err(NotVisibleInConfigs)` and `Err(NotFound)` are kept distinct
+    /// for the same reason as the 3-segment path: callers fall back to
+    /// the platform `lookup_method` only when the workspace
+    /// authoritatively does *not* know the receiver, and the platform
+    /// surface is the legitimate next consult.
+    ///
+    /// [ObjectManager]: crate::ty::Ty::ObjectManager
+    pub fn resolve_aliased_manager_method(
+        &self,
+        db: &dyn ConfigsDatabase,
+        mdo_type: bsl_metadata::MdoType,
+        mdo_name: &Name,
+        method_name: &Name,
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+        let _span = tracing::info_span!(
+            "resolve_aliased_manager_method",
+            ?mdo_type,
+            mdo_name = %mdo_name,
+            method = %method_name
+        )
+        .entered();
+
+        let manager_type = crate::body::ManagerType::from_mdo_type(mdo_type).ok_or_else(|| {
+            tracing::debug!("MdoType {:?} does not have manager module", mdo_type);
+            QualifiedMethodError::NotFound
+        })?;
+
+        let current_module_id = self.module_id().ok_or_else(|| {
+            tracing::warn!("resolve_aliased_manager_method called without module scope");
+            QualifiedMethodError::NotFound
+        })?;
+
+        let current_file_id = current_module_id.file_id;
+        let configurations = db.configurations(current_file_id);
+        if !configurations.is_empty()
+            && !Self::mdo_visible_in_configs(&configurations, mdo_type, mdo_name)
+        {
+            tracing::debug!(
+                "resolve_aliased_manager_method: {:?} '{}' not declared in any visible config",
+                mdo_type,
+                mdo_name
+            );
+            return Err(QualifiedMethodError::NotVisibleInConfigs);
+        }
+
+        let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
+        let module_index = db.module_index(source_root_id);
+
+        let target_file_id =
+            module_index.resolve_manager(manager_type, mdo_name).ok_or_else(|| {
+                tracing::debug!("Manager module not found: {:?} / {}", manager_type, mdo_name);
+                QualifiedMethodError::NotFound
+            })?;
+
+        let target_module_id = crate::ModuleId::new(target_file_id);
+        let symbol_tree = db.symbol_tree(target_module_id);
+
+        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
+            tracing::debug!(
+                "Manager module '{:?}/{}' found but method '{}' NOT found",
+                manager_type,
+                mdo_name,
+                method_name
+            );
+            QualifiedMethodError::NotFound
+        })?;
+
+        tracing::info!(
+            "SUCCESS - aliased manager method '{}' in '{:?}/{}' (is_export={})",
             method_name,
             manager_type,
             mdo_name,

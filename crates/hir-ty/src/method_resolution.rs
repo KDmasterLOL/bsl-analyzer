@@ -190,6 +190,58 @@ pub fn resolve_three_level_call(
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
+/// Resolve a 2-shape aliased manager method call like
+/// `М = Справочники.X; М.МойМетод()` where `М` carries
+/// [`Ty::ObjectManager`].
+///
+/// Mirrors [`resolve_three_level_call`]: delegates the workspace
+/// lookup (with the CFE visibility gate and Salsa invalidation) to
+/// [`Resolver::resolve_aliased_manager_method`] and materialises the
+/// [`FunctionSignature`] from the target method's `MethodSymbol`. The
+/// only difference is that the manager-collection plural has already
+/// been consumed by type inference (the variable's `Ty::ObjectManager`
+/// kind is the parsed `MdoType`), so this entry takes `MdoType`
+/// directly instead of a plural `Name`.
+///
+/// # Returns
+///
+/// - `Ok(MethodResolution)` when the method exists, even when not
+///   exported; the caller inspects `is_export` to pick between
+///   `MethodNotExport` and success.
+/// - `Err(UnresolvedMethodKind::MethodNotFound)` for any resolver
+///   failure (no `ManagerType` for this `MdoType`, MDO not declared in
+///   any visible configuration, manager module not indexed, method
+///   absent in the module). The caller falls back to the platform
+///   `lookup_method` only on this outcome — workspace authority
+///   exhausted, platform gets the next consult.
+pub fn resolve_aliased_manager_call(
+    db: &dyn ConfigsDatabase,
+    mdo_type: bsl_metadata::MdoType,
+    mdo_name: &Name,
+    method_name: &Name,
+    resolver: &Resolver,
+) -> Result<MethodResolution, UnresolvedMethodKind> {
+    let resolution = resolver
+        .resolve_aliased_manager_method(db, mdo_type, mdo_name, method_name)
+        .map_err(|e| match e {
+        QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
+            UnresolvedMethodKind::MethodNotFound
+        }
+    })?;
+
+    // Same invariant as the other adapters: the Resolver just read the
+    // target `symbol_tree` via the same Salsa revision, so the
+    // `MethodId` must be present by id.
+    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in symbol_tree — \
+         symbol_tree / Resolver are out of sync",
+    );
+
+    let signature = materialise_signature(method_symbol);
+    Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
+}
+
 /// Lower a [`MethodSymbol`] into a semantic [`FunctionSignature`].
 ///
 /// Shared by `resolve_qualified_call` (2-segment) and

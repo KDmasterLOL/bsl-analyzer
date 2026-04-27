@@ -125,11 +125,14 @@ pub enum InferenceDiagnostic {
     ///   miss with no platform fallback, or non-exported workspace
     ///   method.
     /// - 2-shape `receiver.method()` on a typed receiver
-    ///   (`MetadataRef` / `ThisObject`) — `lookup_method` returned
-    ///   `None` for an authoritative receiver. `Ty::ObjectManager` is
-    ///   intentionally excluded: workspace `ManagerModule.bsl` methods
-    ///   are not visible to `lookup_method`, so a miss there is
-    ///   inconclusive.
+    ///   (`MetadataRef` / `ThisObject` / `ObjectManager`) — both the
+    ///   workspace resolver and `lookup_method` returned `None`.
+    ///   `Ty::ObjectManager` is authoritative here because the call
+    ///   site consults the workspace `ManagerModule.bsl` resolver
+    ///   first (Phase A); reaching the platform `lookup_method` miss
+    ///   means workspace and platform have both been exhausted.
+    ///   Register-kind `MetadataRef` receivers stay silent until
+    ///   Phase C wires up `RecordSetModule.bsl`.
     /// - CommonModule source file is missing.
     UnresolvedMethodCall {
         expr: ExprId,
@@ -877,6 +880,82 @@ impl<'db> InferenceContext<'db> {
             for arg in args {
                 self.infer_expr(*arg);
             }
+
+            // Workspace-first lookup for `Ty::ObjectManager`. Methods
+            // declared in `<MDO>/Ext/ManagerModule.bsl` are invisible to
+            // `lookup_method` (platform-only via
+            // `platform_manager_lookup::resolve_platform_manager_method`)
+            // — so without this branch every workspace manager method
+            // would slip through to the lookup_method-miss path and
+            // surface a false-positive `MethodNotFound`. Mirrors the
+            // 3-segment `infer_three_level_call` precedence:
+            //   1. workspace `ManagerModule.bsl` (this branch).
+            //   2. platform manager catalogue (`lookup_method` below).
+            //   3. authoritative miss → `UnresolvedMethodCall`.
+            // Only the `MethodNotFound` arm falls through — a non-
+            // exported workspace method takes precedence over a same-
+            // named platform method (a platform shadow on a real
+            // workspace symbol would otherwise be silently chosen).
+            if let Ty::ObjectManager { kind: mdo_type, name: mdo_name } = &receiver_ty {
+                let resolver = self.get_resolver();
+                match crate::method_resolution::resolve_aliased_manager_call(
+                    self.db,
+                    *mdo_type,
+                    mdo_name,
+                    &method_name,
+                    &resolver,
+                ) {
+                    Ok(resolution) => {
+                        let receiver_name =
+                            receiver_display_name(&receiver_ty).unwrap_or_else(|| mdo_name.clone());
+                        if !resolution.is_export {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::UnresolvedMethodCall {
+                                    expr: callee,
+                                    receiver_name: receiver_name.clone(),
+                                    method_name: method_name.clone(),
+                                    kind: UnresolvedMethodKind::MethodNotExport,
+                                },
+                            );
+                        }
+                        if args.len() != resolution.signature.params.len() {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::MismatchedArgCount {
+                                    call_expr: callee,
+                                    expected: resolution.signature.params.len(),
+                                    found: args.len(),
+                                },
+                            );
+                        }
+                        self.emit_arg_type_mismatches(args, &resolution.signature.params);
+                        self.expr_types.insert(callee, Ty::Unknown);
+                        return resolution.return_type;
+                    }
+                    Err(UnresolvedMethodKind::MethodNotFound) => {
+                        // Workspace exhausted → fall through to platform.
+                    }
+                    Err(
+                        kind @ (UnresolvedMethodKind::MethodNotExport
+                        | UnresolvedMethodKind::CommonModuleNoSource
+                        | UnresolvedMethodKind::ReceiverNotResolved),
+                    ) => {
+                        // `resolve_aliased_manager_call` only maps
+                        // `QualifiedMethodError::{NotFound, NotVisibleInConfigs}`
+                        // → `MethodNotFound`; no other variant can reach this
+                        // arm today. Listing the variants explicitly (instead
+                        // of `Err(_)`) means a future kind added to either
+                        // `QualifiedMethodError` or `UnresolvedMethodKind`
+                        // without an explicit mapping won't silently fall
+                        // through to the platform path — it will fail to
+                        // compile here.
+                        unreachable!(
+                            "resolve_aliased_manager_call returned unexpected kind: {:?}",
+                            kind
+                        )
+                    }
+                }
+            }
+
             let result = match crate::method_lookup::lookup_method(&receiver_ty, &method_name) {
                 Some(info) => {
                     // Argument type check (M4 Task 7 follow-up): the
@@ -888,27 +967,22 @@ impl<'db> InferenceContext<'db> {
                     info.return_ty
                 }
                 None => {
-                    // Authoritative-receiver gate: only `MetadataRef` and
-                    // `ThisObject` get the new `UnresolvedMethodCall`.
-                    // Pre-fix the standalone `Expr::Field` arm already
-                    // fired `UnresolvedField` (mis-labeled) on those
-                    // shapes, so renaming to `UnresolvedMethodCall` does
-                    // not introduce new false positives.
+                    // Authoritative-receiver gate. `MetadataRef` and
+                    // `ThisObject` carry full type-system method tables
+                    // through `lookup_method`, so a miss is conclusive.
+                    // `ObjectManager` is **also** authoritative now,
+                    // because the workspace branch above ran first —
+                    // when execution reaches this `None`, both
+                    // workspace `ManagerModule.bsl` (Phase A) and the
+                    // platform manager catalogue have missed.
                     //
-                    // Crucially `Ty::ObjectManager` is **excluded**:
-                    // `lookup_method` for managers consults platform data
-                    // only (`platform_manager_lookup::resolve_platform_manager_method`)
-                    // and does not see workspace `ManagerModule.bsl`
-                    // methods. A miss on
-                    // `М = Справочники.X; М.УсерМетод()` is therefore
-                    // inconclusive — `УсерМетод` may genuinely exist as
-                    // an exported manager-module method that this 2-shape
-                    // path never resolves. Until the workspace resolver
-                    // is wired into `lookup_method`, silence is the
-                    // honest answer for `ObjectManager`. Other receivers
-                    // (`Unknown`, `Union`, primitives, `PlatformObject`,
-                    // `ManagerCollection`) stay silent for the same
-                    // partial-table reason that pre-dates this fix.
+                    // Other receivers (`Unknown`, `Union`, primitives,
+                    // `PlatformObject`, `ManagerCollection`, register
+                    // kinds) stay silent: their method tables are
+                    // partial or platform-data-only, so a miss is "we
+                    // can't tell yet" rather than "method does not
+                    // exist". `receiver_display_name` enforces this gate
+                    // by returning `None` for such receivers.
                     if let Some(receiver_name) = receiver_display_name(&receiver_ty) {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                             expr: callee,
@@ -1227,10 +1301,17 @@ impl<'db> InferenceContext<'db> {
 /// `ThisObject`) where pre-fix the standalone `Expr::Field` arm already
 /// emitted `UnresolvedField` for the same miss — this fix just renames
 /// the diagnostic to the correct kind. Returns `None` for everything
-/// else, in particular `Ty::ObjectManager`: its method table in
-/// `lookup_method` is platform-only and does not see workspace
-/// `ManagerModule.bsl` methods, so a miss is inconclusive and silence
-/// is the honest answer until the workspace resolver is wired in.
+/// else — partial-table receivers (`Unknown`, `Union`, primitives,
+/// `PlatformObject`, `ManagerCollection`, register kinds) stay silent
+/// because a miss is "we can't tell yet" rather than "method does not
+/// exist".
+///
+/// `Ty::ObjectManager` is included as authoritative: the call-site in
+/// `infer_call`'s `Expr::Field` branch consults the workspace
+/// `ManagerModule.bsl` resolver first (Phase A) and only reaches the
+/// `lookup_method` miss path when that workspace lookup also failed,
+/// so by the time `receiver_display_name` is queried both layers
+/// agree.
 ///
 /// The user-visible form matches the 3-segment path's `<Plural>.<MDO>`
 /// convention rendered by `unresolved_method_call::from_hir`.
@@ -1241,6 +1322,10 @@ fn receiver_display_name(receiver_ty: &Ty) -> Option<hir_def::Name> {
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
         Ty::ThisObject { owner: (mdo_type, name) } => {
+            let plural = mdo_type_to_plural(*mdo_type)?;
+            Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
+        }
+        Ty::ObjectManager { kind: mdo_type, name } => {
             let plural = mdo_type_to_plural(*mdo_type)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
@@ -1278,6 +1363,16 @@ fn mdo_type_to_plural(mdo_type: bsl_metadata::MdoType) -> Option<&'static str> {
 /// Map a [`MetadataKind`] to its parent MDO plural for diagnostic
 /// display, covering object/ref/manager kinds whose owner family is
 /// uniquely determined.
+///
+/// Register kinds (`InformationRegisterRecordManager`,
+/// `AccumulationRegisterRecordSet`, all `*RegisterRef`) deliberately
+/// return `None` until a `RecordSetModule.bsl` workspace resolver lands
+/// (Phase C). Their `lookup_method` is permanently `None`
+/// (`metadata_kind_to_prefix_and_mdo` doesn't know register kinds), so
+/// any plural we returned here would be paired with a forever-failing
+/// lookup and produce a `MethodNotFound` on every register method —
+/// false-positive on legitimate workspace `RecordSetModule.bsl`
+/// methods. Silence is the honest answer until that resolver exists.
 fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     use hir_def::ty::MetadataKind;
     let mdo = match kind {
@@ -1292,14 +1387,15 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             bsl_metadata::MdoType::ChartOfAccounts
         }
-        MetadataKind::InformationRegisterRecordManager | MetadataKind::InformationRegisterRef => {
-            bsl_metadata::MdoType::InformationRegister
-        }
-        MetadataKind::AccumulationRegisterRecordSet | MetadataKind::AccumulationRegisterRef => {
-            bsl_metadata::MdoType::AccumulationRegister
-        }
-        MetadataKind::AccountingRegisterRef => bsl_metadata::MdoType::AccountingRegister,
-        MetadataKind::CalculationRegisterRef => bsl_metadata::MdoType::CalculationRegister,
+        // Register kinds: deferred to Phase C (RecordSetModule.bsl
+        // resolver). Until then, no platform/workspace method surface →
+        // silent diagnostic, no false-positive on user methods.
+        MetadataKind::InformationRegisterRecordManager
+        | MetadataKind::InformationRegisterRef
+        | MetadataKind::AccumulationRegisterRecordSet
+        | MetadataKind::AccumulationRegisterRef
+        | MetadataKind::AccountingRegisterRef
+        | MetadataKind::CalculationRegisterRef => return None,
         // Register-part / tabular-section kinds carry a parent payload but
         // no manager-style call surface. Returning `None` keeps the
         // diagnostic silent on these — consistent with `lookup_method`'s

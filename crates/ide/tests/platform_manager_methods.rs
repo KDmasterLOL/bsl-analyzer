@@ -421,16 +421,94 @@ fn document_object_chained_unknown_method_emits_unresolved_method_call() {
 }
 
 #[test]
-fn aliased_object_manager_unknown_method_stays_silent() {
-    // `М = Справочники.X; М.УсерМетод()` — the 2-shape on an
-    // `ObjectManager` receiver. `method_lookup` consults only
-    // `platform_manager_lookup::resolve_platform_manager_method`, which
-    // is platform-data-only and does NOT see workspace
-    // `ManagerModule.bsl` methods. A miss therefore is inconclusive —
-    // `УсерМетод` may legitimately exist as an exported manager-module
-    // method that this 2-shape lookup never resolves. Until the
-    // workspace resolver is wired into `lookup_method`, silence is the
-    // honest answer for `ObjectManager`. Diagnostic must not fire.
+fn aliased_manager_workspace_method_resolves() {
+    // Phase A primary scenario:
+    //   М = Справочники.Справочник1; М.ТестЭкспортная()
+    // The 2-shape callee lowers to
+    // `Expr::Call { callee: Expr::Field {..} }` with `Ty::ObjectManager`
+    // receiver — `lookup_method`'s manager table is platform-only, so
+    // without `resolve_aliased_manager_call` the call would surface a
+    // false-positive `MethodNotFound`.
+    //
+    // The fixture inlines `ManagerModule.bsl` because the designer
+    // fixture path supplies *configuration* data only (so
+    // `Ty::ObjectManager` is produced); BSL source files from disk are
+    // not loaded into the SourceRoot — `module_index.resolve_manager`
+    // finds only the inline path.
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ManagerModule.bsl
+Процедура ТестЭкспортная() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    М = Справочники.Справочник1;
+    М.ТестЭкспортная();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        !unresolved_method_names(&db, file_id)
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("ТестЭкспортная")),
+        "exported workspace ManagerModule method must resolve through Phase A resolver; got {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+    assert!(
+        unresolved_field_names(&db, file_id).is_empty(),
+        "method-call site must not emit UnresolvedField; got {:?}",
+        unresolved_field_names(&db, file_id),
+    );
+}
+
+#[test]
+fn aliased_manager_non_exported_method_emits_method_not_export() {
+    // `ТестНеЭкспортная` exists in the inline `ManagerModule.bsl` but
+    // lacks the `Экспорт` keyword. Workspace resolver finds the
+    // method; the call site must surface `MethodNotExport` (the user
+    // forgot the keyword), distinct from `MethodNotFound` (typo'd or
+    // missing method).
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ManagerModule.bsl
+Процедура ТестНеЭкспортная()
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    М = Справочники.Справочник1;
+    М.ТестНеЭкспортная();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let kinds: Vec<_> = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall { method_name, kind, .. }
+                if method_name.as_str().eq_ignore_ascii_case("ТестНеЭкспортная") =>
+            {
+                Some(*kind)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![UnresolvedMethodKind::MethodNotExport],
+        "non-exported workspace ManagerModule method must surface MethodNotExport, got {kinds:?}",
+    );
+}
+
+#[test]
+fn aliased_manager_typo_emits_method_not_found() {
+    // Inverse of the prior `aliased_object_manager_unknown_method_stays_silent`:
+    // with the Phase A workspace resolver wired in, `ObjectManager` is
+    // now authoritative. `М = Справочники.Справочник1; М.УсерМетод()`
+    // misses both the workspace `ManagerModule.bsl` AND the platform
+    // manager catalogue — the call surface for that `(MdoType, name)`
+    // pair has been exhaustively consulted, so a miss conclusively
+    // means "method does not exist".
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -439,27 +517,96 @@ fn aliased_object_manager_unknown_method_stays_silent() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup(fixture);
-    let inf = db.infer(file_id);
-    let unresolved_method: Vec<_> = inf
+    let entries: Vec<_> = db
+        .infer(file_id)
         .diagnostics
         .iter()
         .filter_map(|(_, d)| match d {
-            InferenceDiagnostic::UnresolvedMethodCall { method_name, .. } => {
-                Some(method_name.as_str().to_string())
+            InferenceDiagnostic::UnresolvedMethodCall {
+                receiver_name, method_name, kind, ..
+            } if method_name.as_str().eq_ignore_ascii_case("УсерМетод") => {
+                Some((receiver_name.as_str().to_string(), *kind))
             }
             _ => None,
         })
         .collect();
-
+    assert_eq!(
+        entries,
+        vec![("Справочники.Справочник1".to_string(), UnresolvedMethodKind::MethodNotFound)],
+        "ObjectManager miss is now authoritative (workspace + platform exhausted); got {entries:?}",
+    );
     assert!(
         unresolved_field_names(&db, file_id).is_empty(),
-        "method-call site on aliased ObjectManager must not emit UnresolvedField; got {:?}",
+        "method-call site must not emit UnresolvedField; got {:?}",
+        unresolved_field_names(&db, file_id),
+    );
+}
+
+#[test]
+fn aliased_register_manager_workspace_method_resolves() {
+    // Register-flavour parallel to
+    // `aliased_manager_workspace_method_resolves`. Locks the Phase A.1
+    // visibility-gate extension: without `mdo_visible_in_configs`
+    // probing `Configuration::find_register_by_type_and_name`, the
+    // register MDO would be falsely invisible (it lives in
+    // `Configuration::registers`, not `metadata_objects`) and the
+    // resolver would short-circuit to `NotVisibleInConfigs`.
+    let fixture = r#"
+//- /InformationRegisters/РегистрСведений1/Ext/ManagerModule.bsl
+Процедура НеУстаревшаяПроцедура() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    М = РегистрыСведений.РегистрСведений1;
+    М.НеУстаревшаяПроцедура();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        !unresolved_method_names(&db, file_id)
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("НеУстаревшаяПроцедура")),
+        "exported register ManagerModule method must resolve through Phase A resolver; got {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+    assert!(
+        unresolved_field_names(&db, file_id).is_empty(),
+        "register manager method-call site must not emit UnresolvedField; got {:?}",
+        unresolved_field_names(&db, file_id),
+    );
+}
+
+#[test]
+fn register_recordset_unknown_method_stays_silent() {
+    // Phase 0 hotfix: register `MetadataRef` receivers (e.g.
+    // `InformationRegisterRecordManager`) have NO platform call surface
+    // in `lookup_method` — `metadata_kind_to_prefix_and_mdo` doesn't
+    // know register kinds, so the platform layer always returns `None`.
+    // Until `RecordSetModule.bsl` workspace resolution lands (Phase C),
+    // any plural we paired with such a kind would be a forever-failing
+    // lookup → false-positive `MethodNotFound` on every legitimate
+    // workspace register method. So `mdo_kind_to_plural` returns
+    // `None` for register kinds and the diagnostic stays silent.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    МЗ = РегистрыСведений.РегистрСведений1.СоздатьМенеджерЗаписи();
+    МЗ.НесуществующийМетод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        unresolved_field_names(&db, file_id).is_empty(),
+        "register recordmanager method-call must not emit UnresolvedField, got {:?}",
         unresolved_field_names(&db, file_id),
     );
     assert!(
-        !unresolved_method.iter().any(|n| n.eq_ignore_ascii_case("УсерМетод")),
-        "ObjectManager miss is not authoritative — workspace ManagerModule methods are not \
-         visible to method_lookup, so the diagnostic must stay silent until the resolver is \
-         wired in; got {unresolved_method:?}",
+        !unresolved_method_names(&db, file_id)
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("НесуществующийМетод")),
+        "register `MetadataRef` lookup is platform-only and unwired (None) — diagnostic must \
+         stay silent until Phase C wires up workspace `RecordSetModule.bsl`; got {:?}",
+        unresolved_method_names(&db, file_id),
     );
 }
