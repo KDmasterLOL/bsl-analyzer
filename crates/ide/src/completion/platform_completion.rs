@@ -82,6 +82,33 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // — completion just shows nothing).
     if receiver_ty.is_unknown() {
         if let Some(name) = extract_receiver_ident(&receiver_expr) {
+            // If the receiver is a real workspace CommonModule, the fast
+            // path `complete_common_module_methods` already had its turn
+            // and either returned the module's methods or `None` (no
+            // exported methods yet). Falling through into the platform
+            // cascade here would mask the user's intent in two ways:
+            //
+            //  1. `get_global_property` could retype the receiver as a
+            //     platform manager (`Метаданные` →
+            //     `КонфигурацияМетаданныеОбъект`), surfacing unrelated
+            //     methods.
+            //  2. The trailing `Ty::PlatformObject(Name::new(&name))`
+            //     fallback could collide with a same-named platform type
+            //     (e.g. `БиблиотекаКартинок` ≡ `PictureLib`), and
+            //     `type_methods_query` would happily surface its 294
+            //     platform members.
+            //
+            // Both behaviours hide that the user's CommonModule is the
+            // authoritative receiver here. Bail out instead.
+            let user_module_shadows = {
+                let source_root_input = db.file_source_root_input(position.file_id);
+                let source_root_id = source_root_input.source_root_id(db);
+                db.module_index(source_root_id).resolve_common_module(&Name::new(&name)).is_some()
+            };
+            if user_module_shadows {
+                return None;
+            }
+
             // Platform global-context properties (`ОбработкаОшибок`,
             // `Метаданные`, `Справочники`, …) — the bare identifier names
             // a *property*, not a type, so the methods we want belong to

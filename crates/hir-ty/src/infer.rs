@@ -783,13 +783,22 @@ impl<'db> InferenceContext<'db> {
         //    `resolve_three_level_call` machinery for `Справочники.X.Method()`
         //    chains. Only non-MDO globals (`ОбработкаОшибок`,
         //    `БиблиотекаКартинок`, `WSСсылки`, …) reach this step.
-        if let Some(prop) =
-            bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
-        {
-            if let Some(declared) = prop.property_types.first() {
-                trace!("resolved {} as platform global → {}", name, declared);
-                let lowering = crate::lower::TyLoweringContext::new();
-                return lowering.lower_bare_name(&hir_def::Name::new(declared.as_str()));
+        // Narrowing: skip the platform fallback when the resolver already
+        // sees the name as a module-level method or variable. The user has
+        // shadowed the platform global (e.g. `Процедура ОбработкаОшибок()
+        // Экспорт`); BSL semantics give the local definition priority and
+        // we must not silently retype a reference to it as `PlatformObject`.
+        let user_shadows =
+            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)));
+        if !user_shadows {
+            if let Some(prop) =
+                bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
+            {
+                if let Some(declared) = prop.property_types.first() {
+                    trace!("resolved {} as platform global → {}", name, declared);
+                    let lowering = crate::lower::TyLoweringContext::new();
+                    return lowering.lower_bare_name(&hir_def::Name::new(declared.as_str()));
+                }
             }
         }
 
