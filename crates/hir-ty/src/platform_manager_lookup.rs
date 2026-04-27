@@ -115,6 +115,7 @@ fn build_resolution(
             p.param_type.as_ref().map(|t| resolve_platform_type_name(t)).unwrap_or(Ty::Unknown)
         })
         .collect();
+    let defaults: Vec<bool> = method.parameters.iter().map(|p| p.is_optional).collect();
 
     let return_ty = method
         .return_type
@@ -125,7 +126,7 @@ fn build_resolution(
         })
         .unwrap_or(Ty::Undefined);
 
-    let signature = FunctionSignature::new(params, return_ty.clone());
+    let signature = FunctionSignature::new_with_defaults(params, defaults, return_ty.clone());
     PlatformMethodResolution { signature, return_ty }
 }
 

@@ -111,8 +111,14 @@ fn dispatch_inference_diagnostic(
                 ctx,
             )
         }
-        InferenceDiagnostic::MismatchedArgCount { expected, found, .. } => {
-            handlers::mismatched_arg_count::from_hir(*expected, *found, range, ctx)
+        InferenceDiagnostic::MismatchedArgCount { required_count, total_count, found, .. } => {
+            handlers::mismatched_arg_count::from_hir(
+                *required_count,
+                *total_count,
+                *found,
+                range,
+                ctx,
+            )
         }
         InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
             handlers::type_mismatch::from_hir(expected, actual, range, ctx)

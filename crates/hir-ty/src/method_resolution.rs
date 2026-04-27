@@ -474,6 +474,7 @@ fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignature {
         .iter()
         .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref(t)).unwrap_or(Ty::Unknown))
         .collect();
+    let defaults: Vec<bool> = method_symbol.params.iter().map(|p| p.has_default).collect();
 
     let ret = method_symbol
         .return_type_ref
@@ -481,7 +482,7 @@ fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignature {
         .map(|t| ctx.lower_type_ref(t))
         .unwrap_or_else(|| method_symbol.return_type.clone());
 
-    FunctionSignature::new(param_types, ret)
+    FunctionSignature::new_with_defaults(param_types, defaults, ret)
 }
 
 #[cfg(test)]

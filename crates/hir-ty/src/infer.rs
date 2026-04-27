@@ -143,8 +143,31 @@ pub enum InferenceDiagnostic {
 
     /// Mismatched argument count in function call.
     ///
-    /// Emitted when calling a function with wrong number of arguments.
-    MismatchedArgCount { call_expr: ExprId, expected: usize, found: usize },
+    /// Emitted when `found` falls outside the inclusive range
+    /// `[required_count, total_count]` derived from the resolved signature.
+    /// `required_count` is the number of leading-required parameters
+    /// (computed via [`hir_def::ty::FunctionSignature::required_count`]
+    /// — the index of the last param without a default + 1, so non-standard
+    /// `(А, Б = ..., В)` orders yield `3`, not `1`). `total_count` is the
+    /// full parameter list length. Equal `required` and `total` mean the
+    /// signature has no optional parameters; the diagnostic message
+    /// renders that as a single number, otherwise as a range.
+    ///
+    /// `found` is `args.len()` from HIR. BSL allows skipped positional
+    /// arguments (`Foo(1,,3)`) which the parser drops; HIR lowering
+    /// inserts `Expr::Missing` placeholders so the arg count still
+    /// matches the call's syntactic shape. As a consequence, this arity
+    /// check does NOT fire when an `Expr::Missing` slot lands on a
+    /// required parameter (e.g. `Foo(,2,3)` with `А` required). That
+    /// per-slot validation is the job of `MissedRequiredParameter`,
+    /// which is already wired with index-aware checks; keeping the two
+    /// concerns separate avoids double-reporting.
+    MismatchedArgCount {
+        call_expr: ExprId,
+        required_count: usize,
+        total_count: usize,
+        found: usize,
+    },
 
     /// Type mismatch between expected and actual type.
     ///
@@ -972,11 +995,14 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        if args.len() != resolution.signature.params.len() {
+                        let total = resolution.signature.params.len();
+                        let required = resolution.signature.required_count();
+                        if args.len() < required || args.len() > total {
                             self.push_inference_diagnostic(
                                 InferenceDiagnostic::MismatchedArgCount {
                                     call_expr: callee,
-                                    expected: resolution.signature.params.len(),
+                                    required_count: required,
+                                    total_count: total,
                                     found: args.len(),
                                 },
                             );
@@ -1048,11 +1074,14 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        if args.len() != resolution.signature.params.len() {
+                        let total = resolution.signature.params.len();
+                        let required = resolution.signature.required_count();
+                        if args.len() < required || args.len() > total {
                             self.push_inference_diagnostic(
                                 InferenceDiagnostic::MismatchedArgCount {
                                     call_expr: callee,
-                                    expected: resolution.signature.params.len(),
+                                    required_count: required,
+                                    total_count: total,
                                     found: args.len(),
                                 },
                             );
@@ -1116,11 +1145,14 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        if args.len() != resolution.signature.params.len() {
+                        let total = resolution.signature.params.len();
+                        let required = resolution.signature.required_count();
+                        if args.len() < required || args.len() > total {
                             self.push_inference_diagnostic(
                                 InferenceDiagnostic::MismatchedArgCount {
                                     call_expr: callee,
-                                    expected: resolution.signature.params.len(),
+                                    required_count: required,
+                                    total_count: total,
                                     found: args.len(),
                                 },
                             );
@@ -1214,11 +1246,22 @@ impl<'db> InferenceContext<'db> {
         // Check if callee is a function type
         match callee_ty {
             Ty::Function { ref params, ref ret } => {
-                // Phase 2: Check argument count
-                if args.len() != params.len() {
+                // `Ty::Function` does not carry per-parameter
+                // optional-ness today (it is built from
+                // `FunctionSignature::params` only — see `infer.rs:732`
+                // for the builtin path). Treat every param as required
+                // so that fluent-typed function values keep the strict
+                // arity behaviour they had before the optional-aware
+                // `MismatchedArgCount` change. Builtin signatures with
+                // optional tails should be promoted to a richer carrier
+                // (e.g. an overload variant or a Ty::Function variant
+                // with defaults) before relaxing the bound here.
+                let total = params.len();
+                if args.len() != total {
                     self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr: callee,
-                        expected: params.len(),
+                        required_count: total,
+                        total_count: total,
                         found: args.len(),
                     });
                 }
@@ -1289,10 +1332,13 @@ impl<'db> InferenceContext<'db> {
                 }
 
                 // Check argument count
-                if args.len() != resolution.signature.params.len() {
+                let total = resolution.signature.params.len();
+                let required = resolution.signature.required_count();
+                if args.len() < required || args.len() > total {
                     self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr,
-                        expected: resolution.signature.params.len(),
+                        required_count: required,
+                        total_count: total,
                         found: args.len(),
                     });
                 }
@@ -1410,10 +1456,13 @@ impl<'db> InferenceContext<'db> {
                     });
                 }
 
-                if args.len() != resolution.signature.params.len() {
+                let total = resolution.signature.params.len();
+                let required = resolution.signature.required_count();
+                if args.len() < required || args.len() > total {
                     self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr,
-                        expected: resolution.signature.params.len(),
+                        required_count: required,
+                        total_count: total,
                         found: args.len(),
                     });
                 }
@@ -1450,10 +1499,13 @@ impl<'db> InferenceContext<'db> {
                             resolve_platform_manager_method(mdo_type, mdo_name, method_name)
                         });
                 if let Some(res) = plat_res {
-                    if args.len() != res.signature.params.len() {
+                    let total = res.signature.params.len();
+                    let required = res.signature.required_count();
+                    if args.len() < required || args.len() > total {
                         self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                             call_expr,
-                            expected: res.signature.params.len(),
+                            required_count: required,
+                            total_count: total,
                             found: args.len(),
                         });
                     }
@@ -1784,13 +1836,23 @@ mod tests {
     fn test_mismatched_arg_count_diagnostic() {
         // Test that MismatchedArgCount diagnostic is created correctly
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
-        let diag =
-            InferenceDiagnostic::MismatchedArgCount { call_expr: expr_id, expected: 2, found: 1 };
+        let diag = InferenceDiagnostic::MismatchedArgCount {
+            call_expr: expr_id,
+            required_count: 2,
+            total_count: 2,
+            found: 1,
+        };
 
         match diag {
-            InferenceDiagnostic::MismatchedArgCount { call_expr, expected, found } => {
+            InferenceDiagnostic::MismatchedArgCount {
+                call_expr,
+                required_count,
+                total_count,
+                found,
+            } => {
                 assert_eq!(call_expr, expr_id);
-                assert_eq!(expected, 2);
+                assert_eq!(required_count, 2);
+                assert_eq!(total_count, 2);
                 assert_eq!(found, 1);
             }
             _ => panic!("Expected MismatchedArgCount"),
@@ -1886,7 +1948,12 @@ mod tests {
         let expr_id = ExprId::from_raw(la_arena::RawIdx::from_u32(0));
         result.diagnostics.push((
             DefWithBodyId::ModuleCode,
-            InferenceDiagnostic::MismatchedArgCount { call_expr: expr_id, expected: 2, found: 1 },
+            InferenceDiagnostic::MismatchedArgCount {
+                call_expr: expr_id,
+                required_count: 2,
+                total_count: 2,
+                found: 1,
+            },
         ));
 
         assert!(result.has_diagnostics());
