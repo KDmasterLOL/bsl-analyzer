@@ -84,6 +84,24 @@ pub fn is_assignable(from: &Ty, to: &Ty) -> bool {
         return true;
     }
 
+    // TabularSectionRow ↔ `Ty::PlatformObject("Строка табличной части")`
+    // bridge (bidirectional). The TS method bridge in `method_lookup`
+    // rebinds the platform return `"Строка табличной части"` to a
+    // concrete `Ty::MetadataRef { TabularSectionRow { parent }, name }`
+    // so chained `.<row attribute>` resolves through `field_lookup`.
+    // Without this rule, structural equality on `MetadataRef` would
+    // reject every legitimate transfer between the concrete row and
+    // the generic platform-object form — including:
+    //   - user-procedure JSDoc params typed `Строка табличной части`,
+    //     which lower to `Ty::PlatformObject("Строка табличной части")`;
+    //   - row values stored in fields / collections that erase the
+    //     `(parent, name)` payload back to the platform name.
+    // The two forms denote the same BSL value, so the subtype
+    // relation is symmetric.
+    if is_tabular_row_bridge(from, to) {
+        return true;
+    }
+
     // ThisObject → MetadataRef{*Object} coercion (one direction only):
     // `ЭтотОбъект` is accepted where the explicit
     // `CatalogObject.Товары` is expected. Delegates to the M3 coercion
@@ -135,6 +153,36 @@ pub fn is_assignable(from: &Ty, to: &Ty) -> bool {
     // `ManagerCollection`, `PlatformObject`, `ThisObject` with equal
     // owner. `Ty::Function` handled above.
     from == to
+}
+
+/// Symmetric bridge between the concrete row receiver
+/// `Ty::MetadataRef { TabularSectionRow { _ }, _ }` and the generic
+/// platform-object form `Ty::PlatformObject("Строка табличной части")`
+/// (and its English alias `"Line of a tabular section"`).
+///
+/// Both denote the same BSL value: the row receiver carries a
+/// `(parent, "Parent.Section")` payload so attribute access can find
+/// the right XML attributes, but the platform's own type system
+/// describes "any tabular-section row" with the bare type name.
+/// Subtyping must accept conversion in either direction so that:
+///
+/// - a row from `ТЧ.Добавить()` can be passed where a JSDoc-typed
+///   parameter declared `Строка табличной части` is expected
+///   (`MetadataRef → PlatformObject`);
+/// - a value typed `Строка табличной части` (e.g. coming back through
+///   a field-eraser) can be passed where a concrete row is expected
+///   (`PlatformObject → MetadataRef`).
+fn is_tabular_row_bridge(a: &Ty, b: &Ty) -> bool {
+    fn is_row_metadata_ref(ty: &Ty) -> bool {
+        matches!(ty, Ty::MetadataRef { kind: MetadataKind::TabularSectionRow { .. }, .. })
+    }
+    fn is_row_platform_object(ty: &Ty) -> bool {
+        matches!(ty, Ty::PlatformObject(name)
+            if name.as_str().eq_ignore_ascii_case("Line of a tabular section")
+                || name.as_str().to_lowercase() == "строка табличной части")
+    }
+    (is_row_metadata_ref(a) && is_row_platform_object(b))
+        || (is_row_platform_object(a) && is_row_metadata_ref(b))
 }
 
 /// Whether `ty` is one of the MDO reference variants — the set for
@@ -250,6 +298,54 @@ mod tests {
         let to = fn_ty(vec![Ty::Number], Ty::union(vec![Ty::Number, Ty::String]));
         assert!(is_assignable(&from, &to));
         assert!(!is_assignable(&to, &from));
+    }
+
+    #[test]
+    fn tabular_row_metadata_ref_assignable_to_platform_object() {
+        // The TS method bridge produces a concrete row receiver
+        // `MetadataRef { TabularSectionRow { Catalog }, "X.Y" }` from
+        // `ТЧ.Добавить()`. Passing it where a JSDoc-declared
+        // `Строка табличной части` (lowered to `Ty::PlatformObject`)
+        // is expected must NOT fire `TypeMismatch` — both denote the
+        // same BSL value.
+        let row = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
+            name: hir_def::Name::new("X.Y"),
+        };
+        let generic_ru = Ty::PlatformObject(hir_def::Name::new("Строка табличной части"));
+        let generic_en = Ty::PlatformObject(hir_def::Name::new("Line of a tabular section"));
+        assert!(is_assignable(&row, &generic_ru));
+        assert!(is_assignable(&row, &generic_en));
+    }
+
+    #[test]
+    fn tabular_row_platform_object_assignable_to_metadata_ref() {
+        // Reverse direction: a `Ty::PlatformObject("Строка табличной
+        // части")` value (e.g. from a field-eraser path) flows into a
+        // slot expecting a concrete row receiver. Symmetric bridge
+        // accepts both directions because BSL has no observable
+        // distinction between them.
+        let row = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Document },
+            name: hir_def::Name::new("X.Y"),
+        };
+        let generic = Ty::PlatformObject(hir_def::Name::new("Строка табличной части"));
+        assert!(is_assignable(&generic, &row));
+    }
+
+    #[test]
+    fn tabular_row_bridge_does_not_open_unrelated_platform_objects() {
+        // The bridge is intentionally narrow: only the two row
+        // platform-name spellings activate. Other `PlatformObject`
+        // values must NOT silently flow into a row receiver — that
+        // would erase real type errors.
+        let row = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::Catalog },
+            name: hir_def::Name::new("X.Y"),
+        };
+        let unrelated = Ty::PlatformObject(hir_def::Name::new("ТаблицаЗначений"));
+        assert!(!is_assignable(&row, &unrelated));
+        assert!(!is_assignable(&unrelated, &row));
     }
 
     #[test]
