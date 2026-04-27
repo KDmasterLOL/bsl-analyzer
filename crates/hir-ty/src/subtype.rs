@@ -225,15 +225,11 @@ mod tests {
 
     fn fn_ty(params: Vec<Ty>, ret: Ty) -> Ty {
         // Tests in this module focus on params/ret variance only; defaults
-        // and is_variadic do not participate in the function subtype rule
+        // and max_args do not participate in the function subtype rule
         // (`is_assignable` ignores them).
+        let max_args = Some(params.len() as u32);
         let defaults = vec![false; params.len()].into_boxed_slice();
-        Ty::Function {
-            params: params.into_boxed_slice(),
-            defaults,
-            is_variadic: false,
-            ret: Box::new(ret),
-        }
+        Ty::Function { params: params.into_boxed_slice(), defaults, max_args, ret: Box::new(ret) }
     }
 
     #[test]

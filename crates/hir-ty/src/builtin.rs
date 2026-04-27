@@ -3,15 +3,17 @@
 //! This module exposes typed signatures for the 498 platform global functions
 //! shipped in `bsl-platform/data/platform_data.json` (parsed once at startup
 //! via `PlatformData::instance()`), plus a small hand-curated fallback list
-//! for entries the platform JSON does not cover (`Новый` constructor,
-//! `ПодставитьПараметрыВСтроку` and `ОписаниеТипов` which are extracted into a
-//! different section of the help book).
+//! for entries the platform JSON does not cover: the `Новый` keyword (real
+//! call sites are handled by `Expr::New` in inference) and `ОписаниеТипов`
+//! (extracted into the `types` section of the help book rather than
+//! `global_functions`).
 //!
 //! The single source of truth is the platform JSON; this module is a thin
 //! adapter that maps `param_type` strings to [`Ty`] (via `Ty::from_type_name`),
-//! reconstructs the `defaults` mask from `is_optional`, derives `is_variadic`
-//! from the platform-idiomatic `<имя>1-<имя><цифра>` last-parameter naming
-//! (e.g. `Значение1-Значение10` for `СтрШаблон`), and parses comma-separated
+//! reconstructs the `defaults` mask from `is_optional`, derives the
+//! documented argument cap (`max_args`) from the platform-idiomatic
+//! `<имя>1-<имя><цифра>` last-parameter naming (e.g. `Значение1-Значение10`
+//! → `max_args = 1 + 10` for `СтрШаблон`), and parses comma-separated
 //! return-type unions through `Ty::union`.
 
 use hir_def::ty::{FunctionSignature, Ty};
@@ -79,9 +81,11 @@ impl BuiltinFunctions {
 ///   or unrecognised tokens collapse to `Ty::Unknown` (deliberately permissive
 ///   — `MismatchedArgCount` only checks arity, not assignability).
 /// - `defaults[i]` mirrors `parameters[i].is_optional`.
-/// - `is_variadic` is `true` iff the last parameter's name matches
-///   `<word>N-<word>M` (the platform-help idiom for "any number of trailing
-///   values up to N", e.g. `Значение1-Значение10` on `СтрШаблон`).
+/// - `max_args` is computed from the last parameter's name: when it matches
+///   the platform-help idiom `<word>N-<word>M` (e.g. `Значение1-Значение10`
+///   for `СтрШаблон`), the documented cap `M` extends the upper bound by
+///   `M - 1` extra slots beyond the declared trailing param. Otherwise it
+///   stays at `params.len()` (a fixed-arity signature).
 /// - `return_type` may be a comma-separated union (`"Булево, Неопределено"`);
 ///   each piece is mapped individually and recombined via `Ty::union`.
 fn signature_from_global_function(func: &bsl_platform::GlobalFunction) -> FunctionSignature {
@@ -97,10 +101,15 @@ fn signature_from_global_function(func: &bsl_platform::GlobalFunction) -> Functi
         Some(s) => map_return_type(s.as_str()),
     };
 
-    let is_variadic =
-        func.parameters.last().is_some_and(|p| is_variadic_param_name(p.name.as_str()));
+    // The trailing variadic slot is one declared param that absorbs `M`
+    // trailing args; the cap is `(params.len() - 1) + M`. Subtract one to
+    // avoid double-counting the slot the param already represents.
+    let max_args = match func.parameters.last().and_then(|p| variadic_param_max(p.name.as_str())) {
+        Some(m) => Some((params.len() as u32).saturating_sub(1).saturating_add(m)),
+        None => Some(params.len() as u32),
+    };
 
-    FunctionSignature::new_with_defaults(params, defaults, ret).with_variadic(is_variadic)
+    FunctionSignature::new_with_defaults(params, defaults, ret).with_max_args(max_args)
 }
 
 /// Map a single platform `param_type` token (or `None`) to [`Ty`].
@@ -129,38 +138,37 @@ fn map_return_type(s: &str) -> Ty {
     map_type_string(Some(s))
 }
 
-/// Detect the platform-help idiom for variadic last parameters,
-/// `<имя>N-<имя>M` (e.g. `Значение1-Значение10`).
+/// Recognise the platform-help idiom for variadic last parameters,
+/// `<имя>N-<имя>M`, returning the upper bound `M` (e.g. `10` for
+/// `Значение1-Значение10`).
 ///
 /// All slicing here uses byte indices returned by `char_indices` — `rfind`
 /// returns the start of a char and adding 1 to that offset would split a
 /// multibyte UTF-8 sequence (e.g. Cyrillic `е` occupies bytes 14..16 in
 /// `Значение1`).
-fn is_variadic_param_name(name: &str) -> bool {
-    let Some((head, tail)) = name.split_once('-') else {
-        return false;
-    };
+fn variadic_param_max(name: &str) -> Option<u32> {
+    let (head, tail) = name.split_once('-')?;
     // Walk `head` from the end, splitting it into a word prefix and a
     // trailing digit run on character (not byte) boundaries.
-    let digits_start_byte = head
+    let digits_start = head
         .char_indices()
         .rev()
         .take_while(|(_, c)| c.is_ascii_digit())
         .last()
-        .map(|(idx, _)| idx);
-    let Some(digits_start) = digits_start_byte else {
-        return false;
-    };
+        .map(|(idx, _)| idx)?;
     let (head_word, head_digits) = head.split_at(digits_start);
     if head_word.is_empty() || head_digits.is_empty() {
-        return false;
+        return None;
     }
     let tail = tail.trim_start();
     if !tail.starts_with(head_word) {
-        return false;
+        return None;
     }
     let tail_digits = &tail[head_word.len()..];
-    !tail_digits.is_empty() && tail_digits.chars().all(|c| c.is_ascii_digit())
+    if tail_digits.is_empty() || !tail_digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    tail_digits.parse::<u32>().ok()
 }
 
 /// Register hand-curated signatures for names the platform JSON does not
@@ -169,36 +177,23 @@ fn is_variadic_param_name(name: &str) -> bool {
 /// Each entry is a separate insert so future drift (a name appearing in
 /// platform JSON later) is easy to audit and remove.
 fn register_fallbacks(sigs: &mut FxHashMap<String, FunctionSignature>) {
-    // `Новый` is the constructor keyword; inference handles `Expr::New`
-    // specially. The signature here is only used for symbol-name resolution
-    // (e.g. completion of the bare token).
+    // `Новый` is the constructor keyword (`Новый Массив`, `Новый Запрос`).
+    // Real call sites are handled in `infer_new_expr`; the signature here
+    // exists purely so the resolver / completion treat the bare token as
+    // a known builtin name. Not a regular call — typed permissively.
     insert_pair(sigs, ("новый", "new"), FunctionSignature::function(vec![Ty::Type], Ty::Unknown));
 
-    // `ПодставитьПараметрыВСтроку(<Шаблон>, <Параметр1>...<Параметр10>)`
-    // — variadic, accepts the template plus up to 10 trailing values.
-    // Marked variadic so callers like `ПодставитьПараметрыВСтроку("...", v1, v2, v3)`
-    // don't trigger MismatchedArgCount.
-    insert_pair(
-        sigs,
-        ("подставитьпараметрывстроку", "substituteparameterstostring"),
-        FunctionSignature::new_with_defaults(
-            vec![Ty::String, Ty::Unknown],
-            vec![false, true],
-            Ty::String,
-        )
-        .with_variadic(true),
-    );
-
     // `ОписаниеТипов(<Типы>, [<СписокИсключаемыхТипов>], [<Квалификаторы…>])`
-    // — typed via Type / TypeDescription factory call. We do not currently
-    // model the qualifier overloads precisely; a single required `Unknown`
-    // argument plus an unbounded variadic tail is the safest under-tight
-    // arity check.
+    // is both a type name (class for `Новый ОписаниеТипов(...)`) and a
+    // bare global-function form. The platform extractor lists it under
+    // `types`, not `global_functions`, so the bare-call form is missing.
+    // Without a precise overload model, we fall back to a single required
+    // `Unknown` plus an unbounded variadic tail (`max_args = None`).
     insert_pair(
         sigs,
         ("описаниетипов", "typedescription"),
         FunctionSignature::new_with_defaults(vec![Ty::Unknown], vec![false], Ty::Unknown)
-            .with_variadic(true),
+            .with_max_args(None),
     );
 }
 
@@ -240,17 +235,22 @@ mod tests {
         let nstr = builtins.get("нстр").expect("НСтр should exist");
         assert_eq!(nstr.params.len(), 2, "НСтр has 2 declared params");
         assert_eq!(nstr.required_count(), 1, "second param is optional, so required=1");
-        assert!(!nstr.is_variadic);
+        assert_eq!(nstr.max_args, Some(2), "fixed arity caps at params.len()");
         assert_eq!(*nstr.ret, Ty::String);
     }
 
     #[test]
-    fn strtemplate_is_variadic() {
-        // СтрШаблон has the platform idiom `Значение1-Значение10` last param,
-        // which the adapter must lift to `is_variadic = true`.
+    fn strtemplate_is_capped_variadic() {
+        // СтрШаблон has the platform idiom `Значение1-Значение10` last param.
+        // The adapter must lift it to a hard 11-arg cap (1 template + 10
+        // values), not to an unbounded variadic.
         let builtins = builtin_functions();
         let sig = builtins.get("стршаблон").expect("СтрШаблон should exist");
-        assert!(sig.is_variadic, "Значение1-Значение10 → is_variadic");
+        assert_eq!(
+            sig.max_args,
+            Some(11),
+            "Значение1-Значение10 → cap at (params.len()-1) + 10 = 11"
+        );
         assert_eq!(*sig.ret, Ty::String);
     }
 
@@ -274,26 +274,28 @@ mod tests {
     }
 
     #[test]
-    fn fallback_substitute_parameters_to_string_is_variadic() {
-        // Hand-curated fallback (not in platform JSON) for one of the most
-        // used global functions in БСП configurations.
+    fn fallback_typedescription_is_unbounded_variadic() {
+        // `ОписаниеТипов` lives in `platform_data`'s `types` section but
+        // not its `global_functions` list, so the adapter never sees it.
+        // The hand-rolled fallback marks it as truly unbounded
+        // (`max_args = None`) because the platform doesn't document a
+        // qualifier-list cap.
         let builtins = builtin_functions();
-        let sig = builtins
-            .get("подставитьпараметрывстроку")
-            .expect("ПодставитьПараметрыВСтроку should exist");
-        assert!(sig.is_variadic);
-        assert_eq!(sig.required_count(), 1, "only the template is required");
-        assert_eq!(*sig.ret, Ty::String);
+        let sig = builtins.get("описаниетипов").expect("ОписаниеТипов should exist");
+        assert_eq!(sig.max_args, None, "fallback marks truly unbounded variadic");
+        assert_eq!(sig.required_count(), 1, "only the type-list is required");
     }
 
     #[test]
-    fn variadic_param_name_detection() {
-        assert!(is_variadic_param_name("Значение1-Значение10"));
-        assert!(is_variadic_param_name("Value1-Value5"));
-        assert!(!is_variadic_param_name("Имя"));
-        assert!(!is_variadic_param_name("Имя-Фамилия"));
-        assert!(!is_variadic_param_name("X-Y"));
-        assert!(!is_variadic_param_name("Значение-Значение10"));
+    fn variadic_param_max_detection() {
+        // Real platform idiom: returns the digit suffix as the cap.
+        assert_eq!(variadic_param_max("Значение1-Значение10"), Some(10));
+        assert_eq!(variadic_param_max("Value1-Value5"), Some(5));
+        // Negatives — None means "not variadic".
+        assert_eq!(variadic_param_max("Имя"), None);
+        assert_eq!(variadic_param_max("Имя-Фамилия"), None);
+        assert_eq!(variadic_param_max("X-Y"), None);
+        assert_eq!(variadic_param_max("Значение-Значение10"), None);
     }
 
     #[test]
@@ -340,8 +342,7 @@ mod tests {
         // signature under both lowercase keys, then ask `insert_pair` to
         // register a different signature for the same pair.
         let mut sigs: FxHashMap<String, FunctionSignature> = FxHashMap::default();
-        let json_like = FunctionSignature::function(vec![Ty::Number, Ty::Number], Ty::Number)
-            .with_variadic(false);
+        let json_like = FunctionSignature::function(vec![Ty::Number, Ty::Number], Ty::Number);
         sigs.insert("foo".into(), json_like.clone());
         sigs.insert("bar".into(), json_like.clone());
 

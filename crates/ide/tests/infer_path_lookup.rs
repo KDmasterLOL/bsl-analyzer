@@ -67,29 +67,6 @@ fn path_resolves_platform_builtin_via_resolver() {
     );
 }
 
-// ---------- hir-ty-only builtin that bsl_platform does NOT index ----------
-
-#[test]
-fn path_resolves_hir_only_builtin_not_in_platform_index() {
-    // `ТипЗначенияСтр` carries a typed signature in `hir-ty::builtin`
-    // (ret = String) but is absent from `bsl_platform`'s global-function
-    // index. Without the hir-ty fallback in `infer_path_name`, Resolver
-    // would return `None` and the return type would regress to `Unknown` —
-    // the exact gap Codex flagged during Task 1.7 review.
-    let fixture = r#"//- /test.bsl
-Функция Тест()
-    Х = ТипЗначенияСтр(Тип("Строка"));
-    Возврат Х;
-КонецФункции
-"#;
-    let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_type(&db, file_id, "х"),
-        Some(Ty::String),
-        "hir-ty-only builtin must keep its typed signature (String), not fall to Unknown"
-    );
-}
-
 // ---------- implicit locals shadow module-level methods ----------
 
 #[test]

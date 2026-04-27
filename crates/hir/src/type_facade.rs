@@ -1115,25 +1115,25 @@ mod tests {
         let f_num_to_str = Ty::Function {
             params: vec![Ty::Number].into(),
             defaults: Box::new([false]),
-            is_variadic: false,
+            max_args: Some(1),
             ret: Box::new(Ty::String),
         };
         let f_num_to_str_2 = Ty::Function {
             params: vec![Ty::Number].into(),
             defaults: Box::new([false]),
-            is_variadic: false,
+            max_args: Some(1),
             ret: Box::new(Ty::String),
         };
         let f_str_to_str = Ty::Function {
             params: vec![Ty::String].into(),
             defaults: Box::new([false]),
-            is_variadic: false,
+            max_args: Some(1),
             ret: Box::new(Ty::String),
         };
         let f_num_to_num = Ty::Function {
             params: vec![Ty::Number].into(),
             defaults: Box::new([false]),
-            is_variadic: false,
+            max_args: Some(1),
             ret: Box::new(Ty::Number),
         };
 
@@ -1163,13 +1163,13 @@ mod tests {
         let from = Ty::Function {
             params: vec![Ty::union(vec![Ty::Number, Ty::String])].into(),
             defaults: Box::new([false]),
-            is_variadic: false,
+            max_args: Some(1),
             ret: Box::new(Ty::Number),
         };
         let to = Ty::Function {
             params: vec![Ty::Number].into(),
             defaults: Box::new([false]),
-            is_variadic: false,
+            max_args: Some(1),
             ret: Box::new(Ty::union(vec![Ty::Number, Ty::String])),
         };
         assert!(t(&db, file_id, from.clone()).is_assignable_to(&t(&db, file_id, to.clone())));

@@ -755,7 +755,7 @@ impl<'db> InferenceContext<'db> {
                 return Ty::Function {
                     params: sig.params.clone(),
                     defaults: sig.defaults.clone(),
-                    is_variadic: sig.is_variadic,
+                    max_args: sig.max_args,
                     ret: sig.ret.clone(),
                 };
             }
@@ -1250,16 +1250,22 @@ impl<'db> InferenceContext<'db> {
 
         // Check if callee is a function type
         match callee_ty {
-            Ty::Function { ref params, ref ret, .. } => {
-                // Slice 3 will replace this strict equality with a
-                // defaults-aware bound; for now the arity rule is
-                // unchanged so that the variant-shape change in Slice 2
-                // is purely structural and doesn't shift any diagnostic.
+            Ty::Function { ref params, ref defaults, max_args, ref ret } => {
+                // Arity check honours per-parameter defaults and the
+                // documented `max_args` cap. The lower bound is the count
+                // of required (non-default) leading parameters. The upper
+                // bound is `max_args` (e.g. `Some(11)` for `СтрШаблон`,
+                // `Some(2)` for `НСтр`, `None` for genuinely unbounded
+                // variadics like the `ОписаниеТипов` fallback).
                 let total = params.len();
-                if args.len() != total {
+                let required =
+                    defaults.iter().rposition(|has_default| !*has_default).map_or(0, |i| i + 1);
+                let too_few = args.len() < required;
+                let too_many = max_args.is_some_and(|m| args.len() > m as usize);
+                if too_few || too_many {
                     self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                         call_expr: callee,
-                        required_count: total,
+                        required_count: required,
                         total_count: total,
                         found: args.len(),
                     });
@@ -1986,7 +1992,7 @@ mod tests {
             let ty = Ty::Function {
                 params: sig.params.clone(),
                 defaults: sig.defaults.clone(),
-                is_variadic: sig.is_variadic,
+                max_args: sig.max_args,
                 ret: sig.ret.clone(),
             };
             match ty {
