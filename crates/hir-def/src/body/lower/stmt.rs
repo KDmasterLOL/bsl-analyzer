@@ -1013,7 +1013,7 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let range = var_token.text_range();
 
     // Register loop variable for unused variable tracking
-
+    ctx.register_local_var(name.clone(), range);
     let var = ctx.alloc_binding(Binding::var(name), range);
 
     let mut expr_iter = node.children().filter(|n| {
@@ -1078,7 +1078,7 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
     let range = var_token.text_range();
 
     // Register loop variable for unused variable tracking
-
+    ctx.register_local_var(name.clone(), range);
     let var = ctx.alloc_binding(Binding::var(name), range);
 
     // Collection is the first expression child

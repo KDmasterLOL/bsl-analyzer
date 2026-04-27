@@ -191,6 +191,9 @@ fn metadata_kind_to_prefix_and_mdo(kind: MetadataKind) -> Option<(&'static str, 
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             MdoType::ChartOfAccounts
         }
+        // Register-record kinds — Phase C platform-side wiring.
+        MetadataKind::InformationRegisterRecordManager => MdoType::InformationRegister,
+        MetadataKind::AccumulationRegisterRecordSet => MdoType::AccumulationRegister,
         // `platform_prefix` already returned `None` for the remaining
         // variants via `?` above, so this arm is unreachable in
         // practice — the guard below documents the invariant and keeps
@@ -246,6 +249,19 @@ fn map_generic_metadata_return_type(raw: &str, mdo_type: MdoType, mdo_name: &Nam
         ("ПланСчетовОбъект" | "ChartOfAccountsObject", MdoType::ChartOfAccounts) => {
             MetadataKind::ChartOfAccountsObject
         }
+        // Register-record return forms (Phase C): manager methods like
+        // `РегистрыСведений.X.СоздатьМенеджерЗаписи()` and
+        // `РегистрыНакопления.X.СоздатьНаборЗаписей()` produce a
+        // register-record receiver that the workspace
+        // `RecordSetModule.bsl` resolver can act on.
+        (
+            "РегистрСведенийМенеджерЗаписи" | "InformationRegisterRecordManager",
+            MdoType::InformationRegister,
+        ) => MetadataKind::InformationRegisterRecordManager,
+        (
+            "РегистрНакопленияНаборЗаписей" | "AccumulationRegisterRecordSet",
+            MdoType::AccumulationRegister,
+        ) => MetadataKind::AccumulationRegisterRecordSet,
         _ => return None,
     };
     Some(Ty::MetadataRef { kind, name: mdo_name.clone() })
@@ -340,14 +356,20 @@ mod tests {
     }
 
     #[test]
-    fn metadata_ref_register_kinds_not_covered() {
-        // Register record kinds return None today — their platform
-        // surface isn't wired into the generic-return table yet.
-        assert!(resolve_platform_metadata_ref_method(
+    fn metadata_ref_register_record_manager_resolves_write() {
+        // Phase C: Register-record kinds were de-authoritized in
+        // Phase 0 (returning `None`) because their platform surface
+        // wasn't wired. Phase C wires `platform_prefix()` so methods
+        // declared under the
+        // `InformationRegisterRecordManager.<Имя>` composite typename
+        // (`Записать`, `Прочитать`, …) now resolve.
+        let res = resolve_platform_metadata_ref_method(
             MetadataKind::InformationRegisterRecordManager,
             &Name::new("Курсы"),
             &Name::new("Записать"),
         )
-        .is_none());
+        .expect("platform data indexes Write under InformationRegisterRecordManager");
+        // `Записать` is a procedure → `Ty::Undefined` return.
+        assert_eq!(res.return_ty, Ty::Undefined);
     }
 }

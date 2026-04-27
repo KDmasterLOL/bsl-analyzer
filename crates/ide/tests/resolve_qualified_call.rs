@@ -216,6 +216,85 @@ fn local_shadowing_skips_qualified_resolution() {
     );
 }
 
+const FOR_EACH_PROPERTY_CHAIN_FIXTURE: &str = r#"
+//- /test.bsl
+Процедура Тест(Коллекция)
+    Для Каждого ТекЭлемент Из Коллекция Цикл
+        Значение = ТекЭлемент.СохраненныеНастройки.Получить();
+    КонецЦикла;
+КонецПроцедуры
+"#;
+
+#[test]
+fn for_each_iterator_property_chain_does_not_emit_unresolved() {
+    // `Для Каждого X Из ...` introduces `X` as a local variable. A chain of
+    // the form `X.Свойство.Метод()` is a property access followed by a method
+    // call on the resulting value — NOT a three-level manager call. Before
+    // the fix, `lower_for_each_stmt` did not register the iterator in
+    // `local_vars`, so `analyze_qualified_call` promoted the chain into
+    // `Expr::QualifiedPath["ТекЭлемент", "СохраненныеНастройки", "Получить"]`
+    // and `infer_three_level_call` emitted `UnresolvedMethodCall` with a
+    // misleading "не найден в модуле 'ТекЭлемент.СохраненныеНастройки'"
+    // message. This test pins the corrected behaviour.
+    let (db, file_id) = setup_fixture(FOR_EACH_PROPERTY_CHAIN_FIXTURE);
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "ForEach iterator chain must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+}
+
+const FOR_ITERATOR_PROPERTY_CHAIN_FIXTURE: &str = r#"
+//- /test.bsl
+Процедура Тест(Коллекция)
+    Для Сч = 1 По 10 Цикл
+        Значение = Сч.Свойство.Метод();
+    КонецЦикла;
+КонецПроцедуры
+"#;
+
+#[test]
+fn for_iterator_property_chain_does_not_emit_unresolved() {
+    // Symmetric to the `Для Каждого` case: classic `Для I = 1 По 10` also
+    // introduces `I` as a local. `lower_for_stmt` must register it in
+    // `local_vars` so the iterator never gets misclassified as the leading
+    // segment of a three-level manager call.
+    let (db, file_id) = setup_fixture(FOR_ITERATOR_PROPERTY_CHAIN_FIXTURE);
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "For iterator chain must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+}
+
+const NON_MDO_LEADING_IDENT_FIXTURE: &str = r#"
+//- /test.bsl
+Процедура Тест()
+    Значение = НеобъявленнаяПеременная.Подсвойство.Метод();
+КонецПроцедуры
+"#;
+
+#[test]
+fn non_mdo_leading_ident_does_not_emit_unresolved() {
+    // Defensive coverage for the `MdoType::from_plural` gate added to
+    // `analyze_qualified_call`. The leading identifier is undeclared, so
+    // the local-vars and param-names shadow checks both miss it — the only
+    // thing that can stop the ThreeLevel classification is the new MDO
+    // gate. Without that gate, `analyze_qualified_call` would promote
+    // `НеобъявленнаяПеременная.Подсвойство.Метод()` into
+    // `Expr::QualifiedPath` and `infer_three_level_call` would emit a
+    // misleading UnresolvedMethodCall.
+    let (db, file_id) = setup_fixture(NON_MDO_LEADING_IDENT_FIXTURE);
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "Non-MDO leading IDENT must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+}
+
 const CASE_INSENSITIVE_FIXTURE: &str = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 Функция ЗначениеРеквизитаОбъекта(Параметр) Экспорт

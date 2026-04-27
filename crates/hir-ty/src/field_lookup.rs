@@ -29,11 +29,13 @@
 //!   `Catalog "X".Товары` and `Document "X".Товары` resolve independently
 //!   without probing a candidate list.
 //! - **`Ty::MetadataRef { kind: TabularSection { parent }, "Parent.Section" }`** —
-//!   `None`. The section value is collection-shaped (iteration, `Добавить`,
-//!   `НайтиСтроки`); field access on the collection itself resolves via
-//!   `MethodLookup` once we ship a `PlatformObject("TabularSection")`
-//!   fallback. For now the chain continues through indexing / iteration
-//!   to a `TabularSectionRow`.
+//!   `None` for field access. The section value is collection-shaped
+//!   (iteration); attribute access on the collection itself doesn't
+//!   exist in BSL. The 18 platform methods (`Добавить`, `НайтиСтроки`,
+//!   `Количество`, …) are served by [`crate::method_lookup`] through
+//!   `PlatformData["Tabular section"]`, which rebinds the generic
+//!   `"Строка табличной части"` return to a `TabularSectionRow`
+//!   receiver so chained calls keep resolving.
 //!
 //! # Deferred (M4+)
 //!
@@ -239,7 +241,16 @@ fn lookup_on_tabular_row(
             });
         }
     }
-    None
+    // Fall through to platform row properties (`НомерСтроки` / `LineNumber`).
+    // HBK ships these under `type_name = "Line of a tabular section"`.
+    // Custom XML attributes intentionally win on name collisions because
+    // they are checked first above — matches the convention that a
+    // user-declared MDO attribute always wins over a platform default.
+    let prop = crate::platform_property_lookup::lookup_platform_property_by_type(
+        "Line of a tabular section",
+        field_name,
+    )?;
+    Some(FieldInfo { ty: prop.return_ty, is_readonly: prop.is_readonly })
 }
 
 /// Map a `MetadataKind` to the [`MdoType`] used for `find_metadata_object`.
@@ -711,6 +722,60 @@ mod tests {
             lookup_field(&configs, &doc_row, &Name::new("Количество")).unwrap().ty,
             Ty::Number,
             "Document row must resolve via its own tabular section — not Catalog's",
+        );
+    }
+
+    #[test]
+    fn field_lookup_tabular_row_line_number_resolves_via_platform() {
+        // Standard row property `НомерСтроки` lives in
+        // `PlatformData["Line of a tabular section"]`, not in the MDO's
+        // XML. The fall-through after `ts.attributes()` lets it resolve
+        // even when the row carries no custom attributes.
+        let ts = TabularSection::new(Uuid::new_v4(), "Услуги");
+        let mut cat = catalog("Номенклатура", vec![]);
+        cat.add_tabular_section(ts);
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(cat);
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            name: Name::new("Номенклатура.Услуги"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("НомерСтроки"))
+            .expect("НомерСтроки resolves through platform property fall-through");
+        assert_eq!(info.ty, Ty::Number);
+    }
+
+    #[test]
+    fn field_lookup_tabular_row_custom_attribute_wins_over_platform() {
+        // If a user names a custom row attribute the same as a standard
+        // platform property (`НомерСтроки`), the user's declaration
+        // wins — XML attributes are checked first, the platform
+        // fall-through only fires on a miss. Mirrors how MDO custom
+        // attributes always win over platform standard ones.
+        let mut ts = TabularSection::new(Uuid::new_v4(), "Услуги");
+        ts.set_attributes(vec![TabularSectionAttribute::new(
+            Uuid::new_v4(),
+            "НомерСтроки",
+            AttributeType::String { length: Some(36) },
+        )]);
+        let mut cat = catalog("Номенклатура", vec![]);
+        cat.add_tabular_section(ts);
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(cat);
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            name: Name::new("Номенклатура.Услуги"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("НомерСтроки"))
+            .expect("custom attribute named НомерСтроки must still resolve");
+        assert_eq!(
+            info.ty,
+            Ty::String,
+            "custom XML attribute must win over the platform standard row property",
         );
     }
 

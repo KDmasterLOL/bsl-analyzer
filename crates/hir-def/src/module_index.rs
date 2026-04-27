@@ -8,6 +8,7 @@
 //! Building the index from VFS paths is very fast (~10ms for 6,540 files)
 //! because it only analyzes path strings, not file contents.
 
+use bsl_metadata::MdoType;
 use rustc_hash::FxHashMap;
 use vfs::FileId;
 
@@ -18,9 +19,13 @@ use crate::Name;
 ///
 /// Built from VFS file paths using Designer format conventions:
 /// - `CommonModules/<Name>/Ext/Module.bsl` → CommonModule
-/// - `Documents/<Name>/Ext/*.bsl` → Document
-/// - `Catalogs/<Name>/Ext/*.bsl` → Catalog
-/// - etc.
+/// - `<Folder>/<Name>/Ext/ManagerModule.bsl` → Manager module
+/// - `<Folder>/<Name>/Ext/ObjectModule.bsl` → Object module (Phase B)
+/// - `<Folder>/<Name>/Ext/RecordSetModule.bsl` → Record-set module (Phase C)
+///
+/// Other module flavours (`FormModule.bsl`, `CommandModule.bsl`) are
+/// deliberately not indexed — they have no type-system call surface
+/// today.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleIndex {
     /// CommonModules: lowercase name → FileId
@@ -28,6 +33,30 @@ pub struct ModuleIndex {
 
     /// Manager objects: (ManagerType, lowercase object name) → FileId (manager module)
     managers: FxHashMap<(ManagerType, String), FileId>,
+
+    /// Object modules: (MdoType, lowercase object name) → FileId
+    /// (`<MDO>/Ext/ObjectModule.bsl`).
+    ///
+    /// Keyed on [`MdoType`] (not [`ManagerType`]) to match
+    /// [`crate::ty::Ty::ObjectManager.kind`] and the strict
+    /// `MetadataKind → MdoType` filter on the call site (Phase B). Not
+    /// every `ManagerType` has a paired `*Object` `MetadataKind`
+    /// (registers, charts of calculation types, business processes,
+    /// tasks today), but the index itself is permissive — the strict
+    /// filter at lookup time gates which kinds are eligible.
+    object_modules: FxHashMap<(MdoType, String), FileId>,
+
+    /// Record-set modules: (MdoType, lowercase register name) → FileId
+    /// (`<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl`).
+    ///
+    /// Phase C: workspace call surface for register-set receivers.
+    /// The strict filter at lookup time (`record_set_kind_to_mdo` in
+    /// `hir-ty/method_resolution.rs`) gates which `MetadataKind`
+    /// variants actually consult this map — today only
+    /// `AccumulationRegisterRecordSet`. The index itself is permissive
+    /// (any register MDO whose path emits a `RecordSetModule.bsl`
+    /// file is recorded), mirroring the `object_modules` contract.
+    record_set_modules: FxHashMap<(MdoType, String), FileId>,
 }
 
 impl ModuleIndex {
@@ -48,96 +77,28 @@ impl ModuleIndex {
             let normalized = path.replace('\\', "/");
 
             // Extract module info from path
-            if let Some((module_type, name)) = parse_module_path(&normalized) {
-                match module_type {
-                    ModulePathType::CommonModule => {
-                        index.common_modules.insert(name.to_lowercase(), file_id);
+            let Some((module_type, name, file_kind)) = parse_module_path(&normalized) else {
+                continue;
+            };
+            let lower = name.to_lowercase();
+
+            match file_kind {
+                ModuleFileKind::Common => {
+                    index.common_modules.insert(lower, file_id);
+                }
+                ModuleFileKind::Manager => {
+                    if let Some(manager_type) = module_type.to_manager_type() {
+                        index.managers.insert((manager_type, lower), file_id);
                     }
-                    ModulePathType::Document => {
-                        index
-                            .managers
-                            .insert((ManagerType::Documents, name.to_lowercase()), file_id);
+                }
+                ModuleFileKind::Object => {
+                    if let Some(mdo_type) = module_type.to_mdo_type() {
+                        index.object_modules.insert((mdo_type, lower), file_id);
                     }
-                    ModulePathType::Catalog => {
-                        index
-                            .managers
-                            .insert((ManagerType::Catalogs, name.to_lowercase()), file_id);
-                    }
-                    ModulePathType::DataProcessor => {
-                        index
-                            .managers
-                            .insert((ManagerType::DataProcessors, name.to_lowercase()), file_id);
-                    }
-                    ModulePathType::Report => {
-                        index.managers.insert((ManagerType::Reports, name.to_lowercase()), file_id);
-                    }
-                    ModulePathType::InformationRegister => {
-                        index.managers.insert(
-                            (ManagerType::InformationRegisters, name.to_lowercase()),
-                            file_id,
-                        );
-                    }
-                    ModulePathType::AccumulationRegister => {
-                        index.managers.insert(
-                            (ManagerType::AccumulationRegisters, name.to_lowercase()),
-                            file_id,
-                        );
-                    }
-                    ModulePathType::AccountingRegister => {
-                        index.managers.insert(
-                            (ManagerType::AccountingRegisters, name.to_lowercase()),
-                            file_id,
-                        );
-                    }
-                    ModulePathType::CalculationRegister => {
-                        index.managers.insert(
-                            (ManagerType::CalculationRegisters, name.to_lowercase()),
-                            file_id,
-                        );
-                    }
-                    ModulePathType::ChartOfCharacteristicTypes => {
-                        index.managers.insert(
-                            (ManagerType::ChartsOfCharacteristicTypes, name.to_lowercase()),
-                            file_id,
-                        );
-                    }
-                    ModulePathType::ChartOfAccounts => {
-                        index
-                            .managers
-                            .insert((ManagerType::ChartsOfAccounts, name.to_lowercase()), file_id);
-                    }
-                    ModulePathType::ChartOfCalculationTypes => {
-                        index.managers.insert(
-                            (ManagerType::ChartsOfCalculationTypes, name.to_lowercase()),
-                            file_id,
-                        );
-                    }
-                    ModulePathType::BusinessProcess => {
-                        index
-                            .managers
-                            .insert((ManagerType::BusinessProcesses, name.to_lowercase()), file_id);
-                    }
-                    ModulePathType::Task => {
-                        index.managers.insert((ManagerType::Tasks, name.to_lowercase()), file_id);
-                    }
-                    ModulePathType::Enum => {
-                        index.managers.insert((ManagerType::Enums, name.to_lowercase()), file_id);
-                    }
-                    ModulePathType::ExchangePlan => {
-                        index
-                            .managers
-                            .insert((ManagerType::ExchangePlans, name.to_lowercase()), file_id);
-                    }
-                    ModulePathType::ExternalDataSource => {
-                        index.managers.insert(
-                            (ManagerType::ExternalDataSources, name.to_lowercase()),
-                            file_id,
-                        );
-                    }
-                    ModulePathType::Constant => {
-                        index
-                            .managers
-                            .insert((ManagerType::Constants, name.to_lowercase()), file_id);
+                }
+                ModuleFileKind::RecordSet => {
+                    if let Some(mdo_type) = module_type.to_mdo_type() {
+                        index.record_set_modules.insert((mdo_type, lower), file_id);
                     }
                 }
             }
@@ -168,6 +129,21 @@ impl ModuleIndex {
         self.managers.get(&(manager_type, name.as_str().to_lowercase())).copied()
     }
 
+    /// Resolve an object module (`<MDO>/Ext/ObjectModule.bsl`) by MDO
+    /// type and object name. Phase B counterpart to
+    /// [`Self::resolve_manager`].
+    pub fn resolve_object_module(&self, mdo_type: MdoType, name: &Name) -> Option<FileId> {
+        self.object_modules.get(&(mdo_type, name.as_str().to_lowercase())).copied()
+    }
+
+    /// Resolve a record-set module
+    /// (`<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl`) by register
+    /// MDO type and name. Phase C counterpart to
+    /// [`Self::resolve_object_module`] for register receivers.
+    pub fn resolve_record_set_module(&self, mdo_type: MdoType, name: &Name) -> Option<FileId> {
+        self.record_set_modules.get(&(mdo_type, name.as_str().to_lowercase())).copied()
+    }
+
     /// Get number of indexed CommonModules.
     pub fn common_module_count(&self) -> usize {
         self.common_modules.len()
@@ -176,6 +152,16 @@ impl ModuleIndex {
     /// Get number of indexed manager objects.
     pub fn manager_count(&self) -> usize {
         self.managers.len()
+    }
+
+    /// Get number of indexed object modules.
+    pub fn object_module_count(&self) -> usize {
+        self.object_modules.len()
+    }
+
+    /// Get number of indexed record-set modules.
+    pub fn record_set_module_count(&self) -> usize {
+        self.record_set_modules.len()
     }
 
     /// Iterate over all CommonModule names.
@@ -207,20 +193,93 @@ enum ModulePathType {
     Constant,
 }
 
-/// Parse module path to extract type and name.
+impl ModulePathType {
+    /// Map a path-extracted [`ModulePathType`] to a [`ManagerType`] for
+    /// the [`ModuleIndex::managers`] keying scheme. `None` for
+    /// `CommonModule` (it lives in its own table).
+    fn to_manager_type(self) -> Option<ManagerType> {
+        Some(match self {
+            ModulePathType::CommonModule => return None,
+            ModulePathType::Document => ManagerType::Documents,
+            ModulePathType::Catalog => ManagerType::Catalogs,
+            ModulePathType::DataProcessor => ManagerType::DataProcessors,
+            ModulePathType::Report => ManagerType::Reports,
+            ModulePathType::InformationRegister => ManagerType::InformationRegisters,
+            ModulePathType::AccumulationRegister => ManagerType::AccumulationRegisters,
+            ModulePathType::AccountingRegister => ManagerType::AccountingRegisters,
+            ModulePathType::CalculationRegister => ManagerType::CalculationRegisters,
+            ModulePathType::ChartOfCharacteristicTypes => ManagerType::ChartsOfCharacteristicTypes,
+            ModulePathType::ChartOfAccounts => ManagerType::ChartsOfAccounts,
+            ModulePathType::ChartOfCalculationTypes => ManagerType::ChartsOfCalculationTypes,
+            ModulePathType::BusinessProcess => ManagerType::BusinessProcesses,
+            ModulePathType::Task => ManagerType::Tasks,
+            ModulePathType::Enum => ManagerType::Enums,
+            ModulePathType::ExchangePlan => ManagerType::ExchangePlans,
+            ModulePathType::ExternalDataSource => ManagerType::ExternalDataSources,
+            ModulePathType::Constant => ManagerType::Constants,
+        })
+    }
+
+    /// Map a path-extracted [`ModulePathType`] to an [`MdoType`] for
+    /// the [`ModuleIndex::object_modules`] keying scheme. `None` for
+    /// path types that have no `MdoType` counterpart (`CommonModule`).
+    fn to_mdo_type(self) -> Option<MdoType> {
+        Some(match self {
+            ModulePathType::CommonModule => return None,
+            ModulePathType::Document => MdoType::Document,
+            ModulePathType::Catalog => MdoType::Catalog,
+            ModulePathType::DataProcessor => MdoType::DataProcessor,
+            ModulePathType::Report => MdoType::Report,
+            ModulePathType::InformationRegister => MdoType::InformationRegister,
+            ModulePathType::AccumulationRegister => MdoType::AccumulationRegister,
+            ModulePathType::AccountingRegister => MdoType::AccountingRegister,
+            ModulePathType::CalculationRegister => MdoType::CalculationRegister,
+            ModulePathType::ChartOfCharacteristicTypes => MdoType::ChartOfCharacteristicTypes,
+            ModulePathType::ChartOfAccounts => MdoType::ChartOfAccounts,
+            ModulePathType::ChartOfCalculationTypes => MdoType::ChartOfCalculationTypes,
+            ModulePathType::BusinessProcess => MdoType::BusinessProcess,
+            ModulePathType::Task => MdoType::Task,
+            ModulePathType::Enum => MdoType::Enum,
+            ModulePathType::ExchangePlan => MdoType::ExchangePlan,
+            ModulePathType::ExternalDataSource => MdoType::ExternalDataSource,
+            ModulePathType::Constant => MdoType::Constant,
+        })
+    }
+}
+
+/// Which BSL module-file flavour a designer-format path identifies.
 ///
-/// Designer format paths:
-/// - `CommonModules/<Name>/Ext/Module.bsl` → CommonModule
-/// - `Documents/<Name>/Ext/ManagerModule.bsl` → Document manager
-/// - `Catalogs/<Name>/Ext/ManagerModule.bsl` → Catalog manager
-/// - `DataProcessors/<Name>/Ext/ManagerModule.bsl` → DataProcessor manager
-/// - `Reports/<Name>/Ext/ManagerModule.bsl` → Report manager
-/// - `InformationRegisters/<Name>/Ext/ManagerModule.bsl` → InformationRegister manager
-/// - `AccumulationRegisters/<Name>/Ext/ManagerModule.bsl` → AccumulationRegister manager
+/// Drives the dispatch in [`ModuleIndex::build_from_paths`]:
+/// `Common` files go to `common_modules`, `Manager` files go to
+/// `managers`, `Object` files go to `object_modules`, `RecordSet`
+/// files go to `record_set_modules`. Other module flavours
+/// (`FormModule.bsl`, `CommandModule.bsl`) are filtered out at the
+/// parse step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleFileKind {
+    /// `CommonModules/<Name>/Ext/Module.bsl`
+    Common,
+    /// `<Folder>/<Name>/Ext/ManagerModule.bsl`
+    Manager,
+    /// `<Folder>/<Name>/Ext/ObjectModule.bsl` (Phase B)
+    Object,
+    /// `<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl` (Phase C)
+    RecordSet,
+}
+
+/// Parse module path to extract type, name, and file flavour.
 ///
-/// Note: Only `ManagerModule.bsl` files are indexed for MDO types that have manager modules.
-/// This ensures we don't accidentally index `ObjectModule.bsl` or `RecordSetModule.bsl`.
-fn parse_module_path(path: &str) -> Option<(ModulePathType, String)> {
+/// Designer-format paths recognised:
+/// - `CommonModules/<Name>/Ext/Module.bsl` → ([`CommonModule`], `Common`)
+/// - `<Folder>/<Name>/Ext/ManagerModule.bsl` → (folder MDO, `Manager`)
+/// - `<Folder>/<Name>/Ext/ObjectModule.bsl` → (folder MDO, `Object`)
+/// - `<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl` → (folder MDO, `RecordSet`)
+///
+/// Other module flavours (`FormModule.bsl`, `CommandModule.bsl`)
+/// return `None` — they have no type-system call surface today.
+///
+/// [`CommonModule`]: ModulePathType::CommonModule
+fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKind)> {
     let parts: Vec<&str> = path.split('/').collect();
 
     // Need at least: <Type>/<Name>/Ext/<Module>.bsl
@@ -275,18 +334,24 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String)> {
             if i + 1 < parts.len() {
                 let name = parts[i + 1].to_string();
 
-                // CommonModules: accept Module.bsl
                 if mod_type == ModulePathType::CommonModule {
-                    if path_lower.ends_with("module.bsl") {
-                        return Some((mod_type, name));
+                    // CommonModules: accept Module.bsl only.
+                    if path_lower.ends_with("module.bsl")
+                        && !path_lower.ends_with("managermodule.bsl")
+                        && !path_lower.ends_with("objectmodule.bsl")
+                        && !path_lower.ends_with("recordsetmodule.bsl")
+                    {
+                        return Some((mod_type, name, ModuleFileKind::Common));
                     }
-                } else {
-                    // For MDO types with managers: only accept ManagerModule.bsl
-                    // This prevents indexing ObjectModule.bsl, RecordSetModule.bsl, etc.
-                    if path_lower.ends_with("managermodule.bsl") {
-                        return Some((mod_type, name));
-                    }
+                } else if path_lower.ends_with("managermodule.bsl") {
+                    return Some((mod_type, name, ModuleFileKind::Manager));
+                } else if path_lower.ends_with("objectmodule.bsl") {
+                    return Some((mod_type, name, ModuleFileKind::Object));
+                } else if path_lower.ends_with("recordsetmodule.bsl") {
+                    return Some((mod_type, name, ModuleFileKind::RecordSet));
                 }
+                // FormModule.bsl / CommandModule.bsl intentionally
+                // fall through — no type-system call surface today.
             }
         }
     }
@@ -302,7 +367,14 @@ mod tests {
     fn test_parse_common_module_path() {
         let path = "src/CommonModules/ОбщегоНазначения/Ext/Module.bsl";
         let result = parse_module_path(path);
-        assert_eq!(result, Some((ModulePathType::CommonModule, "ОбщегоНазначения".to_string())));
+        assert_eq!(
+            result,
+            Some((
+                ModulePathType::CommonModule,
+                "ОбщегоНазначения".to_string(),
+                ModuleFileKind::Common,
+            )),
+        );
     }
 
     #[test]
@@ -310,18 +382,35 @@ mod tests {
         // ManagerModule.bsl is indexed for manager resolution
         let path = "Documents/ПриходнаяНакладная/Ext/ManagerModule.bsl";
         let result = parse_module_path(path);
-        assert_eq!(result, Some((ModulePathType::Document, "ПриходнаяНакладная".to_string())));
+        assert_eq!(
+            result,
+            Some((
+                ModulePathType::Document,
+                "ПриходнаяНакладная".to_string(),
+                ModuleFileKind::Manager,
+            )),
+        );
 
-        // ObjectModule.bsl is NOT indexed (not needed for manager resolution)
+        // ObjectModule.bsl is now also indexed (Phase B).
         let object_path = "Documents/ПриходнаяНакладная/Ext/ObjectModule.bsl";
-        assert_eq!(parse_module_path(object_path), None);
+        assert_eq!(
+            parse_module_path(object_path),
+            Some((
+                ModulePathType::Document,
+                "ПриходнаяНакладная".to_string(),
+                ModuleFileKind::Object,
+            )),
+        );
     }
 
     #[test]
     fn test_parse_catalog_path() {
         let path = "Catalogs/Номенклатура/Ext/ManagerModule.bsl";
         let result = parse_module_path(path);
-        assert_eq!(result, Some((ModulePathType::Catalog, "Номенклатура".to_string())));
+        assert_eq!(
+            result,
+            Some((ModulePathType::Catalog, "Номенклатура".to_string(), ModuleFileKind::Manager,)),
+        );
     }
 
     #[test]
@@ -330,12 +419,23 @@ mod tests {
         let manager_path = "InformationRegisters/Test/Ext/ManagerModule.bsl";
         assert_eq!(
             parse_module_path(manager_path),
-            Some((ModulePathType::InformationRegister, "Test".to_string()))
+            Some((
+                ModulePathType::InformationRegister,
+                "Test".to_string(),
+                ModuleFileKind::Manager,
+            )),
         );
 
-        // RecordSetModule.bsl is NOT indexed
+        // RecordSetModule.bsl is now indexed too (Phase C).
         let recordset_path = "InformationRegisters/Test/Ext/RecordSetModule.bsl";
-        assert_eq!(parse_module_path(recordset_path), None);
+        assert_eq!(
+            parse_module_path(recordset_path),
+            Some((
+                ModulePathType::InformationRegister,
+                "Test".to_string(),
+                ModuleFileKind::RecordSet,
+            )),
+        );
     }
 
     #[test]
@@ -344,8 +444,117 @@ mod tests {
         let result = parse_module_path(path);
         assert_eq!(
             result,
-            Some((ModulePathType::CommonModule, "СтандартныеПодсистемыСервер".to_string()))
+            Some((
+                ModulePathType::CommonModule,
+                "СтандартныеПодсистемыСервер".to_string(),
+                ModuleFileKind::Common,
+            )),
         );
+    }
+
+    #[test]
+    fn test_parse_object_module_path() {
+        // Phase B: ObjectModule.bsl paths are now indexed for catalog,
+        // document, exchange-plan, chart-of-accounts, etc.
+        let cat = "Catalogs/Справочник1/Ext/ObjectModule.bsl";
+        assert_eq!(
+            parse_module_path(cat),
+            Some((ModulePathType::Catalog, "Справочник1".to_string(), ModuleFileKind::Object,)),
+        );
+        let doc = "Documents/Документ1/Ext/ObjectModule.bsl";
+        assert_eq!(
+            parse_module_path(doc),
+            Some((ModulePathType::Document, "Документ1".to_string(), ModuleFileKind::Object,)),
+        );
+    }
+
+    #[test]
+    fn test_resolve_object_module_returns_file_id() {
+        // Build the index from a path tuple to verify both
+        // `parse_module_path` and `resolve_object_module` agree on the
+        // `(MdoType, name)` keying.
+        let file_id = FileId::from_raw(99);
+        let path = "Catalogs/Справочник1/Ext/ObjectModule.bsl";
+        let index = ModuleIndex::build_from_paths([(file_id, path)].into_iter());
+        assert_eq!(index.object_module_count(), 1);
+        assert_eq!(
+            index.resolve_object_module(MdoType::Catalog, &Name::new("Справочник1")),
+            Some(file_id),
+        );
+        // Wrong MDO type misses (strict keying).
+        assert_eq!(index.resolve_object_module(MdoType::Document, &Name::new("Справочник1")), None,);
+    }
+
+    #[test]
+    fn test_parse_record_set_module_path() {
+        // Phase C: register-flavour `RecordSetModule.bsl` paths are
+        // now indexed. Pins both the path-type extraction and the
+        // file-kind discrimination.
+        let info = "InformationRegisters/РегистрСведений1/Ext/RecordSetModule.bsl";
+        assert_eq!(
+            parse_module_path(info),
+            Some((
+                ModulePathType::InformationRegister,
+                "РегистрСведений1".to_string(),
+                ModuleFileKind::RecordSet,
+            )),
+        );
+        let acc = "AccumulationRegisters/РегистрНакопления1/Ext/RecordSetModule.bsl";
+        assert_eq!(
+            parse_module_path(acc),
+            Some((
+                ModulePathType::AccumulationRegister,
+                "РегистрНакопления1".to_string(),
+                ModuleFileKind::RecordSet,
+            )),
+        );
+    }
+
+    #[test]
+    fn test_resolve_record_set_module_returns_file_id() {
+        let file_id = FileId::from_raw(101);
+        let path = "InformationRegisters/РегистрСведений1/Ext/RecordSetModule.bsl";
+        let index = ModuleIndex::build_from_paths([(file_id, path)].into_iter());
+        assert_eq!(index.record_set_module_count(), 1);
+        // Manager / object indexes must NOT pick this up — pins the
+        // file-kind dispatch.
+        assert_eq!(index.manager_count(), 0);
+        assert_eq!(index.object_module_count(), 0);
+        assert_eq!(
+            index.resolve_record_set_module(
+                MdoType::InformationRegister,
+                &Name::new("РегистрСведений1")
+            ),
+            Some(file_id),
+        );
+        // Wrong register flavour misses (strict keying).
+        assert_eq!(
+            index.resolve_record_set_module(
+                MdoType::AccumulationRegister,
+                &Name::new("РегистрСведений1")
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_form_module_remains_unindexed() {
+        // FormModule.bsl / CommandModule.bsl have no type-system call
+        // surface today — pin the negative case so a future
+        // "index everything" drift is caught.
+        let form = FileId::from_raw(77);
+        let cmd = FileId::from_raw(78);
+        let index = ModuleIndex::build_from_paths(
+            [
+                (form, "Documents/Документ1/Forms/ФормаДокумента/Ext/FormModule.bsl"),
+                (cmd, "Catalogs/Справочник1/Commands/КомандаКаталога/Ext/CommandModule.bsl"),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(index.object_module_count(), 0);
+        assert_eq!(index.manager_count(), 0);
+        assert_eq!(index.common_module_count(), 0);
+        assert_eq!(index.record_set_module_count(), 0);
     }
 
     #[test]

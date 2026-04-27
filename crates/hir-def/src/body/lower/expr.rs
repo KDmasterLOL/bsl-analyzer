@@ -1072,9 +1072,18 @@ fn maybe_lower_as_qualified_call(
             };
 
             if is_this_object {
-                // ThisObject.Method() is semantically a local call:
-                // resolve the method against the current module, not a CommonModule.
-                // RedundantAccessToObject::ThisObject is already emitted in lower_field_expr.
+                // ThisObject.Method() is NOT promoted to a QualifiedPath
+                // (which is the CommonModule lookup shape). Per 1С
+                // semantics, `ЭтотОбъект` is an external object
+                // reference: chained `.Method()` on it is the same
+                // surface as `Об.Method()` on a *Object MetadataRef
+                // and only sees `Экспорт` methods. Phase B routes the
+                // resulting `Expr::Field`-callee call through
+                // `infer_call`, which coerces `Ty::ThisObject` to its
+                // matching `*Object` `Ty::MetadataRef` and consults
+                // the workspace `ObjectModule.bsl` resolver.
+                // RedundantAccessToObject::ThisObject is already emitted
+                // in lower_field_expr.
                 ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
                     callee: field_name.as_str().to_string(),
                     module: None,
@@ -1458,6 +1467,14 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
         if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
             return None;
         }
+
+        // Defensive gate: only classify as ThreeLevel when the leading IDENT
+        // really is an MDO plural (Документы / Справочники / …). Any other
+        // identifier that escapes the local-vars / param-names sets — for
+        // example a loop iterator pre-Slice-N, or an identifier injected via
+        // preprocessor — would otherwise be promoted into a QualifiedPath
+        // and mis-resolved as `Документы.<name>.Method()`.
+        bsl_metadata::MdoType::from_plural(&mdo_type)?;
 
         tracing::debug!(
             mdo_type = %mdo_type,
