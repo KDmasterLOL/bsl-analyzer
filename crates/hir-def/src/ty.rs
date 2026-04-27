@@ -325,9 +325,17 @@ impl MetadataKind {
             Self::ExchangePlanObject => Some("ExchangePlanObject"),
             Self::ChartOfAccountsRef => Some("ChartOfAccountsRef"),
             Self::ChartOfAccountsObject => Some("ChartOfAccountsObject"),
-            Self::InformationRegisterRecordManager
-            | Self::AccumulationRegisterRecordSet
-            | Self::InformationRegisterRef
+            // Register-record kinds: platform data indexes their
+            // methods under `InformationRegisterRecordManager.<Имя>`
+            // and `AccumulationRegisterRecordSet.<Имя>` composite
+            // typenames. Wired here as part of Phase C so platform
+            // calls (`Записать`, `Прочитать`, …) on register-record
+            // receivers stay resolvable now that
+            // `map_generic_metadata_return_type` rebinds those return
+            // types to concrete `Ty::MetadataRef` shapes.
+            Self::InformationRegisterRecordManager => Some("InformationRegisterRecordManager"),
+            Self::AccumulationRegisterRecordSet => Some("AccumulationRegisterRecordSet"),
+            Self::InformationRegisterRef
             | Self::AccumulationRegisterRef
             | Self::AccountingRegisterRef
             | Self::CalculationRegisterRef

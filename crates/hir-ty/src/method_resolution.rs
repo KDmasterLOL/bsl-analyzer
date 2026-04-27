@@ -246,6 +246,110 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
     })
 }
 
+/// Strict map from a [`MetadataKind`] to its parent register
+/// [`MdoType`] for the [`resolve_record_set_module_call`] gate.
+///
+/// Returns `Some(MdoType)` only for register-set kinds — the HIR
+/// receiver shape that BSL semantics actually allows to reach
+/// `RecordSetModule.bsl`'s exported procedures:
+///
+/// - [`MetadataKind::AccumulationRegisterRecordSet`] → `MdoType::AccumulationRegister`
+///
+/// **`InformationRegisterRecordManager` is NOT in this map.**
+/// Although `RecordSetModule.bsl` exists for information registers,
+/// the receiver returned by
+/// `РегистрыСведений.X.СоздатьМенеджерЗаписи()` is a *record manager*
+/// (a single-record handle), not a record set. Per 1С runtime
+/// semantics, exported procedures inside `RecordSetModule.bsl` are
+/// callable through a record-set receiver, NOT through the record
+/// manager — calling `МЗ.Экспорт()` where `Экспорт()` lives in
+/// `RecordSetModule.bsl` is rejected by 1С. Wiring it here would
+/// false-positive that error path. (Information-register record
+/// **sets** would be the correct receiver, but our HIR has no
+/// dedicated `InformationRegisterRecordSet` variant today;
+/// adding one is out of scope for Phase C.)
+///
+/// `*Object` kinds belong to [`object_kind_to_mdo`]. `*Ref` kinds and
+/// register parts return `None` — no module-level call surface. The
+/// match is exhaustive on every `MetadataKind` variant (no wildcard)
+/// so adding a new register-record flavour surfaces as a compiler
+/// error here, not a silent fall-through to `None`.
+fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::MdoType> {
+    use bsl_metadata::MdoType;
+    use hir_def::ty::MetadataKind;
+    Some(match kind {
+        MetadataKind::AccumulationRegisterRecordSet => MdoType::AccumulationRegister,
+        // `InformationRegisterRecordManager` deliberately rejected —
+        // see doc comment above (1С semantics: `RecordSetModule.bsl`
+        // procedures need a record-set receiver, not a record-manager).
+        MetadataKind::InformationRegisterRecordManager => return None,
+        // `*Object` kinds — ObjectModule.bsl, not RecordSetModule.bsl.
+        MetadataKind::CatalogObject
+        | MetadataKind::DocumentObject
+        | MetadataKind::ExchangePlanObject
+        | MetadataKind::ChartOfAccountsObject => return None,
+        // `*Ref` kinds — reference values, no module-level call surface.
+        MetadataKind::CatalogRef
+        | MetadataKind::DocumentRef
+        | MetadataKind::EnumRef
+        | MetadataKind::TaskRef
+        | MetadataKind::BusinessProcessRef
+        | MetadataKind::ExchangePlanRef
+        | MetadataKind::ChartOfAccountsRef
+        | MetadataKind::InformationRegisterRef
+        | MetadataKind::AccumulationRegisterRef
+        | MetadataKind::AccountingRegisterRef
+        | MetadataKind::CalculationRegisterRef => return None,
+        // Register parts and tabular sections — no module.
+        MetadataKind::RegisterDimension { .. }
+        | MetadataKind::RegisterResource { .. }
+        | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::TabularSection { .. }
+        | MetadataKind::TabularSectionRow { .. } => return None,
+    })
+}
+
+/// Resolve a 2-shape RecordSetModule method call like
+/// `НЗ = РегистрыСведений.X.СоздатьМенеджерЗаписи(); НЗ.МойМетод()`
+/// where `НЗ` carries
+/// [`Ty::MetadataRef { InformationRegisterRecordManager, .. }`][MetadataRef].
+///
+/// Mirrors [`resolve_object_module_call`] but routes the workspace
+/// lookup to [`Resolver::resolve_record_set_module_method`]. The
+/// strict register-record filter ([`record_set_kind_to_mdo`]) is
+/// applied **inside** the wrapper — the call site can pass any
+/// `MetadataKind` without guarding; non-register-record kinds return
+/// `Err(MethodNotFound)` immediately and the call site's
+/// platform-fallback path takes over.
+///
+/// [MetadataRef]: hir_def::ty::Ty::MetadataRef
+pub fn resolve_record_set_module_call(
+    db: &dyn ConfigsDatabase,
+    kind: hir_def::ty::MetadataKind,
+    mdo_name: &Name,
+    method_name: &Name,
+    resolver: &Resolver,
+) -> Result<MethodResolution, UnresolvedMethodKind> {
+    let mdo_type = record_set_kind_to_mdo(kind).ok_or(UnresolvedMethodKind::MethodNotFound)?;
+
+    let resolution = resolver
+        .resolve_record_set_module_method(db, mdo_type, mdo_name, method_name)
+        .map_err(|e| match e {
+            QualifiedMethodError::NotVisibleInConfigs | QualifiedMethodError::NotFound => {
+                UnresolvedMethodKind::MethodNotFound
+            }
+        })?;
+
+    let symbol_tree = db.symbol_tree(resolution.method_id.module);
+    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in symbol_tree — \
+         symbol_tree / Resolver are out of sync",
+    );
+
+    let signature = materialise_signature(method_symbol);
+    Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
+}
+
 /// Resolve a 2-shape ObjectModule method call like
 /// `Об = Справочники.X.СоздатьЭлемент(); Об.МойМетод()` where `Об`
 /// carries [`Ty::MetadataRef { *Object, .. }`][MetadataRef].
@@ -405,5 +509,53 @@ mod tests {
         let resolution = MethodResolution::new(method_id, false, signature);
 
         assert!(!resolution.is_export);
+    }
+
+    #[test]
+    fn object_kind_to_mdo_accepts_only_object_variants() {
+        use bsl_metadata::MdoType;
+        use hir_def::ty::MetadataKind;
+        // Phase B strict-filter contract.
+        assert_eq!(object_kind_to_mdo(MetadataKind::CatalogObject), Some(MdoType::Catalog));
+        assert_eq!(object_kind_to_mdo(MetadataKind::DocumentObject), Some(MdoType::Document));
+        assert_eq!(
+            object_kind_to_mdo(MetadataKind::ExchangePlanObject),
+            Some(MdoType::ExchangePlan),
+        );
+        assert_eq!(
+            object_kind_to_mdo(MetadataKind::ChartOfAccountsObject),
+            Some(MdoType::ChartOfAccounts),
+        );
+        // `*Ref` rejected.
+        assert_eq!(object_kind_to_mdo(MetadataKind::CatalogRef), None);
+        assert_eq!(object_kind_to_mdo(MetadataKind::DocumentRef), None);
+        // Register-record kinds rejected (Phase C territory).
+        assert_eq!(object_kind_to_mdo(MetadataKind::InformationRegisterRecordManager), None);
+        assert_eq!(object_kind_to_mdo(MetadataKind::AccumulationRegisterRecordSet), None);
+    }
+
+    #[test]
+    fn record_set_kind_to_mdo_accepts_only_register_set_variants() {
+        use bsl_metadata::MdoType;
+        use hir_def::ty::MetadataKind;
+        // Phase C strict-filter contract: only record-set kinds reach
+        // `RecordSetModule.bsl` per 1С semantics.
+        assert_eq!(
+            record_set_kind_to_mdo(MetadataKind::AccumulationRegisterRecordSet),
+            Some(MdoType::AccumulationRegister),
+        );
+        // `InformationRegisterRecordManager` is a single-record
+        // handle, not a record-set receiver — 1С rejects calls to
+        // `RecordSetModule.bsl` exports through it.
+        assert_eq!(record_set_kind_to_mdo(MetadataKind::InformationRegisterRecordManager), None);
+        // `*Object` rejected (Phase B territory).
+        assert_eq!(record_set_kind_to_mdo(MetadataKind::CatalogObject), None);
+        assert_eq!(record_set_kind_to_mdo(MetadataKind::DocumentObject), None);
+        // `*Ref` rejected.
+        assert_eq!(record_set_kind_to_mdo(MetadataKind::CatalogRef), None);
+        assert_eq!(record_set_kind_to_mdo(MetadataKind::InformationRegisterRef), None);
+        assert_eq!(record_set_kind_to_mdo(MetadataKind::AccumulationRegisterRef), None);
+        assert_eq!(record_set_kind_to_mdo(MetadataKind::AccountingRegisterRef), None);
+        assert_eq!(record_set_kind_to_mdo(MetadataKind::CalculationRegisterRef), None);
     }
 }

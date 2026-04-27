@@ -960,6 +960,82 @@ impl<'db> InferenceContext<'db> {
                 }
             }
 
+            // Workspace-first lookup for register-set receivers
+            // (`Ty::MetadataRef { AccumulationRegisterRecordSet, .. }`).
+            // Phase C counterpart to the Phase B *Object branch:
+            // methods declared in
+            // `<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl` are
+            // reachable via a record-set receiver per 1С semantics.
+            //
+            // The strict filter inside `resolve_record_set_module_call`
+            // accepts ONLY `AccumulationRegisterRecordSet` —
+            // `InformationRegisterRecordManager` is deliberately
+            // excluded because that's a single-record handle, not a
+            // record-set, and 1С rejects calls to
+            // `RecordSetModule.bsl` exports through it. Other kinds
+            // (`*Object`, `*Ref`, register parts) also short-circuit
+            // to `MethodNotFound`, falling through to platform
+            // `lookup_method` (which is now wired for register-record
+            // composite typenames via `MetadataKind::platform_prefix`).
+            //
+            // Note: `ThisObject` cannot reach this branch because
+            // `coerce_to_metadata_ref` only produces `*Object` kinds —
+            // there is no `ThisObject → *RecordSet` coercion in BSL
+            // semantics today. So we match on `receiver_ty` directly
+            // here, not on `workspace_receiver_ty`.
+            if let Ty::MetadataRef { kind, name: mdo_name } = &receiver_ty {
+                let resolver = self.get_resolver();
+                match crate::method_resolution::resolve_record_set_module_call(
+                    self.db,
+                    *kind,
+                    mdo_name,
+                    &method_name,
+                    &resolver,
+                ) {
+                    Ok(resolution) => {
+                        let receiver_name =
+                            receiver_display_name(&receiver_ty).unwrap_or_else(|| mdo_name.clone());
+                        if !resolution.is_export {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::UnresolvedMethodCall {
+                                    expr: callee,
+                                    receiver_name: receiver_name.clone(),
+                                    method_name: method_name.clone(),
+                                    kind: UnresolvedMethodKind::MethodNotExport,
+                                },
+                            );
+                        }
+                        if args.len() != resolution.signature.params.len() {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::MismatchedArgCount {
+                                    call_expr: callee,
+                                    expected: resolution.signature.params.len(),
+                                    found: args.len(),
+                                },
+                            );
+                        }
+                        self.emit_arg_type_mismatches(args, &resolution.signature.params);
+                        self.expr_types.insert(callee, Ty::Unknown);
+                        return resolution.return_type;
+                    }
+                    Err(UnresolvedMethodKind::MethodNotFound) => {
+                        // Strict-filter reject (non-register-record
+                        // kinds) or workspace miss → fall through to
+                        // platform `lookup_method`.
+                    }
+                    Err(
+                        kind @ (UnresolvedMethodKind::MethodNotExport
+                        | UnresolvedMethodKind::CommonModuleNoSource
+                        | UnresolvedMethodKind::ReceiverNotResolved),
+                    ) => {
+                        unreachable!(
+                            "resolve_record_set_module_call returned unexpected kind: {:?}",
+                            kind
+                        )
+                    }
+                }
+            }
+
             // Workspace-first lookup for `Ty::ObjectManager`. Methods
             // declared in `<MDO>/Ext/ManagerModule.bsl` are invisible to
             // `lookup_method` (platform-only via
@@ -1443,15 +1519,24 @@ fn mdo_type_to_plural(mdo_type: bsl_metadata::MdoType) -> Option<&'static str> {
 /// display, covering object/ref/manager kinds whose owner family is
 /// uniquely determined.
 ///
-/// Register kinds (`InformationRegisterRecordManager`,
-/// `AccumulationRegisterRecordSet`, all `*RegisterRef`) deliberately
-/// return `None` until a `RecordSetModule.bsl` workspace resolver lands
-/// (Phase C). Their `lookup_method` is permanently `None`
-/// (`metadata_kind_to_prefix_and_mdo` doesn't know register kinds), so
-/// any plural we returned here would be paired with a forever-failing
-/// lookup and produce a `MethodNotFound` on every register method —
-/// false-positive on legitimate workspace `RecordSetModule.bsl`
-/// methods. Silence is the honest answer until that resolver exists.
+/// Register-record kinds
+/// (`InformationRegisterRecordManager`,
+/// `AccumulationRegisterRecordSet`) return their parent register
+/// plural — Phase C wired `MetadataKind::platform_prefix` for these
+/// kinds (and the workspace `RecordSetModule.bsl` resolver for the
+/// record-set kind only), so a `lookup_method` miss is authoritative:
+///
+/// - `InformationRegisterRecordManager` — platform path wired (1С's
+///   record-manager methods like `Записать`, `Прочитать`); no
+///   workspace path because `RecordSetModule.bsl` requires a
+///   record-set receiver, not a record-manager.
+/// - `AccumulationRegisterRecordSet` — both platform AND workspace
+///   `RecordSetModule.bsl` paths wired.
+///
+/// `*RegisterRef` value kinds remain `None` — those are XML-emitted
+/// reference forms whose call surface lives elsewhere (no platform
+/// or RecordSetModule.bsl analogue). Their workspace resolution
+/// would require dedicated MetadataKind variants and is out of scope.
 fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     use hir_def::ty::MetadataKind;
     let mdo = match kind {
@@ -1466,12 +1551,20 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             bsl_metadata::MdoType::ChartOfAccounts
         }
-        // Register kinds: deferred to Phase C (RecordSetModule.bsl
-        // resolver). Until then, no platform/workspace method surface →
-        // silent diagnostic, no false-positive on user methods.
-        MetadataKind::InformationRegisterRecordManager
-        | MetadataKind::InformationRegisterRef
-        | MetadataKind::AccumulationRegisterRecordSet
+        // Register-record kinds: Phase C wired the platform side
+        // (`platform_prefix` + `metadata_kind_to_prefix_and_mdo`) so
+        // misses are authoritative. The record-set kind also has a
+        // workspace `RecordSetModule.bsl` path; the record-manager
+        // kind does not (1С semantics — record-manager doesn't reach
+        // record-set module exports).
+        MetadataKind::InformationRegisterRecordManager => {
+            bsl_metadata::MdoType::InformationRegister
+        }
+        MetadataKind::AccumulationRegisterRecordSet => bsl_metadata::MdoType::AccumulationRegister,
+        // `*RegisterRef` value kinds: no module-level call surface
+        // (no `RecordSetModule.bsl` for the *Ref form), no platform
+        // surface. Silence is the honest answer.
+        MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef => return None,

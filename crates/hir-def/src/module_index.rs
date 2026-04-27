@@ -21,10 +21,11 @@ use crate::Name;
 /// - `CommonModules/<Name>/Ext/Module.bsl` → CommonModule
 /// - `<Folder>/<Name>/Ext/ManagerModule.bsl` → Manager module
 /// - `<Folder>/<Name>/Ext/ObjectModule.bsl` → Object module (Phase B)
+/// - `<Folder>/<Name>/Ext/RecordSetModule.bsl` → Record-set module (Phase C)
 ///
-/// Other module flavours (`RecordSetModule.bsl`, `FormModule.bsl`,
-/// `CommandModule.bsl`) are deliberately not indexed — they have no
-/// type-system call surface today.
+/// Other module flavours (`FormModule.bsl`, `CommandModule.bsl`) are
+/// deliberately not indexed — they have no type-system call surface
+/// today.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleIndex {
     /// CommonModules: lowercase name → FileId
@@ -44,6 +45,18 @@ pub struct ModuleIndex {
     /// tasks today), but the index itself is permissive — the strict
     /// filter at lookup time gates which kinds are eligible.
     object_modules: FxHashMap<(MdoType, String), FileId>,
+
+    /// Record-set modules: (MdoType, lowercase register name) → FileId
+    /// (`<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl`).
+    ///
+    /// Phase C: workspace call surface for register-set receivers.
+    /// The strict filter at lookup time (`record_set_kind_to_mdo` in
+    /// `hir-ty/method_resolution.rs`) gates which `MetadataKind`
+    /// variants actually consult this map — today only
+    /// `AccumulationRegisterRecordSet`. The index itself is permissive
+    /// (any register MDO whose path emits a `RecordSetModule.bsl`
+    /// file is recorded), mirroring the `object_modules` contract.
+    record_set_modules: FxHashMap<(MdoType, String), FileId>,
 }
 
 impl ModuleIndex {
@@ -83,6 +96,11 @@ impl ModuleIndex {
                         index.object_modules.insert((mdo_type, lower), file_id);
                     }
                 }
+                ModuleFileKind::RecordSet => {
+                    if let Some(mdo_type) = module_type.to_mdo_type() {
+                        index.record_set_modules.insert((mdo_type, lower), file_id);
+                    }
+                }
             }
         }
 
@@ -118,6 +136,14 @@ impl ModuleIndex {
         self.object_modules.get(&(mdo_type, name.as_str().to_lowercase())).copied()
     }
 
+    /// Resolve a record-set module
+    /// (`<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl`) by register
+    /// MDO type and name. Phase C counterpart to
+    /// [`Self::resolve_object_module`] for register receivers.
+    pub fn resolve_record_set_module(&self, mdo_type: MdoType, name: &Name) -> Option<FileId> {
+        self.record_set_modules.get(&(mdo_type, name.as_str().to_lowercase())).copied()
+    }
+
     /// Get number of indexed CommonModules.
     pub fn common_module_count(&self) -> usize {
         self.common_modules.len()
@@ -131,6 +157,11 @@ impl ModuleIndex {
     /// Get number of indexed object modules.
     pub fn object_module_count(&self) -> usize {
         self.object_modules.len()
+    }
+
+    /// Get number of indexed record-set modules.
+    pub fn record_set_module_count(&self) -> usize {
+        self.record_set_modules.len()
     }
 
     /// Iterate over all CommonModule names.
@@ -220,9 +251,10 @@ impl ModulePathType {
 ///
 /// Drives the dispatch in [`ModuleIndex::build_from_paths`]:
 /// `Common` files go to `common_modules`, `Manager` files go to
-/// `managers`, `Object` files go to `object_modules`. Other module
-/// flavours (`RecordSetModule.bsl`, `FormModule.bsl`,
-/// `CommandModule.bsl`) are filtered out at the parse step.
+/// `managers`, `Object` files go to `object_modules`, `RecordSet`
+/// files go to `record_set_modules`. Other module flavours
+/// (`FormModule.bsl`, `CommandModule.bsl`) are filtered out at the
+/// parse step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModuleFileKind {
     /// `CommonModules/<Name>/Ext/Module.bsl`
@@ -231,6 +263,8 @@ enum ModuleFileKind {
     Manager,
     /// `<Folder>/<Name>/Ext/ObjectModule.bsl` (Phase B)
     Object,
+    /// `<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl` (Phase C)
+    RecordSet,
 }
 
 /// Parse module path to extract type, name, and file flavour.
@@ -239,11 +273,10 @@ enum ModuleFileKind {
 /// - `CommonModules/<Name>/Ext/Module.bsl` → ([`CommonModule`], `Common`)
 /// - `<Folder>/<Name>/Ext/ManagerModule.bsl` → (folder MDO, `Manager`)
 /// - `<Folder>/<Name>/Ext/ObjectModule.bsl` → (folder MDO, `Object`)
+/// - `<RegisterFolder>/<Name>/Ext/RecordSetModule.bsl` → (folder MDO, `RecordSet`)
 ///
-/// Other module flavours (`RecordSetModule.bsl`, `FormModule.bsl`,
-/// `CommandModule.bsl`) return `None` — they have no type-system call
-/// surface today. `RecordSetModule.bsl` indexing is deferred to
-/// Phase C.
+/// Other module flavours (`FormModule.bsl`, `CommandModule.bsl`)
+/// return `None` — they have no type-system call surface today.
 ///
 /// [`CommonModule`]: ModulePathType::CommonModule
 fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKind)> {
@@ -306,6 +339,7 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
                     if path_lower.ends_with("module.bsl")
                         && !path_lower.ends_with("managermodule.bsl")
                         && !path_lower.ends_with("objectmodule.bsl")
+                        && !path_lower.ends_with("recordsetmodule.bsl")
                     {
                         return Some((mod_type, name, ModuleFileKind::Common));
                     }
@@ -313,9 +347,11 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
                     return Some((mod_type, name, ModuleFileKind::Manager));
                 } else if path_lower.ends_with("objectmodule.bsl") {
                     return Some((mod_type, name, ModuleFileKind::Object));
+                } else if path_lower.ends_with("recordsetmodule.bsl") {
+                    return Some((mod_type, name, ModuleFileKind::RecordSet));
                 }
-                // RecordSetModule.bsl / FormModule.bsl / CommandModule.bsl
-                // intentionally fall through.
+                // FormModule.bsl / CommandModule.bsl intentionally
+                // fall through — no type-system call surface today.
             }
         }
     }
@@ -390,9 +426,16 @@ mod tests {
             )),
         );
 
-        // RecordSetModule.bsl is NOT indexed (Phase C scope).
+        // RecordSetModule.bsl is now indexed too (Phase C).
         let recordset_path = "InformationRegisters/Test/Ext/RecordSetModule.bsl";
-        assert_eq!(parse_module_path(recordset_path), None);
+        assert_eq!(
+            parse_module_path(recordset_path),
+            Some((
+                ModulePathType::InformationRegister,
+                "Test".to_string(),
+                ModuleFileKind::RecordSet,
+            )),
+        );
     }
 
     #[test]
@@ -443,18 +486,75 @@ mod tests {
     }
 
     #[test]
-    fn test_record_set_module_remains_unindexed() {
-        // Phase C scope. Until the RecordSetModule.bsl resolver lands,
-        // these paths must be ignored by the index — pinning this
-        // prevents an accidental "we index everything" drift that
-        // would make register typos silently succeed against an
-        // unrelated module file.
-        let file_id = FileId::from_raw(77);
+    fn test_parse_record_set_module_path() {
+        // Phase C: register-flavour `RecordSetModule.bsl` paths are
+        // now indexed. Pins both the path-type extraction and the
+        // file-kind discrimination.
+        let info = "InformationRegisters/РегистрСведений1/Ext/RecordSetModule.bsl";
+        assert_eq!(
+            parse_module_path(info),
+            Some((
+                ModulePathType::InformationRegister,
+                "РегистрСведений1".to_string(),
+                ModuleFileKind::RecordSet,
+            )),
+        );
+        let acc = "AccumulationRegisters/РегистрНакопления1/Ext/RecordSetModule.bsl";
+        assert_eq!(
+            parse_module_path(acc),
+            Some((
+                ModulePathType::AccumulationRegister,
+                "РегистрНакопления1".to_string(),
+                ModuleFileKind::RecordSet,
+            )),
+        );
+    }
+
+    #[test]
+    fn test_resolve_record_set_module_returns_file_id() {
+        let file_id = FileId::from_raw(101);
         let path = "InformationRegisters/РегистрСведений1/Ext/RecordSetModule.bsl";
         let index = ModuleIndex::build_from_paths([(file_id, path)].into_iter());
+        assert_eq!(index.record_set_module_count(), 1);
+        // Manager / object indexes must NOT pick this up — pins the
+        // file-kind dispatch.
+        assert_eq!(index.manager_count(), 0);
+        assert_eq!(index.object_module_count(), 0);
+        assert_eq!(
+            index.resolve_record_set_module(
+                MdoType::InformationRegister,
+                &Name::new("РегистрСведений1")
+            ),
+            Some(file_id),
+        );
+        // Wrong register flavour misses (strict keying).
+        assert_eq!(
+            index.resolve_record_set_module(
+                MdoType::AccumulationRegister,
+                &Name::new("РегистрСведений1")
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_form_module_remains_unindexed() {
+        // FormModule.bsl / CommandModule.bsl have no type-system call
+        // surface today — pin the negative case so a future
+        // "index everything" drift is caught.
+        let form = FileId::from_raw(77);
+        let cmd = FileId::from_raw(78);
+        let index = ModuleIndex::build_from_paths(
+            [
+                (form, "Documents/Документ1/Forms/ФормаДокумента/Ext/FormModule.bsl"),
+                (cmd, "Catalogs/Справочник1/Commands/КомандаКаталога/Ext/CommandModule.bsl"),
+            ]
+            .into_iter(),
+        );
         assert_eq!(index.object_module_count(), 0);
         assert_eq!(index.manager_count(), 0);
         assert_eq!(index.common_module_count(), 0);
+        assert_eq!(index.record_set_module_count(), 0);
     }
 
     #[test]

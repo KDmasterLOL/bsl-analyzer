@@ -633,16 +633,19 @@ fn aliased_register_manager_workspace_method_resolves() {
 }
 
 #[test]
-fn register_recordset_unknown_method_stays_silent() {
-    // Phase 0 hotfix: register `MetadataRef` receivers (e.g.
-    // `InformationRegisterRecordManager`) have NO platform call surface
-    // in `lookup_method` — `metadata_kind_to_prefix_and_mdo` doesn't
-    // know register kinds, so the platform layer always returns `None`.
-    // Until `RecordSetModule.bsl` workspace resolution lands (Phase C),
-    // any plural we paired with such a kind would be a forever-failing
-    // lookup → false-positive `MethodNotFound` on every legitimate
-    // workspace register method. So `mdo_kind_to_plural` returns
-    // `None` for register kinds and the diagnostic stays silent.
+fn register_recordset_typo_emits_method_not_found() {
+    // Phase C: register-record `MetadataRef` receivers
+    // (`InformationRegisterRecordManager`,
+    // `AccumulationRegisterRecordSet`) now go through the workspace
+    // `RecordSetModule.bsl` resolver before the platform layer. Both
+    // miss `НесуществующийМетод` (no inline RecordSetModule.bsl, no
+    // platform table) → authoritative `MethodNotFound`.
+    //
+    // `СоздатьМенеджерЗаписи` rebinds its return type to
+    // `Ty::MetadataRef { InformationRegisterRecordManager, .. }` via
+    // the Phase C extension to `map_generic_metadata_return_type`,
+    // so the chained call enters the same workspace+platform path as
+    // catalog `Об`/`Спр` receivers.
     let fixture = r#"
 //- /test.bsl
 Процедура Тест()
@@ -651,20 +654,75 @@ fn register_recordset_unknown_method_stays_silent() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup(fixture);
+    let entries: Vec<_> = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall {
+                receiver_name, method_name, kind, ..
+            } if method_name.as_str().eq_ignore_ascii_case("НесуществующийМетод") => {
+                Some((receiver_name.as_str().to_string(), *kind))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        vec![(
+            "РегистрыСведений.РегистрСведений1".to_string(),
+            UnresolvedMethodKind::MethodNotFound
+        )],
+        "register record-manager miss is now authoritative (workspace + platform exhausted); \
+         got {entries:?}",
+    );
     assert!(
         unresolved_field_names(&db, file_id).is_empty(),
         "register recordmanager method-call must not emit UnresolvedField, got {:?}",
         unresolved_field_names(&db, file_id),
     );
+}
+
+#[test]
+fn record_manager_platform_method_resolves() {
+    // Phase C interaction: now that
+    // `map_generic_metadata_return_type` rebinds
+    // `СоздатьМенеджерЗаписи` to
+    // `Ty::MetadataRef { InformationRegisterRecordManager, .. }`,
+    // platform methods declared in the
+    // `InformationRegisterRecordManager.<Имя>` composite typename
+    // (`Записать`, `Прочитать`, `Удалить`, …) MUST stay resolvable —
+    // restoring `mdo_kind_to_plural` in Phase C without also wiring
+    // `platform_prefix()` for register-record kinds would
+    // false-positive every legitimate platform call. Pinned
+    // explicitly because the platform-side wiring is what makes
+    // Phase C's authoritative diagnostic safe.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    МЗ = РегистрыСведений.РегистрСведений1.СоздатьМенеджерЗаписи();
+    МЗ.Записать();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
     assert!(
-        !unresolved_method_names(&db, file_id)
-            .iter()
-            .any(|n| n.eq_ignore_ascii_case("НесуществующийМетод")),
-        "register `MetadataRef` lookup is platform-only and unwired (None) — diagnostic must \
-         stay silent until Phase C wires up workspace `RecordSetModule.bsl`; got {:?}",
+        !unresolved_method_names(&db, file_id).iter().any(|n| n.eq_ignore_ascii_case("Записать")),
+        "platform Записать on InformationRegisterRecordManager must resolve through platform \
+         layer; got {:?}",
         unresolved_method_names(&db, file_id),
     );
 }
+
+// Note: end-to-end workspace-`RecordSetModule.bsl` tests intentionally
+// omitted. Per 1С semantics those exports are reachable only through a
+// record-*set* receiver, but `СоздатьМенеджерЗаписи()` returns a
+// record-*manager*, and there is no `СоздатьНаборЗаписей()` rebinding
+// for InformationRegister today (that would need an
+// `InformationRegisterRecordSet` `MetadataKind` variant — out of
+// Phase C scope). The unit-level `record_set_kind_to_mdo_accepts_only_*`
+// test in `crates/hir-ty/src/method_resolution.rs` pins the strict
+// filter contract; once the missing variant lands the IDE test can be
+// added without changing the Phase C wiring.
 
 #[test]
 fn metadata_ref_object_module_workspace_method_resolves() {
