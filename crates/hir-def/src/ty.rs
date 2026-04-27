@@ -589,13 +589,23 @@ pub struct FunctionSignature {
 
     /// Return type (`Undefined` for procedures).
     pub ret: Box<Ty>,
+
+    /// `true` if the function accepts an unbounded tail of trailing arguments
+    /// of the type given by the last `params` entry.
+    ///
+    /// BSL has no syntactic `...` — variadic-ness is conveyed in platform
+    /// help books by parameter names like `Значение1-Значение10` (СтрШаблон)
+    /// or by free-form documentation. The arity check uses this flag to
+    /// suppress the upper-bound `args.len() > params.len()` rule; the lower
+    /// bound (`args.len() >= required_count()`) still applies.
+    pub is_variadic: bool,
 }
 
 impl FunctionSignature {
     /// Create a new function signature with all parameters required.
     pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
         let defaults = vec![false; params.len()].into_boxed_slice();
-        Self { params: params.into_boxed_slice(), defaults, ret: Box::new(ret) }
+        Self { params: params.into_boxed_slice(), defaults, ret: Box::new(ret), is_variadic: false }
     }
 
     /// Create a new function signature with explicit per-parameter defaults.
@@ -611,6 +621,7 @@ impl FunctionSignature {
             params: params.into_boxed_slice(),
             defaults: defaults.into_boxed_slice(),
             ret: Box::new(ret),
+            is_variadic: false,
         }
     }
 
@@ -622,6 +633,13 @@ impl FunctionSignature {
     /// Create a function signature with known return type. All params required.
     pub fn function(params: Vec<Ty>, ret: Ty) -> Self {
         Self::new(params, ret)
+    }
+
+    /// Mark this signature as variadic (last parameter accepts an unbounded
+    /// tail of trailing arguments).
+    pub fn with_variadic(mut self, is_variadic: bool) -> Self {
+        self.is_variadic = is_variadic;
+        self
     }
 
     /// Number of arguments that the caller MUST supply.
