@@ -1568,16 +1568,22 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef => return None,
-        // Register-part / tabular-section kinds carry a parent payload but
-        // no manager-style call surface. Returning `None` keeps the
-        // diagnostic silent on these — consistent with `lookup_method`'s
-        // behaviour (it returns `None` for these kinds), so we never
+        // Tabular-section kinds: `lookup_method` resolves their methods
+        // through `PlatformData["Tabular section"]` and field_lookup
+        // resolves their row properties through
+        // `PlatformData["Line of a tabular section"]`, so a miss is
+        // authoritative — surface it as `<Plural>.<MdoName>.<Section>`
+        // (the section name is already encoded in `MetadataRef::name`).
+        MetadataKind::TabularSection { parent } | MetadataKind::TabularSectionRow { parent } => {
+            parent
+        }
+        // Register-part kinds carry a parent payload but no manager-style
+        // call surface. Returning `None` keeps the diagnostic silent on
+        // these — `lookup_method` itself returns `None`, so we never
         // construct a misleading `Регистры…/<Раздел>` receiver name.
         MetadataKind::RegisterDimension { .. }
         | MetadataKind::RegisterResource { .. }
-        | MetadataKind::RegisterAttribute { .. }
-        | MetadataKind::TabularSection { .. }
-        | MetadataKind::TabularSectionRow { .. } => return None,
+        | MetadataKind::RegisterAttribute { .. } => return None,
     };
     mdo_type_to_plural(mdo)
 }

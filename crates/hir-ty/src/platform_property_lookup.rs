@@ -77,8 +77,20 @@ pub fn lookup_platform_property(
     prop_name: &Name,
 ) -> Option<PlatformPropertyResolution> {
     let type_key = platform_type_key(receiver_ty)?;
+    lookup_platform_property_by_type(type_key, prop_name)
+}
+
+/// Same as [`lookup_platform_property`] but keyed directly by an English
+/// platform `type_name`. Used by callers whose receiver type does not map
+/// to a `platform_type_key` (e.g. `Ty::MetadataRef { TabularSectionRow, .. }`
+/// borrowing the standard row properties from
+/// `"Line of a tabular section"`).
+pub(crate) fn lookup_platform_property_by_type(
+    type_name: &str,
+    prop_name: &Name,
+) -> Option<PlatformPropertyResolution> {
     let data = PlatformData::instance();
-    let prop = data.get_property(type_key, prop_name.as_str())?;
+    let prop = data.get_property(type_name, prop_name.as_str())?;
     Some(to_resolution(prop))
 }
 

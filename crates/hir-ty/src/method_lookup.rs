@@ -42,8 +42,9 @@
 //! `method_resolution::resolve_three_level_call` → `Resolver`. This module
 //! is the platform-side complement for `Expr::MethodCall { receiver, ... }`.
 
+use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
-use hir_def::ty::Ty;
+use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 
 /// Result of a successful method lookup.
@@ -130,6 +131,19 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
             return None;
         }
         Ty::MetadataRef { kind, name } => {
+            // TabularSection has a flat `type_name = "Tabular section"` in
+            // platform_data — no `"Prefix.<MDO>"` shape — so it cannot be
+            // served by `platform_manager_lookup::find_prefixed_method`
+            // (which requires a dot-separated prefix). Route directly to
+            // the bilingual scalar index and rebind the generic
+            // `"Строка табличной части"` return to a row receiver so the
+            // chain `ТЧ.Добавить().Атрибут` continues resolving via
+            // `field_lookup::lookup_on_tabular_row`.
+            if let MetadataKind::TabularSection { parent } = *kind {
+                let method =
+                    PlatformData::instance().get_method("Tabular section", method_name.as_str())?;
+                return Some(build_tabular_section_method_info(method, parent, name));
+            }
             if let Some(res) = crate::platform_manager_lookup::resolve_platform_metadata_ref_method(
                 *kind,
                 name,
@@ -141,8 +155,10 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
                 });
             }
             // MetadataRef flavours without a platform surface (register
-            // dimensions, tabular sections) fall through `None` — same
-            // behaviour as before the adapter existed.
+            // dimensions, the bare `TabularSectionRow` row receiver) fall
+            // through `None`. Row methods do not exist in HBK data —
+            // `Удалить(Индекс)` and friends are methods on the section,
+            // not on rows.
             return None;
         }
         _ => {}
@@ -240,6 +256,73 @@ fn to_method_info(method: &PlatformMethod) -> MethodInfo {
         .collect();
 
     MethodInfo { return_ty, params }
+}
+
+/// Build a `MethodInfo` from a `PlatformData["Tabular section"]` entry,
+/// rebinding the generic `"Строка табличной части"` (or its English alias
+/// `"Line of a tabular section"`) **in the return type** to the concrete
+/// `Ty::MetadataRef { TabularSectionRow { parent }, section_name.clone() }`
+/// so chained calls (`ТЧ.Добавить().Реквизит` etc.) keep resolving.
+///
+/// `Ty::Union` walks recursively so the `Найти` return
+/// `"Строка табличной части, Неопределено"` becomes
+/// `Ty::Union([MetadataRef { TabularSectionRow { parent }, section_name }, Undefined])`.
+/// Other types (`Ty::Number`, `Ty::Array`, `Ty::ValueTable`,
+/// `Ty::Undefined`) pass through untouched.
+///
+/// **Parameters are deliberately *not* rebound.** Mirrors the
+/// `to_method_info` baseline (`Ty::from_type_name`) so unrecognised
+/// platform names like `"Произвольный"` (Найти's first arg, "any
+/// value") and `"Строка табличной части"` (Индекс's arg) lower to
+/// `Ty::Unknown`. Rebinding params would narrow them to
+/// `Ty::MetadataRef { TabularSectionRow { parent }, "<this section>" }`
+/// — and [`crate::subtype::is_assignable`] uses structural equality on
+/// `MetadataRef`, so any legitimate cross-section transfer
+/// (`ТЧ1.Индекс(ТЧ2.Получить(0))`) or possibly-Undefined `Ty::Union`
+/// argument (`ТЧ.Индекс(ТЧ.Найти(...))`) would be falsely rejected. The
+/// gradual-typing rule (`Unknown ≤ A`) keeps these calls quiet.
+fn build_tabular_section_method_info(
+    method: &PlatformMethod,
+    parent: MdoType,
+    section_name: &Name,
+) -> MethodInfo {
+    let return_ty = method
+        .return_type
+        .as_ref()
+        .map(|ret| rewrite_row_generic(resolve_platform_type_union(ret), parent, section_name))
+        .unwrap_or(Ty::Undefined);
+
+    let params: Vec<Ty> = method
+        .parameters
+        .iter()
+        .map(|p| {
+            p.param_type.as_ref().map(|t| Ty::from_type_name(t.as_str())).unwrap_or(Ty::Unknown)
+        })
+        .collect();
+
+    MethodInfo { return_ty, params }
+}
+
+fn rewrite_row_generic(ty: Ty, parent: MdoType, section_name: &Name) -> Ty {
+    match ty {
+        Ty::PlatformObject(ref n) if is_tabular_row_type_name(n.as_str()) => Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent },
+            name: section_name.clone(),
+        },
+        Ty::Union(members) => Ty::union(
+            members.iter().map(|m| rewrite_row_generic(m.clone(), parent, section_name)).collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Match the platform return / param string for a TS row, accepting both
+/// canonical Russian and English spellings. Uses lowercase comparison so
+/// future scraper-emitted casing variants (`строка табличной части`)
+/// also match — `eq_ignore_ascii_case` would not fold Cyrillic.
+fn is_tabular_row_type_name(name: &str) -> bool {
+    let lc = name.to_lowercase();
+    lc == "строка табличной части" || lc == "line of a tabular section"
 }
 
 /// Split a comma-joined platform type string into a `Ty::union(...)`.
@@ -487,5 +570,188 @@ mod tests {
         let info = lookup_method(&r, &Name::new("Записать"))
             .expect("MetadataRef CatalogObject.Записать must resolve");
         assert_eq!(info.return_ty, Ty::Undefined);
+    }
+
+    fn ts_receiver(parent: MdoType, name: &str) -> Ty {
+        Ty::MetadataRef { kind: MetadataKind::TabularSection { parent }, name: Name::new(name) }
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_add_returns_row_metadata_ref() {
+        // `Добавить()` rebinds the generic `Строка табличной части`
+        // return to a `TabularSectionRow` receiver pinned to the
+        // section's parent MDO and qualified name.
+        let r = ts_receiver(MdoType::Catalog, "Номенклатура.Услуги");
+        let info = lookup_method(&r, &Name::new("Добавить")).expect(
+            "TabularSection.Добавить must resolve through PlatformData[\"Tabular section\"]",
+        );
+        assert_eq!(
+            info.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+                name: Name::new("Номенклатура.Услуги"),
+            }
+        );
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_count_returns_number() {
+        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        let info = lookup_method(&r, &Name::new("Количество"))
+            .expect("TabularSection.Количество must resolve");
+        assert_eq!(info.return_ty, Ty::Number);
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_unload_returns_value_table() {
+        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        let info = lookup_method(&r, &Name::new("Выгрузить"))
+            .expect("TabularSection.Выгрузить must resolve");
+        assert_eq!(info.return_ty, Ty::ValueTable);
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_find_returns_union_with_row() {
+        // Платформенный return `"Строка табличной части, Неопределено"`
+        // → `Ty::Union([TabularSectionRow, Undefined])`. Pin the
+        // member ordering / membership rather than equality so
+        // future Ty::union flattening tweaks don't break the test.
+        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        let info =
+            lookup_method(&r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
+        let members = match info.return_ty {
+            Ty::Union(ref m) => m.clone(),
+            other => panic!("expected Ty::Union, got {other:?}"),
+        };
+        assert!(
+            members.iter().any(|m| matches!(
+                m,
+                Ty::MetadataRef {
+                    kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+                    name,
+                } if name.as_str() == "X.Y"
+            )),
+            "Найти union must include TabularSectionRow {{ parent: Catalog, name: \"X.Y\" }}, got {members:?}",
+        );
+        assert!(
+            members.iter().any(|m| matches!(m, Ty::Undefined)),
+            "Найти union must include Ty::Undefined, got {members:?}",
+        );
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_findrows_returns_array() {
+        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        let info = lookup_method(&r, &Name::new("НайтиСтроки"))
+            .expect("TabularSection.НайтиСтроки must resolve");
+        assert_eq!(info.return_ty, Ty::Array);
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_english_name_resolves() {
+        // The bilingual platform index keys `Tabular section` ↔
+        // `Табличная часть` and the method `Добавить` ↔ `Add`. Asking
+        // by the English method name on the Russian-conventional
+        // English type key still resolves through the same row rebind.
+        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        let info = lookup_method(&r, &Name::new("Add"))
+            .expect("TabularSection.Add must resolve via bilingual platform index");
+        assert!(matches!(
+            info.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+                ..
+            },
+        ));
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_unknown_method_returns_none() {
+        // A miss must return `None` so `UnresolvedMethodCall` can
+        // surface — ТЧ no longer silently swallows typos.
+        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        assert!(lookup_method(&r, &Name::new("НетТакогоМетодаНаТЧ")).is_none());
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_parent_propagates_document() {
+        let r = ts_receiver(MdoType::Document, "ПКО.Товары");
+        let info = lookup_method(&r, &Name::new("Добавить"))
+            .expect("Document TabularSection.Добавить must resolve");
+        assert_eq!(
+            info.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
+                name: Name::new("ПКО.Товары"),
+            }
+        );
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_parent_propagates_exchange_plan() {
+        let r = ts_receiver(MdoType::ExchangePlan, "ПО.Состав");
+        let info = lookup_method(&r, &Name::new("Добавить"))
+            .expect("ExchangePlan TabularSection.Добавить must resolve");
+        assert_eq!(
+            info.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::TabularSectionRow { parent: MdoType::ExchangePlan },
+                name: Name::new("ПО.Состав"),
+            }
+        );
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_find_params_preserve_arbitrary_as_unknown() {
+        // `Найти(Произвольный, Строка)`: the first parameter is
+        // declared `"Произвольный"` (BSL's "any value" placeholder).
+        // It must stay `Ty::Unknown` so subtype checks accept any
+        // argument — narrowing it to `Ty::PlatformObject("Произвольный")`
+        // would reject every real call site.
+        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        let info =
+            lookup_method(&r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
+        assert_eq!(
+            info.params,
+            vec![Ty::Unknown, Ty::String],
+            "Произвольный must stay Ty::Unknown; only the row generic is rebound",
+        );
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_index_param_stays_unknown() {
+        // `Индекс(СтрокаТЧ: Строка табличной части)` — parameter
+        // intentionally lowers to `Ty::Unknown` (mirrors how every
+        // other unrecognised platform-name param behaves through
+        // `Ty::from_type_name`). Rebinding the row generic here
+        // would narrow it to a section-specific row receiver, but
+        // `is_assignable` uses structural equality on `MetadataRef`,
+        // so legitimate cross-section transfers
+        // (`ТЧ1.Индекс(ТЧ2.Получить(0))`) and possibly-Undefined
+        // `Ty::Union` results (`ТЧ.Индекс(ТЧ.Найти(…))`) would be
+        // falsely rejected. Gradual typing (`Unknown ≤ A`) keeps the
+        // diagnostic quiet.
+        let r = ts_receiver(MdoType::Catalog, "X.Y");
+        let info =
+            lookup_method(&r, &Name::new("Индекс")).expect("TabularSection.Индекс must resolve");
+        assert_eq!(
+            info.params,
+            vec![Ty::Unknown],
+            "Индекс param must stay Ty::Unknown — rebinding would false-reject valid args",
+        );
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_parent_propagates_chart_of_accounts() {
+        let r = ts_receiver(MdoType::ChartOfAccounts, "Основной.ВидыСубконто");
+        let info = lookup_method(&r, &Name::new("Добавить"))
+            .expect("ChartOfAccounts TabularSection.Добавить must resolve");
+        assert_eq!(
+            info.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::TabularSectionRow { parent: MdoType::ChartOfAccounts },
+                name: Name::new("Основной.ВидыСубконто"),
+            }
+        );
     }
 }

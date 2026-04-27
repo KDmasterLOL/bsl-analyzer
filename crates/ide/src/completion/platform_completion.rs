@@ -149,6 +149,18 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     db: &DB,
     receiver_ty: &Ty,
 ) -> Option<Vec<CompletionItem>> {
+    // TabularSection / TabularSectionRow are stored under flat platform
+    // type names (`"Tabular section"` / `"Line of a tabular section"`),
+    // not under the dot-prefixed `"CatalogManager.<MDO>"` shape that
+    // `manager_methods_query` walks. Route them to the scalar
+    // methods + properties path so the editor shows `Добавить`,
+    // `НайтиСтроки`, … on a section receiver and `НомерСтроки` on a row.
+    if let Ty::MetadataRef { kind, .. } = receiver_ty {
+        if let Some(scalar_key) = tabular_section_scalar_key(*kind) {
+            tracing::debug!(scalar_key, "Tabular section scalar completion");
+            return Some(complete_platform_methods(db, scalar_key));
+        }
+    }
     let prefix = match receiver_ty {
         Ty::ObjectManager { kind, .. } => kind.manager_type_prefix()?,
         Ty::MetadataRef { kind, .. } => kind.platform_prefix()?,
@@ -158,6 +170,17 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     let input = TypeNameInput::new(db, prefix.to_string());
     let methods = manager_methods_query(db, input);
     Some(methods.iter().map(render_manager_method).collect())
+}
+
+/// Pick the flat platform `type_name` for a TabularSection / row receiver.
+/// Returns `None` for every other `MetadataKind` so the prefix path keeps
+/// handling the dot-shaped receivers unchanged.
+fn tabular_section_scalar_key(kind: hir::MetadataKind) -> Option<&'static str> {
+    match kind {
+        hir::MetadataKind::TabularSection { .. } => Some("Tabular section"),
+        hir::MetadataKind::TabularSectionRow { .. } => Some("Line of a tabular section"),
+        _ => None,
+    }
 }
 
 /// Decide whether we are in `X.| ` / `X.Yyy|` position and, if so, return
