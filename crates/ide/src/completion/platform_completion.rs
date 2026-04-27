@@ -100,12 +100,25 @@ pub(super) fn platform_completions<DB: RootDatabase>(
             //
             // Both behaviours hide that the user's CommonModule is the
             // authoritative receiver here. Bail out instead.
-            let user_module_shadows = {
+            let name_node = Name::new(&name);
+            let workspace_module_shadows = {
                 let source_root_input = db.file_source_root_input(position.file_id);
                 let source_root_id = source_root_input.source_root_id(db);
-                db.module_index(source_root_id).resolve_common_module(&Name::new(&name)).is_some()
+                db.module_index(source_root_id).resolve_common_module(&name_node).is_some()
             };
-            if user_module_shadows {
+            // Same-file shadow: a module-level `Процедура ОбработкаОшибок()`
+            // in the current file isn't in the cross-module `module_index`
+            // but is still authoritative for `ОбработкаОшибок.|` here.
+            // `infer_path_name` already returns `Ty::Unknown` for this case
+            // (so `Semantics::type_of_expr` doesn't classify the receiver),
+            // which is why we land in this fallback at all — without an
+            // explicit symbol-tree probe we'd unmask the platform global.
+            let same_file_shadows = {
+                let module_id = hir::ModuleId::new(position.file_id);
+                let tree = db.symbol_tree(module_id);
+                tree.find_method(&name_node).is_some() || tree.find_variable(&name_node).is_some()
+            };
+            if workspace_module_shadows || same_file_shadows {
                 return None;
             }
 
