@@ -1072,9 +1072,18 @@ fn maybe_lower_as_qualified_call(
             };
 
             if is_this_object {
-                // ThisObject.Method() is semantically a local call:
-                // resolve the method against the current module, not a CommonModule.
-                // RedundantAccessToObject::ThisObject is already emitted in lower_field_expr.
+                // ThisObject.Method() is NOT promoted to a QualifiedPath
+                // (which is the CommonModule lookup shape). Per 1С
+                // semantics, `ЭтотОбъект` is an external object
+                // reference: chained `.Method()` on it is the same
+                // surface as `Об.Method()` on a *Object MetadataRef
+                // and only sees `Экспорт` methods. Phase B routes the
+                // resulting `Expr::Field`-callee call through
+                // `infer_call`, which coerces `Ty::ThisObject` to its
+                // matching `*Object` `Ty::MetadataRef` and consults
+                // the workspace `ObjectModule.bsl` resolver.
+                // RedundantAccessToObject::ThisObject is already emitted
+                // in lower_field_expr.
                 ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
                     callee: field_name.as_str().to_string(),
                     module: None,
