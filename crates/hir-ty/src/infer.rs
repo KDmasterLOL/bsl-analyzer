@@ -752,6 +752,13 @@ impl<'db> InferenceContext<'db> {
         //    (hover / completion) observe the collective type and can
         //    eventually chain `.Name` into `Ty::ObjectManager` once HIR
         //    lifts standalone 2-segment paths into `Expr::QualifiedPath`.
+        //    Note: `Справочники`, `Документы`, `Перечисления`, `РегистрыСведений`
+        //    and other MDO plurals also appear in HBK as global-context
+        //    properties (typed as `СправочникиМенеджер` etc.), so this step
+        //    intentionally runs BEFORE the platform-global cascade below —
+        //    otherwise three-level chains like `Справочники.Контрагенты.X`
+        //    would lose their `Ty::ManagerCollection` shape and the existing
+        //    `resolve_three_level_call` machinery would no longer see them.
         if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(name.as_str()) {
             if let Some(ty) = Ty::manager_collection(mdo_type) {
                 trace!("resolved {} as manager collection {:?}", name, mdo_type);
@@ -759,7 +766,43 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        // 4. Module-level methods / variables (Unknown today; Task 2.x
+        // 4. Platform global-context properties — top-level identifiers
+        //    declared on `Global context` in HBK whose declared type is the
+        //    foreign key into the platform type/method catalogue
+        //    (`ОбработкаОшибок: МенеджерОбработкиОшибок`,
+        //    `БиблиотекаКартинок: БиблиотекаКартинокМенеджер`,
+        //    `Метаданные: КонфигурацияМетаданныеОбъект`, …). Inferring the
+        //    bare identifier to its declared type plugs straight into the
+        //    existing dot-call lookup (`platform_property_lookup`,
+        //    `method_lookup`) — no new infrastructure needed.
+        //
+        //    Order matters: this comes AFTER the MDO plural step so names
+        //    that are both global properties and MDO plurals (`Справочники`,
+        //    `Документы`, `Перечисления`, `РегистрыСведений`, …) keep their
+        //    `Ty::ManagerCollection` shape and feed the existing
+        //    `resolve_three_level_call` machinery for `Справочники.X.Method()`
+        //    chains. Only non-MDO globals (`ОбработкаОшибок`,
+        //    `БиблиотекаКартинок`, `WSСсылки`, …) reach this step.
+        // Narrowing: skip the platform fallback when the resolver already
+        // sees the name as a module-level method or variable. The user has
+        // shadowed the platform global (e.g. `Процедура ОбработкаОшибок()
+        // Экспорт`); BSL semantics give the local definition priority and
+        // we must not silently retype a reference to it as `PlatformObject`.
+        let user_shadows =
+            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)));
+        if !user_shadows {
+            if let Some(prop) =
+                bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
+            {
+                if let Some(declared) = prop.property_types.first() {
+                    trace!("resolved {} as platform global → {}", name, declared);
+                    let lowering = crate::lower::TyLoweringContext::new();
+                    return lowering.lower_bare_name(&hir_def::Name::new(declared.as_str()));
+                }
+            }
+        }
+
+        // 5. Module-level methods / variables (Unknown today; Task 2.x
         //    will synthesise Ty::Function from MethodId).
         match resolved {
             Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => Ty::Unknown,
@@ -1262,6 +1305,54 @@ impl<'db> InferenceContext<'db> {
                 resolution.return_type
             }
             Err(kind) => {
+                // Workspace miss — try the platform global-context catalogue
+                // before declaring failure. `ОбработкаОшибок.КраткоеПредставлениеОшибки(...)`
+                // and similar built-in calls live there: receiver is a global
+                // identifier whose declared type carries the actual method.
+                //
+                // Two narrowings keep this from masking real diagnostics:
+                //
+                // 1. Only fall through on `MethodNotFound`. `MethodNotExport`
+                //    means the workspace *has* a method with that name; the
+                //    user must keep the export-error diagnostic instead of
+                //    silently picking a coincidentally-named platform method.
+                //
+                // 2. Even within `MethodNotFound`, hir-def collapses two
+                //    cases: "module unknown" AND "module known but method
+                //    missing/non-visible". The platform fallback is only
+                //    correct for the first one. A user CommonModule named
+                //    e.g. `Метаданные` (shadowing the platform global) with
+                //    a typo'd member must keep its own diagnostic — so probe
+                //    `module_index` directly: a `Some` here means the
+                //    workspace owns the receiver and platform fallback would
+                //    mask a real bug.
+                if matches!(kind, UnresolvedMethodKind::MethodNotFound) {
+                    let source_root_id =
+                        self.db.file_source_root_input(self.file_id).source_root_id(self.db);
+                    let module_in_workspace = self
+                        .db
+                        .module_index(source_root_id)
+                        .resolve_common_module(module_name)
+                        .is_some();
+
+                    if !module_in_workspace {
+                        if let Some(method) = bsl_platform::PlatformDataInner::instance()
+                            .resolve_global_member(module_name.as_str(), method_name.as_str())
+                        {
+                            let return_ty = method
+                                .return_type
+                                .as_ref()
+                                .map(|s| {
+                                    let lowering = crate::lower::TyLoweringContext::new();
+                                    lowering.lower_bare_name(&hir_def::Name::new(s.as_str()))
+                                })
+                                .unwrap_or(Ty::Unknown);
+                            self.expr_types.insert(call_expr, Ty::Unknown);
+                            return return_ty;
+                        }
+                    }
+                }
+
                 // Method not found - emit diagnostic
                 self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,

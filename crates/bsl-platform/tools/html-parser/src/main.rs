@@ -408,6 +408,20 @@ fn parse_shcntx_data(
     if global_context_dir.exists() {
         println!("Parsing Global context directory...");
         global_functions = parse_global_functions(&global_context_dir, &mut function_id_counter)?;
+
+        // Global properties (e.g. `ОбработкаОшибок`, `Метаданные`, `Справочники`)
+        // are top-level identifiers whose declared type is the foreign key into
+        // the regular type/method index. Reuses `parse_type_properties`: the
+        // `properties/` subdirectory has the same flat layout as for any other
+        // type, and `parse_property_html` extracts the title shape
+        // `Глобальный контекст.X (Global context.X)` via the same dot-split.
+        let global_properties = parse_type_properties(
+            &global_context_dir,
+            "Global context",
+            &mut prop_id_counter,
+        )?;
+        println!("Parsed {} global context properties", global_properties.len());
+        properties.extend(global_properties);
     }
 
     // Iterate through catalog directories.

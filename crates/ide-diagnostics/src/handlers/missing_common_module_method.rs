@@ -55,7 +55,29 @@ pub fn from_hir(
             None
         }
         PathResolution::Unresolved(_) => {
-            // Could not resolve - method or module doesn't exist, or method not exported
+            // Before reporting "method does not exist on common module" — the
+            // identifier on the left may not be a CommonModule at all but a
+            // built-in 1C platform global (e.g. `ОбработкаОшибок` of type
+            // `МенеджерОбработкиОшибок`). Suppress the diagnostic when the
+            // call resolves against the platform global-context catalogue.
+            // Kept distinct from `PathResolution::Method` because platform
+            // globals are NOT CommonModules — collapsing them would leak
+            // CommonModule assumptions into goto/hover/completion.
+            //
+            // Important narrowing: only fall back to the platform catalogue
+            // when the receiver is NOT a real user CommonModule. A user may
+            // legitimately ship a CommonModule named e.g. `Метаданные` that
+            // shadows a platform global; in that case `Unresolved` means
+            // "method on the user module is missing or non-exported" and
+            // must not be silently swallowed by a coincidental platform
+            // member with the same name.
+            let module_is_user_common_module =
+                !ctx.find_common_module_files_anywhere(module).is_empty();
+            if !module_is_user_common_module
+                && ctx.resolve_platform_global_member(&module_name, &method_name).is_some()
+            {
+                return None;
+            }
             Some(create_diagnostic_from_hir(range, method, module, code, ctx))
         }
         _ => None,
@@ -161,6 +183,88 @@ mod tests {
         // Shadowing is handled automatically by analyze_qualified_call
         // which checks if base is a local variable before creating QualifiedPath
         assert_eq!(diags.len(), 0, "Expected 0 diagnostics for shadowed variables");
+    }
+
+    #[test]
+    fn test_platform_global_member_call_suppresses_diagnostic() {
+        // ОбработкаОшибок is a platform global of type МенеджерОбработкиОшибок,
+        // and КраткоеПредставлениеОшибки is a real method on that manager.
+        // The qualified-call lowering still emits MissingCommonModuleMethod
+        // (it does not know about platform globals), so this test exercises
+        // the suppression path in `from_hir`: ctx.resolve_platform_global_member
+        // returns Some(_) → no diagnostic.
+        let code = r#"
+Процедура Тест()
+    ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == crate::DiagnosticCode::MissingCommonModuleMethod)
+            .collect();
+        assert!(
+            diags.is_empty(),
+            "platform global member calls must not raise MissingCommonModuleMethod, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore] // TODO: requires Configuration.xml fixture wiring (same as test_with_common_module_fixture above).
+    fn test_user_module_shadows_platform_global() {
+        // Edge case flagged by Codex pair-mode review: a user CommonModule
+        // sharing a name with a platform global must not have its real
+        // missing-method diagnostic swallowed by the platform fallback.
+        // The narrowing in `from_hir` checks `find_common_module_files_anywhere`
+        // before consulting the platform catalogue.
+        use crate::test_utils::check_hir_diagnostic_with_fixtures;
+        let fixture = r#"
+//- /CommonModules/Метаданные/Module.bsl
+Процедура ОдинЭкспортируемыйМетод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Метаданные.ЗаведомоОтсутствующийМетод();
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic_with_fixtures(fixture);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == crate::DiagnosticCode::MissingCommonModuleMethod)
+            .collect();
+        // The user's CommonModule (named like a platform global) must keep
+        // its diagnostic — `КонфигурацияМетаданныеОбъект` having a
+        // coincidentally-named method must NOT silence it.
+        assert_eq!(
+            diags.len(),
+            1,
+            "user CommonModule shadowing a platform global must keep its missing-method diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_platform_global_unknown_member_keeps_falling_through() {
+        // Receiver is a real platform global, but the named member does not
+        // exist on the declared type — suppression must NOT mask this:
+        // diagnostic still fires (current message wording is "common module"
+        // — refining the wording for platform globals is a separate task).
+        let code = r#"
+Процедура Тест()
+    ОбработкаОшибок.СовершенноНесуществующийМетод();
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == crate::DiagnosticCode::MissingCommonModuleMethod)
+            .collect();
+        assert_eq!(
+            diags.len(),
+            1,
+            "unknown method on platform global must still raise the diagnostic"
+        );
     }
 
     #[test]

@@ -41,9 +41,10 @@ mod generated {
 
 // Re-export public API
 pub use db::{
-    global_function_query, manager_methods_query, platform_constructors_query,
-    platform_method_query, platform_property_query, platform_type_query, type_methods_query,
-    type_properties_query, MethodLookupInput, PlatformData, PlatformDataInner, TypeNameInput,
+    global_function_query, global_member_method_query, global_property_query,
+    manager_methods_query, platform_constructors_query, platform_method_query,
+    platform_property_query, platform_type_query, type_methods_query, type_properties_query,
+    MethodLookupInput, PlatformData, PlatformDataInner, TypeNameInput, GLOBAL_CONTEXT_OWNER,
 };
 pub use types::*;
 

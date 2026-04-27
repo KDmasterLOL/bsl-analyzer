@@ -315,6 +315,30 @@ impl<'a> DiagnosticsContext<'a> {
         ]))
     }
 
+    /// Resolve `Module.Method()` against the platform global-context catalogue.
+    ///
+    /// Built-in 1C identifiers like `ОбработкаОшибок`, `Метаданные`,
+    /// `Справочники` are top-level globals declared on `Global context` whose
+    /// declared type carries the actual methods (e.g.
+    /// `ОбработкаОшибок: МенеджерОбработкиОшибок`). Diagnostics and completion
+    /// must distinguish these from user `CommonModule` calls — a platform
+    /// global is NOT a CommonModule, so we do not widen `PathResolution`. The
+    /// caller treats a `Some(_)` here as "platform-resolved, suppress
+    /// CommonModule-shaped diagnostics".
+    ///
+    /// Returns `None` when:
+    /// - `module_name` is not a platform global,
+    /// - the global has no declared type (empty `property_types` in HBK),
+    /// - no method with `method_name` exists on the declared type.
+    pub fn resolve_platform_global_member(
+        &self,
+        module_name: &hir::Name,
+        method_name: &hir::Name,
+    ) -> Option<bsl_platform::PlatformMethod> {
+        let data = bsl_platform::PlatformDataInner::instance();
+        data.resolve_global_member(module_name.as_str(), method_name.as_str()).cloned()
+    }
+
     // ========================================================================
     // Cross-module file resolution
     // ========================================================================

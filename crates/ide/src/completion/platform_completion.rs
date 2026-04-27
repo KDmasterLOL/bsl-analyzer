@@ -82,7 +82,63 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // — completion just shows nothing).
     if receiver_ty.is_unknown() {
         if let Some(name) = extract_receiver_ident(&receiver_expr) {
-            receiver_ty = Ty::from_type_name(&name);
+            // If the receiver is a real workspace CommonModule, the fast
+            // path `complete_common_module_methods` already had its turn
+            // and either returned the module's methods or `None` (no
+            // exported methods yet). Falling through into the platform
+            // cascade here would mask the user's intent in two ways:
+            //
+            //  1. `get_global_property` could retype the receiver as a
+            //     platform manager (`Метаданные` →
+            //     `КонфигурацияМетаданныеОбъект`), surfacing unrelated
+            //     methods.
+            //  2. The trailing `Ty::PlatformObject(Name::new(&name))`
+            //     fallback could collide with a same-named platform type
+            //     (e.g. `БиблиотекаКартинок` ≡ `PictureLib`), and
+            //     `type_methods_query` would happily surface its 294
+            //     platform members.
+            //
+            // Both behaviours hide that the user's CommonModule is the
+            // authoritative receiver here. Bail out instead.
+            let name_node = Name::new(&name);
+            let workspace_module_shadows = {
+                let source_root_input = db.file_source_root_input(position.file_id);
+                let source_root_id = source_root_input.source_root_id(db);
+                db.module_index(source_root_id).resolve_common_module(&name_node).is_some()
+            };
+            // Same-file shadow: a module-level `Процедура ОбработкаОшибок()`
+            // in the current file isn't in the cross-module `module_index`
+            // but is still authoritative for `ОбработкаОшибок.|` here.
+            // `infer_path_name` already returns `Ty::Unknown` for this case
+            // (so `Semantics::type_of_expr` doesn't classify the receiver),
+            // which is why we land in this fallback at all — without an
+            // explicit symbol-tree probe we'd unmask the platform global.
+            let same_file_shadows = {
+                let module_id = hir::ModuleId::new(position.file_id);
+                let tree = db.symbol_tree(module_id);
+                tree.find_method(&name_node).is_some() || tree.find_variable(&name_node).is_some()
+            };
+            if workspace_module_shadows || same_file_shadows {
+                return None;
+            }
+
+            // Platform global-context properties (`ОбработкаОшибок`,
+            // `Метаданные`, `Справочники`, …) — the bare identifier names
+            // a *property*, not a type, so the methods we want belong to
+            // the declared type, not to a fake `PlatformObject(<property
+            // name>)`. Without this branch the next fallback would index
+            // `type_methods_query` with the property name and surface
+            // zero methods.
+            if let Some(prop) =
+                bsl_platform::PlatformDataInner::instance().get_global_property(&name)
+            {
+                if let Some(declared) = prop.property_types.first() {
+                    receiver_ty = Ty::PlatformObject(Name::new(declared.as_str()));
+                }
+            }
+            if receiver_ty.is_unknown() {
+                receiver_ty = Ty::from_type_name(&name);
+            }
             if receiver_ty.is_unknown() {
                 receiver_ty = Ty::PlatformObject(Name::new(&name));
             }
@@ -674,5 +730,54 @@ mod tests {
             );
             assert_eq!(item.insert_text, item.label);
         }
+    }
+
+    #[test]
+    fn test_completion_after_platform_global() {
+        // `ОбработкаОшибок.|` — receiver is a platform global of type
+        // `МенеджерОбработкиОшибок`. Without the global-scope fallback the
+        // dispatcher would mistakenly treat `ОбработкаОшибок` as the type
+        // name and surface zero methods. With the fix the receiver type
+        // collapses to `Ty::PlatformObject("МенеджерОбработкиОшибок")` and
+        // the manager's methods (e.g. `КраткоеПредставлениеОшибки`) appear.
+        use bsl_platform::PlatformDataInner;
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use syntax::TextSize;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let data = PlatformDataInner::instance();
+        if data.all_global_properties().is_empty() {
+            println!("Skipping: no platform global properties available");
+            return;
+        }
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let code = r#"Процедура Тест()
+    Текст = ОбработкаОшибок.
+КонецПроцедуры"#;
+
+        db.set_file_text(file_id, code);
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        let dot_end = code.find("ОбработкаОшибок.").unwrap() + "ОбработкаОшибок.".len();
+        let offset = TextSize::from(dot_end as u32);
+        let position = CompletionPosition { file_id, offset, workspace_root: None };
+
+        let items = platform_completions(&db, position).expect(
+            "platform_completions must surface МенеджерОбработкиОшибок methods after global property",
+        );
+        assert!(!items.is_empty(), "expected at least one method, got empty list");
+
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"КраткоеПредставлениеОшибки"),
+            "expected КраткоеПредставлениеОшибки in {:?}",
+            labels
+        );
     }
 }
