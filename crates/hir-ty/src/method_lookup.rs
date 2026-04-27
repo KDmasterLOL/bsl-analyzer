@@ -330,8 +330,20 @@ fn is_tabular_row_type_name(name: &str) -> bool {
 /// Only comma-joined strings whose every segment resolves to a known structured
 /// type or sentinel are treated as a union. Free-prose commas fall back to a
 /// single raw platform object type.
+///
+/// If any segment is the BSL "any value" placeholder
+/// (`Произвольный` / `Arbitrary`), the whole result collapses to
+/// [`Ty::Unknown`]: the union "any value ∪ X" is degenerate, and routing
+/// it through `Ty::union([Unknown, X])` would not help — `is_assignable`
+/// distributes over a left-side union (see [`crate::subtype`]), so a
+/// concrete sibling like `Ty::Undefined` would still false-fire
+/// `TypeMismatch` against typed sinks. Mirrors the single-token early
+/// exit in [`resolve_platform_type_name`].
 fn resolve_platform_type_union(raw: &str) -> Ty {
     let segments: Vec<&str> = raw.split(',').map(str::trim).collect();
+    if segments.iter().any(|segment| is_arbitrary_type_name(segment)) {
+        return Ty::Unknown;
+    }
     if segments.iter().any(|segment| !segment_is_valid_type(segment)) {
         resolve_platform_type_name(raw)
     } else {
@@ -352,13 +364,33 @@ fn segment_is_valid_type(s: &str) -> bool {
 /// take their canonical variant; anything else becomes
 /// `Ty::PlatformObject` so fluent chains like
 /// `Запрос.Выполнить().Выбрать()` can continue resolving.
+///
+/// `"Произвольный"` / `"Arbitrary"` is the BSL spec's "any value"
+/// placeholder (`Константы.X.Получить()` returns it; `Найти(...)`
+/// accepts it) and must lower to [`Ty::Unknown`] so the gradual-typing
+/// rule in [`crate::subtype::is_assignable`] accepts the value in any
+/// typed slot. Without this early exit the catch-all below would lift
+/// it to `Ty::PlatformObject("Произвольный")` and structural equality
+/// against `String` / `Number` / etc. would false-fire `TypeMismatch`.
 pub(crate) fn resolve_platform_type_name(name: &str) -> Ty {
+    if is_arbitrary_type_name(name) {
+        return Ty::Unknown;
+    }
     let ty = Ty::from_type_name(name);
     if ty.is_unknown() {
         Ty::PlatformObject(Name::new(name))
     } else {
         ty
     }
+}
+
+/// Whether `name` is the BSL "any value" placeholder. Lowercase
+/// comparison so future scraper-emitted casing variants
+/// (`произвольный`) also match — `eq_ignore_ascii_case` would not
+/// fold Cyrillic.
+fn is_arbitrary_type_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.eq_ignore_ascii_case("Arbitrary") || trimmed.to_lowercase() == "произвольный"
 }
 
 #[cfg(test)]
@@ -481,6 +513,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_platform_type_union_collapses_arbitrary_segment_to_unknown() {
+        // BSL's "any value" placeholder anywhere in a comma-joined return
+        // string makes the whole union degenerate. Collapsing to
+        // `Ty::Unknown` keeps the gradual rule firing on typed sinks; a
+        // `Ty::union([Unknown, Undefined])` would *not* — `is_assignable`
+        // distributes on the left and `Undefined ≤ String` is false, so
+        // `ПустаяСтрока(...)` against a `"Произвольный, Неопределено"`
+        // return would still false-fire `TypeMismatch`. Pinned platform
+        // entries: `LoadDefaultSetting` and the second `Произвольный,
+        // Неопределено` site in platform_data.json.
+        assert_eq!(resolve_platform_type_union("Произвольный, Неопределено"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_union("Неопределено, Произвольный"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_union("Arbitrary, Undefined"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_union("Undefined, Arbitrary"), Ty::Unknown);
+        // Whitespace folding around the placeholder.
+        assert_eq!(resolve_platform_type_union("  Произвольный  ,  Неопределено"), Ty::Unknown);
+    }
+
+    #[test]
     fn resolve_platform_type_union_falls_back_for_prose_commas() {
         assert_eq!(
             resolve_platform_type_union("ТабличныйДокумент, ТекстовыйДокумент; другой объект"),
@@ -502,6 +553,36 @@ mod tests {
         let info = to_method_info(&test_method(Some("Число, Неопределено"), Some("Метаданные,")));
         assert_eq!(info.return_ty, Ty::union(vec![Ty::Number, Ty::Undefined]));
         assert_eq!(info.params, vec![Ty::Unknown]);
+    }
+
+    #[test]
+    fn resolve_platform_type_name_arbitrary_collapses_to_unknown() {
+        // BSL's "any value" placeholder must lower to `Ty::Unknown` so the
+        // gradual-typing rule (`Unknown ≤ A`) accepts the value in any
+        // typed slot. Without this, `Константы.X.Получить()` (declared
+        // `return_type: "Произвольный"` in platform_data.json) would lift
+        // to `Ty::PlatformObject("Произвольный")` and false-fire
+        // `TypeMismatch` on every `ПустаяСтрока(...)` / `СтрДлина(...)` /
+        // assignment-to-typed-var sink.
+        assert_eq!(resolve_platform_type_name("Произвольный"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_name("произвольный"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_name("ПРОИЗВОЛЬНЫЙ"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_name("Arbitrary"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_name("arbitrary"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_name("ARBITRARY"), Ty::Unknown);
+        assert_eq!(resolve_platform_type_name("  Произвольный  "), Ty::Unknown);
+    }
+
+    #[test]
+    fn to_method_info_arbitrary_return_lowers_to_unknown() {
+        // End-to-end pin: a platform method declared with
+        // `return_type: "Произвольный"` (the shape used by
+        // `ConstantManager.<Name>.Get` in platform_data.json) must
+        // surface as `Ty::Unknown` through `to_method_info`, so that
+        // call-site argument checks against it stay quiet under the
+        // gradual rule.
+        let info = to_method_info(&test_method(Some("Произвольный"), None));
+        assert_eq!(info.return_ty, Ty::Unknown);
     }
 
     #[test]
