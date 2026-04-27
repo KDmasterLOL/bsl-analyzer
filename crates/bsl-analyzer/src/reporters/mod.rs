@@ -9,6 +9,7 @@ use ide::DiagnosticOutput;
 
 pub mod console;
 pub mod json;
+pub mod sarif;
 
 /// Analysis results passed to reporters.
 #[derive(Debug, Clone)]
@@ -51,7 +52,8 @@ impl ReporterRegistry {
             reporters: vec![
                 Box::new(console::ConsoleReporter),
                 Box::new(json::JsonReporter),
-                // Phase 2: SARIF, Generic
+                Box::new(sarif::SarifReporter),
+                // Phase 2: Generic
                 // Phase 3: TSLint, JUnit, CodeQuality
             ],
         }
@@ -71,5 +73,16 @@ impl ReporterRegistry {
 impl Default for ReporterRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReporterRegistry;
+
+    #[test]
+    fn registry_contains_sarif_reporter() {
+        let registry = ReporterRegistry::new();
+        assert!(registry.keys().contains(&"sarif"));
     }
 }
