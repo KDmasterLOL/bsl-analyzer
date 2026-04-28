@@ -299,26 +299,10 @@ fn preproc_content(p: &mut Parser) {
     }
 }
 
-/// Parses a preprocessor expression: NOT? (LPAREN expr RPAREN) | logical_expr
+/// Parses a preprocessor expression: operand (AND/OR operand)*
 fn preproc_expression(p: &mut Parser) {
     let m = p.start();
-
-    // Optional NOT
-    let _has_not = p.eat(TokenKind::KwNot);
-    p.skip_trivia();
-
-    // Check for parenthesized expression
-    if p.at(TokenKind::LParen) {
-        p.bump(); // (
-        p.skip_trivia();
-        preproc_expression(p);
-        p.skip_trivia();
-        p.expect(TokenKind::RParen);
-    } else {
-        // Parse logical expression (handles the expression after NOT if present)
-        preproc_logical_expression(p);
-    }
-
+    preproc_logical_expression(p);
     m.complete(p, NodeKind::PreExpr);
 }
 
@@ -364,7 +348,7 @@ fn preproc_logical_operand(p: &mut Parser) {
     } else if p.at(TokenKind::KwNot) {
         p.bump(); // NOT
         p.skip_trivia();
-        preproc_symbol(p);
+        preproc_logical_operand(p);
     } else {
         preproc_symbol(p);
     }

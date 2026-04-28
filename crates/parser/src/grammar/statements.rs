@@ -284,7 +284,7 @@ fn raise_stmt(p: &mut Parser) {
     if p.at(TokenKind::LParen) {
         // Parse as function call with argument list
         parse_raise_call_args(p);
-    } else if !p.at(TokenKind::Semicolon) {
+    } else if !at_bare_raise_boundary(p) {
         // Old style: parse single expression (usually a string literal)
         expressions::expression(p);
     }
@@ -293,6 +293,26 @@ fn raise_stmt(p: &mut Parser) {
     p.eat(TokenKind::Semicolon);
 
     m.complete(p, NodeKind::RaiseStmt);
+}
+
+fn at_bare_raise_boundary(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(
+            TokenKind::Semicolon
+                | TokenKind::KwEndTry
+                | TokenKind::KwExcept
+                | TokenKind::KwEndIf
+                | TokenKind::KwElsIf
+                | TokenKind::KwElse
+                | TokenKind::KwEndDo
+                | TokenKind::KwEndProcedure
+                | TokenKind::KwEndFunction
+                | TokenKind::PreElsIf
+                | TokenKind::PreElse
+                | TokenKind::PreEndIf
+        ) | None
+    )
 }
 
 /// Parse argument list for ВызватьИсключение(...).

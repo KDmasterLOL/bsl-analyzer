@@ -264,9 +264,13 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
         return None;
     }
 
-    // Find the type folder by scanning parts (handles paths with prefix like ./src/cf/)
+    // Find the nearest type folder to the module file.
+    //
+    // Absolute paths can contain ordinary directories named like metadata
+    // plural folders, for example `/Users/.../Documents/git/.../Catalogs/...`.
+    // The metadata folder is the one closest to `Ext/<module>.bsl`.
     let type_idx =
-        parts.iter().position(|&p| mdo_type_from_plural(p).is_some() || p == "CommonModules")?;
+        parts.iter().rposition(|&p| mdo_type_from_plural(p).is_some() || p == "CommonModules")?;
 
     // Need at least type + name + Ext + module file
     if parts.len() < type_idx + 4 {
@@ -1049,6 +1053,17 @@ mod tests {
             .unwrap();
         assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::Catalog));
         assert_eq!(info.name.as_deref(), Some("ДействияСогласования"));
+        assert_eq!(info.module_type, bsl_metadata::ModuleType::ObjectModule);
+    }
+
+    #[test]
+    fn test_parse_module_path_with_absolute_documents_prefix() {
+        let info = parse_module_path(
+            "/Users/test/Documents/git/project/Catalogs/Справочник1/Ext/ObjectModule.bsl",
+        )
+        .unwrap();
+        assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::Catalog));
+        assert_eq!(info.name.as_deref(), Some("Справочник1"));
         assert_eq!(info.module_type, bsl_metadata::ModuleType::ObjectModule);
     }
 
