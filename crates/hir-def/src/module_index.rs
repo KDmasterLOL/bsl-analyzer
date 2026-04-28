@@ -289,8 +289,12 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
 
     let path_lower = path.to_lowercase();
 
-    // Find the type folder and extract name
-    for (i, part) in parts.iter().enumerate() {
+    // Find the nearest type folder to the module file.
+    //
+    // Absolute paths can contain ordinary directories named like metadata
+    // plural folders, for example `/Users/.../Documents/git/.../Catalogs/...`.
+    // The metadata folder is the one closest to `Ext/<module>.bsl`.
+    for (i, part) in parts.iter().enumerate().rev() {
         let module_type = match part.to_lowercase().as_str() {
             "commonmodules" | "общиемодули" => Some(ModulePathType::CommonModule),
             "documents" | "документы" => Some(ModulePathType::Document),
@@ -410,6 +414,16 @@ mod tests {
         assert_eq!(
             result,
             Some((ModulePathType::Catalog, "Номенклатура".to_string(), ModuleFileKind::Manager,)),
+        );
+    }
+
+    #[test]
+    fn test_parse_module_path_with_absolute_documents_prefix() {
+        let path = "/Users/test/Documents/git/project/Catalogs/Справочник1/Ext/ObjectModule.bsl";
+        let result = parse_module_path(path);
+        assert_eq!(
+            result,
+            Some((ModulePathType::Catalog, "Справочник1".to_string(), ModuleFileKind::Object,)),
         );
     }
 

@@ -222,4 +222,169 @@ HHH"#;
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
         assert!(parse_errors.is_empty(), "BOM with region should not trigger parse error");
     }
+
+    #[test]
+    fn test_no_parse_error_for_spaced_preprocessor_directives() {
+        let code = r#"
+Процедура Тест()
+    # Если ВебКлиент Тогда
+        Возврат;
+    # Иначе
+        Сообщить("Не веб");
+    # КонецЕсли
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Spaced preprocessor directives should not trigger parse error"
+        );
+    }
+
+    #[test]
+    fn test_no_parse_error_for_iso_date_literal() {
+        let code = r#"
+Функция МинимальнаяДата()
+    Возврат '0001-01-01';
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(parse_errors.is_empty(), "ISO date literal should not trigger parse error");
+    }
+
+    #[test]
+    fn test_no_parse_error_for_trailing_dot_numeric_literal() {
+        let code = r#"
+Процедура Тест(Значение)
+    Если Значение < 0. Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Numeric literal with trailing dot should not trigger parse error"
+        );
+    }
+
+    fn assert_no_parse_errors_for(code: &str, message: &str) {
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(parse_errors.is_empty(), "{message}");
+    }
+
+    #[test]
+    fn test_no_parse_error_for_dotted_datetime_literals() {
+        let code = r#"
+Процедура Тест()
+    Начало = '1000.01.01 00:00.00';
+    Конец = '2099.12.31 23:59.59';
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(
+            code,
+            "Dotted date/time literals should not trigger parse error",
+        );
+    }
+
+    #[test]
+    fn test_no_parse_error_for_comma_date_literal_argument() {
+        let code = r#"
+Процедура Тест()
+    Минимальная = Дата('0001,01,01');
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(
+            code,
+            "Comma-separated date literal should not trigger parse error",
+        );
+    }
+
+    #[test]
+    fn test_no_parse_error_for_non_breaking_space_before_statement() {
+        let code = "Процедура Тест()\n\
+    \u{00A0}Данные.Вставить(\"Ключ\" \"\");\n\
+КонецПроцедуры";
+        assert_no_parse_errors_for(
+            code,
+            "Non-breaking space before statement should not trigger parse error",
+        );
+    }
+
+    #[test]
+    fn test_no_parse_error_for_chained_less_than_comparison() {
+        let code = r#"
+Процедура Тест(Значение)
+    Если 60 < Значение <= 3600 Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(
+            code,
+            "Chained less-than comparison should not trigger parse error",
+        );
+    }
+
+    #[test]
+    fn test_no_parse_error_for_chained_not_equal_comparison() {
+        let code = r#"
+Процедура Тест(Блок)
+    Значение1 = Блок[0] <> Блок[2] <> Блок[4];
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(
+            code,
+            "Chained not-equal comparison should not trigger parse error",
+        );
+    }
+
+    #[test]
+    fn test_no_parse_error_for_raise_without_semicolon_before_end_try() {
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ВызватьИсключение
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(
+            code,
+            "Raise without semicolon before КонецПопытки should not trigger parse error",
+        );
+    }
+
+    #[test]
+    fn test_no_parse_error_for_parenthesized_preprocessor_condition() {
+        let code = r#"
+Процедура Тест()
+    #Если (Не ВебКлиент) И (Не МобильныйКлиент) Тогда
+        ИмяАрхива = "stat.zip";
+    #КонецЕсли
+КонецПроцедуры
+"#;
+        assert_no_parse_errors_for(
+            code,
+            "Parenthesized preprocessor condition should not trigger parse error",
+        );
+    }
+
+    #[test]
+    fn test_no_parse_error_for_multiline_nstr_argument() {
+        let code = r#"Процедура Тест()
+    ТекстПодсказки = НСтр("ru = 'Доплата может производиться картой,
+        "а также наличными.'");
+КонецПроцедуры"#;
+        assert_no_parse_errors_for(code, "Multiline NStr argument should not trigger parse error");
+    }
 }

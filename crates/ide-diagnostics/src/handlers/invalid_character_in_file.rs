@@ -86,7 +86,7 @@ fn create_diagnostic(
 }
 
 /// Main entry point for InvalidCharacterInFile diagnostic (file-level text-based).
-/// This diagnostic scans all STRING, COMMENT, and ERROR tokens for illegal characters.
+/// This diagnostic scans STRING, COMMENT, WHITESPACE, and ERROR tokens for illegal characters.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::InvalidCharacterInFile;
 
@@ -107,6 +107,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     | SyntaxKind::STRING_PART
                     | SyntaxKind::STRING_START
                     | SyntaxKind::STRING_TAIL
+                    | SyntaxKind::WHITESPACE
                     | SyntaxKind::COMMENT
                     | SyntaxKind::ERROR
             );

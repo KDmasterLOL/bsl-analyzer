@@ -1,6 +1,11 @@
 #![cfg(unix)]
 
-use std::{env, fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use tempfile::TempDir;
 
@@ -119,7 +124,7 @@ fn codex_user_reference_force_uses_cli_and_passes_env() {
             "reference",
         ]
     );
-    assert_eq!(invocations[1].cwd, harness.project_dir.display().to_string());
+    assert_same_path(&invocations[1].cwd, &harness.project_dir);
 }
 
 #[test]
@@ -239,7 +244,7 @@ fn gemini_project_force_updates_via_add() {
     assert!(invocations[0].args.contains(&"-e".to_owned()));
     assert!(invocations[0].args.contains(&"NAPARNIK_TOKEN=test".to_owned()));
     assert!(invocations[0].args.contains(&"bsl-analyzer-workspace".to_owned()));
-    assert_eq!(invocations[0].cwd, harness.project_dir.display().to_string());
+    assert_same_path(&invocations[0].cwd, &harness.project_dir);
 }
 
 #[test]
@@ -494,6 +499,12 @@ fn parse_invocations(contents: &str) -> Vec<Invocation> {
     }
 
     invocations
+}
+
+fn assert_same_path(actual: &str, expected: &Path) {
+    let actual = fs::canonicalize(actual).expect("actual cwd canonical path");
+    let expected = fs::canonicalize(expected).expect("expected cwd canonical path");
+    assert_eq!(actual, expected);
 }
 
 fn codex_stub() -> String {
