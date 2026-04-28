@@ -745,23 +745,21 @@ impl<'db> InferenceContext<'db> {
         let resolved = resolver.resolve_name(self.db, name);
 
         // 1. Builtins — union of Resolver's platform-global view and the
-        //    narrower hir-ty signature table. Either hit makes the name a
-        //    builtin; only the hir-ty table supplies a typed signature.
+        //    narrower hir-ty signature table. BSL has no first-class
+        //    function values: a bare identifier `СтрокаСоединения…`
+        //    without parentheses cannot evaluate to a function — the
+        //    only way to invoke a builtin is `Name(...)`, handled by
+        //    `infer_call`'s `Expr::Path` callee branch which looks up
+        //    the signature directly. So at value position we collapse
+        //    the builtin hit to `Ty::Unknown`; otherwise a parameter
+        //    or local variable that happens to share its name with a
+        //    platform global (e.g. the user-declared
+        //    `Знач СтрокаСоединенияИнформационнойБазы = ""`) would
+        //    false-fire `TypeMismatch { expected: String, actual:
+        //    Function }` when read as an argument.
         let resolver_says_builtin = matches!(resolved, Some(Resolution::Builtin(_)));
         let hir_sig = builtin::builtin_functions().get(name.as_str());
         if resolver_says_builtin || hir_sig.is_some() {
-            if let Some(sig) = hir_sig {
-                trace!("resolved {} as builtin via hir-ty signature table", name);
-                return Ty::Function {
-                    params: sig.params.clone(),
-                    defaults: sig.defaults.clone(),
-                    max_args: sig.max_args,
-                    ret: sig.ret.clone(),
-                };
-            }
-            // Resolver classifies the name as a platform global but the
-            // hir-ty signature table has no typed entry for it. Leave
-            // `Ty::Unknown` until Task 2.x broadens signature coverage.
             return Ty::Unknown;
         }
 
@@ -1250,6 +1248,49 @@ impl<'db> InferenceContext<'db> {
             // `Expr::Call`, which is cached at the call site.
             self.expr_types.insert(callee, Ty::Unknown);
             return result;
+        }
+
+        // Bare-name callees (`ПустаяСтрока(СтрокаСоединения…)`,
+        // `Сообщить(…)`, …) resolve through the hir-ty builtin
+        // signature table directly. The bare-path arm of
+        // `infer_path_name` no longer manufactures `Ty::Function`
+        // values — BSL has no first-class function references — so a
+        // typed arity / arg-type check on a builtin call has to start
+        // from the callee `Expr::Path(name)` here, not from
+        // `callee_ty`.
+        if let Expr::Path(name) = callee_expr {
+            let name = name.clone();
+            if let Some(sig) = builtin::builtin_functions().get(name.as_str()) {
+                let params = sig.params.clone();
+                let defaults = sig.defaults.clone();
+                let max_args = sig.max_args;
+                let ret = (*sig.ret).clone();
+
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+
+                let total = params.len();
+                let required =
+                    defaults.iter().rposition(|has_default| !*has_default).map_or(0, |i| i + 1);
+                let too_few = args.len() < required;
+                let too_many = max_args.is_some_and(|m| args.len() > m as usize);
+                if too_few || too_many {
+                    self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
+                        call_expr: callee,
+                        required_count: required,
+                        total_count: total,
+                        found: args.len(),
+                    });
+                }
+                self.emit_arg_type_mismatches(args, &params);
+                // Pin the bare callee's cached type so the second pass
+                // in `infer_all` doesn't re-enter `Expr::Path` on the
+                // function-name token. Mirrors the `Expr::Field`
+                // callee fix above.
+                self.expr_types.insert(callee, Ty::Unknown);
+                return ret;
+            }
         }
 
         // Infer callee type for non-qualified calls

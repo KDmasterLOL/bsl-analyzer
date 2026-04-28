@@ -340,3 +340,35 @@ fn type_mismatch_does_not_double_fire_on_arg_count_mismatch() {
          got {type_mismatches:?}"
     );
 }
+
+#[test]
+fn bare_identifier_matching_global_function_is_not_function_typed() {
+    // Regression: a parameter (or any bare identifier) whose name
+    // collides with a platform global function — here
+    // `СтрокаСоединенияИнформационнойБазы / InfoBaseConnectionString`
+    // — must not be typed as `Ty::Function` when read as a value.
+    // BSL has no first-class function references: the only way to
+    // invoke a builtin is `Name(...)`, so a bare `Name` token
+    // (without parens) cannot evaluate to a function.
+    //
+    // Pre-fix the inferrer typed the bare path as `Ty::Function`,
+    // which then got passed to `ПустаяСтрока(...)` whose declared
+    // parameter type is `Строка`, false-firing
+    // `TypeMismatch { expected: String, actual: Function }` on
+    // perfectly valid code.
+    let fixture = r#"
+//- /test.bsl
+Функция ИнформационнаяБазаФайловая(Знач СтрокаСоединенияИнформационнойБазы = "") Экспорт
+    Если ПустаяСтрока(СтрокаСоединенияИнформационнойБазы) Тогда
+        Возврат Истина;
+    КонецЕсли;
+    Возврат Ложь;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        mismatches(&db, file_id).is_empty(),
+        "bare identifier shadowing a platform global must not produce TypeMismatch — got {:?}",
+        mismatches(&db, file_id)
+    );
+}
