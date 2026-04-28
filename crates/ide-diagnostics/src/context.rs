@@ -141,6 +141,19 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.infer(self.file_id))
     }
 
+    /// Get narrowing-aware argument-mismatch diagnostics for the
+    /// current file.
+    ///
+    /// Companion to [`Self::infer`]: inference no longer emits
+    /// argument `TypeMismatch` diagnostics inline (it would have to
+    /// run after the narrowing overlay, but `narrow → infer`, so the
+    /// only acyclic option is the downstream
+    /// [`hir::HirDatabase::arg_diagnostics`] query). This accessor
+    /// surfaces those entries to the diagnostics dispatcher.
+    pub fn arg_diagnostics(&self) -> Arc<Vec<(hir::DefWithBodyId, hir::InferenceDiagnostic)>> {
+        self.query(|p| p.arg_diagnostics(self.file_id))
+    }
+
     /// Get module metadata for current file.
     pub fn module_metadata(&self) -> Arc<hir::ModuleMetadata> {
         let module_id = hir::ModuleId::new(self.file_id);

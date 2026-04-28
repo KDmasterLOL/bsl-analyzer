@@ -31,6 +31,7 @@
 //! let ty = db.type_of_expr(file_id, owner, expr_id);
 //! ```
 
+pub mod arg_diagnostics;
 pub mod builtin;
 pub mod db;
 pub mod field_lookup;
@@ -50,7 +51,10 @@ pub use field_lookup::{lookup_field, FieldInfo};
 pub use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
-pub use infer::{InferenceContext, InferenceDiagnostic, InferenceResult, UnresolvedMethodKind};
+pub use infer::{
+    CallArgBinding, InferenceContext, InferenceDiagnostic, InferenceResult, ParamsShape,
+    UnresolvedMethodKind,
+};
 pub use lower::TyLoweringContext;
 pub use manager_lookup::{lookup_manager_field, ManagerMemberInfo};
 pub use method_lookup::{lookup_method, MethodInfo};

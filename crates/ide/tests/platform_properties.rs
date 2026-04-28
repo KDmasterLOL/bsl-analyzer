@@ -508,9 +508,11 @@ fn unload_column_string_arg_does_not_emit_type_mismatch() {
 ";
     let (db, file_id) = setup_inline(code);
     let infer = db.infer(file_id);
+    let arg_diags = db.arg_diagnostics(file_id);
     let mismatches: Vec<&InferenceDiagnostic> = infer
         .diagnostics
         .iter()
+        .chain(arg_diags.iter())
         .map(|(_, d)| d)
         .filter(|d| matches!(d, InferenceDiagnostic::TypeMismatch { .. }))
         .collect();

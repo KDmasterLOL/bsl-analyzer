@@ -11,8 +11,8 @@ use std::sync::Arc;
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
 use hir::{
-    InferenceResult, ItemTree, MethodDocs, MethodId, ModuleBodies, ModuleId, ModuleIndex,
-    ModuleMetadata, SymbolTree,
+    DefWithBodyId, InferenceDiagnostic, InferenceResult, ItemTree, MethodDocs, MethodId,
+    ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
@@ -117,6 +117,20 @@ pub trait AnalysisProvider {
     /// bug in any consumer that expects type-inference diagnostics.
     fn infer(&self, _file_id: FileId) -> Arc<InferenceResult> {
         Arc::new(InferenceResult::default())
+    }
+
+    /// Get narrowing-aware argument-mismatch diagnostics for a file.
+    ///
+    /// Returns the [`InferenceDiagnostic::TypeMismatch`] entries that
+    /// `infer` no longer emits inline — they are produced by
+    /// [`HirDatabase::arg_diagnostics`], which runs **after** inference
+    /// so it can consult the narrowing overlay before deciding.
+    ///
+    /// Default impl returns an empty list so streaming providers (which
+    /// don't run inference) opt-out without breaking consumers — same
+    /// pattern as [`Self::infer`].
+    fn arg_diagnostics(&self, _file_id: FileId) -> Arc<Vec<(DefWithBodyId, InferenceDiagnostic)>> {
+        Arc::new(Vec::new())
     }
 
     /// Get module metadata (type, execution context).

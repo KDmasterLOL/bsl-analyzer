@@ -88,10 +88,14 @@ pub use hir_def::{
 
 // Re-export hir-ty types and queries
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
+pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
-pub use hir_ty::narrow::{narrow_query, narrowed_type_at, NarrowState};
-pub use hir_ty::{InferenceDiagnostic, InferenceResult, MetadataKind, Ty, UnresolvedMethodKind};
+pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowState};
+pub use hir_ty::{
+    CallArgBinding, InferenceDiagnostic, InferenceResult, MetadataKind, ParamsShape, Ty,
+    UnresolvedMethodKind,
+};
 
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
@@ -732,50 +736,6 @@ fn field_name_receiver(token: &syntax::SyntaxToken) -> Option<syntax::SyntaxNode
         return None;
     }
     Some(receiver)
-}
-
-/// Merge the narrowing overlay with the base [`Ty`] for a
-/// [`Semantics::type_of_expr`] lookup.
-///
-/// Only applies when the expression is an [`Expr::Path`] — narrowing
-/// targets named variables. For all other shapes we pass the base type
-/// through unchanged.
-///
-/// Fallback rules (in order):
-/// 1. `db.type_narrowing_enabled() == false` (Task 6.7 feature flag;
-///    workspace opt-out) → `base`.
-/// 2. Non-`Path` expr → `base`.
-/// 3. `db.narrow(...)` returns `None` (body not in this file, provider
-///    opted out) → `base`.
-/// 4. Overlay has no entry for this `Name` at this program point (variable
-///    untouched by any guard that dominates the expression) → `base`.
-/// 5. Overlay entry is [`Ty::Unknown`] (e.g., false-branch complement
-///    against a non-union base — Task 6.3 `ty_difference` degrades
-///    soundly) → `base`.
-/// 6. Otherwise → the narrowed [`Ty`].
-fn narrow_or_base<DB: HirDatabase>(
-    db: &DB,
-    file_id: FileId,
-    owner: DefWithBodyId,
-    body: &Body,
-    expr_id: ExprId,
-    base: Ty,
-) -> Ty {
-    use hir_def::IdConversion;
-
-    if !db.type_narrowing_enabled() {
-        return base;
-    }
-    let Expr::Path(name) = body.expr(expr_id) else {
-        return base;
-    };
-    let Some(result) = db.narrow(file_id, owner) else {
-        return base;
-    };
-    match narrowed_type_at(&result, expr_id.to_idx(), name) {
-        Some(narrowed) if !matches!(narrowed, Ty::Unknown) => narrowed,
-        _ => base,
-    }
 }
 
 /// Recursively extract name segments from an expression node.

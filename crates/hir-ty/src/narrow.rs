@@ -770,6 +770,54 @@ pub fn narrowed_type_at(
     result.block_in(node)?.get(name).cloned()
 }
 
+/// Merge the narrowing overlay with the base [`Ty`] for an expression
+/// lookup (originally lived in `hir::Semantics`).
+///
+/// Hover/completion through `Semantics::type_of_expr` and the argument-
+/// validation query both need the same overlay, so the function lives in
+/// `hir-ty` where the validation query can also reach it without a
+/// `hir → hir-ty → hir` cycle.
+///
+/// Only applies when the expression is an [`Expr::Path`] — narrowing
+/// targets named variables. For all other shapes we pass the base type
+/// through unchanged.
+///
+/// Fallback rules (in order):
+/// 1. `db.type_narrowing_enabled() == false` (Task 6.7 feature flag;
+///    workspace opt-out) → `base`.
+/// 2. Non-`Path` expr → `base`.
+/// 3. `db.narrow(...)` returns `None` (body not in this file, provider
+///    opted out) → `base`.
+/// 4. Overlay has no entry for this `Name` at this program point
+///    (variable untouched by any guard that dominates the expression)
+///    → `base`.
+/// 5. Overlay entry is [`Ty::Unknown`] (e.g., false-branch complement
+///    against a non-union base — Task 6.3 `ty_difference` degrades
+///    soundly) → `base`.
+/// 6. Otherwise → the narrowed [`Ty`].
+pub fn narrow_or_base<DB: HirDatabase + ?Sized>(
+    db: &DB,
+    file_id: FileId,
+    owner: DefWithBodyId,
+    body: &Body,
+    expr_id: ExprId,
+    base: Ty,
+) -> Ty {
+    if !db.type_narrowing_enabled() {
+        return base;
+    }
+    let Expr::Path(name) = body.expr(expr_id) else {
+        return base;
+    };
+    let Some(result) = db.narrow(file_id, owner) else {
+        return base;
+    };
+    match narrowed_type_at(&result, expr_id.to_idx(), name) {
+        Some(narrowed) if !matches!(narrowed, Ty::Unknown) => narrowed,
+        _ => base,
+    }
+}
+
 /// Find the CFG vertex whose evaluation covers `expr_idx`.
 ///
 /// Mirrors the virtualization rule in [`cfg::CfgBuilder`]:

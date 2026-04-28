@@ -87,6 +87,24 @@ pub struct InferenceResult {
     /// [`hir_def::ModuleBodies::all_diagnostics`] for consistency with the rest
     /// of the diagnostics pipeline.
     pub diagnostics: Vec<(DefWithBodyId, InferenceDiagnostic)>,
+
+    /// Per-call-site argument bindings recorded during inference,
+    /// consumed downstream by the narrowing-aware
+    /// [`crate::arg_diagnostics::arg_diagnostics_query`].
+    ///
+    /// Inference itself does **not** emit `TypeMismatch` for arguments
+    /// — it only records the `(args, params)` pair. The downstream
+    /// query merges the recorded base types with the
+    /// [`crate::narrow`] overlay before deciding whether to emit a
+    /// diagnostic, so guards like `If X <> Undefined Then …` correctly
+    /// suppress false positives without forcing inference to depend on
+    /// narrowing (which would create a Salsa cycle).
+    ///
+    /// Recorded for every call shape that accepts a typed signature
+    /// — workspace `CommonModule.Method`, three-segment manager calls,
+    /// receiver method calls (single + multi-overload), platform global
+    /// builtins, and `Ty::Function` callees.
+    pub call_arg_bindings: Vec<CallArgBinding>,
 }
 
 impl InferenceResult {
@@ -217,6 +235,63 @@ pub enum UnresolvedMethodKind {
     ReceiverNotResolved,
 }
 
+/// Per-call-site record of `(args, params)` shape captured during
+/// inference for downstream narrowing-aware validation.
+///
+/// `ExprId`s are body-local, so [`Self::owner`] disambiguates the body
+/// they belong to. The narrowing-aware
+/// [`crate::arg_diagnostics::arg_diagnostics_query`] reads each binding,
+/// re-computes the per-arg type with the narrowing overlay, and emits
+/// the [`InferenceDiagnostic::TypeMismatch`] entries inference no longer
+/// produces directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallArgBinding {
+    /// Body that owns `call_expr` and the entries of `args` —
+    /// `DefWithBodyId::Method(local_id)` for a procedure / function
+    /// body, `DefWithBodyId::ModuleCode` for module-level code.
+    pub owner: DefWithBodyId,
+
+    /// `ExprId` of the call expression itself. Used as the diagnostic
+    /// anchor (and to look up the call's source range when emitting
+    /// `TypeMismatch` for a particular `args[i]` slot).
+    pub call_expr: ExprId,
+
+    /// HIR `ExprId`s of the supplied arguments, in source order. Empty
+    /// when the call has no arguments. The `arg_diagnostics_query`
+    /// zips this against [`Self::params`] to compare per-slot types.
+    pub args: Vec<ExprId>,
+
+    /// Parameter signature shape — single or multi-overload. Used by
+    /// `arg_diagnostics_query` to apply the right validation rule
+    /// (per-arg `is_assignable` for `Single`; `any_accepts` +
+    /// closest-by-arity fallback for `Overloaded`).
+    pub params: ParamsShape,
+}
+
+/// Parameter-list shape captured per call site.
+///
+/// `Arc<[Ty]>` is used (instead of `Vec<Ty>`) so that the same signature
+/// can be shared across many call sites of the same method without
+/// re-allocating the parameter list per record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamsShape {
+    /// Single parameter list — covers plain functions, workspace
+    /// `CommonModule.Method`, three-segment manager calls,
+    /// non-overloaded receiver methods, and `Ty::Function` callees.
+    Single(Arc<[Ty]>),
+
+    /// Multi-overload signature.
+    ///
+    /// `flat` is the legacy "flattened" parameter list used as a
+    /// fallback when the overload set is empty (mirrors the old
+    /// `emit_arg_type_mismatches_overloaded` contract). `overloads`
+    /// carries one entry per declared overload — validation accepts
+    /// the call when any entry's per-arg `is_assignable` check passes,
+    /// and falls back to the closest-by-arity overload for the
+    /// diagnostic message otherwise.
+    Overloaded { flat: Arc<[Ty]>, overloads: Arc<[Arc<[Ty]>]> },
+}
+
 /// Context for type inference.
 ///
 /// Performs type inference for a **single body** (one method, or the
@@ -252,6 +327,11 @@ pub struct InferenceContext<'db> {
 
     /// Diagnostics collected while inferring this body.
     diagnostics: Vec<InferenceDiagnostic>,
+
+    /// Call-site arg/param bindings recorded during inference for the
+    /// downstream narrowing-aware
+    /// [`crate::arg_diagnostics::arg_diagnostics_query`].
+    call_arg_bindings: Vec<CallArgBinding>,
 }
 
 /// Single-body inference output.
@@ -269,6 +349,9 @@ pub struct BodyInferenceResult {
     pub expr_types: FxHashMap<ExprId, Ty>,
     /// Diagnostics collected during inference.
     pub diagnostics: Vec<InferenceDiagnostic>,
+    /// Call-site arg/param bindings collected during inference, to be
+    /// folded into [`InferenceResult::call_arg_bindings`].
+    pub call_arg_bindings: Vec<CallArgBinding>,
 }
 
 impl<'db> InferenceContext<'db> {
@@ -291,6 +374,7 @@ impl<'db> InferenceContext<'db> {
             var_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
+            call_arg_bindings: Vec::new(),
         }
     }
 
@@ -330,7 +414,34 @@ impl<'db> InferenceContext<'db> {
             var_types: self.var_types,
             expr_types: self.expr_types,
             diagnostics: self.diagnostics,
+            call_arg_bindings: self.call_arg_bindings,
         }
+    }
+
+    /// Record a call-site `(args, params)` binding for downstream
+    /// narrowing-aware validation by
+    /// [`crate::arg_diagnostics::arg_diagnostics_query`].
+    ///
+    /// Replaces the legacy `emit_arg_type_mismatches[_overloaded]`
+    /// inline emit: inference no longer decides whether arguments
+    /// type-match (that decision needs the narrowing overlay, which
+    /// runs after inference); it only saves the raw shape so the
+    /// downstream query can replay the check against narrowed types.
+    ///
+    /// The recovery-marker filter from `push_inference_diagnostic`
+    /// applies here too: bindings whose `call_expr` was lowered from a
+    /// parser ERROR node are dropped so the editor doesn't flicker
+    /// `TypeMismatch` while the user is still typing.
+    fn record_call_arg_binding(&mut self, call_expr: ExprId, args: &[ExprId], params: ParamsShape) {
+        if self.body.is_recovered(call_expr) {
+            return;
+        }
+        self.call_arg_bindings.push(CallArgBinding {
+            owner: self.owner,
+            call_expr,
+            args: args.to_vec(),
+            params,
+        });
     }
 
     /// Get resolver for the current module.
@@ -1010,7 +1121,13 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        self.emit_arg_type_mismatches(args, &resolution.signature.params);
+                        self.record_call_arg_binding(
+                            callee,
+                            args,
+                            ParamsShape::Single(Arc::<[Ty]>::from(
+                                &resolution.signature.params[..],
+                            )),
+                        );
                         self.expr_types.insert(callee, Ty::Unknown);
                         return resolution.return_type;
                     }
@@ -1089,7 +1206,13 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        self.emit_arg_type_mismatches(args, &resolution.signature.params);
+                        self.record_call_arg_binding(
+                            callee,
+                            args,
+                            ParamsShape::Single(Arc::<[Ty]>::from(
+                                &resolution.signature.params[..],
+                            )),
+                        );
                         self.expr_types.insert(callee, Ty::Unknown);
                         return resolution.return_type;
                     }
@@ -1160,7 +1283,13 @@ impl<'db> InferenceContext<'db> {
                                 },
                             );
                         }
-                        self.emit_arg_type_mismatches(args, &resolution.signature.params);
+                        self.record_call_arg_binding(
+                            callee,
+                            args,
+                            ParamsShape::Single(Arc::<[Ty]>::from(
+                                &resolution.signature.params[..],
+                            )),
+                        );
                         self.expr_types.insert(callee, Ty::Unknown);
                         return resolution.return_type;
                     }
@@ -1208,7 +1337,19 @@ impl<'db> InferenceContext<'db> {
                             &mut info.params,
                         );
                     }
-                    self.emit_arg_type_mismatches_overloaded(args, &info.params, &info.overloads);
+                    self.record_call_arg_binding(
+                        callee,
+                        args,
+                        ParamsShape::Overloaded {
+                            flat: Arc::<[Ty]>::from(&info.params[..]),
+                            overloads: info
+                                .overloads
+                                .iter()
+                                .map(|ov| Arc::<[Ty]>::from(&ov[..]))
+                                .collect::<Vec<Arc<[Ty]>>>()
+                                .into(),
+                        },
+                    );
                     info.return_ty
                 }
                 None => {
@@ -1344,15 +1485,40 @@ impl<'db> InferenceContext<'db> {
                     }
                 };
 
-                // Type-check only when we picked an overload that hadn't
-                // already passed the per-arg `is_assignable` test (the
-                // `arity_match` fallback or the closest-by-distance
-                // fallback). When `full_match` is `Some`, the chosen
-                // overload already passed all type checks above and
-                // re-emitting would be redundant noise.
-                if full_match.is_none() {
-                    self.emit_arg_type_mismatches(args, &chosen.params);
-                }
+                // Argument-binding policy.
+                //
+                // We always record (do NOT short-circuit on a base-time
+                // `full_match`). Reason: gradual typing makes
+                // `is_assignable(Unknown, T) = true`, so a base-time
+                // `full_match` is reachable for an arg whose inferred
+                // type is `Unknown` — at which point narrowing could
+                // refine it to a concrete type that mismatches the
+                // chosen overload. Skipping the record on
+                // `full_match.is_some()` would let those narrowing-
+                // visible mismatches escape silently.
+                //
+                // `Overloaded { flat, overloads }` (instead of
+                // `Single(chosen)`) lets the downstream
+                // `arg_diagnostics_query`'s `any_accepts` retry against
+                // ALL overloads with narrowed types — this matters when
+                // base types match overload A but narrowing makes only
+                // overload B acceptable, and vice versa. `flat` keeps
+                // the base-time `chosen` so a "no overload accepts"
+                // failure renders the message against the same overload
+                // the legacy emitter would have picked.
+                let overloads_arc: Arc<[Arc<[Ty]>]> = sigs
+                    .iter()
+                    .map(|s| Arc::<[Ty]>::from(&s.params[..]))
+                    .collect::<Vec<_>>()
+                    .into();
+                self.record_call_arg_binding(
+                    callee,
+                    args,
+                    ParamsShape::Overloaded {
+                        flat: Arc::<[Ty]>::from(&chosen.params[..]),
+                        overloads: overloads_arc,
+                    },
+                );
                 // For multi-overload functions whose return types differ,
                 // collapse to a union; otherwise just take the chosen
                 // signature's return type. The 23 multi-overload platform
@@ -1412,7 +1578,11 @@ impl<'db> InferenceContext<'db> {
                 // `Ty::Unknown` on either side as permissive — typical
                 // for BSL where param declarations are often absent or
                 // only partially typed via JSDoc.
-                self.emit_arg_type_mismatches(args, params);
+                self.record_call_arg_binding(
+                    callee,
+                    args,
+                    ParamsShape::Single(Arc::<[Ty]>::from(&params[..])),
+                );
 
                 // Return function's return type
                 (**ret).clone()
@@ -1483,7 +1653,11 @@ impl<'db> InferenceContext<'db> {
 
                 // Argument type check — same rationale as the
                 // plain-function branch in `infer_call`.
-                self.emit_arg_type_mismatches(args, &resolution.signature.params);
+                self.record_call_arg_binding(
+                    call_expr,
+                    args,
+                    ParamsShape::Single(Arc::<[Ty]>::from(&resolution.signature.params[..])),
+                );
 
                 // Return method's return type
                 resolution.return_type
@@ -1606,7 +1780,11 @@ impl<'db> InferenceContext<'db> {
                 }
 
                 // Argument type check — mirrors `infer_qualified_call`.
-                self.emit_arg_type_mismatches(args, &resolution.signature.params);
+                self.record_call_arg_binding(
+                    call_expr,
+                    args,
+                    ParamsShape::Single(Arc::<[Ty]>::from(&resolution.signature.params[..])),
+                );
 
                 resolution.return_type
             }
@@ -1655,7 +1833,11 @@ impl<'db> InferenceContext<'db> {
                             found: args.len(),
                         });
                     }
-                    self.emit_arg_type_mismatches(args, &res.signature.params);
+                    self.record_call_arg_binding(
+                        call_expr,
+                        args,
+                        ParamsShape::Single(Arc::<[Ty]>::from(&res.signature.params[..])),
+                    );
                     return res.return_ty;
                 }
 
@@ -1679,19 +1861,6 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    /// Emit a [`InferenceDiagnostic::TypeMismatch`] per argument whose
-    /// inferred type is not assignable to the corresponding parameter
-    /// type.
-    ///
-    /// Walks `args.iter().zip(params.iter())`, so an extra unpaired
-    /// argument (caught separately by
-    /// [`InferenceDiagnostic::MismatchedArgCount`]) does not also fire
-    /// a pair-wise mismatch. The per-pair predicate is
-    /// [`crate::subtype::is_assignable`] — `Ty::Unknown` on either
-    /// side is permissive (see the `GRADUAL TYPING` note in
-    /// [`crate::subtype`]), so expressions the inferrer could not type
-    /// and parameters without declared types produce no false
-    /// positives.
     /// Is `(mdo_type, mdo_name)` declared in a configuration visible from
     /// the current file?
     ///
@@ -1812,71 +1981,6 @@ impl<'db> InferenceContext<'db> {
         } else if is_set {
             params[0] = value_ty;
         }
-    }
-
-    fn emit_arg_type_mismatches(&mut self, args: &[ExprId], params: &[Ty]) {
-        for (arg_id, param_ty) in args.iter().zip(params.iter()) {
-            let arg_ty = self.expr_types.get(arg_id).cloned().unwrap_or(Ty::Unknown);
-            if !crate::subtype::is_assignable(&arg_ty, param_ty) {
-                self.push_inference_diagnostic(InferenceDiagnostic::TypeMismatch {
-                    expr: *arg_id,
-                    expected: param_ty.clone(),
-                    actual: arg_ty,
-                });
-            }
-        }
-    }
-
-    /// Multi-overload-aware variant of [`Self::emit_arg_type_mismatches`].
-    ///
-    /// `overloads` is the per-variant parameter list from
-    /// [`crate::method_lookup::MethodInfo::overloads`]. When empty, the
-    /// method is single-overload and we fall back to the legacy single-
-    /// signature check against `flat_params`.
-    ///
-    /// Otherwise: a call is silently accepted as soon as ANY overload's
-    /// parameter list passes the per-arg `is_assignable` check (and the
-    /// argument count fits within that overload's declared length). Only
-    /// when no overload accepts do we emit diagnostics — chosen against
-    /// the overload whose param-count is closest to `args.len()`, falling
-    /// back to the first overload to keep the error message anchored to
-    /// declared parameter types.
-    fn emit_arg_type_mismatches_overloaded(
-        &mut self,
-        args: &[ExprId],
-        flat_params: &[Ty],
-        overloads: &[Vec<Ty>],
-    ) {
-        if overloads.is_empty() {
-            self.emit_arg_type_mismatches(args, flat_params);
-            return;
-        }
-
-        let inferred: Vec<Ty> =
-            args.iter().map(|a| self.expr_types.get(a).cloned().unwrap_or(Ty::Unknown)).collect();
-
-        let any_accepts = overloads.iter().any(|params| {
-            // Reject overloads with fewer slots than supplied args — the
-            // platform-help cap is per-overload, so excess args mean a
-            // different overload was intended (or none).
-            if args.len() > params.len() {
-                return false;
-            }
-            inferred.iter().zip(params.iter()).all(|(a, p)| crate::subtype::is_assignable(a, p))
-        });
-        if any_accepts {
-            return;
-        }
-
-        // No overload accepts — pick the one whose param-count is closest
-        // to `args.len()` for the diagnostic. Stable preference for the
-        // first matching overload keeps the message reproducible.
-        let chosen = overloads
-            .iter()
-            .min_by_key(|params| params.len().abs_diff(args.len()))
-            .map(|v| v.as_slice())
-            .unwrap_or(flat_params);
-        self.emit_arg_type_mismatches(args, chosen);
     }
 }
 
@@ -2055,6 +2159,9 @@ pub fn infer_query(db: &dyn HirDatabase, file_id: FileId) -> Arc<InferenceResult
         result.var_types.extend(body_result.var_types);
         let owner = body_result.owner;
         result.diagnostics.extend(body_result.diagnostics.into_iter().map(|d| (owner, d)));
+        // Call-site arg bindings carry their own owner field, so we just
+        // append. `arg_diagnostics_query` consumes the file-wide list.
+        result.call_arg_bindings.extend(body_result.call_arg_bindings);
     };
 
     // Infer module-level code (statements outside procedures/functions)
