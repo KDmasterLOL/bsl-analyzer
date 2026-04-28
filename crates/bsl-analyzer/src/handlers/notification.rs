@@ -121,7 +121,7 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 
     // Process VFS changes and sync to Salsa database
     let process_start = Instant::now();
-    state.process_changes();
+    state.process_changes(false);
     let process_changes_ms = process_start.elapsed().as_millis() as u64;
 
     // Preload dependencies in background for fast GoToDefinition
@@ -252,7 +252,7 @@ pub fn handle_did_change(
     }
 
     // Process VFS changes and sync to Salsa database (triggers incremental recomputation)
-    state.process_changes();
+    state.process_changes(false);
 
     tracing::debug!("Document updated successfully: {}", uri);
 

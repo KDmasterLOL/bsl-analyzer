@@ -128,7 +128,7 @@ impl GlobalState {
     /// 2. Applies them to the Salsa database
     /// 3. Ensures files are mapped to SourceRoot and added to FileSet
     /// 4. Returns (has_changes, config_changed)
-    pub fn process_changes(&mut self) -> (bool, bool) {
+    pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> (bool, bool) {
         use base_db::SourceDatabase;
 
         let start = Instant::now();
@@ -222,8 +222,12 @@ impl GlobalState {
         }
 
         if metadata_xml_changed {
-            tracing::info!("bumping metadata version after XML change");
-            self.analysis_host.raw_database_mut().bump_metadata_version();
+            if suppress_metadata_bump {
+                tracing::debug!("suppressing metadata version bump during initial sync");
+            } else {
+                tracing::info!("bumping metadata version after XML change");
+                self.analysis_host.raw_database_mut().bump_metadata_version();
+            }
         }
 
         tracing::info!(

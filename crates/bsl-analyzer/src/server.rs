@@ -186,8 +186,11 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                         handle_vfs_msg(state, pending_files, false)?;
                     }
 
-                    // Sync all accumulated VFS changes to Salsa
-                    state.process_changes();
+                    // During the cold-start sync every workspace file shows up as a VFS
+                    // change, including all `.xml` metadata files. Suppress the metadata
+                    // bump for this sweep so it does not invalidate the configuration cache
+                    // immediately before `warm_metadata_cache` populates it.
+                    state.process_changes(true);
 
                     state.init_source_root();
 
@@ -391,7 +394,7 @@ fn handle_vfs_msg(
     }
 
     // Process changes and sync to Salsa database
-    let (_, config_changed) = state.process_changes();
+    let (_, config_changed) = state.process_changes(false);
 
     // If config changed, schedule diagnostics for all open files
     if config_changed {

@@ -347,7 +347,7 @@ mod vfs_race_tests {
             vfs.set_file_contents(vfs_path, Some(Arc::from("Процедура Test() КонецПроцедуры")));
         }
 
-        state.process_changes();
+        state.process_changes(false);
 
         let text1 = {
             use base_db::SourceDatabase;
@@ -364,7 +364,7 @@ mod vfs_race_tests {
             );
         }
 
-        state.process_changes();
+        state.process_changes(false);
         state.init_source_root();
 
         let text2 = {
