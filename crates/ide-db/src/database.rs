@@ -393,6 +393,13 @@ impl hir::HirDatabase for RootDatabaseImpl {
         hir::narrow_query(self, file_id, owner)
     }
 
+    fn arg_diagnostics(
+        &self,
+        file_id: FileId,
+    ) -> Arc<Vec<(hir::DefWithBodyId, hir::InferenceDiagnostic)>> {
+        hir::arg_diagnostics_query(self, file_id)
+    }
+
     fn type_narrowing_enabled(&self) -> bool {
         RootDatabaseImpl::type_narrowing_enabled(self)
     }

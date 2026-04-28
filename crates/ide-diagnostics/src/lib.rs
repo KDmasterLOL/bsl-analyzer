@@ -65,7 +65,7 @@ pub fn simple_hir_diagnostic(
 }
 
 use hir_dispatch::collect_hir_diagnostics;
-use hir_inference_dispatch::collect_inference_diagnostics;
+use hir_inference_dispatch::{collect_arg_diagnostics, collect_inference_diagnostics};
 use metadata_dispatch::collect_metadata_diagnostics;
 use runner::{
     collect_configuration_diagnostics, collect_dataflow_diagnostics, collect_item_tree_diagnostics,
@@ -113,6 +113,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // 7. Type-inference diagnostics (BSL-TY-*, emitted by hir-ty::infer)
     result.extend(safe_collect("hir_inference", || collect_inference_diagnostics(ctx)));
+
+    // 7b. Narrowing-aware argument-mismatch diagnostics (BSL-TY-TypeMismatch
+    //     produced by hir-ty::arg_diagnostics_query — runs after the
+    //     narrowing overlay, so guards like `If X <> Undefined Then …`
+    //     correctly suppress false positives that the inference-stage
+    //     collector cannot, since `narrow → infer` rules out reading the
+    //     overlay from inside `infer_query`).
+    result.extend(safe_collect("hir_arg_inference", || collect_arg_diagnostics(ctx)));
 
     // 8. Dataflow-based diagnostics (using CFG + liveness analysis)
     result.extend(safe_collect("dataflow", || collect_dataflow_diagnostics(ctx)));

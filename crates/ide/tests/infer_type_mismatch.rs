@@ -72,9 +72,16 @@ fn setup_impl(fixture_text: &str, attach_designer_config: bool) -> (RootDatabase
 }
 
 fn mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Ty, Ty)> {
+    // Argument-`TypeMismatch` diagnostics live in `arg_diagnostics` after
+    // the narrowing-aware split (M4). Inference itself only retains
+    // non-argument `TypeMismatch` shapes (today: none — the variant is
+    // currently used only by the arg path), so reading both sources
+    // keeps these tests robust if a future caller adds non-arg
+    // mismatches back inside `infer_query`.
     db.infer(file_id)
         .diagnostics
         .iter()
+        .chain(db.arg_diagnostics(file_id).iter())
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
                 Some((expected.clone(), actual.clone()))
@@ -322,16 +329,18 @@ fn type_mismatch_does_not_double_fire_on_arg_count_mismatch() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup(fixture);
-    let diags = db.infer(file_id).diagnostics.clone();
+    let infer_diags = db.infer(file_id).diagnostics.clone();
+    let arg_diags = db.arg_diagnostics(file_id);
 
-    let count_mismatches: Vec<_> = diags
+    let count_mismatches: Vec<_> = infer_diags
         .iter()
         .filter(|(_, d)| matches!(d, InferenceDiagnostic::MismatchedArgCount { .. }))
         .collect();
     assert_eq!(count_mismatches.len(), 1, "exactly one MismatchedArgCount expected");
 
-    let type_mismatches: Vec<_> = diags
+    let type_mismatches: Vec<_> = infer_diags
         .iter()
+        .chain(arg_diags.iter())
         .filter(|(_, d)| matches!(d, InferenceDiagnostic::TypeMismatch { .. }))
         .collect();
     assert!(

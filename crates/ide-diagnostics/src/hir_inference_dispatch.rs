@@ -44,12 +44,47 @@ pub fn collect_inference_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic
         return Vec::new();
     }
 
-    let module_bodies = ctx.module_bodies();
+    dispatch_pairs(ctx, &infer.diagnostics)
+}
 
+/// Collect narrowing-aware argument-mismatch diagnostics for the
+/// current file.
+///
+/// Mirror of [`collect_inference_diagnostics`] for the
+/// [`hir::HirDatabase::arg_diagnostics`] query. Runs as its own
+/// orchestrator stage right after inference so diagnostics produced
+/// **after** the narrowing overlay reach the same dispatch /
+/// deduplication path as the rest of the BSL-TY-* family.
+pub fn collect_arg_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // `arg_diagnostics_query` only ever produces `TypeMismatch`; gate
+    // on that single code rather than the full BSL-TY-* set.
+    if !ctx.config.any_enabled(&[DiagnosticCode::TypeMismatch]) {
+        return Vec::new();
+    }
+
+    let arg_diags = ctx.arg_diagnostics();
+    if arg_diags.is_empty() {
+        return Vec::new();
+    }
+
+    dispatch_pairs(ctx, &arg_diags)
+}
+
+/// Shared `(owner, diag) → Diagnostic` resolution used by both
+/// inference-stage and arg-stage collectors.
+///
+/// The `BodySourceMap` lookup, `ExprId → TextRange` resolution and
+/// drop-on-miss policy are all common — duplicating them between the
+/// two collectors would be a guaranteed source of skew the next time
+/// the source-map shape changes.
+fn dispatch_pairs(
+    ctx: &DiagnosticsContext,
+    pairs: &[(DefWithBodyId, InferenceDiagnostic)],
+) -> Vec<Diagnostic> {
+    let module_bodies = ctx.module_bodies();
     let mut diagnostics = Vec::new();
 
-    for (owner, diag) in &infer.diagnostics {
-        // Resolve the owning BodySourceMap for this diagnostic's body.
+    for (owner, diag) in pairs {
         let source_map = match owner {
             DefWithBodyId::Method(local_id) => module_bodies.source_map(*local_id),
             DefWithBodyId::ModuleCode => module_bodies.module_code_result().map(|r| &r.source_map),

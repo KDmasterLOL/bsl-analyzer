@@ -4,7 +4,7 @@ use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId};
 use std::sync::Arc;
 use vfs::FileId;
 
-use crate::infer::InferenceResult;
+use crate::infer::{InferenceDiagnostic, InferenceResult};
 use crate::narrow::NarrowState;
 use crate::Ty;
 
@@ -82,6 +82,26 @@ pub trait HirDatabase: ConfigsDatabase {
         file_id: FileId,
         owner: DefWithBodyId,
     ) -> Option<Arc<dataflow::DataflowResult<NarrowState>>>;
+
+    /// Narrowing-aware argument type-mismatch diagnostics for `file_id`.
+    ///
+    /// Consumes [`HirDatabase::infer`] (for the per-call-site
+    /// `(args, params)` shape recorded during inference) and
+    /// [`HirDatabase::narrow`] (for the per-program-point overlay).
+    /// Each emitted [`InferenceDiagnostic::TypeMismatch`] is paired
+    /// with its owning [`DefWithBodyId`] so ide-diagnostics can resolve
+    /// the body-local `ExprId` through the right `BodySourceMap`.
+    ///
+    /// Inference itself no longer emits argument-`TypeMismatch`
+    /// diagnostics — moving them out lets this query consult the
+    /// narrowing overlay before deciding, so guards like
+    /// `If X <> Undefined Then …` correctly suppress false positives.
+    /// `MismatchedArgCount` stays inside `infer_query` (no narrowing
+    /// dependency).
+    ///
+    /// # Implementation
+    /// Should delegate to [`crate::arg_diagnostics::arg_diagnostics_query`].
+    fn arg_diagnostics(&self, file_id: FileId) -> Arc<Vec<(DefWithBodyId, InferenceDiagnostic)>>;
 
     /// Whether the type narrowing overlay (ADR-01 Option A) is enabled.
     ///

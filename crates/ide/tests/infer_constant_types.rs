@@ -77,9 +77,12 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty>
 }
 
 fn type_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Ty, Ty)> {
+    // Argument `TypeMismatch` lives in `arg_diagnostics` after the
+    // narrowing-aware split. Chain both sources for forward compatibility.
     db.infer(file_id)
         .diagnostics
         .iter()
+        .chain(db.arg_diagnostics(file_id).iter())
         .filter_map(|(_, d)| match d {
             InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
                 Some((expected.clone(), actual.clone()))
