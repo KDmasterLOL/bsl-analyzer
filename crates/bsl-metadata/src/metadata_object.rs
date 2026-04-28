@@ -384,6 +384,15 @@ pub struct MetadataObject {
     /// Code series mode (for Catalog, ChartOfCharacteristicTypes, ChartOfAccounts)
     #[serde(default)]
     pub code_series: crate::enums::CodeSeries,
+    /// Declared value type (for Constant only).
+    ///
+    /// Constants in BSL have a single value-type slot, not an attribute
+    /// list — `attributes` stays empty. `Composite` covers union shapes
+    /// (`<Type>Строка</Type><Type>Неопределено</Type>`) without widening
+    /// the attribute model. `None` means the parser saw no `<Type>`
+    /// element or the constant predates type extraction.
+    #[serde(default)]
+    pub constant_type: Option<AttributeType>,
 }
 
 /// Metadata object attribute (custom field).
@@ -654,6 +663,7 @@ impl MetadataObject {
             predefined_items: Vec::new(),
             check_unique: false,
             code_series: crate::enums::CodeSeries::default(),
+            constant_type: None,
         }
     }
 
@@ -674,6 +684,7 @@ impl MetadataObject {
             predefined_items: Vec::new(),
             check_unique: false,
             code_series: crate::enums::CodeSeries::default(),
+            constant_type: None,
         }
     }
 
@@ -695,7 +706,13 @@ impl MetadataObject {
             predefined_items: Vec::new(),
             check_unique: false,
             code_series: crate::enums::CodeSeries::default(),
+            constant_type: None,
         }
+    }
+
+    /// Set the declared value type (for [`MdoType::Constant`]).
+    pub fn set_constant_type(&mut self, value: AttributeType) {
+        self.constant_type = Some(value);
     }
 
     /// Set check_unique property

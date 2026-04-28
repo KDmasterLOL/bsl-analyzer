@@ -115,8 +115,16 @@ pub enum Ty {
     /// Function or procedure type.
     ///
     /// In BSL, functions and procedures are first-class values.
-    /// params: parameter types, ret: return type (Undefined for procedures).
-    Function { params: Box<[Ty]>, ret: Box<Ty> },
+    /// `params` are the declared parameter types (positional), `defaults` is
+    /// a parallel mask where `true` at index `i` means parameter `i` has a
+    /// default value (i.e. is optional at the call site), `max_args` is the
+    /// hard upper bound on caller-supplied arguments (`Some(M)` caps at `M`,
+    /// `None` means unbounded — true variadic), and `ret` is the return type
+    /// (`Undefined` for procedures).
+    ///
+    /// `defaults.len() == params.len()` is an invariant on the constructor
+    /// path; consumers may rely on it.
+    Function { params: Box<[Ty]>, defaults: Box<[bool]>, max_args: Option<u32>, ret: Box<Ty> },
 
     /// Platform object type not covered by specific Ty variants.
     ///
@@ -589,16 +597,33 @@ pub struct FunctionSignature {
 
     /// Return type (`Undefined` for procedures).
     pub ret: Box<Ty>,
+
+    /// Maximum number of arguments the caller may supply.
+    ///
+    /// - `Some(M)` enforces a hard upper bound of `M` arguments. For a
+    ///   fixed-arity signature this is `params.len()`; for a documented
+    ///   variadic — `СтрШаблон(Шаблон, Значение1-Значение10)` — this is
+    ///   the platform's documented cap (`1 + 10 = 11`).
+    /// - `None` means no upper bound (truly unbounded variadic, e.g. user
+    ///   helpers whose tail length the platform never specified).
+    ///
+    /// The lower bound `args.len() >= required_count()` is unaffected.
+    /// BSL has no syntactic `...`; this is recovered from the platform-help
+    /// idiom of naming the tail slot `<name>1-<name>N`.
+    pub max_args: Option<u32>,
 }
 
 impl FunctionSignature {
-    /// Create a new function signature with all parameters required.
+    /// Create a new function signature with all parameters required and a
+    /// fixed-arity upper bound (`max_args = Some(params.len())`).
     pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
+        let max_args = Some(params.len() as u32);
         let defaults = vec![false; params.len()].into_boxed_slice();
-        Self { params: params.into_boxed_slice(), defaults, ret: Box::new(ret) }
+        Self { params: params.into_boxed_slice(), defaults, ret: Box::new(ret), max_args }
     }
 
-    /// Create a new function signature with explicit per-parameter defaults.
+    /// Create a new function signature with explicit per-parameter defaults
+    /// and a fixed-arity upper bound (`max_args = Some(params.len())`).
     ///
     /// Panics in debug if `params.len() != defaults.len()`.
     pub fn new_with_defaults(params: Vec<Ty>, defaults: Vec<bool>, ret: Ty) -> Self {
@@ -607,10 +632,12 @@ impl FunctionSignature {
             defaults.len(),
             "FunctionSignature::new_with_defaults: params/defaults length mismatch"
         );
+        let max_args = Some(params.len() as u32);
         Self {
             params: params.into_boxed_slice(),
             defaults: defaults.into_boxed_slice(),
             ret: Box::new(ret),
+            max_args,
         }
     }
 
@@ -622,6 +649,13 @@ impl FunctionSignature {
     /// Create a function signature with known return type. All params required.
     pub fn function(params: Vec<Ty>, ret: Ty) -> Self {
         Self::new(params, ret)
+    }
+
+    /// Override the upper bound on argument count. `Some(M)` caps at `M`;
+    /// `None` means unbounded (truly variadic with no documented limit).
+    pub fn with_max_args(mut self, max_args: Option<u32>) -> Self {
+        self.max_args = max_args;
+        self
     }
 
     /// Number of arguments that the caller MUST supply.
@@ -686,7 +720,13 @@ mod tests {
         assert_eq!(Ty::Unknown.display_name(), "Unknown");
         assert_eq!(Ty::Array.display_name(), "Array");
         assert_eq!(
-            Ty::Function { params: Box::new([]), ret: Box::new(Ty::Undefined) }.display_name(),
+            Ty::Function {
+                params: Box::new([]),
+                defaults: Box::new([]),
+                max_args: Some(0),
+                ret: Box::new(Ty::Undefined),
+            }
+            .display_name(),
             "Function"
         );
     }
@@ -700,7 +740,13 @@ mod tests {
 
     #[test]
     fn test_is_function() {
-        assert!(Ty::Function { params: Box::new([]), ret: Box::new(Ty::Undefined) }.is_function());
+        assert!(Ty::Function {
+            params: Box::new([]),
+            defaults: Box::new([]),
+            max_args: Some(0),
+            ret: Box::new(Ty::Undefined),
+        }
+        .is_function());
         assert!(!Ty::Number.is_function());
         assert!(!Ty::Unknown.is_function());
     }

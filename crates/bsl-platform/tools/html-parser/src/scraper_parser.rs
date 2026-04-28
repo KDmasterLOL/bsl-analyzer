@@ -236,84 +236,147 @@ fn extract_param_name(html: &str) -> Option<String> {
     None
 }
 
-/// Extracts parameter type from element and following siblings
+/// Extracts parameter type from element and following siblings.
+///
+/// **Algorithm.** Builds a single accumulating buffer from the rubric's
+/// `inner_html` plus following sibling text. After every accumulation
+/// step the buffer is fed to the **strict** [`extract_type_from_text`],
+/// which only returns `Some` once a real terminator (`.`, `\n`, `<br>`)
+/// follows the `Тип: ` prefix. This is load-bearing: the prior
+/// implementation accepted partial text via a 200-char fallback inside
+/// `extract_type_from_text` and returned eagerly after the FIRST type-name
+/// arrived in the buffer (e.g. `Тип: Число `, before later siblings
+/// contributed `Строка, КолонкаТаблицыЗначений`). The result was that
+/// every multi-type platform parameter in `platform_data.json` got
+/// truncated to its first variant — which caused false-positive
+/// `TypeMismatch` diagnostics on legitimate `String` arguments to
+/// `ТаблицаЗначений.ВыгрузитьКолонку(<Колонка>)` and similar methods.
+///
+/// Once the sibling walk exhausts (next-rubric / depth limit / EOF) the
+/// permissive companion [`extract_type_from_text_unterminated`] runs
+/// once over the final buffer — capped at 200 chars to avoid bleeding
+/// into description prose, but accepting whatever was collected.
 fn extract_param_type(element: &ElementRef) -> Option<String> {
-    // First, try to find type inside the element itself
-    let inner = element.inner_html();
-    if let Some(type_str) = extract_type_from_text(&inner) {
+    // Seed the buffer with the rubric's own inner_html — types
+    // sometimes live entirely inside the rubric block (e.g.
+    // `<div class="V8SH_rubric">… Тип: <a>Number</a>.</div>`), and
+    // sometimes straddle the closing `</div>` because the platform's
+    // emitted HTML is loose. A unified buffer handles both.
+    let mut buffer = element.inner_html();
+    if let Some(type_str) = extract_type_from_text(&buffer) {
         return Some(type_str);
     }
 
-    // If not found, collect all following content until next rubric or too far
-    // This handles cases where type is in mixed text/element nodes after </div>
-    let mut collected_text = String::new();
     let mut node = element.next_sibling();
     let mut search_depth = 0;
 
     while let Some(n) = node {
-        // Limit search depth to avoid going too far
         if search_depth > 10 {
             break;
         }
         search_depth += 1;
 
-        // Stop if we hit another rubric
+        // Stop at the next rubric — never bleed into a sibling
+        // parameter's `Тип: …` sentence.
         if let Some(elem) = n.value().as_element() {
             if elem.attr("class") == Some("V8SH_rubric") {
                 break;
             }
         }
 
-        // Collect text from text nodes
         if let Some(text) = n.value().as_text() {
-            collected_text.push_str(&text.text);
+            buffer.push_str(&text.text);
         }
-
-        // Collect text from element nodes (including their children)
         if let Some(elem_ref) = ElementRef::wrap(n) {
-            collected_text.push_str(&elem_ref.text().collect::<String>());
-            collected_text.push(' ');
+            buffer.push_str(&elem_ref.text().collect::<String>());
+            buffer.push(' ');
         }
 
         node = n.next_sibling();
 
-        // Check if we have found type in collected text
-        if let Some(type_str) = extract_type_from_text(&collected_text) {
+        if let Some(type_str) = extract_type_from_text(&buffer) {
             return Some(type_str);
         }
     }
 
-    None
+    // Final fallback after sibling walk is exhausted.
+    extract_type_from_text_unterminated(&buffer)
 }
 
-/// Extracts type from text containing "Тип: XXX"
+/// Extracts the `Тип: <names>` substring **only when** a real terminator
+/// (`.`, `\n`, `<br>`) follows the type list.
+///
+/// Returns `None` when no terminator is yet present in `text` — this is
+/// load-bearing for incremental sibling-walk callers (see
+/// [`extract_param_type`]). For the post-walk "use whatever we have"
+/// behaviour, see [`extract_type_from_text_unterminated`].
 fn extract_type_from_text(text: &str) -> Option<String> {
-    if let Some(pos) = text.find("Тип: ") {
-        let after = &text[pos + "Тип: ".len()..];
-        // Find end: period, newline, or <br>
-        let end = after
-            .find('.')
-            .or_else(|| after.find('\n'))
-            .or_else(|| after.find("<br"))
-            .unwrap_or_else(|| {
-                // Limit to 200 chars
-                after.char_indices()
-                    .nth(200)
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(after.len())
-            });
+    let pos = text.find("Тип: ")?;
+    let after = &text[pos + "Тип: ".len()..];
+    let end = after
+        .find('.')
+        .or_else(|| after.find('\n'))
+        .or_else(|| after.find("<br"))?;
+    finalize_type_substring(&after[..end])
+}
 
-        let cleaned = strip_html_tags(&after[..end]);
-        let type_str = cleaned
-            .trim()
-            .trim_end_matches('.')
-            .trim();
+/// Permissive companion to [`extract_type_from_text`] — used as the
+/// final fallback when the sibling walk is done and the strict pass
+/// never matched.
+///
+/// Crucially this **still honours real terminators** when present —
+/// only the truly-no-terminator branch falls back to a 200-char cap.
+/// This protects against the `Тип: . <br>…` shape that some platform
+/// HBK pages use to say "no specific parameter type" (e.g.
+/// `FullTextSearchManager.УстановитьРежимПолнотекстовогоПоиска`):
+/// the literal empty-type-with-`.` must surface as `None`, not as a
+/// 200-char slice of the parameter description that happens to live
+/// behind the `<br>`. Without the terminator-first pass here, the
+/// corruption leaked through to `platform_data.json` as `param_type:
+/// ".  Устанавливаемый режим …Описание:…"` (Codex flagged it at
+/// stop-time on 2026-04-28).
+fn extract_type_from_text_unterminated(text: &str) -> Option<String> {
+    let pos = text.find("Тип: ")?;
+    let after = &text[pos + "Тип: ".len()..];
+    let end = after
+        .find('.')
+        .or_else(|| after.find('\n'))
+        .or_else(|| after.find("<br"))
+        .unwrap_or_else(|| {
+            after.char_indices().nth(200).map(|(idx, _)| idx).unwrap_or(after.len())
+        });
+    finalize_type_substring(&after[..end])
+}
 
-        if !type_str.is_empty() {
-            return Some(type_str.to_string());
-        }
+/// Strip HTML tags, trim, drop the trailing dot, normalise spacing
+/// around comma separators. Shared between the strict and permissive
+/// type-extraction paths.
+///
+/// Comma normalisation is needed because the sibling walk in
+/// [`extract_param_type`] pushes a trailing `' '` after every element's
+/// text content, which combined with HTML's `", "` text nodes between
+/// `<a>` links yields `Тип: Число , Строка , КолонкаТаблицыЗначений`
+/// with stray pre-comma spaces. Downstream consumers
+/// (`resolve_platform_type_union` splits on `,` and trims) are tolerant
+/// of this, but the canonical platform_data.json form uses a tight
+/// `", "` separator, so we collapse here at the source.
+fn finalize_type_substring(raw: &str) -> Option<String> {
+    let cleaned = strip_html_tags(raw);
+    let trimmed = cleaned.trim().trim_end_matches('.').trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    None
+    // Drop empty segments that the sibling walk's trailing-space pushes
+    // can leave between commas (`Тип: A, B, , ` → `["A", "B", "", ""]`),
+    // and the trailing comma case (502+ JSON entries had `…, X, ` shapes
+    // before this filter), so the canonical comma-tight form is emitted.
+    let normalised: Vec<&str> =
+        trimmed.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if normalised.is_empty() {
+        None
+    } else {
+        Some(normalised.join(", "))
+    }
 }
 
 /// Strips HTML tags from text (same as old implementation for compatibility)
@@ -727,6 +790,125 @@ mod tests {
         assert_eq!(params[0].name, "РежимЗаписи");
         assert!(params[0].is_optional);
         assert_eq!(params[0].param_type, Some("РежимЗаписиДокумента".to_string()));
+    }
+
+    /// Real-world `ТаблицаЗначений.ВыгрузитьКолонку` shape — `Тип: …`
+    /// after the rubric `</div>` carries three comma-separated link
+    /// nodes (`Число`, `Строка`, `КолонкаТаблицыЗначений`) before the
+    /// terminating `.<br>`. Before the strict-terminator fix, the
+    /// extractor returned eagerly with just `Число` because the
+    /// premature 200-char fallback fired after the first sibling
+    /// added that single link to the buffer.
+    #[test]
+    fn test_extract_parameters_multi_type_links() {
+        let html = r#"
+            <div class="V8SH_rubric">
+                <p>&lt;Колонка&gt; (обязательный)</p>
+            </div>
+            Тип: <a href="v8help://SyntaxHelperLanguage/def_Number">Число</a>, <a href="v8help://SyntaxHelperLanguage/def_String">Строка</a>, <a href="v8help://SyntaxHelperContext/objects/.../ValueTableColumn.html">КолонкаТаблицыЗначений</a>. <br>
+            Колонка, значения которой необходимо выгрузить.
+        "#;
+
+        let params = extract_parameters(html);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "Колонка");
+        assert_eq!(
+            params[0].param_type,
+            Some("Число, Строка, КолонкаТаблицыЗначений".to_string()),
+            "all three types must survive — premature fallback used to drop the tail"
+        );
+    }
+
+    /// Variant where the entire `Тип: ...` sentence sits inside the
+    /// rubric block itself, before the closing `</div>`. The unified
+    /// `inner_html`-seeded buffer must catch it on the first
+    /// `extract_type_from_text` call.
+    #[test]
+    fn test_extract_parameters_multi_type_in_inner() {
+        let html = r#"
+            <div class="V8SH_rubric">
+                <p>&lt;Колонка&gt; (обязательный)</p>
+                Тип: <a>Число</a>, <a>Строка</a>, <a>КолонкаТаблицыЗначений</a>.
+            </div>
+        "#;
+
+        let params = extract_parameters(html);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "Колонка");
+        assert_eq!(
+            params[0].param_type,
+            Some("Число, Строка, КолонкаТаблицыЗначений".to_string()),
+        );
+    }
+
+    /// When the sibling walk runs out of nodes without ever seeing a
+    /// real terminator (`.`/`\n`/`<br>`), the permissive
+    /// post-walk fallback must still extract whatever was collected
+    /// after `Тип: `. This guards against regressions where dropping
+    /// the premature fallback inside `extract_type_from_text` could
+    /// lose the type entirely on truncated/loose markup.
+    #[test]
+    fn test_extract_parameters_no_terminator_falls_back_at_end() {
+        // No period, no <br>, no newline — only the rubric and the
+        // raw `Тип: …` text.
+        let html = "<div class=\"V8SH_rubric\"><p>&lt;Имя&gt; (обязательный)</p></div>Тип: Строка";
+
+        let params = extract_parameters(html);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "Имя");
+        assert_eq!(params[0].param_type, Some("Строка".to_string()));
+    }
+
+    /// Trailing-comma normalisation: when the source HTML has
+    /// `Тип: A, B, ` (with a stray trailing comma+space before the
+    /// terminator) — typically because the sibling walk pushes an
+    /// extra `' '` after each element — empty segments must be
+    /// filtered, not joined back as `"A, B, "`.
+    #[test]
+    fn test_extract_parameters_trailing_comma_is_normalised() {
+        let html = "<div class=\"V8SH_rubric\"><p>&lt;X&gt; (обязательный)</p></div>Тип: A, B, .";
+
+        let params = extract_parameters(html);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].param_type, Some("A, B".to_string()));
+    }
+
+    /// Real-world HBK shape `Тип: . <br>…description…` — the platform
+    /// docs use a literal empty type to say "no specific parameter
+    /// type" (e.g. `FullTextSearchManager.УстановитьРежимПолнотекстовогоПоиска`).
+    /// The unterminated fallback must NOT recover a 200-char prose
+    /// slice from the description that follows the `<br>`. With
+    /// terminator-first preference in the fallback, the empty type
+    /// surfaces as `None` (no `param_type` emitted in JSON).
+    #[test]
+    fn test_extract_parameters_empty_type_with_dot_yields_none() {
+        let html = "<div class=\"V8SH_rubric\"><p>&lt;Режим&gt; (обязательный)</p></div>Тип: . <br>Описание параметра.";
+
+        let params = extract_parameters(html);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "Режим");
+        assert_eq!(params[0].param_type, None,
+            "literal empty type (Тип: .) must surface as None, not corrupt prose");
+    }
+
+    /// Strict mode: `extract_type_from_text` must return `None` when
+    /// no terminator follows `Тип: ` — callers rely on this to keep
+    /// accumulating sibling text instead of locking in a partial
+    /// answer.
+    #[test]
+    fn test_extract_type_from_text_strict_requires_terminator() {
+        // Single token after `Тип: ` with no terminator → None.
+        assert_eq!(extract_type_from_text("Тип: Число"), None);
+        // Terminated by period → matches.
+        assert_eq!(
+            extract_type_from_text("Тип: Число."),
+            Some("Число".to_string())
+        );
+        // Multi-type, terminated → matches in full.
+        assert_eq!(
+            extract_type_from_text("Тип: Число, Строка."),
+            Some("Число, Строка".to_string())
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::defined_type::DefinedType;
 use crate::error::Result;
 use crate::event_subscription::EventSubscription;
 use crate::http_service::HTTPService;
-use crate::metadata_object::{MdoType, MetadataObject};
+use crate::metadata_object::{AttributeType, MdoType, MetadataObject};
 use crate::register::Register;
 use crate::role::Role;
 use crate::scheduled_job::ScheduledJob;
@@ -385,6 +385,18 @@ impl Configuration {
         self.metadata_objects
             .iter()
             .find(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
+    }
+
+    /// Find a constant's declared value type, if any.
+    ///
+    /// Returns [`None`] both when the constant is not declared in this
+    /// configuration **and** when it is declared without a parsed
+    /// `<Type>` element. Callers that need to distinguish "missing
+    /// constant" from "untyped constant" should use
+    /// [`Self::find_metadata_object`] directly.
+    pub fn find_constant_type(&self, name: &str) -> Option<&AttributeType> {
+        self.find_metadata_object(MdoType::Constant, name)
+            .and_then(|mdo| mdo.constant_type.as_ref())
     }
 
     /// Get all registers

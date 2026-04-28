@@ -134,8 +134,8 @@ pub fn is_assignable(from: &Ty, to: &Ty) -> bool {
     // function case anyway, so we only branch when variance actually
     // changes the answer.
     if let (
-        Ty::Function { params: from_params, ret: from_ret },
-        Ty::Function { params: to_params, ret: to_ret },
+        Ty::Function { params: from_params, ret: from_ret, .. },
+        Ty::Function { params: to_params, ret: to_ret, .. },
     ) = (from, to)
     {
         if from_params.len() != to_params.len() {
@@ -224,7 +224,12 @@ mod tests {
     use super::*;
 
     fn fn_ty(params: Vec<Ty>, ret: Ty) -> Ty {
-        Ty::Function { params: params.into_boxed_slice(), ret: Box::new(ret) }
+        // Tests in this module focus on params/ret variance only; defaults
+        // and max_args do not participate in the function subtype rule
+        // (`is_assignable` ignores them).
+        let max_args = Some(params.len() as u32);
+        let defaults = vec![false; params.len()].into_boxed_slice();
+        Ty::Function { params: params.into_boxed_slice(), defaults, max_args, ret: Box::new(ret) }
     }
 
     #[test]
