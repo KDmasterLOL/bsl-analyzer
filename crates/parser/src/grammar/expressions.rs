@@ -116,27 +116,37 @@ fn not_expr(p: &mut Parser) {
 }
 
 fn comparison_expr(p: &mut Parser) {
-    let m = p.start();
-    let lhs = p.start();
+    let mut lhs = p.start();
     additive_expr(p);
+    let mut saw_comparison = false;
 
-    match p.current() {
+    while matches!(
+        p.current(),
         // Include Eq for comparisons (needed for diagnostics like IdenticalExpressions)
         // Context determines if it's assignment or comparison
-        Some(TokenKind::Eq) | Some(TokenKind::Neq) | Some(TokenKind::Lt) | Some(TokenKind::Le)
-        | Some(TokenKind::Gt) | Some(TokenKind::Ge) => {
-            lhs.complete(p, NodeKind::Expr);
-            p.bump();
-            p.skip_trivia();
-            let rhs = p.start();
-            additive_expr(p);
-            rhs.complete(p, NodeKind::Expr);
-            m.complete(p, NodeKind::BinaryExpr);
-        }
-        _ => {
-            lhs.abandon(p);
-            m.abandon(p);
-        }
+        Some(
+            TokenKind::Eq
+                | TokenKind::Neq
+                | TokenKind::Lt
+                | TokenKind::Le
+                | TokenKind::Gt
+                | TokenKind::Ge
+        )
+    ) {
+        saw_comparison = true;
+        let m = lhs.complete(p, NodeKind::Expr).precede(p);
+        p.bump();
+        p.skip_trivia();
+        let rhs = p.start();
+        additive_expr(p);
+        rhs.complete(p, NodeKind::Expr);
+        lhs = m.complete(p, NodeKind::BinaryExpr).precede(p);
+    }
+
+    if saw_comparison {
+        lhs.complete(p, NodeKind::Expr);
+    } else {
+        lhs.abandon(p);
     }
 }
 
@@ -259,48 +269,7 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             p.bump();
             Some(m.complete(p, NodeKind::Literal))
         }
-        Some(TokenKind::String) => {
-            let m = p.start();
-            p.bump(); // Single-line string
-            Some(m.complete(p, NodeKind::Literal))
-        }
-        Some(TokenKind::StringStart) => {
-            let m = p.start();
-            // Multi-line string: StringStart (Newline Whitespace? StringPart)* StringTail
-            // Don't call skip_trivia() - newlines are part of the string structure
-            p.bump(); // StringStart
-
-            // Consume everything until STRING_TAIL (without skipping trivia)
-            // BSL allows comments between string continuation lines:
-            //   "Line1
-            //   |Line2
-            //       // Comment here
-            //   |Line3"
-            loop {
-                p.check_iteration_limit();
-                match p.current() {
-                    Some(TokenKind::StringTail) => {
-                        p.bump();
-                        break;
-                    }
-                    Some(TokenKind::Newline)
-                    | Some(TokenKind::Whitespace)
-                    | Some(TokenKind::Comment)
-                    | Some(TokenKind::StringPart) => {
-                        p.bump();
-                    }
-                    None => {
-                        p.error(); // Unclosed string (EOF)
-                        break;
-                    }
-                    _ => {
-                        p.error(); // Unexpected token in multiline string
-                        break;
-                    }
-                }
-            }
-            Some(m.complete(p, NodeKind::Literal))
-        }
+        Some(TokenKind::String) | Some(TokenKind::StringStart) => Some(string_literal(p)),
         Some(TokenKind::StringPart) | Some(TokenKind::StringTail) => {
             // These should only appear after StringStart
             p.error(); // Unexpected string fragment
@@ -337,6 +306,67 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             // Error recovery: consume unexpected token and create error node
             p.error();
             None
+        }
+    }
+}
+
+fn string_literal(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+
+    loop {
+        match p.current() {
+            Some(TokenKind::String) => {
+                p.bump();
+            }
+            Some(TokenKind::StringStart) => {
+                p.bump();
+                string_continuation_tail(p);
+            }
+            _ => break,
+        }
+
+        if !at_adjacent_string_literal(p) {
+            break;
+        }
+
+        p.skip_trivia();
+    }
+
+    m.complete(p, NodeKind::Literal)
+}
+
+fn at_adjacent_string_literal(p: &Parser) -> bool {
+    match p.current() {
+        Some(TokenKind::String | TokenKind::StringStart) => true,
+        Some(TokenKind::Whitespace | TokenKind::Newline | TokenKind::Comment | TokenKind::Bom) => {
+            matches!(p.nth_non_trivia(0), Some(TokenKind::String | TokenKind::StringStart))
+        }
+        _ => false,
+    }
+}
+
+fn string_continuation_tail(p: &mut Parser) {
+    loop {
+        p.check_iteration_limit();
+        match p.current() {
+            Some(TokenKind::StringTail) | Some(TokenKind::String) => {
+                p.bump();
+                break;
+            }
+            Some(TokenKind::Newline)
+            | Some(TokenKind::Whitespace)
+            | Some(TokenKind::Comment)
+            | Some(TokenKind::StringPart) => {
+                p.bump();
+            }
+            None => {
+                p.error(); // Unclosed string (EOF)
+                break;
+            }
+            _ => {
+                p.error(); // Unexpected token in multiline string
+                break;
+            }
         }
     }
 }

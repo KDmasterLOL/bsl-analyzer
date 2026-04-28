@@ -161,22 +161,22 @@ pub enum TokenKind {
     #[regex(r"(?i)null")]
     KwNull,
 
-    #[regex(r"#(?i)если|#(?i)if")]
+    #[regex(r"#[ \t]*(?i:если|if)")]
     PreIf,
 
-    #[regex(r"#(?i)иначеесли|#(?i)elsif")]
+    #[regex(r"#[ \t]*(?i:иначеесли|elsif)")]
     PreElsIf,
 
-    #[regex(r"#(?i)иначе|#(?i)else")]
+    #[regex(r"#[ \t]*(?i:иначе|else)")]
     PreElse,
 
-    #[regex(r"#(?i)конецесли|#(?i)endif")]
+    #[regex(r"#[ \t]*(?i:конецесли|endif)")]
     PreEndIf,
 
-    #[regex(r"#(?i)область|#(?i)region")]
+    #[regex(r"#[ \t]*(?i:область|region)")]
     PreRegion,
 
-    #[regex(r"#(?i)конецобласти|#(?i)endregion")]
+    #[regex(r"#[ \t]*(?i:конецобласти|endregion)")]
     PreEndRegion,
 
     #[regex(r"#(?i)использовать|#(?i)use")]
@@ -305,7 +305,7 @@ pub enum TokenKind {
     Exclamation, // Used in preprocessor (e.g., #!)
 
     // Numbers: floats must come before integers to match correctly
-    #[regex(r"[0-9]+\.[0-9]+")]
+    #[regex(r"[0-9]+\.[0-9]*")]
     Float,
 
     #[regex(r"[0-9]+")]
@@ -328,9 +328,13 @@ pub enum TokenKind {
     #[regex(r#"\|([^"\n\r]|"")*"#, priority = 2)]
     StringPart,
 
-    // Date literals: '20240101' or '20240101120000'
-    // Format: 'YYYYMMDD' or 'YYYYMMDDHHMMSS' (8-14 digits)
+    // Date literals:
+    // 'YYYYMMDD', 'YYYYMMDDHHMMSS', 'YYYY-MM-DD', 'YYYY.MM.DD',
+    // 'YYYY.MM.DD HH:MM.SS', or 'YYYY,MM,DD'
     #[regex(r"'[0-9]{8,14}'")]
+    #[regex(r"'[0-9]{4}-[0-9]{2}-[0-9]{2}'")]
+    #[regex(r"'[0-9]{4}\.[0-9]{2}\.[0-9]{2}( [0-9]{2}:[0-9]{2}\.[0-9]{2})?'")]
+    #[regex(r"'[0-9]{4},[0-9]{2},[0-9]{2}'")]
     Date,
 
     // Identifier: Unicode letters, digits, underscore
@@ -348,10 +352,10 @@ pub enum TokenKind {
     #[token("\n")]
     Newline,
 
-    // Whitespace (spaces, tabs, carriage returns)
+    // Whitespace (spaces, tabs, carriage returns, NBSP)
     // Must have LOWEST priority to ensure it doesn't match identifiers or other tokens
     // NOTE: We must tokenize whitespace explicitly for Rowan's full-fidelity trees
-    #[regex(r"[ \t\r]+", priority = 0)]
+    #[regex(r"[ \t\r\x{00A0}]+", priority = 0)]
     Whitespace,
 
     // UTF-8 BOM (Byte Order Mark) - treated as trivia
@@ -524,8 +528,37 @@ mod tests {
     }
 
     #[test]
+    fn test_float_number_with_trailing_dot() {
+        let tokens = tokenize("0.");
+        assert_eq!(tokens[0].kind, TokenKind::Float);
+        assert_eq!(tokens[0].text.as_str(), "0.");
+    }
+
+    #[test]
     fn test_date_literal() {
         let tokens = tokenize("'20240101'");
+        assert_eq!(tokens[0].kind, TokenKind::Date);
+    }
+
+    #[test]
+    fn test_iso_date_literal() {
+        let tokens = tokenize("'0001-01-01'");
+        assert_eq!(tokens[0].kind, TokenKind::Date);
+    }
+
+    #[test]
+    fn test_dotted_date_literals() {
+        let tokens = tokenize("'0001.01.01' '1000.01.01 00:00.00'");
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+
+        assert_eq!(non_whitespace[0].kind, TokenKind::Date);
+        assert_eq!(non_whitespace[1].kind, TokenKind::Date);
+    }
+
+    #[test]
+    fn test_comma_separated_date_literal() {
+        let tokens = tokenize("'0001,01,01'");
         assert_eq!(tokens[0].kind, TokenKind::Date);
     }
 
@@ -541,6 +574,14 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::Comment);
         assert_eq!(tokens[1].kind, TokenKind::Newline);
         assert_eq!(tokens[2].kind, TokenKind::Ident);
+    }
+
+    #[test]
+    fn test_nbsp_is_whitespace() {
+        let tokens = tokenize("А\u{00A0}=\u{00A0}1;\u{00A0}");
+        assert_eq!(tokens[1].kind, TokenKind::Whitespace);
+        assert_eq!(tokens[3].kind, TokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, TokenKind::Whitespace);
     }
 
     #[test]
@@ -562,6 +603,31 @@ mod tests {
         assert_eq!(non_whitespace[0].kind, TokenKind::PreIf);
         assert_eq!(non_whitespace[1].kind, TokenKind::Ident); // "Клиент" is now Ident, checked by parser
         assert_eq!(non_whitespace[2].kind, TokenKind::KwThen);
+    }
+
+    #[test]
+    fn test_preprocessor_directives_with_space_after_hash() {
+        let tokens = tokenize(
+            "# Если Клиент Тогда\n# ИначеЕсли Сервер Тогда\n# Иначе\n# КонецЕсли\n# Область Тест\n# КонецОбласти",
+        );
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+
+        assert_eq!(non_whitespace[0].kind, TokenKind::PreIf);
+        assert_eq!(non_whitespace[4].kind, TokenKind::PreElsIf);
+        assert_eq!(non_whitespace[8].kind, TokenKind::PreElse);
+        assert_eq!(non_whitespace[10].kind, TokenKind::PreEndIf);
+        assert_eq!(non_whitespace[12].kind, TokenKind::PreRegion);
+        assert_eq!(non_whitespace[15].kind, TokenKind::PreEndRegion);
+    }
+
+    #[test]
+    fn test_preprocessor_directive_with_tab_after_hash() {
+        let tokens = tokenize("#\tЕсли Клиент Тогда");
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+
+        assert_eq!(non_whitespace[0].kind, TokenKind::PreIf);
     }
 
     #[test]

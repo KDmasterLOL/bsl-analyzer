@@ -2,6 +2,17 @@
 
 use parser::parse;
 use std::time::Instant;
+use syntax::SyntaxKind;
+
+fn assert_clean_parse(input: &str, message: &str) {
+    let result = parse(input);
+    assert!(!result.has_errors(), "{message}");
+
+    let root = result.syntax_node();
+    let error_nodes: Vec<_> =
+        root.descendants().filter(|node| node.kind() == SyntaxKind::ERROR).collect();
+    assert!(error_nodes.is_empty(), "{message}; ERROR nodes: {error_nodes:?}");
+}
 
 #[test]
 fn test_raise_old_style_string() {
@@ -354,6 +365,32 @@ fn test_preprocessor_elsif_else() {
 }
 
 #[test]
+fn test_preprocessor_with_space_after_hash_inside_procedure() {
+    let input = r#"Процедура Тест()
+    # Если ВебКлиент Тогда
+        Возврат;
+    # Иначе
+        Сообщить("Не веб");
+    # КонецЕсли
+КонецПроцедуры"#;
+    let result = parse(input);
+    assert!(!result.has_errors(), "Should parse spaced preprocessor directives without errors");
+}
+
+#[test]
+fn test_preprocessor_parenthesized_operands_with_and() {
+    let input = r#"Процедура Тест()
+#Если (Не ВебКлиент) И (Не МобильныйКлиент) Тогда
+    ИмяАрхива = "stat.zip";
+#КонецЕсли
+КонецПроцедуры"#;
+    assert_clean_parse(
+        input,
+        "Should parse preprocessor boolean expression after a parenthesized operand",
+    );
+}
+
+#[test]
 fn test_preprocessor_multiple_elsif() {
     let input = r#"#Если ТонкийКлиент Тогда
     Процедура Тонкий() КонецПроцедуры
@@ -403,6 +440,86 @@ fn test_preprocessor_all_platform_symbols() {
 #КонецЕсли"#;
     let result = parse(input);
     assert!(!result.has_errors());
+}
+
+#[test]
+fn test_iso_date_literal_in_return_expression() {
+    let input = r#"Функция МинимальнаяДата()
+    Возврат '0001-01-01';
+КонецФункции"#;
+    let result = parse(input);
+    assert!(!result.has_errors(), "Should parse ISO date literal without errors");
+}
+
+#[test]
+fn test_dotted_and_comma_date_literals_in_expression() {
+    let input = r#"Процедура Тест()
+    Начало = '1000.01.01 00:00.00';
+    Конец = '2099.12.31 23:59.59';
+    Минимальная = Дата('0001,01,01');
+КонецПроцедуры"#;
+    assert_clean_parse(input, "Should parse dotted and comma-separated date literals");
+}
+
+#[test]
+fn test_trailing_dot_numeric_literal_in_condition() {
+    let input = r#"Процедура Тест(Значение)
+    Если Значение < 0. Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
+    let result = parse(input);
+    assert!(!result.has_errors(), "Should parse numeric literal with trailing dot without errors");
+}
+
+#[test]
+fn test_chained_comparisons_in_conditions_and_assignments() {
+    let input = r#"Процедура Тест(Значение, Блок)
+    Если 60 < Значение <= 3600 Тогда
+        Возврат;
+    КонецЕсли;
+    Если ВидСКД <> "Форма" <> НомерРаздела = "02" Тогда
+        Возврат;
+    КонецЕсли;
+    Значение1 = Блок[0] <> Блок[2] <> Блок[4];
+КонецПроцедуры"#;
+    assert_clean_parse(input, "Should parse chained comparison operators");
+}
+
+#[test]
+fn test_bare_raise_before_block_end() {
+    let input = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ВызватьИсключение
+    КонецПопытки;
+КонецПроцедуры"#;
+    assert_clean_parse(input, "Should parse bare raise without semicolon before КонецПопытки");
+}
+
+#[test]
+fn test_adjacent_string_literals() {
+    let input = r#"Процедура Тест()
+    Данные.Вставить("Ключ" "");
+    Расшифровка = """" + ЛеваяЧасть + """" + " = " + ?(Истина, """" """", """" + ПраваяЧасть + """");
+КонецПроцедуры"#;
+    assert_clean_parse(input, "Should parse adjacent string literals as one string expression");
+}
+
+#[test]
+fn test_multiline_string_without_bar_continuation() {
+    let input = r#"Процедура Тест()
+    ТекстПодсказки = НСтр("ru = 'Доплата может производиться картой,
+        "а также наличными.'");
+КонецПроцедуры"#;
+    assert_clean_parse(input, "Should parse multiline string continuation without leading bar");
+}
+
+#[test]
+fn test_nbsp_as_whitespace_in_bsl_code() {
+    let input = "Процедура Тест()\n\u{00A0}\u{00A0}\u{00A0}\u{00A0}А = 1;\u{00A0}\nКонецПроцедуры";
+    assert_clean_parse(input, "Should parse NBSP as whitespace");
 }
 
 #[test]
