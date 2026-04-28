@@ -112,9 +112,15 @@ pub enum Ty {
         owner: (MdoType, crate::Name),
     },
 
-    /// Function or procedure type.
+    /// Function or procedure type — used internally to carry a
+    /// signature through call resolution. **BSL has no first-class
+    /// function values**: a bare identifier without parentheses cannot
+    /// evaluate to a function, so `infer_path_name` never produces this
+    /// shape from a `Expr::Path`. The variant exists for the
+    /// `Expr::Call` callee path (see the `Expr::Path` callee arm in
+    /// `hir_ty::infer::infer_call`) and for tests that synthesise
+    /// signatures directly.
     ///
-    /// In BSL, functions and procedures are first-class values.
     /// `params` are the declared parameter types (positional), `defaults` is
     /// a parallel mask where `true` at index `i` means parameter `i` has a
     /// default value (i.e. is optional at the call site), `max_args` is the

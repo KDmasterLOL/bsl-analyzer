@@ -202,24 +202,135 @@ pub fn extract_parameters(html_content: &str) -> Vec<MethodParameter> {
     let mut parameters = Vec::new();
 
     for rubric in html.select(&rubric_sel) {
-        let inner = rubric.inner_html();
-
-        // Extract parameter name: &lt;ИмяПараметра&gt;
-        if let Some(param_name) = extract_param_name(&inner) {
-            let is_optional = inner.contains("(необязательный)");
-
-            // Extract type from rubric or following content
-            let param_type = extract_param_type(&rubric);
-
-            parameters.push(MethodParameter {
-                name: param_name,
-                param_type,
-                is_optional,
-            });
+        if let Some(p) = extract_parameter_from_rubric(&rubric) {
+            parameters.push(p);
         }
     }
 
     parameters
+}
+
+/// One syntax variant on a multi-overload page (e.g. `ПодключитьВнешнююКомпоненту`,
+/// `Дата`, `ОткрытьФорму`). Matches the JSON schema in `main.rs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParameterVariant {
+    /// Variant name from the `Вариант синтаксиса:` chapter (e.g.
+    /// `"По идентификатору"`). `None` for single-overload pages, where the
+    /// extractor returns one anonymous variant whose `parameters` matches
+    /// the legacy [`extract_parameters`] output.
+    pub variant_name: Option<String>,
+    pub parameters: Vec<MethodParameter>,
+}
+
+/// Partition the page's parameter rubrics by `<p class="V8SH_chapter">`
+/// boundaries.
+///
+/// **Boundaries.** A chapter whose text starts with `Вариант синтаксиса:`
+/// commits the in-flight variant and starts a new one labelled with the
+/// rest of the chapter text. A chapter whose text starts with one of the
+/// page-level end markers (`Возвращаемое значение`, `Описание` —
+/// excluding `Описание варианта метода`, `Доступность`, `Прим…` for
+/// `Примечание/Примечания/Пример/Примеры`, `См. также`, `Использование`)
+/// commits the in-flight variant and stops collecting until the next
+/// `Вариант синтаксиса:`.
+///
+/// **Anonymous fallback.** A `V8SH_rubric` encountered with no in-flight
+/// variant lazily opens an anonymous one (`variant_name = None`) — this
+/// covers single-overload pages, which is the vast majority. On those
+/// pages this function returns exactly one variant whose `parameters`
+/// vector equals the legacy [`extract_parameters`] output.
+///
+/// Compound selector `"p.V8SH_chapter, div.V8SH_rubric"` walks both kinds
+/// of element in document order — scraper's `select` is depth-first
+/// document order, which matches the source layout.
+pub fn extract_parameter_variants(html_content: &str) -> Vec<ParameterVariant> {
+    let html = Html::parse_fragment(html_content);
+    let combined_sel =
+        Selector::parse("p.V8SH_chapter, div.V8SH_rubric").unwrap();
+
+    let mut variants: Vec<ParameterVariant> = Vec::new();
+    let mut current: Option<ParameterVariant> = None;
+
+    for el in html.select(&combined_sel) {
+        let class = el.value().attr("class").unwrap_or("");
+        if class.contains("V8SH_chapter") {
+            let text = el.text().collect::<String>();
+            let trimmed = text.trim();
+
+            if let Some(rest) = trimmed.strip_prefix("Вариант синтаксиса:") {
+                if let Some(v) = current.take() {
+                    variants.push(v);
+                }
+                let name = rest.trim();
+                let variant_name = if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_string())
+                };
+                current = Some(ParameterVariant {
+                    variant_name,
+                    parameters: Vec::new(),
+                });
+            } else if is_variant_end_marker(trimmed) {
+                if let Some(v) = current.take() {
+                    variants.push(v);
+                }
+            }
+            // Other chapters (`Синтаксис:`, `Параметры:`,
+            // `Описание варианта метода:`) are no-ops — they sit
+            // inside the current variant section.
+        } else if class.contains("V8SH_rubric") {
+            if let Some(p) = extract_parameter_from_rubric(&el) {
+                let bucket = current.get_or_insert_with(|| ParameterVariant {
+                    variant_name: None,
+                    parameters: Vec::new(),
+                });
+                bucket.parameters.push(p);
+            }
+        }
+    }
+
+    if let Some(v) = current.take() {
+        variants.push(v);
+    }
+    variants
+}
+
+/// Extracts a single parameter from a `V8SH_rubric` element. Shared between
+/// [`extract_parameters`] (flat list) and [`extract_parameter_variants`]
+/// (per-variant lists).
+fn extract_parameter_from_rubric(rubric: &ElementRef) -> Option<MethodParameter> {
+    let inner = rubric.inner_html();
+    let name = extract_param_name(&inner)?;
+    let is_optional = inner.contains("(необязательный)");
+    let param_type = extract_param_type(rubric);
+    Some(MethodParameter { name, param_type, is_optional })
+}
+
+/// True for chapter labels that close any in-flight variant section.
+///
+/// `Описание варианта метода:` is explicitly NOT a boundary — it lives
+/// inside a variant. All other `Описание…` chapters (page-level
+/// description) ARE boundaries.
+///
+/// The `Прим…` family is enumerated explicitly (`Примечание`, `Примечания`,
+/// `Пример`, `Примеры`) rather than matched by prefix — `Применение` and
+/// other unrelated chapters share that prefix, and a too-broad match would
+/// cause a real variant to commit early on a chapter we don't actually
+/// understand.
+fn is_variant_end_marker(trimmed: &str) -> bool {
+    if trimmed.starts_with("Описание варианта") {
+        return false;
+    }
+    trimmed.starts_with("Возвращаемое значение")
+        || trimmed.starts_with("Описание")
+        || trimmed.starts_with("Доступность")
+        || trimmed.starts_with("Примечание")
+        || trimmed.starts_with("Примечания")
+        || trimmed.starts_with("Пример")
+        || trimmed.starts_with("Примеры")
+        || trimmed.starts_with("См. также")
+        || trimmed.starts_with("Использование")
 }
 
 /// Extracts parameter name from HTML content
@@ -839,6 +950,119 @@ mod tests {
             params[0].param_type,
             Some("Число, Строка, КолонкаТаблицыЗначений".to_string()),
         );
+    }
+
+    /// Single-overload page (no `Вариант синтаксиса:` chapter): the
+    /// variant extractor returns one anonymous variant whose parameters
+    /// match the legacy [`extract_parameters`] output. Locks the
+    /// "no behaviour change for 99% of platform pages" invariant.
+    #[test]
+    fn test_extract_parameter_variants_single_overload_anonymous() {
+        let html = r#"
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric"><p>&lt;Значение&gt; (обязательный)</p></div>Тип: Число.
+            <div class="V8SH_rubric"><p>&lt;Флаг&gt; (необязательный)</p></div>Тип: Булево.
+            <p class="V8SH_chapter">Возвращаемое значение:</p>Тип: Число.
+        "#;
+        let variants = extract_parameter_variants(html);
+        assert_eq!(variants.len(), 1, "single-overload page must yield one variant");
+        assert!(variants[0].variant_name.is_none(), "no Вариант chapter → anonymous");
+        let names: Vec<&str> = variants[0].parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Значение", "Флаг"]);
+        assert!(!variants[0].parameters[0].is_optional);
+        assert!(variants[0].parameters[1].is_optional);
+        // Parity with the legacy flat extractor.
+        let flat = extract_parameters(html);
+        let flat_names: Vec<&str> = flat.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(flat_names, names);
+    }
+
+    /// Mini-replica of the real `ПодключитьВнешнююКомпоненту` HBK page —
+    /// two `Вариант синтаксиса:` chapters, each with its own rubric set,
+    /// terminated by a `Возвращаемое значение:` end-marker. The extractor
+    /// must split into two variants whose union (across all rubrics)
+    /// equals the legacy flat output, but whose individual parameter
+    /// lists differ — slot 1 is `ИдентификаторОбъекта` in v1 and
+    /// `Местоположение` in v2.
+    #[test]
+    fn test_extract_parameter_variants_attach_addin_two_variants() {
+        let html = r#"
+            <p class="V8SH_chapter">Вариант синтаксиса: По идентификатору</p>
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric"><p>&lt;ИдентификаторОбъекта&gt; (обязательный)</p></div>Тип: Строка.
+            <p class="V8SH_chapter">Описание варианта метода:</p>
+            <p class="V8SH_chapter">Вариант синтаксиса: По имени и местоположению</p>
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric"><p>&lt;Местоположение&gt; (обязательный)</p></div>Тип: Строка.
+            <div class="V8SH_rubric"><p>&lt;Имя&gt; (обязательный)</p></div>Тип: Строка.
+            <div class="V8SH_rubric"><p>&lt;Тип&gt; (необязательный)</p></div>Тип: ТипВнешнейКомпоненты.
+            <div class="V8SH_rubric"><p>&lt;ТипПодключения&gt; (необязательный)</p></div>Тип: ТипПодключенияВнешнейКомпоненты.
+            <p class="V8SH_chapter">Возвращаемое значение:</p>Тип: Булево.
+        "#;
+        let variants = extract_parameter_variants(html);
+        assert_eq!(variants.len(), 2, "two `Вариант синтаксиса:` chapters → two variants");
+        assert_eq!(variants[0].variant_name.as_deref(), Some("По идентификатору"));
+        assert_eq!(
+            variants[0].parameters.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["ИдентификаторОбъекта"]
+        );
+        assert_eq!(variants[1].variant_name.as_deref(), Some("По имени и местоположению"));
+        assert_eq!(
+            variants[1].parameters.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["Местоположение", "Имя", "Тип", "ТипПодключения"]
+        );
+        assert!(!variants[1].parameters[0].is_optional);
+        assert!(variants[1].parameters[3].is_optional);
+        // The legacy flat extractor sees the union (5 entries) — that is
+        // the very bug `variants` exists to work around.
+        assert_eq!(extract_parameters(html).len(), 5);
+    }
+
+    /// `XMLReader.GetAttribute` shape (3 variants). Locks the user-
+    /// reported false-positive case: the `По полному имени` variant has
+    /// a single `String` param, so calling `Чтение.ПолучитьАтрибут("…")`
+    /// must accept once `MethodInfo::overloads` is populated.
+    #[test]
+    fn test_extract_parameter_variants_three_variants() {
+        let html = r#"
+            <p class="V8SH_chapter">Вариант синтаксиса: По номеру</p>
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric"><p>&lt;НомерАтрибута&gt; (обязательный)</p></div>Тип: Число.
+            <p class="V8SH_chapter">Вариант синтаксиса: По полному имени</p>
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric"><p>&lt;ПолноеИмяАтрибута&gt; (обязательный)</p></div>Тип: Строка.
+            <p class="V8SH_chapter">Вариант синтаксиса: По локальному имени и пространству имен</p>
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric"><p>&lt;ЛокальноеИмяАтрибута&gt; (обязательный)</p></div>Тип: Строка.
+            <div class="V8SH_rubric"><p>&lt;URIПространстваИмен&gt; (обязательный)</p></div>Тип: Строка.
+            <p class="V8SH_chapter">Возвращаемое значение:</p>Тип: Строка, Неопределено.
+        "#;
+        let variants = extract_parameter_variants(html);
+        assert_eq!(variants.len(), 3);
+        assert_eq!(variants[0].parameters.len(), 1);
+        assert_eq!(variants[0].parameters[0].param_type.as_deref(), Some("Число"));
+        assert_eq!(variants[1].parameters.len(), 1);
+        assert_eq!(variants[1].parameters[0].param_type.as_deref(), Some("Строка"));
+        assert_eq!(variants[2].parameters.len(), 2);
+    }
+
+    /// `Описание варианта метода:` is INSIDE a variant section — it
+    /// must NOT close the variant. Without this carve-out, the variant
+    /// would commit early and any rubrics later would land in a fresh
+    /// anonymous variant, splitting one logical overload into two.
+    #[test]
+    fn test_extract_parameter_variants_method_description_does_not_close() {
+        let html = r#"
+            <p class="V8SH_chapter">Вариант синтаксиса: Один</p>
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric"><p>&lt;Первый&gt; (обязательный)</p></div>Тип: Число.
+            <p class="V8SH_chapter">Описание варианта метода:</p>
+            <p class="V8SH_chapter">Возвращаемое значение:</p>Тип: Булево.
+        "#;
+        let variants = extract_parameter_variants(html);
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].variant_name.as_deref(), Some("Один"));
+        assert_eq!(variants[0].parameters.len(), 1);
     }
 
     /// When the sibling walk runs out of nodes without ever seeing a

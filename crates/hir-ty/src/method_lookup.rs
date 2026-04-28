@@ -53,13 +53,24 @@ use hir_def::Name;
 /// takes no arguments". `Ty::Unknown` slots appear when the platform
 /// parameter type is omitted or not recognised; inference should treat
 /// them as "any".
+///
+/// `overloads` carries per-variant parameter lists for multi-overload
+/// methods — populated when the platform JSON declares multiple
+/// `Вариант синтаксиса:` sections (e.g. `ЧтениеXML.ПолучитьАтрибут`,
+/// `ТаблицаЗначений.Скопировать`). Empty otherwise — the single
+/// signature lives in `params`. Argument-type checks accept the call
+/// when ANY overload accepts it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
     /// Return type. `Ty::Undefined` for procedures (platform methods with
     /// no declared return type).
     pub return_ty: Ty,
-    /// Parameter types, in declaration order.
+    /// Parameter types, in declaration order — flat union across
+    /// overloads. Used by hover / completion / single-signature
+    /// fallbacks.
     pub params: Vec<Ty>,
+    /// Per-overload parameter lists. Empty for single-overload methods.
+    pub overloads: Vec<Vec<Ty>>,
 }
 
 /// Resolve a method call on a typed receiver.
@@ -97,23 +108,26 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
         let live: Vec<&Ty> =
             members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
         let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
-        let mut params: Vec<Ty> = Vec::new();
+        // `params` and `overloads` MUST come from the same branch — if
+        // we let `params` win on the first hit and `overloads` on the
+        // second, callers would type-check args against overloads from
+        // a receiver shape that the chosen `params` does not represent.
+        // Cohesion rule: bind the FIRST successful branch's signature
+        // wholesale and ignore later branches' signatures (only their
+        // return types contribute to the union).
+        let mut chosen_signature: Option<(Vec<Ty>, Vec<Vec<Ty>>)> = None;
         let mut hit_any = false;
         for m in live {
             if let Some(info) = lookup_method(m, method_name) {
                 hit_any = true;
                 returns.push(info.return_ty);
-                // Parameter lists are taken from the first successful
-                // branch — platform overloads with differing signatures
-                // across union branches are vanishingly rare in HBK data,
-                // and inference only consults `params` for arity-style
-                // checks where widening is harmless.
-                if params.is_empty() {
-                    params = info.params;
+                if chosen_signature.is_none() {
+                    chosen_signature = Some((info.params, info.overloads));
                 }
             }
         }
-        return hit_any.then(|| MethodInfo { return_ty: Ty::union(returns), params });
+        let (params, overloads) = chosen_signature.unwrap_or_default();
+        return hit_any.then(|| MethodInfo { return_ty: Ty::union(returns), params, overloads });
     }
 
     match receiver_ty {
@@ -126,6 +140,11 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
                 return Some(MethodInfo {
                     return_ty: res.return_ty,
                     params: res.signature.params.to_vec(),
+                    // Manager-method resolution feeds `MethodResolution`
+                    // (single-signature); per-variant data lives only on
+                    // `PlatformMethod` and reaches us through the scalar
+                    // path below.
+                    overloads: Vec::new(),
                 });
             }
             return None;
@@ -152,6 +171,7 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
                 return Some(MethodInfo {
                     return_ty: res.return_ty,
                     params: res.signature.params.to_vec(),
+                    overloads: Vec::new(),
                 });
             }
             // MetadataRef flavours without a platform surface (register
@@ -200,20 +220,23 @@ pub fn lookup_method_with_key(
         let live: Vec<&Ty> =
             members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
         let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
-        let mut params: Vec<Ty> = Vec::new();
+        // Same cohesion rule as in `lookup_method`: bind params /
+        // overloads / key to the FIRST successful union branch, so the
+        // signature shapes always match the receiver they describe.
+        let mut chosen_signature: Option<(Vec<Ty>, Vec<Vec<Ty>>)> = None;
         let mut first_key: Option<String> = None;
         for m in live {
             if let Some((k, info)) = lookup_method_with_key(m, method_name) {
                 returns.push(info.return_ty);
-                if params.is_empty() {
-                    params = info.params;
-                }
-                if first_key.is_none() {
+                if chosen_signature.is_none() {
+                    chosen_signature = Some((info.params, info.overloads));
                     first_key = Some(k);
                 }
             }
         }
-        return first_key.map(|k| (k, MethodInfo { return_ty: Ty::union(returns), params }));
+        let (params, overloads) = chosen_signature.unwrap_or_default();
+        return first_key
+            .map(|k| (k, MethodInfo { return_ty: Ty::union(returns), params, overloads }));
     }
 
     if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::MetadataRef { .. }) {
@@ -311,7 +334,21 @@ fn to_method_info(method: &PlatformMethod) -> MethodInfo {
         .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
         .collect();
 
-    MethodInfo { return_ty, params }
+    // Per-overload param lists for multi-overload methods
+    // (`ЧтениеXML.ПолучитьАтрибут` etc.). Empty when the platform JSON
+    // declares a single signature — `params` already covers it.
+    let overloads: Vec<Vec<Ty>> = method
+        .variants
+        .iter()
+        .map(|v| {
+            v.parameters
+                .iter()
+                .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
+                .collect()
+        })
+        .collect();
+
+    MethodInfo { return_ty, params, overloads }
 }
 
 /// Lower a platform-method `param_type` string to a [`Ty`].
@@ -414,7 +451,26 @@ fn build_tabular_section_method_info(
         .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t.as_str())).unwrap_or(Ty::Unknown))
         .collect();
 
-    MethodInfo { return_ty, params }
+    // Tabular-section methods can also be multi-overload
+    // (e.g. `ТаблицаЗначений.Скопировать` has 4 variants). Same
+    // conservative lowering — no row-generic rebinding for params.
+    let overloads: Vec<Vec<Ty>> = method
+        .variants
+        .iter()
+        .map(|v| {
+            v.parameters
+                .iter()
+                .map(|p| {
+                    p.param_type
+                        .as_ref()
+                        .map(|t| lower_param_type(t.as_str()))
+                        .unwrap_or(Ty::Unknown)
+                })
+                .collect()
+        })
+        .collect();
+
+    MethodInfo { return_ty, params, overloads }
 }
 
 fn rewrite_row_generic(ty: Ty, parent: MdoType, section_name: &Name) -> Ty {
@@ -526,6 +582,7 @@ mod tests {
                 param_type: param_type.map(Into::into),
                 is_optional: false,
             }],
+            variants: Vec::new(),
             min_version: None,
             context: None,
         }

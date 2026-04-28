@@ -212,6 +212,99 @@ mod tests {
         );
     }
 
+    /// Multi-overload platform global function: `ПодключитьВнешнююКомпоненту`
+    /// has two `Вариант синтаксиса:` sections in the HBK page —
+    /// `(ИдентификаторОбъекта)` (1 arg) and
+    /// `(Местоположение, Имя, Тип, ТипПодключения)` (2 required + 2 optional).
+    /// A 2-arg call must hit the second variant and NOT fire — pre-fix the
+    /// flat-merged signature said `required=3, total=5` and reported
+    /// "ожидалось от 3 до 5, передано 2".
+    #[test]
+    fn multi_overload_attach_addin_two_args_silent() {
+        let fixture = r#"
+//- /test.bsl
+Процедура Тест(Местоположение, Идентификатор)
+    Результат = ПодключитьВнешнююКомпоненту(Местоположение, Идентификатор + "SymbolicName");
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let mismatched: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::MismatchedArgCount).collect();
+        assert!(
+            mismatched.is_empty(),
+            "ПодключитьВнешнююКомпоненту(Loc, Name) hits the 'По имени и местоположению' overload, must not fire MismatchedArgCount; got: {diags:?}"
+        );
+    }
+
+    /// Same multi-overload function, 1-arg call hits the COM variant —
+    /// also silent.
+    #[test]
+    fn multi_overload_attach_addin_one_arg_silent() {
+        let fixture = r#"
+//- /test.bsl
+Процедура Тест(ProgID)
+    Результат = ПодключитьВнешнююКомпоненту(ProgID);
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let mismatched: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::MismatchedArgCount).collect();
+        assert!(
+            mismatched.is_empty(),
+            "ПодключитьВнешнююКомпоненту(ProgID) hits the COM 'По идентификатору' overload; got: {diags:?}"
+        );
+    }
+
+    /// Multi-overload platform METHOD on a typed receiver:
+    /// `XMLReader.ПолучитьАтрибут` has three syntax variants —
+    /// `(НомерАтрибута: Число)`, `(ПолноеИмяАтрибута: Строка)`,
+    /// `(ЛокальноеИмяАтрибута: Строка, URIПространстваИмен: Строка)`.
+    /// A 1-arg call with a string literal must hit the second variant
+    /// silently. Pre-fix the flat-merged signature said the first param
+    /// was `Число`, so a `String` argument false-fired
+    /// `TypeMismatch { expected: Number, actual: String }`.
+    #[test]
+    fn multi_overload_xml_reader_get_attribute_string_arg_silent() {
+        let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    Чтение = Новый ЧтениеXML;
+    ИмяТаблицы = Чтение.ПолучитьАтрибут("Description");
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let blockers: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(d.code, DiagnosticCode::MismatchedArgCount | DiagnosticCode::TypeMismatch)
+            })
+            .collect();
+        assert!(
+            blockers.is_empty(),
+            "ЧтениеXML.ПолучитьАтрибут(\"...\") hits 'По полному имени' overload — neither TypeMismatch nor MismatchedArgCount must fire; got: {diags:?}"
+        );
+    }
+
+    /// Zero-argument call fits NO overload: the smallest required count
+    /// across overloads is 1, so the diagnostic must still fire.
+    #[test]
+    fn multi_overload_attach_addin_zero_args_fires() {
+        let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    Результат = ПодключитьВнешнююКомпоненту();
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let mismatched: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::MismatchedArgCount).collect();
+        assert_eq!(
+            mismatched.len(),
+            1,
+            "0-arg call satisfies no overload; expected one MismatchedArgCount, got: {diags:?}"
+        );
+    }
+
     /// BSL standards prefer required-first ordering, but the language allows
     /// `Функция Foo(А, Б = ..., В)`. The required-count must be the index of
     /// the LAST non-default parameter + 1 — here `В` at index 2, so required

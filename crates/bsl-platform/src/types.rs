@@ -49,12 +49,34 @@ pub struct PlatformMethod {
     pub english_name: SmolStr,
     /// Return type (e.g., "Строка")
     pub return_type: Option<SmolStr>,
-    /// Method parameters
+    /// Method parameters — flattened union across all syntax variants
+    /// (legacy field used by hover / completion). Multi-overload methods
+    /// also populate [`Self::variants`]; arity / type checks must consult
+    /// `variants`.
     pub parameters: Vec<MethodParam>,
+    /// Per-variant parameter lists for methods whose HBK page declares
+    /// several `Вариант синтаксиса:` sections (e.g.
+    /// `ЧтениеXML.ПолучитьАтрибут`, `ТаблицаЗначений.Скопировать`,
+    /// `COMSafeArray.GetValue`). Empty for the vast majority of
+    /// single-overload methods — callers should treat empty as
+    /// "use `parameters` as the only signature".
+    pub variants: Vec<MethodVariant>,
     /// Minimum version (e.g., "8.0")
     pub min_version: Option<SmolStr>,
     /// Context availability
     pub context: Option<ContextAvailability>,
+}
+
+/// One syntax variant of a multi-overload platform method. Structurally
+/// identical to [`GlobalFunctionVariant`] but kept separate so that
+/// changes to one signature kind don't accidentally widen the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodVariant {
+    /// Variant name from the `Вариант синтаксиса:` chapter (e.g.
+    /// `"По номеру"`). `None` for anonymous variants — not emitted today.
+    pub variant_name: Option<SmolStr>,
+    /// Parameters declared inside this variant's section.
+    pub parameters: Vec<MethodParam>,
 }
 
 /// Raw platform method for const initialization (internal use only)
@@ -67,8 +89,16 @@ pub struct RawPlatformMethod {
     pub english_name: &'static str,
     pub return_type: Option<&'static str>,
     pub parameters: &'static [RawMethodParam],
+    pub variants: &'static [RawMethodVariant],
     pub min_version: Option<&'static str>,
     pub context: Option<RawContextAvailability>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawMethodVariant {
+    pub variant_name: Option<&'static str>,
+    pub parameters: &'static [RawMethodParam],
 }
 
 impl From<&RawPlatformMethod> for PlatformMethod {
@@ -80,8 +110,18 @@ impl From<&RawPlatformMethod> for PlatformMethod {
             english_name: raw.english_name.into(),
             return_type: raw.return_type.map(SmolStr::from),
             parameters: raw.parameters.iter().map(MethodParam::from).collect(),
+            variants: raw.variants.iter().map(MethodVariant::from).collect(),
             min_version: raw.min_version.map(SmolStr::from),
             context: raw.context.as_ref().map(ContextAvailability::from),
+        }
+    }
+}
+
+impl From<&RawMethodVariant> for MethodVariant {
+    fn from(raw: &RawMethodVariant) -> Self {
+        Self {
+            variant_name: raw.variant_name.map(SmolStr::from),
+            parameters: raw.parameters.iter().map(MethodParam::from).collect(),
         }
     }
 }
@@ -97,12 +137,34 @@ pub struct GlobalFunction {
     pub english_name: SmolStr,
     /// Return type (e.g., "Строка")
     pub return_type: Option<SmolStr>,
-    /// Function parameters
+    /// Function parameters — flattened union across all syntax variants for
+    /// hover / completion. Multi-overload functions also populate
+    /// [`Self::variants`]; arity / type checks must consult `variants`.
     pub parameters: Vec<MethodParam>,
+    /// Per-variant parameter lists for functions whose HBK page declares
+    /// several `Вариант синтаксиса:` sections (e.g.
+    /// `ПодключитьВнешнююКомпоненту`, `Дата`, `ОткрытьФорму`).
+    /// Empty for the vast majority of single-overload functions — callers
+    /// should treat empty as "use `parameters` as the only signature".
+    pub variants: Vec<GlobalFunctionVariant>,
     /// Minimum version (e.g., "8.0")
     pub min_version: Option<SmolStr>,
     /// Context availability
     pub context: Option<ContextAvailability>,
+}
+
+/// One syntax variant of a multi-overload global function. Mirrors the
+/// `<p class="V8SH_chapter">Вариант синтаксиса: …</p>` partition of the
+/// platform HBK page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalFunctionVariant {
+    /// Human-readable variant name (the suffix after `Вариант синтаксиса:`,
+    /// e.g. "По идентификатору"). `None` for an anonymous variant — never
+    /// emitted by the parser today, but allowed in the schema so that
+    /// future single-page overloads without a chapter label can fit.
+    pub variant_name: Option<SmolStr>,
+    /// Parameters declared inside this variant's section.
+    pub parameters: Vec<MethodParam>,
 }
 
 /// Raw global function for const initialization (internal use only)
@@ -114,8 +176,16 @@ pub struct RawGlobalFunction {
     pub english_name: &'static str,
     pub return_type: Option<&'static str>,
     pub parameters: &'static [RawMethodParam],
+    pub variants: &'static [RawGlobalFunctionVariant],
     pub min_version: Option<&'static str>,
     pub context: Option<RawContextAvailability>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawGlobalFunctionVariant {
+    pub variant_name: Option<&'static str>,
+    pub parameters: &'static [RawMethodParam],
 }
 
 impl From<&RawGlobalFunction> for GlobalFunction {
@@ -126,8 +196,18 @@ impl From<&RawGlobalFunction> for GlobalFunction {
             english_name: raw.english_name.into(),
             return_type: raw.return_type.map(SmolStr::from),
             parameters: raw.parameters.iter().map(MethodParam::from).collect(),
+            variants: raw.variants.iter().map(GlobalFunctionVariant::from).collect(),
             min_version: raw.min_version.map(SmolStr::from),
             context: raw.context.as_ref().map(ContextAvailability::from),
+        }
+    }
+}
+
+impl From<&RawGlobalFunctionVariant> for GlobalFunctionVariant {
+    fn from(raw: &RawGlobalFunctionVariant) -> Self {
+        Self {
+            variant_name: raw.variant_name.map(SmolStr::from),
+            parameters: raw.parameters.iter().map(MethodParam::from).collect(),
         }
     }
 }

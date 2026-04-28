@@ -745,23 +745,21 @@ impl<'db> InferenceContext<'db> {
         let resolved = resolver.resolve_name(self.db, name);
 
         // 1. Builtins — union of Resolver's platform-global view and the
-        //    narrower hir-ty signature table. Either hit makes the name a
-        //    builtin; only the hir-ty table supplies a typed signature.
+        //    narrower hir-ty signature table. BSL has no first-class
+        //    function values: a bare identifier `СтрокаСоединения…`
+        //    without parentheses cannot evaluate to a function — the
+        //    only way to invoke a builtin is `Name(...)`, handled by
+        //    `infer_call`'s `Expr::Path` callee branch which looks up
+        //    the signature directly. So at value position we collapse
+        //    the builtin hit to `Ty::Unknown`; otherwise a parameter
+        //    or local variable that happens to share its name with a
+        //    platform global (e.g. the user-declared
+        //    `Знач СтрокаСоединенияИнформационнойБазы = ""`) would
+        //    false-fire `TypeMismatch { expected: String, actual:
+        //    Function }` when read as an argument.
         let resolver_says_builtin = matches!(resolved, Some(Resolution::Builtin(_)));
         let hir_sig = builtin::builtin_functions().get(name.as_str());
         if resolver_says_builtin || hir_sig.is_some() {
-            if let Some(sig) = hir_sig {
-                trace!("resolved {} as builtin via hir-ty signature table", name);
-                return Ty::Function {
-                    params: sig.params.clone(),
-                    defaults: sig.defaults.clone(),
-                    max_args: sig.max_args,
-                    ret: sig.ret.clone(),
-                };
-            }
-            // Resolver classifies the name as a platform global but the
-            // hir-ty signature table has no typed entry for it. Leave
-            // `Ty::Unknown` until Task 2.x broadens signature coverage.
             return Ty::Unknown;
         }
 
@@ -1210,7 +1208,7 @@ impl<'db> InferenceContext<'db> {
                             &mut info.params,
                         );
                     }
-                    self.emit_arg_type_mismatches(args, &info.params);
+                    self.emit_arg_type_mismatches_overloaded(args, &info.params, &info.overloads);
                     info.return_ty
                 }
                 None => {
@@ -1250,6 +1248,129 @@ impl<'db> InferenceContext<'db> {
             // `Expr::Call`, which is cached at the call site.
             self.expr_types.insert(callee, Ty::Unknown);
             return result;
+        }
+
+        // Bare-name callees (`ПустаяСтрока(СтрокаСоединения…)`,
+        // `Сообщить(…)`, …) resolve through the hir-ty builtin
+        // signature table directly. The bare-path arm of
+        // `infer_path_name` no longer manufactures `Ty::Function`
+        // values — BSL has no first-class function references — so a
+        // typed arity / arg-type check on a builtin call has to start
+        // from the callee `Expr::Path(name)` here, not from
+        // `callee_ty`.
+        if let Expr::Path(name) = callee_expr {
+            let name = name.clone();
+            if let Some(sigs) = builtin::builtin_functions().get(name.as_str()) {
+                debug_assert!(
+                    !sigs.is_empty(),
+                    "BuiltinFunctions::get must never return an empty overload set"
+                );
+
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+
+                let arg_count = args.len();
+                let inferred: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.expr_types.get(a).cloned().unwrap_or(Ty::Unknown))
+                    .collect();
+
+                // Two-stage overload selection — must consider BOTH arity
+                // AND argument types. Stage 1 prefers an overload that
+                // accepts on both axes (so `XYZ(string)` and `XYZ(num)`
+                // overloads dispatch correctly when the caller's actual
+                // arg type matches one of them). Stage 2 falls back to
+                // the first arity-only match (covers callers with
+                // `Ty::Unknown` arguments where types aren't yet refined).
+                // Stage 3 picks the closest-by-distance overload purely
+                // for the diagnostic message when nothing accepts.
+                let mut full_match: Option<usize> = None;
+                let mut arity_match: Option<usize> = None;
+                let mut best_idx = 0usize;
+                let mut best_distance = usize::MAX;
+                for (idx, sig) in sigs.iter().enumerate() {
+                    let required = sig
+                        .defaults
+                        .iter()
+                        .rposition(|has_default| !*has_default)
+                        .map_or(0, |i| i + 1);
+                    let too_few = arg_count < required;
+                    let too_many = sig.max_args.is_some_and(|m| arg_count > m as usize);
+                    if !too_few && !too_many {
+                        if arity_match.is_none() {
+                            arity_match = Some(idx);
+                        }
+                        // Type check: zip arg types against this overload's
+                        // params; `is_assignable` treats `Ty::Unknown` on
+                        // either side as permissive.
+                        let types_ok =
+                            inferred.iter().zip(sig.params.iter()).all(|(actual, expected)| {
+                                crate::subtype::is_assignable(actual, expected)
+                            });
+                        if types_ok && full_match.is_none() {
+                            full_match = Some(idx);
+                            break;
+                        }
+                    }
+                    let upper = sig.max_args.map_or(arg_count, |m| m as usize);
+                    let distance = if too_few {
+                        required - arg_count
+                    } else {
+                        arg_count.saturating_sub(upper)
+                    };
+                    if distance < best_distance {
+                        best_distance = distance;
+                        best_idx = idx;
+                    }
+                }
+
+                let chosen = match full_match.or(arity_match) {
+                    Some(idx) => &sigs[idx],
+                    None => {
+                        let sig = &sigs[best_idx];
+                        let required = sig
+                            .defaults
+                            .iter()
+                            .rposition(|has_default| !*has_default)
+                            .map_or(0, |i| i + 1);
+                        self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
+                            call_expr: callee,
+                            required_count: required,
+                            total_count: sig.params.len(),
+                            found: arg_count,
+                        });
+                        sig
+                    }
+                };
+
+                // Type-check only when we picked an overload that hadn't
+                // already passed the per-arg `is_assignable` test (the
+                // `arity_match` fallback or the closest-by-distance
+                // fallback). When `full_match` is `Some`, the chosen
+                // overload already passed all type checks above and
+                // re-emitting would be redundant noise.
+                if full_match.is_none() {
+                    self.emit_arg_type_mismatches(args, &chosen.params);
+                }
+                // For multi-overload functions whose return types differ,
+                // collapse to a union; otherwise just take the chosen
+                // signature's return type. The 23 multi-overload platform
+                // functions today all share a single return type per name
+                // (e.g. `Булево` for AttachAddIn), so the union path is a
+                // future-proof default.
+                let ret = if sigs.len() == 1 {
+                    (*chosen.ret).clone()
+                } else {
+                    Ty::union(sigs.iter().map(|s| (*s.ret).clone()).collect())
+                };
+                // Pin the bare callee's cached type so the second pass
+                // in `infer_all` doesn't re-enter `Expr::Path` on the
+                // function-name token. Mirrors the `Expr::Field`
+                // callee fix above.
+                self.expr_types.insert(callee, Ty::Unknown);
+                return ret;
+            }
         }
 
         // Infer callee type for non-qualified calls
@@ -1705,6 +1826,58 @@ impl<'db> InferenceContext<'db> {
             }
         }
     }
+
+    /// Multi-overload-aware variant of [`Self::emit_arg_type_mismatches`].
+    ///
+    /// `overloads` is the per-variant parameter list from
+    /// [`crate::method_lookup::MethodInfo::overloads`]. When empty, the
+    /// method is single-overload and we fall back to the legacy single-
+    /// signature check against `flat_params`.
+    ///
+    /// Otherwise: a call is silently accepted as soon as ANY overload's
+    /// parameter list passes the per-arg `is_assignable` check (and the
+    /// argument count fits within that overload's declared length). Only
+    /// when no overload accepts do we emit diagnostics — chosen against
+    /// the overload whose param-count is closest to `args.len()`, falling
+    /// back to the first overload to keep the error message anchored to
+    /// declared parameter types.
+    fn emit_arg_type_mismatches_overloaded(
+        &mut self,
+        args: &[ExprId],
+        flat_params: &[Ty],
+        overloads: &[Vec<Ty>],
+    ) {
+        if overloads.is_empty() {
+            self.emit_arg_type_mismatches(args, flat_params);
+            return;
+        }
+
+        let inferred: Vec<Ty> =
+            args.iter().map(|a| self.expr_types.get(a).cloned().unwrap_or(Ty::Unknown)).collect();
+
+        let any_accepts = overloads.iter().any(|params| {
+            // Reject overloads with fewer slots than supplied args — the
+            // platform-help cap is per-overload, so excess args mean a
+            // different overload was intended (or none).
+            if args.len() > params.len() {
+                return false;
+            }
+            inferred.iter().zip(params.iter()).all(|(a, p)| crate::subtype::is_assignable(a, p))
+        });
+        if any_accepts {
+            return;
+        }
+
+        // No overload accepts — pick the one whose param-count is closest
+        // to `args.len()` for the diagnostic. Stable preference for the
+        // first matching overload keeps the message reproducible.
+        let chosen = overloads
+            .iter()
+            .min_by_key(|params| params.len().abs_diff(args.len()))
+            .map(|v| v.as_slice())
+            .unwrap_or(flat_params);
+        self.emit_arg_type_mismatches(args, chosen);
+    }
 }
 
 /// Build the qualified `Plural.MDO` receiver-name string used in
@@ -2076,6 +2249,17 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
     }
 
+    /// `BuiltinFunctions::get` returns a slice (multi-overload aware) — for
+    /// the single-overload functions exercised here, the lone signature is
+    /// at index 0.
+    fn first_sig<'a>(
+        builtins: &'a builtin::BuiltinFunctions,
+        name: &str,
+    ) -> &'a hir_def::ty::FunctionSignature {
+        let sigs = builtins.get(name).unwrap_or_else(|| panic!("{name} should exist"));
+        &sigs[0]
+    }
+
     #[test]
     fn test_builtin_function_lookup() {
         // Verify builtin functions are accessible for inference.
@@ -2083,13 +2267,13 @@ mod tests {
         let builtins = builtin::builtin_functions();
 
         // Test that СтрДлина returns Number
-        let strlen_sig = builtins.get("стрдлина").expect("СтрДлина should exist");
+        let strlen_sig = first_sig(builtins, "стрдлина");
         assert_eq!(*strlen_sig.ret, Ty::Number);
         assert_eq!(strlen_sig.params.len(), 1);
         assert_eq!(strlen_sig.params[0], Ty::String);
 
         // Test English variant
-        let strlen_en = builtins.get("strlen").expect("StrLen should exist");
+        let strlen_en = first_sig(builtins, "strlen");
         assert_eq!(*strlen_en.ret, Ty::Number);
 
         // Test case-insensitive lookup
@@ -2099,20 +2283,19 @@ mod tests {
         // Test that the resolved type would be correct
         // When Expr::Path("СтрДлина") is inferred, it should return:
         // Ty::Function { params: [Ty::String], ret: Ty::Number }
-        if let Some(sig) = builtins.get("стрдлина") {
-            let ty = Ty::Function {
-                params: sig.params.clone(),
-                defaults: sig.defaults.clone(),
-                max_args: sig.max_args,
-                ret: sig.ret.clone(),
-            };
-            match ty {
-                Ty::Function { params, ret, .. } => {
-                    assert_eq!(params.len(), 1);
-                    assert_eq!(*ret, Ty::Number);
-                }
-                _ => panic!("Expected Function type"),
+        let sig = first_sig(builtins, "стрдлина");
+        let ty = Ty::Function {
+            params: sig.params.clone(),
+            defaults: sig.defaults.clone(),
+            max_args: sig.max_args,
+            ret: sig.ret.clone(),
+        };
+        match ty {
+            Ty::Function { params, ret, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(*ret, Ty::Number);
             }
+            _ => panic!("Expected Function type"),
         }
     }
 
@@ -2121,12 +2304,12 @@ mod tests {
         let builtins = builtin::builtin_functions();
 
         // ТекущаяДата() -> Дата
-        let current_date = builtins.get("текущаядата").expect("ТекущаяДата should exist");
+        let current_date = first_sig(builtins, "текущаядата");
         assert_eq!(*current_date.ret, Ty::Date);
         assert!(current_date.params.is_empty());
 
         // Год(Дата) -> Число
-        let year = builtins.get("год").expect("Год should exist");
+        let year = first_sig(builtins, "год");
         assert_eq!(*year.ret, Ty::Number);
         assert_eq!(year.params.len(), 1);
         assert_eq!(year.params[0], Ty::Date);
@@ -2137,7 +2320,7 @@ mod tests {
         let builtins = builtin::builtin_functions();
 
         // ТипЗнч(Any) -> Type
-        let type_of = builtins.get("типзнч").expect("ТипЗнч should exist");
+        let type_of = first_sig(builtins, "типзнч");
         assert_eq!(*type_of.ret, Ty::Type);
     }
 }
