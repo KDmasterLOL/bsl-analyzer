@@ -312,6 +312,7 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
     let mut global_function_param_names: Vec<Option<String>> = Vec::new();
     let mut global_function_context_names: Vec<Option<String>> = Vec::new();
 
+    let mut method_variants_names: Vec<Option<String>> = Vec::new();
     if let Some(methods) = data.get("methods").and_then(|v| v.as_array()) {
         for method in methods {
             // Generate parameters array
@@ -351,6 +352,79 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 }
             } else {
                 method_param_names.push(None);
+            }
+
+            // Per-variant parameter arrays for multi-overload methods
+            // (e.g. `ЧтениеXML.ПолучитьАтрибут`, `ТаблицаЗначений.Скопировать`).
+            // Mirrors the global-function variants codegen below.
+            if let Some(variants) =
+                method.get("variants").and_then(|v| v.as_array()).filter(|v| !v.is_empty())
+            {
+                let variants_array_name =
+                    format!("METHOD_VARIANTS_{}", method_variants_names.len());
+
+                let mut per_variant_param_names: Vec<Option<String>> = Vec::new();
+                for variant in variants {
+                    if let Some(vparams) = variant
+                        .get("parameters")
+                        .and_then(|v| v.as_array())
+                        .filter(|v| !v.is_empty())
+                    {
+                        let vparam_name = format!("METHOD_VARIANT_PARAMS_{}", param_counter);
+                        param_counter += 1;
+                        code.push_str(&format!("const {}: &[RawMethodParam] = &[\n", vparam_name));
+                        for param in vparams {
+                            code.push_str("    RawMethodParam {\n");
+                            code.push_str(&format!(
+                                "        name: {:?},\n",
+                                param.get("name").and_then(|v| v.as_str()).unwrap_or("")
+                            ));
+                            if let Some(param_type) =
+                                param.get("param_type").and_then(|v| v.as_str())
+                            {
+                                code.push_str(&format!(
+                                    "        param_type: Some({:?}),\n",
+                                    param_type
+                                ));
+                            } else {
+                                code.push_str("        param_type: None,\n");
+                            }
+                            code.push_str(&format!(
+                                "        is_optional: {},\n",
+                                param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
+                            ));
+                            code.push_str("    },\n");
+                        }
+                        code.push_str("];\n\n");
+                        per_variant_param_names.push(Some(vparam_name));
+                    } else {
+                        per_variant_param_names.push(None);
+                    }
+                }
+
+                code.push_str(&format!(
+                    "const {}: &[RawMethodVariant] = &[\n",
+                    variants_array_name
+                ));
+                for (variant, params_const) in variants.iter().zip(per_variant_param_names.iter()) {
+                    code.push_str("    RawMethodVariant {\n");
+                    if let Some(name) = variant.get("variant_name").and_then(|v| v.as_str()) {
+                        code.push_str(&format!("        variant_name: Some({:?}),\n", name));
+                    } else {
+                        code.push_str("        variant_name: None,\n");
+                    }
+                    if let Some(name) = params_const {
+                        code.push_str(&format!("        parameters: {},\n", name));
+                    } else {
+                        code.push_str("        parameters: &[],\n");
+                    }
+                    code.push_str("    },\n");
+                }
+                code.push_str("];\n\n");
+
+                method_variants_names.push(Some(variants_array_name));
+            } else {
+                method_variants_names.push(None);
             }
 
             // Generate context availability
@@ -395,7 +469,9 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         }
     }
 
-    // Generate global function parameter arrays and context availability constants
+    // Generate global function parameter arrays, per-variant arrays, and
+    // context availability constants
+    let mut global_function_variants_names: Vec<Option<String>> = Vec::new();
     if let Some(global_functions) = data.get("global_functions").and_then(|v| v.as_array()) {
         for function in global_functions {
             // Generate parameters array
@@ -435,6 +511,84 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 }
             } else {
                 global_function_param_names.push(None);
+            }
+
+            // Per-variant parameter arrays for multi-overload functions
+            // (e.g. `ПодключитьВнешнююКомпоненту`, `Дата`, `ОткрытьФорму`).
+            // Each variant becomes its own `RawMethodParam` slice plus a
+            // `RawGlobalFunctionVariant` wrapper that carries the
+            // human-readable variant name. The whole list of variants is
+            // emitted as one `&[RawGlobalFunctionVariant]` slice.
+            if let Some(variants) =
+                function.get("variants").and_then(|v| v.as_array()).filter(|v| !v.is_empty())
+            {
+                let variants_array_name =
+                    format!("GLOBAL_FUNC_VARIANTS_{}", global_function_variants_names.len());
+
+                // First emit the parameter arrays for each variant so
+                // they can be referenced from within the variants slice.
+                let mut per_variant_param_names: Vec<Option<String>> = Vec::new();
+                for variant in variants {
+                    if let Some(vparams) = variant
+                        .get("parameters")
+                        .and_then(|v| v.as_array())
+                        .filter(|v| !v.is_empty())
+                    {
+                        let vparam_name = format!("GLOBAL_FUNC_VARIANT_PARAMS_{}", param_counter);
+                        param_counter += 1;
+                        code.push_str(&format!("const {}: &[RawMethodParam] = &[\n", vparam_name));
+                        for param in vparams {
+                            code.push_str("    RawMethodParam {\n");
+                            code.push_str(&format!(
+                                "        name: {:?},\n",
+                                param.get("name").and_then(|v| v.as_str()).unwrap_or("")
+                            ));
+                            if let Some(param_type) =
+                                param.get("param_type").and_then(|v| v.as_str())
+                            {
+                                code.push_str(&format!(
+                                    "        param_type: Some({:?}),\n",
+                                    param_type
+                                ));
+                            } else {
+                                code.push_str("        param_type: None,\n");
+                            }
+                            code.push_str(&format!(
+                                "        is_optional: {},\n",
+                                param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
+                            ));
+                            code.push_str("    },\n");
+                        }
+                        code.push_str("];\n\n");
+                        per_variant_param_names.push(Some(vparam_name));
+                    } else {
+                        per_variant_param_names.push(None);
+                    }
+                }
+
+                code.push_str(&format!(
+                    "const {}: &[RawGlobalFunctionVariant] = &[\n",
+                    variants_array_name
+                ));
+                for (variant, params_const) in variants.iter().zip(per_variant_param_names.iter()) {
+                    code.push_str("    RawGlobalFunctionVariant {\n");
+                    if let Some(name) = variant.get("variant_name").and_then(|v| v.as_str()) {
+                        code.push_str(&format!("        variant_name: Some({:?}),\n", name));
+                    } else {
+                        code.push_str("        variant_name: None,\n");
+                    }
+                    if let Some(name) = params_const {
+                        code.push_str(&format!("        parameters: {},\n", name));
+                    } else {
+                        code.push_str("        parameters: &[],\n");
+                    }
+                    code.push_str("    },\n");
+                }
+                code.push_str("];\n\n");
+
+                global_function_variants_names.push(Some(variants_array_name));
+            } else {
+                global_function_variants_names.push(None);
             }
 
             // Generate context availability
@@ -540,6 +694,13 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 code.push_str("        parameters: &[],\n");
             }
 
+            // variants — populated only for multi-overload methods
+            if let Some(variants_name) = &method_variants_names[idx] {
+                code.push_str(&format!("        variants: {},\n", variants_name));
+            } else {
+                code.push_str("        variants: &[],\n");
+            }
+
             // min_version
             if let Some(min_version) = method.get("min_version").and_then(|v| v.as_str()) {
                 code.push_str(&format!("        min_version: Some({:?}),\n", min_version));
@@ -586,6 +747,13 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 code.push_str(&format!("        parameters: {},\n", param_name));
             } else {
                 code.push_str("        parameters: &[],\n");
+            }
+
+            // variants — populated only for multi-overload functions
+            if let Some(variants_name) = &global_function_variants_names[idx] {
+                code.push_str(&format!("        variants: {},\n", variants_name));
+            } else {
+                code.push_str("        variants: &[],\n");
             }
 
             // min_version

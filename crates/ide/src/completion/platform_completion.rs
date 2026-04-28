@@ -612,6 +612,7 @@ mod tests {
                 param_type: Some("Строка".into()),
                 is_optional: false,
             }],
+            variants: Vec::new(),
             min_version: Some("8.0".into()),
             context: Some(ContextAvailability {
                 thick_client: true,

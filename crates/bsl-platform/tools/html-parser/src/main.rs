@@ -7,7 +7,7 @@
 mod scraper_parser;
 
 use anyhow::{Context, Result};
-use scraper_parser::{CodeExample, ParamDescription}; // Reuse from scraper_parser
+use scraper_parser::{CodeExample, ParamDescription, ParameterVariant}; // Reuse from scraper_parser
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -78,9 +78,19 @@ struct MethodInfo {
     /// Return type (e.g., "Число", "Неопределено")
     #[serde(skip_serializing_if = "Option::is_none")]
     return_type: Option<String>,
-    /// Method parameters
+    /// Method parameters — flattened union across all syntax variants
+    /// (legacy field used by hover/completion). Multi-overload methods
+    /// also populate `variants`; arity / type checks must consult
+    /// `variants`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     parameters: Vec<MethodParameter>,
+    /// Per-variant parameter lists when the HBK page declares multiple
+    /// `<p class="V8SH_chapter">Вариант синтаксиса: …</p>` sections
+    /// (e.g. `ЧтениеXML.ПолучитьАтрибут`, `ТаблицаЗначений.Скопировать`).
+    /// Empty for single-overload methods — `parameters` already covers
+    /// them.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    variants: Vec<MethodVariantInfo>,
     /// Minimum version (e.g., "8.0")
     #[serde(skip_serializing_if = "Option::is_none")]
     min_version: Option<String>,
@@ -90,6 +100,23 @@ struct MethodInfo {
     /// Full documentation
     #[serde(skip_serializing_if = "Option::is_none")]
     documentation: Option<MethodDocumentation>,
+}
+
+/// One syntax variant of a multi-overload platform method.
+///
+/// Mirrors `crates/bsl-platform/src/types.rs::MethodVariant`.
+#[derive(Debug, Serialize, Deserialize)]
+struct MethodVariantInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variant_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    parameters: Vec<MethodParameter>,
+}
+
+impl From<ParameterVariant> for MethodVariantInfo {
+    fn from(v: ParameterVariant) -> Self {
+        Self { variant_name: v.variant_name, parameters: v.parameters }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,9 +130,17 @@ struct GlobalFunctionInfo {
     /// Return type (e.g., "Число", "Неопределено")
     #[serde(skip_serializing_if = "Option::is_none")]
     return_type: Option<String>,
-    /// Function parameters
+    /// Function parameters — flattened union across all syntax variants
+    /// (legacy field used by hover/completion). Multi-overload functions
+    /// also populate `variants`; arity / type checks must consult
+    /// `variants`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     parameters: Vec<MethodParameter>,
+    /// Per-variant parameter lists when the HBK page declares multiple
+    /// `<p class="V8SH_chapter">Вариант синтаксиса: …</p>` sections.
+    /// Empty for the vast majority of single-overload functions.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    variants: Vec<GlobalFunctionVariantInfo>,
     /// Minimum version (e.g., "8.0")
     #[serde(skip_serializing_if = "Option::is_none")]
     min_version: Option<String>,
@@ -115,6 +150,25 @@ struct GlobalFunctionInfo {
     /// Full documentation
     #[serde(skip_serializing_if = "Option::is_none")]
     documentation: Option<MethodDocumentation>,
+}
+
+/// One syntax variant of a multi-overload global function.
+///
+/// Mirrors `crates/bsl-platform/src/types.rs::GlobalFunctionVariant`.
+#[derive(Debug, Serialize, Deserialize)]
+struct GlobalFunctionVariantInfo {
+    /// Variant name from the `Вариант синтаксиса:` chapter (e.g.
+    /// `"По идентификатору"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variant_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    parameters: Vec<MethodParameter>,
+}
+
+impl From<ParameterVariant> for GlobalFunctionVariantInfo {
+    fn from(v: ParameterVariant) -> Self {
+        Self { variant_name: v.variant_name, parameters: v.parameters }
+    }
 }
 
 /// Constructor of a platform type (e.g. `Новый Массив(<КоличествоЭлементов>)`).
@@ -205,7 +259,7 @@ struct PropertyDocumentation {
     see_also: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct MethodParameter {
     /// Parameter name (e.g., "Значение")
     name: String,
@@ -636,6 +690,19 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                             // Extract additional information using scraper
                             let return_type = scraper_parser::extract_return_type(&html_content);
                             let parameters = scraper_parser::extract_parameters(&html_content);
+                            // Per-variant breakdown for multi-overload pages
+                            // (e.g. `ЧтениеXML.ПолучитьАтрибут`,
+                            // `ТаблицаЗначений.Скопировать`). Empty for
+                            // single-overload methods — `parameters`
+                            // already covers them.
+                            let raw_variants =
+                                scraper_parser::extract_parameter_variants(&html_content);
+                            let variants: Vec<MethodVariantInfo> =
+                                if raw_variants.len() > 1 {
+                                    raw_variants.into_iter().map(Into::into).collect()
+                                } else {
+                                    Vec::new()
+                                };
                             let min_version = scraper_parser::extract_version(&html_content);
                             let context = scraper_parser::extract_context(&html_content);
 
@@ -649,6 +716,7 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                                 english_name: english_method,
                                 return_type,
                                 parameters,
+                                variants,
                                 min_version,
                                 context,
                                 documentation,
@@ -1055,6 +1123,19 @@ fn parse_global_function_html(
                         // Extract additional information using scraper
                         let return_type = scraper_parser::extract_return_type(&html_content);
                         let parameters = scraper_parser::extract_parameters(&html_content);
+                        // Per-variant breakdown for multi-overload pages
+                        // (`ПодключитьВнешнююКомпоненту`, `Дата`,
+                        // `ОткрытьФорму`, …). Empty when the page has a
+                        // single anonymous variant — `parameters` already
+                        // covers it.
+                        let raw_variants =
+                            scraper_parser::extract_parameter_variants(&html_content);
+                        let variants: Vec<GlobalFunctionVariantInfo> =
+                            if raw_variants.len() > 1 {
+                                raw_variants.into_iter().map(Into::into).collect()
+                            } else {
+                                Vec::new()
+                            };
                         let min_version = scraper_parser::extract_version(&html_content);
                         let context = scraper_parser::extract_context(&html_content);
 
@@ -1069,6 +1150,7 @@ fn parse_global_function_html(
                             english_name: english_function,
                             return_type,
                             parameters,
+                            variants,
                             min_version,
                             context,
                             documentation,
