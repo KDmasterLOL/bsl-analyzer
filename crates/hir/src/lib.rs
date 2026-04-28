@@ -358,7 +358,29 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return Some(def);
         }
 
-        // 2. Builtin platform functions
+        // 2. Field-name guard (chained method / property access).
+        //
+        // When the token sits to the right of a `.` in a `FIELD_EXPR`
+        // (i.e. it's the method or attribute name in
+        // `recv.method(...)` / `obj.attr`), it is *never* a free name
+        // in the current module — it's looked up against the receiver
+        // type. The type-aware path lives in
+        // [`Self::resolve_method_call_to_definition`]; IDE callers
+        // (hover) try it first.
+        //
+        // This guard fires BEFORE the builtin / local / MDO-plural /
+        // module-method fall-throughs. Without it, a same-named local
+        // (`ВыгрузитьКолонку = "..."`), parameter, builtin, or
+        // workspace function would hijack the field-name token and
+        // hover/goto/references would jump to that unrelated symbol.
+        // The qualified-name path above is left intact so legitimate
+        // `Module.Method` access still resolves through it.
+        if field_name_receiver(token).is_some() {
+            tracing::debug!("skipping free-name resolution: token is field-name in FIELD_EXPR");
+            return None;
+        }
+
+        // 3. Builtin platform functions
         // IMPORTANT: Builtins are NOT shadowed by local variables in BSL!
         // НачатьТранзакцию() is always a builtin even if there's a local var with that name
         if let Some(def) = self.try_resolve_builtin(token_text) {
@@ -366,14 +388,14 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return Some(def);
         }
 
-        // 3. Local symbols (parameters, local variables)
+        // 4. Local symbols (parameters, local variables)
         // These shadow MDO types and module-level symbols, but NOT builtins
         if let Some(def) = self.resolve_local_to_definition(file_id, token) {
             tracing::debug!(?def, "resolved as local symbol");
             return Some(def);
         }
 
-        // 4. MDO plural forms (Справочники, Документы, РегистрыСведений)
+        // 5. MDO plural forms (Справочники, Документы, РегистрыСведений)
         if bsl_metadata::MdoType::is_plural_form(token_text) {
             if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(token_text) {
                 tracing::debug!(?mdo_type, "resolved as MDO collection");
@@ -381,7 +403,7 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             }
         }
 
-        // 5. Module-level resolution (methods and variables)
+        // 6. Module-level resolution (methods and variables).
         let module_id = ModuleId::new(file_id);
         let resolver = hir_def::resolver::Resolver::for_module(module_id);
 
@@ -627,6 +649,89 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         Ty::Unknown
     }
+
+    /// Resolve `recv.method(...)` to a [`Definition::BuiltinMethod`] when
+    /// the receiver's inferred [`Ty`] yields a platform-method match
+    /// through [`hir_ty::method_lookup::lookup_method_with_key`].
+    ///
+    /// This is the **type-aware** counterpart to
+    /// [`Self::resolve_name_to_definition`], which is purely
+    /// syntactic / lexical and falls back to module-level method
+    /// resolution when a qualified-name path cannot be extracted.
+    /// Chained calls like `Запрос.Выполнить().Выгрузить().ВыгрузитьКолонку`
+    /// have a base that is a `CALL_EXPR` (no IDENT segments to chain
+    /// through `extract_qualified_name_from_field_expr`), so the
+    /// lexical resolver previously matched `ВыгрузитьКолонку` as a
+    /// **free workspace function** — pulling in unrelated БСП modules.
+    /// This method short-circuits that by consulting the inference
+    /// result for the receiver and routing through the fluent-aware
+    /// [`hir_ty::method_lookup::lookup_method`] dispatch (which already
+    /// handles `Ty::Union` member walks and `Undefined` / `Null`
+    /// stripping for the `Запрос.Выполнить()` style happy-path-plus-
+    /// sentinel return shape).
+    ///
+    /// Returns:
+    /// - `Some(Definition::BuiltinMethod { type_name, method_name })`
+    ///   when the receiver type carries the named method in
+    ///   [`bsl_platform::PlatformData`];
+    /// - `None` for non-IDENT tokens, tokens that aren't a field-name
+    ///   under a `FIELD_EXPR`, receivers that don't yield a scalar
+    ///   platform key (manager / metadata-ref shapes go through their
+    ///   own paths), or methods that aren't in platform data.
+    ///
+    /// IDE callers (`hover`, `goto_definition`, `references`) should
+    /// invoke this **before** [`Self::resolve_name_to_definition`].
+    pub fn resolve_method_call_to_definition(
+        &self,
+        file_id: FileId,
+        token: &syntax::SyntaxToken,
+    ) -> Option<crate::definition::Definition> {
+        use crate::definition::Definition;
+
+        if token.kind() != syntax::SyntaxKind::IDENT {
+            return None;
+        }
+
+        let receiver_node = field_name_receiver(token)?;
+        let receiver_ty = self.type_of_expr(file_id, &receiver_node);
+        if matches!(receiver_ty, Ty::Unknown) {
+            return None;
+        }
+
+        let method_name = Name::new(token.text());
+        let (type_key, _info) =
+            hir_ty::method_lookup::lookup_method_with_key(&receiver_ty, &method_name)?;
+
+        Some(Definition::BuiltinMethod { type_name: Name::new(&type_key), method_name })
+    }
+}
+
+/// Given an IDENT token, return the receiver [`syntax::SyntaxNode`] when
+/// the token is the **field-name** of a `FIELD_EXPR` (i.e. the token
+/// stands to the right of the dot), otherwise [`None`].
+///
+/// Uses range containment rather than token-position counting so it is
+/// robust against trivia placement and against parser variants that
+/// nest the field-name inside a deeper child node. The receiver is the
+/// first direct child node of `FIELD_EXPR`; the field-name token's
+/// range must fall **outside** that receiver's range.
+///
+/// Used by [`Semantics::resolve_method_call_to_definition`] (type-aware
+/// lookup) and by [`Semantics::resolve_name_to_definition`] (negative
+/// guard against falling through to module-method lookup for tokens
+/// that are obviously a method-of access).
+fn field_name_receiver(token: &syntax::SyntaxToken) -> Option<syntax::SyntaxNode> {
+    use syntax::SyntaxKind;
+
+    let parent = token.parent()?;
+    if parent.kind() != SyntaxKind::FIELD_EXPR {
+        return None;
+    }
+    let receiver = parent.children().next()?;
+    if receiver.text_range().contains_range(token.text_range()) {
+        return None;
+    }
+    Some(receiver)
 }
 
 /// Merge the narrowing overlay with the base [`Ty`] for a

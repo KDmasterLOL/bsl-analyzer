@@ -53,6 +53,23 @@ pub(crate) fn hover<DB: RootDatabase>(
         return Some(result);
     }
 
+    // Type-aware platform-method hover for chained receivers like
+    // `Запрос.Выполнить().Выгрузить().ВыгрузитьКолонку(...)`. The
+    // syntactic `try_extract_method_call` inside `hover_platform`
+    // only handles `IDENT.method()`; for any chained / parenthesised /
+    // indexed receiver it bails out, which previously let
+    // `hover_user_defined` match the method name against an unrelated
+    // workspace free function (e.g. БСП's
+    // `ОбщегоНазначения.ВыгрузитьКолонку`). With the
+    // `field_name_receiver` guard in `Semantics::resolve_name_to_definition`
+    // the `hover_user_defined` branch above already returns `None` for
+    // such tokens — this branch then resolves the method by inferring
+    // the receiver's type and looking it up through the fluent-aware
+    // [`hir_ty::method_lookup::lookup_method_with_key`] dispatch.
+    if let Some(result) = hover_platform_method_via_ty(db, file_id, &token) {
+        return Some(result);
+    }
+
     // Try platform type/method hover
     if let Some(result) = hover_platform(db, &token) {
         return Some(result);
@@ -367,6 +384,40 @@ fn hover_platform_property<DB: RootDatabase>(
     let prop = platform_property_query(db, input)?;
 
     Some(render_property_hover(&prop, token.text_range()))
+}
+
+/// Type-aware hover for `recv.method(...)` calls where the receiver is
+/// not a bare identifier (chained calls, indexed access, etc.).
+///
+/// Resolves the receiver's inferred [`hir::Ty`] via
+/// [`hir::Semantics::resolve_method_call_to_definition`], which routes
+/// through `hir_ty::method_lookup::lookup_method_with_key` and gives us
+/// back a `(type_key, method_name)` pair when the method exists on the
+/// receiver type in [`bsl_platform::PlatformData`]. The actual hover
+/// markdown is produced by the existing [`hover_for_platform_method`]
+/// renderer so the output is identical to what users see for the
+/// syntactic-shortcut path (`Строка.ВРег()`).
+///
+/// Returns [`None`] when:
+/// - the token isn't an IDENT under a `FIELD_EXPR` field-name slot,
+/// - the receiver's inferred type is `Ty::Unknown`,
+/// - the receiver's type yields no scalar key (manager / metadata-ref
+///   shapes are served by their own paths),
+/// - the method name does not exist in platform data.
+fn hover_platform_method_via_ty<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    token: &SyntaxToken,
+) -> Option<HoverResult> {
+    if token.kind() != SyntaxKind::IDENT {
+        return None;
+    }
+    let sema = Semantics::new(db);
+    let definition = sema.resolve_method_call_to_definition(file_id, token)?;
+    let hir::Definition::BuiltinMethod { type_name, method_name } = definition else {
+        return None;
+    };
+    hover_for_platform_method(db, type_name.as_str(), method_name.as_str(), token.text_range())
 }
 
 /// Build the markdown block for a platform-property hover.

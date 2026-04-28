@@ -346,3 +346,178 @@ fn completion_on_query_parameters_lists_structure_methods() {
         );
     }
 }
+
+#[test]
+fn hover_on_chained_method_resolves_platform_method() {
+    // Regression for the user-reported hover bug:
+    //   `Запрос.Выполнить().Выгрузить().ВыгрузитьКолонку("Ссылка")`
+    // — the field-name `ВыгрузитьКолонку` previously fell through
+    // `Semantics::resolve_name_to_definition` into module-method
+    // resolution and matched a workspace free function (e.g. БСП's
+    // `ОбщегоНазначения.ВыгрузитьКолонку`), so hover showed
+    // `Функция ВыгрузитьКолонку() Экспортная …` from foreign code
+    // instead of the platform method's signature.
+    //
+    // The fix is two-pronged:
+    //   1. `Semantics::resolve_method_call_to_definition` (type-aware)
+    //      infers the receiver Ty (`Ty::Union([ValueTable, ValueTree])`
+    //      after `.Выгрузить()`) and resolves through
+    //      `lookup_method_with_key` → returns
+    //      `Definition::BuiltinMethod`.
+    //   2. `Semantics::resolve_name_to_definition` adds a guard that
+    //      refuses to fall through to `resolve_module_method` when the
+    //      token is the field-name in a `FIELD_EXPR`.
+    //
+    // Hover emits the platform method markdown via
+    // `hover_for_platform_method`, so the assertion checks for a
+    // distinctive header substring.
+    let code = "\
+Процедура Тест()
+    Зап = Новый Запрос;
+    Зап.Текст = \"ВЫБРАТЬ 1\";
+    Результат = Зап.Выполнить().Выгрузить().ВыгрузитьКолонку(\"Ссылка\");
+КонецПроцедуры
+";
+    let cursor = code.rfind("ВыгрузитьКолонку").expect("fixture must contain ВыгрузитьКолонку");
+    let (db, file_id) = setup_inline(code);
+    let hover = Analysis::from_database(db)
+        .hover(file_id, cursor as u32)
+        .expect("hover must produce a result on chained ВыгрузитьКолонку");
+    let markup = &hover.markup;
+    assert!(
+        markup.contains("ВыгрузитьКолонку") && markup.contains("UnloadColumn"),
+        "hover must show bilingual platform-method header, got: {markup}"
+    );
+    // The bug-state markup contained these substrings — guard against
+    // a regression that resolves to the workspace free function again.
+    assert!(
+        !markup.contains("КоллекцияСтрок"),
+        "hover must NOT include workspace free-function param list, got: {markup}"
+    );
+}
+
+#[test]
+fn hover_on_chained_method_does_not_match_workspace_free_function() {
+    // Same chain as above, but with a same-named module-method
+    // definition in scope. The resolver guard must short-circuit
+    // before module-level lookup; even if the platform-method hover
+    // were unavailable, hover must NOT surface the workspace function
+    // for a token that sits to the right of `.` in a FIELD_EXPR.
+    //
+    // The cursor lands on the call inside the function; the
+    // workspace `ВыгрузитьКолонку` defined above is shadowed for
+    // hover purposes by the type-aware platform path.
+    let code = "\
+Функция ВыгрузитьКолонку(КоллекцияСтрок, ИмяКолонки) Экспорт
+    Возврат Новый Массив;
+КонецФункции
+
+Процедура Тест()
+    Зап = Новый Запрос;
+    Зап.Текст = \"ВЫБРАТЬ 1\";
+    Результат = Зап.Выполнить().Выгрузить().ВыгрузитьКолонку(\"Ссылка\");
+КонецПроцедуры
+";
+    let cursor = code
+        .rfind("ВыгрузитьКолонку(\"Ссылка")
+        .expect("fixture must contain the chained call site");
+    let (db, file_id) = setup_inline(code);
+    let result = Analysis::from_database(db).hover(file_id, cursor as u32);
+    match result {
+        Some(hover) => {
+            assert!(
+                !hover.markup.contains("Функция ВыгрузитьКолонку()"),
+                "hover must NOT render the workspace free-function header, got: {markup}",
+                markup = hover.markup
+            );
+            assert!(
+                !hover.markup.contains("КоллекцияСтрок"),
+                "hover must NOT mention the workspace function's param, got: {markup}",
+                markup = hover.markup
+            );
+        }
+        None => {
+            // Acceptable: type-aware lookup may degrade to None on this
+            // exact fixture (no platform_data hit). The guard already did
+            // its job by preventing the workspace match.
+        }
+    }
+}
+
+#[test]
+fn hover_on_chained_method_ignores_local_var_with_same_name() {
+    // Regression for the field-name-guard placement.
+    //
+    // The chained `…Выгрузить().ВыгрузитьКолонку("Ссылка")` token must
+    // resolve through the type-aware path even when a same-named local
+    // variable (`ВыгрузитьКолонку = "..."`) exists in the same scope.
+    // Before the guard moved above the local-symbol fallback, the
+    // resolver matched the field-name token against the local first
+    // and `hover_user_defined` rendered a `Локальная переменная …`
+    // hover for the method-name token — a real shadowing collision
+    // that masked the platform method.
+    //
+    // The fix: `field_name_receiver` guard now fires after qualified
+    // resolution but BEFORE builtin / local / MDO / module-method
+    // fallbacks. The token then takes the type-aware platform-method
+    // hover branch, not the shadowed-name branch.
+    let code = "\
+Процедура Тест()
+    ВыгрузитьКолонку = \"shadow-name\";
+    Зап = Новый Запрос;
+    Зап.Текст = \"ВЫБРАТЬ 1\";
+    Результат = Зап.Выполнить().Выгрузить().ВыгрузитьКолонку(\"Ссылка\");
+КонецПроцедуры
+";
+    // The cursor lands on the chained-call site, NOT the assignment.
+    let cursor = code
+        .rfind("ВыгрузитьКолонку(\"Ссылка")
+        .expect("fixture must contain the chained call site");
+    let (db, file_id) = setup_inline(code);
+    let hover = Analysis::from_database(db)
+        .hover(file_id, cursor as u32)
+        .expect("hover must produce a result");
+    assert!(
+        hover.markup.contains("ВыгрузитьКолонку") && hover.markup.contains("UnloadColumn"),
+        "hover must show platform-method header, got: {markup}",
+        markup = hover.markup
+    );
+    assert!(
+        !hover.markup.contains("Локальная переменная"),
+        "hover must NOT show the shadowing local-var hover, got: {markup}",
+        markup = hover.markup
+    );
+}
+
+#[test]
+fn unload_column_string_arg_does_not_emit_type_mismatch() {
+    // Regression for the user-reported diagnostic bug:
+    //   `Зап.Выполнить().Выгрузить().ВыгрузитьКолонку("Ссылка")`
+    // — `<Колонка>` accepts `Число | Строка | КолонкаТаблицыЗначений`
+    // per HBK, but `platform_data.json` had truncated `param_type` to
+    // `"Число"` (HTML scraper bug). After fixing the scraper AND
+    // routing param-type lowering through `resolve_platform_type_union`
+    // in `to_method_info`, the diagnostic's `is_assignable` sees a
+    // `Ty::Union` on the right and silently accepts `Ty::String`.
+    let code = "\
+Процедура Тест()
+    Зап = Новый Запрос;
+    Зап.Текст = \"ВЫБРАТЬ 1\";
+    Результат = Зап.Выполнить().Выгрузить().ВыгрузитьКолонку(\"Ссылка\");
+КонецПроцедуры
+";
+    let (db, file_id) = setup_inline(code);
+    let infer = db.infer(file_id);
+    let mismatches: Vec<&InferenceDiagnostic> = infer
+        .diagnostics
+        .iter()
+        .map(|(_, d)| d)
+        .filter(|d| matches!(d, InferenceDiagnostic::TypeMismatch { .. }))
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "ВыгрузитьКолонку(\"Ссылка\") must not emit TypeMismatch — \
+         param type after fix is Ty::Union([Number, String, ValueTableColumn]). \
+         Got: {mismatches:#?}",
+    );
+}

@@ -170,6 +170,62 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
     Some(to_method_info(method))
 }
 
+/// Like [`lookup_method`], but additionally returns the `PlatformData`
+/// type-name key that was used to resolve the method.
+///
+/// Consumers (IDE hover, goto, etc.) need the type-name string both to
+/// build a [`hir_def::Definition::BuiltinMethod`]-equivalent identifier
+/// and to feed `MethodLookupInput` for hover-markdown rendering. The
+/// public entry point is intentionally separate from [`lookup_method`]
+/// so the inference path keeps its narrow `Option<MethodInfo>` shape.
+///
+/// For [`Ty::Union`] receivers, returns the **first live member's** key
+/// alongside the unioned [`MethodInfo`] (matching `lookup_method`'s
+/// "first hit owns the params" semantics).
+///
+/// [`Ty::ObjectManager`] / [`Ty::MetadataRef`] receivers return [`None`]
+/// — those resolve through [`crate::platform_manager_lookup`] which
+/// keys on composite `"<Kind>Manager.<Имя>"` strings that the scalar
+/// hover path does not understand. Hover for those receivers is served
+/// by other paths (see `crates/ide/src/hover.rs`); this entry point is
+/// reserved for value-type receivers.
+pub fn lookup_method_with_key(
+    receiver_ty: &Ty,
+    method_name: &Name,
+) -> Option<(String, MethodInfo)> {
+    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
+    let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
+
+    if let Ty::Union(members) = receiver_ty {
+        let live: Vec<&Ty> =
+            members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
+        let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
+        let mut params: Vec<Ty> = Vec::new();
+        let mut first_key: Option<String> = None;
+        for m in live {
+            if let Some((k, info)) = lookup_method_with_key(m, method_name) {
+                returns.push(info.return_ty);
+                if params.is_empty() {
+                    params = info.params;
+                }
+                if first_key.is_none() {
+                    first_key = Some(k);
+                }
+            }
+        }
+        return first_key.map(|k| (k, MethodInfo { return_ty: Ty::union(returns), params }));
+    }
+
+    if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::MetadataRef { .. }) {
+        return None;
+    }
+
+    let type_key = platform_type_key(receiver_ty)?;
+    let data = PlatformData::instance();
+    let method = data.get_method(type_key, method_name.as_str())?;
+    Some((type_key.to_string(), to_method_info(method)))
+}
+
 /// Pick the `PlatformData::get_method` key for a scalar receiver.
 ///
 /// The platform-data index uses **English** type names keyed through a
@@ -252,10 +308,65 @@ fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     let params: Vec<Ty> = method
         .parameters
         .iter()
-        .map(|p| p.param_type.as_ref().map(|t| Ty::from_type_name(t)).unwrap_or(Ty::Unknown))
+        .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
         .collect();
 
     MethodInfo { return_ty, params }
+}
+
+/// Lower a platform-method `param_type` string to a [`Ty`].
+///
+/// **Asymmetric with return-type lowering, on purpose.** Returns route
+/// through [`resolve_platform_type_union`] so chained receivers carry
+/// every possible shape (e.g. `Запрос.Выполнить()` →
+/// `Ty::Union([QueryResult, Undefined])`). Params live on the **left**
+/// of `is_assignable` checks at the call site, where structural
+/// equality on `Ty::PlatformObject` would false-fire on legitimate
+/// looser actuals — so we keep gradual-typing (`Ty::Unknown`)
+/// reachable.
+///
+/// Three cases, matching what BSL's loose param semantics expect:
+///
+/// 1. **Single recognised primitive / collection** (`"Строка"`,
+///    `"ТаблицаЗначений"`, …): `Ty::from_type_name` lowers to the
+///    canonical variant (`Ty::String`, `Ty::ValueTable`, …).
+/// 2. **Single unrecognised name** (`"Строка табличной части"`,
+///    `"Произвольный"`): stays `Ty::Unknown`. Gradual typing
+///    (`Unknown ≤ A`) accepts any actual — mirrors the pre-fix
+///    `Ty::from_type_name` behaviour and keeps cross-section transfers
+///    (`ТЧ1.Индекс(ТЧ2.Получить(0))`) and `Undefined`-tolerant unions
+///    (`ТЧ.Индекс(ТЧ.Найти(…))`) quiet.
+/// 3. **Comma-joined string with EVERY segment a recognised type** —
+///    the headline fix. `"Число, Строка, КолонкаТаблицыЗначений"` lowers
+///    to `Ty::union([Number, String, PlatformObject("…")])` so
+///    `ТаблицаЗначений.ВыгрузитьКолонку(<Колонка>)` accepts every
+///    legitimate variant. `is_assignable` distributes correctly over a
+///    right-side `Ty::Union`.
+///
+/// Comma-joined strings where any segment fails validation
+/// (`"Ссылка на объект, либо"`, `"Метаданные,"`) collapse to
+/// `Ty::Unknown` — they are prose-with-commas or scraper garbage, not
+/// a real type list, and routing them through `resolve_platform_type_union`
+/// would lift the whole raw string to a strict `Ty::PlatformObject` and
+/// false-fire `TypeMismatch`.
+fn lower_param_type(raw: &str) -> Ty {
+    if !raw.contains(',') {
+        return Ty::from_type_name(raw);
+    }
+
+    // Multi-segment: only treat as a union when EVERY segment is a
+    // recognised type. `is_arbitrary_type_name` collapses BSL's
+    // "any value" placeholder anywhere in the list back to
+    // `Ty::Unknown` (delegated to `resolve_platform_type_union`).
+    let segments: Vec<&str> = raw.split(',').map(str::trim).collect();
+    let all_valid = !segments.is_empty()
+        && segments.iter().all(|seg| !seg.is_empty() && segment_is_valid_type(seg));
+
+    if all_valid {
+        resolve_platform_type_union(raw)
+    } else {
+        Ty::Unknown
+    }
 }
 
 /// Build a `MethodInfo` from a `PlatformData["Tabular section"]` entry,
@@ -292,12 +403,15 @@ fn build_tabular_section_method_info(
         .map(|ret| rewrite_row_generic(resolve_platform_type_union(ret), parent, section_name))
         .unwrap_or(Ty::Undefined);
 
+    // Same conservative param lowering as `to_method_info` — see
+    // [`lower_param_type`] for the multi-type-vs-single-type
+    // asymmetry rationale. We deliberately do NOT pipe through
+    // `rewrite_row_generic` for params (function-doc on
+    // `build_tabular_section_method_info` above explains why).
     let params: Vec<Ty> = method
         .parameters
         .iter()
-        .map(|p| {
-            p.param_type.as_ref().map(|t| Ty::from_type_name(t.as_str())).unwrap_or(Ty::Unknown)
-        })
+        .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t.as_str())).unwrap_or(Ty::Unknown))
         .collect();
 
     MethodInfo { return_ty, params }
@@ -549,10 +663,68 @@ mod tests {
     }
 
     #[test]
-    fn to_method_info_keeps_param_type_as_single_raw_value() {
+    fn to_method_info_lowers_param_type_asymmetrically() {
+        // Returns and params lower differently on purpose — see
+        // [`lower_param_type`]. For garbage / scraper-prose with a
+        // stray comma (`"Метаданные,"`), the return path lifts to
+        // `Ty::PlatformObject("Метаданные,")` (any future receiver
+        // chain is best-effort), but the param path stays
+        // `Ty::Unknown` so the call-site `is_assignable` check accepts
+        // any actual via gradual typing rather than false-firing
+        // structural-equality `TypeMismatch`.
         let info = to_method_info(&test_method(Some("Число, Неопределено"), Some("Метаданные,")));
         assert_eq!(info.return_ty, Ty::union(vec![Ty::Number, Ty::Undefined]));
+        assert_eq!(
+            info.params,
+            vec![Ty::Unknown],
+            "garbage param strings stay Unknown for gradual typing",
+        );
+    }
+
+    #[test]
+    fn to_method_info_prose_comma_param_stays_unknown() {
+        // Real-world `param_type` strings emitted by the HBK scraper
+        // include human-prose descriptions with commas
+        // (e.g. `"Ссылка на объект, либо Уникальный идентификатор"`).
+        // These must NOT be misread as a type union — at least one
+        // segment fails type validation, so we collapse to
+        // `Ty::Unknown` rather than a strict
+        // `Ty::PlatformObject("Ссылка на объект, либо …")`.
+        let info = to_method_info(&test_method(None, Some("Ссылка на объект, либо")));
         assert_eq!(info.params, vec![Ty::Unknown]);
+    }
+
+    #[test]
+    fn to_method_info_single_unknown_param_stays_unknown() {
+        // The asymmetry in [`lower_param_type`] preserves gradual
+        // typing for SINGLE-name params whose name `Ty::from_type_name`
+        // doesn't recognise — `Ty::Unknown` accepts any actual at the
+        // call-site argument check. Routing this through
+        // `resolve_platform_type_union` would lift to a structural
+        // `PlatformObject`, falsely rejecting valid args.
+        let info = to_method_info(&test_method(None, Some("Строка табличной части")));
+        assert_eq!(info.params, vec![Ty::Unknown]);
+    }
+
+    #[test]
+    fn to_method_info_multi_type_param_lowers_to_union() {
+        // Headline regression: `ТаблицаЗначений.ВыгрузитьКолонку.Колонка`
+        // is `"Число, Строка, КолонкаТаблицыЗначений"`. After the
+        // multi-type lowering fix, it surfaces as a `Ty::Union` so the
+        // `is_assignable` check at the call site accepts a `Ty::String`
+        // arg without false-firing `TypeMismatch`.
+        let info =
+            to_method_info(&test_method(None, Some("Число, Строка, КолонкаТаблицыЗначений")));
+        match &info.params[..] {
+            [Ty::Union(members)] => {
+                assert!(members.contains(&Ty::Number));
+                assert!(members.contains(&Ty::String));
+                assert!(members.iter().any(
+                    |m| matches!(m, Ty::PlatformObject(n) if n.as_str() == "КолонкаТаблицыЗначений")
+                ));
+            }
+            other => panic!("expected single Ty::Union param, got {other:?}"),
+        }
     }
 
     #[test]
