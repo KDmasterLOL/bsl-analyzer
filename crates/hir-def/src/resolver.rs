@@ -253,6 +253,64 @@ impl Resolver {
         Some((mdo.mdo_type, Name::new(&mdo.name)))
     }
 
+    /// Visibility-aware probe for "is `module_name` a user CommonModule?".
+    ///
+    /// Mirrors the two-stage gate inside [`Self::resolve_qualified_method`]:
+    /// (1) the module name must be declared in at least one registered
+    /// configuration, and (2) the module-index must resolve it to a file.
+    /// A raw `module_index().resolve_common_module(...)` probe is **not**
+    /// equivalent — extensions or main configurations can hide a module
+    /// that's still present in the workspace index, and form-self callers
+    /// must respect the same visibility semantics or they'd silently
+    /// shadow a real CommonModule that the user can't actually call.
+    ///
+    /// Returns `false` when the resolver has no module scope or no
+    /// workspace scope (the same refusal `resolve_qualified_method` issues
+    /// — cross-module questions need both).
+    pub fn user_common_module_exists(&self, db: &dyn ConfigsDatabase, module_name: &Name) -> bool {
+        if !self.scopes.iter().any(|s| matches!(s, Scope::WorkspaceScope)) {
+            return false;
+        }
+        let Some(module_id) = self.module_id() else { return false };
+        let file_id = module_id.file_id;
+
+        let configurations = db.configurations(file_id);
+        if !configurations.is_empty()
+            && !Self::module_visible_in_configs(&configurations, module_name)
+        {
+            return false;
+        }
+
+        let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
+        db.module_index(source_root_id).resolve_common_module(module_name).is_some()
+    }
+
+    /// Returns `true` when the resolver's enclosing module is a managed form.
+    ///
+    /// Sibling to [`Self::resolve_this_object`]: same input shape and
+    /// parallel module-metadata gate, but answers a different question.
+    /// `resolve_this_object` returns the `(MdoType, Name)` pair that lets
+    /// `infer_path_name` build a `Ty::ThisObject` for an object module's
+    /// `ЭтотОбъект`. Forms have no `MdoType` companion (they live outside
+    /// the catalog/document/exchange-plan/chart-of-accounts axis), so the
+    /// form path returns just a flag — the caller maps it to the platform
+    /// type `ФормаКлиентскогоПриложения` directly.
+    ///
+    /// Gate is strict: only `ModuleType::FormModule` *and* an attached
+    /// managed `Form` payload qualifies. Ordinary forms and form modules
+    /// without a loaded `Form.xml` return `false` (conservative — we'd
+    /// rather miss type info than mistype an ordinary form as managed).
+    pub fn resolve_this_form(&self, db: &dyn DefDatabase) -> bool {
+        let Some(module_id) = self.module_id() else { return false };
+        let metadata = db.module_metadata(module_id);
+
+        if metadata.module_type != bsl_metadata::ModuleType::FormModule {
+            return false;
+        }
+
+        metadata.form.as_ref().is_some_and(|f| f.is_managed())
+    }
+
     /// Resolve a name at any level (builtin, local, module, workspace).
     ///
     /// Resolution order (first match wins):

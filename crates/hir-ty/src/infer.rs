@@ -454,6 +454,23 @@ impl<'db> InferenceContext<'db> {
         Resolver::with_builtins_and_workspace(module_id)
     }
 
+    /// Case-insensitive probe: does the current body declare a parameter or
+    /// local variable named `name`?
+    ///
+    /// `get_resolver` does not push `Scope::ExprScope`, so
+    /// `Resolver::resolve_name` never returns `Resolution::Local` for these.
+    /// Implicit locals derived from `Stmt::Assign` are tracked via
+    /// `var_types`, but **declared** parameters and bare `Перем` locals
+    /// without a prior assignment never reach `var_types` either — they
+    /// only live as `Body::Binding`s. Form-self resolution must consult
+    /// this list to honour BSL's "explicit user declaration shadows
+    /// implicit Self" rule (e.g. `Процедура Тест(Заголовок)` must read the
+    /// parameter, not the form's `Заголовок` property).
+    fn body_declares_binding(&self, name: &hir_def::Name) -> bool {
+        let target = name.as_str().to_lowercase();
+        self.body.bindings_iter().any(|(_, b)| b.name.as_str().to_lowercase() == target)
+    }
+
     /// Infer types for all expressions in the body.
     ///
     /// Walks statements top-down to track variable types from assignments,
@@ -497,8 +514,61 @@ impl<'db> InferenceContext<'db> {
                 // Track variable type if target is a simple name
                 let target_expr = self.body.expr_idx(*target).clone();
                 match &target_expr {
-                    Expr::Path(name) if !value_ty.is_unknown() => {
-                        self.var_types.insert(name.as_str().to_lowercase(), value_ty);
+                    Expr::Path(name) => {
+                        // Managed-form Self assignment gate: if `name` is a
+                        // property of `ФормаКлиентскогоПриложения` in a
+                        // managed-form module, the LHS is the form property
+                        // itself, not a fresh implicit local. We must NOT
+                        // pollute `var_types` — otherwise a later
+                        // `X = Заголовок;` would read the RHS-derived local
+                        // (e.g. `Ty::String` from a literal) instead of the
+                        // platform-typed property and the form-self resolver
+                        // in `infer_path_name` would never get a chance.
+                        // Read-only properties additionally emit
+                        // `ReadOnlyPropertyAssignment`, mirroring the
+                        // `Expr::Field` arm below.
+                        //
+                        // Shadowing rule mirrors `infer_path_name`'s step
+                        // 4: a module-level `Метод()` or `Перем`, AND any
+                        // parameter or local `Перем` declared in this
+                        // body, take priority over the form-self property
+                        // (BSL semantics — explicit user declaration wins
+                        // over implicit self). `body_declares_binding`
+                        // covers the parameter / declared-local gap left
+                        // by `Resolver::resolve_name` (no ExprScope) and
+                        // `var_types` (no entry until first assign).
+                        let resolver = self.get_resolver();
+                        let user_shadows = matches!(
+                            resolver.resolve_name(self.db, name),
+                            Some(hir_def::resolver::Resolution::Method(_))
+                                | Some(hir_def::resolver::Resolution::Variable(_))
+                        ) || self.body_declares_binding(name);
+                        let form_self_resolution = if user_shadows {
+                            None
+                        } else {
+                            crate::form_self::resolve_form_self_property(self.db, &resolver, name)
+                        };
+                        match form_self_resolution {
+                            Some(prop) => {
+                                if prop.is_readonly {
+                                    let form_ty = Ty::PlatformObject(hir_def::Name::new(
+                                        crate::form_self::FORM_TYPE_NAME,
+                                    ));
+                                    self.push_inference_diagnostic(
+                                        InferenceDiagnostic::ReadOnlyPropertyAssignment {
+                                            lhs: ExprId::from_idx(*target),
+                                            receiver_ty: form_ty,
+                                            field_name: name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                            None => {
+                                if !value_ty.is_unknown() {
+                                    self.var_types.insert(name.as_str().to_lowercase(), value_ty);
+                                }
+                            }
+                        }
                     }
                     Expr::Field { base, field } => {
                         // Read-only-property gate. We resolve the receiver
@@ -849,7 +919,18 @@ impl<'db> InferenceContext<'db> {
                 trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
                 return Ty::ThisObject { owner };
             }
-            // Fall through: record-set / form / common-module
+            // Managed-form fallback: `ЭтотОбъект` in a managed form module
+            // names the form itself. There is no `MdoType` companion (forms
+            // are outside the catalog/document/exchange-plan/CoA axis), so
+            // we don't go through `Ty::ThisObject` — we hand back the
+            // platform type directly. Subsequent `.Элементы` / `.Найти(…)`
+            // chains then route through the existing platform-property /
+            // platform-method adapters with no special-case code.
+            if resolver.resolve_this_form(self.db) {
+                trace!("resolved {} as managed form Self", name);
+                return Ty::PlatformObject(hir_def::Name::new(crate::form_self::FORM_TYPE_NAME));
+            }
+            // Fall through: record-set / ordinary-form / common-module
             // `ЭтотОбъект` stays Unknown for now (M4 Task 5 follow-up).
         }
 
@@ -903,7 +984,43 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        // 4. Platform global-context properties — top-level identifiers
+        // Shared shadowing rule for steps 4 and 5: a module-level `Метод()`
+        // or `Перем` declaration with this name takes priority over any
+        // platform / form-self property. We hoist the predicate so both
+        // steps consult the same binding.
+        let user_shadows =
+            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)));
+
+        // 4. Managed-form Self property — inside a managed-form module,
+        //    bare `Элементы`, `Команды`, `Параметры`, `Заголовок`, … are
+        //    properties of `ФормаКлиентскогоПриложения`. The form-self
+        //    helper does a cheap platform-data lookup first, so non-form
+        //    modules pay only one `FxHashMap` probe per unresolved name
+        //    before bailing.
+        //
+        //    Ordering: BEFORE platform globals so a property name that
+        //    coincidentally collides with a platform global resolves with
+        //    the form's perspective. AFTER MDO plurals so `Документы` /
+        //    `Справочники` continue to lower as `Ty::ManagerCollection`
+        //    (no current ClientApplicationForm property collides with an
+        //    MDO plural; a regression test in `tests/form_self.rs` pins
+        //    that invariant).
+        //
+        //    Extra shadowing gate: a parameter or `Перем` local with this
+        //    name must shadow the form-self property. `var_types` only
+        //    captures *assigned* implicit locals; an unassigned parameter
+        //    or `Перем X;` without a prior write is invisible to it.
+        //    `body_declares_binding` plugs that gap.
+        if !user_shadows && !self.body_declares_binding(name) {
+            if let Some(resolution) =
+                crate::form_self::resolve_form_self_property(self.db, &resolver, name)
+            {
+                trace!("resolved {} as managed-form Self property", name);
+                return resolution.return_ty;
+            }
+        }
+
+        // 5. Platform global-context properties — top-level identifiers
         //    declared on `Global context` in HBK whose declared type is the
         //    foreign key into the platform type/method catalogue
         //    (`ОбработкаОшибок: МенеджерОбработкиОшибок`,
@@ -925,8 +1042,6 @@ impl<'db> InferenceContext<'db> {
         // shadowed the platform global (e.g. `Процедура ОбработкаОшибок()
         // Экспорт`); BSL semantics give the local definition priority and
         // we must not silently retype a reference to it as `PlatformObject`.
-        let user_shadows =
-            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)));
         if !user_shadows {
             if let Some(prop) =
                 bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
@@ -939,7 +1054,7 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        // 5. Module-level methods / variables (Unknown today; Task 2.x
+        // 6. Module-level methods / variables (Unknown today; Task 2.x
         //    will synthesise Ty::Function from MethodId).
         match resolved {
             Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => Ty::Unknown,
@@ -1026,6 +1141,83 @@ impl<'db> InferenceContext<'db> {
                 2 => {
                     let module_name = qualified_path.first().clone();
                     let method_name = qualified_path.last().clone();
+
+                    // Managed-form Self property method-call dispatch.
+                    // HIR lowering (`analyze_qualified_call`) cannot
+                    // distinguish a CommonModule call (`М.Метод()`) from a
+                    // method on a managed-form Self property
+                    // (`Элементы.Найти()`) — both lower to a 2-segment
+                    // `QualifiedPath` because lowering has no `db`. So the
+                    // disambiguation runs here in Phase B: if the first
+                    // segment names a property of `ФормаКлиентскогоПриложения`
+                    // **and** the enclosing module is a managed form
+                    // **and** the receiver name is NOT also a real user
+                    // CommonModule (a user `Метаданные` CommonModule
+                    // shadowing the platform global must keep its
+                    // CommonModule semantics — same precedence rule as
+                    // `missing_common_module_method::from_hir`), the call
+                    // is `<property>.<method>` and routes through the
+                    // platform `lookup_method` adapter on the property's
+                    // declared `Ty`. Otherwise it falls through to the
+                    // CommonModule resolver as before.
+                    let resolver = self.get_resolver();
+                    // `user_common_module_exists` carries the same
+                    // visibility-aware semantics as
+                    // `Resolver::resolve_qualified_method`: a raw
+                    // `module_index` probe would falsely "shadow" a
+                    // configuration-hidden module and produce a silent
+                    // miss when the form-self skip kicks in but the
+                    // CommonModule path can't see the receiver.
+                    if !resolver.user_common_module_exists(self.db, &module_name) {
+                        if let Some(prop_resolution) = crate::form_self::resolve_form_self_property(
+                            self.db,
+                            &resolver,
+                            &module_name,
+                        ) {
+                            for arg in args {
+                                self.infer_expr(*arg);
+                            }
+                            let receiver_ty = prop_resolution.return_ty;
+                            if let Some(info) =
+                                crate::method_lookup::lookup_method(&receiver_ty, &method_name)
+                            {
+                                // Argument binding mirrors the
+                                // `Expr::Field`-callee platform path on
+                                // line ~1453: without it, narrow / arg
+                                // diagnostics silently drop for
+                                // form-self method calls.
+                                self.record_call_arg_binding(
+                                    callee,
+                                    args,
+                                    ParamsShape::Overloaded {
+                                        flat: Arc::<[Ty]>::from(&info.params[..]),
+                                        overloads: info
+                                            .overloads
+                                            .iter()
+                                            .map(|ov| Arc::<[Ty]>::from(&ov[..]))
+                                            .collect::<Vec<Arc<[Ty]>>>()
+                                            .into(),
+                                    },
+                                );
+                                trace!(
+                                    "resolved form-self call {}.{} as {:?}",
+                                    module_name,
+                                    method_name,
+                                    info.return_ty
+                                );
+                                return info.return_ty;
+                            }
+                            // Form-self property exists, but the method
+                            // is missing on its type — silent for now
+                            // (mirrors the Authoritative-receiver gate
+                            // in the Expr::Field path: we don't fire
+                            // UnresolvedMethodCall here so the user
+                            // doesn't see two error sources for one
+                            // misspelled member name).
+                            return Ty::Unknown;
+                        }
+                    }
+
                     return self.infer_qualified_call(&module_name, &method_name, args, callee);
                 }
                 3 => {

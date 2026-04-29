@@ -78,6 +78,31 @@ pub fn from_hir(
             {
                 return None;
             }
+
+            // Managed-form Self property suppression.
+            // HIR lowering classifies `Элементы.Найти(...)` as a
+            // 2-segment qualified call because the lowerer has no `db`
+            // and cannot ask "is `Элементы` a property of the enclosing
+            // form?". Phase B does have the answer: when the file is a
+            // managed form module *and* the receiver name is a property
+            // of `ФормаКлиентскогоПриложения`, the call is a method on
+            // the form's Self property — `infer_call`'s form-self
+            // dispatch handles it — so this CommonModule diagnostic is
+            // a false positive and must be silenced. Kept narrow: only
+            // managed forms (ordinary forms have a different platform
+            // type), only when the receiver name is in the form's
+            // platform property index, and only when the receiver is
+            // NOT also a real user CommonModule (a user may legitimately
+            // ship a CommonModule named like a form property).
+            if !module_is_user_common_module && hir::is_form_self_property_name(module) {
+                let metadata = ctx.module_metadata();
+                let is_managed_form = metadata.module_type == bsl_metadata::ModuleType::FormModule
+                    && metadata.form.as_ref().is_some_and(|f| f.is_managed());
+                if is_managed_form {
+                    return None;
+                }
+            }
+
             Some(create_diagnostic_from_hir(range, method, module, code, ctx))
         }
         _ => None,
@@ -110,6 +135,7 @@ fn create_diagnostic_from_hir(
 #[cfg(test)]
 mod tests {
     use crate::test_utils::check_hir_diagnostic;
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_missing_common_module_method() {
@@ -264,6 +290,120 @@ mod tests {
             diags.len(),
             1,
             "unknown method on platform global must still raise the diagnostic"
+        );
+    }
+
+    /// Build a `ModuleMetadata` for a managed-form module from raw `Form.xml`.
+    ///
+    /// Used by the form-self suppression tests below — they need a metadata
+    /// pre-populated with a managed `Form` payload (the form-self gate in
+    /// `from_hir` checks `metadata.form.as_ref().is_some_and(|f| f.is_managed())`).
+    /// Real-world metadata loading goes through `load_form_from_path` in
+    /// `ide-db`, which reads `Form.xml` off disk; tests can't rely on that
+    /// because fixtures are VFS-only, so we parse the XML directly the way
+    /// other `check_metadata_diagnostic` consumers do.
+    fn managed_form_metadata(form_xml: &str) -> hir::ModuleMetadata {
+        use std::sync::Arc;
+        let form = bsl_metadata::xml_parser::parse_form_xml(form_xml).unwrap();
+        assert!(form.is_managed(), "fixture must produce a managed form");
+        hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: Some(Arc::new(form)),
+            http_service: None,
+            web_service: None,
+        }
+    }
+
+    /// Minimal managed-form XML — `parse_form_xml` defaults `FormType` to
+    /// `Managed` when the `<FormType>` element is absent, so the bare root
+    /// element is enough.
+    const MANAGED_FORM_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"></Form>"#;
+
+    #[test]
+    fn form_self_method_call_in_managed_form_does_not_emit_missing_common_module_method() {
+        // Главный пользовательский кейс из плана: `Элементы.Найти(...)`
+        // в модуле управляемой формы НЕ должен фейерверкать
+        // `MissingCommonModuleMethod`. До фикса диагностика срабатывала,
+        // потому что `analyze_qualified_call` поднимает любой 2-сегментный
+        // вызов в `QualifiedPath`, а `from_hir` не знал про managed-form
+        // Self properties.
+        let code = r#"
+&НаКлиенте
+Процедура Тест()
+    Элементы.Найти("ТЗШкалы");
+КонецПроцедуры
+"#;
+        let metadata = managed_form_metadata(MANAGED_FORM_XML);
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                crate::diagnostics(ctx)
+            });
+        let bad: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::MissingCommonModuleMethod)
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "form-self property `Элементы` must not fire MissingCommonModuleMethod, got: {:?}",
+            bad.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unknown_module_in_managed_form_still_emits_missing_common_module_method() {
+        // Suppression очень узкий: только form-self property names. Любой
+        // другой неизвестный 2-сегментный вызов в managed form должен
+        // продолжать жаловаться, иначе мы скрыли бы реальные опечатки и
+        // отсутствующие CommonModule'и.
+        let code = r#"
+&НаКлиенте
+Процедура Тест()
+    ЗаведомоНесуществующийМодуль.КакойТоМетод();
+КонецПроцедуры
+"#;
+        let metadata = managed_form_metadata(MANAGED_FORM_XML);
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                crate::diagnostics(ctx)
+            });
+        let hits: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::MissingCommonModuleMethod)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "unknown module call must still fire MissingCommonModuleMethod, got: {:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn form_self_name_in_common_module_keeps_firing_diagnostic() {
+        // Suppression — managed-form gated. Если кто-то пишет
+        // `Элементы.Найти(...)` в обычном CommonModule, это либо опечатка,
+        // либо и правда отсутствующий CommonModule с именем `Элементы` —
+        // в обоих случаях diagnostic уместна и должна сработать.
+        let code = r#"
+Процедура Тест()
+    Элементы.Найти("Х");
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let hits: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::MissingCommonModuleMethod)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "form-self suppression must NOT bleed into non-form modules, got: {:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 
