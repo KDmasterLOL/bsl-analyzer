@@ -845,6 +845,84 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
+                // Constructor arity check — multi-overload "accept-if-any".
+                //
+                // Resolves the platform constructors for the bare type name
+                // (case-insensitive, bilingual via `constructors_by_type`).
+                // Each overload becomes a `FunctionSignature` through the
+                // same adapter that handles global functions, so the
+                // PR1/PR2/PR3 `is_variadic` precedence applies uniformly:
+                // explicit JSON flag → `,...,<X>N` name idiom → `<X>N-<X>M`
+                // capped name → fixed arity. Diagnostic fires only when
+                // NO overload accepts the call's arity.
+                //
+                // Skipped paths (intentional):
+                // - `args = []` (`Новый Массив` w/ or w/o parens) when any
+                //   overload has `required = 0`. Covers the no-parens
+                //   form for types that ship a zero-arity ctor (Array,
+                //   Structure, Query, …).
+                // - Empty constructor list (unresolved type, primitive
+                //   `Новый Строка`, user CFE — none of which surface in
+                //   `PLATFORM_CONSTRUCTORS`). Avoids double-firing on top
+                //   of upstream "unresolved type" diagnostics.
+                if let Some(name) = type_name {
+                    let ctors =
+                        bsl_platform::PlatformDataInner::instance().get_constructors(name.as_str());
+                    if !ctors.is_empty() {
+                        let arg_count = args.len();
+                        let sigs: Vec<hir_def::ty::FunctionSignature> = ctors
+                            .iter()
+                            .map(|ctor| {
+                                builtin::signature_from_params(&ctor.parameters, Ty::Unknown)
+                            })
+                            .collect();
+
+                        let mut arity_match: Option<usize> = None;
+                        let mut best_idx = 0usize;
+                        let mut best_distance = usize::MAX;
+                        for (idx, sig) in sigs.iter().enumerate() {
+                            let required = sig
+                                .defaults
+                                .iter()
+                                .rposition(|has_default| !*has_default)
+                                .map_or(0, |i| i + 1);
+                            let too_few = arg_count < required;
+                            let too_many = sig.max_args.is_some_and(|m| arg_count > m as usize);
+                            if !too_few && !too_many {
+                                arity_match = Some(idx);
+                                break;
+                            }
+                            let upper = sig.max_args.map_or(arg_count, |m| m as usize);
+                            let distance = if too_few {
+                                required - arg_count
+                            } else {
+                                arg_count.saturating_sub(upper)
+                            };
+                            if distance < best_distance {
+                                best_distance = distance;
+                                best_idx = idx;
+                            }
+                        }
+
+                        if arity_match.is_none() {
+                            let sig = &sigs[best_idx];
+                            let required = sig
+                                .defaults
+                                .iter()
+                                .rposition(|has_default| !*has_default)
+                                .map_or(0, |i| i + 1);
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::MismatchedArgCount {
+                                    call_expr: expr_id,
+                                    required_count: required,
+                                    total_count: sig.params.len(),
+                                    found: arg_count,
+                                },
+                            );
+                        }
+                    }
+                }
+
                 // Lower the constructor name through the shared TypeRef →
                 // Ty adapter. The cascade (builtin → MDO plural → platform
                 // object fallback) moved into `lower_bare_name`, so every

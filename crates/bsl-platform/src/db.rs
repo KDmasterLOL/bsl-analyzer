@@ -156,8 +156,15 @@ impl PlatformDataInner {
         // mirrors `methods_by_name`: same `type_en_to_ru` mapping, same
         // lowercase normalization, so callers can look constructors up by
         // either Russian or English type name without special-casing.
-        let constructors: Vec<PlatformConstructor> =
+        let mut constructors: Vec<PlatformConstructor> =
             crate::generated::PLATFORM_CONSTRUCTORS.iter().map(PlatformConstructor::from).collect();
+
+        // HBK-data correction: a handful of constructors are variadic per
+        // `Описание:` (free text) but encode a fixed `Синтаксис:` line, so
+        // PR2's `>,...,<`-in-syntax detector misses them. Apply the overlay
+        // before the per-type index is built so every consumer (completion
+        // / hover / inference) sees the corrected `is_variadic` flag.
+        apply_docs_only_variadic_overlay(&mut constructors);
 
         let mut constructors_by_type: FxHashMap<SmolStr, Vec<usize>> = FxHashMap::default();
         for (idx, ctor) in constructors.iter().enumerate() {
@@ -434,6 +441,54 @@ impl PlatformDataInner {
     /// Examples: "ВызватьИсключение", "Для", "Если"
     pub fn get_keyword_docs(&self, keyword: &str) -> Option<crate::types::KeywordDocs> {
         get_keyword_docs_static(keyword)
+    }
+}
+
+/// HBK-data correction: lift `is_variadic = true` on the trailing
+/// parameter of constructors that are variadic per `Описание:` (free
+/// text) but encode a fixed `Синтаксис:` line in HBK. Applied during
+/// [`PlatformDataInner::new`] before the per-type index is built so all
+/// consumers (completion / hover / inference) see the corrected flag
+/// uniformly.
+///
+/// **This is a data correction, not a runtime-inference shortcut.** If a
+/// future regen of `platform_data.json` makes the JSON correct (or HBK
+/// starts encoding these properly), the matching entry becomes a
+/// no-op — the overlay only touches param flags it does not already
+/// see set, and missing entries (renamed types/variants) silently skip.
+///
+/// Inventory (audit 2026-04-29 against the 8.3.27.1989 HBK dump):
+/// - `Structure.По ключам и значениям` — `parameters: [Ключи, Значения]`
+///   both optional. Description: «Если в первом параметре заданы ключи
+///   элементов структуры, то в следующих параметрах могут быть указаны
+///   значения этих элементов в том порядке, в котором они расположены
+///   в строке в первом параметре.»
+/// - `FixedStructure.По ключам и значениям` — `[Ключ, Значения]`
+///   `Ключ` required + `Значения` optional. Description mirrors
+///   Structure (additional values are unbounded).
+/// - `DynamicListRowKey.На основе путей и значений полей` —
+///   `[ПутиКлючевыхПолей, Значения]` both required. Description: «в
+///   следующих параметрах — значения этих ключевых полей в том
+///   порядке, в котором они расположены в строке в первом параметре».
+fn apply_docs_only_variadic_overlay(constructors: &mut [PlatformConstructor]) {
+    /// `(type_name, variant_name)` pairs of constructors whose trailing
+    /// parameter must be lifted to `is_variadic = true`. Both fields are
+    /// matched verbatim against the values in `PlatformConstructor`
+    /// (English `type_name`, Russian `variant_name`).
+    const OVERLAY: &[(&str, &str)] = &[
+        ("Structure", "По ключам и значениям"),
+        ("FixedStructure", "По ключам и значениям"),
+        ("DynamicListRowKey", "На основе путей и значений полей"),
+    ];
+
+    for ctor in constructors.iter_mut() {
+        let variant = ctor.variant_name.as_deref().unwrap_or("");
+        if !OVERLAY.iter().any(|(t, v)| *t == ctor.type_name.as_str() && *v == variant) {
+            continue;
+        }
+        if let Some(last) = ctor.parameters.last_mut() {
+            last.is_variadic = true;
+        }
     }
 }
 
@@ -930,16 +985,32 @@ mod tests {
     }
 
     /// Pin the exact set of platform entries whose last parameter is
-    /// the unbounded-variadic tail (`<X1>,...,<XN>` shape in the HBK
-    /// `Синтаксис:` chapter). PR2 of plan C wired the html-parser to
-    /// detect the `>,...,<` substring and populate `is_variadic` on
-    /// regeneration; this test locks the resulting set against the
-    /// committed `platform_data.json` (audit 2026-04-29 against the
-    /// 8.3.27.1989 HBK dump):
+    /// the unbounded-variadic tail. Sources:
+    ///
+    /// - **PR2** detector — `<X1>,...,<XN>` substring (`>,...,<` after
+    ///   HTML decoding) in the HBK `Синтаксис:` chapter sets the JSON
+    ///   field directly during regen.
+    /// - **PR3** [`apply_docs_only_variadic_overlay`] — corrects three
+    ///   constructors that are variadic per HBK `Описание:` but encode
+    ///   a fixed `Синтаксис:` line; the overlay flips the trailing
+    ///   param's flag at `PlatformDataInner::new` time.
+    ///
+    /// Combined inventory (audit 2026-04-29 against the 8.3.27.1989
+    /// HBK dump):
     ///
     /// - **Globals** (3): `Мин`, `Макс`, `ПродолжитьВызов`.
-    /// - **Constructors** (3): `Array.По количеству элементов`,
-    ///   `COMSafeArray.Из массива 1`, `COMSafeArray.По типу элемента 1`.
+    /// - **Constructors** (6): `Array.По количеству элементов`,
+    ///   `COMSafeArray.Из массива 1`, `COMSafeArray.По типу элемента 1`
+    ///   (PR2 — from syntax) and `Structure.По ключам и значениям`,
+    ///   `FixedStructure.По ключам и значениям`,
+    ///   `DynamicListRowKey.На основе путей и значений полей`
+    ///   (PR3 — from overlay).
+    ///
+    /// `FormattedString.На основании строк` is intentionally NOT in
+    /// this set: its variadic shape is encoded inside ONE rubric
+    /// `MethodParam.name` (`Содержимое1,...,СодержимоеN`), so the JSON
+    /// flag stays `false` and the adapter (`hir-ty/builtin.rs`) lifts
+    /// `max_args = None` via [`name_implies_unbounded_variadic`].
     ///
     /// Any drift — extra entries, missing entries, or the flag landing
     /// on a non-last parameter — fails this test loudly.
@@ -996,11 +1067,17 @@ mod tests {
              — a missing global silently passing the per-function loop is a regression"
         );
 
-        // Constructors — pinned by (type_name, variant_name).
+        // Constructors — pinned by (type_name, variant_name). The first
+        // three come from PR2's syntax-line detector; the last three are
+        // PR3's `apply_docs_only_variadic_overlay` (variadic per HBK
+        // description, fixed per HBK syntax).
         let expected_ctors: &[(&str, &str)] = &[
             ("Array", "По количеству элементов"),
             ("COMSafeArray", "Из массива 1"),
             ("COMSafeArray", "По типу элемента 1"),
+            ("Structure", "По ключам и значениям"),
+            ("FixedStructure", "По ключам и значениям"),
+            ("DynamicListRowKey", "На основе путей и значений полей"),
         ];
         let mut seen_ctor_hits = 0usize;
         for ctor in data.all_constructors() {
