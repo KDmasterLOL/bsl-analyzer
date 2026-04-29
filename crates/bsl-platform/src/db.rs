@@ -929,41 +929,106 @@ mod tests {
         assert_eq!(func_upper.unwrap().id, func.id);
     }
 
-    /// Smoke test for the `is_variadic` codegen path: confirms the field
-    /// flows through `RawMethodParam` → `MethodParam` and defaults to
-    /// `false` for every parameter in the currently-committed
-    /// `platform_data.json` (which has no `is_variadic` keys yet — that
-    /// gets wired up in PR2 of plan C). Locks PR1's "zero behaviour
-    /// change" promise: until the extractor produces `true`, every
-    /// platform parameter must read back as `is_variadic: false`.
+    /// Pin the exact set of platform entries whose last parameter is
+    /// the unbounded-variadic tail (`<X1>,...,<XN>` shape in the HBK
+    /// `Синтаксис:` chapter). PR2 of plan C wired the html-parser to
+    /// detect the `>,...,<` substring and populate `is_variadic` on
+    /// regeneration; this test locks the resulting set against the
+    /// committed `platform_data.json` (audit 2026-04-29 against the
+    /// 8.3.27.1989 HBK dump):
+    ///
+    /// - **Globals** (3): `Мин`, `Макс`, `ПродолжитьВызов`.
+    /// - **Constructors** (3): `Array.По количеству элементов`,
+    ///   `COMSafeArray.Из массива 1`, `COMSafeArray.По типу элемента 1`.
+    ///
+    /// Any drift — extra entries, missing entries, or the flag landing
+    /// on a non-last parameter — fails this test loudly.
     #[test]
-    fn test_is_variadic_defaults_to_false_across_corpus() {
+    fn test_is_variadic_marks_expected_unbounded_entries_only() {
         let data = PlatformDataInner::instance();
         let funcs = data.all_global_functions();
         if funcs.is_empty() {
             println!("Skipping test: no global functions available");
             return;
         }
+        let expected_global_ru: &[&str] = &["Мин", "Макс", "ПродолжитьВызов"];
+        let mut seen_global_hits = 0usize;
+
         for func in funcs {
-            for param in &func.parameters {
-                assert!(
-                    !param.is_variadic,
-                    "PR1: no JSON entry should set is_variadic=true yet \
-                     (function={}, param={})",
-                    func.name, param.name
-                );
+            let expected = expected_global_ru.contains(&func.name.as_str());
+            // The flag belongs only to the LAST parameter of the
+            // signature. Walk all params and check both the
+            // expected-on-last and not-on-others invariants.
+            let last_idx = func.parameters.len().saturating_sub(1);
+            for (idx, param) in func.parameters.iter().enumerate() {
+                if expected && idx == last_idx {
+                    assert!(
+                        param.is_variadic,
+                        "{} must mark its last param ({}) as variadic",
+                        func.name, param.name
+                    );
+                    seen_global_hits += 1;
+                } else {
+                    assert!(
+                        !param.is_variadic,
+                        "{} param {} unexpectedly carries is_variadic=true",
+                        func.name, param.name
+                    );
+                }
             }
+            // No multi-variant global currently uses the unbounded
+            // shape — variants must all stay at false.
             for variant in &func.variants {
                 for param in &variant.parameters {
                     assert!(
                         !param.is_variadic,
-                        "PR1: variant param must default to is_variadic=false \
+                        "global variant param must stay non-variadic \
                          (function={}, variant={:?}, param={})",
                         func.name, variant.variant_name, param.name
                     );
                 }
             }
         }
+        assert_eq!(
+            seen_global_hits,
+            expected_global_ru.len(),
+            "every entry in `expected_global_ru` must be present in the platform corpus \
+             — a missing global silently passing the per-function loop is a regression"
+        );
+
+        // Constructors — pinned by (type_name, variant_name).
+        let expected_ctors: &[(&str, &str)] = &[
+            ("Array", "По количеству элементов"),
+            ("COMSafeArray", "Из массива 1"),
+            ("COMSafeArray", "По типу элемента 1"),
+        ];
+        let mut seen_ctor_hits = 0usize;
+        for ctor in data.all_constructors() {
+            let ctor_key = (ctor.type_name.as_str(), ctor.variant_name.as_deref().unwrap_or(""));
+            let expected = expected_ctors.contains(&ctor_key);
+            let last_idx = ctor.parameters.len().saturating_sub(1);
+            for (idx, param) in ctor.parameters.iter().enumerate() {
+                if expected && idx == last_idx {
+                    assert!(
+                        param.is_variadic,
+                        "{}.{} must mark its last param ({}) as variadic",
+                        ctor.type_name, ctor_key.1, param.name
+                    );
+                    seen_ctor_hits += 1;
+                } else {
+                    assert!(
+                        !param.is_variadic,
+                        "{}.{:?} param {} unexpectedly carries is_variadic=true",
+                        ctor.type_name, ctor.variant_name, param.name
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            seen_ctor_hits,
+            expected_ctors.len(),
+            "every entry in `expected_ctors` must be present in the platform corpus"
+        );
     }
 
     #[test]

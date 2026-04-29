@@ -268,6 +268,53 @@ struct MethodParameter {
     param_type: Option<String>,
     /// Is parameter optional
     is_optional: bool,
+    /// Is the parameter the unbounded-variadic tail of the call. Lifted
+    /// from the page's `Синтаксис:` chapter when it contains the
+    /// separate-bracket ellipsis idiom `<X1>,...,<XN>` (substring
+    /// `>,...,<` after HTML decoding). Defaults to `false`; the JSON
+    /// omits the field when not set so the on-disk diff stays minimal
+    /// for non-variadic functions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    is_variadic: bool,
+}
+
+/// `serde` skip helper — see `MethodParameter::is_variadic`.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// If the page's `Синтаксис:` chapter encodes an unbounded variadic
+/// tail with separate name brackets (`<X1>,...,<XN>` shape), set
+/// `is_variadic = true` on the last parameter. Otherwise leave the list
+/// untouched.
+///
+/// **Detection rule** — the substring `>,...,<` after HTML decoding.
+/// Distinguishes:
+/// - `<X1>,...,<XN>` (Мин, Макс, ПродолжитьВызов, Новый Массив, two
+///   COMSafeArray ctors) — separate name groups, contains `>,...,<` →
+///   mark.
+/// - `<X1,...,XN>` (СтрШаблон, ФорматированнаяСтрока ctor 173) — single
+///   name group, NO `>,...,<` substring → skip. The capped name idiom
+///   `<word>N-<word>M` in `hir-ty/src/builtin.rs` handles those.
+///
+/// **Multi-variant assumption.** For pages with several `Вариант
+/// синтаксиса:` chapters this looks at the page-level Syntax chapter
+/// only. The current BSL platform corpus has zero multi-variant
+/// methods/globals with the `,...,` shape (audit 2026-04-29) so this
+/// is exact today; if a future regen produces such a case, refine into
+/// per-variant detection.
+fn mark_trailing_variadic_from_syntax(parameters: &mut [MethodParameter], html: &str) {
+    if parameters.is_empty() {
+        return;
+    }
+    let Some(syntax) = scraper_parser::extract_syntax(html) else {
+        return;
+    };
+    if syntax.contains(">,...,<") {
+        if let Some(last) = parameters.last_mut() {
+            last.is_variadic = true;
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -689,7 +736,8 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
 
                             // Extract additional information using scraper
                             let return_type = scraper_parser::extract_return_type(&html_content);
-                            let parameters = scraper_parser::extract_parameters(&html_content);
+                            let mut parameters = scraper_parser::extract_parameters(&html_content);
+                            mark_trailing_variadic_from_syntax(&mut parameters, &html_content);
                             // Per-variant breakdown for multi-overload pages
                             // (e.g. `ЧтениеXML.ПолучитьАтрибут`,
                             // `ТаблицаЗначений.Скопировать`). Empty for
@@ -697,12 +745,18 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                             // already covers them.
                             let raw_variants =
                                 scraper_parser::extract_parameter_variants(&html_content);
-                            let variants: Vec<MethodVariantInfo> =
+                            let mut variants: Vec<MethodVariantInfo> =
                                 if raw_variants.len() > 1 {
                                     raw_variants.into_iter().map(Into::into).collect()
                                 } else {
                                     Vec::new()
                                 };
+                            for variant in variants.iter_mut() {
+                                mark_trailing_variadic_from_syntax(
+                                    &mut variant.parameters,
+                                    &html_content,
+                                );
+                            }
                             let min_version = scraper_parser::extract_version(&html_content);
                             let context = scraper_parser::extract_context(&html_content);
 
@@ -819,7 +873,8 @@ fn parse_constructor_html(
     let id = *ctor_id_counter;
     *ctor_id_counter += 1;
 
-    let parameters = scraper_parser::extract_parameters(&html_content);
+    let mut parameters = scraper_parser::extract_parameters(&html_content);
+    mark_trailing_variadic_from_syntax(&mut parameters, &html_content);
     let min_version = scraper_parser::extract_version(&html_content);
     let context = scraper_parser::extract_context(&html_content);
     let documentation = extract_constructor_documentation(&html_content);
@@ -1122,7 +1177,8 @@ fn parse_global_function_html(
 
                         // Extract additional information using scraper
                         let return_type = scraper_parser::extract_return_type(&html_content);
-                        let parameters = scraper_parser::extract_parameters(&html_content);
+                        let mut parameters = scraper_parser::extract_parameters(&html_content);
+                        mark_trailing_variadic_from_syntax(&mut parameters, &html_content);
                         // Per-variant breakdown for multi-overload pages
                         // (`ПодключитьВнешнююКомпоненту`, `Дата`,
                         // `ОткрытьФорму`, …). Empty when the page has a
@@ -1130,12 +1186,18 @@ fn parse_global_function_html(
                         // covers it.
                         let raw_variants =
                             scraper_parser::extract_parameter_variants(&html_content);
-                        let variants: Vec<GlobalFunctionVariantInfo> =
+                        let mut variants: Vec<GlobalFunctionVariantInfo> =
                             if raw_variants.len() > 1 {
                                 raw_variants.into_iter().map(Into::into).collect()
                             } else {
                                 Vec::new()
                             };
+                        for variant in variants.iter_mut() {
+                            mark_trailing_variadic_from_syntax(
+                                &mut variant.parameters,
+                                &html_content,
+                            );
+                        }
                         let min_version = scraper_parser::extract_version(&html_content);
                         let context = scraper_parser::extract_context(&html_content);
 
@@ -1339,5 +1401,164 @@ mod ctor_tests {
         assert_eq!(counter, 503, "counter must advance once per parsed ctor");
 
         fs::remove_dir_all(&type_dir).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // mark_trailing_variadic_from_syntax — direct detector tests.
+    //
+    // Detection contract: the substring `>,...,<` (separate-bracket
+    // ellipsis idiom) in the page's `Синтаксис:` chapter lifts the
+    // last parameter's `is_variadic` flag. No marker → no flag.
+    // The single-bracket idiom (`<X1,...,XN>` for СтрШаблон /
+    // ФорматированнаяСтрока) intentionally does NOT trigger here —
+    // that path is handled by the `<word>N-<word>M` name idiom
+    // downstream in `hir-ty/src/builtin.rs`.
+    // -----------------------------------------------------------------
+
+    /// Build a minimal page with a `Синтаксис:` chapter and ONE rubric
+    /// param. Caller injects the syntax body to exercise the detector.
+    fn synthetic_page_with_syntax(syntax_body: &str, rubric_inner: &str) -> String {
+        format!(
+            r#"<html><body>
+<h1 class="V8SH_pagetitle">Глобальный контекст.Тест (Global context.Test)</h1>
+<p class="V8SH_chapter">Синтаксис:</p>{syntax_body}
+<p class="V8SH_chapter">Параметры:</p><div class="V8SH_rubric"> <p>{rubric_inner}</div>Тип: <a href="x">Произвольный</a>.<br>
+<p class="V8SH_chapter">Описание:</p><p>desc</p>
+</body></html>"#
+        )
+    }
+
+    /// `Мин(<Значение1>,...,<ЗначениеN>)` — separate brackets, the
+    /// canonical unbounded-variadic shape. After HTML decode the
+    /// substring `>,...,<` is present, so the flag must lift.
+    #[test]
+    fn detector_marks_separate_bracket_ellipsis() {
+        let html = synthetic_page_with_syntax(
+            "Тест(&lt;Значение1>,...,<ЗначениеN&gt;)",
+            "&lt;Значение1>,...,<ЗначениеN&gt; (обязательный)",
+        );
+        let mut params = scraper_parser::extract_parameters(&html);
+        assert!(!params.is_empty(), "rubric must yield at least one param");
+        mark_trailing_variadic_from_syntax(&mut params, &html);
+        assert!(
+            params.last().unwrap().is_variadic,
+            "Мин-style `<X1>,...,<XN>` must lift is_variadic"
+        );
+    }
+
+    /// `ПродолжитьВызов(<<Значение1>,...,<ЗначениеN>>)` — the double-
+    /// angle quirk found in HBK. The inner `<…>,...,<…>` still produces
+    /// `>,...,<` after decoding, so the flag must lift even though the
+    /// outer wrappers are doubled.
+    #[test]
+    fn detector_marks_double_angle_quirk() {
+        let html = synthetic_page_with_syntax(
+            "Тест(&lt;<Значение1>,...,<ЗначениеN>&gt;)",
+            "&lt;Значение1>,...,<ЗначениеN&gt; (обязательный)",
+        );
+        let mut params = scraper_parser::extract_parameters(&html);
+        mark_trailing_variadic_from_syntax(&mut params, &html);
+        assert!(
+            params.last().unwrap().is_variadic,
+            "ПродолжитьВызов-style `<<X1>,...,<XN>>` must still lift is_variadic"
+        );
+    }
+
+    /// `ФорматированнаяСтрока(<Содержимое1,...,СодержимоеN>)` — single
+    /// bracket spans the whole ellipsis. NO `>,...,<` substring →
+    /// detector must NOT lift; this case is handled by the name idiom.
+    #[test]
+    fn detector_skips_single_bracket_idiom() {
+        let html = synthetic_page_with_syntax(
+            "Тест(&lt;Содержимое1,...,СодержимоеN&gt;)",
+            "&lt;Содержимое1,...,СодержимоеN&gt; (обязательный)",
+        );
+        let mut params = scraper_parser::extract_parameters(&html);
+        mark_trailing_variadic_from_syntax(&mut params, &html);
+        assert!(
+            !params.last().unwrap().is_variadic,
+            "single-bracket idiom must NOT lift is_variadic — name idiom owns this shape"
+        );
+    }
+
+    /// Fixed-arity signature with no ellipsis whatsoever — flag stays
+    /// false, locking the no-behaviour-change path for the bulk of the
+    /// platform corpus.
+    #[test]
+    fn detector_skips_fixed_arity() {
+        let html = synthetic_page_with_syntax(
+            "Тест(&lt;Параметр&gt;)",
+            "&lt;Параметр&gt; (обязательный)",
+        );
+        let mut params = scraper_parser::extract_parameters(&html);
+        mark_trailing_variadic_from_syntax(&mut params, &html);
+        assert!(
+            !params.last().unwrap().is_variadic,
+            "fixed-arity must NOT lift is_variadic"
+        );
+    }
+
+    /// Empty parameter list — early-return guard: no last param to
+    /// mark, no panic, no allocation churn.
+    #[test]
+    fn detector_handles_empty_params_list() {
+        let html = synthetic_page_with_syntax(
+            "Тест(&lt;X1&gt;,...,&lt;XN&gt;)",
+            "&lt;X&gt;",
+        );
+        let mut params: Vec<MethodParameter> = Vec::new();
+        mark_trailing_variadic_from_syntax(&mut params, &html);
+        assert!(params.is_empty(), "empty input must remain empty");
+    }
+
+    /// Page without a `Синтаксис:` chapter — `extract_syntax` returns
+    /// `None`. Detector must early-return without touching the params.
+    #[test]
+    fn detector_handles_missing_syntax_chapter() {
+        let html = r#"<html><body>
+<h1 class="V8SH_pagetitle">FakeType</h1>
+<p class="V8SH_chapter">Параметры:</p><div class="V8SH_rubric"> <p>&lt;X&gt; (обязательный)</div>Тип: <a href="x">Число</a>.
+</body></html>"#;
+        let mut params = scraper_parser::extract_parameters(html);
+        mark_trailing_variadic_from_syntax(&mut params, html);
+        assert!(
+            !params.last().unwrap().is_variadic,
+            "absent Синтаксис: chapter must keep is_variadic at false"
+        );
+    }
+
+    /// End-to-end through `parse_constructor_html`: `Новый Массив(
+    /// <КоличествоЭлементов1>,...,<КоличествоЭлементовN>)` shape feeds
+    /// the full pipeline (syntax extraction + detector + serialization
+    /// of `is_variadic`). Locks the integration with the constructor
+    /// callsite.
+    #[test]
+    fn parse_constructor_html_lifts_variadic_for_array_count_shape() {
+        let html = synthetic_ctor_html(
+            "По количеству элементов",
+            r#"<div class="V8SH_rubric"> <p>&lt;КоличествоЭлементов1>,...,<КоличествоЭлементовN&gt; (необязательный)</div>Тип: <a href="x">Число</a>. <br>Размерности.<br>"#,
+            "Создаёт массив указанной размерности.",
+        );
+        // synthetic_ctor_html hardcodes a non-variadic Синтаксис body
+        // (`Новый ФейкТип(…)`); rewrite the syntax line so the
+        // detector sees the real Array shape.
+        let html = html.replace(
+            "<p class=\"V8SH_chapter\">Синтаксис:</p>Новый ФейкТип(…)",
+            "<p class=\"V8SH_chapter\">Синтаксис:</p>Новый ФейкТип(&lt;КоличествоЭлементов1>,...,<КоличествоЭлементовN&gt;)",
+        );
+
+        let dir = unique_tmpdir("array-variadic");
+        let path = dir.join("ctor13.html");
+        fs::write(&path, &html).unwrap();
+        let mut counter: u32 = 0;
+        let info = parse_constructor_html(&path, "FakeType", &mut counter)
+            .unwrap()
+            .expect("ctor info");
+        assert_eq!(info.parameters.len(), 1);
+        assert!(
+            info.parameters[0].is_variadic,
+            "Array's count-list ctor must mark its sole param as variadic"
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 }
