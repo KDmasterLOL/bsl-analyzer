@@ -7,7 +7,11 @@
 //! - Metadata cache warming
 //! - File ↔ URL resolution
 
-use std::{path::PathBuf, time::Instant};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use anyhow::{anyhow, Result};
 use lsp_types::Url;
@@ -270,16 +274,11 @@ impl GlobalState {
     fn prune_stale_workspace_files(&mut self) {
         use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 
-        let allowed_roots: Vec<PathBuf> = match self.project.as_ref() {
-            Some(project) => {
-                let mut roots = vec![project.source_path().to_path_buf()];
-                for (_name, ext_path) in project.extension_paths() {
-                    roots.push(ext_path.clone());
-                }
-                roots
-            }
-            None => return,
-        };
+        let allowed_roots = self.workspace_allowed_roots();
+        if allowed_roots.is_empty() {
+            return;
+        }
+        let open_paths = self.open_doc_paths();
 
         let source_root_id = SourceRootId(0);
         let mut new_file_set = vfs::file_set::FileSet::new();
@@ -292,13 +291,7 @@ impl GlobalState {
 
             for file_id in file_set.iter() {
                 let Some(vfs_path) = file_set.path_for_file(&file_id) else { continue };
-                let path = vfs_path.as_path();
-                let kept_by_root = allowed_roots.iter().any(|root| path.starts_with(root));
-                let kept_by_open = !kept_by_root
-                    && Url::from_file_path(path)
-                        .ok()
-                        .is_some_and(|url| self.mem_docs.contains(&url));
-                if kept_by_root || kept_by_open {
+                if path_in_workspace(vfs_path.as_path(), &allowed_roots, &open_paths) {
                     new_file_set.insert(file_id, vfs_path.clone());
                 } else {
                     dropped += 1;
@@ -317,6 +310,25 @@ impl GlobalState {
         self.analysis_host.raw_database_mut().set_source_root(source_root_id, new_source_root);
     }
 
+    /// Список корней, которые сейчас считаются «своими»: source-path и пути
+    /// расширений из `Project`. Пустой `Vec` означает, что проект ещё не
+    /// загружен и фильтрация выключена.
+    fn workspace_allowed_roots(&self) -> Vec<PathBuf> {
+        let Some(project) = self.project.as_ref() else { return Vec::new() };
+        let mut roots = vec![project.source_path().to_path_buf()];
+        for (_name, ext_path) in project.extension_paths() {
+            roots.push(ext_path.clone());
+        }
+        roots
+    }
+
+    /// Множество путей файлов, открытых в редакторе через LSP. Используется,
+    /// чтобы не выгребать из SourceRoot файл, который пользователь уже
+    /// смотрит, даже если расширение этого файла исчезло из конфига.
+    fn open_doc_paths(&self) -> HashSet<PathBuf> {
+        self.mem_docs.uris().into_iter().filter_map(|u| u.to_file_path().ok()).collect()
+    }
+
     /// Returns URIs of all currently opened documents.
     pub fn opened_document_uris(&self) -> Vec<Url> {
         self.mem_docs.uris()
@@ -325,30 +337,47 @@ impl GlobalState {
     /// Initialize or update SourceRoot after VFS loading completes.
     ///
     /// Merges VFS-loaded files with existing SourceRoot to preserve
-    /// files opened via LSP before loader finished.
+    /// files opened via LSP before loader finished. Файлы вне разрешённых
+    /// корней (`workspace_allowed_roots`) и не открытые в редакторе
+    /// пропускаются — иначе после перенастройки loader'а (например, после
+    /// удаления расширения из `bsl-analyzer.toml`) `LoadingProgress::Finished`
+    /// возвращал бы старые VFS-файлы обратно в SourceRoot и отменял очистку,
+    /// сделанную в `prune_stale_workspace_files`.
     pub fn init_source_root(&mut self) {
         use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 
         let start = Instant::now();
         let source_root_id = SourceRootId(0);
-        let vfs = self.vfs.read();
 
+        // Snapshot allowed roots and open-doc paths *before* taking the
+        // mutable DB borrow so the per-file filter doesn't fight Rust's
+        // split-borrow rules.
+        let allowed_roots = self.workspace_allowed_roots();
+        let open_paths = self.open_doc_paths();
+
+        let vfs = self.vfs.read();
         let db = self.analysis_host.raw_database_mut();
         let existing_source_root = db.source_root_input(source_root_id);
         let mut file_set = existing_source_root.root(db).file_set().clone();
 
         let mut vfs_files_added = 0;
+        let mut vfs_files_skipped = 0;
 
         for file_id_raw in 0..vfs.num_file_ids() {
             let file_id = vfs::FileId(file_id_raw);
-            if vfs.exists(file_id) {
-                let path = vfs.file_path(file_id);
-
-                if file_set.path_for_file(&file_id).is_none() {
-                    vfs_files_added += 1;
-                }
-                file_set.insert(file_id, path.clone());
+            if !vfs.exists(file_id) {
+                continue;
             }
+            let path = vfs.file_path(file_id);
+            if !path_in_workspace(path.as_path(), &allowed_roots, &open_paths) {
+                vfs_files_skipped += 1;
+                continue;
+            }
+
+            if file_set.path_for_file(&file_id).is_none() {
+                vfs_files_added += 1;
+            }
+            file_set.insert(file_id, path.clone());
         }
 
         let total_files = file_set.len();
@@ -375,6 +404,7 @@ impl GlobalState {
         tracing::info!(
             total_files,
             vfs_files_added,
+            vfs_files_skipped,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "updated SourceRoot with VFS files (merged)",
         );
@@ -458,4 +488,21 @@ impl GlobalState {
         Url::from_file_path(std_path)
             .map_err(|_| anyhow!("Failed to convert path to URL: {:?}", std_path))
     }
+}
+
+/// Возвращает `true`, если `path` находится под одним из разрешённых корней
+/// или открыт в редакторе. Если список корней пуст — фильтрация выключена
+/// (проект ещё не загружен), и метод пропускает любой файл.
+fn path_in_workspace(
+    path: &Path,
+    allowed_roots: &[PathBuf],
+    open_paths: &HashSet<PathBuf>,
+) -> bool {
+    if allowed_roots.is_empty() {
+        return true;
+    }
+    if allowed_roots.iter().any(|root| path.starts_with(root)) {
+        return true;
+    }
+    open_paths.contains(path)
 }
