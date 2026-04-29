@@ -372,6 +372,12 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
             return Some(docs);
         }
     }
+    if let Some(last_non_empty) = comments.iter().rev().find(|c| !c.trim().is_empty()) {
+        if is_hyperlink_line(last_non_empty.trim()) && !has_structural_section(comments) {
+            docs.link = Some(last_non_empty.trim().to_string());
+            return Some(docs);
+        }
+    }
 
     // Find section indices
     let mut section_indices = Vec::new();
@@ -379,20 +385,20 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
         let lower = line.trim().to_lowercase();
 
         if is_parameters_keyword(&lower) {
-            section_indices.push((i, Section::Parameters));
-        } else if is_returns_keyword(&lower) {
-            section_indices.push((i, Section::Returns));
+            section_indices.push(SectionMarker::new(i, Section::Parameters, None));
+        } else if let Some(payload) = returns_section_payload(line.trim()) {
+            section_indices.push(SectionMarker::new(i, Section::Returns, payload));
         } else if is_example_keyword(&lower) {
-            section_indices.push((i, Section::Examples));
+            section_indices.push(SectionMarker::new(i, Section::Examples, None));
         } else if is_call_options_keyword(&lower) {
-            section_indices.push((i, Section::CallOptions));
+            section_indices.push(SectionMarker::new(i, Section::CallOptions, None));
         } else if is_deprecated_keyword(&lower) {
-            section_indices.push((i, Section::Deprecated));
+            section_indices.push(SectionMarker::new(i, Section::Deprecated, None));
         }
     }
 
     // Parse purpose (everything before first section)
-    let purpose_end = section_indices.first().map(|(i, _)| *i).unwrap_or(comments.len());
+    let purpose_end = section_indices.first().map(|marker| marker.index).unwrap_or(comments.len());
     if purpose_end > 0 {
         let purpose_lines: Vec<_> =
             comments[..purpose_end].iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
@@ -403,25 +409,36 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
     }
 
     // Parse each section
-    for (idx, (start, section)) in section_indices.iter().enumerate() {
-        let end = section_indices.get(idx + 1).map(|(i, _)| *i).unwrap_or(comments.len());
-        let section_lines = &comments[*start + 1..end];
+    for (idx, marker) in section_indices.iter().enumerate() {
+        let end = section_indices
+            .get(idx + 1)
+            .map(|next_marker| next_marker.index)
+            .unwrap_or(comments.len());
 
-        match section {
+        let mut section_lines = Vec::new();
+        if marker.section == Section::Returns {
+            if let Some(payload) = &marker.inline_payload {
+                section_lines.push(payload.clone());
+            }
+        }
+        section_lines.extend(comments[marker.index + 1..end].iter().cloned());
+
+        match marker.section {
             Section::Parameters => {
-                docs.parameters = parse_parameters(section_lines);
+                docs.parameters = parse_parameters(&section_lines);
             }
             Section::Returns => {
-                docs.returned_value = parse_returns(section_lines);
+                docs.returned_value = parse_returns(&section_lines);
             }
             Section::Examples => {
-                docs.examples = parse_simple_section(section_lines);
+                docs.examples = parse_simple_section(&section_lines);
             }
             Section::CallOptions => {
-                docs.call_options = parse_simple_section(section_lines);
+                docs.call_options = parse_simple_section(&section_lines);
             }
             Section::Deprecated => {
-                docs.deprecation = parse_deprecated_section(&comments[*start], section_lines);
+                docs.deprecation =
+                    parse_deprecated_section(&comments[marker.index], &section_lines);
             }
         }
     }
@@ -439,14 +456,95 @@ enum Section {
     Deprecated,
 }
 
-/// Check if line contains "Параметры:" / "Parameters:" keyword.
-fn is_parameters_keyword(lower_line: &str) -> bool {
-    lower_line.contains("параметры:") || lower_line.contains("parameters:")
+/// Documentation section marker with optional same-line section payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SectionMarker {
+    index: usize,
+    section: Section,
+    inline_payload: Option<String>,
 }
 
-/// Check if line contains "Возвращаемое значение:" / "Returns:" keyword.
-fn is_returns_keyword(lower_line: &str) -> bool {
-    lower_line.contains("возвращаемое значение:") || lower_line.contains("returns:")
+impl SectionMarker {
+    fn new(index: usize, section: Section, inline_payload: Option<String>) -> Self {
+        Self { index, section, inline_payload }
+    }
+}
+
+/// Check if line contains "Параметры:" / "Parameters:" keyword.
+fn is_parameters_keyword(lower_line: &str) -> bool {
+    lower_line.starts_with("параметры:") || lower_line.starts_with("parameters:")
+}
+
+fn has_structural_section(comments: &[String]) -> bool {
+    comments.iter().any(|line| is_structural_section_line(line.trim()))
+}
+
+fn is_structural_section_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    is_parameters_keyword(&lower)
+        || returns_section_payload(line).is_some()
+        || is_example_keyword(&lower)
+        || is_call_options_keyword(&lower)
+        || is_deprecated_keyword(&lower)
+}
+
+/// Extract same-line payload from a returned-value section header.
+///
+/// Accepts real-world variants such as:
+/// - "Возвращаемое значение:"
+/// - "Возвращаемое значение (варианты):"
+/// - "Возвращаемое значение - соответствие"
+/// - "Возвращаемое значение;"
+/// - "Returns:"
+/// - "Return value:"
+fn returns_section_payload(line: &str) -> Option<Option<String>> {
+    let trimmed = line.trim();
+    let lower = trimmed.to_lowercase();
+
+    for keyword in ["возвращаемое значение", "return value", "returns", "результат", "result"]
+    {
+        if lower.starts_with(keyword) {
+            return parse_section_payload_after_keyword(trimmed, keyword.len());
+        }
+    }
+
+    None
+}
+
+fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option<Option<String>> {
+    let mut rest = line[keyword_len..].trim_start();
+
+    if rest.starts_with('(') {
+        let closing_paren = rest.find(')')?;
+        rest = rest[closing_paren + 1..].trim_start();
+    }
+
+    if rest.is_empty() {
+        return Some(None);
+    }
+
+    if let Some(payload) = rest.strip_prefix(':') {
+        return Some(non_empty_payload(payload));
+    }
+
+    if let Some(payload) = rest.strip_prefix('-') {
+        return Some(non_empty_payload(payload.trim_start_matches('-')));
+    }
+
+    if let Some(payload) = rest.strip_prefix(';') {
+        return Some(non_empty_payload(payload));
+    }
+
+    None
+}
+
+fn non_empty_payload(payload: &str) -> Option<String> {
+    let payload = payload.trim();
+    if payload.is_empty() {
+        None
+    } else {
+        Some(payload.to_string())
+    }
 }
 
 /// Check if line contains "Пример:" / "Example:" keyword.
@@ -557,6 +655,10 @@ fn parse_parameter_line(line: &str) -> Option<(String, Vec<TypeDoc>)> {
     }
 
     let param_name = parts[0].trim().to_string();
+    if !is_likely_parameter_doc_name(&param_name) {
+        return None;
+    }
+
     let type_part = parts[1].trim();
     let description = parts.get(2).map(|s| s.trim().to_string());
 
@@ -571,6 +673,27 @@ fn parse_parameter_line(line: &str) -> Option<(String, Vec<TypeDoc>)> {
     };
 
     Some((param_name, types))
+}
+
+fn is_likely_parameter_doc_name(name: &str) -> bool {
+    is_likely_parameter_name(name) || is_dotted_type_reference(name)
+}
+
+fn is_likely_parameter_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first_char) = chars.next() else {
+        return false;
+    };
+
+    if !(first_char.is_alphabetic() || first_char == '_') {
+        return false;
+    }
+
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn is_dotted_type_reference(name: &str) -> bool {
+    name.contains('.') && is_likely_type_name(name)
 }
 
 /// Parse a sub-parameter line: "* FieldName - Type - description".
@@ -631,6 +754,9 @@ fn parse_returns(lines: &[String]) -> Vec<TypeDoc> {
                 types.push(type_doc);
             }
             current_type = Some(TypeDoc::simple(type_name, description));
+        } else if current_type.is_none() && types.is_empty() {
+            current_type =
+                Some(TypeDoc::simple("Произвольный".to_string(), Some(trimmed.to_string())));
         }
     }
 
@@ -653,53 +779,85 @@ fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
         return None;
     }
 
-    // Pattern 0: "Type:" (type name with colon, no description)
-    // Example: "Структура:", "Массив:"
-    if trimmed.ends_with(':') && !trimmed.contains(" - ") {
-        let type_name = trimmed.trim_end_matches(':').trim();
-        if !type_name.is_empty() && is_likely_type_name(type_name) {
-            return Some((type_name.to_string(), None));
-        }
+    let type_line = trimmed.strip_prefix('-').map(str::trim).unwrap_or(trimmed);
+    if type_line.is_empty() {
         return None;
     }
 
-    // Pattern 1: "- Type - description" (leading dash with description)
-    if let Some(without_dash) = trimmed.strip_prefix('-') {
-        let without_dash = without_dash.trim();
-        if trimmed.matches('-').count() >= 2 {
-            if let Some(sep_pos) = without_dash.find(" - ") {
-                let type_name = without_dash[..sep_pos].trim().to_string();
-                let description = without_dash[sep_pos + 3..].trim().to_string();
-                return Some((type_name, Some(description)));
-            }
-        }
+    if let Some((type_part, description)) = split_type_description(type_line) {
+        let (type_name, type_description) = parse_return_type_name(type_part)?;
+        return Some((
+            type_name,
+            merge_type_descriptions(type_description, Some(description.to_string())),
+        ));
     }
 
-    // Pattern 2: "Type - description" (no leading dash)
-    if let Some(sep_pos) = trimmed.find(" - ") {
-        let type_name = trimmed[..sep_pos].trim();
-        if type_name.is_empty() || type_name.starts_with('*') {
-            return None;
-        }
-        let type_name = type_name.to_string();
-        let description = trimmed[sep_pos + 3..].trim().to_string();
-        return Some((type_name, Some(description)));
-    }
+    parse_return_type_name(type_line)
+}
 
-    // Pattern 3: "- Type" (leading dash without description)
-    if let Some(without_dash) = trimmed.strip_prefix('-') {
-        let type_name = without_dash.trim().to_string();
-        if !type_name.is_empty() {
-            return Some((type_name, None));
+fn split_type_description(line: &str) -> Option<(&str, &str)> {
+    for separator in [" -- ", " — ", " – ", " - "] {
+        if let Some(separator_pos) = line.find(separator) {
+            return Some((
+                line[..separator_pos].trim(),
+                line[separator_pos + separator.len()..].trim(),
+            ));
         }
-    }
-
-    // Pattern 4: "Type" (just type name)
-    if !trimmed.is_empty() && is_likely_type_name(trimmed) {
-        return Some((trimmed.to_string(), None));
     }
 
     None
+}
+
+fn parse_return_type_name(type_part: &str) -> Option<(String, Option<String>)> {
+    let type_part = type_part.trim().trim_end_matches(':').trim();
+
+    if type_part.is_empty() {
+        return None;
+    }
+
+    if let Some((collection_type, description)) = parse_collection_type(type_part) {
+        return Some((collection_type, Some(description)));
+    }
+
+    if is_likely_type_name(type_part) {
+        return Some((type_part.to_string(), None));
+    }
+
+    None
+}
+
+fn parse_collection_type(type_part: &str) -> Option<(String, String)> {
+    let lower = type_part.to_lowercase();
+    let marker = " из ";
+    let marker_pos = lower.find(marker)?;
+    let collection_type = type_part[..marker_pos].trim();
+    let element_type = type_part[marker_pos + marker.len()..].trim();
+
+    if collection_type.is_empty() || element_type.is_empty() {
+        return None;
+    }
+
+    if !is_likely_type_name(collection_type) {
+        return None;
+    }
+
+    Some((collection_type.to_string(), format!("из {element_type}")))
+}
+
+fn merge_type_descriptions(
+    type_description: Option<String>,
+    explicit_description: Option<String>,
+) -> Option<String> {
+    match (type_description, explicit_description) {
+        (Some(type_description), Some(explicit_description))
+            if !explicit_description.trim().is_empty() =>
+        {
+            Some(format!("{type_description} - {explicit_description}"))
+        }
+        (Some(type_description), _) => Some(type_description),
+        (None, Some(explicit_description)) => Some(explicit_description),
+        (None, None) => None,
+    }
 }
 
 /// Check if a string is likely a type name.
@@ -921,6 +1079,131 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_return_value_variants_header() {
+        let comments = vec![
+            "Возвращает дату начала периода.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение (варианты):".to_string(),
+            "  Дата - дата начала периода.".to_string(),
+            "  Неопределено - если период не применим.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 2);
+        assert_eq!(docs.returned_value[0].name, "Дата");
+        assert_eq!(docs.returned_value[1].name, "Неопределено");
+    }
+
+    #[test]
+    fn test_parse_return_value_english_header() {
+        let comments = vec![
+            "Calculates total amount.".to_string(),
+            "".to_string(),
+            "Return value:".to_string(),
+            "  Number - total amount.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Number");
+    }
+
+    #[test]
+    fn test_parse_return_value_inline_dash_header() {
+        let comments = vec![
+            "Возвращает соответствие настроек.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение - соответствие.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Произвольный");
+        assert_eq!(docs.returned_value[0].description.as_deref(), Some("соответствие."));
+    }
+
+    #[test]
+    fn test_parse_return_collection_of_structure() {
+        let comments = vec![
+            "Возвращает список правил.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Массив из Структура:".to_string(),
+            "    * Ссылка - СправочникСсылка.Правила - правило.".to_string(),
+            "    * Представление - Строка - представление правила.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Массив");
+        assert_eq!(docs.returned_value[0].description.as_deref(), Some("из Структура"));
+        assert_eq!(docs.returned_value[0].parameters.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_return_map_of_key_and_value() {
+        let comments = vec![
+            "Возвращает шаблоны выражений.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Соответствие из КлючИЗначение:".to_string(),
+            "    * Ключ - Строка - имя шаблона.".to_string(),
+            "    * Значение - Строка - выражение на встроенном языке.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Соответствие");
+        assert_eq!(docs.returned_value[0].description.as_deref(), Some("из КлючИЗначение"));
+        assert_eq!(docs.returned_value[0].parameters.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_return_collection_of_see_reference() {
+        let comments = vec![
+            "Возвращает хранимые файлы.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Массив из см. РаботаСФайлами.ДанныеФайла".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Массив");
+        assert_eq!(
+            docs.returned_value[0].description.as_deref(),
+            Some("из см. РаботаСФайлами.ДанныеФайла")
+        );
+    }
+
+    #[test]
+    fn test_parse_return_structure_double_dash() {
+        let comments = vec![
+            "Возвращает результат фонового задания.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Структура -- содержит следующие параметры:".to_string(),
+            "    * ЗаданиеВыполнено - Булево - Истина, если задание выполнено.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Структура");
+        assert_eq!(
+            docs.returned_value[0].description.as_deref(),
+            Some("содержит следующие параметры:")
+        );
+        assert_eq!(docs.returned_value[0].parameters.len(), 1);
+    }
+
+    #[test]
     fn test_parse_returns_does_not_swallow_description_continuation() {
         // The description after the type can span multiple lines. Continuation lines
         // must NOT be promoted to phantom union members of the return type.
@@ -954,6 +1237,105 @@ mod tests {
 
         assert!(docs.is_hyperlink());
         assert_eq!(docs.link, Some("См. ДругойМетод()".to_string()));
+    }
+
+    #[test]
+    fn test_parse_hyperlink_with_service_prefix() {
+        let comments = vec![
+            "СтандартныеПодсистемы.УправлениеДоступом".to_string(),
+            "".to_string(),
+            "См. УправлениеДоступомПереопределяемый.ПриЗаполненииСписковСОграничениемДоступа."
+                .to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(docs.is_hyperlink());
+        assert_eq!(
+            docs.link.as_deref(),
+            Some(
+                "См. УправлениеДоступомПереопределяемый.ПриЗаполненииСписковСОграничениемДоступа."
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_result_section_ends_parameters() {
+        let comments = vec![
+            "Для переданной организации определяет, является ли она юридическим лицом".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Организация - СправочникСсылка.Организации - организация.".to_string(),
+            "".to_string(),
+            "Результат:".to_string(),
+            "  Булево - Истина, если организация - юридическое лицо.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 1);
+        assert_eq!(docs.parameters[0].name, "Организация");
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Булево");
+    }
+
+    #[test]
+    fn test_parse_english_result_section_ends_parameters() {
+        let comments = vec![
+            "Checks whether the organization is legal entity.".to_string(),
+            "".to_string(),
+            "Parameters:".to_string(),
+            "  Organization - CatalogRef.Organizations - organization.".to_string(),
+            "".to_string(),
+            "Result:".to_string(),
+            "  Boolean - true when organization is legal entity.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 1);
+        assert_eq!(docs.parameters[0].name, "Organization");
+        assert_eq!(docs.returned_value.len(), 1);
+        assert_eq!(docs.returned_value[0].name, "Boolean");
+    }
+
+    #[test]
+    fn test_parse_parameter_description_continuation_not_extra_parameter() {
+        let comments = vec![
+            "Получает оформленное накладными по заказам количество.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  ОтборПоИзмерениям - Структура - Ключ структуры определяет имя измерения,"
+                .to_string(),
+            "                      а значение структуры - искомое значение.".to_string(),
+            "  ИсключитьЗаказ - Булево - признак исключения заказа.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 2);
+        assert_eq!(docs.parameters[0].name, "ОтборПоИзмерениям");
+        assert_eq!(docs.parameters[1].name, "ИсключитьЗаказ");
+    }
+
+    #[test]
+    fn test_parse_nested_parameter_fields_still_attached() {
+        let comments = vec![
+            "Заполняет настройки.".to_string(),
+            "".to_string(),
+            "Параметры:".to_string(),
+            "  Настройки - Структура - настройки заполнения:".to_string(),
+            "    * Организация - СправочникСсылка.Организации - организация.".to_string(),
+            "    * Дата - Дата - дата заполнения.".to_string(),
+        ];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert_eq!(docs.parameters.len(), 1);
+        assert_eq!(docs.parameters[0].name, "Настройки");
+        assert_eq!(docs.parameters[0].types[0].parameters.len(), 2);
+        assert_eq!(docs.parameters[0].types[0].parameters[0].name, "Организация");
+        assert_eq!(docs.parameters[0].types[0].parameters[1].name, "Дата");
     }
 
     #[test]

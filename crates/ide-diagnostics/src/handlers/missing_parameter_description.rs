@@ -54,16 +54,16 @@ fn check_method(
         tree.top_level_items().get(method_id.local_id as usize).and_then(|item| match item {
             ModItem::Function(func_idx) if is_function => {
                 let func = tree.function(*func_idx);
-                Some((func.name_range, &func.params[..]))
+                Some((func.name_range, &func.params[..], func.is_export))
             }
             ModItem::Procedure(proc_idx) if !is_function => {
                 let proc = tree.procedure(*proc_idx);
-                Some((proc.name_range, &proc.params[..]))
+                Some((proc.name_range, &proc.params[..], proc.is_export))
             }
             _ => None,
         });
 
-    let (name_range, params) = match method_info {
+    let (name_range, params, is_export) = match method_info {
         Some(info) => info,
         None => return Vec::new(),
     };
@@ -95,12 +95,14 @@ fn check_method(
     }
 
     if !params.is_empty() && param_docs.is_empty() {
-        diagnostics.push(create_diagnostic(
-            name_range,
-            "Необходимо добавить описание всех параметров метода",
-            code,
-            ctx,
-        ));
+        if is_export {
+            diagnostics.push(create_diagnostic(
+                name_range,
+                "Необходимо добавить описание всех параметров метода",
+                code,
+                ctx,
+            ));
+        }
         return diagnostics;
     }
 
@@ -117,6 +119,10 @@ fn check_parameter_descriptions(
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    if is_single_parameter_legacy_type_only_doc(params, param_docs) {
+        return;
+    }
+
     let mut doc_map: HashMap<String, &hir::ParameterDoc> = HashMap::new();
     let mut doc_order: Vec<String> = Vec::new();
     let mut duplicate_docs: Vec<&str> = Vec::new();
@@ -183,6 +189,31 @@ fn check_parameter_descriptions(
     }
 }
 
+fn is_single_parameter_legacy_type_only_doc(
+    params: &[hir::Param],
+    param_docs: &[hir::ParameterDoc],
+) -> bool {
+    if params.len() != 1 || param_docs.len() != 1 {
+        return false;
+    }
+
+    let param_name = params[0].name.to_string();
+    let doc_name = param_docs[0].name.as_str();
+
+    !param_name.eq_ignore_ascii_case(doc_name) && is_dotted_type_reference(doc_name)
+}
+
+fn is_dotted_type_reference(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first_char) = chars.next() else {
+        return false;
+    };
+
+    name.contains('.')
+        && first_char.is_uppercase()
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+}
+
 fn create_diagnostic(
     range: TextRange,
     message: &str,
@@ -215,14 +246,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::MissingParameterDescription)
             .collect();
 
-        assert_eq!(mpd.len(), 12, "Expected 12 diagnostics");
-
-        assert_diagnostic_message_at_line(
-            FIXTURE,
-            &mpd,
-            7,
-            "Необходимо добавить описание всех параметров метода",
-        );
+        assert_eq!(mpd.len(), 11, "Expected 11 diagnostics");
 
         assert_diagnostic_message_at_line(
             FIXTURE,
@@ -297,6 +321,98 @@ mod tests {
     #[test]
     fn test_hyperlink_reference() {
         let code = "// См. ДругойМетод()\nФункция Пример(Параметр1)\nКонецФункции";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_non_export_purpose_only_comment_does_not_require_parameters() {
+        let code =
+            "// Межотчетный период\nПроцедура УстановитьУточнениеПериода(Проводки)\nКонецПроцедуры";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_export_purpose_only_comment_still_requires_parameters() {
+        let code =
+            "// Межотчетный период\nПроцедура УстановитьУточнениеПериода(Проводки) Экспорт\nКонецПроцедуры";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingParameterDescription);
+        assert!(diagnostics[0]
+            .message
+            .contains("Необходимо добавить описание всех параметров метода"));
+    }
+
+    #[test]
+    fn test_non_export_with_parameter_section_still_checks_missing_parameter() {
+        let code = r#"// Описание.
+//
+// Параметры:
+//   Первый - Строка - первый параметр.
+Процедура Пример(Первый, Второй)
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingParameterDescription);
+        assert!(diagnostics[0]
+            .message
+            .contains("Необходимо добавить описание параметра \"Второй\""));
+    }
+
+    #[test]
+    fn test_hyperlink_reference_after_service_prefix() {
+        let code = r#"// СтандартныеПодсистемы.УправлениеДоступом
+//
+// См. УправлениеДоступомПереопределяемый.ПриЗаполненииСписковСОграничениемДоступа.
+Процедура ПриЗаполненииОграниченияДоступа(Ограничение) Экспорт
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_parameter_description_continuation_not_extra_parameter() {
+        let code = r#"// Получает оформленное накладными по заказам количество.
+//
+// Параметры:
+//   ТаблицаОтбора - ТаблицаЗначений - таблица отбора.
+//   ОтборПоИзмерениям - Структура - Ключ структуры определяет имя измерения,
+//                       а значение структуры - искомое значение.
+//   ИсключитьЗаказ - Булево - признак исключения заказа.
+Функция ТаблицаОформлено(ТаблицаОтбора, ОтборПоИзмерениям = Неопределено, ИсключитьЗаказ = Ложь) Экспорт
+КонецФункции"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_result_section_after_parameters_not_extra_parameter() {
+        let code = r#"// Для переданной организации определяет, является ли она юридическим лицом.
+//
+// Параметры:
+//   Организация - СправочникСсылка.Организации - организация.
+//
+// Результат:
+//   Булево - Истина, если организация - юридическое лицо.
+Функция ЭтоЮрЛицо(Организация) Экспорт
+КонецФункции"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_single_parameter_legacy_type_only_description_ok() {
+        let code = r#"// Для переданной организации определяет, является ли она юридическим лицом.
+//
+// Параметры:
+//   СправочникСсылка.Организации - организация.
+//
+// Результат:
+//   Булево - Истина, если организация - юридическое лицо.
+Функция ЭтоЮрЛицо(Организация) Экспорт
+КонецФункции"#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
