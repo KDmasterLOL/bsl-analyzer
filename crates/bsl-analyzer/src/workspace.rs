@@ -7,7 +7,11 @@
 //! - Metadata cache warming
 //! - File ↔ URL resolution
 
-use std::{path::PathBuf, time::Instant};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use anyhow::{anyhow, Result};
 use lsp_types::Url;
@@ -93,7 +97,12 @@ impl GlobalState {
         }
 
         let mut load_entries = vec![loader::Entry::Directories(loader::Directories {
-            extensions: vec!["bsl".to_string(), "os".to_string(), "xml".to_string()],
+            // Only `.bsl` enters Salsa via `set_file_text`; `.xml` files stay
+            // in the FileSet so the watcher invalidates `metadata_version`,
+            // but their text is read straight from disk by
+            // `bsl_metadata::loader`. OneScript `.os` is intentionally not
+            // scanned — this LSP targets 1C BSL only.
+            extensions: vec!["bsl".to_string(), "xml".to_string()],
             include,
             exclude: vec![
                 paths::AbsPathBuf::assert_utf8(root.join(".git")),
@@ -128,7 +137,7 @@ impl GlobalState {
     /// 2. Applies them to the Salsa database
     /// 3. Ensures files are mapped to SourceRoot and added to FileSet
     /// 4. Returns (has_changes, config_changed)
-    pub fn process_changes(&mut self) -> (bool, bool) {
+    pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> (bool, bool) {
         use base_db::SourceDatabase;
 
         let start = Instant::now();
@@ -170,15 +179,17 @@ impl GlobalState {
             {
                 let vfs = self.vfs.read();
                 let path = vfs.file_path(file.file_id);
-                let path_str = path.as_path().to_string_lossy();
-                if path_str.ends_with(".bsl-analyzer.json")
-                    || path_str.ends_with(".bsl-language-server.json")
-                {
-                    tracing::info!(path = %path_str, "config file changed");
+                let path_path = path.as_path();
+                let file_name = path_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if matches!(
+                    file_name,
+                    "bsl-analyzer.toml" | ".bsl-analyzer.json" | ".bsl-language-server.json"
+                ) {
+                    tracing::info!(path = %path_path.display(), "config file changed");
                     config_file_changed = true;
                 }
-                if !metadata_xml_changed && path_str.ends_with(".xml") {
-                    tracing::info!(path = %path_str, "metadata XML file changed");
+                if !metadata_xml_changed && path_path.extension().is_some_and(|ext| ext == "xml") {
+                    tracing::info!(path = %path_path.display(), "metadata XML file changed");
                     metadata_xml_changed = true;
                 }
             }
@@ -198,17 +209,27 @@ impl GlobalState {
             }
 
             if let Some(text) = text {
+                // Salsa `FileTextInput` is sized for BSL parsing only.
+                // XML metadata files are reloaded straight from disk by
+                // `bsl_metadata::loader`, so for a 1C ERP-sized
+                // configuration we would otherwise pin ~8 GB of XML text in
+                // Salsa with zero readers. FileSet membership stays so the
+                // watcher → `bump_metadata_version` path keeps working.
                 let path_str = {
                     let vfs = self.vfs.read();
                     format!("{:?}", vfs.file_path(file.file_id))
                 };
+                let store_in_salsa = ide_db::is_bsl_source(&file_set, file.file_id);
                 tracing::debug!(
                     file_id = file.file_id.0,
                     path = %path_str,
                     text_len = text.len(),
-                    "process_changes: set_file_text (invalidates Salsa cache)"
+                    store_in_salsa,
+                    "process_changes: file text"
                 );
-                db.set_file_text(file.file_id, &text);
+                if store_in_salsa {
+                    db.set_file_text(file.file_id, &text);
+                }
             }
         }
 
@@ -222,8 +243,12 @@ impl GlobalState {
         }
 
         if metadata_xml_changed {
-            tracing::info!("bumping metadata version after XML change");
-            self.analysis_host.raw_database_mut().bump_metadata_version();
+            if suppress_metadata_bump {
+                tracing::debug!("suppressing metadata version bump during initial sync");
+            } else {
+                tracing::info!("bumping metadata version after XML change");
+                self.analysis_host.raw_database_mut().bump_metadata_version();
+            }
         }
 
         tracing::info!(
@@ -237,17 +262,86 @@ impl GlobalState {
     }
 
     /// Reloads project config from disk and updates diagnostics config.
+    ///
+    /// Делегирует в [`Self::set_workspace_root`], чтобы при правке
+    /// `bsl-analyzer.toml` обновлялся не только `self.project`, но и
+    /// Salsa-вход `set_all_config_paths`, и `include`-список VFS-loader'а —
+    /// иначе вновь добавленное расширение не подхватится без рестарта LSP.
+    /// Дополнительно вычищает из `SourceRoot` файлы из корней, которых
+    /// больше нет в конфиге, чтобы `module_index` и `workspace_symbols` не
+    /// продолжали резолвить общие модули удалённого расширения.
     pub fn reload_project_config(&mut self) -> bool {
-        if let Some(root) = self.workspace_root.clone() {
-            tracing::info!("reloading project config");
-            let project = project_model::Project::new(&root);
-            self.project = Some(project);
-            self.update_diagnostics_config();
-            self.update_features_config();
-            true
-        } else {
-            false
+        let Some(root) = self.workspace_root.clone() else {
+            return false;
+        };
+        tracing::info!("reloading project config");
+        self.set_workspace_root(root);
+        self.prune_stale_workspace_files();
+        true
+    }
+
+    /// Удаляет из `SourceRoot(0)` файлы, чьи пути больше не покрыты ни одним
+    /// из разрешённых корней (`source_path` + текущие `extension_paths`).
+    ///
+    /// Файлы, открытые в редакторе (`mem_docs`), сохраняются — пользователь
+    /// может оказаться в файле удалённого расширения и продолжать получать
+    /// диагностику для него.
+    fn prune_stale_workspace_files(&mut self) {
+        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+
+        let allowed_roots = self.workspace_allowed_roots();
+        if allowed_roots.is_empty() {
+            return;
         }
+        let open_paths = self.open_doc_paths();
+
+        let source_root_id = SourceRootId(0);
+        let mut new_file_set = vfs::file_set::FileSet::new();
+        let mut dropped = 0usize;
+        {
+            let db = self.analysis_host.raw_database();
+            let source_root_input = db.source_root_input(source_root_id);
+            let source_root = source_root_input.root(db);
+            let file_set = source_root.file_set();
+
+            for file_id in file_set.iter() {
+                let Some(vfs_path) = file_set.path_for_file(&file_id) else { continue };
+                if path_in_workspace(vfs_path.as_path(), &allowed_roots, &open_paths) {
+                    new_file_set.insert(file_id, vfs_path.clone());
+                } else {
+                    dropped += 1;
+                }
+            }
+        }
+
+        if dropped == 0 {
+            return;
+        }
+
+        tracing::info!(dropped, "pruning stale files from SourceRoot after workspace reconfig");
+
+        self.analysis_host.request_cancellation();
+        let new_source_root = SourceRoot::new_local(new_file_set);
+        self.analysis_host.raw_database_mut().set_source_root(source_root_id, new_source_root);
+    }
+
+    /// Список корней, которые сейчас считаются «своими»: source-path и пути
+    /// расширений из `Project`. Пустой `Vec` означает, что проект ещё не
+    /// загружен и фильтрация выключена.
+    fn workspace_allowed_roots(&self) -> Vec<PathBuf> {
+        let Some(project) = self.project.as_ref() else { return Vec::new() };
+        let mut roots = vec![project.source_path().to_path_buf()];
+        for (_name, ext_path) in project.extension_paths() {
+            roots.push(ext_path.clone());
+        }
+        roots
+    }
+
+    /// Множество путей файлов, открытых в редакторе через LSP. Используется,
+    /// чтобы не выгребать из SourceRoot файл, который пользователь уже
+    /// смотрит, даже если расширение этого файла исчезло из конфига.
+    fn open_doc_paths(&self) -> HashSet<PathBuf> {
+        self.mem_docs.uris().into_iter().filter_map(|u| u.to_file_path().ok()).collect()
     }
 
     /// Returns URIs of all currently opened documents.
@@ -258,30 +352,47 @@ impl GlobalState {
     /// Initialize or update SourceRoot after VFS loading completes.
     ///
     /// Merges VFS-loaded files with existing SourceRoot to preserve
-    /// files opened via LSP before loader finished.
+    /// files opened via LSP before loader finished. Файлы вне разрешённых
+    /// корней (`workspace_allowed_roots`) и не открытые в редакторе
+    /// пропускаются — иначе после перенастройки loader'а (например, после
+    /// удаления расширения из `bsl-analyzer.toml`) `LoadingProgress::Finished`
+    /// возвращал бы старые VFS-файлы обратно в SourceRoot и отменял очистку,
+    /// сделанную в `prune_stale_workspace_files`.
     pub fn init_source_root(&mut self) {
         use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 
         let start = Instant::now();
         let source_root_id = SourceRootId(0);
-        let vfs = self.vfs.read();
 
+        // Snapshot allowed roots and open-doc paths *before* taking the
+        // mutable DB borrow so the per-file filter doesn't fight Rust's
+        // split-borrow rules.
+        let allowed_roots = self.workspace_allowed_roots();
+        let open_paths = self.open_doc_paths();
+
+        let vfs = self.vfs.read();
         let db = self.analysis_host.raw_database_mut();
         let existing_source_root = db.source_root_input(source_root_id);
         let mut file_set = existing_source_root.root(db).file_set().clone();
 
         let mut vfs_files_added = 0;
+        let mut vfs_files_skipped = 0;
 
         for file_id_raw in 0..vfs.num_file_ids() {
             let file_id = vfs::FileId(file_id_raw);
-            if vfs.exists(file_id) {
-                let path = vfs.file_path(file_id);
-
-                if file_set.path_for_file(&file_id).is_none() {
-                    vfs_files_added += 1;
-                }
-                file_set.insert(file_id, path.clone());
+            if !vfs.exists(file_id) {
+                continue;
             }
+            let path = vfs.file_path(file_id);
+            if !path_in_workspace(path.as_path(), &allowed_roots, &open_paths) {
+                vfs_files_skipped += 1;
+                continue;
+            }
+
+            if file_set.path_for_file(&file_id).is_none() {
+                vfs_files_added += 1;
+            }
+            file_set.insert(file_id, path.clone());
         }
 
         let total_files = file_set.len();
@@ -308,6 +419,7 @@ impl GlobalState {
         tracing::info!(
             total_files,
             vfs_files_added,
+            vfs_files_skipped,
             elapsed_ms = start.elapsed().as_millis() as u64,
             "updated SourceRoot with VFS files (merged)",
         );
@@ -369,6 +481,9 @@ impl GlobalState {
     /// Gets or creates a FileId for the given URL.
     pub fn vfs_file_for_url(&mut self, url: &Url) -> Result<FileId> {
         let path = url.to_file_path().map_err(|_| anyhow!("Invalid file URL: {}", url))?;
+        if !ide_db::is_bsl_source_path(&path) {
+            return Err(anyhow!("File is not BSL, LSP unsupported: {}", url));
+        }
 
         let vfs_path = VfsPath::new(path);
 
@@ -391,4 +506,21 @@ impl GlobalState {
         Url::from_file_path(std_path)
             .map_err(|_| anyhow!("Failed to convert path to URL: {:?}", std_path))
     }
+}
+
+/// Возвращает `true`, если `path` находится под одним из разрешённых корней
+/// или открыт в редакторе. Если список корней пуст — фильтрация выключена
+/// (проект ещё не загружен), и метод пропускает любой файл.
+fn path_in_workspace(
+    path: &Path,
+    allowed_roots: &[PathBuf],
+    open_paths: &HashSet<PathBuf>,
+) -> bool {
+    if allowed_roots.is_empty() {
+        return true;
+    }
+    if allowed_roots.iter().any(|root| path.starts_with(root)) {
+        return true;
+    }
+    open_paths.contains(path)
 }

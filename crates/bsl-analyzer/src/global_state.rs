@@ -134,9 +134,6 @@ pub struct GlobalState {
 
     /// Last time progress was reported to the client.
     pub last_progress_report: std::time::Instant,
-
-    /// Buffer for VFS files during initial loading.
-    pub pending_vfs_files: Vec<(paths::AbsPathBuf, Option<Vec<u8>>)>,
 }
 
 impl GlobalState {
@@ -168,7 +165,6 @@ impl GlobalState {
             preload_external_tokens: HashMap::new(),
             request_tokens: HashMap::new(),
             last_progress_report: std::time::Instant::now(),
-            pending_vfs_files: Vec::new(),
         }
     }
 
@@ -306,6 +302,9 @@ impl GlobalStateSnapshot {
     /// against a frozen VFS snapshot instead.
     pub fn file_id_for_url(&self, url: &Url) -> anyhow::Result<vfs::FileId> {
         let path = url.to_file_path().map_err(|_| anyhow::anyhow!("Invalid file URL: {}", url))?;
+        if !ide_db::is_bsl_source_path(&path) {
+            return Err(anyhow::anyhow!("File is not BSL, request unsupported: {}", url));
+        }
 
         let vfs_path = vfs::VfsPath::new(path);
 
@@ -347,7 +346,7 @@ mod vfs_race_tests {
             vfs.set_file_contents(vfs_path, Some(Arc::from("Процедура Test() КонецПроцедуры")));
         }
 
-        state.process_changes();
+        state.process_changes(false);
 
         let text1 = {
             use base_db::SourceDatabase;
@@ -364,7 +363,7 @@ mod vfs_race_tests {
             );
         }
 
-        state.process_changes();
+        state.process_changes(false);
         state.init_source_root();
 
         let text2 = {

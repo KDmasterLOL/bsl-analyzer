@@ -29,6 +29,7 @@ pub use hir_def::item_tree::{Annotation, AnnotationKind, Function, ModItem, Para
 // Re-export tree types
 pub use hir_def::region_tree::{RegionIdx, RegionTree};
 pub use hir_def::symbol_tree::MethodSymbol;
+pub use hir_def::{is_bsl_source, is_bsl_source_path};
 pub use hir_def::{ConditionalTree, ItemTree, ModuleIndex, SymbolTree, WorkspaceSymbols};
 
 // Re-export database and resolution

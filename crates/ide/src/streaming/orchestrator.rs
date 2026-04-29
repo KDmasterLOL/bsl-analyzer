@@ -301,10 +301,13 @@ impl AnalysisOrchestrator {
         let file_reader = FileReader::from_disk(self.workspace_root.clone(), file_set_arc.clone());
 
         // 3. Build all SymbolTrees in parallel
-        // Build for ALL files in file_set (not just files to analyze),
+        // Build for ALL BSL files in file_set (not just files to analyze),
         // because cross-module diagnostics need SymbolTrees from other modules.
+        // Filter out non-BSL entries — feeding XML metadata files to the BSL
+        // parser is wasted work and produces empty ItemTrees.
         use rayon::prelude::*;
-        let all_file_ids: Vec<FileId> = file_set.iter().collect();
+        let all_file_ids: Vec<FileId> =
+            file_set.iter().filter(|&file_id| hir::is_bsl_source(&file_set, file_id)).collect();
         info!(num_files = all_file_ids.len(), "Building SymbolTrees");
 
         let symbol_trees: FxHashMap<_, _> = all_file_ids

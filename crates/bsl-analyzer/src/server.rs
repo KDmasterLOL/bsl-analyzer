@@ -175,19 +175,17 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     state.vfs_done = true;
                     tracing::info!("VFS loading complete");
 
-                    // Process all buffered VFS files (accumulated during loading)
-                    let pending_files = std::mem::take(&mut state.pending_vfs_files);
-                    let pending_count = pending_files.len();
-                    if !pending_files.is_empty() {
-                        tracing::debug!(
-                            file_count = pending_count,
-                            "processing buffered VFS files"
-                        );
-                        handle_vfs_msg(state, pending_files, false)?;
-                    }
-
-                    // Sync all accumulated VFS changes to Salsa
-                    state.process_changes();
+                    // Loader batches were already streamed into VFS as they arrived
+                    // (see `Message::Loaded`/`Changed` arm below), so no buffered
+                    // payload needs draining here. We only need the single Salsa
+                    // flush over the accumulated `Vfs::changes`.
+                    //
+                    // During the cold-start sync every workspace file shows up as a
+                    // VFS change, including all `.xml` metadata files. Suppress the
+                    // metadata bump for this sweep so it does not invalidate the
+                    // configuration cache immediately before `warm_metadata_cache`
+                    // populates it.
+                    state.process_changes(true);
 
                     state.init_source_root();
 
@@ -211,7 +209,6 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     state.request_semantic_tokens_refresh();
 
                     tracing::info!(
-                        pending_files = pending_count,
                         elapsed_ms = finalize_start.elapsed().as_millis() as u64,
                         "vfs_done finalize complete (process_changes + init_source_root + warm_metadata)",
                     );
@@ -247,15 +244,20 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             }
         }
         vfs::loader::Message::Loaded { files } | vfs::loader::Message::Changed { files } => {
-            if state.vfs_done {
-                // After loading complete, process immediately
-                handle_vfs_msg(state, files, true)?;
-            } else {
-                // During initial loading, buffer files for later processing
-                let count = files.len();
-                state.pending_vfs_files.extend(files);
-                tracing::debug!(count, total = state.pending_vfs_files.len(), "buffered VFS files");
-            }
+            // Stream straight into VFS in both phases. handle_vfs_msg converts
+            // each file's `Vec<u8>` to `Arc<str>` and drops the bytes per entry,
+            // so we never accumulate raw payloads in the application layer.
+            //
+            // During cold-start (`vfs_done == false`) the loader path here does
+            // not sync Salsa — changes pile up in `Vfs::changes`. They are
+            // drained either by the bulk `process_changes` at
+            // `LoadingProgress::Finished` below, or earlier by a `didOpen` /
+            // `didChange` handler that fires during cold-start (those drains
+            // pass `suppress_metadata_bump = true`, see `notification.rs`).
+            // After cold-start this call performs the immediate Salsa sync.
+            let count = files.len();
+            handle_vfs_msg(state, files, state.vfs_done)?;
+            tracing::debug!(count, vfs_done = state.vfs_done, "streamed VFS batch");
         }
     }
     Ok(())
@@ -384,14 +386,17 @@ fn handle_vfs_msg(
 
     drop(vfs); // Release VFS lock before processing changes
 
-    // During initial loading, defer Salsa sync to allow progress updates.
-    // All changes will be synced once VFS loading completes.
+    // Loader-driven cold-start batches pass `sync_to_salsa = false`: the bytes
+    // are now in `Vfs::changes` but Salsa is not synced here. The eventual
+    // drain happens at `LoadingProgress::Finished`, or sooner if a `didOpen` /
+    // `didChange` arrives during cold-start (those handlers call
+    // `process_changes` directly).
     if !sync_to_salsa {
         return Ok(());
     }
 
     // Process changes and sync to Salsa database
-    let (_, config_changed) = state.process_changes();
+    let (_, config_changed) = state.process_changes(false);
 
     // If config changed, schedule diagnostics for all open files
     if config_changed {
