@@ -72,7 +72,7 @@ pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::{FunctionSignature, Ty};
 pub use type_ref::{BuiltinTypeRef, TypeRef};
-pub use workspace::{CommonModuleInfo, WorkspaceSymbols};
+pub use workspace::{is_bsl_source, is_bsl_source_path, CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 
 // Re-export all Salsa query functions from the queries module

@@ -306,6 +306,9 @@ impl GlobalStateSnapshot {
     /// against a frozen VFS snapshot instead.
     pub fn file_id_for_url(&self, url: &Url) -> anyhow::Result<vfs::FileId> {
         let path = url.to_file_path().map_err(|_| anyhow::anyhow!("Invalid file URL: {}", url))?;
+        if !ide_db::is_bsl_source_path(&path) {
+            return Err(anyhow::anyhow!("File is not BSL, request unsupported: {}", url));
+        }
 
         let vfs_path = vfs::VfsPath::new(path);
 

@@ -18,6 +18,16 @@ use salsa::Database; // brings cancellation_token() into scope
 
 use crate::global_state::{GlobalState, Task};
 
+/// Returns `true` when a textDocument notification should reach the BSL
+/// pipeline. Editors may attach this server to non-BSL buffers (XML
+/// metadata, OneScript, plain text) — the pipeline can't analyze them and
+/// the URL guards return `Err`, which would surface as a notification
+/// failure. Silently skipping at the notification boundary is the
+/// LSP-correct response for `didOpen` / `didChange` etc.
+fn is_handled_uri(uri: &Url) -> bool {
+    uri.to_file_path().map(|p| ide_db::is_bsl_source_path(&p)).unwrap_or(false)
+}
+
 /// Schedules diagnostics computation in a background thread.
 ///
 /// Before spawning, any previous in-flight worker for this URI is cancelled via its
@@ -95,6 +105,10 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
 /// 4. Preload dependencies in background for fast GoToDefinition
 pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_open", uri = %params.text_document.uri).entered();
+    if !is_handled_uri(&params.text_document.uri) {
+        tracing::debug!(uri = %params.text_document.uri, "didOpen: ignoring non-BSL file");
+        return Ok(());
+    }
     let start = Instant::now();
     let vfs_done = state.vfs_done;
 
@@ -222,6 +236,10 @@ pub fn handle_did_change(
     params: DidChangeTextDocumentParams,
 ) -> Result<()> {
     let _p = tracing::info_span!("handle_did_change", uri = %params.text_document.uri).entered();
+    if !is_handled_uri(&params.text_document.uri) {
+        tracing::debug!(uri = %params.text_document.uri, "didChange: ignoring non-BSL file");
+        return Ok(());
+    }
 
     let uri = params.text_document.uri;
     let version = params.text_document.version;

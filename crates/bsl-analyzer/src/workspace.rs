@@ -97,7 +97,12 @@ impl GlobalState {
         }
 
         let mut load_entries = vec![loader::Entry::Directories(loader::Directories {
-            extensions: vec!["bsl".to_string(), "os".to_string(), "xml".to_string()],
+            // Only `.bsl` enters Salsa via `set_file_text`; `.xml` files stay
+            // in the FileSet so the watcher invalidates `metadata_version`,
+            // but their text is read straight from disk by
+            // `bsl_metadata::loader`. OneScript `.os` is intentionally not
+            // scanned — this LSP targets 1C BSL only.
+            extensions: vec!["bsl".to_string(), "xml".to_string()],
             include,
             exclude: vec![
                 paths::AbsPathBuf::assert_utf8(root.join(".git")),
@@ -204,17 +209,27 @@ impl GlobalState {
             }
 
             if let Some(text) = text {
+                // Salsa `FileTextInput` is sized for BSL parsing only.
+                // XML metadata files are reloaded straight from disk by
+                // `bsl_metadata::loader`, so for a 1C ERP-sized
+                // configuration we would otherwise pin ~8 GB of XML text in
+                // Salsa with zero readers. FileSet membership stays so the
+                // watcher → `bump_metadata_version` path keeps working.
                 let path_str = {
                     let vfs = self.vfs.read();
                     format!("{:?}", vfs.file_path(file.file_id))
                 };
+                let store_in_salsa = ide_db::is_bsl_source(&file_set, file.file_id);
                 tracing::debug!(
                     file_id = file.file_id.0,
                     path = %path_str,
                     text_len = text.len(),
-                    "process_changes: set_file_text (invalidates Salsa cache)"
+                    store_in_salsa,
+                    "process_changes: file text"
                 );
-                db.set_file_text(file.file_id, &text);
+                if store_in_salsa {
+                    db.set_file_text(file.file_id, &text);
+                }
             }
         }
 
@@ -466,6 +481,9 @@ impl GlobalState {
     /// Gets or creates a FileId for the given URL.
     pub fn vfs_file_for_url(&mut self, url: &Url) -> Result<FileId> {
         let path = url.to_file_path().map_err(|_| anyhow!("Invalid file URL: {}", url))?;
+        if !ide_db::is_bsl_source_path(&path) {
+            return Err(anyhow!("File is not BSL, LSP unsupported: {}", url));
+        }
 
         let vfs_path = VfsPath::new(path);
 

@@ -133,12 +133,19 @@ fn get_search_scope<DB: RootDatabase>(
             let source_root_input = db.source_root_input(source_root_id);
             let source_root = source_root_input.root(db);
 
-            // Collect all files in source root
-            let all_files: Vec<FileId> = source_root.iter().collect();
+            // Collect BSL files in source root. Non-BSL entries (XML metadata,
+            // manifests) have no Salsa file_text after `process_changes` skips
+            // them, so feeding them to `db.parse` below would panic in
+            // `Files::file_text`.
+            let file_set = source_root.file_set();
+            let all_files: Vec<FileId> = source_root
+                .iter()
+                .filter(|&file_id| hir::is_bsl_source(file_set, file_id))
+                .collect();
 
             tracing::debug!(
                 file_count = all_files.len(),
-                "Searching all files in source root (WorkspaceIndex usage tracking not yet implemented)"
+                "Searching BSL files in source root (WorkspaceIndex usage tracking not yet implemented)"
             );
 
             all_files
