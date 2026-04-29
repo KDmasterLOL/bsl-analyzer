@@ -610,12 +610,15 @@ pub struct FunctionSignature {
     ///   fixed-arity signature this is `params.len()`; for a documented
     ///   variadic — `СтрШаблон(Шаблон, Значение1-Значение10)` — this is
     ///   the platform's documented cap (`1 + 10 = 11`).
-    /// - `None` means no upper bound (truly unbounded variadic, e.g. user
-    ///   helpers whose tail length the platform never specified).
+    /// - `None` means no upper bound (truly unbounded variadic, e.g.
+    ///   `Мин`/`Макс` or user helpers whose tail length the platform
+    ///   never specified).
     ///
     /// The lower bound `args.len() >= required_count()` is unaffected.
-    /// BSL has no syntactic `...`; this is recovered from the platform-help
-    /// idiom of naming the tail slot `<name>1-<name>N`.
+    /// BSL has no syntactic `...`; the platform adapter recovers the cap
+    /// from `MethodParam::is_variadic` (explicit flag, → `None`) or, as a
+    /// fallback, the platform-help idiom of naming the tail slot
+    /// `<name>1-<name>N` (→ `Some(N)` after offset).
     pub max_args: Option<u32>,
 }
 

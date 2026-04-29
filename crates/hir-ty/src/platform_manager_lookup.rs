@@ -41,7 +41,7 @@ use bsl_platform::{PlatformData, PlatformDataInner, PlatformMethod};
 use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 use hir_def::Name;
 
-use crate::method_lookup::resolve_platform_type_name;
+use crate::method_lookup::{lower_param_type, resolve_platform_type_name};
 
 /// Outcome of a successful platform-method lookup.
 ///
@@ -111,9 +111,7 @@ fn build_resolution(
     let params: Vec<Ty> = method
         .parameters
         .iter()
-        .map(|p| {
-            p.param_type.as_ref().map(|t| resolve_platform_type_name(t)).unwrap_or(Ty::Unknown)
-        })
+        .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
         .collect();
     let defaults: Vec<bool> = method.parameters.iter().map(|p| p.is_optional).collect();
 
@@ -306,6 +304,31 @@ mod tests {
         assert_eq!(
             res.return_ty,
             Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Валюты") }
+        );
+    }
+
+    #[test]
+    fn manager_find_by_code_param_lowers_to_union() {
+        // `НайтиПоКоду`'s first param is `param_type = "Число, Строка"` in
+        // platform_data. The bug: `build_resolution` used to lower this
+        // through `resolve_platform_type_name` directly, which doesn't
+        // split on `,` — the whole string became `Ty::PlatformObject(
+        // "Число, Строка")` and `String → that` failed structural equality.
+        // Pin that comma-joined param_type lowers to a `Ty::Union` so
+        // `is_assignable(String, Number|String)` passes via the
+        // union-right rule.
+        let res = resolve_platform_manager_method(
+            MdoType::Catalog,
+            &Name::new("Валюты"),
+            &Name::new("НайтиПоКоду"),
+        )
+        .expect("platform data indexes FindByCode under CatalogManager");
+
+        assert_eq!(
+            res.signature.params.first(),
+            Some(&Ty::union(vec![Ty::Number, Ty::String])),
+            "first param of FindByCode must be a Union, not a single PlatformObject; got {:?}",
+            res.signature.params.first(),
         );
     }
 

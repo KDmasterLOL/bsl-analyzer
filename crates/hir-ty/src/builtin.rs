@@ -96,11 +96,13 @@ impl BuiltinFunctions {
 ///   or unrecognised tokens collapse to `Ty::Unknown` (deliberately permissive
 ///   — `MismatchedArgCount` only checks arity, not assignability).
 /// - `defaults[i]` mirrors `parameters[i].is_optional`.
-/// - `max_args` is computed from the last parameter's name: when it matches
-///   the platform-help idiom `<word>N-<word>M` (e.g. `Значение1-Значение10`
-///   for `СтрШаблон`), the documented cap `M` extends the upper bound by
-///   `M - 1` extra slots beyond the declared trailing param. Otherwise it
-///   stays at `params.len()` (a fixed-arity signature).
+/// - `max_args` is derived in this precedence (see [`signature_from_params`]):
+///   1. **Explicit flag** — `last.is_variadic == true` lifts to `None`
+///      (truly unbounded, e.g. `Мин`/`Макс`).
+///   2. **Name idiom** — last param named `<word>N-<word>M` (e.g.
+///      `Значение1-Значение10` for `СтрШаблон`) caps at
+///      `(params.len() - 1) + M`.
+///   3. **Fixed arity** — `Some(params.len())` otherwise.
 /// - `return_type` may be a comma-separated union (`"Булево, Неопределено"`);
 ///   each piece is mapped individually and recombined via `Ty::union`. The
 ///   same return type is shared across all overloads — the platform JSON
@@ -128,7 +130,25 @@ fn signatures_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<F
 /// Build a single [`FunctionSignature`] from a flat parameter list and a
 /// pre-mapped return type. Shared between single-overload and per-variant
 /// paths.
-fn signature_from_params(params_in: &[bsl_platform::MethodParam], ret: Ty) -> FunctionSignature {
+///
+/// Variadic-encoding precedence on the **last** parameter:
+/// 1. **Explicit flag** — `last.is_variadic == true` → `max_args = None`
+///    (truly unbounded tail, e.g. `Мин`/`Макс`/`ПродолжитьВызов`,
+///    `Array.По количеству элементов`, two `COMSafeArray` ctors).
+/// 2. **Name implies unbounded** — name shape `<word>N,...,<word>M` where
+///    `M` is a literal letter (not a digit run) → `max_args = None`.
+///    Used by `FormattedString.На основании строк` whose param name in
+///    HBK is literally `Содержимое1,...,СодержимоеN`.
+/// 3. **Name idiom (capped)** — `<word>N-<word>M` (dash) or
+///    `<word>N,...,<word>M` (ellipsis) where `M` is a digit run →
+///    `max_args = (params.len() - 1) + M`. The dash form covers
+///    `СтрШаблон`'s `Значение1-Значение10`; the ellipsis form is reserved
+///    for symmetry — no current corpus entry uses it.
+/// 4. **Fixed arity** — otherwise `max_args = Some(params.len())`.
+pub(crate) fn signature_from_params(
+    params_in: &[bsl_platform::MethodParam],
+    ret: Ty,
+) -> FunctionSignature {
     let mut params = Vec::with_capacity(params_in.len());
     let mut defaults = Vec::with_capacity(params_in.len());
     for param in params_in {
@@ -136,12 +156,19 @@ fn signature_from_params(params_in: &[bsl_platform::MethodParam], ret: Ty) -> Fu
         defaults.push(param.is_optional);
     }
 
-    // The trailing variadic slot is one declared param that absorbs `M`
-    // trailing args; the cap is `(params.len() - 1) + M`. Subtract one to
-    // avoid double-counting the slot the param already represents.
-    let max_args = match params_in.last().and_then(|p| variadic_param_max(p.name.as_str())) {
-        Some(m) => Some((params.len() as u32).saturating_sub(1).saturating_add(m)),
-        None => Some(params.len() as u32),
+    let last = params_in.last();
+    let max_args = if last.is_some_and(|p| p.is_variadic)
+        || last.is_some_and(|p| name_implies_unbounded_variadic(p.name.as_str()))
+    {
+        None
+    } else if let Some(m) = last.and_then(|p| variadic_param_max(p.name.as_str())) {
+        // The trailing variadic slot is one declared param that absorbs
+        // `M` trailing args; the cap is `(params.len() - 1) + M`. Subtract
+        // one to avoid double-counting the slot the param already
+        // represents.
+        Some((params.len() as u32).saturating_sub(1).saturating_add(m))
+    } else {
+        Some(params.len() as u32)
     };
 
     FunctionSignature::new_with_defaults(params, defaults, ret).with_max_args(max_args)
@@ -173,16 +200,67 @@ fn map_return_type(s: &str) -> Ty {
     map_type_string(Some(s))
 }
 
-/// Recognise the platform-help idiom for variadic last parameters,
-/// `<имя>N-<имя>M`, returning the upper bound `M` (e.g. `10` for
-/// `Значение1-Значение10`).
+/// Split a capped-variadic name idiom into `(head, tail)` around either
+/// the dash or the `,...,` separator. Returns `None` when neither
+/// separator is present. Used by both [`variadic_param_max`] (capped,
+/// digit suffix) and [`name_implies_unbounded_variadic`] (unbounded,
+/// letter suffix).
+fn split_variadic_name(name: &str) -> Option<(&str, &str)> {
+    if let Some(idx) = name.find(",...,") {
+        return Some((&name[..idx], &name[idx + ",...,".len()..]));
+    }
+    name.split_once('-')
+}
+
+/// `true` when the last param's name encodes an unbounded variadic with
+/// a letter suffix instead of a digit cap, e.g. `Содержимое1,...,
+/// СодержимоеN`. This is the in-name twin of [`bsl_platform::MethodParam::is_variadic`]
+/// and is the only way `FormattedString.На основании строк` declares its
+/// variadic shape today (HBK encodes the entire ellipsis inside ONE
+/// rubric name; the page-level syntax `<Содержимое1,...,СодержимоеN>` is
+/// a single bracket group, so PR2's `>,...,<` detector skipped it).
+fn name_implies_unbounded_variadic(name: &str) -> bool {
+    let Some((head, tail)) = split_variadic_name(name) else {
+        return false;
+    };
+    let Some(digits_start) = head
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .last()
+        .map(|(idx, _)| idx)
+    else {
+        return false;
+    };
+    let (head_word, head_digits) = head.split_at(digits_start);
+    if head_word.is_empty() || head_digits.is_empty() {
+        return false;
+    }
+    let tail = tail.trim_start();
+    if !tail.starts_with(head_word) {
+        return false;
+    }
+    let suffix = &tail[head_word.len()..];
+    // Suffix must be a non-empty all-alphabetic token (e.g. `N`, `K`,
+    // `енд`). Stricter than "no digits, ≥1 letter" — also rejects
+    // mixed-punctuation tails like `-end` or `-` that the looser rule
+    // would have admitted (Codex review 2026-04-29). Capped variants
+    // (digit suffix) stay on [`variadic_param_max`] where they belong.
+    !suffix.is_empty() && suffix.chars().all(|c| c.is_alphabetic())
+}
+
+/// Recognise the platform-help idiom for **capped** variadic last
+/// parameters, `<имя>N-<имя>M` or `<имя>N,...,<имя>M` where `M` is a
+/// digit run, returning the upper bound `M` (e.g. `10` for
+/// `Значение1-Значение10`). Letter-suffix variants (`<имя>N`) are
+/// covered by [`name_implies_unbounded_variadic`] instead.
 ///
 /// All slicing here uses byte indices returned by `char_indices` — `rfind`
 /// returns the start of a char and adding 1 to that offset would split a
 /// multibyte UTF-8 sequence (e.g. Cyrillic `е` occupies bytes 14..16 in
 /// `Значение1`).
 fn variadic_param_max(name: &str) -> Option<u32> {
-    let (head, tail) = name.split_once('-')?;
+    let (head, tail) = split_variadic_name(name)?;
     // Walk `head` from the end, splitting it into a word prefix and a
     // trailing digit run on character (not byte) boundaries.
     let digits_start = head
@@ -337,11 +415,119 @@ mod tests {
         // Real platform idiom: returns the digit suffix as the cap.
         assert_eq!(variadic_param_max("Значение1-Значение10"), Some(10));
         assert_eq!(variadic_param_max("Value1-Value5"), Some(5));
-        // Negatives — None means "not variadic".
+        // Comma-ellipsis separator with digit suffix — capped variant
+        // (no current corpus entry uses this shape, retained for symmetry
+        // with the dash form).
+        assert_eq!(variadic_param_max("Значение1,...,Значение10"), Some(10));
+        // Negatives — None means "not capped via this idiom".
         assert_eq!(variadic_param_max("Имя"), None);
         assert_eq!(variadic_param_max("Имя-Фамилия"), None);
         assert_eq!(variadic_param_max("X-Y"), None);
         assert_eq!(variadic_param_max("Значение-Значение10"), None);
+        // Letter-suffix shape belongs to `name_implies_unbounded_variadic`,
+        // NOT here. Returning `None` here is correct.
+        assert_eq!(variadic_param_max("Содержимое1,...,СодержимоеN"), None);
+    }
+
+    #[test]
+    fn name_implies_unbounded_variadic_detection() {
+        // `FormattedString.На основании строк` — only current
+        // corpus consumer of this shape (param name in HBK literally
+        // contains `,...,` separator and a letter suffix `N`).
+        assert!(name_implies_unbounded_variadic("Содержимое1,...,СодержимоеN"));
+        // Latin-letter equivalent — locks the "no digits in suffix" rule.
+        assert!(name_implies_unbounded_variadic("Value1,...,ValueK"));
+        // Capped variants must NOT trigger the unbounded detector.
+        assert!(!name_implies_unbounded_variadic("Значение1-Значение10"));
+        assert!(!name_implies_unbounded_variadic("Значение1,...,Значение10"));
+        // No separator → not a variadic-name idiom at all.
+        assert!(!name_implies_unbounded_variadic("Имя"));
+        // Separator present but head has no digit suffix → not a
+        // numbered family, can't be variadic.
+        assert!(!name_implies_unbounded_variadic("Имя,...,Фамилия"));
+        // Tail does not start with head_word — different families.
+        assert!(!name_implies_unbounded_variadic("X1,...,Y2"));
+        // Punctuation-only suffix must NOT flag — defensive against
+        // exotic HBK encodings where the trailing token is `-` or
+        // similar (Codex review 2026-04-29).
+        assert!(!name_implies_unbounded_variadic("X1,...,X-"));
+        assert!(!name_implies_unbounded_variadic("X1,...,X-end-"));
+    }
+
+    /// `signature_from_params` lifts `max_args = None` for the
+    /// `<word>N,...,<word>N` letter-suffix shape, even when the
+    /// `MethodParam.is_variadic` JSON flag is `false`. Locks the PR3
+    /// Step 1 fix for `FormattedString.На основании строк`.
+    #[test]
+    fn name_implies_unbounded_lifts_signature_max_args() {
+        let params = vec![bsl_platform::MethodParam {
+            name: "Содержимое1,...,СодержимоеN".into(),
+            param_type: Some("Произвольный".into()),
+            is_optional: true,
+            is_variadic: false,
+        }];
+        let sig = signature_from_params(&params, Ty::Unknown);
+        assert_eq!(
+            sig.max_args, None,
+            "letter-suffix `,...,` name idiom must lift max_args to None"
+        );
+    }
+
+    /// `is_variadic` on the last param lifts `max_args` to `None` even
+    /// when the name idiom does not match. Models the `Мин`/`Макс`
+    /// shape: one required param with name `Значение1`, no `-ЗначениеN`
+    /// in the name — variadicity comes from the explicit flag.
+    #[test]
+    fn explicit_is_variadic_flag_yields_unbounded_max() {
+        let params = vec![bsl_platform::MethodParam {
+            name: "Значение1".into(),
+            param_type: Some("Произвольный".into()),
+            is_optional: false,
+            is_variadic: true,
+        }];
+        let sig = signature_from_params(&params, Ty::Unknown);
+        assert_eq!(sig.max_args, None, "is_variadic=true must lift the cap");
+        assert_eq!(sig.required_count(), 1, "non-optional param stays required");
+    }
+
+    /// Flag wins over the name idiom: even if the param name matched the
+    /// `Значение1-Значение10` shape, an explicit `is_variadic = true`
+    /// must still yield `None` (truly unbounded > documented cap).
+    #[test]
+    fn is_variadic_flag_overrides_name_idiom() {
+        let params = vec![bsl_platform::MethodParam {
+            name: "Значение1-Значение10".into(),
+            param_type: Some("Произвольный".into()),
+            is_optional: false,
+            is_variadic: true,
+        }];
+        let sig = signature_from_params(&params, Ty::Unknown);
+        assert_eq!(sig.max_args, None, "explicit flag must override the cap idiom");
+    }
+
+    /// Regression guard for `НСтр`-shaped fixed-arity signatures: with
+    /// `is_variadic = false` and no name idiom on the last param, the
+    /// cap stays at `params.len()`. Protects PR1's "no behaviour change
+    /// when JSON does not yet set the flag" promise.
+    #[test]
+    fn no_flag_no_idiom_preserves_fixed_arity() {
+        let params = vec![
+            bsl_platform::MethodParam {
+                name: "Шаблон".into(),
+                param_type: Some("Строка".into()),
+                is_optional: false,
+                is_variadic: false,
+            },
+            bsl_platform::MethodParam {
+                name: "КодЯзыка".into(),
+                param_type: Some("Строка".into()),
+                is_optional: true,
+                is_variadic: false,
+            },
+        ];
+        let sig = signature_from_params(&params, Ty::String);
+        assert_eq!(sig.max_args, Some(2), "fixed-arity cap stays at params.len()");
+        assert_eq!(sig.required_count(), 1, "optional second param drops required to 1");
     }
 
     #[test]

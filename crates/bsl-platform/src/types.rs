@@ -330,6 +330,12 @@ pub struct MethodParam {
     pub param_type: Option<SmolStr>,
     /// Whether parameter is optional
     pub is_optional: bool,
+    /// Whether this parameter is the unbounded-variadic tail of the
+    /// signature (`<X1>,...,<XN>` shape in HBK syntax). Only ever true
+    /// for the last parameter — there are no required-after-ellipsis
+    /// shapes in the BSL platform corpus. Defaults to `false` when the
+    /// JSON omits the field.
+    pub is_variadic: bool,
 }
 
 /// Raw method parameter for const initialization (internal use only)
@@ -339,6 +345,7 @@ pub struct RawMethodParam {
     pub name: &'static str,
     pub param_type: Option<&'static str>,
     pub is_optional: bool,
+    pub is_variadic: bool,
 }
 
 impl From<&RawMethodParam> for MethodParam {
@@ -347,6 +354,7 @@ impl From<&RawMethodParam> for MethodParam {
             name: raw.name.into(),
             param_type: raw.param_type.map(SmolStr::from),
             is_optional: raw.is_optional,
+            is_variadic: raw.is_variadic,
         }
     }
 }

@@ -35,6 +35,7 @@ pub mod arg_diagnostics;
 pub mod builtin;
 pub mod db;
 pub mod field_lookup;
+pub mod form_self;
 pub mod infer;
 pub mod lower;
 pub mod manager_lookup;

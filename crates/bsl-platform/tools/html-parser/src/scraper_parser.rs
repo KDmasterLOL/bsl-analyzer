@@ -304,7 +304,10 @@ fn extract_parameter_from_rubric(rubric: &ElementRef) -> Option<MethodParameter>
     let name = extract_param_name(&inner)?;
     let is_optional = inner.contains("(необязательный)");
     let param_type = extract_param_type(rubric);
-    Some(MethodParameter { name, param_type, is_optional })
+    // `is_variadic` defaults to false here — `mark_trailing_variadic_from_syntax`
+    // at the page level lifts the flag for the trailing param when the
+    // page's `Синтаксис:` chapter shows the `<X1>,...,<XN>` shape.
+    Some(MethodParameter { name, param_type, is_optional, is_variadic: false })
 }
 
 /// True for chapter labels that close any in-flight variant section.

@@ -193,3 +193,78 @@ fn currentdate_no_args_is_accepted() {
         arg_count_diags(&db, file_id)
     );
 }
+
+#[test]
+fn min_max_accept_many_args() {
+    // The user's repro: `Мин`/`Макс` accept any number of arguments. HBK
+    // encodes this only in the `Синтаксис:` chapter (`<Значение1>,...,
+    // <ЗначениеN>`); plan C wires the html-parser to detect the
+    // `>,...,<` substring and lift `is_variadic = true` on the trailing
+    // param. Confirmed by `bsl-platform/src/db.rs::test_is_variadic_marks_*`.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест(Мин, Макс)
+    Х = Мин(Макс(1, 2), 3, 4, 5);
+    У = Макс(10, 20, 30, 40, 50);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        arg_count_diags(&db, file_id).is_empty(),
+        "Мин/Макс are unbounded variadic, multi-arg calls must NOT fire \
+         MismatchedArgCount, got {:?}",
+        arg_count_diags(&db, file_id)
+    );
+}
+
+#[test]
+fn min_max_zero_args_fires_mismatch() {
+    // Unbounded-variadic does NOT mean "all optional" — the first
+    // `Значение1` is required. `Мин()` / `Макс()` must still fire.
+    // (`Значение1` carries `is_optional = false` in platform_data.json.)
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    Х = Мин();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let diags = arg_count_diags(&db, file_id);
+    // total_count = 1 (the single declared required param), max_args =
+    // None (unbounded). Required floor still fails for zero args.
+    assert_eq!(
+        diags.len(),
+        1,
+        "Мин() with zero args must fire exactly one MismatchedArgCount, got {diags:?}"
+    );
+    assert_eq!(diags[0].2, 0, "found = 0");
+    assert!(diags[0].0 >= 1, "required >= 1 for the leading param");
+}
+
+#[test]
+fn user_repro_min_max_okr_intervals() {
+    // Verbatim shape from the user's bug report: nested
+    // `Мин(Макс(Окр(...), Мин), Макс)` with three-arg `Окр` (number,
+    // digits, mode). All three builtins must accept their argument
+    // counts without firing MismatchedArgCount.
+    //
+    // Local parameters `Мин` / `Макс` shadow the builtins as VALUES
+    // (the `(Макс - Мин) * Случ` arithmetic) but in CALL position
+    // (`Мин(...)`, `Макс(...)`) BSL resolves to the platform builtin.
+    // This test pins both regressions: variadic arity for the calls,
+    // and the absence of arity false-positives in the inner expressions.
+    let fixture = r#"
+//- /test.bsl
+Процедура ВыбратьЧисло(Мин, Макс)
+    Случ = 0.5;
+    ЧислоИзИнтервала = Мин(Макс(Окр(Мин + (Макс - Мин) * Случ, 0, 1), Мин), Макс);
+    Сообщить(ЧислоИзИнтервала);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        arg_count_diags(&db, file_id).is_empty(),
+        "user repro line must produce zero MismatchedArgCount diagnostics, got {:?}",
+        arg_count_diags(&db, file_id)
+    );
+}

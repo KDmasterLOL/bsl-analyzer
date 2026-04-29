@@ -91,6 +91,7 @@ pub use hir_def::{
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::db::HirDatabase;
+pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
 pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowState};
 pub use hir_ty::{

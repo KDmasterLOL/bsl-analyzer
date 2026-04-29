@@ -386,7 +386,7 @@ fn to_method_info(method: &PlatformMethod) -> MethodInfo {
 /// a real type list, and routing them through `resolve_platform_type_union`
 /// would lift the whole raw string to a strict `Ty::PlatformObject` and
 /// false-fire `TypeMismatch`.
-fn lower_param_type(raw: &str) -> Ty {
+pub(crate) fn lower_param_type(raw: &str) -> Ty {
     if !raw.contains(',') {
         return Ty::from_type_name(raw);
     }
@@ -581,6 +581,7 @@ mod tests {
                 name: "Параметр".into(),
                 param_type: param_type.map(Into::into),
                 is_optional: false,
+                is_variadic: false,
             }],
             variants: Vec::new(),
             min_version: None,

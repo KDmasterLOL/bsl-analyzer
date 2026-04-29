@@ -239,7 +239,15 @@ impl GlobalState {
         }
 
         if config_file_changed {
-            self.reload_project_config();
+            if suppress_metadata_bump {
+                // Cold-start: project уже сконфигурирован из bsl-analyzer.toml
+                // в set_workspace_root, повторный reload здесь приводит к
+                // лишнему полному проходу VFS-loader'а сразу после первого
+                // LoadingProgress::Finished.
+                tracing::debug!("suppressing project reload during initial sync");
+            } else {
+                self.reload_project_config();
+            }
         }
 
         if metadata_xml_changed {
