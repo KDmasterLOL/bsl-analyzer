@@ -134,9 +134,6 @@ pub struct GlobalState {
 
     /// Last time progress was reported to the client.
     pub last_progress_report: std::time::Instant,
-
-    /// Buffer for VFS files during initial loading.
-    pub pending_vfs_files: Vec<(paths::AbsPathBuf, Option<Vec<u8>>)>,
 }
 
 impl GlobalState {
@@ -168,7 +165,6 @@ impl GlobalState {
             preload_external_tokens: HashMap::new(),
             request_tokens: HashMap::new(),
             last_progress_report: std::time::Instant::now(),
-            pending_vfs_files: Vec::new(),
         }
     }
 

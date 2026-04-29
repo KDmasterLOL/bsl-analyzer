@@ -133,9 +133,14 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // Process VFS changes and sync to Salsa database
+    // Process VFS changes and sync to Salsa database. During cold-start
+    // (`!vfs_done`) loader batches stream straight into `Vfs::changes`,
+    // so a pre-finish drain here will pick them up too — that is fine
+    // (set_file_text is idempotent and the bulk-finish drain just becomes
+    // a no-op for already-synced files), but suppress the metadata-cache
+    // version bump while `warm_metadata_cache` has not yet populated it.
     let process_start = Instant::now();
-    state.process_changes(false);
+    state.process_changes(!vfs_done);
     let process_changes_ms = process_start.elapsed().as_millis() as u64;
 
     // Preload dependencies in background for fast GoToDefinition
@@ -269,8 +274,11 @@ pub fn handle_did_change(
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // Process VFS changes and sync to Salsa database (triggers incremental recomputation)
-    state.process_changes(false);
+    // Process VFS changes and sync to Salsa database (triggers incremental recomputation).
+    // During cold-start the loader streams batches into `Vfs::changes` too; a pre-finish
+    // drain here is idempotent with the bulk drain at LoadingProgress::Finished, but we
+    // suppress the metadata-cache bump until `warm_metadata_cache` has populated it.
+    state.process_changes(!state.vfs_done);
 
     tracing::debug!("Document updated successfully: {}", uri);
 
