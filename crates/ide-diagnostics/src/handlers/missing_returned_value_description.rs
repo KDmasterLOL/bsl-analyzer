@@ -76,19 +76,9 @@ fn check_function_hir(
         return None;
     }
 
-    // Get documentation via ctx (works in both LSP and streaming mode)
-    // If no documentation, require it for export functions
-    let docs = match ctx.method_docs(method_id) {
-        Some(d) => d,
-        None => {
-            return Some(create_diagnostic(
-                name_range,
-                "Добавьте описание возвращаемого значения функции",
-                code,
-                ctx,
-            ));
-        }
-    };
+    // Get documentation via ctx (works in both LSP and streaming mode).
+    // Missing whole-method documentation is handled by PublicMethodsDescription.
+    let docs = ctx.method_docs(method_id)?;
 
     // If it's a hyperlink reference, skip validation
     if docs.is_hyperlink() {
@@ -209,19 +199,14 @@ mod tests {
 
     #[test]
     fn test_export_function_without_comments() {
-        // Export function without any comments should trigger diagnostic
         let code = "Функция Example() Экспорт\nКонецФункции";
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
-            1,
-            "Export function without any comments should trigger diagnostic"
+            0,
+            "MissingReturnedValueDescription should not duplicate PublicMethodsDescription"
         );
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
-        assert!(diagnostics[0].message.contains("Добавьте описание"));
-        // Line 0, function name
-        assert_diagnostic_range(code, &diagnostics[0], 0, 8, 15);
     }
 
     #[test]
@@ -424,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_export_function_requires_documentation() {
-        // Export functions must have return value documentation
+        // Export functions with an existing comment must have return value documentation.
         let code =
             "// Описание\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
         let diagnostics = check_ast_diagnostic(code, check);
@@ -447,6 +432,22 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 0, "Export function with return docs should be OK");
+    }
+
+    #[test]
+    fn test_export_function_with_collection_return_docs_ok() {
+        let code = r#"// Возвращает хранимые файлы.
+//
+// Возвращаемое значение:
+//   Массив из см. РаботаСФайлами.ДанныеФайла
+//
+Функция ПолучитьХранимыеФайлы(ВнешнийОбъект) Экспорт
+    Возврат Новый Массив;
+КонецФункции"#;
+
+        let diagnostics = check_ast_diagnostic(code, check);
+
+        assert_eq!(diagnostics.len(), 0, "Collection return docs with 'из см.' should be accepted");
     }
 
     #[test]

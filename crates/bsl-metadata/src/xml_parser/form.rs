@@ -190,9 +190,11 @@ fn collect_child_items(child_items: roxmltree::Node<'_, '_>, elements: &mut Vec<
 ///
 /// Given a BSL module path like:
 /// `Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl`
+/// `CommonForms/ОбщаяФорма/Ext/Form/Module.bsl`
 ///
 /// Reads two XML files:
-/// 1. `Catalogs/Справочник1/Forms/ФормаЭлемента.xml` - MetaDataObject with FormType, UUID, Name
+/// 1. `Catalogs/Справочник1/Forms/ФормаЭлемента.xml` or
+///    `CommonForms/ОбщаяФорма.xml` - MetaDataObject with FormType, UUID, Name
 /// 2. `Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form.xml` - Form definition with Events, Commands
 ///
 /// Combines information from both files.
@@ -280,8 +282,8 @@ struct FormMetadataInfo {
 ///     <Form uuid="...">
 ///         <Properties>
 ///             <Name>ФормаЭлемента</Name>
+///             <FormType>Managed</FormType>
 ///         </Properties>
-///         <FormType>Managed</FormType>
 ///     </Form>
 /// </MetaDataObject>
 /// ```
@@ -291,17 +293,31 @@ fn parse_form_metadata_xml(xml: &str) -> Result<FormMetadataInfo> {
 
     let root = doc.root_element();
 
-    let form_node =
-        root.children().find(|n| n.is_element() && n.tag_name().name() == "Form").ok_or_else(
-            || MetadataError::InvalidFormat("No <Form> element in MetaDataObject".to_string()),
-        )?;
+    let form_node = if matches!(root.tag_name().name(), "Form" | "CommonForm") {
+        root
+    } else {
+        root.children()
+            .find(|n| n.is_element() && matches!(n.tag_name().name(), "Form" | "CommonForm"))
+            .ok_or_else(|| {
+                MetadataError::InvalidFormat(
+                    "No <Form> or <CommonForm> element in MetaDataObject".to_string(),
+                )
+            })?
+    };
 
     let uuid_str = form_node.attribute("uuid").unwrap_or("");
     let uuid = if uuid_str.is_empty() { uuid::Uuid::nil() } else { parse_uuid(uuid_str, "form")? };
 
-    let form_type_str = form_node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "FormType")
+    let properties =
+        form_node.children().find(|n| n.is_element() && n.tag_name().name() == "Properties");
+
+    let form_type_str = properties
+        .and_then(|props| {
+            props.children().find(|n| n.is_element() && n.tag_name().name() == "FormType")
+        })
+        .or_else(|| {
+            form_node.children().find(|n| n.is_element() && n.tag_name().name() == "FormType")
+        })
         .and_then(|n| n.text())
         .unwrap_or("");
     let form_type = if form_type_str.is_empty() {
@@ -310,9 +326,7 @@ fn parse_form_metadata_xml(xml: &str) -> Result<FormMetadataInfo> {
         FormType::from_name(form_type_str)
     };
 
-    let name = form_node
-        .children()
-        .find(|n| n.is_element() && n.tag_name().name() == "Properties")
+    let name = properties
         .and_then(|props| {
             props.children().find(|n| n.is_element() && n.tag_name().name() == "Name")
         })
@@ -629,5 +643,19 @@ mod tests {
         // Event handlers from Ext/Form.xml
         assert_eq!(form.event_handler_names().len(), 1);
         assert!(form.is_handler("ПриСозданииНаСервере"));
+    }
+
+    #[test]
+    fn test_parse_common_form_from_bsl_path() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let bsl_path =
+            manifest_dir.join("fixtures/designer/CommonForms/ТестоваяФорма/Ext/Form/Module.bsl");
+
+        let form = parse_form_from_bsl_path(&bsl_path).unwrap();
+
+        assert_eq!(form.name(), "ТестоваяФорма");
+        assert_eq!(form.form_type(), FormType::Ordinary);
+        assert!(form.is_handler("ПриСозданииНаСервере"));
+        assert!(form.is_handler("КомандаОК"));
     }
 }

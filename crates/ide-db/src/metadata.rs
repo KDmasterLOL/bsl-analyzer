@@ -147,6 +147,7 @@ pub trait MetadataDb: salsa::Database {
 ///
 /// Парсит путь к файлу для определения типа модуля по структуре:
 /// - `CommonModules/<Name>/Ext/Module.bsl` → CommonModule
+/// - `CommonForms/<Name>/Ext/Form/Module.bsl` → FormModule
 /// - `Catalogs/<Name>/Commands/<Cmd>/Ext/CommandModule.bsl` → CommandModule
 /// - `Catalogs/<Name>/Forms/<Form>/Ext/Form/Module.bsl` → FormModule
 /// - `Catalogs/<Name>/Ext/ObjectModule.bsl` → ObjectModule
@@ -203,6 +204,18 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
     if let Some(cmd_idx) = parts.iter().position(|&p| p == "Commands") {
         if parts.len() >= cmd_idx + 4 && parts[parts.len() - 1].ends_with("CommandModule.bsl") {
             return Some(bsl_metadata::ModuleType::CommandModule);
+        }
+    }
+
+    // CommonForms/<Name>/Ext/Form/Module.bsl (top-level common forms)
+    if let Some(idx) = parts.iter().rposition(|&p| p == "CommonForms" || p == "ОбщиеФормы")
+    {
+        if parts.len() == idx + 5
+            && parts[parts.len() - 1] == "Module.bsl"
+            && parts[parts.len() - 2] == "Form"
+            && parts[parts.len() - 3] == "Ext"
+        {
+            return Some(bsl_metadata::ModuleType::FormModule);
         }
     }
 
@@ -1008,6 +1021,37 @@ mod tests {
         // Absolute path (real-world use case)
         let uri = "/home/user/project/src/cf/BusinessProcesses/Исполнение/Forms/ВводОписанияЗадачиИсполнителя/Ext/Form/Module.bsl";
         assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::FormModule));
+    }
+
+    #[test]
+    fn test_get_module_type_common_form_module() {
+        let uri = "CommonForms/ТестоваяФорма/Ext/Form/Module.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::FormModule));
+
+        let uri = "/home/user/project/src/cf/CommonForms/ТестоваяФорма/Ext/Form/Module.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::FormModule));
+
+        let uri = "ОбщиеФормы/ТестоваяФорма/Ext/Form/Module.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::FormModule));
+
+        let uri = "CommonForms/ТестоваяФорма/Ext/Module.bsl";
+        assert_eq!(get_module_type_from_uri(uri), None);
+    }
+
+    #[test]
+    fn test_build_module_metadata_loads_common_form_without_configuration() {
+        let fixture_root = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer"
+        ));
+        let bsl_path = fixture_root.join("CommonForms/ТестоваяФорма/Ext/Form/Module.bsl");
+
+        let metadata = build_module_metadata(&bsl_path, None);
+
+        assert_eq!(metadata.module_type, bsl_metadata::ModuleType::FormModule);
+        let form = metadata.form.as_ref().expect("common form metadata should be loaded");
+        assert_eq!(form.name(), "ТестоваяФорма");
+        assert!(form.is_handler("ПриСозданииНаСервере"));
     }
 
     #[test]

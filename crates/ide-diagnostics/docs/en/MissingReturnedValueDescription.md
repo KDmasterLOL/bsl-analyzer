@@ -6,19 +6,22 @@
 
 The description of a method (procedure or function) should be formatted correctly to help programmers use the functionality correctly.
 
-The function description must contain a description of the return value in the block of the same name. You must provide a description for all possible return types.
+When an export function already has a documentation comment, that comment must contain a return-value section. You must provide a description for all possible return types.
+
+Missing whole-method documentation is handled by a separate diagnostic: `PublicMethodsDescription`.
 
 Diagnostics detects typical errors:
 
-- No return value description
+- Missing return value description in an existing export-function comment
 - Return value description for procedure
 - Poor description of the return value: when the type name is present in the description, but its description is not specified
   - To activate this more stringent check, you must turn off the short form permission by the diagnostic parameter
 
 The current implementation has a few important scope details:
 
-- missing returned-value documentation is checked only for export functions;
+- missing returned-value sections are checked only for export functions that already have documentation comments;
 - procedures are checked only to ensure they do not contain a returned-value section;
+- a completely missing export-function comment is not reported by this diagnostic;
 - hyperlink-style comments such as `See OtherMethod()` are skipped;
 - the `allowShortDescriptionReturnValues` parameter controls whether a type name alone is accepted.
 
