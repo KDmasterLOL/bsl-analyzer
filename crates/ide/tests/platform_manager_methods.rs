@@ -237,6 +237,41 @@ fn catalog_find_by_code_returns_catalog_ref() {
 }
 
 #[test]
+fn catalog_find_by_code_string_arg_does_not_fire_type_mismatch() {
+    // Regression: `НайтиПоКоду` declares `Код: Число, Строка` in
+    // platform_data — the manager-method lowering path used to lift the
+    // raw "Число, Строка" string into a single `Ty::PlatformObject`,
+    // which made `String → expected` fail structural equality and
+    // false-fired `TypeMismatch` for `НайтиПоКоду("796")`. The fix
+    // routes manager params through `lower_param_type`, the same
+    // comma-aware splitter used by tabular-section / fluent paths, so
+    // the param lowers to `Ty::Union([Number, String])` and the union-
+    // right rule accepts a `String` literal.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    Ссылка = Справочники.Справочник1.НайтиПоКоду("796");
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+
+    let mismatches: Vec<_> = db
+        .arg_diagnostics(file_id)
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::TypeMismatch { expected, actual, .. } => {
+                Some((expected.clone(), actual.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "String literal must be assignable to FindByCode's `Число, Строка` param — got {mismatches:?}",
+    );
+}
+
+#[test]
 fn unknown_manager_method_still_emits_unresolved_diagnostic() {
     // Regression guard: an actually-missing method must still surface
     // `UnresolvedMethodCall`. Without this, the fallback would silence
