@@ -581,6 +581,7 @@ mod tests {
                 name: "Параметр".into(),
                 param_type: param_type.map(Into::into),
                 is_optional: false,
+                is_variadic: false,
             }],
             variants: Vec::new(),
             min_version: None,

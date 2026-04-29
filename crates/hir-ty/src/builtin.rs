@@ -96,11 +96,13 @@ impl BuiltinFunctions {
 ///   or unrecognised tokens collapse to `Ty::Unknown` (deliberately permissive
 ///   — `MismatchedArgCount` only checks arity, not assignability).
 /// - `defaults[i]` mirrors `parameters[i].is_optional`.
-/// - `max_args` is computed from the last parameter's name: when it matches
-///   the platform-help idiom `<word>N-<word>M` (e.g. `Значение1-Значение10`
-///   for `СтрШаблон`), the documented cap `M` extends the upper bound by
-///   `M - 1` extra slots beyond the declared trailing param. Otherwise it
-///   stays at `params.len()` (a fixed-arity signature).
+/// - `max_args` is derived in this precedence (see [`signature_from_params`]):
+///   1. **Explicit flag** — `last.is_variadic == true` lifts to `None`
+///      (truly unbounded, e.g. `Мин`/`Макс`).
+///   2. **Name idiom** — last param named `<word>N-<word>M` (e.g.
+///      `Значение1-Значение10` for `СтрШаблон`) caps at
+///      `(params.len() - 1) + M`.
+///   3. **Fixed arity** — `Some(params.len())` otherwise.
 /// - `return_type` may be a comma-separated union (`"Булево, Неопределено"`);
 ///   each piece is mapped individually and recombined via `Ty::union`. The
 ///   same return type is shared across all overloads — the platform JSON
@@ -128,6 +130,17 @@ fn signatures_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<F
 /// Build a single [`FunctionSignature`] from a flat parameter list and a
 /// pre-mapped return type. Shared between single-overload and per-variant
 /// paths.
+///
+/// Two unbounded/capped-variadic encodings coexist:
+/// - **Explicit flag** — `params_in.last().is_variadic == true` lifts
+///   `max_args = None` (truly unbounded tail, e.g. `Мин`/`Макс`/`ПродолжитьВызов`).
+///   This is the primary signal once the extractor wires it through.
+/// - **Name idiom** — `<word>N-<word>M` on the last param's name (e.g.
+///   `Значение1-Значение10` for `СтрШаблон`) yields a cap at
+///   `(params.len() - 1) + M`. Retained as a fallback for the
+///   capped-variadic shape that the explicit flag cannot express today.
+///
+/// Otherwise `max_args = Some(params.len())` — fixed arity.
 fn signature_from_params(params_in: &[bsl_platform::MethodParam], ret: Ty) -> FunctionSignature {
     let mut params = Vec::with_capacity(params_in.len());
     let mut defaults = Vec::with_capacity(params_in.len());
@@ -136,12 +149,17 @@ fn signature_from_params(params_in: &[bsl_platform::MethodParam], ret: Ty) -> Fu
         defaults.push(param.is_optional);
     }
 
-    // The trailing variadic slot is one declared param that absorbs `M`
-    // trailing args; the cap is `(params.len() - 1) + M`. Subtract one to
-    // avoid double-counting the slot the param already represents.
-    let max_args = match params_in.last().and_then(|p| variadic_param_max(p.name.as_str())) {
-        Some(m) => Some((params.len() as u32).saturating_sub(1).saturating_add(m)),
-        None => Some(params.len() as u32),
+    let last = params_in.last();
+    let max_args = if last.is_some_and(|p| p.is_variadic) {
+        None
+    } else if let Some(m) = last.and_then(|p| variadic_param_max(p.name.as_str())) {
+        // The trailing variadic slot is one declared param that absorbs
+        // `M` trailing args; the cap is `(params.len() - 1) + M`. Subtract
+        // one to avoid double-counting the slot the param already
+        // represents.
+        Some((params.len() as u32).saturating_sub(1).saturating_add(m))
+    } else {
+        Some(params.len() as u32)
     };
 
     FunctionSignature::new_with_defaults(params, defaults, ret).with_max_args(max_args)
@@ -342,6 +360,63 @@ mod tests {
         assert_eq!(variadic_param_max("Имя-Фамилия"), None);
         assert_eq!(variadic_param_max("X-Y"), None);
         assert_eq!(variadic_param_max("Значение-Значение10"), None);
+    }
+
+    /// `is_variadic` on the last param lifts `max_args` to `None` even
+    /// when the name idiom does not match. Models the `Мин`/`Макс`
+    /// shape: one required param with name `Значение1`, no `-ЗначениеN`
+    /// in the name — variadicity comes from the explicit flag.
+    #[test]
+    fn explicit_is_variadic_flag_yields_unbounded_max() {
+        let params = vec![bsl_platform::MethodParam {
+            name: "Значение1".into(),
+            param_type: Some("Произвольный".into()),
+            is_optional: false,
+            is_variadic: true,
+        }];
+        let sig = signature_from_params(&params, Ty::Unknown);
+        assert_eq!(sig.max_args, None, "is_variadic=true must lift the cap");
+        assert_eq!(sig.required_count(), 1, "non-optional param stays required");
+    }
+
+    /// Flag wins over the name idiom: even if the param name matched the
+    /// `Значение1-Значение10` shape, an explicit `is_variadic = true`
+    /// must still yield `None` (truly unbounded > documented cap).
+    #[test]
+    fn is_variadic_flag_overrides_name_idiom() {
+        let params = vec![bsl_platform::MethodParam {
+            name: "Значение1-Значение10".into(),
+            param_type: Some("Произвольный".into()),
+            is_optional: false,
+            is_variadic: true,
+        }];
+        let sig = signature_from_params(&params, Ty::Unknown);
+        assert_eq!(sig.max_args, None, "explicit flag must override the cap idiom");
+    }
+
+    /// Regression guard for `НСтр`-shaped fixed-arity signatures: with
+    /// `is_variadic = false` and no name idiom on the last param, the
+    /// cap stays at `params.len()`. Protects PR1's "no behaviour change
+    /// when JSON does not yet set the flag" promise.
+    #[test]
+    fn no_flag_no_idiom_preserves_fixed_arity() {
+        let params = vec![
+            bsl_platform::MethodParam {
+                name: "Шаблон".into(),
+                param_type: Some("Строка".into()),
+                is_optional: false,
+                is_variadic: false,
+            },
+            bsl_platform::MethodParam {
+                name: "КодЯзыка".into(),
+                param_type: Some("Строка".into()),
+                is_optional: true,
+                is_variadic: false,
+            },
+        ];
+        let sig = signature_from_params(&params, Ty::String);
+        assert_eq!(sig.max_args, Some(2), "fixed-arity cap stays at params.len()");
+        assert_eq!(sig.required_count(), 1, "optional second param drops required to 1");
     }
 
     #[test]

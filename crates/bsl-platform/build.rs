@@ -342,6 +342,10 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                             "        is_optional: {},\n",
                             param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
                         ));
+                        code.push_str(&format!(
+                            "        is_variadic: {},\n",
+                            param.get("is_variadic").and_then(|v| v.as_bool()).unwrap_or(false)
+                        ));
                         code.push_str("    },\n");
                     }
                     code.push_str("];\n\n");
@@ -392,6 +396,10 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                             code.push_str(&format!(
                                 "        is_optional: {},\n",
                                 param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
+                            ));
+                            code.push_str(&format!(
+                                "        is_variadic: {},\n",
+                                param.get("is_variadic").and_then(|v| v.as_bool()).unwrap_or(false)
                             ));
                             code.push_str("    },\n");
                         }
@@ -501,6 +509,10 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                             "        is_optional: {},\n",
                             param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
                         ));
+                        code.push_str(&format!(
+                            "        is_variadic: {},\n",
+                            param.get("is_variadic").and_then(|v| v.as_bool()).unwrap_or(false)
+                        ));
                         code.push_str("    },\n");
                     }
                     code.push_str("];\n\n");
@@ -556,6 +568,10 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                             code.push_str(&format!(
                                 "        is_optional: {},\n",
                                 param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
+                            ));
+                            code.push_str(&format!(
+                                "        is_variadic: {},\n",
+                                param.get("is_variadic").and_then(|v| v.as_bool()).unwrap_or(false)
                             ));
                             code.push_str("    },\n");
                         }
@@ -1111,6 +1127,10 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                         code.push_str(&format!(
                             "        is_optional: {},\n",
                             param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
+                        ));
+                        code.push_str(&format!(
+                            "        is_variadic: {},\n",
+                            param.get("is_variadic").and_then(|v| v.as_bool()).unwrap_or(false)
                         ));
                         code.push_str("    },\n");
                     }

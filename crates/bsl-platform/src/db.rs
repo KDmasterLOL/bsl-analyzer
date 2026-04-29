@@ -929,6 +929,43 @@ mod tests {
         assert_eq!(func_upper.unwrap().id, func.id);
     }
 
+    /// Smoke test for the `is_variadic` codegen path: confirms the field
+    /// flows through `RawMethodParam` → `MethodParam` and defaults to
+    /// `false` for every parameter in the currently-committed
+    /// `platform_data.json` (which has no `is_variadic` keys yet — that
+    /// gets wired up in PR2 of plan C). Locks PR1's "zero behaviour
+    /// change" promise: until the extractor produces `true`, every
+    /// platform parameter must read back as `is_variadic: false`.
+    #[test]
+    fn test_is_variadic_defaults_to_false_across_corpus() {
+        let data = PlatformDataInner::instance();
+        let funcs = data.all_global_functions();
+        if funcs.is_empty() {
+            println!("Skipping test: no global functions available");
+            return;
+        }
+        for func in funcs {
+            for param in &func.parameters {
+                assert!(
+                    !param.is_variadic,
+                    "PR1: no JSON entry should set is_variadic=true yet \
+                     (function={}, param={})",
+                    func.name, param.name
+                );
+            }
+            for variant in &func.variants {
+                for param in &variant.parameters {
+                    assert!(
+                        !param.is_variadic,
+                        "PR1: variant param must default to is_variadic=false \
+                         (function={}, variant={:?}, param={})",
+                        func.name, variant.variant_name, param.name
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_platform_constructors_query_bilingual() {
         let db = TestDatabase::default();

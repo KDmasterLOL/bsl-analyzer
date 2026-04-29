@@ -611,6 +611,7 @@ mod tests {
                 name: "Значение".into(),
                 param_type: Some("Строка".into()),
                 is_optional: false,
+                is_variadic: false,
             }],
             variants: Vec::new(),
             min_version: Some("8.0".into()),
