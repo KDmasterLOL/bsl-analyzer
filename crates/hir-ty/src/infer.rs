@@ -1161,14 +1161,35 @@ impl<'db> InferenceContext<'db> {
                     // declared `Ty`. Otherwise it falls through to the
                     // CommonModule resolver as before.
                     let resolver = self.get_resolver();
-                    // `user_common_module_exists` carries the same
-                    // visibility-aware semantics as
-                    // `Resolver::resolve_qualified_method`: a raw
-                    // `module_index` probe would falsely "shadow" a
-                    // configuration-hidden module and produce a silent
-                    // miss when the form-self skip kicks in but the
-                    // CommonModule path can't see the receiver.
-                    if !resolver.user_common_module_exists(self.db, &module_name) {
+                    // Full shadowing gate, mirroring `infer_path_name`'s
+                    // step 4 and the assignment handler:
+                    //   * `user_common_module_exists` — visibility-aware
+                    //     CommonModule precedence (a raw `module_index`
+                    //     probe would falsely shadow a config-hidden
+                    //     module and silently miss when the CommonModule
+                    //     path can't see the receiver);
+                    //   * module-level `Метод()` / `Перем` declared in
+                    //     the current module overrides the form-self
+                    //     property (BSL: explicit user declaration wins
+                    //     over implicit Self);
+                    //   * any parameter or `Перем` declared in this body
+                    //     covers the gap left by `Resolver::resolve_name`
+                    //     (no ExprScope) and `var_types` (no entry until
+                    //     first assign).
+                    // Lowering already drops `local_vars`/`param_names`
+                    // before classifying as `QualifiedPath`, but the
+                    // module-level / declared-binding checks here close
+                    // the cases lowering cannot see.
+                    let module_level_shadow = matches!(
+                        resolver.resolve_name(self.db, &module_name),
+                        Some(hir_def::resolver::Resolution::Method(_))
+                            | Some(hir_def::resolver::Resolution::Variable(_))
+                    );
+                    let body_shadow = self.body_declares_binding(&module_name);
+                    if !resolver.user_common_module_exists(self.db, &module_name)
+                        && !module_level_shadow
+                        && !body_shadow
+                    {
                         if let Some(prop_resolution) = crate::form_self::resolve_form_self_property(
                             self.db,
                             &resolver,
