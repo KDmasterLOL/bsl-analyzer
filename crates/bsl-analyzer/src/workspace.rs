@@ -170,15 +170,17 @@ impl GlobalState {
             {
                 let vfs = self.vfs.read();
                 let path = vfs.file_path(file.file_id);
-                let path_str = path.as_path().to_string_lossy();
-                if path_str.ends_with(".bsl-analyzer.json")
-                    || path_str.ends_with(".bsl-language-server.json")
-                {
-                    tracing::info!(path = %path_str, "config file changed");
+                let path_path = path.as_path();
+                let file_name = path_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if matches!(
+                    file_name,
+                    "bsl-analyzer.toml" | ".bsl-analyzer.json" | ".bsl-language-server.json"
+                ) {
+                    tracing::info!(path = %path_path.display(), "config file changed");
                     config_file_changed = true;
                 }
-                if !metadata_xml_changed && path_str.ends_with(".xml") {
-                    tracing::info!(path = %path_str, "metadata XML file changed");
+                if !metadata_xml_changed && path_path.extension().is_some_and(|ext| ext == "xml") {
+                    tracing::info!(path = %path_path.display(), "metadata XML file changed");
                     metadata_xml_changed = true;
                 }
             }
@@ -241,17 +243,78 @@ impl GlobalState {
     }
 
     /// Reloads project config from disk and updates diagnostics config.
+    ///
+    /// Делегирует в [`Self::set_workspace_root`], чтобы при правке
+    /// `bsl-analyzer.toml` обновлялся не только `self.project`, но и
+    /// Salsa-вход `set_all_config_paths`, и `include`-список VFS-loader'а —
+    /// иначе вновь добавленное расширение не подхватится без рестарта LSP.
+    /// Дополнительно вычищает из `SourceRoot` файлы из корней, которых
+    /// больше нет в конфиге, чтобы `module_index` и `workspace_symbols` не
+    /// продолжали резолвить общие модули удалённого расширения.
     pub fn reload_project_config(&mut self) -> bool {
-        if let Some(root) = self.workspace_root.clone() {
-            tracing::info!("reloading project config");
-            let project = project_model::Project::new(&root);
-            self.project = Some(project);
-            self.update_diagnostics_config();
-            self.update_features_config();
-            true
-        } else {
-            false
+        let Some(root) = self.workspace_root.clone() else {
+            return false;
+        };
+        tracing::info!("reloading project config");
+        self.set_workspace_root(root);
+        self.prune_stale_workspace_files();
+        true
+    }
+
+    /// Удаляет из `SourceRoot(0)` файлы, чьи пути больше не покрыты ни одним
+    /// из разрешённых корней (`source_path` + текущие `extension_paths`).
+    ///
+    /// Файлы, открытые в редакторе (`mem_docs`), сохраняются — пользователь
+    /// может оказаться в файле удалённого расширения и продолжать получать
+    /// диагностику для него.
+    fn prune_stale_workspace_files(&mut self) {
+        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+
+        let allowed_roots: Vec<PathBuf> = match self.project.as_ref() {
+            Some(project) => {
+                let mut roots = vec![project.source_path().to_path_buf()];
+                for (_name, ext_path) in project.extension_paths() {
+                    roots.push(ext_path.clone());
+                }
+                roots
+            }
+            None => return,
+        };
+
+        let source_root_id = SourceRootId(0);
+        let mut new_file_set = vfs::file_set::FileSet::new();
+        let mut dropped = 0usize;
+        {
+            let db = self.analysis_host.raw_database();
+            let source_root_input = db.source_root_input(source_root_id);
+            let source_root = source_root_input.root(db);
+            let file_set = source_root.file_set();
+
+            for file_id in file_set.iter() {
+                let Some(vfs_path) = file_set.path_for_file(&file_id) else { continue };
+                let path = vfs_path.as_path();
+                let kept_by_root = allowed_roots.iter().any(|root| path.starts_with(root));
+                let kept_by_open = !kept_by_root
+                    && Url::from_file_path(path)
+                        .ok()
+                        .is_some_and(|url| self.mem_docs.contains(&url));
+                if kept_by_root || kept_by_open {
+                    new_file_set.insert(file_id, vfs_path.clone());
+                } else {
+                    dropped += 1;
+                }
+            }
         }
+
+        if dropped == 0 {
+            return;
+        }
+
+        tracing::info!(dropped, "pruning stale files from SourceRoot after workspace reconfig");
+
+        self.analysis_host.request_cancellation();
+        let new_source_root = SourceRoot::new_local(new_file_set);
+        self.analysis_host.raw_database_mut().set_source_root(source_root_id, new_source_root);
     }
 
     /// Returns URIs of all currently opened documents.
