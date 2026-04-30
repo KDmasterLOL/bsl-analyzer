@@ -23,8 +23,36 @@
 pub use crate::field_enum::FieldInfo;
 
 use hir_def::configs::VisibleConfig;
-use hir_def::ty::Ty;
+use hir_def::ty::{FormDataKind, MetadataKind, Ty};
 use hir_def::Name;
+
+/// Project a [`Ty::FormData`] receiver to the underlying MDO for **field**
+/// resolution.
+///
+/// Fields on a managed-form attribute that wraps an `*Object` MDO behave
+/// like the MDO's attributes — `Объект.Дата` inside a document form must
+/// reach the document's `Дата` declaration, not the form-data wrapper's
+/// platform members. Methods are routed differently (see
+/// [`crate::method_lookup::platform_type_key`]); that's why the projection
+/// lives here, in `field_lookup`, not inside a global coercion.
+///
+/// Returns:
+/// - `Some(MetadataRef { *Object, name })` for `Structure` /
+///   `StructureWithCollection` whose `underlying` MDO has an `*Object`
+///   companion in [`MetadataKind::object_kind_for`].
+/// - `None` for `Collection` (no name-keyed fields), for `Structure`s with
+///   no `underlying` (e.g. `ValueTable` attribute without an MDO), and for
+///   underlying MDO kinds without an `*Object` surface.
+fn project_form_data_for_fields(ty: &Ty) -> Option<Ty> {
+    let Ty::FormData { kind, underlying: Some((mdo, name)) } = ty else {
+        return None;
+    };
+    if !matches!(kind, FormDataKind::Structure | FormDataKind::StructureWithCollection) {
+        return None;
+    }
+    let object_kind = MetadataKind::object_kind_for(*mdo)?;
+    Some(Ty::MetadataRef { kind: object_kind, name: name.clone() })
+}
 
 /// Resolve a field access on a typed receiver.
 ///
@@ -43,10 +71,19 @@ pub fn lookup_field(
     receiver_ty: &Ty,
     field_name: &Name,
 ) -> Option<FieldInfo> {
+    // Managed-form attribute projection happens BEFORE `ThisObject`
+    // coercion: a `Ty::FormData { Structure | StructureWithCollection,
+    // underlying: Some((mdo, n)) }` walks the MDO's attribute table for
+    // field lookup (`Объект.Дата` must reach the document's `Дата`).
+    // Method lookup deliberately doesn't do this — see
+    // [`Ty::FormData`] docs.
+    let projected_form_data = project_form_data_for_fields(receiver_ty);
+    let projected_ty = projected_form_data.as_ref().unwrap_or(receiver_ty);
+
     // `Ty::ThisObject` coercion and dispatch split: MetadataRef → enumerator,
     // Union → intersection over live arms, everything else → platform-property adapter.
-    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
-    let effective_ty = coerced.as_ref().unwrap_or(receiver_ty);
+    let coerced = crate::this_object::coerce_to_metadata_ref(projected_ty);
+    let effective_ty = coerced.as_ref().unwrap_or(projected_ty);
 
     // Union receivers (e.g. `НайтиСтроки(...) → Union(TabularSectionRow,
     // Undefined)`). Skip nullish arms (consistent with `enumerate_fields`

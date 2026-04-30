@@ -112,6 +112,41 @@ pub enum Ty {
         owner: (MdoType, crate::Name),
     },
 
+    /// Managed-form attribute receiver — the platform wrapper that exposes
+    /// a form attribute (`Объект`, `Замечание`, `ТаблицаРасходов`) to
+    /// FormModule code.
+    ///
+    /// Why a dedicated variant rather than reusing [`Self::ThisObject`] for
+    /// the main attribute (`Объект`)? Method lookup on a `ThisObject` falls
+    /// through to `MetadataRef { *Object, … }` via coercion in
+    /// `hir-ty::this_object`. That coercion would expose `Записать()`,
+    /// `ЗаблокироватьДанныеДляРедактирования()`, and other object-level
+    /// methods that the platform deliberately blocks on the form-data
+    /// wrapper — `Объект.Записать()` inside a managed form is a runtime
+    /// error, not a valid call. Routing methods through
+    /// `ДанныеФормыСтруктура` / `ДанныеФормыКоллекция` /
+    /// `ДанныеФормыСтруктураСКоллекцией` (per [`FormDataKind`]) closes that
+    /// gap.
+    ///
+    /// `underlying` carries the `(MdoType, Name)` that the form attribute
+    /// projects when present (`<MainAttribute>true</...>` typed as
+    /// `cfg:CatalogObject.X`). Field lookup on
+    /// `Ty::FormData { Structure, underlying: Some((mdo, name)), .. }`
+    /// enumerates the MDO's attributes — `Объект.Дата` resolves through the
+    /// catalog/document attribute table just like `ЭтотОбъект.Дата` would
+    /// in an object module. `None` covers `ValueTable`-typed attributes
+    /// (the schema lives in `<Columns>`) and any future form attribute
+    /// without a backing MDO.
+    FormData {
+        /// Platform wrapper kind — picks the right method table in
+        /// `bsl-platform::PlatformDataInner`.
+        kind: FormDataKind,
+        /// Optional MDO behind a `Structure` / `StructureWithCollection`
+        /// projection — `Some` for `<MainAttribute>` typed as
+        /// `cfg:CatalogObject.X` / `cfg:DocumentObject.Y` / etc.
+        underlying: Option<(MdoType, crate::Name)>,
+    },
+
     /// Function or procedure type — used internally to carry a
     /// signature through call resolution. **BSL has no first-class
     /// function values**: a bare identifier without parentheses cannot
@@ -158,6 +193,40 @@ pub enum Ty {
     /// `Expr::Field` / `Expr::MethodCall` on a union give `Ty::Unknown` until
     /// a narrowing step selects a concrete component.
     Union(Arc<[Ty]>),
+}
+
+/// Managed-form data wrapper flavour.
+///
+/// Picks the platform type whose method table backs a [`Ty::FormData`]
+/// receiver:
+///
+/// | Variant | Platform type | When chosen |
+/// |---------|---------------|-------------|
+/// | [`Self::Structure`] | `ДанныеФормыСтруктура` / `FormDataStructure` | scalar / `<MainAttribute>` form attribute (e.g. `Объект` typed as `cfg:DocumentObject.X`) |
+/// | [`Self::Collection`] | `ДанныеФормыКоллекция` / `FormDataCollection` | `ValueTable`-typed attribute with `<Columns>` (table inside the form) |
+/// | [`Self::StructureWithCollection`] | `ДанныеФормыСтруктураСКоллекцией` / `FormDataStructureAndCollection` | object-typed attribute that also exposes table parts (covers `Объект` for documents/catalogs with tabular sections — the platform composite that exposes both fields and tabular collections) |
+///
+/// The platform type names live in `bsl-platform/data/platform_data.json`;
+/// `Display::fmt` and `platform_type_name` map this enum to those names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FormDataKind {
+    /// Plain form-data structure (no nested collections).
+    Structure,
+    /// Form-data collection (`ValueTable` attribute).
+    Collection,
+    /// Form-data structure that also has nested form-data collections.
+    StructureWithCollection,
+}
+
+impl FormDataKind {
+    /// Russian platform type name for method/property lookup.
+    pub fn platform_type_name(self) -> &'static str {
+        match self {
+            Self::Structure => "ДанныеФормыСтруктура",
+            Self::Collection => "ДанныеФормыКоллекция",
+            Self::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
+        }
+    }
 }
 
 /// Metadata object kind.
@@ -517,6 +586,7 @@ impl Ty {
             }
             Ty::ObjectManager { .. } => "ObjectManager",
             Ty::ThisObject { .. } => "ThisObject",
+            Ty::FormData { kind, .. } => kind.platform_type_name(),
             Ty::Function { .. } => "Function",
             Ty::PlatformObject(name) => name.as_str(),
             // Coarse label mirrors `MetadataRef` / `ObjectManager`: the
@@ -548,6 +618,12 @@ impl Ty {
             // `None` here keeps the platform fallback from surfacing
             // bogus methods before the coercion step runs.
             Ty::ThisObject { .. } => None,
+            // Form data wraps the platform `ДанныеФормыСтруктура` /
+            // `ДанныеФормыКоллекция` / `ДанныеФормыСтруктураСКоллекцией`
+            // method tables. Method lookup goes through these names; field
+            // lookup on a `Structure` / `StructureWithCollection` peels off
+            // the wrapper through `underlying` (handled in `field_lookup`).
+            Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
             // Unions have no single platform type by construction — a
             // caller that wants methods on `Ty::Union([Number, String])`
             // must narrow first (M4) or intersect method tables explicitly.

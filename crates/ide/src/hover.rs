@@ -656,6 +656,25 @@ fn render_ty_ru(ty: &Ty) -> String {
         Ty::ValueList => "СписокЗначений".into(),
         Ty::Function { .. } => "Функция".into(),
         Ty::ThisObject { .. } => "ЭтотОбъект".into(),
+        Ty::FormData { kind, underlying } => {
+            // Surface the projected MDO so hover on `Объект` reads
+            // "ДанныеФормыСтруктура (ДокументОбъект.ПКО)" — the wrapper
+            // name explains method semantics, the parenthetical reminds
+            // the reader which catalog/document fields are visible.
+            // The `*Object` MetadataKind is the same surface a manual
+            // `ЭтотОбъект` cast would expose, so we reuse `metadata_kind_ru`
+            // for consistency with `Ty::MetadataRef` rendering.
+            let wrapper = kind.platform_type_name();
+            match underlying
+                .as_ref()
+                .and_then(|(mdo, name)| MetadataKind::object_kind_for(*mdo).map(|k| (k, name)))
+            {
+                Some((object_kind, name)) => {
+                    format!("{} ({}.{})", wrapper, metadata_kind_ru(object_kind), name.as_str())
+                }
+                None => wrapper.into(),
+            }
+        }
         Ty::MetadataRef { kind, name } => {
             format!("{}.{}", metadata_kind_ru(*kind), name.as_str())
         }

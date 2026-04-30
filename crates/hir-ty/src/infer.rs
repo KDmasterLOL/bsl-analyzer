@@ -1098,6 +1098,36 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
+        // 4b. Managed-form attribute — user-declared реквизиты of the
+        //     enclosing form (`<Attributes><Attribute name="…">` in
+        //     Form.xml). Same shadowing gate as form-self property:
+        //     module-level methods, `Перем` declarations, parameters and
+        //     assigned implicit locals win over a same-named attribute.
+        //
+        //     Order matters:
+        //     - AFTER form-self property (4) so platform members
+        //       `Элементы` / `Команды` / `Параметры` keep their wrapper
+        //       type even if the configuration declares an attribute with
+        //       the same name (impossible in well-formed configurations,
+        //       but the cascade choice is deliberate).
+        //     - BEFORE platform globals (5) so user-defined attributes
+        //       like `Метаданные`, `ОбработкаОшибок` win over the
+        //       global-context property of the same name when typed in a
+        //       form module.
+        //     - AFTER MDO plurals (3) — names like `Документы` resolve as
+        //       `Ty::ManagerCollection(Document)` regardless of whether
+        //       the form happens to declare an attribute with that name.
+        //
+        //     Cheap-first probe: `resolve_form_attribute` opens with the
+        //     same `resolve_this_form` gate `form_self` uses, so non-form
+        //     modules pay nothing.
+        if !user_shadows && !self.body_declares_binding(name) {
+            if let Some(ty) = crate::form_attr::resolve_form_attribute(self.db, &resolver, name) {
+                trace!("resolved {} as managed-form attribute", name);
+                return ty;
+            }
+        }
+
         // 5. Platform global-context properties — top-level identifiers
         //    declared on `Global context` in HBK whose declared type is the
         //    foreign key into the platform type/method catalogue
