@@ -16,6 +16,8 @@ Diagnostic detects typical errors:
 
 The current implementation also skips hyperlink-style documentation comments such as `See OtherMethod()`.
 
+> **Behavioural change:** the `Параметры:` / `Parameters:` keywords are now recognised only at the start of a comment line. The previous parser also matched the keyword anywhere in free-form text, which occasionally produced false positives. If existing comments had `parameters:` occurring mid-sentence and implicitly opening a section, after the upgrade those cases must be rewritten as explicit section headers.
+
 ## Examples
 
 ### Incorrect
