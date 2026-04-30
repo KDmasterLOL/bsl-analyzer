@@ -20,6 +20,7 @@ use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
 
+use crate::lower::metadata_resolver::ConfigsResolver;
 use crate::lower::TyLoweringContext;
 
 /// Where a field came from.
@@ -140,7 +141,7 @@ fn enumerate_mdo_fields(
             let info = FieldInfo {
                 name: Name::new(&attr.name),
                 name_en: attr.name_en.as_deref().filter(|s| !s.is_empty()).map(Name::new),
-                ty: attribute_type_to_ty(&attr.attr_type),
+                ty: attribute_type_to_ty(&attr.attr_type, configs),
                 is_readonly,
                 origin,
             };
@@ -195,6 +196,7 @@ fn enumerate_register_fields(
                     MetadataKind::RegisterDimension { parent },
                     register_name,
                     dim.name(),
+                    configs,
                 ),
                 is_readonly: false,
                 origin: FieldOrigin::RegisterDimension,
@@ -211,6 +213,7 @@ fn enumerate_register_fields(
                     MetadataKind::RegisterResource { parent },
                     register_name,
                     res.name(),
+                    configs,
                 ),
                 is_readonly: false,
                 origin: FieldOrigin::RegisterResource,
@@ -227,6 +230,7 @@ fn enumerate_register_fields(
                     MetadataKind::RegisterAttribute { parent },
                     register_name,
                     attr.name(),
+                    configs,
                 ),
                 is_readonly: false,
                 origin: FieldOrigin::RegisterAttribute,
@@ -259,7 +263,7 @@ fn enumerate_tabular_row_fields(
         .map(|attr| FieldInfo {
             name: Name::new(attr.name()),
             name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
-            ty: attribute_type_to_ty(attr.attr_type()),
+            ty: attribute_type_to_ty(attr.attr_type(), configs),
             is_readonly: false,
             origin: FieldOrigin::TabularSectionRowColumn,
         })
@@ -367,9 +371,17 @@ pub(crate) fn find_mdo<'a>(
 }
 
 /// Lower an [`AttributeType`] to a [`Ty`] through [`TyLoweringContext`].
-pub(crate) fn attribute_type_to_ty(attr_type: &AttributeType) -> Ty {
+///
+/// `configs` is forwarded so `ОпределяемыйТип`-typed attributes can be
+/// expanded to their underlying `Ty` (e.g. `СуммаДокумента` typed as
+/// `cfg:DefinedType.ДенежнаяСуммаЛюбогоЗнака` lowers to `Ty::Number`).
+/// Without the visible configurations the resolver could not look up
+/// the DefinedType chain — every field-enumeration call site already has
+/// `&[VisibleConfig]` in scope, so the dependency is thread-through, not new.
+pub(crate) fn attribute_type_to_ty(attr_type: &AttributeType, configs: &[VisibleConfig]) -> Ty {
     let type_ref = TypeRef::from_attribute_type(attr_type);
-    TyLoweringContext::new().lower_type_ref(&type_ref)
+    let resolver = ConfigsResolver(configs);
+    TyLoweringContext::with_resolver(&resolver).lower_type_ref(&type_ref)
 }
 
 /// Lower a register-part type, falling back to a symbolic
@@ -380,9 +392,10 @@ pub(crate) fn register_part_ty(
     fallback_kind: MetadataKind,
     register_name: &Name,
     part_name: &str,
+    configs: &[VisibleConfig],
 ) -> Ty {
     match attr_type {
-        Some(at) => attribute_type_to_ty(at),
+        Some(at) => attribute_type_to_ty(at, configs),
         None => Ty::MetadataRef {
             kind: fallback_kind,
             name: Name::new(&format!("{}.{}", register_name.as_str(), part_name)),
@@ -786,6 +799,50 @@ mod tests {
         assert!(
             fields.iter().any(|f| f.name.as_str() == "Номенклатура"),
             "Union(MetadataRef.Row, Undefined) must surface row columns"
+        );
+    }
+
+    #[test]
+    fn document_attribute_typed_via_defined_type_lowers_to_underlying() {
+        // niagara_ut bug repro at the field-enumeration layer.
+        //
+        // Mirror of `Documents/ПриобретениеТоваровУслуг.xml`, where
+        // `СуммаДокумента` is typed via
+        // `<v8:TypeSet>cfg:DefinedType.ДенежнаяСуммаЛюбогоЗнака</v8:TypeSet>`,
+        // and `DefinedTypes/ДенежнаяСуммаЛюбогоЗнака.xml` declares the
+        // underlying as `xs:decimal`. The enumerator must follow the
+        // DefinedType reference all the way to `Ty::Number` instead of
+        // collapsing to `Ty::Unknown`.
+        let mut config = Configuration::new("Test");
+        config.add_defined_type(
+            bsl_metadata::DefinedType::builder()
+                .uuid(Uuid::new_v4())
+                .name("ДенежнаяСуммаЛюбогоЗнака")
+                .underlying_type(AttributeType::Number { precision: 15, scale: 2 })
+                .build(),
+        );
+        config.add_metadata_object({
+            let mut doc = MetadataObject::new(MdoType::Document, "ПКО");
+            doc.add_attribute(attr(
+                "СуммаДокумента",
+                None,
+                AttributeType::DefinedType {
+                    name: "ДенежнаяСуммаЛюбогоЗнака".to_string()
+                },
+            ));
+            doc
+        });
+        let configs = wrap(config);
+
+        let receiver =
+            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") };
+        let fields = enumerate_fields(&configs, &receiver);
+        let sum =
+            fields.iter().find(|f| f.name.as_str() == "СуммаДокумента").expect("СуммаДокумента");
+        assert_eq!(
+            sum.ty,
+            Ty::Number,
+            "DefinedType-typed attribute must resolve to its underlying `Ty::Number`"
         );
     }
 

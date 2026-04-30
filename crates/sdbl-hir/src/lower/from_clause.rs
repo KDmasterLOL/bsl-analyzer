@@ -1061,24 +1061,38 @@ impl LoweringContext {
         (Some(MdoType::ExternalDataSource), None)
     }
 
-    /// Parse attribute type from type_str (simplified for MVP).
-    /// Resolve AttributeType to SdblType, resolving DefinedType through metadata if needed.
+    /// Resolve [`bsl_metadata::AttributeType`] to [`SdblType`], expanding a
+    /// `DefinedType` reference through the attached metadata.
+    ///
+    /// Recursion is cycle-guarded — `A → B → A` shaped chains in the
+    /// configuration return a `DefinedType` node with `underlying_type = None`
+    /// instead of overflowing the stack.
     fn resolve_attribute_type(&self, attr_type: &bsl_metadata::AttributeType) -> SdblType {
-        use bsl_metadata::AttributeType;
+        let mut visited = std::collections::HashSet::new();
+        self.resolve_attribute_type_inner(attr_type, &mut visited)
+    }
+
+    fn resolve_attribute_type_inner(
+        &self,
+        attr_type: &bsl_metadata::AttributeType,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> SdblType {
+        use bsl_metadata::{AttributeType, MetadataResolver};
 
         match attr_type {
             AttributeType::DefinedType { name } => {
-                // Try to resolve underlying type through metadata
-                let underlying_type = if let Some(metadata) = &self.metadata {
-                    metadata.find_defined_type(name).map(|defined_type| {
-                        // Recursively resolve the underlying type
-                        Box::new(self.resolve_attribute_type(defined_type.underlying_type()))
-                    })
-                } else {
-                    None
-                };
-
-                // Return DefinedType with optional underlying type
+                if !visited.insert(name.to_lowercase()) {
+                    // Cycle detected — return the surface name without an
+                    // underlying type so downstream consumers still see "this
+                    // is some DefinedType" but cannot recurse further.
+                    return SdblType::DefinedType { name: name.clone(), underlying_type: None };
+                }
+                let underlying_type =
+                    self.metadata.as_ref().and_then(|m| m.resolve_defined_type(name)).map(
+                        |underlying| {
+                            Box::new(self.resolve_attribute_type_inner(underlying, visited))
+                        },
+                    );
                 SdblType::DefinedType { name: name.clone(), underlying_type }
             }
             // For all other types, use standard conversion

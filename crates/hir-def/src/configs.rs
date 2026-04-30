@@ -23,7 +23,7 @@ use crate::DefDatabase;
 /// Carries only the metadata — never a filesystem URI — because name
 /// resolution and type inference only consume the declarative
 /// `Configuration` description.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct VisibleConfig {
     /// Extension name; `None` for the main configuration.
     pub name: Option<String>,

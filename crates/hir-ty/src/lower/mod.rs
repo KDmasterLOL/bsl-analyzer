@@ -27,8 +27,11 @@
 //!    from a `TypeRef`. The syntactic layer stays db-free.
 
 pub(crate) mod builtin_names;
+pub(crate) mod metadata_resolver;
 
-use bsl_metadata::MdoType;
+use std::collections::HashSet;
+
+use bsl_metadata::{resolve_defined_type_terminal, MdoType, MetadataResolver};
 use hir_def::path::QualifiedName;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
@@ -36,15 +39,38 @@ use hir_def::Name;
 
 /// Adapter that lowers a syntactic [`TypeRef`] into a semantic [`Ty`].
 ///
-/// Stateless in M2. Gains a `Resolver` + database reference in Task 7 when
-/// three-segment paths and cross-module resolution move through this layer.
+/// Carries an optional [`MetadataResolver`] so qualified names of the form
+/// `ОпределяемыйТип.X` can be expanded to their underlying type at lowering
+/// time. Without a resolver the context is otherwise stateless — every other
+/// branch (builtins, plurals, MetadataKind prefixes, unions) ignores it and
+/// produces the same `Ty` as before.
+///
+/// The resolver is the seam M2 Task 7 will widen into the full `Resolver` /
+/// `ConfigsDatabase` plumbing without changing the lowering surface.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct TyLoweringContext;
+pub struct TyLoweringContext<'a> {
+    resolver: Option<&'a dyn MetadataResolver>,
+}
 
-impl TyLoweringContext {
-    /// Build an empty lowering context.
+impl<'a> TyLoweringContext<'a> {
+    /// Build an empty lowering context with no resolver attached.
+    ///
+    /// `ОпределяемыйТип.X` qualified names lower to `Ty::Unknown` because
+    /// the underlying type is unreachable without a resolver. Every other
+    /// branch behaves identically to a resolver-aware context.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Build a context that resolves `ОпределяемыйТип.X` references through
+    /// `resolver`.
+    ///
+    /// The resolver is borrowed for the lifetime of the context; pass a
+    /// `ConfigsResolver(&configs)` from `hir-ty::lower::metadata_resolver`
+    /// for BSL field enumeration, or an `Arc<Configuration>`-derived
+    /// resolver for SDBL.
+    pub fn with_resolver(resolver: &'a dyn MetadataResolver) -> Self {
+        Self { resolver: Some(resolver) }
     }
 
     /// Lower a [`TypeRef`] into a [`Ty`].
@@ -63,6 +89,11 @@ impl TyLoweringContext {
     ///   `Ty::AnyRef` variant yet, and narrowing it to a concrete kind would
     ///   lie to callers).
     pub fn lower_type_ref(&self, type_ref: &TypeRef) -> Ty {
+        let mut visited = HashSet::new();
+        self.lower_type_ref_inner(type_ref, &mut visited)
+    }
+
+    fn lower_type_ref_inner(&self, type_ref: &TypeRef, visited: &mut HashSet<String>) -> Ty {
         match type_ref {
             TypeRef::Builtin(b) => builtin_names::builtin_to_ty(*b),
             TypeRef::Array(_) => Ty::Array,
@@ -70,10 +101,11 @@ impl TyLoweringContext {
             TypeRef::Name(qname) => match qname.len() {
                 0 => Ty::Unknown,
                 1 => self.lower_bare_name(qname.first()),
-                _ => self.lower_qualified(qname),
+                _ => self.lower_qualified_inner(qname, visited),
             },
             TypeRef::Union(parts) => {
-                let lowered: Vec<Ty> = parts.iter().map(|t| self.lower_type_ref(t)).collect();
+                let lowered: Vec<Ty> =
+                    parts.iter().map(|t| self.lower_type_ref_inner(t, visited)).collect();
                 Ty::union(lowered)
             }
             TypeRef::AnyRef | TypeRef::Unknown => Ty::Unknown,
@@ -122,21 +154,92 @@ impl TyLoweringContext {
 
     /// Lower a multi-segment qualified name.
     ///
-    /// The only pattern M2 decodes is the 2-segment metadata reference
-    /// (`СправочникСсылка.Товары`, `DocumentObject.ПКО`). Three-segment
-    /// paths (`Документы.ПКО.СоздатьДокумент`) are delegated to the resolver
-    /// in Task 7 — this method returns `Ty::Unknown` for anything beyond the
-    /// 2-segment case so callers cannot silently observe a wrong tail.
+    /// Two patterns are decoded:
+    /// - 2-segment metadata reference (`СправочникСсылка.Товары`,
+    ///   `DocumentObject.ПКО`).
+    /// - 2-segment `ОпределяемыйТип.X` (or `DefinedType.X`) — when a
+    ///   resolver is attached, the underlying [`bsl_metadata::AttributeType`]
+    ///   is fetched via the resolver and lowered through this same context,
+    ///   so a `DefinedType` whose underlying is `xs:decimal` becomes
+    ///   `Ty::Number`. Without a resolver — or when the chain is unresolved
+    ///   or cyclic — the result is `Ty::Unknown`.
+    ///
+    /// Three-segment paths (`Документы.ПКО.СоздатьДокумент`) are delegated
+    /// to the resolver in Task 7 — this method returns `Ty::Unknown` for
+    /// anything beyond the 2-segment case so callers cannot silently observe
+    /// a wrong tail.
     pub fn lower_qualified(&self, qname: &QualifiedName) -> Ty {
+        let mut visited = HashSet::new();
+        self.lower_qualified_inner(qname, &mut visited)
+    }
+
+    fn lower_qualified_inner(&self, qname: &QualifiedName, visited: &mut HashSet<String>) -> Ty {
         if qname.len() != 2 {
             return Ty::Unknown;
         }
 
-        match metadata_kind_from_prefix(qname.first().as_str()) {
+        let prefix = qname.first().as_str();
+
+        // `ОпределяемыйТип.X` / `DefinedType.X` — resolve through the
+        // attached resolver, then lower the underlying `AttributeType`
+        // recursively. Two distinct cycle layers operate here:
+        //
+        // 1. **Lowering-level guard (`visited`)** — tracks DefinedTypes that
+        //    are currently in the process of being lowered up the call stack,
+        //    snapshot/restore-style. Without it, a self-referential
+        //    `A → Composite{A, …}` would recurse forever between the
+        //    `Composite` arm lowering and re-entry into `lower_qualified`.
+        //    The set must be popped when the arm exits so sibling arms of
+        //    the same `Composite` start from the same shared ancestry but do
+        //    not see *each other's* chain.
+        // 2. **Chain guard (inside `resolve_defined_type_terminal`)** — a
+        //    fresh, *local* set per call protects against `A → B → A`
+        //    chains. Keeping this set local is essential: two sibling arms
+        //    `DefT.A` and `DefT.B` that happen to chain through the same
+        //    intermediate `X → terminal` must each be free to walk through
+        //    `X`, otherwise the second arm collapses to `Ty::Unknown`.
+        if is_defined_type_prefix(prefix) {
+            let Some(resolver) = self.resolver else {
+                return Ty::Unknown;
+            };
+            let name = qname.last().as_str();
+            let key = name.to_lowercase();
+
+            if !visited.insert(key.clone()) {
+                // Already inside a lowering of this DefinedType higher up
+                // the stack — break the recursion.
+                return Ty::Unknown;
+            }
+
+            let mut chain_visited = HashSet::new();
+            let result = resolve_defined_type_terminal(resolver, name, &mut chain_visited)
+                .map(|underlying| {
+                    let tref = TypeRef::from_attribute_type(underlying);
+                    self.lower_type_ref_inner(&tref, visited)
+                })
+                .unwrap_or(Ty::Unknown);
+
+            visited.remove(&key);
+            return result;
+        }
+
+        match metadata_kind_from_prefix(prefix) {
             Some(kind) => Ty::MetadataRef { kind, name: qname.last().clone() },
             None => Ty::Unknown,
         }
     }
+}
+
+/// Recognise the `DefinedType` prefix in either language, case-insensitively.
+///
+/// `TypeRef::from_attribute_type` always emits the canonical Russian
+/// `"ОпределяемыйТип"`, but BSL identifiers are case-insensitive at the
+/// language level — `определяемыйтип.X` written in user source must reach
+/// the same branch. Cyrillic case folding requires `to_lowercase`;
+/// `eq_ignore_ascii_case` only normalises ASCII bytes.
+fn is_defined_type_prefix(prefix: &str) -> bool {
+    let lower = prefix.to_lowercase();
+    lower == "определяемыйтип" || lower == "definedtype"
 }
 
 /// Prefix → [`MetadataKind`] table for the reference/object forms currently
@@ -207,7 +310,7 @@ mod tests {
     use super::*;
     use hir_def::type_ref::BuiltinTypeRef;
 
-    fn ctx() -> TyLoweringContext {
+    fn ctx() -> TyLoweringContext<'static> {
         TyLoweringContext::new()
     }
 
@@ -482,5 +585,215 @@ mod tests {
         // AnyRef / Unknown remain Unknown until Ty::AnyRef lands.
         assert_eq!(ctx().lower_type_ref(&TypeRef::AnyRef), Ty::Unknown);
         assert_eq!(ctx().lower_type_ref(&TypeRef::Unknown), Ty::Unknown);
+    }
+
+    // -----------------------------------------------------------------------
+    // ОпределяемыйТип resolution
+    //
+    // The lowering layer interacts with the resolver only through the
+    // `MetadataResolver` trait — the production wire-up against
+    // `Configuration` / `&[VisibleConfig]` is exercised by the integration
+    // test in `field_enum.rs`. Here we use a HashMap-backed mock so the unit
+    // test stays focused on the lowering logic (cycle guard, prefix
+    // recognition, recursive Composite arms).
+    // -----------------------------------------------------------------------
+
+    use bsl_metadata::{AttributeType, MetadataResolver};
+
+    #[derive(Debug, Default)]
+    struct MockResolver(std::collections::HashMap<String, AttributeType>);
+
+    impl MockResolver {
+        fn with(entries: &[(&str, AttributeType)]) -> Self {
+            let mut map = std::collections::HashMap::new();
+            for (name, at) in entries {
+                map.insert(name.to_lowercase(), at.clone());
+            }
+            Self(map)
+        }
+    }
+
+    impl MetadataResolver for MockResolver {
+        fn resolve_defined_type(&self, name: &str) -> Option<&AttributeType> {
+            self.0.get(&name.to_lowercase())
+        }
+    }
+
+    #[test]
+    fn defined_type_without_resolver_stays_unknown() {
+        // Stateless context (no resolver) — `ОпределяемыйТип.X` is unresolvable
+        // by definition, so we deliberately produce `Ty::Unknown` instead of
+        // guessing at a primitive. Mirrors the legacy M2 behaviour for the
+        // same prefix.
+        let qname = QualifiedName::from_segments([
+            Name::new("ОпределяемыйТип"),
+            Name::new("ДенежнаяСумма"),
+        ]);
+        assert_eq!(ctx().lower_qualified(&qname), Ty::Unknown);
+    }
+
+    #[test]
+    fn defined_type_with_resolver_lowers_to_underlying_primitive() {
+        // The niagara_ut bug repro at the lowering layer: a DefinedType
+        // backed by `xs:decimal` must lower to `Ty::Number` once a resolver
+        // is attached. Numeric qualifiers (precision/scale) drop in M2
+        // because `Ty::Number` does not carry them yet — that mirrors the
+        // direct `xs:decimal` path.
+        let resolver = MockResolver::with(&[(
+            "ДенежнаяСумма",
+            AttributeType::Number { precision: 15, scale: 2 },
+        )]);
+
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+        let qname = QualifiedName::from_segments([
+            Name::new("ОпределяемыйТип"),
+            Name::new("ДенежнаяСумма"),
+        ]);
+        assert_eq!(lowering.lower_qualified(&qname), Ty::Number);
+    }
+
+    #[test]
+    fn defined_type_chain_lowers_through_terminal_walk() {
+        // Two-step chain — A points at B, B's underlying is `xs:string`.
+        // The terminal walk collapses both hops in one go before lowering.
+        let resolver = MockResolver::with(&[
+            ("A", AttributeType::DefinedType { name: "B".to_string() }),
+            ("B", AttributeType::String { length: Some(64) }),
+        ]);
+
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+        let qname = QualifiedName::from_segments([Name::new("ОпределяемыйТип"), Name::new("A")]);
+        assert_eq!(lowering.lower_qualified(&qname), Ty::String);
+    }
+
+    #[test]
+    fn defined_type_cycle_returns_unknown_without_overflow() {
+        // Pathological metadata: `A → B → A`. `resolve_defined_type_terminal`
+        // returns None on the second visit, lowering reports `Ty::Unknown`,
+        // and crucially the recursion does not blow the stack.
+        let resolver = MockResolver::with(&[
+            ("A", AttributeType::DefinedType { name: "B".to_string() }),
+            ("B", AttributeType::DefinedType { name: "A".to_string() }),
+        ]);
+
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+        let qname = QualifiedName::from_segments([Name::new("ОпределяемыйТип"), Name::new("A")]);
+        assert_eq!(lowering.lower_qualified(&qname), Ty::Unknown);
+    }
+
+    #[test]
+    fn defined_type_composite_underlying_lowers_to_union() {
+        // A DefinedType whose underlying is `Composite { Number, String }`
+        // must lower to `Ty::Union([Number, String])` — the inner Composite
+        // goes through `TypeRef::from_attribute_type` → `TypeRef::Union`,
+        // and the outer `lower_type_ref_inner` recursively handles each arm.
+        let resolver = MockResolver::with(&[(
+            "ЛюбоеЧислоИлиСтрока",
+            AttributeType::Composite {
+                types: vec![
+                    AttributeType::Number { precision: 10, scale: 0 },
+                    AttributeType::String { length: None },
+                ],
+            },
+        )]);
+
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+        let qname = QualifiedName::from_segments([
+            Name::new("ОпределяемыйТип"),
+            Name::new("ЛюбоеЧислоИлиСтрока"),
+        ]);
+        match lowering.lower_qualified(&qname) {
+            Ty::Union(arms) => {
+                assert!(arms.contains(&Ty::Number), "union must contain Number");
+                assert!(arms.contains(&Ty::String), "union must contain String");
+            }
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn defined_type_sibling_arms_share_terminal_step_independently() {
+        // A `Composite { DefT.A, DefT.B }` whose arms both chain through the
+        // same intermediate `X → Number` must lower to `Ty::Number`
+        // (singleton union collapse). The chain guard inside
+        // `resolve_defined_type_terminal` is per-call-local; if it were
+        // shared with the lowering-level `visited`, arm 2 would observe `X`
+        // already visited from arm 1 and degrade to `Ty::Unknown`.
+        let resolver = MockResolver::with(&[
+            ("A", AttributeType::DefinedType { name: "X".to_string() }),
+            ("B", AttributeType::DefinedType { name: "X".to_string() }),
+            ("X", AttributeType::Number { precision: 10, scale: 0 }),
+        ]);
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+
+        let arm = |name: &str| {
+            TypeRef::Name(QualifiedName::from_segments([
+                Name::new("ОпределяемыйТип"),
+                Name::new(name),
+            ]))
+        };
+        let tref = TypeRef::Union(vec![arm("A"), arm("B")]);
+        // Both arms collapse to `Ty::Number`; `Ty::union` then dedupes the
+        // singleton — the assertion fails if either arm degrades to
+        // `Ty::Unknown` (the bug case).
+        assert_eq!(lowering.lower_type_ref(&tref), Ty::Number);
+    }
+
+    #[test]
+    fn defined_type_self_referential_composite_is_safe() {
+        // `A → Composite{A, Number}`. The lowering-level guard must catch
+        // re-entry into `A` while we're still lowering its underlying
+        // composite, otherwise the recursion overflows the stack.
+        let resolver = MockResolver::with(&[(
+            "A",
+            AttributeType::Composite {
+                types: vec![
+                    AttributeType::DefinedType { name: "A".to_string() },
+                    AttributeType::Number { precision: 10, scale: 0 },
+                ],
+            },
+        )]);
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+        let qname = QualifiedName::from_segments([Name::new("ОпределяемыйТип"), Name::new("A")]);
+        // Self-reference inside the composite collapses to `Ty::Unknown`,
+        // the other arm to `Ty::Number` — the smart constructor builds a
+        // union of the two.
+        match lowering.lower_qualified(&qname) {
+            Ty::Union(arms) => {
+                assert!(arms.contains(&Ty::Number));
+                assert!(arms.contains(&Ty::Unknown));
+            }
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn russian_prefix_is_case_insensitive() {
+        // BSL identifiers are case-insensitive; `определяемыйтип.X` written
+        // in user source must reach the same DefinedType branch as the
+        // canonical `ОпределяемыйТип.X` form emitted by
+        // `TypeRef::from_attribute_type`.
+        let resolver = MockResolver::with(&[("X", AttributeType::Boolean)]);
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+        for prefix in ["ОпределяемыйТип", "определяемыйтип", "ОПРЕДЕЛЯЕМЫЙТИП"]
+        {
+            let qname = QualifiedName::from_segments([Name::new(prefix), Name::new("X")]);
+            assert_eq!(
+                lowering.lower_qualified(&qname),
+                Ty::Boolean,
+                "case-insensitive lookup failed for `{prefix}`"
+            );
+        }
+    }
+
+    #[test]
+    fn defined_type_english_prefix_also_resolves() {
+        // `TypeRef::from_attribute_type` always emits Russian, but defensive
+        // code accepts English `DefinedType.X` too — JSDoc and future XML
+        // sources may use either. Case-insensitive on the ASCII spelling.
+        let resolver = MockResolver::with(&[("X", AttributeType::Boolean)]);
+        let lowering = TyLoweringContext::with_resolver(&resolver);
+        let qname = QualifiedName::from_segments([Name::new("DefinedType"), Name::new("X")]);
+        assert_eq!(lowering.lower_qualified(&qname), Ty::Boolean);
     }
 }

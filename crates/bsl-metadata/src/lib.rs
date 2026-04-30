@@ -101,6 +101,7 @@ pub mod form;
 pub mod http_service;
 pub mod loader;
 pub mod metadata_object;
+pub mod metadata_resolver;
 pub mod register;
 pub mod role;
 pub mod scheduled_job;
@@ -125,6 +126,7 @@ pub use http_service::{
 };
 pub use loader::load_from_directory;
 pub use metadata_object::{Attribute, AttributeType, MdoType, MetadataObject};
+pub use metadata_resolver::{resolve_defined_type_terminal, MetadataResolver};
 pub use register::{
     AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,
     RegisterResource,
