@@ -207,7 +207,12 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         }
     }
 
-    // CommonForms/<Name>/Ext/Form/Module.bsl (top-level common forms)
+    // CommonForms/<Name>/Ext/Form/Module.bsl (top-level common forms).
+    // `rposition` (not `position` like the neighbouring branches) deliberately
+    // matches the deepest occurrence: an absolute path can include an ordinary
+    // directory whose name happens to be `CommonForms` further up the tree
+    // (e.g. `/.../legacy/CommonForms-archive/.../CommonForms/<Name>/...`), and
+    // only the metadata folder closest to `Ext/Form/Module.bsl` is the real one.
     if let Some(idx) = parts.iter().rposition(|&p| p == "CommonForms" || p == "ОбщиеФормы")
     {
         if parts.len() == idx + 5

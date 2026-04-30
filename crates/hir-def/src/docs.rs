@@ -572,6 +572,13 @@ fn payload_looks_like_type_section(payload: &str) -> bool {
 }
 
 fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option<ReturnsHeader> {
+    // SAFETY of byte slicing: `keyword_len` is the byte length of the lower-cased
+    // keyword, but it is used to slice `line` (original case). This is sound only
+    // because every keyword listed in `returns_section_header` is either ASCII or
+    // pure Cyrillic in U+0400..=U+04FF — both ranges have identical byte length
+    // under `to_lowercase`, so the offset still lands on a UTF-8 char boundary.
+    // Adding a keyword outside these ranges (e.g. Turkish dotted-I, ß, German
+    // umlauts) would break this assumption.
     let mut rest = line[keyword_len..].trim_start();
 
     if rest.starts_with('(') {
