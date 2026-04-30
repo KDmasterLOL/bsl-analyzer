@@ -6,7 +6,8 @@ mod definition;
 pub mod type_facade;
 
 pub use definition::Definition;
-pub use type_facade::Type;
+pub use hir_ty::coerce_this_object_to_metadata_ref;
+pub use type_facade::{Field, HirFieldOrigin, Type};
 
 // Re-export core types
 pub use hir_def::{

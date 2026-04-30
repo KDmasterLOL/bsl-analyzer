@@ -34,6 +34,7 @@
 pub mod arg_diagnostics;
 pub mod builtin;
 pub mod db;
+pub mod field_enum;
 pub mod field_lookup;
 pub mod form_self;
 pub mod infer;
@@ -48,7 +49,8 @@ pub mod subtype;
 pub mod this_object;
 
 // Re-export main types for convenience
-pub use field_lookup::{lookup_field, FieldInfo};
+pub use field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
+pub use field_lookup::lookup_field;
 pub use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::{ConfigsDatabase, VisibleConfig};

@@ -9,7 +9,7 @@ use bsl_platform::{
     manager_methods_query, type_methods_query, type_properties_query, PlatformDataInner,
     PlatformMethod, PlatformProperty, TypeNameInput,
 };
-use hir::{MethodSymbol, Name, Semantics, Ty};
+use hir::{Field, HirFieldOrigin, MethodSymbol, Name, Semantics, Ty, Type as HirType};
 use ide_db::RootDatabase;
 use symbol_info::{
     build_signature, from_platform_method, render_completion_detail, CalleeKind, CompletionDetail,
@@ -152,7 +152,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // `type_name` prefixes (`"CatalogManager."`, `"CatalogObject."`,
     // …). Route them through `manager_methods_query` with the
     // `bsl-metadata` / `hir::MetadataKind` prefix tables.
-    if let Some(items) = complete_prefix_methods_for_receiver(db, &receiver_ty) {
+    if let Some(items) = complete_prefix_methods_for_receiver(db, &receiver_ty, position.file_id) {
         return Some(apply_prefix_filter(items, &prefix, db));
     }
 
@@ -189,43 +189,140 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 }
 
 /// Enumerate platform methods for receivers that use a composite
-/// `type_name` prefix instead of a scalar key.
+/// `type_name` prefix instead of a scalar key, and — for `MetadataRef`
+/// receivers — MDO fields (custom attributes, standard attributes,
+/// tabular sections, register parts) from `hir::Type::fields()`.
 ///
-/// - `Ty::ObjectManager { kind, .. }` → `"CatalogManager"` /
-///   `"DocumentManager"` / … via `MdoType::manager_type_prefix`.
-/// - `Ty::MetadataRef { kind, .. }` → `"CatalogObject"` / `"CatalogRef"` /
-///   … via `MetadataKind::platform_prefix`.
+/// - `Ty::ObjectManager { kind, .. }` / `Ty::ManagerCollection` — fast
+///   path: only platform methods, no MDO fields.
+/// - `Ty::MetadataRef { kind: TabularSection, .. }` /
+///   `Ty::MetadataRef { kind: TabularSectionRow, .. }` — scalar-key path
+///   returns platform methods only (the tabular row's column list comes
+///   from `HirType::fields()` below).
+/// - All other `Ty::MetadataRef` — merges MDO fields with platform methods.
 ///
-/// Returns `None` for every other receiver shape so the scalar path
-/// below (`platform_type_name()` + `complete_platform_methods`) keeps
-/// handling value types, primitives, and `PlatformObject`. No Salsa-DB
-/// overhead is paid for those cases — the prefix arm only fires when
-/// the receiver is specifically a manager / metadata-ref.
+/// Returns `None` for every other receiver shape.
 fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     db: &DB,
     receiver_ty: &Ty,
+    file_id: FileId,
 ) -> Option<Vec<CompletionItem>> {
-    // TabularSection / TabularSectionRow are stored under flat platform
-    // type names (`"Tabular section"` / `"Line of a tabular section"`),
-    // not under the dot-prefixed `"CatalogManager.<MDO>"` shape that
-    // `manager_methods_query` walks. Route them to the scalar
-    // methods + properties path so the editor shows `Добавить`,
-    // `НайтиСтроки`, … on a section receiver and `НомерСтроки` on a row.
+    // Fast path: ObjectManager / ManagerCollection have no MDO fields.
+    if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::ManagerCollection(_)) {
+        return collect_platform_items_or_none(db, receiver_ty);
+    }
+
+    // Coerce `ЭтотОбъект` so a catalog/document object module surfaces
+    // attributes + tabular sections on `ЭтотОбъект.|`. Both `Type::fields`
+    // and `enumerate_fields` would coerce internally, but the dispatch
+    // gate below also needs the effective ty for Union recognition, so
+    // we coerce once here.
+    let coerced = hir::coerce_this_object_to_metadata_ref(receiver_ty);
+    let effective_ty = coerced.as_ref().unwrap_or(receiver_ty);
+
+    // MDO-field branch fires for direct `MetadataRef` receivers and for
+    // unions containing at least one `MetadataRef` arm (typical shape:
+    // `Найти(...) → Union(TabularSectionRow, Undefined)`). For unions
+    // we still want to enumerate fields per arm (handled inside
+    // `Type::fields()` via `enumerate_fields`).
+    let is_union_with_metadata_ref = match effective_ty {
+        Ty::Union(arms) => arms.iter().any(|a| matches!(a, Ty::MetadataRef { .. })),
+        _ => false,
+    };
+    let is_metadata_ref = matches!(effective_ty, Ty::MetadataRef { .. });
+    if !is_metadata_ref && !is_union_with_metadata_ref {
+        return None;
+    }
+
+    let mdo_fields = HirType::new(db, file_id, effective_ty.clone()).fields();
+    let platform_items = collect_platform_items_for_effective(db, effective_ty);
+
+    if mdo_fields.is_empty() && platform_items.is_empty() {
+        return None;
+    }
+
+    let mut items: Vec<CompletionItem> = mdo_fields.iter().map(render_mdo_field).collect();
+    // Dedup keyed on the visible Russian label only. An MDO attribute and
+    // a platform method are conceptually distinct symbols even when they
+    // share an English alias (the platform method's English form is not
+    // a name the user writes against the MDO), so we don't over-broaden
+    // the key with bilingual filter-text tokens.
+    let mut seen: std::collections::HashSet<String> =
+        items.iter().map(|i| i.label.to_lowercase()).collect();
+    for p in platform_items {
+        if seen.insert(p.label.to_lowercase()) {
+            items.push(p);
+        }
+    }
+    tracing::debug!(
+        mdo_field_count = mdo_fields.len(),
+        platform_item_count = items.len(),
+        "MDO+platform completion for MetadataRef receiver"
+    );
+    Some(items)
+}
+
+/// Wrap [`collect_platform_items`] for unions: visit every non-`Undefined`/
+/// `Null` arm and merge the results, deduping by label so platform members
+/// shared across arms (e.g. `Количество`) appear once. Non-union types
+/// pass straight through.
+fn collect_platform_items_for_effective<DB: RootDatabase>(
+    db: &DB,
+    effective_ty: &Ty,
+) -> Vec<CompletionItem> {
+    let Ty::Union(arms) = effective_ty else {
+        return collect_platform_items(db, effective_ty);
+    };
+    let mut out: Vec<CompletionItem> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for arm in arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)) {
+        for item in collect_platform_items(db, arm) {
+            if seen.insert(item.label.to_lowercase()) {
+                out.push(item);
+            }
+        }
+    }
+    out
+}
+
+/// Collect only platform methods/properties for a receiver — no MDO fields.
+///
+/// Handles the three sub-cases:
+/// - `TabularSection` / `TabularSectionRow` → scalar-key path.
+/// - `ObjectManager` → manager prefix.
+/// - `MetadataRef` with a known platform prefix → manager prefix.
+fn collect_platform_items<DB: RootDatabase>(db: &DB, receiver_ty: &Ty) -> Vec<CompletionItem> {
     if let Ty::MetadataRef { kind, .. } = receiver_ty {
         if let Some(scalar_key) = tabular_section_scalar_key(*kind) {
             tracing::debug!(scalar_key, "Tabular section scalar completion");
-            return Some(complete_platform_methods(db, scalar_key));
+            return complete_platform_methods(db, scalar_key);
         }
     }
     let prefix = match receiver_ty {
-        Ty::ObjectManager { kind, .. } => kind.manager_type_prefix()?,
-        Ty::MetadataRef { kind, .. } => kind.platform_prefix()?,
-        _ => return None,
+        Ty::ObjectManager { kind, .. } => kind.manager_type_prefix(),
+        Ty::MetadataRef { kind, .. } => kind.platform_prefix(),
+        _ => None,
     };
+    let Some(prefix) = prefix else { return Vec::new() };
     tracing::debug!(prefix, "Prefix-based completion for manager / metadata-ref receiver");
     let input = TypeNameInput::new(db, prefix.to_string());
     let methods = manager_methods_query(db, input);
-    Some(methods.iter().map(render_manager_method).collect())
+    methods.iter().map(render_manager_method).collect()
+}
+
+/// Thin wrapper used by the `ObjectManager` / `ManagerCollection` fast-path:
+/// returns `None` when the platform item list is empty so the behaviour
+/// stays identical to the pre-Phase-3 path (where no MDO branch ran).
+fn collect_platform_items_or_none<DB: RootDatabase>(
+    db: &DB,
+    receiver_ty: &Ty,
+) -> Option<Vec<CompletionItem>> {
+    let items = collect_platform_items(db, receiver_ty);
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
 }
 
 /// Pick the flat platform `type_name` for a TabularSection / row receiver.
@@ -592,6 +689,77 @@ pub(super) fn render_platform_property(prop: &PlatformProperty) -> CompletionIte
         sort_text: None,
         filter_text: Some(format!("{} {}", prop.name, prop.english_name)),
         source: None,
+    }
+}
+
+/// Render an MDO field (custom attribute, standard attribute, tabular
+/// section, or register part) as a completion item.
+///
+/// - `kind` is always `Field` regardless of origin — `Property` is reserved
+///   for read-only platform properties on value-type receivers.
+/// - `filter_text` carries both names so the user can type either the Russian
+///   or English identifier to narrow the list.
+/// - `sort_text` uses a short prefix (`"10_"`, `"20_"`, …) so MDO fields
+///   sort before platform methods in the popup: user attributes first, then
+///   tabular sections, then standard attributes, then register parts.
+fn render_mdo_field(field: &Field) -> CompletionItem {
+    let filter_text = format!("{} {}", field.name, field.english_name);
+    CompletionItem {
+        label: field.name.to_string(),
+        detail: Some(render_field_detail(&field.ty, field.is_readonly)),
+        kind: CompletionItemKind::Field,
+        insert_text: field.name.to_string(),
+        documentation: None,
+        sort_text: Some(sort_key_for_origin(field.origin).to_string()),
+        filter_text: Some(filter_text),
+        source: None,
+    }
+}
+
+/// Build the `detail` string for an MDO field.
+///
+/// - TabularSection fields render as `"ТабличнаяЧасть"`.
+/// - Other `MetadataRef` fields render as `"Prefix.Name"` when the kind
+///   carries a platform prefix, otherwise fall back to `Ty::display_name`.
+/// - Primitive types (`Число`, `Строка`, …) render via `Ty::display_name`.
+/// - Appends `" [Только чтение]"` for read-only fields.
+fn render_field_detail(ty: &Ty, is_readonly: bool) -> String {
+    use hir::MetadataKind;
+    let body = match ty {
+        Ty::MetadataRef { kind, name } => {
+            if matches!(kind, MetadataKind::TabularSection { .. }) {
+                "ТабличнаяЧасть".to_string()
+            } else if let Some(prefix) = kind.platform_prefix() {
+                format!("{}.{}", prefix, name.as_str())
+            } else {
+                ty.display_name().to_string()
+            }
+        }
+        _ => ty.display_name().to_string(),
+    };
+    if is_readonly {
+        format!("{body} [Только чтение]")
+    } else {
+        body
+    }
+}
+
+/// Sort-text prefix for MDO field origins.
+///
+/// Lower prefix → item appears higher in the sorted list.
+/// Ordering: user attributes (most relevant) → tabular sections →
+/// standard attributes → row columns → register parts →
+/// platform properties (usually at the bottom).
+fn sort_key_for_origin(origin: HirFieldOrigin) -> &'static str {
+    match origin {
+        HirFieldOrigin::UserAttribute => "10_",
+        HirFieldOrigin::TabularSection => "20_",
+        HirFieldOrigin::StandardAttribute => "30_",
+        HirFieldOrigin::TabularSectionRowColumn => "40_",
+        HirFieldOrigin::RegisterDimension
+        | HirFieldOrigin::RegisterResource
+        | HirFieldOrigin::RegisterAttribute => "50_",
+        HirFieldOrigin::PlatformProperty => "60_",
     }
 }
 

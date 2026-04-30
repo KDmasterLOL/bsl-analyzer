@@ -29,6 +29,7 @@
 //! ```
 
 mod db;
+pub mod standard_mdo_attributes;
 mod types;
 
 // Include generated code from build.rs
@@ -38,6 +39,11 @@ mod generated {
 
     use super::types::*;
 }
+
+pub use standard_mdo_attributes::{
+    standard_attributes_for, AttrValueKind, MdoTemplateKind, ObjectView, PresenceCondition,
+    StandardAttrSpec, StandardKind,
+};
 
 // Re-export public API
 pub use db::{
