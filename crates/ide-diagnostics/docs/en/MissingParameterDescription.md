@@ -2,13 +2,13 @@
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
-The description of a method (procedure or function) should be formatted correctly to help programmers use the functionality correctly.
+The description of an export method (procedure or function) with parameters should document those parameters correctly.
 
-If a method contains parameters, then its documentation comment should describe them in the parameter section and keep the same order as in the signature.
+For non-export methods, this diagnostic does not require adding a `Parameters` section when the comment only explains the method purpose. If a `Parameters` section is already present, its content is checked against the signature regardless of whether the method is exported.
 
 Diagnostic detects typical errors:
 
-- Lack of description of all parameters
+- Missing `Parameters` section for an export method with parameters
 - Absence of a description of some of the parameters, indicating for which parameter the description was not found
 - The presence in the description of parameters that are absent in the method signature (which could remain from refactoring)
 - Duplicate parameter descriptions
