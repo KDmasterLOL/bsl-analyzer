@@ -7,8 +7,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use crate::cache::{
-    compute_sha256, get_cache_dir, get_current_version, read_current_link, update_current_link,
-    verify_file_checksum,
+    compute_sha256, get_cache_dir, get_current_version, is_reserved_cache_entry, read_current_link,
+    read_stable_version, stable_app_path, sweep_stale_swap_temps, unique_stable_temp_path,
+    update_current_link, verify_file_checksum, write_stable_version, SwapLock,
 };
 use crate::entities::{get_platform_binary, FileInfo};
 use crate::messages::messages;
@@ -68,29 +69,112 @@ fn try_fetch_latest_version_fast(provider: &dyn ReleaseProvider) -> Result<Strin
 pub fn ensure_analyzer(provider: &dyn ReleaseProvider, sync_update: bool) -> Result<PathBuf> {
     let cache_dir = get_cache_dir()?;
 
-    if let Some(target) = read_current_link(&cache_dir) {
-        let full_path = if target.is_absolute() { target } else { cache_dir.join(&target) };
+    // Sweep any swap temps left behind by a crashed prior launcher.
+    sweep_stale_swap_temps(&cache_dir);
 
-        if full_path.exists() {
-            check_updates_if_needed(provider, &cache_dir, sync_update)?;
-            // После синхронного обновления current мог измениться
-            if sync_update {
-                if let Some(new_target) = read_current_link(&cache_dir) {
-                    let new_path = if new_target.is_absolute() {
-                        new_target
-                    } else {
-                        cache_dir.join(&new_target)
-                    };
-                    if new_path.exists() {
-                        return Ok(new_path);
-                    }
-                }
+    // Make sure the versioned cache holds the version we want to run. We
+    // bind `read_current_link` once per branch — `update_current_link` is
+    // not atomic on Linux (remove+symlink), so a concurrent launcher could
+    // briefly leave it absent.
+    match read_current_link(&cache_dir) {
+        None => {
+            download_latest(provider, &cache_dir)?;
+        }
+        Some(target) => {
+            let full_path = if target.is_absolute() { target } else { cache_dir.join(&target) };
+            if full_path.exists() {
+                check_updates_if_needed(provider, &cache_dir, sync_update)?;
+            } else {
+                download_latest(provider, &cache_dir)?;
             }
-            return Ok(full_path);
         }
     }
 
-    download_latest(provider, &cache_dir)
+    // Cold start: no analyzer child has been spawned yet, so the stable file
+    // is unlocked. Resolve the path to spawn under the swap lock — that
+    // way a concurrent launcher cannot interleave its swap between our
+    // sidecar/current observation and our return value, so we never hand
+    // back a stable path that mismatches the version we believe it holds.
+    swap_and_resolve(&cache_dir)
+}
+
+/// Decide which on-disk binary the launcher should spawn, performing a
+/// stable-app swap if needed.
+///
+/// Returns the stable path if it now matches `current`; the versioned cache
+/// path otherwise (so the editor still gets a working LSP even when the
+/// swap fails — only the AV exclusion advantage is lost for that session).
+/// The whole decision (current-read, sidecar-read, copy, rename, sidecar
+/// write) is held under a cross-process exclusive file lock so that two
+/// cold-start launchers racing cannot observe a torn `(stable bytes,
+/// sidecar version)` pair.
+fn swap_and_resolve(cache_dir: &Path) -> Result<PathBuf> {
+    let _lock = SwapLock::acquire(cache_dir)?;
+
+    let Some(current_ver) = get_current_version(cache_dir) else {
+        bail!("bsl-analyzer is not installed and could not be downloaded");
+    };
+
+    let stable = stable_app_path(cache_dir);
+    let stable_ver = read_stable_version(cache_dir);
+    if stable.exists() && stable_ver.as_deref() == Some(current_ver.as_str()) {
+        return Ok(stable);
+    }
+
+    let versioned = cache_dir.join(format!("bsl-analyzer-{}", current_ver));
+
+    if versioned.exists() {
+        match perform_swap(cache_dir, &versioned, &current_ver) {
+            Ok(()) => return Ok(stable),
+            Err(e) => eprintln!("warn: stable app swap skipped: {e:#}"),
+        }
+    }
+
+    // Fallback: run the versioned binary directly. Image name is
+    // non-stable for this session, but the editor still works.
+    if versioned.exists() {
+        return Ok(versioned);
+    }
+
+    bail!("bsl-analyzer is not installed and could not be downloaded")
+}
+
+/// Raw swap step: copy versioned to a per-process temp, atomic rename
+/// into the stable path, then write the sidecar. Caller MUST hold the
+/// `SwapLock`. Captures `current_ver` once and uses it for both rename
+/// source and sidecar write so the two never disagree.
+fn perform_swap(cache_dir: &Path, versioned: &Path, current_ver: &str) -> Result<()> {
+    let temp = unique_stable_temp_path(cache_dir);
+
+    if let Err(e) = fs::copy(versioned, &temp) {
+        let _ = fs::remove_file(&temp);
+        return Err(e)
+            .with_context(|| format!("Failed to copy {} to stable temp", versioned.display()));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perm_result = fs::metadata(&temp).and_then(|m| {
+            let mut perms = m.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&temp, perms)
+        });
+        if let Err(e) = perm_result {
+            let _ = fs::remove_file(&temp);
+            return Err(e).context("Failed to set permissions on stable temp");
+        }
+    }
+
+    let stable = stable_app_path(cache_dir);
+    if let Err(e) = fs::rename(&temp, &stable) {
+        let _ = fs::remove_file(&temp);
+        return Err(e)
+            .with_context(|| format!("Failed to swap stable app to version {}", current_ver));
+    }
+
+    write_stable_version(cache_dir, current_ver)?;
+    Ok(())
 }
 
 pub fn ensure_specific_version(provider: &dyn ReleaseProvider, version: &str) -> Result<PathBuf> {
@@ -283,7 +367,11 @@ pub fn cleanup_versions(args: &[String]) -> Result<()> {
     for entry in fs::read_dir(&cache_dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        if let Some(version) = name.to_str().and_then(|n| n.strip_prefix("bsl-analyzer-")) {
+        let Some(name_str) = name.to_str() else { continue };
+        if is_reserved_cache_entry(name_str) {
+            continue;
+        }
+        if let Some(version) = name_str.strip_prefix("bsl-analyzer-") {
             versions.push((version.to_string(), entry.path()));
         }
     }
@@ -369,7 +457,11 @@ fn cleanup_cached_versions(cache_dir: &Path, preserve_versions: &[String], keep_
     let Ok(entries) = fs::read_dir(cache_dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if let Some(version) = name.to_str().and_then(|n| n.strip_prefix("bsl-analyzer-")) {
+        let Some(name_str) = name.to_str() else { continue };
+        if is_reserved_cache_entry(name_str) {
+            continue;
+        }
+        if let Some(version) = name_str.strip_prefix("bsl-analyzer-") {
             versions.push((version.to_string(), entry.path()));
         }
     }
@@ -665,5 +757,196 @@ mod tests {
         assert!(version_exists(dir.path(), "0.1.2"));
         assert!(version_exists(dir.path(), "0.1.1"));
         assert!(!version_exists(dir.path(), "0.0.9"));
+    }
+
+    #[test]
+    fn cleanup_does_not_touch_stable_app_or_sidecar() {
+        // Three versioned entries — with keep_count=1, the oldest must be
+        // reaped. That assertion is what proves cleanup actually ran; the
+        // rest of the test verifies it left reserved files alone.
+        let dir = TestDir::new();
+        create_version_file(dir.path(), "0.0.1");
+        create_version_file(dir.path(), "0.1.0");
+        let current = create_version_file(dir.path(), "0.1.5");
+        update_current_link(dir.path(), &current).expect("failed to update current link");
+
+        let stable = stable_app_path(dir.path());
+        fs::write(&stable, b"stable bytes").expect("failed to write stable app");
+        write_stable_version(dir.path(), "0.1.5").expect("failed to write sidecar");
+        // Synthesise a swap-temp filename matching the prefix convention
+        // — cleanup must skip anything starting with `bsl-analyzer-app.new-`.
+        let temp = dir.path().join("bsl-analyzer-app.new-99999-12345");
+        fs::write(&temp, b"temp bytes").expect("failed to write temp");
+
+        cleanup_cached_versions(dir.path(), &[], 1);
+
+        assert!(stable.exists(), "stable app must survive cleanup");
+        assert!(dir.path().join(".app-version").exists(), "sidecar must survive cleanup");
+        assert!(temp.exists(), "swap temp must survive cleanup (caller-owned)");
+        assert!(version_exists(dir.path(), "0.1.5"));
+        assert!(version_exists(dir.path(), "0.1.0"));
+        assert!(
+            !version_exists(dir.path(), "0.0.1"),
+            "oldest non-current version should be reaped"
+        );
+    }
+
+    #[test]
+    fn swap_and_resolve_creates_stable_on_cold_cache() {
+        let dir = TestDir::new();
+        let current = create_version_file(dir.path(), "0.1.5");
+        update_current_link(dir.path(), &current).expect("failed to update current link");
+
+        let path = swap_and_resolve(dir.path()).expect("swap must succeed");
+        let stable = stable_app_path(dir.path());
+
+        assert_eq!(path, stable, "must return stable path after successful swap");
+        assert!(stable.exists(), "stable app must exist after swap");
+        assert_eq!(fs::read(&stable).expect("read stable"), b"0.1.5");
+        assert_eq!(read_stable_version(dir.path()).as_deref(), Some("0.1.5"));
+    }
+
+    #[test]
+    fn swap_and_resolve_is_noop_when_in_sync() {
+        let dir = TestDir::new();
+        let current = create_version_file(dir.path(), "0.1.5");
+        update_current_link(dir.path(), &current).expect("failed to update current link");
+
+        let stable = stable_app_path(dir.path());
+        fs::write(&stable, b"existing-stable").expect("seed stable");
+        write_stable_version(dir.path(), "0.1.5").expect("seed sidecar");
+
+        let path = swap_and_resolve(dir.path()).expect("noop in sync");
+
+        assert_eq!(path, stable);
+        // Stable content must NOT be overwritten when sidecar already matches.
+        assert_eq!(fs::read(&stable).expect("read stable"), b"existing-stable");
+    }
+
+    #[test]
+    fn swap_and_resolve_overwrites_on_divergence() {
+        let dir = TestDir::new();
+        let current = create_version_file(dir.path(), "0.1.6");
+        update_current_link(dir.path(), &current).expect("failed to update current link");
+
+        let stable = stable_app_path(dir.path());
+        fs::write(&stable, b"old-stable").expect("seed old stable");
+        write_stable_version(dir.path(), "0.1.5").expect("seed old sidecar");
+
+        let path = swap_and_resolve(dir.path()).expect("swap on divergence");
+
+        assert_eq!(path, stable);
+        assert_eq!(fs::read(&stable).expect("read stable"), b"0.1.6");
+        assert_eq!(read_stable_version(dir.path()).as_deref(), Some("0.1.6"));
+    }
+
+    #[test]
+    fn swap_and_resolve_returns_versioned_when_swap_path_unwritable() {
+        // Versioned is present but stable cannot be created (e.g. dir is
+        // read-only on Windows, or rename fails for any reason). We
+        // simulate "swap impossible" by pre-creating a directory at the
+        // stable path so `fs::rename(temp, stable)` fails.
+        let dir = TestDir::new();
+        let current = create_version_file(dir.path(), "0.1.5");
+        update_current_link(dir.path(), &current).expect("link");
+
+        let stable = stable_app_path(dir.path());
+        fs::create_dir(&stable).expect("seed stable as a directory to block rename");
+
+        let path = swap_and_resolve(dir.path()).expect("must fall back");
+
+        // Fallback: returned path is the versioned cache file.
+        assert_eq!(path, current);
+    }
+
+    #[test]
+    fn swap_and_resolve_bails_without_current() {
+        let dir = TestDir::new();
+        // No `current` link, no versioned cache — swap must error.
+        let err = swap_and_resolve(dir.path()).expect_err("must error without current");
+        assert!(err.to_string().contains("not installed"));
+    }
+
+    /// Concurrent `update_current_link` calls must not error out on
+    /// EEXIST (Linux remove+symlink would). Per-process temp + atomic
+    /// rename eliminates that.
+    #[test]
+    fn update_current_link_is_concurrency_safe() {
+        use std::sync::Arc;
+        use std::sync::Barrier;
+        use std::thread;
+
+        let dir = Arc::new(TestDir::new());
+        let v1 = create_version_file(dir.path(), "0.1.0");
+        let v2 = create_version_file(dir.path(), "0.2.0");
+        let targets = Arc::new(vec![v1, v2]);
+
+        const THREADS: usize = 8;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for i in 0..THREADS {
+            let dir = Arc::clone(&dir);
+            let barrier = Arc::clone(&barrier);
+            let targets = Arc::clone(&targets);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let target = &targets[i % targets.len()];
+                for _ in 0..32 {
+                    update_current_link(dir.path(), target).expect("atomic relink");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("join");
+        }
+
+        // Whatever final value, current must point at one of the two versions.
+        let ver = get_current_version(dir.path()).expect("current readable");
+        assert!(ver == "0.1.0" || ver == "0.2.0");
+    }
+
+    /// Stress-test the swap lock: N cold-start launchers racing on the
+    /// same `current` must always leave stable bytes consistent with the
+    /// version named in the sidecar. The lock prevents binary-rename and
+    /// sidecar-write of one thread from interleaving with another.
+    #[test]
+    fn swap_stable_concurrent_writes_stay_consistent() {
+        use std::sync::Arc;
+        use std::sync::Barrier;
+        use std::thread;
+
+        let dir = Arc::new(TestDir::new());
+        let current = create_version_file(dir.path(), "0.1.5");
+        update_current_link(dir.path(), &current).expect("link");
+
+        const THREADS: usize = 8;
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let dir = Arc::clone(&dir);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..16 {
+                    swap_and_resolve(dir.path()).expect("swap under lock");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("join");
+        }
+
+        // Final state: whatever sidecar names, stable bytes must match the
+        // versioned cache file with the same name. No torn write survives.
+        let stable_ver = read_stable_version(dir.path()).expect("sidecar present");
+        let stable_bytes = fs::read(stable_app_path(dir.path())).expect("read stable bytes");
+        let expected_bytes = fs::read(dir.path().join(format!("bsl-analyzer-{stable_ver}")))
+            .expect("read versioned bytes");
+        assert_eq!(
+            stable_bytes, expected_bytes,
+            "stable bytes must match version named in sidecar"
+        );
+        assert_eq!(stable_ver, "0.1.5");
     }
 }
