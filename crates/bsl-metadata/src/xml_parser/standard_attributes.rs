@@ -1,11 +1,20 @@
-//! Standard attributes handling for different MDO types
+//! Standard attributes handling for different MDO types.
+//!
+//! This module is a thin adapter: it reads the authoritative attribute spec
+//! from `bsl_platform::standard_mdo_attributes` and instantiates concrete
+//! `Attribute` / `RegisterAttribute` values by evaluating the presence
+//! conditions against the MDO's configuration properties.
 
-use crate::metadata_object::{Attribute, AttributeType, MdoType, StandardAttributeKind};
+use bsl_platform::{
+    standard_attributes_for, AttrValueKind, MdoTemplateKind, ObjectView, PresenceCondition,
+    StandardAttrSpec, StandardKind,
+};
+
+use crate::metadata_object::{Attribute, AttributeType, MdoType};
 use crate::register::RegisterAttribute;
 
 use super::helpers::{
-    child_bool, child_text, child_u32, create_register_standard_attribute,
-    create_standard_attribute, find_child,
+    child_bool, child_text, child_u32, create_register_standard_attribute, find_child,
 };
 
 // ============================================================================
@@ -65,7 +74,76 @@ impl MdoProperties {
 }
 
 // ============================================================================
-// Register standard attributes
+// Generic adapter
+// ============================================================================
+
+/// Returns `true` if the presence condition is satisfied by `properties`.
+fn condition_satisfied(cond: PresenceCondition, p: &MdoProperties) -> bool {
+    match cond {
+        PresenceCondition::Always => true,
+        PresenceCondition::HasCode => p.code_length.is_some_and(|l| l > 0),
+        PresenceCondition::HasDescription => p.description_length.is_some_and(|l| l > 0),
+        PresenceCondition::HasNumber => p.number_length.is_some_and(|l| l > 0),
+        PresenceCondition::Hierarchical => p.hierarchical,
+        PresenceCondition::HasOwners => !p.owners.is_empty(),
+        PresenceCondition::IsPeriodic => {
+            p.periodicity.as_deref().unwrap_or("Nonperiodical") != "Nonperiodical"
+        }
+    }
+}
+
+/// Build an `AttributeType` from a spec entry and the MDO properties.
+fn build_attr_type(spec: &StandardAttrSpec, p: &MdoProperties, mdo_type: MdoType) -> AttributeType {
+    match spec.value {
+        AttrValueKind::Boolean => AttributeType::Boolean,
+        AttrValueKind::DateTime => AttributeType::DateTime,
+        AttrValueKind::StringCodeOrDescription => {
+            let length = match spec.kind {
+                StandardKind::Code => p.code_length,
+                StandardKind::Description => p.description_length,
+                _ => None,
+            };
+            AttributeType::String { length }
+        }
+        AttrValueKind::StringNumber => AttributeType::String { length: p.number_length },
+        AttrValueKind::StringUnbounded => AttributeType::String { length: None },
+        AttrValueKind::NumberLineNumber => AttributeType::Number { precision: 10, scale: 0 },
+        AttrValueKind::SelfRef => AttributeType::Ref { mdo_type, name: p.name.clone() },
+        AttrValueKind::OwnerRef => owner_attr_type(&p.owners),
+        AttrValueKind::AnyDocumentRef => {
+            AttributeType::AnyObjectRef { mdo_type: MdoType::Document }
+        }
+        AttrValueKind::Unknown => AttributeType::Unknown,
+    }
+}
+
+/// Build an `Attribute` from a spec entry.
+fn build_attribute(spec: &StandardAttrSpec, p: &MdoProperties, mdo_type: MdoType) -> Attribute {
+    Attribute {
+        name: spec.kind.russian_name().to_string(),
+        name_en: Some(spec.kind.english_name().to_string()),
+        attr_type: build_attr_type(spec, p, mdo_type),
+    }
+}
+
+/// Populate `attributes` from a platform spec, filtering by presence conditions.
+fn add_standard_attributes_from_spec(
+    attributes: &mut Vec<Attribute>,
+    properties: &MdoProperties,
+    mdo_type: MdoType,
+    template: MdoTemplateKind,
+    view: ObjectView,
+) {
+    for spec in standard_attributes_for(template, view) {
+        if !condition_satisfied(spec.condition, properties) {
+            continue;
+        }
+        attributes.push(build_attribute(spec, properties, mdo_type));
+    }
+}
+
+// ============================================================================
+// Register standard attributes (Vec<RegisterAttribute>)
 // ============================================================================
 
 /// Add common standard attributes for all register types (Active, LineNumber, Recorder)
@@ -74,20 +152,19 @@ pub(crate) fn add_register_common_attrs(
     object_name: &str,
     mdo_type: MdoType,
 ) {
+    use crate::metadata_object::StandardAttributeKind;
     // Active - always present
     attributes.push(create_register_standard_attribute(
         &StandardAttributeKind::Active,
         mdo_type,
         object_name,
     ));
-
     // LineNumber - always present
     attributes.push(create_register_standard_attribute(
         &StandardAttributeKind::LineNumber,
         mdo_type,
         object_name,
     ));
-
     // Recorder - always present
     attributes.push(create_register_standard_attribute(
         &StandardAttributeKind::Recorder,
@@ -103,6 +180,7 @@ pub(crate) fn add_register_period_attr(
     mdo_type: MdoType,
     periodicity: Option<&str>,
 ) {
+    use crate::metadata_object::StandardAttributeKind;
     let should_add_period = match mdo_type {
         // InformationRegister: add Period only if not Nonperiodical
         MdoType::InformationRegister => periodicity.unwrap_or("Nonperiodical") != "Nonperiodical",
@@ -142,281 +220,112 @@ pub(crate) fn add_accumulation_register_standard_attrs(
 }
 
 // ============================================================================
-// Catalog/Document standard attributes
+// Catalog/Document standard attributes (Vec<Attribute>) — wrapper API
 // ============================================================================
 
-/// Add standard attributes for Catalog/Document objects
+/// Add standard attributes for Catalog objects
 pub(crate) fn add_catalog_standard_attributes(
     attributes: &mut Vec<Attribute>,
     properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
-    let object_name = &properties.name;
-
-    // Ref - always present
-    attributes.push(create_standard_attribute(&StandardAttributeKind::Ref, mdo_type, object_name));
-
-    // DeletionMark - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::DeletionMark,
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
         mdo_type,
-        object_name,
-    ));
-
-    // Code - only if CodeLength > 0
-    if let Some(length) = properties.code_length.filter(|&l| l > 0) {
-        let kind = StandardAttributeKind::Code { length };
-        attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
-    }
-
-    // Description - only if DescriptionLength > 0
-    if let Some(length) = properties.description_length.filter(|&l| l > 0) {
-        let kind = StandardAttributeKind::Description { length };
-        attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
-    }
-
-    // IsFolder/Parent - only if Hierarchical
-    if properties.hierarchical {
-        attributes.push(create_standard_attribute(
-            &StandardAttributeKind::IsFolder,
-            mdo_type,
-            object_name,
-        ));
-
-        attributes.push(create_standard_attribute(
-            &StandardAttributeKind::Parent,
-            mdo_type,
-            object_name,
-        ));
-    }
-
-    // Owner - only if owners is not empty
-    if !properties.owners.is_empty() {
-        let owner_types = parse_owner_types(&properties.owners);
-        let owner_attr_type = match owner_types.len() {
-            0 => AttributeType::Unknown,
-            1 => owner_types.into_iter().next().unwrap(),
-            _ => AttributeType::Composite { types: owner_types },
-        };
-
-        attributes.push(Attribute {
-            name: StandardAttributeKind::Owner.russian_name().to_string(),
-            name_en: Some(StandardAttributeKind::Owner.english_name().to_string()),
-            attr_type: owner_attr_type,
-        });
-    }
-
-    // Predefined - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::Predefined,
-        mdo_type,
-        object_name,
-    ));
-
-    // PredefinedDataName - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::PredefinedDataName,
-        mdo_type,
-        object_name,
-    ));
+        MdoTemplateKind::Catalog,
+        ObjectView::Object,
+    );
 }
 
 /// Add standard attributes for Document objects
-///
-/// Documents have: Ref, DeletionMark, Number (if NumberLength > 0), Date, Posted
 pub(crate) fn add_document_standard_attributes(
     attributes: &mut Vec<Attribute>,
     properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
-    let object_name = &properties.name;
-
-    // Ref - always present
-    attributes.push(create_standard_attribute(&StandardAttributeKind::Ref, mdo_type, object_name));
-
-    // DeletionMark - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::DeletionMark,
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
         mdo_type,
-        object_name,
-    ));
-
-    // Number - only if NumberLength > 0
-    if let Some(length) = properties.number_length.filter(|&l| l > 0) {
-        let kind = StandardAttributeKind::Number { length };
-        attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
-    }
-
-    // Date - always present
-    attributes.push(create_standard_attribute(&StandardAttributeKind::Date, mdo_type, object_name));
-
-    // Posted - always present for Document
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::Posted,
-        mdo_type,
-        object_name,
-    ));
+        MdoTemplateKind::Document,
+        ObjectView::Object,
+    );
 }
 
 /// Add standard attributes for BusinessProcess objects
-///
-/// BusinessProcesses have: Ref, DeletionMark, Number (if NumberLength > 0), Date,
-/// Started, Completed, HeadTask
 pub(crate) fn add_business_process_standard_attributes(
     attributes: &mut Vec<Attribute>,
     properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
-    let object_name = &properties.name;
-
-    // Ref - always present
-    attributes.push(create_standard_attribute(&StandardAttributeKind::Ref, mdo_type, object_name));
-
-    // DeletionMark - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::DeletionMark,
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
         mdo_type,
-        object_name,
-    ));
-
-    // Number - only if NumberLength > 0
-    if let Some(length) = properties.number_length.filter(|&l| l > 0) {
-        let kind = StandardAttributeKind::Number { length };
-        attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
-    }
-
-    // Date - always present
-    attributes.push(create_standard_attribute(&StandardAttributeKind::Date, mdo_type, object_name));
-
-    // Started - always present for BusinessProcess
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::Started,
-        mdo_type,
-        object_name,
-    ));
-
-    // Completed - always present for BusinessProcess
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::Completed,
-        mdo_type,
-        object_name,
-    ));
-
-    // HeadTask - always present for BusinessProcess
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::HeadTask,
-        mdo_type,
-        object_name,
-    ));
+        MdoTemplateKind::BusinessProcess,
+        ObjectView::Object,
+    );
 }
 
 /// Add standard attributes for Task objects
-///
-/// Tasks have: Ref, DeletionMark, Number (if NumberLength > 0), Date,
-/// Executed, TaskBusinessProcess, RoutePoint
 pub(crate) fn add_task_standard_attributes(
     attributes: &mut Vec<Attribute>,
     properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
-    let object_name = &properties.name;
-
-    // Ref - always present
-    attributes.push(create_standard_attribute(&StandardAttributeKind::Ref, mdo_type, object_name));
-
-    // DeletionMark - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::DeletionMark,
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
         mdo_type,
-        object_name,
-    ));
-
-    // Number - only if NumberLength > 0
-    if let Some(length) = properties.number_length.filter(|&l| l > 0) {
-        let kind = StandardAttributeKind::Number { length };
-        attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
-    }
-
-    // Date - always present
-    attributes.push(create_standard_attribute(&StandardAttributeKind::Date, mdo_type, object_name));
-
-    // Executed - always present for Task
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::Executed,
-        mdo_type,
-        object_name,
-    ));
-
-    // TaskBusinessProcess - always present for Task
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::TaskBusinessProcess,
-        mdo_type,
-        object_name,
-    ));
-
-    // RoutePoint - always present for Task
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::RoutePoint,
-        mdo_type,
-        object_name,
-    ));
+        MdoTemplateKind::Task,
+        ObjectView::Object,
+    );
 }
 
 /// Add standard attributes for ExchangePlan objects
-///
-/// ExchangePlans have: same as Catalog + ThisNode
 pub(crate) fn add_exchange_plan_standard_attributes(
     attributes: &mut Vec<Attribute>,
     properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
-    add_catalog_standard_attributes(attributes, properties, mdo_type);
-
-    let object_name = &properties.name;
-    // ThisNode - always present for ExchangePlan
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::ThisNode,
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
         mdo_type,
-        object_name,
-    ));
+        MdoTemplateKind::ExchangePlan,
+        ObjectView::Object,
+    );
 }
 
 /// Add standard attributes for ChartOfCharacteristicTypes objects
-///
-/// ChartOfCharacteristicTypes have: same as Catalog + ValueType
 pub(crate) fn add_chart_of_characteristic_types_standard_attributes(
     attributes: &mut Vec<Attribute>,
     properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
-    add_catalog_standard_attributes(attributes, properties, mdo_type);
-
-    let object_name = &properties.name;
-    // ValueType - always present for ChartOfCharacteristicTypes
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::ValueType,
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
         mdo_type,
-        object_name,
-    ));
+        MdoTemplateKind::ChartOfCharacteristicTypes,
+        ObjectView::Object,
+    );
 }
 
 /// Add standard attributes for ChartOfAccounts objects
-///
-/// ChartOfAccounts have: same as Catalog + Order
 pub(crate) fn add_chart_of_accounts_standard_attributes(
     attributes: &mut Vec<Attribute>,
     properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
-    add_catalog_standard_attributes(attributes, properties, mdo_type);
-
-    let object_name = &properties.name;
-    // Order - always present for ChartOfAccounts
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::Order,
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
         mdo_type,
-        object_name,
-    ));
+        MdoTemplateKind::ChartOfAccounts,
+        ObjectView::Object,
+    );
 }
 
 /// Add standard attributes for InformationRegister (Attribute variant)
@@ -425,41 +334,29 @@ pub(crate) fn add_information_register_standard_attributes_as_attrs(
     properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
-    let object_name = &properties.name;
-
-    // Active - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::Active,
+    add_standard_attributes_from_spec(
+        attributes,
+        properties,
         mdo_type,
-        object_name,
-    ));
+        MdoTemplateKind::InformationRegister,
+        ObjectView::Object,
+    );
+}
 
-    // LineNumber - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::LineNumber,
-        mdo_type,
-        object_name,
-    ));
+// ============================================================================
+// Owner type helper
+// ============================================================================
 
-    // Recorder - always present
-    attributes.push(create_standard_attribute(
-        &StandardAttributeKind::Recorder,
-        mdo_type,
-        object_name,
-    ));
-
-    // Period - only if periodic (not Nonperiodical)
-    let periodicity = properties.periodicity.as_deref().unwrap_or("Nonperiodical");
-    if periodicity != "Nonperiodical" {
-        attributes.push(create_standard_attribute(
-            &StandardAttributeKind::Period,
-            mdo_type,
-            object_name,
-        ));
+/// Parse owner types from owner string values
+fn owner_attr_type(owners: &[String]) -> AttributeType {
+    let types = parse_owner_types(owners);
+    match types.len() {
+        0 => AttributeType::Unknown,
+        1 => types.into_iter().next().unwrap(),
+        _ => AttributeType::Composite { types },
     }
 }
 
-/// Parse owner types from owner string values
 fn parse_owner_types(items: &[String]) -> Vec<AttributeType> {
     items
         .iter()

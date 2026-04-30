@@ -10,6 +10,8 @@ When an export function already has a documentation comment, that comment must c
 
 Missing whole-method documentation is handled by a separate diagnostic: `PublicMethodsDescription`.
 
+> **Dependency:** if `PublicMethodsDescription` is disabled in the config or filtered out, export functions with no documentation comment at all (including value-returning ones) will receive *no* diagnostic — neither from this check, nor from `PublicMethodsDescription`. To cover both cases — missing comment and missing returned-value section — both diagnostics must remain active.
+
 Diagnostics detects typical errors:
 
 - Missing return value description in an existing export-function comment

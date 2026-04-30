@@ -384,10 +384,15 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
     for (i, line) in comments.iter().enumerate() {
         let lower = line.trim().to_lowercase();
 
+        let returns_header = returns_section_header(line.trim());
         if is_parameters_keyword(&lower) {
             section_indices.push(SectionMarker::new(i, Section::Parameters, None));
-        } else if let Some(payload) = returns_section_payload(line.trim()) {
-            section_indices.push(SectionMarker::new(i, Section::Returns, payload));
+        } else if returns_header != ReturnsHeader::NotReturns {
+            let inline_payload = match returns_header {
+                ReturnsHeader::WithPayload(payload) => Some(payload),
+                _ => None,
+            };
+            section_indices.push(SectionMarker::new(i, Section::Returns, inline_payload));
         } else if is_example_keyword(&lower) {
             section_indices.push(SectionMarker::new(i, Section::Examples, None));
         } else if is_call_options_keyword(&lower) {
@@ -482,13 +487,29 @@ fn has_structural_section(comments: &[String]) -> bool {
 fn is_structural_section_line(line: &str) -> bool {
     let lower = line.to_lowercase();
     is_parameters_keyword(&lower)
-        || returns_section_payload(line).is_some()
+        || returns_section_header(line) != ReturnsHeader::NotReturns
         || is_example_keyword(&lower)
         || is_call_options_keyword(&lower)
         || is_deprecated_keyword(&lower)
 }
 
-/// Extract same-line payload from a returned-value section header.
+/// Result of trying to interpret a comment line as a returned-value section header.
+///
+/// Three outcomes are visible to callers:
+/// - the line is not a returned-value header at all (`NotReturns`);
+/// - the line is a header with no same-line payload, e.g. `Возвращаемое значение:`
+///   (`NoPayload`); the actual content lives on subsequent lines;
+/// - the line packs the type into the same line, e.g.
+///   `Возвращаемое значение - соответствие` (`WithPayload(...)`); the payload
+///   is hoisted into the section as its first content line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReturnsHeader {
+    NotReturns,
+    NoPayload,
+    WithPayload(String),
+}
+
+/// Classify a comment line as a returned-value section header.
 ///
 /// Accepts real-world variants such as:
 /// - "Возвращаемое значение:"
@@ -497,21 +518,69 @@ fn is_structural_section_line(line: &str) -> bool {
 /// - "Возвращаемое значение;"
 /// - "Returns:"
 /// - "Return value:"
-fn returns_section_payload(line: &str) -> Option<Option<String>> {
+fn returns_section_header(line: &str) -> ReturnsHeader {
     let trimmed = line.trim();
     let lower = trimmed.to_lowercase();
 
     for keyword in ["возвращаемое значение", "return value", "returns", "результат", "result"]
     {
-        if lower.starts_with(keyword) {
-            return parse_section_payload_after_keyword(trimmed, keyword.len());
+        if !lower.starts_with(keyword) {
+            continue;
         }
+        let header = match parse_section_payload_after_keyword(trimmed, keyword.len()) {
+            Some(header) => header,
+            None => return ReturnsHeader::NotReturns,
+        };
+        // Ambiguous keywords ("Результат:" / "Result:") often appear in
+        // ordinary prose. Treat them as a section header only when there
+        // is no inline content, or when the inline content actually
+        // looks like a type token. Otherwise the line is purpose text.
+        if let ReturnsHeader::WithPayload(text) = &header {
+            if is_ambiguous_returns_keyword(keyword) && !payload_looks_like_type_section(text) {
+                return ReturnsHeader::NotReturns;
+            }
+        }
+        return header;
     }
 
-    None
+    ReturnsHeader::NotReturns
 }
 
-fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option<Option<String>> {
+/// Whether a returns-section keyword is loose enough to occur in free-form prose.
+///
+/// `результат`/`result` are common nouns in BSL/English documentation; we accept
+/// them as section headers only if structure (no inline payload, or a type-like
+/// payload) confirms they are headers.
+fn is_ambiguous_returns_keyword(keyword: &str) -> bool {
+    matches!(keyword, "результат" | "result")
+}
+
+/// Heuristic for whether an inline payload after a returns keyword looks like
+/// the start of a type description rather than free-form prose.
+fn payload_looks_like_type_section(payload: &str) -> bool {
+    let stripped = payload.trim_end_matches(['.', ',', ';', ':', '!', '?']).trim();
+    if stripped.is_empty() {
+        return false;
+    }
+
+    let type_part = [" -- ", " — ", " – ", " - "]
+        .iter()
+        .find_map(|sep| stripped.find(*sep).map(|pos| stripped[..pos].trim()))
+        .unwrap_or(stripped);
+
+    is_likely_type_name(type_part)
+}
+
+fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option<ReturnsHeader> {
+    // SAFETY of byte slicing: `keyword_len` is the byte length of the lower-cased
+    // keyword, but it is used to slice `line` (original case). This is sound only
+    // because every keyword listed in `returns_section_header` is either ASCII or
+    // pure Cyrillic in U+0400..=U+04FF — both ranges have identical byte length
+    // under `to_lowercase`, so the offset still lands on a UTF-8 char boundary.
+    // Adding a keyword that contains a character whose `to_lowercase` expands
+    // (Turkish dotted-I `İ` → `i\u{0307}`, capital Eszett `ẞ` → `ß`, etc.)
+    // would break this assumption — the byte offset of the lower-cased form
+    // would no longer line up with `trimmed`.
     let mut rest = line[keyword_len..].trim_start();
 
     if rest.starts_with('(') {
@@ -520,30 +589,30 @@ fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option
     }
 
     if rest.is_empty() {
-        return Some(None);
+        return Some(ReturnsHeader::NoPayload);
     }
 
     if let Some(payload) = rest.strip_prefix(':') {
-        return Some(non_empty_payload(payload));
+        return Some(returns_header_from_payload(payload));
     }
 
     if let Some(payload) = rest.strip_prefix('-') {
-        return Some(non_empty_payload(payload.trim_start_matches('-')));
+        return Some(returns_header_from_payload(payload.trim_start_matches('-')));
     }
 
     if let Some(payload) = rest.strip_prefix(';') {
-        return Some(non_empty_payload(payload));
+        return Some(returns_header_from_payload(payload));
     }
 
     None
 }
 
-fn non_empty_payload(payload: &str) -> Option<String> {
+fn returns_header_from_payload(payload: &str) -> ReturnsHeader {
     let payload = payload.trim();
     if payload.is_empty() {
-        None
+        ReturnsHeader::NoPayload
     } else {
-        Some(payload.to_string())
+        ReturnsHeader::WithPayload(payload.to_string())
     }
 }
 
@@ -692,7 +761,12 @@ fn is_likely_parameter_name(name: &str) -> bool {
     chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn is_dotted_type_reference(name: &str) -> bool {
+/// True if `name` is a qualified BSL type reference like `Справочники.Партнеры`.
+///
+/// Single source of truth — diagnostics that need to recognise legacy
+/// "type-only" parameter docs (e.g. `MissingParameterDescription`) reuse this
+/// rather than carrying their own copy with subtly different rules.
+pub fn is_dotted_type_reference(name: &str) -> bool {
     name.contains('.') && is_likely_type_name(name)
 }
 
@@ -755,8 +829,22 @@ fn parse_returns(lines: &[String]) -> Vec<TypeDoc> {
             }
             current_type = Some(TypeDoc::simple(type_name, description));
         } else if current_type.is_none() && types.is_empty() {
-            current_type =
-                Some(TypeDoc::simple("Произвольный".to_string(), Some(trimmed.to_string())));
+            // Conservative fallback for inline payloads like
+            // `Возвращаемое значение - соответствие.`: accept the line only
+            // when it is just a type token (with optional trailing punctuation).
+            // We deliberately do NOT manufacture a synthetic
+            // `Произвольный`/`Arbitrary` type for unparseable lines — that
+            // silenced MissingReturnedValueDescription and baked a Russian
+            // default into otherwise-bilingual parsing. As a deliberate
+            // tradeoff, multi-word prose that follows a returns header (e.g.
+            // `Возвращаемое значение - результат выполнения.`) is dropped on
+            // the floor here: keeping diagnostic accuracy is worth more than
+            // round-tripping freeform descriptions, which were never carried
+            // anywhere downstream anyway.
+            let stripped = trimmed.trim_end_matches(['.', ',', ';', ':', '!', '?']).trim();
+            if !stripped.is_empty() && is_likely_type_name(stripped) {
+                current_type = Some(TypeDoc::simple(stripped.to_string(), None));
+            }
         }
     }
 
@@ -1120,9 +1208,58 @@ mod tests {
 
         let docs = parse_method_docs(&comments).unwrap();
 
+        // Inline payload that is just a type token (with trailing punctuation)
+        // gets recognised directly. We do NOT manufacture a synthetic
+        // `Произвольный`/`Arbitrary` type — that masked diagnostics on
+        // genuinely unparseable lines.
         assert_eq!(docs.returned_value.len(), 1);
-        assert_eq!(docs.returned_value[0].name, "Произвольный");
-        assert_eq!(docs.returned_value[0].description.as_deref(), Some("соответствие."));
+        assert_eq!(docs.returned_value[0].name, "соответствие");
+        assert_eq!(docs.returned_value[0].description, None);
+    }
+
+    #[test]
+    fn test_parse_result_freetext_is_not_returns_section() {
+        // `Результат:` / `Result:` are common nouns and frequently appear in
+        // ordinary prose. When the inline payload is not type-like, the line
+        // must remain part of the purpose, not become an empty Returns section
+        // (which would silently drop the prose AND mark returned_value as
+        // empty for downstream diagnostics).
+        let comments =
+            vec!["Описание метода.".to_string(), "Результат: упрощает работу.".to_string()];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(
+            docs.returned_value.is_empty(),
+            "Free-text \"Результат: ...\" must not be detected as a Returns section, got: {:?}",
+            docs.returned_value
+        );
+        let purpose = docs.purpose.as_deref().unwrap_or("");
+        assert!(
+            purpose.contains("упрощает работу"),
+            "Expected purpose to include the prose, got: {purpose:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_english_result_freetext_is_not_returns_section() {
+        // English symmetry of test_parse_result_freetext_is_not_returns_section:
+        // ambiguous keywords must behave the same regardless of language.
+        let comments =
+            vec!["Method description.".to_string(), "Result: simplifies the workflow.".to_string()];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(
+            docs.returned_value.is_empty(),
+            "Free-text \"Result: ...\" must not be detected as a Returns section, got: {:?}",
+            docs.returned_value
+        );
+        let purpose = docs.purpose.as_deref().unwrap_or("");
+        assert!(
+            purpose.contains("simplifies the workflow"),
+            "Expected purpose to include the prose, got: {purpose:?}"
+        );
     }
 
     #[test]

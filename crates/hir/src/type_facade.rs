@@ -22,17 +22,14 @@
 //! - `is_nullable` — `Null` / `Undefined` are separate `Ty` variants,
 //!   not a modifier on other types. No dedicated method needed.
 
-use bsl_metadata::{AttributeType, MdoType};
+use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
 use hir_def::configs::ConfigsDatabase;
 use hir_def::ty::{MetadataKind, Ty};
-use hir_def::type_ref::TypeRef;
 use hir_def::Name;
-use hir_ty::lower::TyLoweringContext;
 use hir_ty::{
-    coerce_this_object_to_metadata_ref, is_assignable, is_ref_ty, lookup_field, lookup_method,
+    enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldOrigin,
 };
-use std::collections::HashSet;
 use vfs::FileId;
 
 /// Lightweight DTO for a method exposed by a [`Type`].
@@ -56,6 +53,37 @@ pub struct MethodParam {
     pub optional: bool,
 }
 
+/// Where a field came from — mirrors [`hir_ty::FieldOrigin`].
+///
+/// Re-exported here so IDE callers (`ide/src/completion/`, hover, etc.) do
+/// not need to depend directly on `hir-ty` for this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirFieldOrigin {
+    StandardAttribute,
+    UserAttribute,
+    TabularSection,
+    TabularSectionRowColumn,
+    RegisterDimension,
+    RegisterResource,
+    RegisterAttribute,
+    PlatformProperty,
+}
+
+impl From<FieldOrigin> for HirFieldOrigin {
+    fn from(o: FieldOrigin) -> Self {
+        match o {
+            FieldOrigin::StandardAttribute => Self::StandardAttribute,
+            FieldOrigin::UserAttribute => Self::UserAttribute,
+            FieldOrigin::TabularSection => Self::TabularSection,
+            FieldOrigin::TabularSectionRowColumn => Self::TabularSectionRowColumn,
+            FieldOrigin::RegisterDimension => Self::RegisterDimension,
+            FieldOrigin::RegisterResource => Self::RegisterResource,
+            FieldOrigin::RegisterAttribute => Self::RegisterAttribute,
+            FieldOrigin::PlatformProperty => Self::PlatformProperty,
+        }
+    }
+}
+
 /// Lightweight DTO for a field (MDO attribute, tabular section, …).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
@@ -67,6 +95,10 @@ pub struct Field {
     pub english_name: Name,
     /// Field type after lowering through [`TyLoweringContext`].
     pub ty: Ty,
+    /// Whether this field is read-only.
+    pub is_readonly: bool,
+    /// Where this field originated from.
+    pub origin: HirFieldOrigin,
 }
 
 /// Semantic type handle with IDE-facing queries.
@@ -241,168 +273,21 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// sections as a whole return an empty vec (a section's "fields"
     /// are actually row-level accesses — use `.Строки[0].X` or the
     /// promoted `TabularSectionRow` receiver).
+    ///
+    /// `Ty::ThisObject` coercion is handled inside [`enumerate_fields`],
+    /// so callers do not need to prepare the receiver.
     pub fn fields(&self) -> Vec<Field> {
-        // `Ty::ThisObject` is coerced to its matching `*Object`
-        // `MetadataRef` so IDE callers that hover / complete on
-        // `ЭтотОбъект.` see the same attribute / tabular-section list
-        // as on the explicit object reference. Non-coercible owner
-        // kinds (forms, record sets, …) fall through to the empty
-        // default below.
-        let coerced = coerce_this_object_to_metadata_ref(&self.ty);
-        let ty = coerced.as_ref().unwrap_or(&self.ty);
-        match ty {
-            Ty::MetadataRef { kind, name } => self.enumerate_metadata_ref_fields(*kind, name),
-            _ => Vec::new(),
-        }
-    }
-
-    fn enumerate_metadata_ref_fields(&self, kind: MetadataKind, mdo_name: &Name) -> Vec<Field> {
         let configs = self.db.configurations(self.file_id);
-        let ctx = TyLoweringContext::new();
-
-        if let Some(mdo_type) = mdo_type_for_kind(kind) {
-            // Attributes (custom + standard, since the XML loader folds
-            // standard attrs into `mdo.attributes`) plus tabular-section
-            // promotions. `configs` iterates main-first, extensions-last;
-            // reverse so extensions override main on name collisions.
-            for cfg in configs.iter().rev() {
-                if let Some(mdo) =
-                    cfg.configuration.find_metadata_object(mdo_type, mdo_name.as_str())
-                {
-                    let mut out =
-                        Vec::with_capacity(mdo.attributes.len() + mdo.tabular_sections.len());
-                    let mut seen_names = HashSet::with_capacity(out.capacity() * 2);
-                    for attr in &mdo.attributes {
-                        push_unique_field(
-                            &mut out,
-                            &mut seen_names,
-                            Field {
-                                name: Name::new(&attr.name),
-                                english_name: metadata_english_name(
-                                    attr.name_en.as_deref(),
-                                    attr.name.as_str(),
-                                ),
-                                ty: lower_attribute_type(&attr.attr_type, &ctx),
-                            },
-                        );
-                    }
-                    for ts in &mdo.tabular_sections {
-                        let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
-                        push_unique_field(
-                            &mut out,
-                            &mut seen_names,
-                            Field {
-                                name: Name::new(ts.name()),
-                                english_name: metadata_english_name(ts.name_en(), ts.name()),
-                                ty: Ty::MetadataRef {
-                                    kind: MetadataKind::TabularSection { parent: mdo_type },
-                                    name: qualified,
-                                },
-                            },
-                        );
-                    }
-                    return out;
-                }
-            }
-            return Vec::new();
-        }
-
-        if let MetadataKind::TabularSectionRow { parent } = kind {
-            let Some((parent_name, section_name)) = split_parent_section(mdo_name.as_str()) else {
-                return Vec::new();
-            };
-            for cfg in configs.iter().rev() {
-                if let Some(mdo) = cfg.configuration.find_metadata_object(parent, parent_name) {
-                    if let Some(ts) = mdo.find_tabular_section(section_name) {
-                        return ts
-                            .attributes()
-                            .iter()
-                            .map(|attr| Field {
-                                name: Name::new(attr.name()),
-                                english_name: metadata_english_name(attr.name_en(), attr.name()),
-                                ty: lower_attribute_type(attr.attr_type(), &ctx),
-                            })
-                            .collect();
-                    }
-                    return Vec::new();
-                }
-            }
-        }
-
-        if let Some(parent) = register_parent_for_kind(kind) {
-            // Same extensions-override-main iteration order as the MDO
-            // branch; register parts are kept flat in the returned vec
-            // (dimensions + resources + attributes) so completion sees
-            // one unified field list, matching how `FieldLookup` walks
-            // them in order.
-            for cfg in configs.iter().rev() {
-                if let Some(register) =
-                    cfg.configuration.find_register_by_type_and_name(parent, mdo_name.as_str())
-                {
-                    let mut out = Vec::with_capacity(
-                        register.dimensions().len()
-                            + register.resources().len()
-                            + register.attributes().len(),
-                    );
-                    let mut seen_names = HashSet::with_capacity(out.capacity() * 2);
-                    for dim in register.dimensions() {
-                        push_unique_field(
-                            &mut out,
-                            &mut seen_names,
-                            Field {
-                                name: Name::new(dim.name()),
-                                english_name: Name::new(dim.name()),
-                                ty: register_part_ty_for_facade(
-                                    dim.attr_type(),
-                                    MetadataKind::RegisterDimension { parent },
-                                    mdo_name,
-                                    dim.name(),
-                                    &ctx,
-                                ),
-                            },
-                        );
-                    }
-                    for res in register.resources() {
-                        push_unique_field(
-                            &mut out,
-                            &mut seen_names,
-                            Field {
-                                name: Name::new(res.name()),
-                                english_name: metadata_english_name(res.name_en(), res.name()),
-                                ty: register_part_ty_for_facade(
-                                    res.attr_type(),
-                                    MetadataKind::RegisterResource { parent },
-                                    mdo_name,
-                                    res.name(),
-                                    &ctx,
-                                ),
-                            },
-                        );
-                    }
-                    for attr in register.attributes() {
-                        push_unique_field(
-                            &mut out,
-                            &mut seen_names,
-                            Field {
-                                name: Name::new(attr.name()),
-                                english_name: metadata_english_name(attr.name_en(), attr.name()),
-                                ty: register_part_ty_for_facade(
-                                    attr.attr_type(),
-                                    MetadataKind::RegisterAttribute { parent },
-                                    mdo_name,
-                                    attr.name(),
-                                    &ctx,
-                                ),
-                            },
-                        );
-                    }
-                    return out;
-                }
-            }
-            return Vec::new();
-        }
-
-        Vec::new()
+        enumerate_fields(&configs, &self.ty)
+            .into_iter()
+            .map(|info| Field {
+                name: info.name.clone(),
+                english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
+                ty: info.ty,
+                is_readonly: info.is_readonly,
+                origin: HirFieldOrigin::from(info.origin),
+            })
+            .collect()
     }
 }
 
@@ -453,104 +338,12 @@ fn resolve_platform_type_name(name: &str) -> Ty {
     }
 }
 
-/// Parity helper with `field_lookup::mdo_type_for_kind`.
-fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
-    match kind {
-        MetadataKind::CatalogRef | MetadataKind::CatalogObject => Some(MdoType::Catalog),
-        MetadataKind::DocumentRef | MetadataKind::DocumentObject => Some(MdoType::Document),
-        MetadataKind::EnumRef => Some(MdoType::Enum),
-        MetadataKind::TaskRef => Some(MdoType::Task),
-        MetadataKind::BusinessProcessRef => Some(MdoType::BusinessProcess),
-        MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
-            Some(MdoType::ExchangePlan)
-        }
-        MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
-            Some(MdoType::ChartOfAccounts)
-        }
-        MetadataKind::InformationRegisterRecordManager
-        | MetadataKind::InformationRegisterRef
-        | MetadataKind::AccumulationRegisterRecordSet
-        | MetadataKind::AccumulationRegisterRef
-        | MetadataKind::AccountingRegisterRef
-        | MetadataKind::CalculationRegisterRef
-        | MetadataKind::RegisterDimension { .. }
-        | MetadataKind::RegisterResource { .. }
-        | MetadataKind::RegisterAttribute { .. }
-        | MetadataKind::TabularSection { .. }
-        | MetadataKind::TabularSectionRow { .. } => None,
-    }
-}
-
-fn lower_attribute_type(attr_type: &AttributeType, ctx: &TyLoweringContext) -> Ty {
-    ctx.lower_type_ref(&TypeRef::from_attribute_type(attr_type))
-}
-
-/// Parity helper with `field_lookup::register_parent_for_kind` — maps the
-/// six register receiver kinds (RecordManager / RecordSet / *Ref) to
-/// their register flavour [`MdoType`]. Leaf part kinds
-/// (`RegisterDimension` / `RegisterResource` / `RegisterAttribute`) are
-/// deliberately excluded: they already carry their `parent` explicitly
-/// and have no field surface to enumerate.
-fn register_parent_for_kind(kind: MetadataKind) -> Option<MdoType> {
-    match kind {
-        MetadataKind::InformationRegisterRecordManager | MetadataKind::InformationRegisterRef => {
-            Some(MdoType::InformationRegister)
-        }
-        MetadataKind::AccumulationRegisterRecordSet | MetadataKind::AccumulationRegisterRef => {
-            Some(MdoType::AccumulationRegister)
-        }
-        MetadataKind::AccountingRegisterRef => Some(MdoType::AccountingRegister),
-        MetadataKind::CalculationRegisterRef => Some(MdoType::CalculationRegister),
-        _ => None,
-    }
-}
-
-/// Parity with `field_lookup::register_part_ty`: lower a register-part
-/// type or fall back to the symbolic `Register{Dimension,Resource,
-/// Attribute}` variant when `attr_type` is absent.
-fn register_part_ty_for_facade(
-    attr_type: Option<&AttributeType>,
-    fallback_kind: MetadataKind,
-    register_name: &Name,
-    part_name: &str,
-    ctx: &TyLoweringContext,
-) -> Ty {
-    match attr_type {
-        Some(at) => lower_attribute_type(at, ctx),
-        None => Ty::MetadataRef {
-            kind: fallback_kind,
-            name: Name::new(&format!("{}.{}", register_name.as_str(), part_name)),
-        },
-    }
-}
-
-fn split_parent_section(name: &str) -> Option<(&str, &str)> {
-    let (parent, section) = name.split_once('.')?;
-    if parent.is_empty() || section.is_empty() {
-        return None;
-    }
-    Some((parent, section))
-}
-
-fn metadata_english_name(english_name: Option<&str>, fallback: &str) -> Name {
-    fallback_name(english_name.unwrap_or_default(), fallback)
-}
-
 fn fallback_name(name: &str, fallback: &str) -> Name {
     if name.is_empty() {
         Name::new(fallback)
     } else {
         Name::new(name)
     }
-}
-
-fn push_unique_field(out: &mut Vec<Field>, seen_names: &mut HashSet<Name>, field: Field) {
-    if seen_names.contains(&field.name) || seen_names.contains(&field.english_name) {
-        return;
-    }
-    seen_names.insert(field.name.clone());
-    seen_names.insert(field.english_name.clone());
-    out.push(field);
 }
 
 #[cfg(test)]

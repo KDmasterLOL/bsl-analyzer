@@ -1,0 +1,827 @@
+//! Specification of standard MDO attributes.
+//!
+//! Source of truth for the standard attribute "shape" — names (Russian +
+//! English), classification, presence conditions, and value kind. The
+//! `bsl-metadata::xml_parser` adapter reads this spec and instantiates
+//! concrete `Attribute`s in `MetadataObject` after evaluating the
+//! conditions against the configuration's MDO properties (CodeLength,
+//! NumberLength, Hierarchical, Owners, Periodicity).
+//!
+//! This crate intentionally does NOT depend on `bsl-metadata`: keeping the
+//! spec on the platform side preserves the dependency rule (`hir-ty` →
+//! `bsl-metadata` → `bsl-platform`, not back).
+
+/// MDO template kinds that have standard attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MdoTemplateKind {
+    Catalog,
+    Document,
+    BusinessProcess,
+    Task,
+    ChartOfAccounts,
+    ChartOfCharacteristicTypes,
+    ChartOfCalculationTypes,
+    ExchangePlan,
+    InformationRegister,
+    AccumulationRegister,
+    AccountingRegister,
+    CalculationRegister,
+}
+
+/// View perspective of a metadata object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectView {
+    /// "ДокументОбъект.<Имя>", "СправочникОбъект.<Имя>" — read-write
+    Object,
+    /// "ДокументСсылка.<Имя>", "СправочникСсылка.<Имя>" — read-only
+    Ref,
+    /// "РегистрСведенийНаборЗаписей.<Имя>" — record set
+    RecordSet,
+}
+
+/// Canonical kind of a standard attribute (language-neutral handle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StandardKind {
+    Code,
+    Description,
+    Ref,
+    DeletionMark,
+    IsFolder,
+    Owner,
+    Parent,
+    Predefined,
+    PredefinedDataName,
+    Number,
+    Date,
+    Posted,
+    Started,
+    Completed,
+    HeadTask,
+    Executed,
+    TaskBusinessProcess,
+    RoutePoint,
+    ThisNode,
+    ValueType,
+    Order,
+    Active,
+    LineNumber,
+    Recorder,
+    Period,
+}
+
+impl StandardKind {
+    /// Russian name of this standard attribute.
+    pub fn russian_name(self) -> &'static str {
+        match self {
+            Self::Code => "Код",
+            Self::Description => "Наименование",
+            Self::Ref => "Ссылка",
+            Self::DeletionMark => "ПометкаУдаления",
+            Self::IsFolder => "ЭтоГруппа",
+            Self::Owner => "Владелец",
+            Self::Parent => "Родитель",
+            Self::Predefined => "Предопределенный",
+            Self::PredefinedDataName => "ИмяПредопределенныхДанных",
+            Self::Number => "Номер",
+            Self::Date => "Дата",
+            Self::Posted => "Проведен",
+            Self::Started => "Стартован",
+            Self::Completed => "Завершен",
+            Self::HeadTask => "ГлавнаяЗадача",
+            Self::Executed => "Выполнена",
+            Self::TaskBusinessProcess => "БизнесПроцесс",
+            Self::RoutePoint => "ТочкаМаршрута",
+            Self::ThisNode => "ЭтотУзел",
+            Self::ValueType => "ТипЗначения",
+            Self::Order => "Порядок",
+            Self::Active => "Активность",
+            Self::LineNumber => "НомерСтроки",
+            Self::Recorder => "Регистратор",
+            Self::Period => "Период",
+        }
+    }
+
+    /// English name of this standard attribute.
+    pub fn english_name(self) -> &'static str {
+        match self {
+            Self::Code => "Code",
+            Self::Description => "Description",
+            Self::Ref => "Ref",
+            Self::DeletionMark => "DeletionMark",
+            Self::IsFolder => "IsFolder",
+            Self::Owner => "Owner",
+            Self::Parent => "Parent",
+            Self::Predefined => "Predefined",
+            Self::PredefinedDataName => "PredefinedDataName",
+            Self::Number => "Number",
+            Self::Date => "Date",
+            Self::Posted => "Posted",
+            Self::Started => "Started",
+            Self::Completed => "Completed",
+            Self::HeadTask => "HeadTask",
+            Self::Executed => "Executed",
+            Self::TaskBusinessProcess => "BusinessProcess",
+            Self::RoutePoint => "RoutePoint",
+            Self::ThisNode => "ThisNode",
+            Self::ValueType => "ValueType",
+            Self::Order => "Order",
+            Self::Active => "Active",
+            Self::LineNumber => "LineNumber",
+            Self::Recorder => "Recorder",
+            Self::Period => "Period",
+        }
+    }
+}
+
+/// Condition under which a standard attribute is present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceCondition {
+    Always,
+    HasCode,
+    HasDescription,
+    HasNumber,
+    Hierarchical,
+    HasOwners,
+    IsPeriodic,
+}
+
+/// Abstract value kind for a standard attribute.
+///
+/// The concrete `AttributeType` is resolved by the adapter in `bsl-metadata`
+/// which has access to the full type hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrValueKind {
+    Boolean,
+    DateTime,
+    /// Length from `CodeLength` (for Code) or `DescriptionLength` (for Description).
+    StringCodeOrDescription,
+    /// Length from `NumberLength`.
+    StringNumber,
+    /// Unbounded string (PredefinedDataName, Order).
+    StringUnbounded,
+    /// `Number { precision: 10, scale: 0 }` — НомерСтроки.
+    NumberLineNumber,
+    /// `Ref { mdo_type, name }` — self-reference (Ссылка, Родитель).
+    SelfRef,
+    /// `Ref` built from `Owners` property — Владелец.
+    OwnerRef,
+    /// `AnyObjectRef { mdo_type: Document }` — Регистратор.
+    AnyDocumentRef,
+    /// Not yet resolved — HeadTask, TaskBusinessProcess, RoutePoint, ValueType.
+    Unknown,
+}
+
+/// Full spec for a single standard attribute entry.
+#[derive(Debug, Clone, Copy)]
+pub struct StandardAttrSpec {
+    pub kind: StandardKind,
+    pub value: AttrValueKind,
+    pub condition: PresenceCondition,
+    /// True on `Ref` view (all attrs read-only) or for inherently read-only
+    /// attrs on `Object` view (Ссылка, Предопределенный, ИмяПредопределенныхДанных,
+    /// НомерСтроки).
+    pub is_readonly: bool,
+}
+
+// ============================================================================
+// Static spec tables
+// ============================================================================
+
+/// Catalog-base attrs (shared by Catalog, ExchangePlan, ChartOfCharacteristic,
+/// ChartOfAccounts), Object view.
+static CATALOG_BASE_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Ref,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::DeletionMark,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Code,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasCode,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Description,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasDescription,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::IsFolder,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Hierarchical,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Parent,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Hierarchical,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Owner,
+        value: AttrValueKind::OwnerRef,
+        condition: PresenceCondition::HasOwners,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Predefined,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::PredefinedDataName,
+        value: AttrValueKind::StringUnbounded,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+];
+
+static CATALOG_OBJECT: &[StandardAttrSpec] = CATALOG_BASE_OBJECT;
+
+static EXCHANGE_PLAN_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Ref,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::DeletionMark,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Code,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasCode,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Description,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasDescription,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::IsFolder,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Hierarchical,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Parent,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Hierarchical,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Owner,
+        value: AttrValueKind::OwnerRef,
+        condition: PresenceCondition::HasOwners,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Predefined,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::PredefinedDataName,
+        value: AttrValueKind::StringUnbounded,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::ThisNode,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+];
+
+static CHART_OF_CHARACTERISTIC_TYPES_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Ref,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::DeletionMark,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Code,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasCode,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Description,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasDescription,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::IsFolder,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Hierarchical,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Parent,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Hierarchical,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Owner,
+        value: AttrValueKind::OwnerRef,
+        condition: PresenceCondition::HasOwners,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Predefined,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::PredefinedDataName,
+        value: AttrValueKind::StringUnbounded,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::ValueType,
+        value: AttrValueKind::Unknown,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+];
+
+static CHART_OF_ACCOUNTS_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Ref,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::DeletionMark,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Code,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasCode,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Description,
+        value: AttrValueKind::StringCodeOrDescription,
+        condition: PresenceCondition::HasDescription,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::IsFolder,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Hierarchical,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Parent,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Hierarchical,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Owner,
+        value: AttrValueKind::OwnerRef,
+        condition: PresenceCondition::HasOwners,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Predefined,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::PredefinedDataName,
+        value: AttrValueKind::StringUnbounded,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Order,
+        value: AttrValueKind::StringUnbounded,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+];
+
+static DOCUMENT_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Ref,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::DeletionMark,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Number,
+        value: AttrValueKind::StringNumber,
+        condition: PresenceCondition::HasNumber,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Date,
+        value: AttrValueKind::DateTime,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Posted,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+];
+
+static BUSINESS_PROCESS_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Ref,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::DeletionMark,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Number,
+        value: AttrValueKind::StringNumber,
+        condition: PresenceCondition::HasNumber,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Date,
+        value: AttrValueKind::DateTime,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Started,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Completed,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::HeadTask,
+        value: AttrValueKind::Unknown,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+];
+
+static TASK_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Ref,
+        value: AttrValueKind::SelfRef,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::DeletionMark,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Number,
+        value: AttrValueKind::StringNumber,
+        condition: PresenceCondition::HasNumber,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Date,
+        value: AttrValueKind::DateTime,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Executed,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::TaskBusinessProcess,
+        value: AttrValueKind::Unknown,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::RoutePoint,
+        value: AttrValueKind::Unknown,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+];
+
+static INFORMATION_REGISTER_OBJECT: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Active,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::LineNumber,
+        value: AttrValueKind::NumberLineNumber,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Recorder,
+        value: AttrValueKind::AnyDocumentRef,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Period,
+        value: AttrValueKind::DateTime,
+        condition: PresenceCondition::IsPeriodic,
+        is_readonly: false,
+    },
+];
+
+static INFORMATION_REGISTER_RECORD_SET: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Active,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::LineNumber,
+        value: AttrValueKind::NumberLineNumber,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Recorder,
+        value: AttrValueKind::AnyDocumentRef,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Period,
+        value: AttrValueKind::DateTime,
+        condition: PresenceCondition::IsPeriodic,
+        is_readonly: false,
+    },
+];
+
+static ACCUMULATION_REGISTER_RECORD_SET: &[StandardAttrSpec] = &[
+    StandardAttrSpec {
+        kind: StandardKind::Active,
+        value: AttrValueKind::Boolean,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::LineNumber,
+        value: AttrValueKind::NumberLineNumber,
+        condition: PresenceCondition::Always,
+        is_readonly: true,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Recorder,
+        value: AttrValueKind::AnyDocumentRef,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+    StandardAttrSpec {
+        kind: StandardKind::Period,
+        value: AttrValueKind::DateTime,
+        condition: PresenceCondition::Always,
+        is_readonly: false,
+    },
+];
+
+/// Returns the ordered list of standard attribute specs for `(template_kind, view)`.
+///
+/// The order matches the current `xml_parser/standard_attributes.rs` insertion order.
+///
+/// # Coverage
+///
+/// Specced today: `Object` view for Catalog/ExchangePlan/
+/// ChartOfCharacteristicTypes/ChartOfAccounts/Document/BusinessProcess/Task/
+/// InformationRegister, plus `RecordSet` view for the two register kinds
+/// that already have one. These match the eight pre-population entry
+/// points in `bsl-metadata::xml_parser::standard_attributes`.
+///
+/// Returns `&[]` for:
+/// - `ObjectView::Ref` — the ref view shares spec _shape_ with the object
+///   view but every entry is read-only. Adding a separate Ref table
+///   duplicates content; callers reading a Ref-flavoured `MetadataRef`
+///   today still get standard attributes via the `Object` table because
+///   pre-population in `mdo.attributes` does not branch on view. Phase 1b
+///   will introduce dedicated Ref tables and the corresponding readonly
+///   uplift.
+/// - `MdoTemplateKind::ChartOfCalculationTypes`, `AccountingRegister`,
+///   `CalculationRegister` — these MDO kinds aren't covered by the XML
+///   adapter today (no `add_*_standard_attributes` for them), so there
+///   are no specs to mirror yet.
+pub fn standard_attributes_for(
+    kind: MdoTemplateKind,
+    view: ObjectView,
+) -> &'static [StandardAttrSpec] {
+    match (kind, view) {
+        (MdoTemplateKind::Catalog, ObjectView::Object) => CATALOG_OBJECT,
+        (MdoTemplateKind::ExchangePlan, ObjectView::Object) => EXCHANGE_PLAN_OBJECT,
+        (MdoTemplateKind::ChartOfCharacteristicTypes, ObjectView::Object) => {
+            CHART_OF_CHARACTERISTIC_TYPES_OBJECT
+        }
+        (MdoTemplateKind::ChartOfAccounts, ObjectView::Object) => CHART_OF_ACCOUNTS_OBJECT,
+        (MdoTemplateKind::Document, ObjectView::Object) => DOCUMENT_OBJECT,
+        (MdoTemplateKind::BusinessProcess, ObjectView::Object) => BUSINESS_PROCESS_OBJECT,
+        (MdoTemplateKind::Task, ObjectView::Object) => TASK_OBJECT,
+        (MdoTemplateKind::InformationRegister, ObjectView::Object) => INFORMATION_REGISTER_OBJECT,
+        (MdoTemplateKind::InformationRegister, ObjectView::RecordSet) => {
+            INFORMATION_REGISTER_RECORD_SET
+        }
+        (MdoTemplateKind::AccumulationRegister, ObjectView::RecordSet) => {
+            ACCUMULATION_REGISTER_RECORD_SET
+        }
+        _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn russian_name_and_english_name_match_help() {
+        // Spot-check that every StandardKind has non-empty names and they differ.
+        let all = [
+            StandardKind::Code,
+            StandardKind::Description,
+            StandardKind::Ref,
+            StandardKind::DeletionMark,
+            StandardKind::IsFolder,
+            StandardKind::Owner,
+            StandardKind::Parent,
+            StandardKind::Predefined,
+            StandardKind::PredefinedDataName,
+            StandardKind::Number,
+            StandardKind::Date,
+            StandardKind::Posted,
+            StandardKind::Started,
+            StandardKind::Completed,
+            StandardKind::HeadTask,
+            StandardKind::Executed,
+            StandardKind::TaskBusinessProcess,
+            StandardKind::RoutePoint,
+            StandardKind::ThisNode,
+            StandardKind::ValueType,
+            StandardKind::Order,
+            StandardKind::Active,
+            StandardKind::LineNumber,
+            StandardKind::Recorder,
+            StandardKind::Period,
+        ];
+        for kind in all {
+            assert!(!kind.russian_name().is_empty(), "{kind:?} has empty russian_name");
+            assert!(!kind.english_name().is_empty(), "{kind:?} has empty english_name");
+        }
+    }
+
+    #[test]
+    fn catalog_object_view_contains_ref_deletion_predefined() {
+        let specs = standard_attributes_for(MdoTemplateKind::Catalog, ObjectView::Object);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::Ref));
+        assert!(kinds.contains(&StandardKind::DeletionMark));
+        assert!(kinds.contains(&StandardKind::Predefined));
+        assert!(kinds.contains(&StandardKind::PredefinedDataName));
+    }
+
+    #[test]
+    fn document_object_view_contains_ref_date_posted_number() {
+        let specs = standard_attributes_for(MdoTemplateKind::Document, ObjectView::Object);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::Ref));
+        assert!(kinds.contains(&StandardKind::Date));
+        assert!(kinds.contains(&StandardKind::Posted));
+        // Number is conditional (HasNumber), but must be in the spec list
+        assert!(kinds.contains(&StandardKind::Number));
+    }
+
+    #[test]
+    fn business_process_object_view_contains_started_completed_headtask() {
+        let specs = standard_attributes_for(MdoTemplateKind::BusinessProcess, ObjectView::Object);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::Started));
+        assert!(kinds.contains(&StandardKind::Completed));
+        assert!(kinds.contains(&StandardKind::HeadTask));
+    }
+
+    #[test]
+    fn task_object_view_contains_executed_taskbp_routepoint() {
+        let specs = standard_attributes_for(MdoTemplateKind::Task, ObjectView::Object);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::Executed));
+        assert!(kinds.contains(&StandardKind::TaskBusinessProcess));
+        assert!(kinds.contains(&StandardKind::RoutePoint));
+    }
+
+    #[test]
+    fn exchange_plan_object_view_contains_thisnode_after_catalog_set() {
+        let specs = standard_attributes_for(MdoTemplateKind::ExchangePlan, ObjectView::Object);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        // Must have all catalog-base attrs
+        assert!(kinds.contains(&StandardKind::Ref));
+        assert!(kinds.contains(&StandardKind::DeletionMark));
+        // Plus ExchangePlan-specific
+        assert!(kinds.contains(&StandardKind::ThisNode));
+    }
+
+    #[test]
+    fn chart_of_characteristic_types_object_view_contains_value_type() {
+        let specs = standard_attributes_for(
+            MdoTemplateKind::ChartOfCharacteristicTypes,
+            ObjectView::Object,
+        );
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::ValueType));
+        assert!(kinds.contains(&StandardKind::Ref));
+    }
+
+    #[test]
+    fn chart_of_accounts_object_view_contains_order() {
+        let specs = standard_attributes_for(MdoTemplateKind::ChartOfAccounts, ObjectView::Object);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::Order));
+        assert!(kinds.contains(&StandardKind::Ref));
+    }
+
+    #[test]
+    fn information_register_object_view_contains_active_line_number_recorder() {
+        let specs =
+            standard_attributes_for(MdoTemplateKind::InformationRegister, ObjectView::Object);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::Active));
+        assert!(kinds.contains(&StandardKind::LineNumber));
+        assert!(kinds.contains(&StandardKind::Recorder));
+        // Period is conditional (IsPeriodic) — present in spec but not Always
+        let period_spec = specs.iter().find(|s| s.kind == StandardKind::Period);
+        assert!(
+            period_spec.map(|s| s.condition) == Some(PresenceCondition::IsPeriodic),
+            "Period must be IsPeriodic for InformationRegister"
+        );
+    }
+
+    #[test]
+    fn accumulation_register_object_view_contains_period_always() {
+        let specs =
+            standard_attributes_for(MdoTemplateKind::AccumulationRegister, ObjectView::RecordSet);
+        let kinds: Vec<StandardKind> = specs.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StandardKind::Period));
+        let period_spec = specs.iter().find(|s| s.kind == StandardKind::Period).unwrap();
+        assert_eq!(period_spec.condition, PresenceCondition::Always);
+    }
+}

@@ -15,5 +15,6 @@ tracing = { workspace = true }
 rustc-hash = { workspace = true }
 stdx = { workspace = true }
 rayon = { workspace = true }
+bsl-platform = { path = "../bsl-platform" }
 
 [dev-dependencies]
