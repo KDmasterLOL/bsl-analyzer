@@ -113,6 +113,9 @@ pub mod xml_parser;
 pub use common_module::{CommonModule, CommonModuleBuilder};
 pub use configuration::Configuration;
 pub use defined_type::{DefinedType, DefinedTypeBuilder};
+// Re-export the `Uuid` type so downstream crates can construct
+// `DefinedType`s in tests without taking a separate dependency on the
+// `uuid` crate.
 pub use dimension::{Dimension, DimensionBuilder};
 pub use enums::{
     CodeSeries, FormType, ModuleType, ObjectBelonging, ReturnValueReuse, SupportVariant,
@@ -135,6 +138,7 @@ pub use role::{Role, RoleData};
 pub use scheduled_job::{ScheduledJob, ScheduledJobHandler};
 pub use tabular_section::{TabularSection, TabularSectionAttribute};
 pub use traits::{MdObject, Module};
+pub use uuid::Uuid;
 pub use web_service::{
     WebService, WebServiceBuilder, WebServiceOperation, WebServiceOperationBuilder,
     WebServiceParameter,
