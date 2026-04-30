@@ -468,7 +468,11 @@ fn format_form(form: &bsl_metadata::Form) -> String {
     if !form.attributes.is_empty() {
         let _ = writeln!(out, "\n## Реквизиты формы ({})\n", form.attributes.len());
         for attr in &form.attributes {
-            let _ = writeln!(out, "- {attr}");
+            let main_marker = if attr.is_main { " (основной)" } else { "" };
+            let _ = writeln!(out, "- {}{}: {}", attr.name, main_marker, attr.attr_type);
+            for col in &attr.columns {
+                let _ = writeln!(out, "    - {}: {}", col.name, col.attr_type);
+            }
         }
     }
 

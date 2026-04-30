@@ -6,9 +6,11 @@
 
 use crate::enums::FormType;
 use crate::error::{MetadataError, Result};
-use crate::form::{Form, FormElement, FormEventHandler};
+use crate::form::{Form, FormAttribute, FormAttributeColumn, FormElement, FormEventHandler};
+use crate::metadata_object::AttributeType;
 
 use super::helpers::parse_uuid;
+use super::type_parser::parse_type_xml;
 
 /// Parse form XML to extract FormType and elements.
 ///
@@ -100,16 +102,14 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
         })
         .unwrap_or_default();
 
-    let attributes: Vec<String> = form_node
+    let attributes: Vec<FormAttribute> = form_node
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "Attributes")
         .map(|attrs| {
             attrs
                 .children()
                 .filter(|n| n.is_element() && n.tag_name().name() == "Attribute")
-                .filter_map(|attr| attr.attribute("name"))
-                .filter(|name| !name.is_empty())
-                .map(|name| name.to_string())
+                .filter_map(parse_form_attribute)
                 .collect()
         })
         .unwrap_or_default();
@@ -130,6 +130,52 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
     );
 
     Ok(form)
+}
+
+/// Parse one `<Attribute>` node into [`FormAttribute`].
+///
+/// Skips nameless attributes. A missing or unparseable `<Type>` collapses to
+/// [`AttributeType::Unknown`] — the attribute is still surfaced (its name is
+/// needed by `UnusedLocalVariable` and completion), but type inference will
+/// see it as untyped.
+fn parse_form_attribute(node: roxmltree::Node<'_, '_>) -> Option<FormAttribute> {
+    let name = node.attribute("name").filter(|s| !s.is_empty())?.to_string();
+
+    let attr_type = node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Type")
+        .and_then(|t| parse_type_xml(t).ok())
+        .unwrap_or(AttributeType::Unknown);
+
+    let is_main = node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "MainAttribute")
+        .and_then(|n| n.text())
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("true"));
+
+    let columns = node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Columns")
+        .map(|cols| {
+            cols.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "Column")
+                .filter_map(parse_form_attribute_column)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(FormAttribute { name, attr_type, is_main, columns })
+}
+
+/// Parse one `<Column>` node inside `<Columns>`.
+fn parse_form_attribute_column(node: roxmltree::Node<'_, '_>) -> Option<FormAttributeColumn> {
+    let name = node.attribute("name").filter(|s| !s.is_empty())?.to_string();
+    let attr_type = node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Type")
+        .and_then(|t| parse_type_xml(t).ok())
+        .unwrap_or(AttributeType::Unknown);
+    Some(FormAttributeColumn { name, attr_type })
 }
 
 /// Recursively collect `<Event>` handlers from an element and all its descendants.
@@ -560,9 +606,22 @@ mod tests {
 
         // Check attributes parsed
         assert_eq!(form.attributes().len(), 3);
-        assert!(form.attributes().contains(&"Замечание".to_string()));
-        assert!(form.attributes().contains(&"ТекущееОписание".to_string()));
-        assert!(form.attributes().contains(&"ИсправленноеОписание".to_string()));
+        let names: Vec<&str> = form.attribute_names().collect();
+        assert!(names.contains(&"Замечание"));
+        assert!(names.contains(&"ТекущееОписание"));
+        assert!(names.contains(&"ИсправленноеОписание"));
+
+        // No <Type> in any of these — all collapse to Unknown.
+        for attr in form.attributes() {
+            assert_eq!(
+                attr.attr_type,
+                crate::metadata_object::AttributeType::Unknown,
+                "attribute {} has no <Type>, expected Unknown",
+                attr.name
+            );
+            assert!(!attr.is_main, "no <MainAttribute> in fixture");
+            assert!(attr.columns.is_empty());
+        }
 
         // Check elements still parsed
         assert_eq!(form.elements().len(), 2);
@@ -609,7 +668,7 @@ mod tests {
 
         // Verify form attributes parsed from <Attributes> section
         assert_eq!(form.attributes().len(), 4);
-        let attr_names: Vec<String> = form.attributes().iter().map(|a| a.to_lowercase()).collect();
+        let attr_names: Vec<String> = form.attribute_names().map(|n| n.to_lowercase()).collect();
         assert!(attr_names.contains(&"объект".to_string()));
         assert!(attr_names.contains(&"новыйобъект".to_string()));
         assert!(attr_names.contains(&"пересчитать".to_string()));
@@ -617,6 +676,168 @@ mod tests {
             attr_names.contains(&"рольтекущегопользователявrnd".to_string()),
             "Must contain 'РольТекущегоПользователяВRnD' attribute, got: {:?}",
             form.attributes()
+        );
+    }
+
+    #[test]
+    fn test_parse_form_attributes_with_types() {
+        // Covers: simple ref, primitive with qualifier, MainAttribute,
+        // composite, DefinedType, ValueTable + Columns, missing <Type>.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+    <Attributes>
+        <Attribute name="Объект" id="1">
+            <Type>
+                <v8:Type>cfg:DocumentObject.Заказ</v8:Type>
+            </Type>
+            <MainAttribute>true</MainAttribute>
+        </Attribute>
+        <Attribute name="Замечание" id="2">
+            <Type>
+                <v8:Type>xs:string</v8:Type>
+                <StringQualifiers><Length>100</Length></StringQualifiers>
+            </Type>
+        </Attribute>
+        <Attribute name="Контрагент" id="3">
+            <Type>
+                <v8:Type>cfg:CatalogRef.Контрагенты</v8:Type>
+            </Type>
+        </Attribute>
+        <Attribute name="Сумма" id="4">
+            <Type>
+                <v8:TypeSet>cfg:DefinedType.ДенежнаяСумма</v8:TypeSet>
+            </Type>
+        </Attribute>
+        <Attribute name="Источник" id="5">
+            <Type>
+                <v8:Type>cfg:CatalogRef.Контрагенты</v8:Type>
+                <v8:Type>cfg:DocumentRef.Заказ</v8:Type>
+            </Type>
+        </Attribute>
+        <Attribute name="ТаблицаСтрок" id="6">
+            <Type>
+                <v8:Type>v8:ValueTable</v8:Type>
+            </Type>
+            <Columns>
+                <Column name="Признак">
+                    <Type><v8:Type>xs:boolean</v8:Type></Type>
+                </Column>
+                <Column name="Подразделение">
+                    <Type><v8:Type>cfg:CatalogRef.СтруктураПредприятия</v8:Type></Type>
+                </Column>
+            </Columns>
+        </Attribute>
+        <Attribute name="БезТипа" id="7"/>
+    </Attributes>
+</Form>"#;
+
+        let form = parse_form_xml(xml).unwrap();
+        assert_eq!(form.attributes().len(), 7);
+
+        let main = form.main_attribute().expect("Объект is MainAttribute");
+        assert_eq!(main.name, "Объект");
+        assert!(main.is_main);
+        // `cfg:DocumentObject.Заказ` carries a name → `parse_reference_type`
+        // path → `Ref{Document, "Заказ"}`. Bare `cfg:DocumentObject` (no
+        // name) is the AnyObjectRef path, exercised separately.
+        match &main.attr_type {
+            crate::metadata_object::AttributeType::Ref { mdo_type, name } => {
+                assert_eq!(*mdo_type, crate::metadata_object::MdoType::Document);
+                assert_eq!(name, "Заказ");
+            }
+            other => panic!("Expected Ref{{Document,Заказ}}, got: {:?}", other),
+        }
+
+        let zamechanie = form.find_attribute("Замечание").unwrap();
+        assert!(matches!(
+            &zamechanie.attr_type,
+            crate::metadata_object::AttributeType::String { length: Some(100) }
+        ));
+        assert!(!zamechanie.is_main);
+
+        let kontragent = form.find_attribute("Контрагент").unwrap();
+        assert!(matches!(
+            &kontragent.attr_type,
+            crate::metadata_object::AttributeType::Ref {
+                mdo_type: crate::metadata_object::MdoType::Catalog,
+                ..
+            }
+        ));
+
+        let summa = form.find_attribute("Сумма").unwrap();
+        assert!(matches!(
+            &summa.attr_type,
+            crate::metadata_object::AttributeType::DefinedType { .. }
+        ));
+
+        let source = form.find_attribute("Источник").unwrap();
+        match &source.attr_type {
+            crate::metadata_object::AttributeType::Composite { types } => {
+                assert_eq!(types.len(), 2);
+            }
+            other => panic!("expected Composite, got {:?}", other),
+        }
+
+        let table = form.find_attribute("ТаблицаСтрок").unwrap();
+        assert_eq!(table.columns.len(), 2);
+        assert_eq!(table.columns[0].name, "Признак");
+        assert!(matches!(
+            &table.columns[0].attr_type,
+            crate::metadata_object::AttributeType::Boolean
+        ));
+        assert!(matches!(
+            &table.columns[1].attr_type,
+            crate::metadata_object::AttributeType::Ref {
+                mdo_type: crate::metadata_object::MdoType::Catalog,
+                ..
+            }
+        ));
+
+        let bez_tipa = form.find_attribute("БезТипа").unwrap();
+        assert_eq!(bez_tipa.attr_type, crate::metadata_object::AttributeType::Unknown);
+    }
+
+    #[test]
+    fn test_find_attribute_case_insensitive() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+    <Attributes>
+        <Attribute name="Замечание" id="1">
+            <Type><v8:Type>xs:string</v8:Type></Type>
+        </Attribute>
+    </Attributes>
+</Form>"#;
+        let form = parse_form_xml(xml).unwrap();
+        assert!(form.find_attribute("замечание").is_some());
+        assert!(form.find_attribute("ЗАМЕЧАНИЕ").is_some());
+        assert!(form.find_attribute("Замечание").is_some());
+        assert!(form.find_attribute("Замечани").is_none());
+    }
+
+    #[test]
+    fn test_parse_form_attribute_malformed_type() {
+        // Unknown <v8:Type> text and a stray <Type> with no children must
+        // not panic — collapse to Unknown and keep the attribute surfaced.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+    <Attributes>
+        <Attribute name="Странный" id="1">
+            <Type><v8:Type>cfg:NoSuchKind.X</v8:Type></Type>
+        </Attribute>
+        <Attribute name="Пустой" id="2">
+            <Type/>
+        </Attribute>
+    </Attributes>
+</Form>"#;
+        let form = parse_form_xml(xml).unwrap();
+        assert_eq!(form.attributes().len(), 2);
+        assert_eq!(
+            form.find_attribute("Странный").unwrap().attr_type,
+            crate::metadata_object::AttributeType::Unknown
+        );
+        assert_eq!(
+            form.find_attribute("Пустой").unwrap().attr_type,
+            crate::metadata_object::AttributeType::Unknown
         );
     }
 
