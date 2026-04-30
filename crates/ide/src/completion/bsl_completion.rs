@@ -135,6 +135,19 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
         // Add user-defined symbols (module methods, variables)
         completions.extend(complete_user_defined_symbols(db, position.file_id, prefix));
 
+        // Managed-form attributes (Объект, Замечание, ТаблицаРасходов) come
+        // AFTER locals AND user-defined symbols — symmetric with the
+        // cascade in `infer_path_name`: parameters / `Перем` / module-level
+        // methods all shadow a same-named form attribute. Suppress
+        // collisions case-insensitively against everything we have so far.
+        let shadow_labels: std::collections::HashSet<String> =
+            completions.iter().map(|c| c.label.to_lowercase()).collect();
+        completions.extend(
+            complete_form_attributes(db, position.file_id, prefix)
+                .into_iter()
+                .filter(|c| !shadow_labels.contains(&c.label.to_lowercase())),
+        );
+
         // Add MDO types and objects from metadata
         completions.extend(complete_mdo_symbols(db, position.file_id, prefix));
 
@@ -161,6 +174,19 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
             item.sort_text = Some(format!("1_{}", item.label));
             completions.push(item);
         }
+        // Managed-form attributes — symmetric with `infer_path_name`
+        // cascade: parameters / `Перем` / module methods shadow same-named
+        // form attributes. Dedup case-insensitively against everything
+        // produced so far.
+        let shadow_labels: std::collections::HashSet<String> =
+            completions.iter().map(|c| c.label.to_lowercase()).collect();
+        for mut item in complete_form_attributes(db, position.file_id, "")
+            .into_iter()
+            .filter(|c| !shadow_labels.contains(&c.label.to_lowercase()))
+        {
+            item.sort_text = Some(format!("1_5_{}", item.label));
+            completions.push(item);
+        }
         // Global functions
         for mut item in complete_global_functions("") {
             item.sort_text = Some(format!("2_{}", item.label));
@@ -179,6 +205,54 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
     // No BSL completion context
     tracing::info!("No BSL completion context - returning None");
     None
+}
+
+/// Completes managed-form attributes declared in `Form.xml`.
+///
+/// Inside a managed form, bare identifiers like `Замечание`, `Объект`,
+/// `ТаблицаРасходов` resolve as реквизиты формы — type inference covers
+/// them via [`hir_ty::form_attr::resolve_form_attribute`]; this surface
+/// makes them visible in the unqualified completion list too.
+///
+/// Returns an empty list for non-form modules and ordinary forms (managed
+/// gate is symmetric with the type-system layer).
+fn complete_form_attributes<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_form_attributes").entered();
+
+    let module_id = hir::ModuleId::new(file_id);
+    let metadata = db.module_metadata(module_id);
+    let Some(form) = metadata.form.as_ref() else { return Vec::new() };
+    if !form.is_managed() {
+        return Vec::new();
+    }
+
+    let prefix_lower = prefix.to_lowercase();
+    let mut items = Vec::with_capacity(form.attributes().len());
+    for attr in form.attributes() {
+        if !attr.name.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        let detail = if attr.is_main {
+            format!("{} (основной реквизит формы)", attr.attr_type)
+        } else {
+            format!("{} (реквизит формы)", attr.attr_type)
+        };
+        items.push(CompletionItem {
+            label: attr.name.clone(),
+            detail: Some(detail),
+            kind: CompletionItemKind::Field,
+            insert_text: attr.name.clone(),
+            documentation: None,
+            sort_text: None,
+            filter_text: None,
+            source: None,
+        });
+    }
+    items
 }
 
 /// Completes local symbols (parameters and local variables).
@@ -1135,5 +1209,29 @@ mod tests {
         let implicit_count =
             items.iter().filter(|i| i.detail == Some("Переменная".to_string())).count();
         assert_eq!(implicit_count, 3, "Should have 3 implicit variables");
+    }
+
+    #[test]
+    fn test_complete_form_attributes_skips_non_form_module() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        // Plain BSL source — no Form.xml association in the VFS, so
+        // `module_metadata.form` is None. The completion source must
+        // gracefully return an empty list (gate is symmetric with the
+        // type-system layer).
+        let source = "Процедура Test() КонецПроцедуры\n";
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, source);
+
+        let items = complete_form_attributes(&db, file_id, "");
+        assert!(items.is_empty(), "non-form file must not surface form attributes");
     }
 }
