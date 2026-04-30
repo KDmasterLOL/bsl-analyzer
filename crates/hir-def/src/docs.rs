@@ -577,8 +577,10 @@ fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option
     // because every keyword listed in `returns_section_header` is either ASCII or
     // pure Cyrillic in U+0400..=U+04FF — both ranges have identical byte length
     // under `to_lowercase`, so the offset still lands on a UTF-8 char boundary.
-    // Adding a keyword outside these ranges (e.g. Turkish dotted-I, ß, German
-    // umlauts) would break this assumption.
+    // Adding a keyword that contains a character whose `to_lowercase` expands
+    // (Turkish dotted-I `İ` → `i\u{0307}`, capital Eszett `ẞ` → `ß`, etc.)
+    // would break this assumption — the byte offset of the lower-cased form
+    // would no longer line up with `trimmed`.
     let mut rest = line[keyword_len..].trim_start();
 
     if rest.starts_with('(') {
@@ -833,7 +835,12 @@ fn parse_returns(lines: &[String]) -> Vec<TypeDoc> {
             // We deliberately do NOT manufacture a synthetic
             // `Произвольный`/`Arbitrary` type for unparseable lines — that
             // silenced MissingReturnedValueDescription and baked a Russian
-            // default into otherwise-bilingual parsing.
+            // default into otherwise-bilingual parsing. As a deliberate
+            // tradeoff, multi-word prose that follows a returns header (e.g.
+            // `Возвращаемое значение - результат выполнения.`) is dropped on
+            // the floor here: keeping diagnostic accuracy is worth more than
+            // round-tripping freeform descriptions, which were never carried
+            // anywhere downstream anyway.
             let stripped = trimmed.trim_end_matches(['.', ',', ';', ':', '!', '?']).trim();
             if !stripped.is_empty() && is_likely_type_name(stripped) {
                 current_type = Some(TypeDoc::simple(stripped.to_string(), None));
@@ -1230,6 +1237,27 @@ mod tests {
         let purpose = docs.purpose.as_deref().unwrap_or("");
         assert!(
             purpose.contains("упрощает работу"),
+            "Expected purpose to include the prose, got: {purpose:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_english_result_freetext_is_not_returns_section() {
+        // English symmetry of test_parse_result_freetext_is_not_returns_section:
+        // ambiguous keywords must behave the same regardless of language.
+        let comments =
+            vec!["Method description.".to_string(), "Result: simplifies the workflow.".to_string()];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(
+            docs.returned_value.is_empty(),
+            "Free-text \"Result: ...\" must not be detected as a Returns section, got: {:?}",
+            docs.returned_value
+        );
+        let purpose = docs.purpose.as_deref().unwrap_or("");
+        assert!(
+            purpose.contains("simplifies the workflow"),
             "Expected purpose to include the prose, got: {purpose:?}"
         );
     }
