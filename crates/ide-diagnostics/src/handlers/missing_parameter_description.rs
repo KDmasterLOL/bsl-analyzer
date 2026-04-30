@@ -3,7 +3,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::ModItem;
+use hir::{is_dotted_type_reference, ModItem};
 use ide_db::TextRange;
 use std::collections::HashMap;
 
@@ -203,17 +203,6 @@ fn is_single_parameter_legacy_type_only_doc(
     !param_name.eq_ignore_ascii_case(doc_name) && is_dotted_type_reference(doc_name)
 }
 
-fn is_dotted_type_reference(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first_char) = chars.next() else {
-        return false;
-    };
-
-    name.contains('.')
-        && first_char.is_uppercase()
-        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-}
-
 fn create_diagnostic(
     range: TextRange,
     message: &str,
@@ -246,6 +235,11 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::MissingParameterDescription)
             .collect();
 
+        // Was 12 before PR #3: a non-export purpose-only comment (line 7,
+        // `// Описание есть, но нет параметров`) used to trigger
+        // "Необходимо добавить описание всех параметров метода". Non-export
+        // methods no longer require a Параметры section unless one is
+        // already present.
         assert_eq!(mpd.len(), 11, "Expected 11 diagnostics");
 
         assert_diagnostic_message_at_line(

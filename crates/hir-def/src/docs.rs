@@ -727,7 +727,12 @@ fn is_likely_parameter_name(name: &str) -> bool {
     chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn is_dotted_type_reference(name: &str) -> bool {
+/// True if `name` is a qualified BSL type reference like `Справочники.Партнеры`.
+///
+/// Single source of truth — diagnostics that need to recognise legacy
+/// "type-only" parameter docs (e.g. `MissingParameterDescription`) reuse this
+/// rather than carrying their own copy with subtly different rules.
+pub fn is_dotted_type_reference(name: &str) -> bool {
     name.contains('.') && is_likely_type_name(name)
 }
 
