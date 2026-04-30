@@ -504,11 +504,46 @@ fn returns_section_payload(line: &str) -> Option<Option<String>> {
     for keyword in ["возвращаемое значение", "return value", "returns", "результат", "result"]
     {
         if lower.starts_with(keyword) {
-            return parse_section_payload_after_keyword(trimmed, keyword.len());
+            let payload = parse_section_payload_after_keyword(trimmed, keyword.len())?;
+            // Ambiguous keywords ("Результат:" / "Result:") often appear in
+            // ordinary prose. Treat them as a section header only when there
+            // is no inline content, or when the inline content actually
+            // looks like a type token. Otherwise the line is purpose text.
+            if let Some(text) = &payload {
+                if is_ambiguous_returns_keyword(keyword) && !payload_looks_like_type_section(text) {
+                    return None;
+                }
+            }
+            return Some(payload);
         }
     }
 
     None
+}
+
+/// Whether a returns-section keyword is loose enough to occur in free-form prose.
+///
+/// `результат`/`result` are common nouns in BSL/English documentation; we accept
+/// them as section headers only if structure (no inline payload, or a type-like
+/// payload) confirms they are headers.
+fn is_ambiguous_returns_keyword(keyword: &str) -> bool {
+    matches!(keyword, "результат" | "result")
+}
+
+/// Heuristic for whether an inline payload after a returns keyword looks like
+/// the start of a type description rather than free-form prose.
+fn payload_looks_like_type_section(payload: &str) -> bool {
+    let stripped = payload.trim_end_matches(['.', ',', ';', ':', '!', '?']).trim();
+    if stripped.is_empty() {
+        return false;
+    }
+
+    let type_part = [" -- ", " — ", " – ", " - "]
+        .iter()
+        .find_map(|sep| stripped.find(*sep).map(|pos| stripped[..pos].trim()))
+        .unwrap_or(stripped);
+
+    is_likely_type_name(type_part)
 }
 
 fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option<Option<String>> {
@@ -755,8 +790,17 @@ fn parse_returns(lines: &[String]) -> Vec<TypeDoc> {
             }
             current_type = Some(TypeDoc::simple(type_name, description));
         } else if current_type.is_none() && types.is_empty() {
-            current_type =
-                Some(TypeDoc::simple("Произвольный".to_string(), Some(trimmed.to_string())));
+            // Conservative fallback for inline payloads like
+            // `Возвращаемое значение - соответствие.`: accept the line only
+            // when it is just a type token (with optional trailing punctuation).
+            // We deliberately do NOT manufacture a synthetic
+            // `Произвольный`/`Arbitrary` type for unparseable lines — that
+            // silenced MissingReturnedValueDescription and baked a Russian
+            // default into otherwise-bilingual parsing.
+            let stripped = trimmed.trim_end_matches(['.', ',', ';', ':', '!', '?']).trim();
+            if !stripped.is_empty() && is_likely_type_name(stripped) {
+                current_type = Some(TypeDoc::simple(stripped.to_string(), None));
+            }
         }
     }
 
@@ -1120,9 +1164,37 @@ mod tests {
 
         let docs = parse_method_docs(&comments).unwrap();
 
+        // Inline payload that is just a type token (with trailing punctuation)
+        // gets recognised directly. We do NOT manufacture a synthetic
+        // `Произвольный`/`Arbitrary` type — that masked diagnostics on
+        // genuinely unparseable lines.
         assert_eq!(docs.returned_value.len(), 1);
-        assert_eq!(docs.returned_value[0].name, "Произвольный");
-        assert_eq!(docs.returned_value[0].description.as_deref(), Some("соответствие."));
+        assert_eq!(docs.returned_value[0].name, "соответствие");
+        assert_eq!(docs.returned_value[0].description, None);
+    }
+
+    #[test]
+    fn test_parse_result_freetext_is_not_returns_section() {
+        // `Результат:` / `Result:` are common nouns and frequently appear in
+        // ordinary prose. When the inline payload is not type-like, the line
+        // must remain part of the purpose, not become an empty Returns section
+        // (which would silently drop the prose AND mark returned_value as
+        // empty for downstream diagnostics).
+        let comments =
+            vec!["Описание метода.".to_string(), "Результат: упрощает работу.".to_string()];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(
+            docs.returned_value.is_empty(),
+            "Free-text \"Результат: ...\" must not be detected as a Returns section, got: {:?}",
+            docs.returned_value
+        );
+        let purpose = docs.purpose.as_deref().unwrap_or("");
+        assert!(
+            purpose.contains("упрощает работу"),
+            "Expected purpose to include the prose, got: {purpose:?}"
+        );
     }
 
     #[test]
