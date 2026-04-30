@@ -384,10 +384,15 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
     for (i, line) in comments.iter().enumerate() {
         let lower = line.trim().to_lowercase();
 
+        let returns_header = returns_section_header(line.trim());
         if is_parameters_keyword(&lower) {
             section_indices.push(SectionMarker::new(i, Section::Parameters, None));
-        } else if let Some(payload) = returns_section_payload(line.trim()) {
-            section_indices.push(SectionMarker::new(i, Section::Returns, payload));
+        } else if returns_header != ReturnsHeader::NotReturns {
+            let inline_payload = match returns_header {
+                ReturnsHeader::WithPayload(payload) => Some(payload),
+                _ => None,
+            };
+            section_indices.push(SectionMarker::new(i, Section::Returns, inline_payload));
         } else if is_example_keyword(&lower) {
             section_indices.push(SectionMarker::new(i, Section::Examples, None));
         } else if is_call_options_keyword(&lower) {
@@ -482,13 +487,29 @@ fn has_structural_section(comments: &[String]) -> bool {
 fn is_structural_section_line(line: &str) -> bool {
     let lower = line.to_lowercase();
     is_parameters_keyword(&lower)
-        || returns_section_payload(line).is_some()
+        || returns_section_header(line) != ReturnsHeader::NotReturns
         || is_example_keyword(&lower)
         || is_call_options_keyword(&lower)
         || is_deprecated_keyword(&lower)
 }
 
-/// Extract same-line payload from a returned-value section header.
+/// Result of trying to interpret a comment line as a returned-value section header.
+///
+/// Three outcomes are visible to callers:
+/// - the line is not a returned-value header at all (`NotReturns`);
+/// - the line is a header with no same-line payload, e.g. `Возвращаемое значение:`
+///   (`NoPayload`); the actual content lives on subsequent lines;
+/// - the line packs the type into the same line, e.g.
+///   `Возвращаемое значение - соответствие` (`WithPayload(...)`); the payload
+///   is hoisted into the section as its first content line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReturnsHeader {
+    NotReturns,
+    NoPayload,
+    WithPayload(String),
+}
+
+/// Classify a comment line as a returned-value section header.
 ///
 /// Accepts real-world variants such as:
 /// - "Возвращаемое значение:"
@@ -497,28 +518,32 @@ fn is_structural_section_line(line: &str) -> bool {
 /// - "Возвращаемое значение;"
 /// - "Returns:"
 /// - "Return value:"
-fn returns_section_payload(line: &str) -> Option<Option<String>> {
+fn returns_section_header(line: &str) -> ReturnsHeader {
     let trimmed = line.trim();
     let lower = trimmed.to_lowercase();
 
     for keyword in ["возвращаемое значение", "return value", "returns", "результат", "result"]
     {
-        if lower.starts_with(keyword) {
-            let payload = parse_section_payload_after_keyword(trimmed, keyword.len())?;
-            // Ambiguous keywords ("Результат:" / "Result:") often appear in
-            // ordinary prose. Treat them as a section header only when there
-            // is no inline content, or when the inline content actually
-            // looks like a type token. Otherwise the line is purpose text.
-            if let Some(text) = &payload {
-                if is_ambiguous_returns_keyword(keyword) && !payload_looks_like_type_section(text) {
-                    return None;
-                }
-            }
-            return Some(payload);
+        if !lower.starts_with(keyword) {
+            continue;
         }
+        let header = match parse_section_payload_after_keyword(trimmed, keyword.len()) {
+            Some(header) => header,
+            None => return ReturnsHeader::NotReturns,
+        };
+        // Ambiguous keywords ("Результат:" / "Result:") often appear in
+        // ordinary prose. Treat them as a section header only when there
+        // is no inline content, or when the inline content actually
+        // looks like a type token. Otherwise the line is purpose text.
+        if let ReturnsHeader::WithPayload(text) = &header {
+            if is_ambiguous_returns_keyword(keyword) && !payload_looks_like_type_section(text) {
+                return ReturnsHeader::NotReturns;
+            }
+        }
+        return header;
     }
 
-    None
+    ReturnsHeader::NotReturns
 }
 
 /// Whether a returns-section keyword is loose enough to occur in free-form prose.
@@ -546,7 +571,7 @@ fn payload_looks_like_type_section(payload: &str) -> bool {
     is_likely_type_name(type_part)
 }
 
-fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option<Option<String>> {
+fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option<ReturnsHeader> {
     let mut rest = line[keyword_len..].trim_start();
 
     if rest.starts_with('(') {
@@ -555,30 +580,30 @@ fn parse_section_payload_after_keyword(line: &str, keyword_len: usize) -> Option
     }
 
     if rest.is_empty() {
-        return Some(None);
+        return Some(ReturnsHeader::NoPayload);
     }
 
     if let Some(payload) = rest.strip_prefix(':') {
-        return Some(non_empty_payload(payload));
+        return Some(returns_header_from_payload(payload));
     }
 
     if let Some(payload) = rest.strip_prefix('-') {
-        return Some(non_empty_payload(payload.trim_start_matches('-')));
+        return Some(returns_header_from_payload(payload.trim_start_matches('-')));
     }
 
     if let Some(payload) = rest.strip_prefix(';') {
-        return Some(non_empty_payload(payload));
+        return Some(returns_header_from_payload(payload));
     }
 
     None
 }
 
-fn non_empty_payload(payload: &str) -> Option<String> {
+fn returns_header_from_payload(payload: &str) -> ReturnsHeader {
     let payload = payload.trim();
     if payload.is_empty() {
-        None
+        ReturnsHeader::NoPayload
     } else {
-        Some(payload.to_string())
+        ReturnsHeader::WithPayload(payload.to_string())
     }
 }
 
