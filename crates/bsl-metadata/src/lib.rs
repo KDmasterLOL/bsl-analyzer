@@ -101,6 +101,7 @@ pub mod form;
 pub mod http_service;
 pub mod loader;
 pub mod metadata_object;
+pub mod metadata_resolver;
 pub mod register;
 pub mod role;
 pub mod scheduled_job;
@@ -125,6 +126,7 @@ pub use http_service::{
 };
 pub use loader::load_from_directory;
 pub use metadata_object::{Attribute, AttributeType, MdoType, MetadataObject};
+pub use metadata_resolver::{resolve_defined_type_terminal, MetadataResolver};
 pub use register::{
     AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,
     RegisterResource,
@@ -133,6 +135,10 @@ pub use role::{Role, RoleData};
 pub use scheduled_job::{ScheduledJob, ScheduledJobHandler};
 pub use tabular_section::{TabularSection, TabularSectionAttribute};
 pub use traits::{MdObject, Module};
+// Re-export the `Uuid` type so downstream crates can construct
+// `DefinedType`s in tests without taking a separate dependency on the
+// `uuid` crate.
+pub use uuid::Uuid;
 pub use web_service::{
     WebService, WebServiceBuilder, WebServiceOperation, WebServiceOperationBuilder,
     WebServiceParameter,

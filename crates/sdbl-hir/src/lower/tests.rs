@@ -2764,3 +2764,57 @@ fn test_virtual_table_semantic_tokens_resolved() {
         unresolved
     );
 }
+
+#[test]
+fn defined_type_inside_composite_resolves_through_metadata() {
+    // Codex Q7a regression test.
+    //
+    // `AttributeType::Composite { types: [DefinedType("X"), Boolean] }` —
+    // the original SDBL `resolve_attribute_type` only matched the
+    // top-level `DefinedType` arm and fell through to
+    // `SdblType::from_attribute_type` for `Composite`. The latter is
+    // metadata-unaware: it produces `SdblType::DefinedType { name: "X",
+    // underlying_type: None }` for nested DefinedType arms even when the
+    // underlying type is reachable through the configuration.
+    use crate::lower::context::LoweringContext;
+    use crate::types::SdblType;
+    use bsl_metadata::{AttributeType, Configuration, DefinedType, Uuid};
+    use std::sync::Arc;
+
+    let mut config = Configuration::new("Test");
+    config.add_defined_type(
+        DefinedType::builder()
+            .uuid(Uuid::new_v4())
+            .name("X")
+            .underlying_type(AttributeType::Boolean)
+            .build(),
+    );
+
+    let ctx = LoweringContext::new(Some(Arc::new(config)));
+    let composite = AttributeType::Composite {
+        types: vec![AttributeType::DefinedType { name: "X".to_string() }, AttributeType::Boolean],
+    };
+
+    let resolved = ctx.resolve_attribute_type(&composite);
+
+    // The composite arm carrying `DefinedType("X")` must reflect that
+    // metadata resolved its underlying — i.e. the DefinedType wrapper is
+    // present *with* `underlying_type: Some(...)`, not the metadata-blind
+    // `None` shape that the bug produced.
+    let arms = match &resolved {
+        SdblType::Composite { types } => types.clone(),
+        other => panic!("expected Composite, got {other:?}"),
+    };
+    let defined_arm = arms
+        .iter()
+        .find_map(|t| match t {
+            SdblType::DefinedType { name, underlying_type } if name == "X" => {
+                Some(underlying_type.clone())
+            }
+            _ => None,
+        })
+        .expect("Composite must carry the DefinedType('X') arm");
+    let underlying =
+        defined_arm.expect("DefinedType('X') underlying must resolve through metadata");
+    assert_eq!(*underlying, SdblType::Boolean);
+}

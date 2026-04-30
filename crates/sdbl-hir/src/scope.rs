@@ -596,6 +596,14 @@ impl Scope {
     /// Resolve fields for a DefinedType.
     ///
     /// Unwraps DefinedType to its underlying type and returns fields.
+    /// `LoweringContext::resolve_attribute_type` preserves intermediate
+    /// DefinedType wrappers along a chain (`A → B → Ref` lowers to
+    /// `DefinedType { name: A, underlying: DefinedType { name: B,
+    /// underlying: Ref(...) } }`), so the unwrap recurses on chained
+    /// `DefinedType` underlying values. The `Box<SdblType>` chain is
+    /// finite by construction (`resolve_attribute_type` cycle-guards the
+    /// chain at lowering time), so plain recursion does not need its own
+    /// visited tracking.
     fn resolve_defined_type_fields(
         &self,
         _name: &str,
@@ -606,6 +614,9 @@ impl Scope {
         match underlying.as_ref() {
             SdblType::Ref(mdo_ref) => self.resolve_ref_fields(mdo_ref),
             SdblType::Composite { types } => self.resolve_composite_fields(types),
+            SdblType::DefinedType { name: inner_name, underlying_type: inner_underlying } => {
+                self.resolve_defined_type_fields(inner_name, inner_underlying)
+            }
             _ => None,
         }
     }
@@ -806,6 +817,50 @@ mod tests {
         // Shared field is ambiguous
         let ty = scope.resolve_column_type(None, "SharedField");
         assert_eq!(ty, SdblType::Error);
+    }
+
+    #[test]
+    fn defined_type_chained_underlying_unwraps_to_ref_fields() {
+        // Codex Q7b regression test.
+        //
+        // Two-step DefinedType chain `A → B → CatalogRef.Валюты`. After
+        // `LoweringContext::resolve_attribute_type` builds the SdblType, the
+        // outer wrapper is `DefinedType { name: "A", underlying: Some(
+        // DefinedType { name: "B", underlying: Some(Ref(Catalog, "Валюты")) }
+        // ) }`. Field access through `Scope::get_fields_for_defined_type`
+        // must follow that nested DefinedType to surface the catalog's
+        // attributes — the original implementation only matched `Ref` and
+        // `Composite` and silently dropped chained DefinedType wrappers.
+        use bsl_metadata::{Attribute, AttributeType, Configuration, MetadataObject};
+        use std::sync::Arc;
+
+        let mut config = Configuration::new("Test");
+        let mut catalog = MetadataObject::new(MdoType::Catalog, "Валюты");
+        catalog.add_attribute(Attribute {
+            name: "Код".to_string(),
+            name_en: Some("Code".to_string()),
+            attr_type: AttributeType::String { length: Some(10) },
+        });
+        config.add_metadata_object(catalog);
+
+        let scope = Scope::new_with_metadata(Some(Arc::new(config)));
+
+        let inner = SdblType::DefinedType {
+            name: "B".to_string(),
+            underlying_type: Some(Box::new(SdblType::Ref(crate::types::MdoRef {
+                mdo_type: MdoType::Catalog,
+                name: "Валюты".to_string(),
+            }))),
+        };
+        let outer_underlying = Some(Box::new(inner));
+
+        let fields = scope.get_fields_for_defined_type("A", &outer_underlying);
+        assert!(
+            fields.iter().any(|f| f.name == "Код"),
+            "chained DefinedType A → B → CatalogRef must surface `Код` from \
+             the catalog underlying; got fields: {:?}",
+            fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

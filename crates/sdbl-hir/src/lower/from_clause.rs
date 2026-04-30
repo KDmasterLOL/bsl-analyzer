@@ -1061,25 +1061,66 @@ impl LoweringContext {
         (Some(MdoType::ExternalDataSource), None)
     }
 
-    /// Parse attribute type from type_str (simplified for MVP).
-    /// Resolve AttributeType to SdblType, resolving DefinedType through metadata if needed.
-    fn resolve_attribute_type(&self, attr_type: &bsl_metadata::AttributeType) -> SdblType {
-        use bsl_metadata::AttributeType;
+    /// Resolve [`bsl_metadata::AttributeType`] to [`SdblType`], expanding a
+    /// `DefinedType` reference through the attached metadata.
+    ///
+    /// Recursion is cycle-guarded — `A → B → A` shaped chains in the
+    /// configuration return a `DefinedType` node with `underlying_type = None`
+    /// instead of overflowing the stack.
+    pub(crate) fn resolve_attribute_type(
+        &self,
+        attr_type: &bsl_metadata::AttributeType,
+    ) -> SdblType {
+        let mut visited = std::collections::HashSet::new();
+        self.resolve_attribute_type_inner(attr_type, &mut visited)
+    }
+
+    fn resolve_attribute_type_inner(
+        &self,
+        attr_type: &bsl_metadata::AttributeType,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> SdblType {
+        use bsl_metadata::{AttributeType, MetadataResolver};
 
         match attr_type {
             AttributeType::DefinedType { name } => {
-                // Try to resolve underlying type through metadata
-                let underlying_type = if let Some(metadata) = &self.metadata {
-                    metadata.find_defined_type(name).map(|defined_type| {
-                        // Recursively resolve the underlying type
-                        Box::new(self.resolve_attribute_type(defined_type.underlying_type()))
-                    })
-                } else {
-                    None
-                };
-
-                // Return DefinedType with optional underlying type
+                let key = name.to_lowercase();
+                if !visited.insert(key.clone()) {
+                    // Cycle detected — return the surface name without an
+                    // underlying type so downstream consumers still see "this
+                    // is some DefinedType" but cannot recurse further.
+                    return SdblType::DefinedType { name: name.clone(), underlying_type: None };
+                }
+                let underlying_type =
+                    self.metadata.as_ref().and_then(|m| m.resolve_defined_type(name)).map(
+                        |underlying| {
+                            Box::new(self.resolve_attribute_type_inner(underlying, visited))
+                        },
+                    );
+                // Snapshot/restore: pop the name once we leave its lowering
+                // so sibling `Composite` arms that share an intermediate
+                // DefinedType (`{DefT.A, DefT.B}` both chaining through
+                // `X → terminal`) can each walk through it without
+                // observing a false cycle. Mirrors the BSL HIR fix in
+                // `hir-ty/src/lower/mod.rs::lower_qualified_inner`.
+                visited.remove(&key);
                 SdblType::DefinedType { name: name.clone(), underlying_type }
+            }
+            // Recurse into composite arms so nested `DefinedType` references
+            // are resolved through metadata. The metadata-blind
+            // `SdblType::from_attribute_type` would silently drop
+            // `underlying_type`, breaking downstream field resolution
+            // (`Scope::resolve_defined_type_fields`).
+            AttributeType::Composite { types } => {
+                let arms: Vec<SdblType> =
+                    types.iter().map(|t| self.resolve_attribute_type_inner(t, visited)).collect();
+                if arms.is_empty() {
+                    SdblType::Unknown
+                } else if arms.len() == 1 {
+                    arms.into_iter().next().unwrap()
+                } else {
+                    SdblType::Composite { types: arms }
+                }
             }
             // For all other types, use standard conversion
             _ => SdblType::from_attribute_type(attr_type),

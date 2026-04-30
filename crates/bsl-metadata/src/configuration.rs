@@ -460,8 +460,11 @@ impl Configuration {
         self.name_to_defined_type.get(&name_lower).and_then(|&idx| self.defined_types.get(idx))
     }
 
-    /// Add defined type
-    pub(crate) fn add_defined_type(&mut self, defined_type: DefinedType) {
+    /// Add defined type.
+    ///
+    /// Public for symmetry with `add_metadata_object` / `add_register` —
+    /// downstream crates' tests construct `Configuration` directly.
+    pub fn add_defined_type(&mut self, defined_type: DefinedType) {
         let idx = self.defined_types.len();
         self.name_to_defined_type.insert(defined_type.name().to_lowercase(), idx);
         self.defined_types.push(defined_type);
