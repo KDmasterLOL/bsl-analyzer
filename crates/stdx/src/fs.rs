@@ -117,7 +117,7 @@ pub fn parallel_count_cancellable(
 
                 // Check extension
                 let ext = path.extension().and_then(|e| e.to_str());
-                if extensions.iter().any(|e| Some(*e) == ext) {
+                if ext.is_some_and(|x| extensions.iter().any(|e| e.eq_ignore_ascii_case(x))) {
                     count.fetch_add(1, Ordering::Relaxed);
                 }
 
@@ -182,7 +182,7 @@ pub fn parallel_walk_paths(
 
                 // Check extension
                 let ext = path.extension().and_then(|e| e.to_str());
-                if extensions.iter().any(|e| Some(*e) == ext) {
+                if ext.is_some_and(|x| extensions.iter().any(|e| e.eq_ignore_ascii_case(x))) {
                     items.lock().unwrap().push(path.to_path_buf());
                 }
 
@@ -252,7 +252,7 @@ pub fn parallel_read_files(
 
                 // Check extension
                 let ext = path.extension().and_then(|e| e.to_str());
-                if extensions.iter().any(|e| Some(*e) == ext) {
+                if ext.is_some_and(|x| extensions.iter().any(|e| e.eq_ignore_ascii_case(x))) {
                     // Read file contents
                     if let Ok(contents) = std::fs::read(path) {
                         items.lock().unwrap().push((path.to_path_buf(), contents));
@@ -330,7 +330,7 @@ where
 
                 // Check extension
                 let ext = path.extension().and_then(|e| e.to_str());
-                if extensions.iter().any(|e| Some(*e) == ext) {
+                if ext.is_some_and(|x| extensions.iter().any(|e| e.eq_ignore_ascii_case(x))) {
                     // Read and transform
                     if let Ok(contents) = std::fs::read(path) {
                         if let Some(item) = transform(path, contents) {
@@ -415,7 +415,7 @@ where
 
                 // Check extension
                 let ext = path.extension().and_then(|e| e.to_str());
-                if extensions.iter().any(|e| Some(*e) == ext) {
+                if ext.is_some_and(|x| extensions.iter().any(|e| e.eq_ignore_ascii_case(x))) {
                     if let Ok(contents) = std::fs::read(path) {
                         if let Some(item) = transform(path, contents) {
                             items.lock().unwrap().push(item);

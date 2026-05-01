@@ -332,16 +332,19 @@ impl NotifyActor {
                             // lists) is always `LoadContent` — those
                             // entries carry no rules.
                             //
-                            // Pre-existing limitation: `Remove` events lose
-                            // the path's metadata before this handler
-                            // runs, so they fall through `fs::metadata`
-                            // and are dropped here for *both* load modes.
-                            // PR-3 will fix Remove handling alongside
-                            // wiring the watch-only consumer side
-                            // (`Vfs::register_watch_only` dispatch from
-                            // `Message::WatchOnly`); doing it earlier
-                            // would emit deletions that no consumer can
-                            // observe.
+                            // `Remove` events lose `fs::metadata` and are
+                            // currently dropped here for both load modes.
+                            // Surfacing them properly requires Salsa-side
+                            // cleanup (clearing `FileText` for the deleted
+                            // FileId and removing it from the source-root
+                            // `FileSet`); without that, a propagated
+                            // `Change::Delete` would leave stale parse /
+                            // HIR / diagnostic state alive in Salsa for
+                            // the deleted file. Deferred to a follow-up
+                            // PR that wires the Salsa-side delete path
+                            // alongside the `register_watch_only` /
+                            // `Message::WatchOnly` invalidation already
+                            // landed in PR-3.
                             let mut changed_files: Vec<(AbsPathBuf, Option<Vec<u8>>)> = Vec::new();
                             let mut watch_only_files: Vec<AbsPathBuf> = Vec::new();
                             for path in event.paths {
@@ -367,40 +370,7 @@ impl NotifyActor {
                                     continue;
                                 }
 
-                                // Determine the file's load mode across all
-                                // matching entries. `LoadContent` wins
-                                // globally — if any entry classifies this
-                                // path as content-loaded, that is the
-                                // semantics, even if a different (later)
-                                // entry tags the same path as watch-only.
-                                // This guarantees deterministic behaviour
-                                // when overlapping `Directories` entries
-                                // are configured (e.g. an extension root
-                                // that overlaps a metadata root). Without
-                                // this rule, the order in which entries
-                                // were enqueued during the parallel scan
-                                // would silently decide whether a file
-                                // is loaded as content or watch-only.
-                                let mode = if self.watched_file_entries.contains(&path) {
-                                    Some(loader::LoadMode::LoadContent)
-                                } else {
-                                    let mut found: Option<loader::LoadMode> = None;
-                                    for dir in &self.watched_dir_entries {
-                                        if let Some(m) = dir.classify_file(&path) {
-                                            match m {
-                                                loader::LoadMode::LoadContent => {
-                                                    found = Some(loader::LoadMode::LoadContent);
-                                                    break;
-                                                }
-                                                loader::LoadMode::WatchOnly => {
-                                                    found
-                                                        .get_or_insert(loader::LoadMode::WatchOnly);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    found
-                                };
+                                let mode = self.classify_watched_path(&path);
                                 match mode {
                                     Some(loader::LoadMode::LoadContent) => {
                                         let contents = read(&path);
@@ -562,14 +532,17 @@ impl NotifyActor {
                         // listing an extension in both fields) never
                         // silently downgrades to watch-only. Path-level
                         // include/exclude is enforced by `filter_entry`
-                        // above, so we only check the extension here —
-                        // matching legacy behaviour.
+                        // above, so we only check the extension here.
+                        // Case-insensitive — see `Directories::classify_file`
+                        // for the rationale (project-model is the
+                        // case-insensitive single source of truth at the
+                        // LSP boundary; the loader scan must agree).
                         let ext = abs_path.extension().unwrap_or_default();
-                        if dirs.extensions.iter().any(|it| it.as_str() == ext) {
+                        if dirs.extensions.iter().any(|it| it.eq_ignore_ascii_case(ext)) {
                             return Some((abs_path, loader::LoadMode::LoadContent));
                         }
                         for rule in &dirs.rules {
-                            if rule.extensions.iter().any(|it| it.as_str() == ext) {
+                            if rule.extensions.iter().any(|it| it.eq_ignore_ascii_case(ext)) {
                                 return Some((abs_path, rule.load_mode));
                             }
                         }
@@ -602,6 +575,41 @@ impl NotifyActor {
         if !watch_only_buf.is_empty() && !aborted {
             send_watch_only(watch_only_buf);
         }
+    }
+
+    /// Determine the load mode for a watched `path`, scanning all entries
+    /// configured by the most recent `set_config`.
+    ///
+    /// `LoadContent` wins globally — if any entry classifies this path as
+    /// content-loaded, that is the semantics, even if a different (later)
+    /// entry tags the same path as watch-only. This guarantees
+    /// deterministic behaviour when overlapping `Directories` entries are
+    /// configured (e.g. an extension root that overlaps a metadata root);
+    /// without this rule, the order in which entries were enqueued during
+    /// the parallel scan would silently decide whether a file is loaded
+    /// as content or watch-only.
+    ///
+    /// `watched_file_entries` (raw `Entry::Files` lists) is always
+    /// `LoadContent` — those entries carry no rules. Returns `None` if
+    /// the path matches no watched entry.
+    fn classify_watched_path(&self, path: &AbsPathBuf) -> Option<loader::LoadMode> {
+        if self.watched_file_entries.contains(path) {
+            return Some(loader::LoadMode::LoadContent);
+        }
+        let mut found: Option<loader::LoadMode> = None;
+        for dir in &self.watched_dir_entries {
+            if let Some(m) = dir.classify_file(path) {
+                match m {
+                    loader::LoadMode::LoadContent => {
+                        return Some(loader::LoadMode::LoadContent);
+                    }
+                    loader::LoadMode::WatchOnly => {
+                        found.get_or_insert(loader::LoadMode::WatchOnly);
+                    }
+                }
+            }
+        }
+        found
     }
 
     /// Count files in an entry without reading their contents.
@@ -974,6 +982,90 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let count = NotifyActor::count_files_in_entry(&loader::Entry::Directories(dirs), &cancel);
         assert_eq!(count, 8, "count must union extensions + rules");
+    }
+
+    /// Build a `NotifyActor` with the given watched directory entries and
+    /// no real loader sender — enough surface to exercise
+    /// `classify_watched_path` without spinning up a real `notify` watcher.
+    fn actor_with_watched_dirs(dirs: Vec<loader::Directories>) -> NotifyActor {
+        let (tx, _rx) = crossbeam_channel::unbounded::<loader::Message>();
+        let mut actor = NotifyActor::new(tx, Arc::new(AtomicBool::new(false)));
+        actor.watched_dir_entries = dirs;
+        actor
+    }
+
+    fn dirs_for(
+        root: &AbsPathBuf,
+        content_ext: &[&str],
+        watch_ext: &[&str],
+    ) -> loader::Directories {
+        let rules = if watch_ext.is_empty() {
+            Vec::new()
+        } else {
+            vec![loader::FileRule {
+                extensions: watch_ext.iter().map(|s| (*s).to_string()).collect(),
+                load_mode: loader::LoadMode::WatchOnly,
+            }]
+        };
+        loader::Directories {
+            extensions: content_ext.iter().map(|s| (*s).to_string()).collect(),
+            include: vec![root.clone()],
+            exclude: vec![],
+            rules,
+        }
+    }
+
+    #[test]
+    fn classify_watched_path_dispatches_load_modes() {
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let dirs = dirs_for(&root, &["bsl"], &["xml"]);
+        let actor = actor_with_watched_dirs(vec![dirs]);
+
+        let bsl =
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("Module.bsl"));
+        let xml = AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("Form.xml"));
+        let other =
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("README.md"));
+
+        assert_eq!(actor.classify_watched_path(&bsl), Some(loader::LoadMode::LoadContent));
+        assert_eq!(actor.classify_watched_path(&xml), Some(loader::LoadMode::WatchOnly));
+        assert_eq!(actor.classify_watched_path(&other), None);
+    }
+
+    #[test]
+    fn classify_watched_path_is_case_insensitive() {
+        // Regression for the Codex Q3 finding: a deleted `Module.BSL` /
+        // `Form.XML` from a Windows-authored configuration would
+        // previously be dropped from the watcher dispatch because the
+        // walk-time predicate compared extensions case-sensitively
+        // while `project_model::file_role` (the LSP boundary) is
+        // case-insensitive. The two layers must agree.
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let dirs = dirs_for(&root, &["bsl"], &["xml"]);
+        let actor = actor_with_watched_dirs(vec![dirs]);
+
+        let bsl_upper =
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("Module.BSL"));
+        let xml_upper =
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("Form.XML"));
+        assert_eq!(actor.classify_watched_path(&bsl_upper), Some(loader::LoadMode::LoadContent));
+        assert_eq!(actor.classify_watched_path(&xml_upper), Some(loader::LoadMode::WatchOnly));
+    }
+
+    #[test]
+    fn classify_watched_path_load_content_wins_across_entries() {
+        // Two overlapping watched dir entries — one tagging .xml as
+        // LoadContent, one as WatchOnly. The global precedence rule
+        // says LoadContent must always win, regardless of entry order.
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let load_first = vec![dirs_for(&root, &["xml"], &[]), dirs_for(&root, &[], &["xml"])];
+        let load_last = vec![dirs_for(&root, &[], &["xml"]), dirs_for(&root, &["xml"], &[])];
+        let xml = AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("a.xml"));
+
+        let actor1 = actor_with_watched_dirs(load_first);
+        let actor2 = actor_with_watched_dirs(load_last);
+        assert_eq!(actor1.classify_watched_path(&xml), Some(loader::LoadMode::LoadContent));
+        assert_eq!(actor2.classify_watched_path(&xml), Some(loader::LoadMode::LoadContent));
     }
 
     #[test]

@@ -15,7 +15,7 @@
 
 // Re-export commonly used types
 pub use base_db;
-pub use hir::{is_bsl_source, is_bsl_source_path};
+pub use hir::is_bsl_source;
 pub use syntax::TextRange;
 pub use vfs;
 

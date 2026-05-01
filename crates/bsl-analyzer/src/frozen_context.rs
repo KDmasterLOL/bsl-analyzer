@@ -57,7 +57,7 @@ impl FrozenFilePaths {
         // `set_file_text` for them, so any downstream `db.parse(file_id)`
         // would panic. Returning `Err` here turns the LSP request into a
         // clean error response instead of a server crash.
-        if !ide_db::is_bsl_source_path(&path) {
+        if !project_model::is_bsl_source_path(&path) {
             return Err(anyhow::anyhow!("File is not BSL, request unsupported: {}", url));
         }
         self.forward

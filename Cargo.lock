@@ -1532,6 +1532,7 @@ dependencies = [
  "line-index",
  "ordered-float",
  "parser",
+ "project-model",
  "rustc-hash 2.1.2",
  "salsa",
  "smallvec",

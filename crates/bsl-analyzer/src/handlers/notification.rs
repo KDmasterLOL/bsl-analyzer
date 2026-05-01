@@ -25,7 +25,7 @@ use crate::global_state::{GlobalState, Task};
 /// failure. Silently skipping at the notification boundary is the
 /// LSP-correct response for `didOpen` / `didChange` etc.
 fn is_handled_uri(uri: &Url) -> bool {
-    uri.to_file_path().map(|p| ide_db::is_bsl_source_path(&p)).unwrap_or(false)
+    uri.to_file_path().map(|p| project_model::is_bsl_source_path(&p)).unwrap_or(false)
 }
 
 /// Schedules diagnostics computation in a background thread.

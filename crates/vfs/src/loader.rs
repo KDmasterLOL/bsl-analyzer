@@ -222,11 +222,17 @@ impl Directories {
             return None;
         }
         let ext = path.extension().unwrap_or_default();
-        if self.extensions.iter().any(|it| it.as_str() == ext) {
+        // Case-insensitive — matches `project_model::file_role` (the
+        // single source of truth at the LSP boundary) and 1C:Enterprise
+        // semantics on Windows / macOS filesystems where `Module.BSL`
+        // and `Module.bsl` are the same file. Without this, a deleted
+        // `Form.XML` from a Windows-authored configuration would be
+        // dropped from the watcher dispatch.
+        if self.extensions.iter().any(|it| it.eq_ignore_ascii_case(ext)) {
             return Some(LoadMode::LoadContent);
         }
         for rule in &self.rules {
-            if rule.extensions.iter().any(|it| it.as_str() == ext) {
+            if rule.extensions.iter().any(|it| it.eq_ignore_ascii_case(ext)) {
                 return Some(rule.load_mode);
             }
         }

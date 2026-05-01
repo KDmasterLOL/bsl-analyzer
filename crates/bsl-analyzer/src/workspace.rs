@@ -96,20 +96,32 @@ impl GlobalState {
             include.push(paths::AbsPathBuf::assert_utf8(ext_path.clone()));
         }
 
+        // BSL sources load as content; XML metadata uses the watch-only rule
+        // so `Form.xml` / `Configuration.xml` / etc. enter the FileSet (the
+        // watcher still invalidates `metadata_version` and `bsl_metadata::loader`
+        // re-reads from disk on demand) but never become resident in the VFS
+        // as `Arc<str>`. On ERP-scale workspaces this is the dominant memory
+        // saving over the legacy "all extensions load content" path. Rule
+        // sets are owned by `project_model::file_role` so the workspace
+        // scanner, the semantic-layer source filter and the LSP entry-point
+        // gate (`is_bsl_source_path`) all agree on the same classification.
+        // OneScript `.os` is intentionally not scanned — this LSP targets
+        // 1C BSL only.
         let mut load_entries = vec![loader::Entry::Directories(loader::Directories {
-            // Only `.bsl` enters Salsa via `set_file_text`; `.xml` files stay
-            // in the FileSet so the watcher invalidates `metadata_version`,
-            // but their text is read straight from disk by
-            // `bsl_metadata::loader`. OneScript `.os` is intentionally not
-            // scanned — this LSP targets 1C BSL only.
-            extensions: vec!["bsl".to_string(), "xml".to_string()],
+            extensions: project_model::SOURCE_EXTENSIONS.iter().map(|s| (*s).to_string()).collect(),
             include,
             exclude: vec![
                 paths::AbsPathBuf::assert_utf8(root.join(".git")),
                 paths::AbsPathBuf::assert_utf8(root.join("build")),
                 paths::AbsPathBuf::assert_utf8(root.join(".vscode")),
             ],
-            rules: Vec::new(),
+            rules: vec![loader::FileRule {
+                extensions: project_model::METADATA_WATCHED_EXTENSIONS
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                load_mode: loader::LoadMode::WatchOnly,
+            }],
         })];
 
         let watch = if config_files.is_empty() {
@@ -189,7 +201,7 @@ impl GlobalState {
                     tracing::info!(path = %path_path.display(), "config file changed");
                     config_file_changed = true;
                 }
-                if !metadata_xml_changed && path_path.extension().is_some_and(|ext| ext == "xml") {
+                if !metadata_xml_changed && project_model::is_metadata_path(path_path) {
                     tracing::info!(path = %path_path.display(), "metadata XML file changed");
                     metadata_xml_changed = true;
                 }
@@ -490,7 +502,7 @@ impl GlobalState {
     /// Gets or creates a FileId for the given URL.
     pub fn vfs_file_for_url(&mut self, url: &Url) -> Result<FileId> {
         let path = url.to_file_path().map_err(|_| anyhow!("Invalid file URL: {}", url))?;
-        if !ide_db::is_bsl_source_path(&path) {
+        if !project_model::is_bsl_source_path(&path) {
             return Err(anyhow!("File is not BSL, LSP unsupported: {}", url));
         }
 

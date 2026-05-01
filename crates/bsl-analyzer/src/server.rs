@@ -260,15 +260,38 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             tracing::debug!(count, vfs_done = state.vfs_done, "streamed VFS batch");
         }
         vfs::loader::Message::WatchOnly { files } => {
-            // PR-3 will dispatch watch-only paths to `Vfs::register_watch_only`
-            // and trigger the metadata XML reload pipeline. The loader never
-            // emits this variant in PR-2 — no caller populates
-            // `Directories::rules` yet — but the arm exists so the match is
-            // exhaustive and a future PR-3 wiring lands as a localised change.
-            tracing::debug!(
-                count = files.len(),
-                "received WatchOnly batch (no consumer wired yet)",
-            );
+            // Mirror the mini-batching strategy used for content batches
+            // (`handle_vfs_msg`): allocate FileIds for each watch-only path
+            // under short-held write locks so latency-sensitive read
+            // snapshots from hover/completion/goto are not starved during
+            // the cold-start sweep on ERP-scale workspaces.
+            //
+            // Cold-start (`vfs_done == false`): registrations alone, no
+            // metadata bump — `LoadingProgress::Finished` later calls
+            // `warm_metadata_cache` which reads XML straight from disk.
+            // Runtime (`vfs_done == true`): bump `metadata_version` so the
+            // bsl-metadata Salsa cache invalidates and the next query
+            // re-reads from disk. `register_watch_only` is idempotent so
+            // duplicate registrations across overlapping watch events
+            // remain cheap.
+            const VFS_WATCH_ONLY_BATCH: usize = 64;
+            let count = files.len();
+            for chunk in files.chunks(VFS_WATCH_ONLY_BATCH) {
+                let mut vfs = state.vfs.write();
+                for path in chunk {
+                    vfs.register_watch_only(vfs::VfsPath::new(path.as_path()));
+                }
+            }
+            if state.vfs_done {
+                // Wake outstanding Salsa snapshots before any setter, mirroring
+                // the ABBA-prevention pattern in `process_changes`
+                // (`base_db::Files`). `bump_metadata_version` would otherwise
+                // race a live background snapshot reading the stale metadata
+                // cache between this `vfs.write()` release and the bump.
+                state.analysis_host.request_cancellation();
+                state.analysis_host.raw_database_mut().bump_metadata_version();
+            }
+            tracing::debug!(count, vfs_done = state.vfs_done, "registered WatchOnly batch",);
         }
     }
     Ok(())
