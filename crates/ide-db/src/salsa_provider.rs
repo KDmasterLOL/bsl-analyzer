@@ -15,7 +15,7 @@ use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
 use crate::{
-    metadata::{load_configuration, ConfigurationPathInput},
+    metadata::{intern_configuration_path, load_configuration, ConfigurationPathInput},
     provider::{AnalysisProvider, VisibleConfig},
     RootDatabase,
 };
@@ -80,8 +80,8 @@ impl AnalysisProvider for SalsaProvider<'_> {
         paths
             .into_iter()
             .map(|(name, path)| {
-                let path_str = path.to_string_lossy().into_owned();
-                let path_input = ConfigurationPathInput::new(self.db, path_str, version);
+                let path_input =
+                    intern_configuration_path(self.db, &path.to_string_lossy(), version);
                 let configuration = load_configuration(self.db, path_input);
                 VisibleConfig { name, root: path, configuration }
             })
