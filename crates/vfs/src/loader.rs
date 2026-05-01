@@ -12,10 +12,41 @@ pub enum Entry {
     Directories(Directories),
 }
 
+/// What the loader should do with files matching a [`FileRule`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LoadMode {
+    /// Read the file contents and ship them via [`Message::Loaded`] /
+    /// [`Message::Changed`]. This is the default behaviour for the legacy
+    /// [`Directories::extensions`] field — every extension listed there is
+    /// implicitly `LoadContent`.
+    LoadContent,
+    /// Allocate a `FileId` and register the path for change-tracking, but
+    /// do not read its bytes from disk. The loader emits
+    /// [`Message::WatchOnly`] (instead of `Loaded`) so the consumer can
+    /// react without paying the resident-memory cost of an `Arc<str>` copy.
+    WatchOnly,
+}
+
+/// A rule that classifies files inside a [`Directories`] entry by extension.
+///
+/// Rules are layered on top of [`Directories::extensions`]: a path matching
+/// `extensions` is always [`LoadMode::LoadContent`]; a path matching a
+/// rule's extension is dispatched per the rule's [`LoadMode`]. If both
+/// match, `extensions` wins (load-content semantics) so a half-migrated
+/// caller never silently downgrades an existing extension to watch-only.
+#[derive(Debug, Clone)]
+pub struct FileRule {
+    /// File extensions matched by this rule (no leading dot).
+    pub extensions: Vec<String>,
+    /// What to do with files matching this rule.
+    pub load_mode: LoadMode,
+}
+
 /// Specifies a set of files on the file system.
 ///
 /// A file is included if:
-///   * it has included extension
+///   * it has an extension listed in [`extensions`](Self::extensions) or
+///     matches one of the [`rules`](Self::rules)
 ///   * it is under an `include` path
 ///   * it is not under `exclude` path
 ///
@@ -27,6 +58,11 @@ pub struct Directories {
     pub extensions: Vec<String>,
     pub include: Vec<AbsPathBuf>,
     pub exclude: Vec<AbsPathBuf>,
+    /// Per-extension rules layered on top of `extensions`. Empty in legacy
+    /// callers; populated by the project-model classifier (PR-3) for
+    /// metadata files (XML) that should be watched but not resident in
+    /// the VFS as `Arc<str>`.
+    pub rules: Vec<FileRule>,
 }
 
 /// [`Handle`]'s configuration.
@@ -74,6 +110,20 @@ pub enum Message {
     Loaded { files: Vec<(AbsPathBuf, Option<Vec<u8>>)> },
     /// The handle loaded the following files' content.
     Changed { files: Vec<(AbsPathBuf, Option<Vec<u8>>)> },
+    /// The handle observed paths matching a [`LoadMode::WatchOnly`] rule.
+    /// Only the paths are shipped; contents are not read. Consumers that
+    /// need a `FileId` for change-tracking should pair this with
+    /// [`Vfs::register_watch_only`](crate::Vfs::register_watch_only).
+    ///
+    /// Currently emitted for the initial scan and for `Create` / `Modify`
+    /// notify events. **Not yet emitted for `Remove`**: the watcher path
+    /// requires `fs::metadata` and silently drops deletions for both load
+    /// modes — a pre-existing limitation, deferred to PR-3 alongside the
+    /// `register_watch_only` consumer wiring (emitting deletions with no
+    /// consumer to observe them is worse than the latent gap). When PR-3
+    /// lands, consumers will handle add / modify / delete uniformly by
+    /// re-running their downstream loader (e.g. metadata XML reader).
+    WatchOnly { files: Vec<AbsPathBuf> },
 }
 
 /// Type that will receive [`Messages`](Message) from a [`Handle`].
@@ -157,16 +207,41 @@ impl Entry {
 }
 
 impl Directories {
-    /// Returns `true` if `path` is included in `self`.
-    pub fn contains_file(&self, path: &AbsPath) -> bool {
-        // First, check the file extension...
-        let ext = path.extension().unwrap_or_default();
-        if self.extensions.iter().all(|it| it.as_str() != ext) {
-            return false;
+    /// Classify `path` by [`LoadMode`], or return `None` if the path is not
+    /// included in this directory entry.
+    ///
+    /// Resolution order:
+    /// 1. The path must be under [`include`](Self::include) and not under
+    ///    [`exclude`](Self::exclude); otherwise returns `None`.
+    /// 2. If the extension is in [`extensions`](Self::extensions), returns
+    ///    [`LoadMode::LoadContent`].
+    /// 3. Otherwise, the first matching rule in [`rules`](Self::rules) wins.
+    /// 4. If no rule matches, returns `None`.
+    pub fn classify_file(&self, path: &AbsPath) -> Option<LoadMode> {
+        if !self.includes_path(path) {
+            return None;
         }
+        let ext = path.extension().unwrap_or_default();
+        // Case-insensitive — matches `project_model::file_role` (the
+        // single source of truth at the LSP boundary) and 1C:Enterprise
+        // semantics on Windows / macOS filesystems where `Module.BSL`
+        // and `Module.bsl` are the same file. Without this, a deleted
+        // `Form.XML` from a Windows-authored configuration would be
+        // dropped from the watcher dispatch.
+        if self.extensions.iter().any(|it| it.eq_ignore_ascii_case(ext)) {
+            return Some(LoadMode::LoadContent);
+        }
+        for rule in &self.rules {
+            if rule.extensions.iter().any(|it| it.eq_ignore_ascii_case(ext)) {
+                return Some(rule.load_mode);
+            }
+        }
+        None
+    }
 
-        // Then, check for path inclusion...
-        self.includes_path(path)
+    /// Returns `true` if `path` is included in `self` under any load mode.
+    pub fn contains_file(&self, path: &AbsPath) -> bool {
+        self.classify_file(path).is_some()
     }
 
     /// Returns `true` if `path` is included in `self`.
@@ -213,7 +288,12 @@ impl Directories {
 /// ```
 fn dirs(base: AbsPathBuf, exclude: &[&str]) -> Directories {
     let exclude = exclude.iter().map(|it| base.join(it)).collect::<Vec<_>>();
-    Directories { extensions: vec!["rs".to_owned()], include: vec![base], exclude }
+    Directories {
+        extensions: vec!["rs".to_owned()],
+        include: vec![base],
+        exclude,
+        rules: Vec::new(),
+    }
 }
 
 impl fmt::Debug for Message {
@@ -224,6 +304,9 @@ impl fmt::Debug for Message {
             }
             Message::Changed { files } => {
                 f.debug_struct("Changed").field("n_files", &files.len()).finish()
+            }
+            Message::WatchOnly { files } => {
+                f.debug_struct("WatchOnly").field("n_files", &files.len()).finish()
             }
             Message::Progress { n_total, n_done, dir, config_version } => f
                 .debug_struct("Progress")

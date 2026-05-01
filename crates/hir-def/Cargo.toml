@@ -29,6 +29,7 @@ tracing.workspace = true
 parser.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
+project-model.workspace = true
 line-index.workspace = true
 
 [dev-dependencies]

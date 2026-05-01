@@ -5,6 +5,7 @@
 use uuid::Uuid;
 
 use crate::enums::FormType;
+use crate::metadata_object::AttributeType;
 
 /// Form element with data path information.
 ///
@@ -39,6 +40,46 @@ impl FormElement {
     }
 }
 
+/// Form attribute column (for ValueTable / FormDataCollection-typed
+/// attributes that declare a `<Columns>` schema in `Form.xml`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormAttributeColumn {
+    /// Column name as written in `<Column name="…">`.
+    pub name: String,
+    /// Column type lowered from the nested `<Type>` element.
+    pub attr_type: AttributeType,
+}
+
+/// Form attribute declared in `Form.xml` `<Attributes>`.
+///
+/// Carries the full type information needed for type inference inside
+/// the form module (`Объект.Дата`, `Замечание`, `ТаблицаРасходов.Колонка`).
+/// `is_main` flags the form's main attribute (`<MainAttribute>true</...>`),
+/// which the platform exposes as `Объект` and wraps in
+/// `ДанныеФормыСтруктура` so `Объект.Записать()` is **not** the same as
+/// `<Object>Object.Записать()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormAttribute {
+    /// Attribute name as written in `<Attribute name="…">`.
+    pub name: String,
+    /// Type lowered from the `<Type>` element. `Unknown` if the type
+    /// element is absent or unrecognised.
+    pub attr_type: AttributeType,
+    /// `true` when `<MainAttribute>true</...>` is set — the platform exposes
+    /// this attribute as `Объект` inside the form module.
+    pub is_main: bool,
+    /// `<Columns>` schema for `ValueTable` / `FormDataCollection`-typed
+    /// attributes; empty otherwise.
+    pub columns: Vec<FormAttributeColumn>,
+}
+
+impl FormAttribute {
+    /// Create a plain attribute (no MainAttribute flag, no columns).
+    pub fn new(name: impl Into<String>, attr_type: AttributeType) -> Self {
+        Self { name: name.into(), attr_type, is_main: false, columns: Vec::new() }
+    }
+}
+
 /// Form metadata (minimal structure for diagnostics).
 ///
 /// Contains form name, type (Managed/Ordinary), UUID, elements, and event handlers.
@@ -61,12 +102,13 @@ pub struct Form {
     ///
     /// These are methods called when form commands are executed.
     pub command_handlers: Vec<String>,
-    /// Form attribute names (from `<Attributes><Attribute name="...">`)
+    /// Form attributes with full type information (from `<Attributes><Attribute>`).
     ///
     /// In FormModule, assignments like `Замечание = Параметры.Замечание` write to
-    /// form attributes, not local variables. These names must be excluded from
-    /// UnusedLocalVariable diagnostic.
-    pub attributes: Vec<String>,
+    /// form attributes, not local variables. The attribute names must be excluded
+    /// from UnusedLocalVariable diagnostic (see [`Self::attribute_names`]); the
+    /// types feed type inference inside the form module.
+    pub attributes: Vec<FormAttribute>,
 }
 
 impl Form {
@@ -146,11 +188,31 @@ impl Form {
         self.uuid
     }
 
-    /// Get form attribute names.
-    ///
-    /// These are form-level attributes (реквизиты формы) defined in `<Attributes>` section.
-    pub fn attributes(&self) -> &[String] {
+    /// Get form attributes (typed).
+    pub fn attributes(&self) -> &[FormAttribute] {
         &self.attributes
+    }
+
+    /// Iterate over form attribute names.
+    ///
+    /// Convenience for consumers (UnusedLocalVariable, formatting) that
+    /// only need the names of реквизиты формы — they declared their own
+    /// projection before [`FormAttribute`] carried type information.
+    pub fn attribute_names(&self) -> impl Iterator<Item = &str> {
+        self.attributes.iter().map(|a| a.name.as_str())
+    }
+
+    /// Find an attribute by name (case-insensitive — BSL identifiers are
+    /// case-insensitive).
+    pub fn find_attribute(&self, name: &str) -> Option<&FormAttribute> {
+        let name_lower = name.to_lowercase();
+        self.attributes.iter().find(|a| a.name.to_lowercase() == name_lower)
+    }
+
+    /// The form's main attribute (the one flagged `<MainAttribute>true</...>`),
+    /// exposed as `Объект` inside the form module.
+    pub fn main_attribute(&self) -> Option<&FormAttribute> {
+        self.attributes.iter().find(|a| a.is_main)
     }
 
     /// Check if this is a managed form.

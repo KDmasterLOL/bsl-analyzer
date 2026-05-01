@@ -14,6 +14,12 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod file_role;
+pub use file_role::{
+    file_role, is_bsl_source_path, is_metadata_path, FileRole, METADATA_WATCHED_EXTENSIONS,
+    SOURCE_EXTENSIONS,
+};
+
 /// A BSL project.
 #[derive(Debug, Clone)]
 pub struct Project {

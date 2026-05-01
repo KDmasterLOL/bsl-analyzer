@@ -302,6 +302,13 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
         // did not match a coercible MDO kind — `None` is the safe
         // fallback.
         Ty::ThisObject { .. } => None,
+        // Managed-form attribute receivers route methods through the
+        // platform form-data wrappers (`ДанныеФормыСтруктура` /
+        // `ДанныеФормыКоллекция` / `ДанныеФормыСтруктураСКоллекцией`),
+        // **not** through `underlying`. The wrapper deliberately hides
+        // object-level methods like `Записать()` that don't apply to a
+        // form-data projection — see [`Ty::FormData`] docs.
+        Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
     }
 }
 

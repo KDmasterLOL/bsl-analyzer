@@ -259,6 +259,40 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             handle_vfs_msg(state, files, state.vfs_done)?;
             tracing::debug!(count, vfs_done = state.vfs_done, "streamed VFS batch");
         }
+        vfs::loader::Message::WatchOnly { files } => {
+            // Mirror the mini-batching strategy used for content batches
+            // (`handle_vfs_msg`): allocate FileIds for each watch-only path
+            // under short-held write locks so latency-sensitive read
+            // snapshots from hover/completion/goto are not starved during
+            // the cold-start sweep on ERP-scale workspaces.
+            //
+            // Cold-start (`vfs_done == false`): registrations alone, no
+            // metadata bump — `LoadingProgress::Finished` later calls
+            // `warm_metadata_cache` which reads XML straight from disk.
+            // Runtime (`vfs_done == true`): bump `metadata_version` so the
+            // bsl-metadata Salsa cache invalidates and the next query
+            // re-reads from disk. `register_watch_only` is idempotent so
+            // duplicate registrations across overlapping watch events
+            // remain cheap.
+            const VFS_WATCH_ONLY_BATCH: usize = 64;
+            let count = files.len();
+            for chunk in files.chunks(VFS_WATCH_ONLY_BATCH) {
+                let mut vfs = state.vfs.write();
+                for path in chunk {
+                    vfs.register_watch_only(vfs::VfsPath::new(path.as_path()));
+                }
+            }
+            if state.vfs_done {
+                // Wake outstanding Salsa snapshots before any setter, mirroring
+                // the ABBA-prevention pattern in `process_changes`
+                // (`base_db::Files`). `bump_metadata_version` would otherwise
+                // race a live background snapshot reading the stale metadata
+                // cache between this `vfs.write()` release and the bump.
+                state.analysis_host.request_cancellation();
+                state.analysis_host.raw_database_mut().bump_metadata_version();
+            }
+            tracing::debug!(count, vfs_done = state.vfs_done, "registered WatchOnly batch",);
+        }
     }
     Ok(())
 }
@@ -355,36 +389,54 @@ fn handle_vfs_msg(
 ) -> Result<()> {
     use std::sync::Arc;
 
-    let mut vfs = state.vfs.write();
+    /// Number of files written under a single `vfs.write()` lock acquisition.
+    /// Releasing the lock between mini-batches lets latency-sensitive task-pool
+    /// workers (hover/completion/goto) grab a read snapshot during cold-start
+    /// instead of blocking for the full chunk.
+    const VFS_WRITE_MINI_BATCH: usize = 16;
 
-    for (path, contents) in files {
-        // Convert AbsPathBuf to std::path::Path for VfsPath
-        let std_path: &std::path::Path = path.as_ref();
-        let vfs_path = vfs::VfsPath::new(std_path);
+    // Phase 1: convert raw bytes to `Arc<str>` and filter `mem_docs` paths
+    // outside any VFS lock. UTF-8 validation + Arc allocation for a 64 MiB
+    // chunk is non-trivial, and holding `vfs.write()` across it would block
+    // every read snapshot taken by background latency tasks.
+    let converted: Vec<(vfs::VfsPath, Option<Arc<str>>)> = files
+        .into_iter()
+        .filter_map(|(path, contents)| {
+            let std_path: &std::path::Path = path.as_ref();
 
-        // Skip files that are managed by the LSP client (in MemDocs)
-        // These files' content comes from didOpen/didChange, not disk
-        if let Ok(url) = lsp_types::Url::from_file_path(std_path) {
-            if state.mem_docs.contains(&url) {
-                continue;
+            // Skip files managed by the LSP client (in MemDocs) — their
+            // content comes from didOpen/didChange, not disk.
+            if let Ok(url) = lsp_types::Url::from_file_path(std_path) {
+                if state.mem_docs.contains(&url) {
+                    return None;
+                }
             }
+
+            let vfs_path = vfs::VfsPath::new(std_path);
+
+            // Convert Vec<u8> to Arc<str>, stripping UTF-8 BOM if present.
+            // BOM (0xEF 0xBB 0xBF) is common in BSL files from 1C:Enterprise,
+            // but LSP clients like VS Code strip it when sending file
+            // content. Without this, VFS would see a "modify" change on
+            // every didOpen.
+            let contents_str = contents.and_then(|bytes| {
+                String::from_utf8(bytes).ok().map(|s| {
+                    let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
+                    Arc::from(s)
+                })
+            });
+
+            Some((vfs_path, contents_str))
+        })
+        .collect();
+
+    // Phase 2: drain into VFS in mini-batches under short-held write locks.
+    for chunk in converted.chunks(VFS_WRITE_MINI_BATCH) {
+        let mut vfs = state.vfs.write();
+        for (vfs_path, contents_str) in chunk {
+            vfs.set_file_contents(vfs_path.clone(), contents_str.clone());
         }
-
-        // Convert Vec<u8> to Arc<str>, stripping UTF-8 BOM if present.
-        // BOM (0xEF 0xBB 0xBF) is common in BSL files from 1C:Enterprise,
-        // but LSP clients like VS Code strip it when sending file content.
-        // Without this, VFS would see a "modify" change on every didOpen.
-        let contents_str = contents.and_then(|bytes| {
-            String::from_utf8(bytes).ok().map(|s| {
-                let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
-                Arc::from(s)
-            })
-        });
-
-        vfs.set_file_contents(vfs_path, contents_str);
     }
-
-    drop(vfs); // Release VFS lock before processing changes
 
     // Loader-driven cold-start batches pass `sync_to_salsa = false`: the bytes
     // are now in `Vfs::changes` but Salsa is not synced here. The eventual

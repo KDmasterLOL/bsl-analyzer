@@ -91,7 +91,7 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
                 STANDARD_FORM_PROPERTIES.iter().map(|s| (*s).to_string()).collect();
 
             if let Some(form) = &metadata.form {
-                for attr_name in form.attributes() {
+                for attr_name in form.attribute_names() {
                     names.insert(attr_name.to_lowercase());
                 }
             }
@@ -1229,7 +1229,10 @@ mod tests {
             bsl_metadata::FormType::Managed,
             uuid::Uuid::nil(),
         );
-        form.attributes = attribute_names.into_iter().map(|s| s.to_string()).collect();
+        form.attributes = attribute_names
+            .into_iter()
+            .map(|s| bsl_metadata::FormAttribute::new(s, bsl_metadata::AttributeType::Unknown))
+            .collect();
 
         hir::ModuleMetadata {
             module_type: bsl_metadata::ModuleType::FormModule,

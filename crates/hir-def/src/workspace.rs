@@ -3,35 +3,25 @@
 //! This module provides a global index of all CommonModules in the workspace,
 //! enabling O(1) lookup for qualified name resolution like `ОбщийМодуль.Метод()`.
 
-use std::path::Path;
-
 use rustc_hash::FxHashMap;
 use tracing::debug;
 use vfs::{FileId, FileSet};
 
 use crate::{DefDatabase, MethodSymbol, ModuleId, Name};
 
-/// Returns `true` when `path` has the `.bsl` extension (case-insensitive).
+/// FileSet-aware BSL-source predicate: resolves `file_id` through `file_set`
+/// and applies [`project_model::is_bsl_source_path`]. Returns `false` for
+/// unknown ids, matching the safe-default expected by every caller.
 ///
-/// XML metadata files, OneScript `.os` modules, and other non-BSL entries
-/// scanned into VFS are never valid inputs for the BSL parser. Every
-/// workspace-wide scan that calls into `db.parse` / `db.item_tree` must
-/// filter through this predicate, and `process_changes` uses the same
-/// predicate to decide whether to push the file's text through the Salsa
-/// `FileTextInput` (non-BSL files keep their FileSet entry but never enter
-/// Salsa storage — see `bsl_metadata::loader` for the disk-side reader).
-pub fn is_bsl_source_path(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("bsl"))
-}
-
-/// FileSet-aware companion of [`is_bsl_source_path`]: resolves `file_id`
-/// through `file_set` and applies the same `.bsl` check. Returns `false`
-/// for unknown ids, matching the safe-default expected by every caller.
+/// The path-only predicate lives in `project-model` (single source of truth
+/// for file classification across infra/semantic/IDE layers); this wrapper
+/// stays here because workspace-wide Salsa scans need the FileSet
+/// indirection and `project-model` deliberately avoids depending on `vfs`.
 pub fn is_bsl_source(file_set: &FileSet, file_id: FileId) -> bool {
     let Some(vfs_path) = file_set.path_for_file(&file_id) else {
         return false;
     };
-    is_bsl_source_path(vfs_path.as_path())
+    project_model::is_bsl_source_path(vfs_path.as_path())
 }
 
 /// Information about a CommonModule in the workspace.
