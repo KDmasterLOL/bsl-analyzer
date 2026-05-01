@@ -34,5 +34,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
-[target.'cfg(windows)'.build-dependencies]
+[build-dependencies]
+# Pulled on every host because build.rs gates usage at runtime via
+# `CARGO_CFG_TARGET_OS` to support cross-compilation under `cargo xwin`.
 winresource = "0.1"
