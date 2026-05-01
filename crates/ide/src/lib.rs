@@ -154,14 +154,16 @@ impl Analysis {
 
     /// Create a cache-warming task for background execution.
     ///
-    /// Returns a task containing a cloned database that can be moved to a background thread.
-    /// The task warms symbol_tree, module_bodies, and diagnostics caches.
-    pub fn warm_caches_task(
-        &self,
-        file_ids: &[FileId],
-        config: DiagnosticsConfigInput,
-    ) -> WarmCachesTask {
-        WarmCachesTask { db: self.db.clone(), file_ids: file_ids.to_vec(), config }
+    /// Returns a task containing a cloned database that can be moved to a
+    /// background thread. The task primes `symbol_tree` and `module_bodies` so
+    /// navigation features (GoToDefinition, hover, semantic tokens) on
+    /// dependent files are responsive once the user actually requests them.
+    /// Full diagnostic computation is **not** included — that remains the job
+    /// of `schedule_diagnostics` in the LSP layer, which only fires after VFS
+    /// finalization and avoids the duplicate-and-throw-away cycle this task
+    /// used to cause while VFS was still loading.
+    pub fn warm_caches_task(&self, file_ids: &[FileId]) -> WarmCachesTask {
+        WarmCachesTask { db: self.db.clone(), file_ids: file_ids.to_vec() }
     }
 
     /// Returns semantic highlighting for a file.
@@ -240,11 +242,11 @@ impl Default for Analysis {
 /// Background task for warming Salsa caches.
 ///
 /// Contains a cloned database that can be sent to a background thread.
-/// Warms symbol_tree, module_bodies, and diagnostics caches for the given files.
+/// Warms `symbol_tree` and `module_bodies` for the given files so navigation
+/// (GoToDefinition, hover, semantic tokens) on dependents is responsive.
 pub struct WarmCachesTask {
     db: RootDatabaseImpl,
     file_ids: Vec<FileId>,
-    config: DiagnosticsConfigInput,
 }
 
 impl WarmCachesTask {
@@ -260,16 +262,11 @@ impl WarmCachesTask {
     /// Run the cache-warming task. Returns the number of files processed.
     pub fn run(self) -> usize {
         use hir::{DefDatabase, ModuleId};
-        use ide_db::base_db::{DiagnosticsConfigId, FileIdInput};
-
-        let config_id = DiagnosticsConfigId::new(&self.db, self.config);
 
         for file_id in &self.file_ids {
             let module_id = ModuleId::new(*file_id);
             let _ = self.db.symbol_tree(module_id);
             let _ = self.db.module_bodies(module_id);
-            let file_id_input = FileIdInput::new(&self.db, *file_id);
-            let _ = ide_diagnostics::file_diagnostics_query(&self.db, file_id_input, config_id);
         }
 
         self.file_ids.len()

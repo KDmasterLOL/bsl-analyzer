@@ -37,6 +37,14 @@ use std::sync::Arc;
 /// Using `interned` instead of `input` ensures that multiple calls with the same path
 /// return the same ID, enabling proper Salsa caching.
 /// When the path changes, all dependent queries are invalidated.
+///
+/// # Path normalization
+///
+/// Different call sites can produce paths that differ only in directory separators
+/// (Windows `C:\foo\bar` vs forward-slash `C:/foo/bar`) — Salsa interns those as
+/// distinct keys, so the same configuration ends up loaded twice. Always create
+/// instances via [`intern_configuration_path`] which canonicalizes separators
+/// before interning.
 #[salsa::interned(debug)]
 pub struct ConfigurationPathInput {
     /// Path to configuration root directory (stored as String for Salsa)
@@ -44,6 +52,45 @@ pub struct ConfigurationPathInput {
     /// Generation counter for cache invalidation when XML metadata files change on disk.
     /// Bumped when VFS detects changes to .xml files in the configuration directory.
     pub version: u32,
+}
+
+/// Intern a configuration path with separators canonicalized to `/`.
+///
+/// Different call sites can produce paths that differ only in surface form —
+/// directory separators (Windows `C:\foo\bar` vs `C:/foo/bar`), drive-letter
+/// case (`C:\` vs `c:\`), or the `\\?\` extended-length prefix produced by
+/// `std::fs::canonicalize`. Salsa interns by the raw `String`, so without
+/// canonicalization the same configuration ends up loaded multiple times.
+///
+/// On Windows the helper additionally strips `\\?\`, replaces `\` with `/`,
+/// and ASCII-lowercases the result so all variants collapse to a single key.
+/// Non-ASCII path segments (e.g. Cyrillic module folders) are left intact —
+/// NTFS handles those via Unicode case-folding which call sites already
+/// agree on, and ASCII-lowercasing the drive letter is enough to deduplicate
+/// the cases observed in practice.
+///
+/// On non-Windows targets only `\` → `/` is applied; case is preserved
+/// because POSIX file systems are case-sensitive.
+pub fn intern_configuration_path<'db>(
+    db: &'db dyn salsa::Database,
+    raw_path: &str,
+    version: u32,
+) -> ConfigurationPathInput<'db> {
+    let canonical = canonicalize_configuration_path(raw_path);
+    ConfigurationPathInput::new(db, canonical, version)
+}
+
+fn canonicalize_configuration_path(raw_path: &str) -> String {
+    if cfg!(windows) {
+        let trimmed = raw_path.strip_prefix(r"\\?\").unwrap_or(raw_path);
+        let mut s = trimmed.replace('\\', "/");
+        s.make_ascii_lowercase();
+        s
+    } else if raw_path.contains('\\') {
+        raw_path.replace('\\', "/")
+    } else {
+        raw_path.to_owned()
+    }
 }
 
 /// Salsa input holding the workspace-wide set of visible configurations.
@@ -799,6 +846,44 @@ mod tests {
 
         // Different inputs should be different
         assert_ne!(input1, input2, "Different paths should create different inputs");
+    }
+
+    #[test]
+    fn intern_configuration_path_collapses_separator_variants() {
+        let db = TestDatabase::default();
+        let backslash = intern_configuration_path(&db, r"C:\foo\bar", 0);
+        let forward = intern_configuration_path(&db, "C:/foo/bar", 0);
+        assert_eq!(
+            backslash, forward,
+            "backslash and forward-slash paths must intern as the same Salsa key",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn intern_configuration_path_is_case_insensitive_on_windows() {
+        let db = TestDatabase::default();
+        let upper = intern_configuration_path(&db, r"C:\Foo\Bar", 0);
+        let lower = intern_configuration_path(&db, r"c:\foo\bar", 0);
+        assert_eq!(upper, lower);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn intern_configuration_path_strips_extended_prefix_on_windows() {
+        let db = TestDatabase::default();
+        let extended = intern_configuration_path(&db, r"\\?\C:\foo\bar", 0);
+        let plain = intern_configuration_path(&db, r"C:\foo\bar", 0);
+        assert_eq!(extended, plain);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn intern_configuration_path_preserves_case_on_posix() {
+        let db = TestDatabase::default();
+        let upper = intern_configuration_path(&db, "/Foo/Bar", 0);
+        let lower = intern_configuration_path(&db, "/foo/bar", 0);
+        assert_ne!(upper, lower, "POSIX file systems are case-sensitive");
     }
 
     #[test]

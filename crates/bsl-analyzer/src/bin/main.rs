@@ -2646,10 +2646,9 @@ fn analyze_salsa(
 
     // CRITICAL: Create ConfigurationPathInput ONCE for Salsa caching!
     // If we create a new input for each diagnostic, Salsa won't cache the metadata load
-    let config_path_input = configuration_path.as_ref().map(|path| {
-        let path_str = path.to_string_lossy().to_string();
-        metadata::ConfigurationPathInput::new(&db, path_str, 0)
-    });
+    let config_path_input = configuration_path
+        .as_ref()
+        .map(|path| metadata::intern_configuration_path(&db, &path.to_string_lossy(), 0));
 
     // Parallel diagnostics execution WITHOUT Mutex!
     // Use map_with to clone database for each thread worker

@@ -198,7 +198,7 @@ fn preload_dependencies(state: &mut GlobalState, file_id: vfs::FileId) {
         prev.cancel();
     }
 
-    let task = analysis.warm_caches_task(&deps, state.diagnostics_config().clone());
+    let task = analysis.warm_caches_task(&deps);
     state.preload_tokens.insert(file_id, task.cancellation_token());
     let queued_at = Instant::now();
 

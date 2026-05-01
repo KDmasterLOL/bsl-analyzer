@@ -27,7 +27,10 @@ use std::sync::Arc;
 use base_db::FileIdInput;
 use hir::ModuleId;
 
-use crate::{metadata::ConfigurationPathInput, RootDatabase, SdblHirEntries};
+use crate::{
+    metadata::{intern_configuration_path, ConfigurationPathInput},
+    RootDatabase, SdblHirEntries,
+};
 
 // Re-export query from metadata module
 pub use crate::metadata::load_configuration;
@@ -42,11 +45,7 @@ pub fn configuration_path_for_file<'db>(
 ) -> Option<ConfigurationPathInput<'db>> {
     let file_path = crate::vfs_helpers::get_file_path(db, file_id)?;
     let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path)?;
-    Some(ConfigurationPathInput::new(
-        db,
-        config_root.to_string_lossy().to_string(),
-        db.metadata_version(),
-    ))
+    Some(intern_configuration_path(db, &config_root.to_string_lossy(), db.metadata_version()))
 }
 
 // Helper types for internal use
@@ -94,8 +93,8 @@ pub fn module_metadata_query<'db>(
     // Load configuration (Salsa-cached)
     let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path);
     let configuration = config_root.map(|root| {
-        let config_path_str = root.to_string_lossy().to_string();
-        let path_input = ConfigurationPathInput::new(db, config_path_str, db.metadata_version());
+        let path_input =
+            intern_configuration_path(db, &root.to_string_lossy(), db.metadata_version());
         load_configuration(db, path_input)
     });
 
@@ -206,9 +205,11 @@ pub fn sdbl_hir_in_file_query<'db>(
     let configuration = file_path_opt.and_then(|file_path| {
         let config_root_opt = crate::vfs_helpers::find_configuration_root(db, &file_path);
         config_root_opt.map(|config_root| {
-            let config_path_str = config_root.to_string_lossy().to_string();
-            let path_input =
-                ConfigurationPathInput::new(db, config_path_str, db.metadata_version());
+            let path_input = intern_configuration_path(
+                db,
+                &config_root.to_string_lossy(),
+                db.metadata_version(),
+            );
             // Salsa dependency tracked automatically!
             load_configuration(db, path_input)
         })

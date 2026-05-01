@@ -410,9 +410,11 @@ impl RootDatabase for RootDatabaseImpl {
     fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>> {
         let file_path = vfs_helpers::get_file_path(self, file_id)?;
         let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
-        let config_path_str = config_root.to_string_lossy().to_string();
-        let path_input =
-            metadata::ConfigurationPathInput::new(self, config_path_str, self.metadata_version());
+        let path_input = metadata::intern_configuration_path(
+            self,
+            &config_root.to_string_lossy(),
+            self.metadata_version(),
+        );
         Some(metadata::load_configuration(self, path_input))
     }
 
@@ -430,8 +432,8 @@ impl RootDatabase for RootDatabaseImpl {
         all_paths
             .into_iter()
             .map(|(name, path)| {
-                let path_str = path.to_string_lossy().to_string();
-                let path_input = metadata::ConfigurationPathInput::new(self, path_str, version);
+                let path_input =
+                    metadata::intern_configuration_path(self, &path.to_string_lossy(), version);
                 let config = metadata::load_configuration(self, path_input);
                 (name, config)
             })

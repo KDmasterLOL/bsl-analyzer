@@ -462,9 +462,9 @@ impl GlobalState {
         let start = Instant::now();
 
         let db = self.analysis_host.raw_database();
-        let path_input = ide_db::metadata::ConfigurationPathInput::new(
+        let path_input = ide_db::metadata::intern_configuration_path(
             db,
-            config_path.to_string_lossy().into_owned(),
+            &config_path.to_string_lossy(),
             db.metadata_version(),
         );
 
@@ -479,9 +479,9 @@ impl GlobalState {
 
         let extension_paths: Vec<_> = project.extension_paths().to_vec();
         for (name, ext_path) in &extension_paths {
-            let ext_path_input = ide_db::metadata::ConfigurationPathInput::new(
+            let ext_path_input = ide_db::metadata::intern_configuration_path(
                 db,
-                ext_path.to_string_lossy().into_owned(),
+                &ext_path.to_string_lossy(),
                 db.metadata_version(),
             );
             let ext_config = ide_db::metadata::load_configuration(db, ext_path_input);

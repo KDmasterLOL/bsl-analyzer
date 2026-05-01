@@ -345,7 +345,7 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
             tracing::debug!(?file_ids, "preloading external files from semantic highlighting");
 
             let analysis = state.analysis_host.analysis();
-            let task = analysis.warm_caches_task(&files, state.diagnostics_config().clone());
+            let task = analysis.warm_caches_task(&files);
             let first_file = files[0];
 
             if let Some(prev) = state.preload_external_tokens.remove(&first_file) {
