@@ -428,6 +428,19 @@ impl NotifyActor {
                     send_message(root.clone());
                     let walkdir =
                         WalkDir::new(root).follow_links(true).into_iter().filter_entry(|entry| {
+                            // `WalkDir` does not expose a cancellation API, but
+                            // `filter_entry` is consulted for every node it
+                            // is about to visit. Returning `false` here
+                            // skips the entry (and, if it's a directory,
+                            // prunes the entire subtree from descent), so
+                            // an in-flight walk drains its pending stack
+                            // without recursing further once shutdown is
+                            // latched. Pairs with the per-file `shutdown`
+                            // probe in the load loop below for a two-tier
+                            // bail-out.
+                            if shutdown.load(Ordering::Relaxed) {
+                                return false;
+                            }
                             if !entry.file_type().is_dir() {
                                 return true;
                             }
