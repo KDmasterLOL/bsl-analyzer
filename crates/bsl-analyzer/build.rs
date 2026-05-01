@@ -15,10 +15,15 @@ fn main() {
         res.set("LegalCopyright", "Copyright (C) 1C BSL Analyzer contributors");
         res.set("OriginalFilename", "bsl-analyzer-app.exe");
         res.set("InternalName", "bsl-analyzer-app.exe");
-        // Fail loudly so a CI image without `windres` / `rc.exe` produces a
-        // visibly broken pipeline rather than a silently shippable binary
-        // that's missing its VersionInfo. To unblock cross-compile in CI,
-        // install `mingw-w64` (provides `windres`) into the build image.
+        // Fail loudly so a CI image without the resource compiler
+        // produces a visibly broken pipeline rather than a silently
+        // shippable binary that's missing its VersionInfo.
+        //
+        // On Windows host: needs MSVC's `rc.exe` (bundled with VS).
+        // On Linux host (cargo-xwin cross-compile): winresource looks
+        // for `llvm-rc` in PATH — install Debian's `llvm` package
+        // (which provides `/usr/bin/llvm-rc-XX` plus a `llvm-rc`
+        // symlink) into the CI image.
         res.compile().expect("failed to embed Windows resources for bsl-analyzer");
     }
 
