@@ -31,6 +31,14 @@ use walkdir::WalkDir;
 /// conversion) stays bounded for ERP-scale workspaces.
 const LOADED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
+/// Path-count budget per `Message::WatchOnly` chunk emitted by
+/// [`NotifyActor::load_entry`]. Watch-only entries carry no bytes, so the
+/// transient peak is dominated by `AbsPathBuf` + `Vec` overhead on the
+/// receiver side. ~4096 paths × ~200 B ≈ ~800 KiB per batch keeps shutdown
+/// and `set_config` reload latency low without wasting per-path send
+/// overhead on tiny chunks.
+const WATCH_ONLY_CHUNK_PATHS: usize = 4096;
+
 #[derive(Debug)]
 pub struct NotifyHandle {
     // Relative order of fields below is significant.
@@ -264,6 +272,8 @@ impl NotifyActor {
                                 },
                                 |files| self.send(loader::Message::Loaded { files }),
                                 LOADED_CHUNK_BYTES,
+                                |files| self.send(loader::Message::WatchOnly { files }),
+                                WATCH_ONLY_CHUNK_PATHS,
                                 shutdown,
                             );
                         });
@@ -315,47 +325,99 @@ impl NotifyActor {
                             event.kind,
                             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                         ) {
-                            let files = event
-                                .paths
-                                .into_iter()
-                                .filter_map(|path| {
-                                    Some(
-                                        AbsPathBuf::try_from(
-                                            Utf8PathBuf::from_path_buf(path).ok()?,
-                                        )
-                                        .expect("path is absolute"),
-                                    )
-                                })
-                                .filter_map(|path| -> Option<(AbsPathBuf, Option<Vec<u8>>)> {
-                                    let meta = fs::metadata(&path).ok()?;
-                                    if meta.file_type().is_dir()
-                                        && self
-                                            .watched_dir_entries
-                                            .iter()
-                                            .any(|dir| dir.contains_dir(&path))
-                                    {
-                                        self.watch(path.as_ref());
-                                        return None;
-                                    }
+                            // Classify each path through `Directories::classify_file`
+                            // so a watch-only XML does not silently get
+                            // re-loaded as content via `Message::Changed`.
+                            // `watched_file_entries` (raw `Entry::Files`
+                            // lists) is always `LoadContent` — those
+                            // entries carry no rules.
+                            //
+                            // Pre-existing limitation: `Remove` events lose
+                            // the path's metadata before this handler
+                            // runs, so they fall through `fs::metadata`
+                            // and are dropped here for *both* load modes.
+                            // PR-3 will fix Remove handling alongside
+                            // wiring the watch-only consumer side
+                            // (`Vfs::register_watch_only` dispatch from
+                            // `Message::WatchOnly`); doing it earlier
+                            // would emit deletions that no consumer can
+                            // observe.
+                            let mut changed_files: Vec<(AbsPathBuf, Option<Vec<u8>>)> = Vec::new();
+                            let mut watch_only_files: Vec<AbsPathBuf> = Vec::new();
+                            for path in event.paths {
+                                let Some(path) = Utf8PathBuf::from_path_buf(path)
+                                    .ok()
+                                    .and_then(|p| AbsPathBuf::try_from(p).ok())
+                                else {
+                                    continue;
+                                };
+                                let Ok(meta) = fs::metadata(&path) else {
+                                    continue;
+                                };
+                                if meta.file_type().is_dir()
+                                    && self
+                                        .watched_dir_entries
+                                        .iter()
+                                        .any(|dir| dir.contains_dir(&path))
+                                {
+                                    self.watch(path.as_ref());
+                                    continue;
+                                }
+                                if !meta.file_type().is_file() {
+                                    continue;
+                                }
 
-                                    if !meta.file_type().is_file() {
-                                        return None;
+                                // Determine the file's load mode across all
+                                // matching entries. `LoadContent` wins
+                                // globally — if any entry classifies this
+                                // path as content-loaded, that is the
+                                // semantics, even if a different (later)
+                                // entry tags the same path as watch-only.
+                                // This guarantees deterministic behaviour
+                                // when overlapping `Directories` entries
+                                // are configured (e.g. an extension root
+                                // that overlaps a metadata root). Without
+                                // this rule, the order in which entries
+                                // were enqueued during the parallel scan
+                                // would silently decide whether a file
+                                // is loaded as content or watch-only.
+                                let mode = if self.watched_file_entries.contains(&path) {
+                                    Some(loader::LoadMode::LoadContent)
+                                } else {
+                                    let mut found: Option<loader::LoadMode> = None;
+                                    for dir in &self.watched_dir_entries {
+                                        if let Some(m) = dir.classify_file(&path) {
+                                            match m {
+                                                loader::LoadMode::LoadContent => {
+                                                    found = Some(loader::LoadMode::LoadContent);
+                                                    break;
+                                                }
+                                                loader::LoadMode::WatchOnly => {
+                                                    found
+                                                        .get_or_insert(loader::LoadMode::WatchOnly);
+                                                }
+                                            }
+                                        }
                                     }
-
-                                    if !(self.watched_file_entries.contains(&path)
-                                        || self
-                                            .watched_dir_entries
-                                            .iter()
-                                            .any(|dir| dir.contains_file(&path)))
-                                    {
-                                        return None;
+                                    found
+                                };
+                                match mode {
+                                    Some(loader::LoadMode::LoadContent) => {
+                                        let contents = read(&path);
+                                        changed_files.push((path, contents));
                                     }
-
-                                    let contents = read(&path);
-                                    Some((path, contents))
-                                })
-                                .collect();
-                            self.send(loader::Message::Changed { files });
+                                    Some(loader::LoadMode::WatchOnly) => {
+                                        watch_only_files.push(path);
+                                    }
+                                    None => continue,
+                                }
+                            }
+                            if !changed_files.is_empty() {
+                                self.send(loader::Message::Changed { files: changed_files });
+                            }
+                            if !watch_only_files.is_empty() {
+                                self.send(loader::Message::WatchOnly { files: watch_only_files });
+                            }
                         }
                     }
                 }
@@ -363,21 +425,31 @@ impl NotifyActor {
         }
     }
 
-    /// Load files for `entry`, streaming results to `send_loaded` in chunks.
+    /// Load files for `entry`, streaming results to `send_loaded` /
+    /// `send_watch_only` in chunks.
     ///
-    /// `send_loaded` is invoked whenever the in-flight buffer reaches
-    /// `chunk_threshold` bytes, plus once at the end for the remainder. A
-    /// file larger than the threshold becomes its own single-file chunk, so
-    /// the algorithm degrades gracefully on huge inputs.
+    /// Files matching [`Directories::extensions`](loader::Directories::extensions)
+    /// or a [`FileRule`](loader::FileRule) with [`LoadMode::LoadContent`](loader::LoadMode::LoadContent)
+    /// are read from disk and shipped via `send_loaded` whenever the
+    /// in-flight buffer reaches `chunk_threshold` bytes; a file larger than
+    /// the threshold becomes its own single-file chunk, so the algorithm
+    /// degrades gracefully on huge inputs.
+    ///
+    /// Files matching a rule with [`LoadMode::WatchOnly`](loader::LoadMode::WatchOnly)
+    /// are routed to `send_watch_only` (path only, no read) every
+    /// `watch_chunk_paths` paths. Buffers for the two modes are independent
+    /// so a slow read of a large content file does not delay the watch-only
+    /// stream and vice versa.
     ///
     /// `shutdown` is polled before every file read so a parallel worker that
     /// observes receiver disconnect can short-circuit the in-flight scan
     /// without waiting for `WalkDir` to finish enumerating the workspace.
     // Each callback wires this private associated function into a different
     // observable on `NotifyActor` (watcher set, root-progress messages, the
-    // per-file progress counter, the chunked Loaded sender). Folding them
-    // into a struct trades the same parameter count for indirection without
-    // simplifying the caller — the only invocation site is `NotifyActor::run`.
+    // per-file progress counter, and one of the two chunked senders).
+    // Folding them into a struct trades the same parameter count for
+    // indirection without simplifying the caller — the only invocation
+    // site is `NotifyActor::run`.
     #[allow(clippy::too_many_arguments)]
     fn load_entry(
         mut watch: impl FnMut(&Path),
@@ -387,22 +459,36 @@ impl NotifyActor {
         on_file_loaded: impl Fn(),
         send_loaded: impl Fn(Vec<(AbsPathBuf, Option<Vec<u8>>)>),
         chunk_threshold: usize,
+        send_watch_only: impl Fn(Vec<AbsPathBuf>),
+        watch_chunk_paths: usize,
         shutdown: &AtomicBool,
     ) {
-        let mut buf: Vec<(AbsPathBuf, Option<Vec<u8>>)> = Vec::new();
-        let mut buf_bytes: usize = 0;
+        let mut loaded_buf: Vec<(AbsPathBuf, Option<Vec<u8>>)> = Vec::new();
+        let mut loaded_bytes: usize = 0;
+        let mut watch_only_buf: Vec<AbsPathBuf> = Vec::new();
 
-        let mut push = |file: AbsPathBuf, contents: Option<Vec<u8>>| {
-            buf_bytes += contents.as_ref().map(|c| c.len()).unwrap_or(0);
-            buf.push((file, contents));
-            if buf_bytes >= chunk_threshold {
-                send_loaded(std::mem::take(&mut buf));
-                buf_bytes = 0;
+        let mut push_loaded = |file: AbsPathBuf, contents: Option<Vec<u8>>| {
+            loaded_bytes += contents.as_ref().map(|c| c.len()).unwrap_or(0);
+            loaded_buf.push((file, contents));
+            if loaded_bytes >= chunk_threshold {
+                send_loaded(std::mem::take(&mut loaded_buf));
+                loaded_bytes = 0;
+            }
+        };
+
+        let mut push_watch_only = |file: AbsPathBuf| {
+            watch_only_buf.push(file);
+            if watch_only_buf.len() >= watch_chunk_paths {
+                send_watch_only(std::mem::take(&mut watch_only_buf));
             }
         };
 
         match entry {
             loader::Entry::Files(files) => {
+                // `Entry::Files` is an explicit list with no extension/rule
+                // metadata; its members are always loaded as content (this
+                // matches legacy behaviour and the assumption made by the
+                // only existing caller — `bsl-analyzer.toml` config files).
                 for file in files {
                     if shutdown.load(Ordering::Relaxed) {
                         return;
@@ -412,7 +498,7 @@ impl NotifyActor {
                     }
                     let contents = read(file.as_path());
                     on_file_loaded();
-                    push(file, contents);
+                    push_loaded(file, contents);
                 }
             }
             loader::Entry::Directories(dirs) => {
@@ -471,27 +557,50 @@ impl NotifyActor {
                         if !is_file {
                             return None;
                         }
+                        // Classify the file by extension. `extensions`
+                        // wins over rules so a half-migrated caller (still
+                        // listing an extension in both fields) never
+                        // silently downgrades to watch-only. Path-level
+                        // include/exclude is enforced by `filter_entry`
+                        // above, so we only check the extension here —
+                        // matching legacy behaviour.
                         let ext = abs_path.extension().unwrap_or_default();
-                        if dirs.extensions.iter().all(|it| it.as_str() != ext) {
-                            return None;
+                        if dirs.extensions.iter().any(|it| it.as_str() == ext) {
+                            return Some((abs_path, loader::LoadMode::LoadContent));
                         }
-                        Some(abs_path)
+                        for rule in &dirs.rules {
+                            if rule.extensions.iter().any(|it| it.as_str() == ext) {
+                                return Some((abs_path, rule.load_mode));
+                            }
+                        }
+                        None
                     });
 
-                    for file in files {
+                    for (file, mode) in files {
                         if shutdown.load(Ordering::Relaxed) {
                             return;
                         }
-                        let contents = read(file.as_path());
                         on_file_loaded();
-                        push(file, contents);
+                        match mode {
+                            loader::LoadMode::LoadContent => {
+                                let contents = read(file.as_path());
+                                push_loaded(file, contents);
+                            }
+                            loader::LoadMode::WatchOnly => {
+                                push_watch_only(file);
+                            }
+                        }
                     }
                 }
             }
         }
 
-        if !buf.is_empty() && !shutdown.load(Ordering::Relaxed) {
-            send_loaded(buf);
+        let aborted = shutdown.load(Ordering::Relaxed);
+        if !loaded_buf.is_empty() && !aborted {
+            send_loaded(loaded_buf);
+        }
+        if !watch_only_buf.is_empty() && !aborted {
+            send_watch_only(watch_only_buf);
         }
     }
 
@@ -508,7 +617,20 @@ impl NotifyActor {
                     dirs.include.iter().map(|p| p.as_path().as_ref()).collect();
                 let excludes: Vec<&std::path::Path> =
                     dirs.exclude.iter().map(|p| p.as_path().as_ref()).collect();
-                let extensions: Vec<&str> = dirs.extensions.iter().map(|s| s.as_str()).collect();
+                // Union of `extensions` and rule extensions, deduplicated.
+                // `n_total` shipped to the progress bar must include
+                // watch-only files so the user sees a truthful
+                // "n loaded out of m" indicator across both load modes.
+                let mut extensions: Vec<&str> =
+                    dirs.extensions.iter().map(|s| s.as_str()).collect();
+                for rule in &dirs.rules {
+                    for ext in &rule.extensions {
+                        let s = ext.as_str();
+                        if !extensions.contains(&s) {
+                            extensions.push(s);
+                        }
+                    }
+                }
 
                 stdx::fs::parallel_count_cancellable(
                     &roots,
@@ -598,8 +720,18 @@ mod tests {
             extensions: vec!["txt".to_string()],
             include: vec![abs_root],
             exclude: vec![],
+            rules: Vec::new(),
         };
         (dir, dirs)
+    }
+
+    /// Captured output from `load_entry`: per-chunk path/size summaries
+    /// for content-loaded files and per-chunk path lists for watch-only
+    /// files. Tests that only care about content can read `loaded`.
+    #[derive(Default)]
+    struct LoadCapture {
+        loaded: Vec<Vec<(AbsPathBuf, usize)>>,
+        watch_only: Vec<Vec<AbsPathBuf>>,
     }
 
     /// Drive `load_entry` with the given threshold and capture the chunks it
@@ -614,7 +746,24 @@ mod tests {
         threshold: usize,
         shutdown: &AtomicBool,
     ) -> Vec<Vec<(AbsPathBuf, usize)>> {
-        let chunks: Mutex<Vec<Vec<(AbsPathBuf, usize)>>> = Mutex::new(Vec::new());
+        run_full_with_shutdown(dirs, threshold, WATCH_ONLY_CHUNK_PATHS, shutdown).loaded
+    }
+
+    /// Like [`run`] but also captures `Message::WatchOnly` chunks. Used by
+    /// tests that exercise rule-based dispatch.
+    fn run_full(dirs: loader::Directories, threshold: usize, watch_chunk: usize) -> LoadCapture {
+        let shutdown = AtomicBool::new(false);
+        run_full_with_shutdown(dirs, threshold, watch_chunk, &shutdown)
+    }
+
+    fn run_full_with_shutdown(
+        dirs: loader::Directories,
+        threshold: usize,
+        watch_chunk: usize,
+        shutdown: &AtomicBool,
+    ) -> LoadCapture {
+        let loaded: Mutex<Vec<Vec<(AbsPathBuf, usize)>>> = Mutex::new(Vec::new());
+        let watch_only: Mutex<Vec<Vec<AbsPathBuf>>> = Mutex::new(Vec::new());
         NotifyActor::load_entry(
             |_| {},
             loader::Entry::Directories(dirs),
@@ -624,12 +773,19 @@ mod tests {
             |files| {
                 let summary =
                     files.into_iter().map(|(p, c)| (p, c.map(|c| c.len()).unwrap_or(0))).collect();
-                chunks.lock().unwrap().push(summary);
+                loaded.lock().unwrap().push(summary);
             },
             threshold,
+            |files| {
+                watch_only.lock().unwrap().push(files);
+            },
+            watch_chunk,
             shutdown,
         );
-        chunks.into_inner().unwrap()
+        LoadCapture {
+            loaded: loaded.into_inner().unwrap(),
+            watch_only: watch_only.into_inner().unwrap(),
+        }
     }
 
     #[test]
@@ -672,6 +828,152 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].len(), 1);
         assert_eq!(chunks[0][0].1, 8 * 1024);
+    }
+
+    /// Build a fixture with `bsl_count` BSL files and `xml_count` XML
+    /// files, all of `bytes_per_file` bytes, in a fresh temp directory.
+    /// Used by tests that exercise the new rule-based dispatch.
+    fn fixture_mixed(
+        bsl_count: usize,
+        xml_count: usize,
+        bytes_per_file: usize,
+    ) -> (tempfile::TempDir, AbsPathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for i in 0..bsl_count {
+            let path = dir.path().join(format!("module_{i}.bsl"));
+            std::fs::write(&path, vec![b'x'; bytes_per_file]).expect("write bsl fixture");
+        }
+        for i in 0..xml_count {
+            let path = dir.path().join(format!("form_{i}.xml"));
+            std::fs::write(&path, vec![b'x'; bytes_per_file]).expect("write xml fixture");
+        }
+        let abs_root = AbsPathBuf::assert_utf8(dir.path().to_path_buf());
+        (dir, abs_root)
+    }
+
+    #[test]
+    fn watch_only_rule_dispatches_to_separate_buffer() {
+        // 3 .bsl + 5 .xml; .bsl is loaded as content, .xml watch-only.
+        // Verify the two streams are independent and that no .xml file
+        // ever appears in the loaded buffer (i.e. its bytes were never
+        // read from disk into a `Vec<u8>`).
+        let (_guard, root) = fixture_mixed(3, 5, 1024);
+        let dirs = loader::Directories {
+            extensions: vec!["bsl".to_string()],
+            include: vec![root],
+            exclude: vec![],
+            rules: vec![loader::FileRule {
+                extensions: vec!["xml".to_string()],
+                load_mode: loader::LoadMode::WatchOnly,
+            }],
+        };
+
+        let cap = run_full(dirs, 1024 * 1024, 1024);
+        let total_loaded: usize = cap.loaded.iter().map(|c| c.len()).sum();
+        let total_watch_only: usize = cap.watch_only.iter().map(|c| c.len()).sum();
+        assert_eq!(total_loaded, 3, "exactly the 3 .bsl files should be loaded");
+        assert_eq!(total_watch_only, 5, "exactly the 5 .xml files should be watch-only");
+
+        // No .xml may leak into the loaded chunks.
+        for chunk in &cap.loaded {
+            for (path, _) in chunk {
+                assert_ne!(path.extension(), Some("xml"), "xml must not be in loaded buffer");
+            }
+        }
+        // No .bsl may leak into the watch-only chunks.
+        for chunk in &cap.watch_only {
+            for path in chunk {
+                assert_ne!(path.extension(), Some("bsl"), "bsl must not be in watch-only buffer");
+            }
+        }
+    }
+
+    #[test]
+    fn pure_watch_only_emits_only_watch_only_chunks() {
+        // No content extensions at all — only an XML watch-only rule. The
+        // loaded buffer should never be touched.
+        let (_guard, root) = fixture_mixed(0, 4, 1024);
+        let dirs = loader::Directories {
+            extensions: vec![],
+            include: vec![root],
+            exclude: vec![],
+            rules: vec![loader::FileRule {
+                extensions: vec!["xml".to_string()],
+                load_mode: loader::LoadMode::WatchOnly,
+            }],
+        };
+
+        let cap = run_full(dirs, 1024 * 1024, 1024);
+        assert!(cap.loaded.is_empty(), "no content extensions configured, got {:#?}", cap.loaded);
+        let total_watch_only: usize = cap.watch_only.iter().map(|c| c.len()).sum();
+        assert_eq!(total_watch_only, 4);
+    }
+
+    #[test]
+    fn watch_only_chunking_respects_path_threshold() {
+        // 7 watch-only paths, threshold 3 → at least 3 chunks (3+3+1)
+        // and every path appears exactly once.
+        let (_guard, root) = fixture_mixed(0, 7, 64);
+        let dirs = loader::Directories {
+            extensions: vec![],
+            include: vec![root],
+            exclude: vec![],
+            rules: vec![loader::FileRule {
+                extensions: vec!["xml".to_string()],
+                load_mode: loader::LoadMode::WatchOnly,
+            }],
+        };
+
+        let cap = run_full(dirs, 1024 * 1024, 3);
+        assert!(
+            cap.watch_only.len() >= 3,
+            "expected ≥3 watch-only chunks at threshold 3, got {} chunks",
+            cap.watch_only.len(),
+        );
+        let total: usize = cap.watch_only.iter().map(|c| c.len()).sum();
+        assert_eq!(total, 7, "all watch-only paths emitted exactly once");
+    }
+
+    #[test]
+    fn extensions_win_over_rules_for_same_extension() {
+        // Defensive: if a half-migrated caller lists an extension in both
+        // `extensions` and a `WatchOnly` rule, content semantics must
+        // win — never silently downgrade.
+        let (_guard, root) = fixture_mixed(0, 2, 64);
+        let dirs = loader::Directories {
+            extensions: vec!["xml".to_string()],
+            include: vec![root],
+            exclude: vec![],
+            rules: vec![loader::FileRule {
+                extensions: vec!["xml".to_string()],
+                load_mode: loader::LoadMode::WatchOnly,
+            }],
+        };
+
+        let cap = run_full(dirs, 1024 * 1024, 1024);
+        let total_loaded: usize = cap.loaded.iter().map(|c| c.len()).sum();
+        assert_eq!(total_loaded, 2, "extensions must win — both .xml load as content");
+        assert!(cap.watch_only.is_empty(), "watch-only buffer must stay empty");
+    }
+
+    #[test]
+    fn count_files_unions_extensions_and_rules() {
+        // count_files_in_entry must include rule-matched files in the
+        // total, otherwise the progress bar would understate `n_total`
+        // when the workspace contains watch-only metadata.
+        let (_guard, root) = fixture_mixed(3, 5, 64);
+        let dirs = loader::Directories {
+            extensions: vec!["bsl".to_string()],
+            include: vec![root],
+            exclude: vec![],
+            rules: vec![loader::FileRule {
+                extensions: vec!["xml".to_string()],
+                load_mode: loader::LoadMode::WatchOnly,
+            }],
+        };
+        let cancel = AtomicBool::new(false);
+        let count = NotifyActor::count_files_in_entry(&loader::Entry::Directories(dirs), &cancel);
+        assert_eq!(count, 8, "count must union extensions + rules");
     }
 
     #[test]

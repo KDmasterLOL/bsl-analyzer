@@ -72,6 +72,15 @@ pub enum FileState {
     Exists(u64),
     /// File was deleted
     Deleted,
+    /// Path is registered for change-tracking, but contents are not stored.
+    ///
+    /// Used for metadata files (XML) where the consumer wants notifications
+    /// when the path changes without paying the resident-memory cost of an
+    /// `Arc<str>` copy. Transitioning to `Exists` (via `set_file_contents`
+    /// with `Some`) is allowed and emits a `Create` change. Transitioning
+    /// back to `Deleted` (via `set_file_contents` with `None`) is allowed
+    /// and emits no change — no `Create` was ever observed by consumers.
+    WatchOnly,
 }
 
 /// A file change detected by the VFS.
@@ -183,15 +192,25 @@ impl Vfs {
                 Change::Delete
             }
 
-            // File was deleted, now being created
-            (FileState::Deleted, Some(text)) => {
+            // File was deleted (or registered as watch-only), now being created.
+            // For `WatchOnly` -> `Exists`, no prior `Create` was emitted, so
+            // the consumer sees this as the first observation of the file.
+            (FileState::Deleted, Some(text)) | (FileState::WatchOnly, Some(text)) => {
                 let new_hash = stdx::hash_once::<FxHasher>(&*text);
                 self.data[file_id.0 as usize] = FileState::Exists(new_hash);
-                Change::Create(text, new_hash) // First time the file exists
+                Change::Create(text, new_hash)
             }
 
             // File was deleted, still deleted (no-op)
             (FileState::Deleted, None) => {
+                return false;
+            }
+
+            // Watch-only registration dropped. Transition to `Deleted` but
+            // emit no change: consumers never observed a `Create`, so
+            // pairing it with a `Delete` would be a phantom event.
+            (FileState::WatchOnly, None) => {
+                self.data[file_id.0 as usize] = FileState::Deleted;
                 return false;
             }
         };
@@ -211,6 +230,28 @@ impl Vfs {
             self.data.push(FileState::Deleted);
         }
 
+        file_id
+    }
+
+    /// Register `path` for change-tracking without storing its contents.
+    ///
+    /// Allocates a [`FileId`] for the path and marks it [`FileState::WatchOnly`].
+    /// This is the entry point used by the loader's
+    /// [`Message::WatchOnly`](loader::Message::WatchOnly) dispatch (PR-3): the
+    /// consumer receives the watch-only path, calls this to obtain a
+    /// [`FileId`], and then drives a downstream loader (e.g. metadata XML
+    /// reader) using the file id as the cache key.
+    ///
+    /// If the path is already in [`FileState::Exists`], the existing state
+    /// is preserved (an active full-content registration trumps a
+    /// watch-only re-registration). Calling this on an already-watch-only
+    /// path is a no-op.
+    pub fn register_watch_only(&mut self, path: VfsPath) -> FileId {
+        let _span = tracing::debug_span!("Vfs::register_watch_only", ?path).entered();
+        let file_id = self.alloc_file_id(path);
+        if matches!(self.get_state(file_id), FileState::Deleted) {
+            self.data[file_id.0 as usize] = FileState::WatchOnly;
+        }
         file_id
     }
 
@@ -289,8 +330,15 @@ impl Vfs {
     }
 
     /// Check if a file exists in the VFS.
+    ///
+    /// Returns `true` for both [`FileState::Exists`] (contents stored) and
+    /// [`FileState::WatchOnly`] (path registered for change-tracking, no
+    /// contents stored): from a consumer's standpoint, both correspond to
+    /// "the file is present and tracked". Use [`Self::file_content`] /
+    /// downstream Salsa queries to distinguish the two when content is
+    /// actually needed.
     pub fn exists(&self, file_id: FileId) -> bool {
-        matches!(self.get_state(file_id), FileState::Exists(_))
+        matches!(self.get_state(file_id), FileState::Exists(_) | FileState::WatchOnly)
     }
 
     /// Returns the number of allocated file IDs.
@@ -425,6 +473,94 @@ mod tests {
         // Delete file
         vfs.set_file_contents(path.clone(), None);
         assert!(!vfs.exists(file_id));
+    }
+
+    #[test]
+    fn test_register_watch_only_new_path() {
+        let mut vfs = Vfs::new();
+        let path = VfsPath::new("/Form.xml");
+
+        let file_id = vfs.register_watch_only(path.clone());
+        assert!(vfs.exists(file_id), "watch-only path should report as existing");
+        assert_eq!(vfs.file_id(&path), Some(file_id));
+
+        // Watch-only registration emits no Change — consumers track these
+        // via the loader's `Message::WatchOnly` stream, not the VFS change
+        // pipeline.
+        assert!(vfs.take_changes().is_empty(), "register_watch_only must not record a Change");
+    }
+
+    #[test]
+    fn test_register_watch_only_idempotent() {
+        let mut vfs = Vfs::new();
+        let path = VfsPath::new("/Form.xml");
+
+        let id1 = vfs.register_watch_only(path.clone());
+        let id2 = vfs.register_watch_only(path.clone());
+        assert_eq!(id1, id2);
+        assert!(vfs.take_changes().is_empty());
+    }
+
+    #[test]
+    fn test_register_watch_only_then_set_contents_emits_create() {
+        // A watch-only path being upgraded to full-content (e.g. user opens
+        // an XML file in the editor and the consumer decides to load it
+        // for diagnostics) should look like a fresh `Create` to consumers,
+        // since they never saw a prior change for this path.
+        let mut vfs = Vfs::new();
+        let path = VfsPath::new("/Form.xml");
+
+        vfs.register_watch_only(path.clone());
+        let changed = vfs.set_file_contents(path.clone(), Some(Arc::<str>::from("<form/>")));
+        assert!(changed);
+
+        let changes = vfs.take_changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind(), ChangeKind::Create);
+    }
+
+    #[test]
+    fn test_register_watch_only_preserves_existing_contents() {
+        // If a path already has content (`Exists`), a subsequent
+        // `register_watch_only` must not downgrade it — full-content state
+        // wins.
+        let mut vfs = Vfs::new();
+        let path = VfsPath::new("/Form.xml");
+
+        vfs.set_file_contents(path.clone(), Some(Arc::<str>::from("<form/>")));
+        let file_id = vfs.file_id(&path).unwrap();
+        vfs.take_changes();
+
+        let same_id = vfs.register_watch_only(path.clone());
+        assert_eq!(file_id, same_id);
+        // No new change recorded; the file is still in `Exists`.
+        assert!(vfs.take_changes().is_empty());
+        // Modifying it still works as `Modify`, proving state is `Exists`,
+        // not `WatchOnly`.
+        let changed =
+            vfs.set_file_contents(path.clone(), Some(Arc::<str>::from("<form><x/></form>")));
+        assert!(changed);
+        let changes = vfs.take_changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind(), ChangeKind::Modify);
+    }
+
+    #[test]
+    fn test_watch_only_drop_emits_no_change() {
+        // Calling `set_file_contents(path, None)` on a watch-only path
+        // (consumer dropping the registration) transitions to `Deleted`
+        // but emits no change — consumers never observed a `Create` for
+        // it, so a `Delete` would be a phantom event.
+        let mut vfs = Vfs::new();
+        let path = VfsPath::new("/Form.xml");
+
+        vfs.register_watch_only(path.clone());
+        let changed = vfs.set_file_contents(path.clone(), None);
+        assert!(!changed, "dropping a watch-only registration must not be reported as a change");
+        assert!(vfs.take_changes().is_empty());
+
+        let file_id = vfs.file_id(&path).unwrap();
+        assert!(!vfs.exists(file_id), "after drop, the file should no longer be tracked");
     }
 
     #[test]

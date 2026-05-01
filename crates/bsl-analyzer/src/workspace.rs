@@ -109,6 +109,7 @@ impl GlobalState {
                 paths::AbsPathBuf::assert_utf8(root.join("build")),
                 paths::AbsPathBuf::assert_utf8(root.join(".vscode")),
             ],
+            rules: Vec::new(),
         })];
 
         let watch = if config_files.is_empty() {

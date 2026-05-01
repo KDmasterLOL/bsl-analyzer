@@ -259,6 +259,17 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             handle_vfs_msg(state, files, state.vfs_done)?;
             tracing::debug!(count, vfs_done = state.vfs_done, "streamed VFS batch");
         }
+        vfs::loader::Message::WatchOnly { files } => {
+            // PR-3 will dispatch watch-only paths to `Vfs::register_watch_only`
+            // and trigger the metadata XML reload pipeline. The loader never
+            // emits this variant in PR-2 — no caller populates
+            // `Directories::rules` yet — but the arm exists so the match is
+            // exhaustive and a future PR-3 wiring lands as a localised change.
+            tracing::debug!(
+                count = files.len(),
+                "received WatchOnly batch (no consumer wired yet)",
+            );
+        }
     }
     Ok(())
 }
