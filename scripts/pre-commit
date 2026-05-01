@@ -10,6 +10,29 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# Skip the full check suite when the commit only bumps the workspace
+# version (Cargo.toml + Cargo.lock, with the Cargo.toml diff limited
+# to a `version = "x.y.z"` line). No source change → fmt / clippy /
+# tests would all be no-ops, and skipping them shaves several minutes
+# off every release.
+is_version_only_commit() {
+    local staged
+    staged=$(git diff --cached --name-only | sort | tr '\n' ' ')
+    if [ "$staged" != "Cargo.lock Cargo.toml " ]; then
+        return 1
+    fi
+    local non_version
+    non_version=$(git diff --cached -U0 -- Cargo.toml \
+        | grep -E '^[+-][^+-]' \
+        | grep -vE '^[+-]version = "[0-9]+\.[0-9]+\.[0-9]+"$' || true)
+    [ -z "$non_version" ]
+}
+
+if is_version_only_commit; then
+    echo -e "${GREEN}✓ Version-only commit detected — skipping fmt/clippy/tests${NC}\n"
+    exit 0
+fi
+
 echo -e "${YELLOW}Running pre-commit checks...${NC}\n"
 
 # 1. Cargo fmt
