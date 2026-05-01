@@ -77,5 +77,8 @@ tikv-jemallocator.workspace = true
 zip = { version = "8", default-features = false, features = ["deflate"] }
 walkdir = "2.4"
 
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dev-dependencies]
 expect-test.workspace = true

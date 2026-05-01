@@ -2,6 +2,18 @@ use std::io::Write;
 use std::path::Path;
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    {
+        let mut res = winresource::WindowsResource::new();
+        res.set("FileDescription", "BSL Analyzer LSP");
+        res.set("ProductName", "BSL Analyzer");
+        res.set("CompanyName", "1C BSL Analyzer contributors");
+        res.set("LegalCopyright", "Copyright (C) 1C BSL Analyzer contributors");
+        res.set("OriginalFilename", "bsl-analyzer-app.exe");
+        res.set("InternalName", "bsl-analyzer-app.exe");
+        res.compile().expect("failed to compile windows resources");
+    }
+
     let extension_dir = Path::new("../../extension/src");
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let zip_path = Path::new(&out_dir).join("extension.zip");
