@@ -4,7 +4,7 @@
 //! using the `ignore` crate for maximum performance.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ignore::WalkBuilder;
 
@@ -60,9 +60,30 @@ pub struct WalkConfig<'a> {
 /// );
 /// ```
 pub fn parallel_count(roots: &[&Path], config: &WalkConfig<'_>) -> usize {
+    parallel_count_cancellable(roots, config, None)
+}
+
+/// Like [`parallel_count`], but observes a shared cancellation flag and
+/// returns early once it is set.
+///
+/// Each `ignore::WalkBuilder` worker checks the flag at the start of every
+/// directory entry it visits and returns `WalkState::Quit` to stop further
+/// traversal. Already-counted entries are kept; the function returns the
+/// partial count so callers can distinguish "no matches" from "aborted".
+///
+/// Pass `None` to disable cancellation (equivalent to [`parallel_count`]).
+pub fn parallel_count_cancellable(
+    roots: &[&Path],
+    config: &WalkConfig<'_>,
+    cancel: Option<&AtomicBool>,
+) -> usize {
     let count = AtomicUsize::new(0);
 
     for root in roots {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
+
         let mut builder = WalkBuilder::new(root);
         builder.follow_links(config.follow_links).standard_filters(false).hidden(false);
 
@@ -71,6 +92,10 @@ pub fn parallel_count(roots: &[&Path], config: &WalkConfig<'_>) -> usize {
 
         builder.build_parallel().run(|| {
             Box::new(|entry| {
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return ignore::WalkState::Quit;
+                }
+
                 let Ok(entry) = entry else {
                     return ignore::WalkState::Continue;
                 };
@@ -431,5 +456,38 @@ mod tests {
         assert_eq!(result.len(), 3);
         assert!(!result.is_empty());
         assert_eq!(result.into_vec(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parallel_count_cancellable_quits_when_pre_set() {
+        // Sanity: the crate's own src/ has at least a handful of .rs files,
+        // so an uncancelled count is non-zero and lets us spot regressions
+        // where the cancel flag silently does nothing.
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let baseline = parallel_count(
+            &[here],
+            &WalkConfig { extensions: &["rs"], excludes: &[], follow_links: false },
+        );
+        assert!(baseline >= 1, "expected at least one .rs file under stdx/, got {baseline}");
+
+        // With cancel pre-set, every worker quits on its first callback
+        // invocation — before reaching the `fetch_add` for matching files —
+        // so the result must be exactly zero.
+        let cancel = AtomicBool::new(true);
+        let cancelled = parallel_count_cancellable(
+            &[here],
+            &WalkConfig { extensions: &["rs"], excludes: &[], follow_links: false },
+            Some(&cancel),
+        );
+        assert_eq!(cancelled, 0, "pre-set cancel must short-circuit before any fetch_add");
+    }
+
+    #[test]
+    fn parallel_count_cancellable_matches_uncancelled_when_disabled() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cfg = WalkConfig { extensions: &["rs"], excludes: &[], follow_links: false };
+        let plain = parallel_count(&[here], &cfg);
+        let with_none = parallel_count_cancellable(&[here], &cfg, None);
+        assert_eq!(plain, with_none);
     }
 }

@@ -4497,6 +4497,7 @@ dependencies = [
  "rayon",
  "rustc-hash 2.1.2",
  "stdx",
+ "tempfile",
  "tracing",
  "vfs",
  "walkdir",

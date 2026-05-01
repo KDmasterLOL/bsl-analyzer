@@ -82,11 +82,19 @@ pub struct GlobalState {
     /// Whether shutdown has been requested.
     pub shutdown_requested: bool,
 
+    /// Receiver for loader messages (file loaded/changed/progress).
+    ///
+    /// **Drop order matters:** declared *before* `loader` so it drops first
+    /// during `GlobalState` teardown. The loader channel is bounded for
+    /// backpressure; if the receiver outlived the loader handle, the worker
+    /// thread could be stuck on a full-capacity `send` while `loader::Drop`
+    /// joins it, deadlocking shutdown. With this order the receiver drops
+    /// first, the next `send` from the worker returns a `SendError`, the
+    /// rayon `for_each` unwinds, and `loader::Drop` joins cleanly.
+    pub loader_receiver: Receiver<loader::Message>,
+
     /// Handle to VFS loader thread for background file loading.
     pub loader: Box<dyn loader::Handle>,
-
-    /// Receiver for loader messages (file loaded/changed/progress).
-    pub loader_receiver: Receiver<loader::Message>,
 
     /// VFS loading progress state (config version counter).
     pub vfs_progress_config_version: u32,
@@ -139,7 +147,12 @@ pub struct GlobalState {
 impl GlobalState {
     /// Creates a new GlobalState with the given sender.
     pub fn new(sender: Sender<Message>) -> Self {
-        let (loader_sender, loader_receiver) = crossbeam_channel::unbounded();
+        // Bounded channel applies backpressure to `vfs-notify`'s parallel
+        // loader: when the main loop is still draining one chunked
+        // `Message::Loaded` (UTF-8 + `Arc<str>` conversion + VFS write),
+        // additional chunks block in the rayon scope instead of piling up
+        // and reconstituting the cold-start memory peak.
+        let (loader_sender, loader_receiver) = crossbeam_channel::bounded(4);
         let loader = vfs_notify::NotifyHandle::spawn(loader_sender);
 
         Self {

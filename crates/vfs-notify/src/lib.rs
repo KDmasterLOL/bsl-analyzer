@@ -10,7 +10,10 @@
 use std::{
     fs,
     path::{Component, Path},
-    sync::atomic::AtomicUsize,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
     time::Instant,
 };
 
@@ -22,11 +25,32 @@ use rustc_hash::FxHashSet;
 use vfs::loader::{self, LoadingProgress};
 use walkdir::WalkDir;
 
+/// Approximate byte budget per `Message::Loaded` chunk emitted by
+/// [`NotifyActor::load_entry`]. Sized so the transient peak (raw `Vec<u8>` on
+/// the loader thread plus converted `Arc<str>` on the receiver during
+/// conversion) stays bounded for ERP-scale workspaces.
+const LOADED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 pub struct NotifyHandle {
     // Relative order of fields below is significant.
     sender: Sender<Message>,
+    /// Shared with the worker actor. The custom [`Drop`] impl flips this
+    /// before the inbox sender drops so an in-flight scan or `parallel_count`
+    /// pass — which never call `send`, so they can't detect receiver
+    /// disconnect on their own — bails out cooperatively before the
+    /// `JoinHandle` drop blocks on `join`.
+    shutdown: Arc<AtomicBool>,
     _thread: stdx::thread::JoinHandle,
+}
+
+impl Drop for NotifyHandle {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        // Field drop order continues: `sender` next (closes the inbox so the
+        // actor wakes from `next_event` once the current scan unwinds),
+        // then `_thread` joins.
+    }
 }
 
 #[derive(Debug)]
@@ -37,12 +61,13 @@ enum Message {
 
 impl loader::Handle for NotifyHandle {
     fn spawn(sender: loader::Sender) -> NotifyHandle {
-        let actor = NotifyActor::new(sender);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let actor = NotifyActor::new(sender, Arc::clone(&shutdown));
         let (sender, receiver) = unbounded::<Message>();
         let thread = stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker, "VfsLoader")
             .spawn(move || actor.run(receiver))
             .expect("failed to spawn thread");
-        NotifyHandle { sender, _thread: thread }
+        NotifyHandle { sender, shutdown, _thread: thread }
     }
 
     fn set_config(&mut self, config: loader::Config) {
@@ -62,6 +87,16 @@ type NotifyEvent = notify::Result<notify::Event>;
 
 struct NotifyActor {
     sender: loader::Sender,
+    /// Cooperative cancellation latch. Set in two ways:
+    /// (a) [`NotifyHandle::drop`] flips it on shutdown so a count pass or
+    ///     parallel scan that issues no [`Self::send`] calls still notices
+    ///     the receiver is gone; (b) [`Self::send`] flips it on
+    ///     [`crossbeam_channel::SendError`] so peer rayon workers and the
+    ///     per-file walk see disconnect on their next probe. Once set, all
+    ///     further sends and iterations become no-ops, which lets shutdown
+    ///     — or a future `set_config` reload — abort a stale scan in tens
+    ///     of milliseconds.
+    shutdown: Arc<AtomicBool>,
     watched_file_entries: FxHashSet<AbsPathBuf>,
     watched_dir_entries: Vec<loader::Directories>,
     // Drop order is significant.
@@ -75,9 +110,10 @@ enum Event {
 }
 
 impl NotifyActor {
-    fn new(sender: loader::Sender) -> NotifyActor {
+    fn new(sender: loader::Sender, shutdown: Arc<AtomicBool>) -> NotifyActor {
         NotifyActor {
             sender,
+            shutdown,
             watched_dir_entries: Vec::new(),
             watched_file_entries: FxHashSet::default(),
             watcher: None,
@@ -129,10 +165,30 @@ impl NotifyActor {
                             dir: None,
                         });
 
-                        // First pass: count total files (uses WalkDir, may take time on large projects)
+                        // If the receiver was already gone before we kicked
+                        // off the scan (e.g., LSP was killed during start-up
+                        // or a stale `set_config` raced with shutdown),
+                        // `send` above latched `shutdown`. Bail before
+                        // walking the workspace for a count nobody will
+                        // observe.
+                        if self.shutdown.load(Ordering::Relaxed) {
+                            continue;
+                        }
+
+                        // First pass: count total files (uses WalkDir, may
+                        // take time on large projects). Pass `&self.shutdown`
+                        // through so a disconnect mid-count short-circuits
+                        // the parallel walker via `WalkState::Quit`.
                         let count_start = Instant::now();
-                        let n_total: usize =
-                            config.load.iter().map(Self::count_files_in_entry).sum();
+                        let n_total: usize = config
+                            .load
+                            .iter()
+                            .map(|e| Self::count_files_in_entry(e, self.shutdown.as_ref()))
+                            .sum();
+                        if self.shutdown.load(Ordering::Relaxed) {
+                            tracing::debug!("count pass aborted by shutdown latch");
+                            continue;
+                        }
                         tracing::info!(
                             n_total,
                             elapsed_ms = count_start.elapsed().as_millis() as u64,
@@ -153,12 +209,18 @@ impl NotifyActor {
                         const PROGRESS_BATCH_SIZE: usize = 50; // Report every 50 files
 
                         let load_start = Instant::now();
+                        let shutdown: &AtomicBool = self.shutdown.as_ref();
                         config.load.into_par_iter().enumerate().for_each(|(i, entry)| {
+                            // Bail out before touching disk if a peer worker
+                            // has already observed receiver disconnect.
+                            if shutdown.load(Ordering::Relaxed) {
+                                return;
+                            }
                             let do_watch = config.watch.contains(&i);
                             if do_watch {
                                 _ = entry_tx.send(entry.clone());
                             }
-                            let files = Self::load_entry(
+                            Self::load_entry(
                                 |f| _ = watch_tx.send(f.to_owned()),
                                 entry,
                                 do_watch,
@@ -200,9 +262,10 @@ impl NotifyActor {
                                         });
                                     }
                                 },
+                                |files| self.send(loader::Message::Loaded { files }),
+                                LOADED_CHUNK_BYTES,
+                                shutdown,
                             );
-
-                            self.send(loader::Message::Loaded { files });
                         });
 
                         // Files loaded - send Finished immediately so UI updates
@@ -300,29 +363,63 @@ impl NotifyActor {
         }
     }
 
+    /// Load files for `entry`, streaming results to `send_loaded` in chunks.
+    ///
+    /// `send_loaded` is invoked whenever the in-flight buffer reaches
+    /// `chunk_threshold` bytes, plus once at the end for the remainder. A
+    /// file larger than the threshold becomes its own single-file chunk, so
+    /// the algorithm degrades gracefully on huge inputs.
+    ///
+    /// `shutdown` is polled before every file read so a parallel worker that
+    /// observes receiver disconnect can short-circuit the in-flight scan
+    /// without waiting for `WalkDir` to finish enumerating the workspace.
+    // Each callback wires this private associated function into a different
+    // observable on `NotifyActor` (watcher set, root-progress messages, the
+    // per-file progress counter, the chunked Loaded sender). Folding them
+    // into a struct trades the same parameter count for indirection without
+    // simplifying the caller — the only invocation site is `NotifyActor::run`.
+    #[allow(clippy::too_many_arguments)]
     fn load_entry(
         mut watch: impl FnMut(&Path),
         entry: loader::Entry,
         do_watch: bool,
         send_message: impl Fn(AbsPathBuf),
         on_file_loaded: impl Fn(),
-    ) -> Vec<(AbsPathBuf, Option<Vec<u8>>)> {
+        send_loaded: impl Fn(Vec<(AbsPathBuf, Option<Vec<u8>>)>),
+        chunk_threshold: usize,
+        shutdown: &AtomicBool,
+    ) {
+        let mut buf: Vec<(AbsPathBuf, Option<Vec<u8>>)> = Vec::new();
+        let mut buf_bytes: usize = 0;
+
+        let mut push = |file: AbsPathBuf, contents: Option<Vec<u8>>| {
+            buf_bytes += contents.as_ref().map(|c| c.len()).unwrap_or(0);
+            buf.push((file, contents));
+            if buf_bytes >= chunk_threshold {
+                send_loaded(std::mem::take(&mut buf));
+                buf_bytes = 0;
+            }
+        };
+
         match entry {
-            loader::Entry::Files(files) => files
-                .into_iter()
-                .map(|file| {
+            loader::Entry::Files(files) => {
+                for file in files {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
                     if do_watch {
                         watch(file.as_ref());
                     }
                     let contents = read(file.as_path());
-                    on_file_loaded(); // Report progress after loading each file
-                    (file, contents)
-                })
-                .collect::<Vec<_>>(),
+                    on_file_loaded();
+                    push(file, contents);
+                }
+            }
             loader::Entry::Directories(dirs) => {
-                let mut res = Vec::new();
-
                 for root in &dirs.include {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
                     // Watch root directory with Recursive mode (handles all subdirs)
                     if do_watch {
                         watch(root.as_ref());
@@ -368,20 +465,29 @@ impl NotifyActor {
                         Some(abs_path)
                     });
 
-                    res.extend(files.map(|file| {
+                    for file in files {
+                        if shutdown.load(Ordering::Relaxed) {
+                            return;
+                        }
                         let contents = read(file.as_path());
-                        on_file_loaded(); // Report progress after loading each file
-                        (file, contents)
-                    }));
+                        on_file_loaded();
+                        push(file, contents);
+                    }
                 }
-                res
             }
+        }
+
+        if !buf.is_empty() && !shutdown.load(Ordering::Relaxed) {
+            send_loaded(buf);
         }
     }
 
     /// Count files in an entry without reading their contents.
     /// Uses parallel directory traversal for better performance on large projects.
-    fn count_files_in_entry(entry: &loader::Entry) -> usize {
+    /// `cancel` is polled inside the walker so a shutdown latched between
+    /// `Scanning` and `Started` short-circuits the count pass without first
+    /// enumerating every workspace path.
+    fn count_files_in_entry(entry: &loader::Entry, cancel: &AtomicBool) -> usize {
         match entry {
             loader::Entry::Files(files) => files.len(),
             loader::Entry::Directories(dirs) => {
@@ -391,13 +497,14 @@ impl NotifyActor {
                     dirs.exclude.iter().map(|p| p.as_path().as_ref()).collect();
                 let extensions: Vec<&str> = dirs.extensions.iter().map(|s| s.as_str()).collect();
 
-                stdx::fs::parallel_count(
+                stdx::fs::parallel_count_cancellable(
                     &roots,
                     &stdx::fs::WalkConfig {
                         extensions: &extensions,
                         excludes: &excludes,
                         follow_links: true,
                     },
+                    Some(cancel),
                 )
             }
         }
@@ -413,7 +520,21 @@ impl NotifyActor {
 
     #[track_caller]
     fn send(&self, msg: loader::Message) {
-        self.sender.send(msg).unwrap();
+        // Latch-checked early-out: once shutdown is set we stop emitting,
+        // and (combined with the per-file `shutdown` checks in
+        // [`Self::load_entry`]) the in-flight scan unwinds without finishing
+        // disk reads for results nobody will consume.
+        if self.shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        // The receiver lives in `GlobalState`; once it drops (graceful or
+        // panicked shutdown), the bounded sender would otherwise hang the
+        // loader thread on full-channel waits. Latch shutdown on disconnect
+        // so peer sends and walks see it and abort.
+        if let Err(crossbeam_channel::SendError(_)) = self.sender.send(msg) {
+            tracing::debug!("loader receiver disconnected, aborting vfs scan");
+            self.shutdown.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -443,4 +564,133 @@ fn symlink_might_be_cyclic(path: &Path) -> bool {
         destination.components().all(|c| matches!(c, Component::CurDir | Component::ParentDir));
 
     is_relative_parent || path.starts_with(destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Build a test fixture: `count` files of `bytes_per_file` bytes each,
+    /// extension `.txt`, inside a fresh temp directory. Returns the temp
+    /// guard and the `Directories` entry pointing at it.
+    fn fixture(count: usize, bytes_per_file: usize) -> (tempfile::TempDir, loader::Directories) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for i in 0..count {
+            let path = dir.path().join(format!("file_{i}.txt"));
+            std::fs::write(&path, vec![b'x'; bytes_per_file]).expect("write fixture");
+        }
+        let abs_root = AbsPathBuf::assert_utf8(dir.path().to_path_buf());
+        let dirs = loader::Directories {
+            extensions: vec!["txt".to_string()],
+            include: vec![abs_root],
+            exclude: vec![],
+        };
+        (dir, dirs)
+    }
+
+    /// Drive `load_entry` with the given threshold and capture the chunks it
+    /// emits. Watch / progress callbacks are stubbed; shutdown stays false.
+    fn run(dirs: loader::Directories, threshold: usize) -> Vec<Vec<(AbsPathBuf, usize)>> {
+        let shutdown = AtomicBool::new(false);
+        run_with_shutdown(dirs, threshold, &shutdown)
+    }
+
+    fn run_with_shutdown(
+        dirs: loader::Directories,
+        threshold: usize,
+        shutdown: &AtomicBool,
+    ) -> Vec<Vec<(AbsPathBuf, usize)>> {
+        let chunks: Mutex<Vec<Vec<(AbsPathBuf, usize)>>> = Mutex::new(Vec::new());
+        NotifyActor::load_entry(
+            |_| {},
+            loader::Entry::Directories(dirs),
+            false,
+            |_| {},
+            || {},
+            |files| {
+                let summary =
+                    files.into_iter().map(|(p, c)| (p, c.map(|c| c.len()).unwrap_or(0))).collect();
+                chunks.lock().unwrap().push(summary);
+            },
+            threshold,
+            shutdown,
+        );
+        chunks.into_inner().unwrap()
+    }
+
+    #[test]
+    fn under_threshold_emits_single_chunk() {
+        let (_guard, dirs) = fixture(5, 4 * 1024);
+        let chunks = run(dirs, 1024 * 1024);
+        assert_eq!(chunks.len(), 1, "expected one chunk under threshold, got {chunks:#?}");
+        assert_eq!(chunks[0].len(), 5);
+    }
+
+    #[test]
+    fn over_threshold_emits_multiple_chunks() {
+        // 8 files × 4 KiB = 32 KiB total, threshold 10 KiB → at least 3 chunks.
+        let (_guard, dirs) = fixture(8, 4 * 1024);
+        let chunks = run(dirs, 10 * 1024);
+        assert!(
+            chunks.len() >= 3,
+            "expected multiple chunks over threshold, got {} chunks: {:#?}",
+            chunks.len(),
+            chunks,
+        );
+        let total_files: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total_files, 8, "all files must be emitted exactly once across chunks");
+    }
+
+    #[test]
+    fn empty_entry_emits_no_chunks() {
+        let (_guard, dirs) = fixture(0, 0);
+        let chunks = run(dirs, 1024);
+        assert!(chunks.is_empty(), "empty entry must not emit any Loaded message");
+    }
+
+    #[test]
+    fn oversized_single_file_becomes_own_chunk() {
+        // One 8 KiB file with a 1 KiB threshold: pushed first, then flushed
+        // once the buffer overshoots — the algorithm degrades gracefully on
+        // files larger than the threshold instead of refusing to flush.
+        let (_guard, dirs) = fixture(1, 8 * 1024);
+        let chunks = run(dirs, 1024);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 1);
+        assert_eq!(chunks[0][0].1, 8 * 1024);
+    }
+
+    #[test]
+    fn pre_set_shutdown_skips_scan_and_flush() {
+        // 50 files × 1 KiB; if shutdown was already latched before
+        // load_entry is called, the per-file walk must short-circuit and
+        // the trailing flush must not emit anything either.
+        let (_guard, dirs) = fixture(50, 1024);
+        let shutdown = AtomicBool::new(true);
+        let chunks = run_with_shutdown(dirs, 100 * 1024, &shutdown);
+        assert!(chunks.is_empty(), "shutdown latch must suppress all sends, got {chunks:#?}");
+    }
+
+    #[test]
+    fn handle_drop_latches_shutdown() {
+        // Constructs the inner pieces of `NotifyHandle::spawn` directly so
+        // the test exercises only the `Drop` impl, without racing a real
+        // loader. The worker thread returns immediately so `JoinHandle`
+        // drop joins instantly; the assertion is that the shared shutdown
+        // flag is observable as `true` before the handle's fields complete
+        // their drops — the contract that a count pass or scan needs to
+        // notice receiver disconnect when no `send` has been issued yet.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (sender, _receiver) = unbounded::<Message>();
+        let thread = stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker, "test-drop")
+            .spawn(|| {})
+            .expect("spawn test worker");
+
+        let handle = NotifyHandle { sender, shutdown: Arc::clone(&shutdown), _thread: thread };
+
+        assert!(!shutdown.load(Ordering::Relaxed), "flag is false before drop");
+        drop(handle);
+        assert!(shutdown.load(Ordering::Relaxed), "Drop must latch shutdown");
+    }
 }
