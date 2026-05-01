@@ -73,7 +73,17 @@ pub fn arg_diagnostics_query(
     let _span = tracing::info_span!("arg_diagnostics_query", ?file_id).entered();
     let query_start = Instant::now();
 
+    // Per-stage accumulators — split the 73 ms / owner that the
+    // legacy single Δ rolled together so the slow-query summary can
+    // attribute time to the four independent subsystems on the hot
+    // path: file-level inference, per-owner narrowing, per-arg
+    // narrow-overlay lookup, and per-binding assignability checks.
+    // Their sum + `query_self_ms` (the loop's bookkeeping) reconstructs
+    // `total_elapsed_ms`.
+    let infer_start = Instant::now();
     let infer = db.infer(file_id);
+    let infer_ns = infer_start.elapsed().as_nanos();
+
     if infer.call_arg_bindings.is_empty() {
         return Arc::new(Vec::new());
     }
@@ -105,6 +115,10 @@ pub fn arg_diagnostics_query(
     let mut owner_stats: Vec<OwnerStat> = Vec::new();
     let mut current: Option<OwnerInProgress> = None;
 
+    let mut narrow_ns: u128 = 0;
+    let mut narrow_arg_ns: u128 = 0;
+    let mut emit_ns: u128 = 0;
+
     for binding in &infer.call_arg_bindings {
         let body: &Body = match resolve_body(&module_bodies, binding.owner) {
             Some(body) => body,
@@ -118,8 +132,10 @@ pub fn arg_diagnostics_query(
             current = Some(OwnerInProgress::new(binding.owner));
 
             cached_owner = Some(binding.owner);
+            let narrow_start = Instant::now();
             cached_narrow =
                 if narrowing_enabled { db.narrow(file_id, binding.owner) } else { None };
+            narrow_ns += narrow_start.elapsed().as_nanos();
         }
         if let Some(state) = current.as_mut() {
             state.bindings += 1;
@@ -127,6 +143,7 @@ pub fn arg_diagnostics_query(
         }
         let narrow = cached_narrow.as_deref();
 
+        let narrow_arg_start = Instant::now();
         let arg_types: Vec<Ty> = binding
             .args
             .iter()
@@ -136,7 +153,9 @@ pub fn arg_diagnostics_query(
                 narrow_arg(narrow, body, *arg_id, base)
             })
             .collect();
+        narrow_arg_ns += narrow_arg_start.elapsed().as_nanos();
 
+        let emit_start = Instant::now();
         match &binding.params {
             ParamsShape::Single(params) => {
                 emit_single(&binding.args, &arg_types, params, &mut out, binding.owner)
@@ -145,15 +164,44 @@ pub fn arg_diagnostics_query(
                 emit_overloaded(&binding.args, &arg_types, flat, overloads, &mut out, binding.owner)
             }
         }
+        emit_ns += emit_start.elapsed().as_nanos();
     }
 
     if let Some(prev) = current.take() {
         owner_stats.push(prev.finish());
     }
 
-    log_owner_stats(query_start.elapsed(), &infer.call_arg_bindings, &out, &mut owner_stats);
+    let stage_breakdown = StageBreakdown { infer_ns, narrow_ns, narrow_arg_ns, emit_ns };
+    log_owner_stats(
+        query_start.elapsed(),
+        &infer.call_arg_bindings,
+        &out,
+        &mut owner_stats,
+        stage_breakdown,
+    );
 
     Arc::new(out)
+}
+
+/// Per-stage time budget for one `arg_diagnostics_query` call.
+///
+/// Together with `query_self_ms` (computed in [`log_owner_stats`] as
+/// `total - sum(stages)`) these account for the full wall time of the
+/// query and let the slow-query summary attribute cost to specific
+/// subsystems instead of one opaque per-owner Δ.
+#[derive(Default)]
+struct StageBreakdown {
+    /// Wall time of the single up-front `db.infer(file_id)` call.
+    infer_ns: u128,
+    /// Sum of `db.narrow(file_id, owner)` Salsa reads — paid once per
+    /// distinct owner observed in the bindings stream.
+    narrow_ns: u128,
+    /// Sum of per-binding [`narrow_arg`] passes that materialize
+    /// `arg_types` for the call site.
+    narrow_arg_ns: u128,
+    /// Sum of per-binding [`emit_single`]/[`emit_overloaded`]
+    /// assignability checks that produce the diagnostics.
+    emit_ns: u128,
 }
 
 /// Per-owner timing accumulator. `start` is sampled at the iteration
@@ -209,6 +257,7 @@ fn log_owner_stats(
     bindings: &[crate::infer::CallArgBinding],
     out: &[(DefWithBodyId, InferenceDiagnostic)],
     owner_stats: &mut [OwnerStat],
+    stages: StageBreakdown,
 ) {
     const SLOW_THRESHOLD: Duration = Duration::from_millis(500);
     if total_elapsed < SLOW_THRESHOLD {
@@ -216,11 +265,31 @@ fn log_owner_stats(
     }
 
     owner_stats.sort_by_key(|s| std::cmp::Reverse(s.elapsed));
+
+    let total_ms = total_elapsed.as_millis() as u64;
+    let infer_ms = (stages.infer_ns / 1_000_000) as u64;
+    let narrow_ms = (stages.narrow_ns / 1_000_000) as u64;
+    let narrow_arg_ms = (stages.narrow_arg_ns / 1_000_000) as u64;
+    let emit_ms = (stages.emit_ns / 1_000_000) as u64;
+    // `query_self_ms` captures the loop's bookkeeping (resolve_body,
+    // OwnerStat updates, allocs) — anything not attributed to one of
+    // the four named stages. Saturating sub keeps the field non-negative
+    // even if Instant noise pushes the named-stage sum slightly past
+    // total on very short queries.
+    let attributed_ms =
+        infer_ms.saturating_add(narrow_ms).saturating_add(narrow_arg_ms).saturating_add(emit_ms);
+    let query_self_ms = total_ms.saturating_sub(attributed_ms);
+
     tracing::info!(
-        total_elapsed_ms = total_elapsed.as_millis() as u64,
+        total_elapsed_ms = total_ms,
         total_bindings = bindings.len(),
         total_owners = owner_stats.len(),
         diagnostics = out.len(),
+        infer_ms,
+        narrow_ms,
+        narrow_arg_ms,
+        emit_ms,
+        query_self_ms,
         "arg_diagnostics_query summary",
     );
     for (rank, stat) in owner_stats.iter().take(5).enumerate() {
