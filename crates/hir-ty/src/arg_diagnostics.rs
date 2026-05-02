@@ -103,8 +103,23 @@ pub fn arg_diagnostics_query(
     // even though both produce the same value. Hot bodies have dozens
     // of call sites with several args each — the redundant lookups
     // dominated the diff in `arg_diagnostics_query`'s self-time.
+    //
+    // `narrow_attempted` records whether `db.narrow(file_id, owner)`
+    // has been called for the currently cached owner. Distinct from
+    // `cached_narrow.is_some()`: a successful call that returns None
+    // (body not in this file, solver gave up) must still count as
+    // "attempted" so we don't redrive the Salsa lookup on every binding.
+    // Drives the caller-side gate that skips owners with no Path-typed
+    // arguments — `narrow_arg` returns `base` for non-Path expressions
+    // unconditionally, so an owner whose every binding's args are
+    // literals / qualified-call results / other non-Path shapes can
+    // never observe the narrowing overlay. Skipping it avoids the
+    // ~60 ms CFG-build + dataflow solve that `narrow_query` would
+    // otherwise pay per owner.
     let mut cached_owner: Option<DefWithBodyId> = None;
     let mut cached_narrow: Option<Arc<dataflow::DataflowResult<NarrowState>>> = None;
+    let mut narrow_attempted: bool = false;
+    let mut narrow_skipped_owners: u64 = 0;
 
     // Per-owner accounting for the slow-query profiler. Bindings are
     // appended in body order (see `infer_query`), so each owner's
@@ -129,17 +144,40 @@ pub fn arg_diagnostics_query(
             if let Some(prev) = current.take() {
                 owner_stats.push(prev.finish());
             }
+            // Account for the previous owner before resetting state:
+            // if narrowing was enabled but no binding ever triggered a
+            // `db.narrow` call, that's an owner whose ~60 ms narrow_query
+            // cost we successfully avoided.
+            if narrowing_enabled && cached_owner.is_some() && !narrow_attempted {
+                narrow_skipped_owners += 1;
+            }
             current = Some(OwnerInProgress::new(binding.owner));
 
             cached_owner = Some(binding.owner);
-            let narrow_start = Instant::now();
-            cached_narrow =
-                if narrowing_enabled { db.narrow(file_id, binding.owner) } else { None };
-            narrow_ns += narrow_start.elapsed().as_nanos();
+            cached_narrow = None;
+            narrow_attempted = false;
         }
         if let Some(state) = current.as_mut() {
             state.bindings += 1;
             state.args += binding.args.len();
+        }
+
+        // Lazy `db.narrow` lookup: only fire the Salsa query once we see
+        // a binding whose args contain at least one `Expr::Path`. The
+        // `narrow_arg` helper returns `base` for every non-Path arg
+        // unconditionally, so an owner whose every arg is a literal /
+        // qualified call / other non-Path shape cannot observe the
+        // narrowing overlay — running narrow_query for it would cost
+        // ~60 ms (CFG build + dataflow solve) and discard the result.
+        if narrowing_enabled && !narrow_attempted {
+            let any_path_arg =
+                binding.args.iter().any(|arg_id| matches!(body.expr(*arg_id), Expr::Path(_)));
+            if any_path_arg {
+                let narrow_start = Instant::now();
+                cached_narrow = db.narrow(file_id, binding.owner);
+                narrow_ns += narrow_start.elapsed().as_nanos();
+                narrow_attempted = true;
+            }
         }
         let narrow = cached_narrow.as_deref();
 
@@ -170,8 +208,13 @@ pub fn arg_diagnostics_query(
     if let Some(prev) = current.take() {
         owner_stats.push(prev.finish());
     }
+    // Final owner's accounting — same gate logic as the boundary above.
+    if narrowing_enabled && cached_owner.is_some() && !narrow_attempted {
+        narrow_skipped_owners += 1;
+    }
 
-    let stage_breakdown = StageBreakdown { infer_ns, narrow_ns, narrow_arg_ns, emit_ns };
+    let stage_breakdown =
+        StageBreakdown { infer_ns, narrow_ns, narrow_arg_ns, emit_ns, narrow_skipped_owners };
     log_owner_stats(
         query_start.elapsed(),
         &infer.call_arg_bindings,
@@ -194,7 +237,10 @@ struct StageBreakdown {
     /// Wall time of the single up-front `db.infer(file_id)` call.
     infer_ns: u128,
     /// Sum of `db.narrow(file_id, owner)` Salsa reads — paid once per
-    /// distinct owner observed in the bindings stream.
+    /// distinct owner observed in the bindings stream, *and only when
+    /// at least one binding for that owner has a Path-typed arg* (the
+    /// caller-side gate that skips owners which can never consume the
+    /// overlay).
     narrow_ns: u128,
     /// Sum of per-binding [`narrow_arg`] passes that materialize
     /// `arg_types` for the call site.
@@ -202,6 +248,12 @@ struct StageBreakdown {
     /// Sum of per-binding [`emit_single`]/[`emit_overloaded`]
     /// assignability checks that produce the diagnostics.
     emit_ns: u128,
+    /// Owners for which `db.narrow` was deliberately not called because
+    /// none of their bindings' args were Path expressions. Each skip
+    /// avoids the ~60 ms CFG-build + dataflow solve that narrow_query
+    /// would otherwise pay. Ratio against `total_owners` quantifies the
+    /// caller-side gate's actual hit rate.
+    narrow_skipped_owners: u64,
 }
 
 /// Per-owner timing accumulator. `start` is sampled at the iteration
@@ -290,6 +342,7 @@ fn log_owner_stats(
         narrow_arg_ms,
         emit_ms,
         query_self_ms,
+        narrow_skipped_owners = stages.narrow_skipped_owners,
         "arg_diagnostics_query summary",
     );
     for (rank, stat) in owner_stats.iter().take(5).enumerate() {
