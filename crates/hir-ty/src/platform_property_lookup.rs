@@ -100,7 +100,7 @@ pub(crate) fn lookup_platform_property_by_type(
 /// `resolve_platform_type_name` for each declared value type, then
 /// `Ty::union` when the HBK page declared more than one (e.g.
 /// `МенеджерВременныхТаблиц, Неопределено`).
-fn to_resolution(prop: &PlatformProperty) -> PlatformPropertyResolution {
+pub(crate) fn to_resolution(prop: &PlatformProperty) -> PlatformPropertyResolution {
     PlatformPropertyResolution {
         return_ty: map_property_type_list(&prop.property_types),
         is_readonly: prop.is_readonly,

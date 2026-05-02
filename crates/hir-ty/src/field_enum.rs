@@ -14,7 +14,7 @@
 //! `pub(crate)` so both modules use the single canonical copy.
 
 use bsl_metadata::{AttributeType, MdoType, MetadataObject};
-use bsl_platform::{standard_attributes_for, MdoTemplateKind, ObjectView};
+use bsl_platform::{standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData};
 use hir_def::configs::VisibleConfig;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
@@ -280,6 +280,38 @@ fn enumerate_register_fields(
                 origin: FieldOrigin::RegisterAttribute,
             };
             push_unique(&mut out, &mut seen, info);
+        }
+
+        // Platform properties indexed under the composite type prefix
+        // (`InformationRegisterRecordSet.<Имя>` / `CatalogObject.<Имя>` / …).
+        // Surfaces `Записывать`, `ОбменДанными`, `ДополнительныеСвойства`,
+        // `БлокироватьДляИзменения` (Accounting only), etc., that the HBK
+        // declares per receiver flavour. Pushed AFTER user-defined parts
+        // so a real dimension/resource/attribute always wins on a name
+        // collision (`push_unique` keeps the first entry); the synthetic
+        // `.Отбор` pushed above already won over any platform `Filter`.
+        if let Some(prefix) = kind.platform_prefix() {
+            for prop in PlatformData::instance().get_manager_properties(prefix) {
+                let res = crate::platform_property_lookup::to_resolution(prop);
+                let info = FieldInfo {
+                    name: Name::new(prop.name.as_str()),
+                    name_en: Some(Name::new(
+                        // english_name shape: `<Type>.<Name>.<Property>`
+                        // (composite). Take the rightmost segment so the
+                        // bilingual lookup matches a bare `Filter` /
+                        // `WriteDataHistory` / etc.
+                        prop.english_name
+                            .as_str()
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(prop.english_name.as_str()),
+                    )),
+                    ty: res.return_ty,
+                    is_readonly: res.is_readonly,
+                    origin: FieldOrigin::PlatformProperty,
+                };
+                push_unique(&mut out, &mut seen, info);
+            }
         }
 
         return out;

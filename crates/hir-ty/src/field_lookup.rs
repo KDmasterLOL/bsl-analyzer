@@ -815,6 +815,83 @@ mod tests {
     }
 
     #[test]
+    fn field_lookup_information_register_record_set_pulls_platform_properties() {
+        // After the html-parser fix lets composite-type properties land
+        // in `platform_data.json`, the field enumerator must surface them
+        // on every register record-set receiver. Pin three of the seven
+        // properties HBK declares for `InformationRegisterRecordSet.<Имя>`:
+        // - `Записывать` / `Write` (Boolean)
+        // - `ДополнительныеСвойства` / `AdditionalProperties` (Структура)
+        // - `ЗаписьИсторииДанных` / `WriteDataHistory` (Boolean)
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "Курсы",
+            MdoType::InformationRegister,
+            vec![dimension_typed("Валюта", AttributeType::String { length: Some(3) })],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRecordSet,
+            name: Name::new("Курсы"),
+        };
+        for prop in ["Записывать", "ДополнительныеСвойства", "ЗаписьИсторииДанных"]
+        {
+            assert!(
+                lookup_field(&configs, &receiver, &Name::new(prop)).is_some(),
+                "platform property `{prop}` must surface on InformationRegisterRecordSet",
+            );
+        }
+        // Bilingual contract: English alias resolves too.
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("Write")).is_some(),
+            "English alias `Write` must resolve via bilingual rsplit on english_name",
+        );
+
+        // Accounting-flavour-only property (`БлокироватьДляИзменения` /
+        // `LockForUpdate`) must NOT appear on InformationRegister, but
+        // MUST appear on AccountingRegisterRecordSet — proves per-flavour
+        // platform-prefix routing.
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("БлокироватьДляИзменения")).is_none(),
+            "Accounting-only property must not leak into InformationRegister surface",
+        );
+    }
+
+    #[test]
+    fn field_lookup_accounting_register_record_set_has_lock_for_update() {
+        // Cross-flavour pin: AccountingRegisterRecordSet's HBK page declares
+        // `БлокироватьДляИзменения` / `LockForUpdate`, which is absent on
+        // every other record-set flavour. The platform-prefix routing in
+        // `enumerate_register_fields` must thread the right prefix per
+        // receiver kind so these flavour-specific properties surface.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "Хозрасчетный",
+            MdoType::AccountingRegister,
+            vec![],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::AccountingRegisterRecordSet,
+            name: Name::new("Хозрасчетный"),
+        };
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("БлокироватьДляИзменения")).is_some(),
+            "AccountingRegisterRecordSet must expose БлокироватьДляИзменения from HBK",
+        );
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("LockForUpdate")).is_some(),
+            "English alias LockForUpdate must resolve via bilingual rsplit",
+        );
+    }
+
+    #[test]
     fn field_lookup_register_filter_synthesized_for_all_record_set_flavours() {
         // The synthetic `.Отбор` push must fire for every register
         // record-set kind we declare today (Information / Accumulation
