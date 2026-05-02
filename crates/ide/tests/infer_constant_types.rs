@@ -227,11 +227,17 @@ fn three_level_set_with_matching_type_is_silent() {
 }
 
 #[test]
-fn typed_sink_fires_on_get_of_number_constant() {
-    // Round-trip the original session's snippet shape: passing a
-    // Number-constant `Получить()` into the String-typed sink
-    // `ПустаяСтрока(...)` must fire `TypeMismatch`. Proves typing is
-    // live, not just permissive.
+fn typed_sink_silent_on_number_into_string_via_coercion() {
+    // Pin the call-site coercion rule from `is_coercible_to`:
+    // `ПустаяСтрока(<Number>)` lands a typed-Number constant into
+    // a `String`-declared platform sink. BSL implicitly stringifies
+    // any value flowing into a String slot, so this is noise rather
+    // than a runtime bug — the diagnostic must stay silent.
+    //
+    // Live-typing coverage at the qualified-call hook is already
+    // pinned by `three_level_set_typechecks_first_argument` (which
+    // exercises the reverse direction `String → Number`, where the
+    // coercion rule does NOT apply and the diagnostic still fires).
     let fixture = r#"
 //- /test.bsl
 Функция Тест()
@@ -239,10 +245,10 @@ fn typed_sink_fires_on_get_of_number_constant() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    let mm = type_mismatches(&db, file_id);
-    assert!(
-        mm.iter().any(|(e, a)| matches!(e, Ty::String) && matches!(a, Ty::Number)),
-        "expected TypeMismatch(String, Number) on ПустаяСтрока(<Number>), got {mm:?}",
+    assert_eq!(
+        type_mismatches(&db, file_id),
+        Vec::<(Ty, Ty)>::new(),
+        "Number arg into a String-typed platform sink must coerce silently — BSL stringifies on entry",
     );
 }
 

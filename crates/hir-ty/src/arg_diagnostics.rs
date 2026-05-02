@@ -412,7 +412,7 @@ fn emit_single(
     owner: DefWithBodyId,
 ) {
     for ((arg_id, arg_ty), param_ty) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
-        if !crate::subtype::is_assignable(arg_ty, param_ty) {
+        if !crate::subtype::is_coercible_to(arg_ty, param_ty) {
             out.push((
                 owner,
                 InferenceDiagnostic::TypeMismatch {
@@ -454,7 +454,7 @@ fn emit_overloaded(
         if args.len() > params.len() {
             return false;
         }
-        arg_types.iter().zip(params.iter()).all(|(a, p)| crate::subtype::is_assignable(a, p))
+        arg_types.iter().zip(params.iter()).all(|(a, p)| crate::subtype::is_coercible_to(a, p))
     });
     if any_accepts {
         return;

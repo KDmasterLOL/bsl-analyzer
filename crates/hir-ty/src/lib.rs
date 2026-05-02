@@ -67,5 +67,5 @@ pub use platform_manager_lookup::{
     resolve_platform_manager_method, resolve_platform_metadata_ref_method, PlatformMethodResolution,
 };
 pub use platform_property_lookup::{lookup_platform_property, PlatformPropertyResolution};
-pub use subtype::{is_assignable, is_ref_ty};
+pub use subtype::{is_assignable, is_coercible_to, is_ref_ty};
 pub use this_object::coerce_to_metadata_ref as coerce_this_object_to_metadata_ref;

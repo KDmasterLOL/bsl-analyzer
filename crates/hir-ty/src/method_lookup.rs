@@ -697,11 +697,15 @@ mod tests {
         // string makes the whole union degenerate. Collapsing to
         // `Ty::Unknown` keeps the gradual rule firing on typed sinks; a
         // `Ty::union([Unknown, Undefined])` would *not* — `is_assignable`
-        // distributes on the left and `Undefined ≤ String` is false, so
-        // `ПустаяСтрока(...)` against a `"Произвольный, Неопределено"`
-        // return would still false-fire `TypeMismatch`. Pinned platform
-        // entries: `LoadDefaultSetting` and the second `Произвольный,
-        // Неопределено` site in platform_data.json.
+        // distributes on the left, and for any non-String typed sink
+        // (e.g. `НачалоДня(Дата - Дата)`) `Undefined ≤ Дата` is false,
+        // so `НачалоДня(LoadDefaultSetting())` would still false-fire
+        // `TypeMismatch`. (The bare `to == Ty::String` short-circuit in
+        // `subtype::is_coercible_to` masks this for String sinks
+        // specifically, but the collapse must hold for every typed sink,
+        // not just String.) Pinned platform entries: `LoadDefaultSetting`
+        // and the second `Произвольный, Неопределено` site in
+        // platform_data.json.
         assert_eq!(resolve_platform_type_union("Произвольный, Неопределено"), Ty::Unknown);
         assert_eq!(resolve_platform_type_union("Неопределено, Произвольный"), Ty::Unknown);
         assert_eq!(resolve_platform_type_union("Arbitrary, Undefined"), Ty::Unknown);
