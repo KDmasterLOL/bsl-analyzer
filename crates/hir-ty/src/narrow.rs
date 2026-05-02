@@ -60,6 +60,7 @@ use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId, Name};
 use la_arena::{Idx, RawIdx};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use vfs::FileId;
 
 use crate::db::HirDatabase;
@@ -670,7 +671,14 @@ pub fn narrow_query(
     owner: DefWithBodyId,
 ) -> Option<Arc<dataflow::DataflowResult<NarrowState>>> {
     let _span = tracing::info_span!("narrow_query", ?file_id, ?owner).entered();
+    let total_start = Instant::now();
 
+    // Per-stage Δ instrumentation. Slow `arg_diagnostics_query` summary
+    // already showed `narrow_ms` dominates; this breakdown attributes
+    // those ~60 ms / owner across the steps inside narrow_query so
+    // optimization targeting (cached CFG, in-place join, etc.) gets a
+    // ranked list rather than a single black-box Δ.
+    let resolve_start = Instant::now();
     let module_id = ModuleId { file_id };
     let module_bodies = db.module_bodies(module_id);
 
@@ -680,13 +688,102 @@ pub fn narrow_query(
             module_bodies.lower_result(local_id).map(|lr| &lr.body)?
         }
     };
+    let resolve_ns = resolve_start.elapsed().as_nanos();
 
+    let infer_start = Instant::now();
     let infer = db.infer(file_id);
     let per_body_types = infer.expr_types_by_body.get(&owner);
-    let base_types = build_base_types_for_body(body, per_body_types);
+    let infer_ns = infer_start.elapsed().as_nanos();
 
-    let result = narrow_body(body.clone(), base_types)?;
-    Some(Arc::new(result))
+    let base_types_start = Instant::now();
+    let base_types = build_base_types_for_body(body, per_body_types);
+    let base_types_ns = base_types_start.elapsed().as_nanos();
+
+    // Inline CFG build + solve so the `narrow_body` test helper signature
+    // stays untouched while we get isolated timers for the two heaviest
+    // chunks. The `body.clone()` is forced by `DataflowSolver::new`
+    // taking `Body` by value — kept measurable so it can be revisited
+    // separately if the clone shows up as a hot allocation.
+    let body_clone_start = Instant::now();
+    let body_owned = body.clone();
+    let body_clone_ns = body_clone_start.elapsed().as_nanos();
+
+    let cfg_build_start = Instant::now();
+    let cfg = Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(
+        body_owned.body_stmts_typed(),
+        &body_owned,
+        None,
+    ));
+    let cfg_build_ns = cfg_build_start.elapsed().as_nanos();
+
+    let solve_start = Instant::now();
+    let mut solver =
+        dataflow::DataflowSolver::new(cfg, body_owned, NarrowingTransfer::new(base_types));
+    solver.set_bottom_factory(NarrowState::new);
+    let solved = solver.solve();
+    let solve_ns = solve_start.elapsed().as_nanos();
+
+    let stages = NarrowQueryStages {
+        total_ns: total_start.elapsed().as_nanos(),
+        resolve_ns,
+        infer_ns,
+        base_types_ns,
+        body_clone_ns,
+        cfg_build_ns,
+        solve_ns,
+    };
+    log_narrow_query_stages(owner, &stages);
+
+    Some(Arc::new(solved?))
+}
+
+/// Per-stage time budget for one [`narrow_query`] call.
+///
+/// Together they cover total wall time of the call. Microsecond-keyed
+/// fields surface in the slow-path log when the call exceeds
+/// [`log_narrow_query_stages`]'s threshold so optimization work has a
+/// concrete target ranking instead of one opaque per-owner Δ.
+struct NarrowQueryStages {
+    /// Wall time of the entire `narrow_query` call.
+    total_ns: u128,
+    /// `db.module_bodies(module_id)` lookup + `Body` resolution by owner.
+    resolve_ns: u128,
+    /// `db.infer(file_id)` Salsa hit (Arc clone in steady state) +
+    /// per-body type-map fetch.
+    infer_ns: u128,
+    /// `build_base_types_for_body` — linear scan over `Expr::Path` nodes.
+    base_types_ns: u128,
+    /// `body.clone()` forced by the `DataflowSolver::new` by-value contract.
+    body_clone_ns: u128,
+    /// `CfgBuilder::build_graph_from_hir` — currently rebuilt every call
+    /// (no Salsa cache hit), the prime suspect for narrow_ms dominance.
+    cfg_build_ns: u128,
+    /// `DataflowSolver::solve` — fixed-point iterations over `NarrowState`.
+    solve_ns: u128,
+}
+
+/// Emit a per-call stage breakdown when narrow_query takes longer than
+/// the slow-path threshold. Filters out the median-fast calls so the
+/// log stays a usable signal: the hot file `ОбщегоНазначения` produces
+/// 240 owners; with a 20 ms gate only those above the median surface,
+/// keeping the scan compact while preserving every interesting tail.
+fn log_narrow_query_stages(owner: DefWithBodyId, stages: &NarrowQueryStages) {
+    const SLOW_NS: u128 = 20_000_000; // 20 ms
+    if stages.total_ns < SLOW_NS {
+        return;
+    }
+    let to_us = |ns: u128| (ns / 1_000) as u64;
+    tracing::info!(
+        owner = ?owner,
+        total_us = to_us(stages.total_ns),
+        resolve_us = to_us(stages.resolve_ns),
+        infer_us = to_us(stages.infer_ns),
+        base_types_us = to_us(stages.base_types_ns),
+        body_clone_us = to_us(stages.body_clone_ns),
+        cfg_build_us = to_us(stages.cfg_build_ns),
+        solve_us = to_us(stages.solve_ns),
+        "narrow_query stages",
+    );
 }
 
 /// Build a per-body `Name → Ty` base map by scanning [`Expr::Path`]
