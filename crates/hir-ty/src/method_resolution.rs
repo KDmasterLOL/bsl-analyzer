@@ -233,14 +233,19 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef => return None,
-        // Register record managers / record sets — RecordSetModule.bsl
-        // resolution is Phase C scope, not Phase B.
+        // Register record managers / record sets — RecordSetModule.bsl,
+        // not ObjectModule.bsl. Reject here so the gate stays strict.
         MetadataKind::InformationRegisterRecordManager
-        | MetadataKind::AccumulationRegisterRecordSet => return None,
-        // Register parts and tabular sections — no module.
+        | MetadataKind::InformationRegisterRecordSet
+        | MetadataKind::AccumulationRegisterRecordSet
+        | MetadataKind::AccountingRegisterRecordSet
+        | MetadataKind::CalculationRegisterRecordSet => return None,
+        // Register parts, the synthetic `RegisterFilter` receiver, and
+        // tabular sections have no ObjectModule.bsl surface.
         MetadataKind::RegisterDimension { .. }
         | MetadataKind::RegisterResource { .. }
         | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::RegisterFilter { .. }
         | MetadataKind::TabularSection { .. }
         | MetadataKind::TabularSectionRow { .. } => return None,
     })
@@ -253,21 +258,18 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
 /// receiver shape that BSL semantics actually allows to reach
 /// `RecordSetModule.bsl`'s exported procedures:
 ///
+/// - [`MetadataKind::InformationRegisterRecordSet`] → `MdoType::InformationRegister`
 /// - [`MetadataKind::AccumulationRegisterRecordSet`] → `MdoType::AccumulationRegister`
+/// - [`MetadataKind::AccountingRegisterRecordSet`] → `MdoType::AccountingRegister`
+/// - [`MetadataKind::CalculationRegisterRecordSet`] → `MdoType::CalculationRegister`
 ///
 /// **`InformationRegisterRecordManager` is NOT in this map.**
-/// Although `RecordSetModule.bsl` exists for information registers,
-/// the receiver returned by
-/// `РегистрыСведений.X.СоздатьМенеджерЗаписи()` is a *record manager*
-/// (a single-record handle), not a record set. Per 1С runtime
-/// semantics, exported procedures inside `RecordSetModule.bsl` are
-/// callable through a record-set receiver, NOT through the record
-/// manager — calling `МЗ.Экспорт()` where `Экспорт()` lives in
-/// `RecordSetModule.bsl` is rejected by 1С. Wiring it here would
-/// false-positive that error path. (Information-register record
-/// **sets** would be the correct receiver, but our HIR has no
-/// dedicated `InformationRegisterRecordSet` variant today;
-/// adding one is out of scope for Phase C.)
+/// Per 1С runtime semantics, exported procedures inside
+/// `RecordSetModule.bsl` are callable through a record-set receiver,
+/// NOT through the record manager. Calling `МЗ.Экспорт()` where
+/// `Экспорт()` lives in `RecordSetModule.bsl` is rejected by 1С;
+/// wiring the record-manager kind here would false-positive that
+/// error path.
 ///
 /// `*Object` kinds belong to [`object_kind_to_mdo`]. `*Ref` kinds and
 /// register parts return `None` — no module-level call surface. The
@@ -278,7 +280,10 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
     use bsl_metadata::MdoType;
     use hir_def::ty::MetadataKind;
     Some(match kind {
+        MetadataKind::InformationRegisterRecordSet => MdoType::InformationRegister,
         MetadataKind::AccumulationRegisterRecordSet => MdoType::AccumulationRegister,
+        MetadataKind::AccountingRegisterRecordSet => MdoType::AccountingRegister,
+        MetadataKind::CalculationRegisterRecordSet => MdoType::CalculationRegister,
         // `InformationRegisterRecordManager` deliberately rejected —
         // see doc comment above (1С semantics: `RecordSetModule.bsl`
         // procedures need a record-set receiver, not a record-manager).
@@ -300,10 +305,12 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef => return None,
-        // Register parts and tabular sections — no module.
+        // Register parts, the synthetic `RegisterFilter` receiver, and
+        // tabular sections have no RecordSetModule.bsl surface.
         MetadataKind::RegisterDimension { .. }
         | MetadataKind::RegisterResource { .. }
         | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::RegisterFilter { .. }
         | MetadataKind::TabularSection { .. }
         | MetadataKind::TabularSectionRow { .. } => return None,
     })
@@ -539,17 +546,37 @@ mod tests {
     fn record_set_kind_to_mdo_accepts_only_register_set_variants() {
         use bsl_metadata::MdoType;
         use hir_def::ty::MetadataKind;
-        // Phase C strict-filter contract: only record-set kinds reach
+        // Strict-filter contract: only record-set kinds reach
         // `RecordSetModule.bsl` per 1С semantics.
+        assert_eq!(
+            record_set_kind_to_mdo(MetadataKind::InformationRegisterRecordSet),
+            Some(MdoType::InformationRegister),
+        );
         assert_eq!(
             record_set_kind_to_mdo(MetadataKind::AccumulationRegisterRecordSet),
             Some(MdoType::AccumulationRegister),
+        );
+        assert_eq!(
+            record_set_kind_to_mdo(MetadataKind::AccountingRegisterRecordSet),
+            Some(MdoType::AccountingRegister),
+        );
+        assert_eq!(
+            record_set_kind_to_mdo(MetadataKind::CalculationRegisterRecordSet),
+            Some(MdoType::CalculationRegister),
         );
         // `InformationRegisterRecordManager` is a single-record
         // handle, not a record-set receiver — 1С rejects calls to
         // `RecordSetModule.bsl` exports through it.
         assert_eq!(record_set_kind_to_mdo(MetadataKind::InformationRegisterRecordManager), None);
-        // `*Object` rejected (Phase B territory).
+        // Synthetic `RegisterFilter` is the `.Отбор` receiver, not a
+        // record-set; it has no module-level call surface of its own.
+        assert_eq!(
+            record_set_kind_to_mdo(MetadataKind::RegisterFilter {
+                parent: MdoType::InformationRegister,
+            }),
+            None,
+        );
+        // `*Object` rejected.
         assert_eq!(record_set_kind_to_mdo(MetadataKind::CatalogObject), None);
         assert_eq!(record_set_kind_to_mdo(MetadataKind::DocumentObject), None);
         // `*Ref` rejected.

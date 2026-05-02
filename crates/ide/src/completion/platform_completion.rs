@@ -287,14 +287,23 @@ fn collect_platform_items_for_effective<DB: RootDatabase>(
 
 /// Collect only platform methods/properties for a receiver — no MDO fields.
 ///
-/// Handles the three sub-cases:
-/// - `TabularSection` / `TabularSectionRow` → scalar-key path.
+/// Handles four sub-cases:
+/// - `TabularSection` / `TabularSectionRow` → flat-typename scalar path.
+/// - Synthetic kinds with [`hir::MetadataKind::scalar_platform_key`] (e.g.
+///   `RegisterFilter` → `"Filter"`) → flat-typename scalar path. Lets
+///   `<recordSet>.Отбор.|` surface `Сбросить`, `Получить`, … from the
+///   single `Filter` HBK row.
 /// - `ObjectManager` → manager prefix.
-/// - `MetadataRef` with a known platform prefix → manager prefix.
+/// - `MetadataRef` with a known [`hir::MetadataKind::platform_prefix`] →
+///   manager prefix.
 fn collect_platform_items<DB: RootDatabase>(db: &DB, receiver_ty: &Ty) -> Vec<CompletionItem> {
     if let Ty::MetadataRef { kind, .. } = receiver_ty {
         if let Some(scalar_key) = tabular_section_scalar_key(*kind) {
             tracing::debug!(scalar_key, "Tabular section scalar completion");
+            return complete_platform_methods(db, scalar_key);
+        }
+        if let Some(scalar_key) = kind.scalar_platform_key() {
+            tracing::debug!(scalar_key, "Synthetic-kind scalar completion");
             return complete_platform_methods(db, scalar_key);
         }
     }

@@ -748,16 +748,129 @@ fn record_manager_platform_method_resolves() {
     );
 }
 
-// Note: end-to-end workspace-`RecordSetModule.bsl` tests intentionally
-// omitted. Per 1С semantics those exports are reachable only through a
-// record-*set* receiver, but `СоздатьМенеджерЗаписи()` returns a
-// record-*manager*, and there is no `СоздатьНаборЗаписей()` rebinding
-// for InformationRegister today (that would need an
-// `InformationRegisterRecordSet` `MetadataKind` variant — out of
-// Phase C scope). The unit-level `record_set_kind_to_mdo_accepts_only_*`
-// test in `crates/hir-ty/src/method_resolution.rs` pins the strict
-// filter contract; once the missing variant lands the IDE test can be
-// added without changing the Phase C wiring.
+#[test]
+fn record_set_platform_method_resolves_on_information_register() {
+    // After wiring `MetadataKind::InformationRegisterRecordSet`,
+    // `СоздатьНаборЗаписей()` rebinds to a typed record-set receiver
+    // and platform methods declared under
+    // `InformationRegisterRecordSet.<Имя>` (`Записать`, `Загрузить`,
+    // `Очистить`, …) MUST resolve through the metadata-ref path.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    НЗ = РегистрыСведений.РегистрСведений1.СоздатьНаборЗаписей();
+    НЗ.Записать();
+    НЗ.Загрузить(Новый ТаблицаЗначений);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let unresolved = unresolved_method_names(&db, file_id);
+    assert!(
+        !unresolved.iter().any(|n| n.eq_ignore_ascii_case("Записать")),
+        "platform Записать on InformationRegisterRecordSet must resolve; got {unresolved:?}",
+    );
+    assert!(
+        !unresolved.iter().any(|n| n.eq_ignore_ascii_case("Загрузить")),
+        "platform Загрузить on InformationRegisterRecordSet must resolve; got {unresolved:?}",
+    );
+    assert!(
+        unresolved_field_names(&db, file_id).is_empty(),
+        "record-set platform method calls must not emit UnresolvedField; got {:?}",
+        unresolved_field_names(&db, file_id),
+    );
+}
+
+#[test]
+fn record_set_filter_dimension_set_method_resolves() {
+    // Repro of the original user defect: the full chain
+    // `НаборЗаписей.Отбор.<Изм>.Установить(...)` must fully resolve.
+    // Step-by-step:
+    //   1. `СоздатьНаборЗаписей()` → `MetadataRef{InformationRegisterRecordSet}`
+    //   2. `.Отбор` → synthetic `MetadataRef{RegisterFilter{InformationRegister}}`
+    //   3. `.Справочник1` (the fixture's only dimension) →
+    //      `Ty::PlatformObject("ЭлементОтбора")`
+    //   4. `.Установить(...)` → platform `FilterItem.Установить` method
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест(Знач Значение)
+    НЗ = РегистрыСведений.РегистрСведений1.СоздатьНаборЗаписей();
+    НЗ.Отбор.Справочник1.Установить(Значение);
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        !unresolved_method_names(&db, file_id).iter().any(|n| n.eq_ignore_ascii_case("Установить")),
+        "FilterItem.Установить must resolve through scalar-key + platform path; got {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+    let unresolved_fields = unresolved_field_names(&db, file_id);
+    assert!(
+        !unresolved_fields.iter().any(|n| n.eq_ignore_ascii_case("Отбор")),
+        "synthetic .Отбор must resolve as a field; got unresolved fields: {unresolved_fields:?}",
+    );
+    assert!(
+        !unresolved_fields.iter().any(|n| n.eq_ignore_ascii_case("Справочник1")),
+        "dimension Справочник1 must resolve through Filter member surface; \
+         got unresolved fields: {unresolved_fields:?}",
+    );
+}
+
+#[test]
+fn record_set_filter_method_resolves_through_scalar_key() {
+    // Filter's own scalar methods (`Сбросить`, `Получить`, `Найти`,
+    // …) must be reachable on a `RegisterFilter` receiver via the
+    // `metadata_ref_scalar_key` side channel. Their HBK rows live
+    // under `type_name = "Filter"`, not a composite prefix.
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    НЗ = РегистрыСведений.РегистрСведений1.СоздатьНаборЗаписей();
+    НЗ.Отбор.Сбросить();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert!(
+        !unresolved_method_names(&db, file_id).iter().any(|n| n.eq_ignore_ascii_case("Сбросить")),
+        "Filter.Сбросить must resolve through scalar-key path; got {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+}
+
+#[test]
+fn aliased_record_set_workspace_method_unresolved_keeps_strict_diagnostic() {
+    // `RecordSetModule.bsl` for InformationRegister is now in scope
+    // (after the new `record_set_kind_to_mdo` arm). The fixture's
+    // RecordSetModule.bsl has no exported `НесуществующийМетод`; the
+    // chain below must surface an authoritative `MethodNotFound`,
+    // not silently fall through to "type unknown".
+    let fixture = r#"
+//- /test.bsl
+Процедура Тест()
+    НЗ = РегистрыСведений.РегистрСведений1.СоздатьНаборЗаписей();
+    НЗ.НесуществующийМетод();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    let entries: Vec<_> = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter_map(|(_, d)| match d {
+            InferenceDiagnostic::UnresolvedMethodCall { method_name, kind, .. }
+                if method_name.as_str().eq_ignore_ascii_case("НесуществующийМетод") =>
+            {
+                Some(*kind)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        vec![UnresolvedMethodKind::MethodNotFound],
+        "record-set miss is authoritative now that workspace+platform paths are wired; \
+         got {entries:?}",
+    );
+}
 
 #[test]
 fn metadata_ref_object_module_workspace_method_resolves() {

@@ -98,7 +98,11 @@ pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<Fiel
     }
 
     if let Some(parent) = register_parent_for_kind(*kind) {
-        return enumerate_register_fields(configs, parent, name);
+        return enumerate_register_fields(configs, *kind, parent, name);
+    }
+
+    if let MetadataKind::RegisterFilter { parent } = kind {
+        return enumerate_filter_fields(configs, *parent, name);
     }
 
     if let MetadataKind::TabularSectionRow { parent } = kind {
@@ -109,6 +113,21 @@ pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<Fiel
     }
 
     Vec::new()
+}
+
+/// Whether `kind` represents a register **record-set** receiver — the only
+/// shape that exposes the synthetic `.Отбор` (Filter) field.
+///
+/// Record-manager / value-key (`*Ref`) kinds are excluded: their 1С runtime
+/// surface does not expose `.Отбор`.
+fn is_record_set_kind(kind: MetadataKind) -> bool {
+    matches!(
+        kind,
+        MetadataKind::InformationRegisterRecordSet
+            | MetadataKind::AccumulationRegisterRecordSet
+            | MetadataKind::AccountingRegisterRecordSet
+            | MetadataKind::CalculationRegisterRecordSet
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +189,7 @@ fn enumerate_mdo_fields(
 
 fn enumerate_register_fields(
     configs: &[VisibleConfig],
+    kind: MetadataKind,
     parent: MdoType,
     register_name: &Name,
 ) -> Vec<FieldInfo> {
@@ -180,11 +200,35 @@ fn enumerate_register_fields(
             continue;
         };
 
-        let cap =
-            register.dimensions().len() + register.resources().len() + register.attributes().len();
+        let cap = register.dimensions().len()
+            + register.resources().len()
+            + register.attributes().len()
+            + 1;
         let mut out = Vec::with_capacity(cap);
         let mut seen: std::collections::HashSet<Name> =
             std::collections::HashSet::with_capacity(cap * 2);
+
+        // Synthetic `.Отбор` (Filter) on record-set receivers. The HBK
+        // does not declare this property on any RecordSet `type_name`
+        // (gap of `shcntx_ru.hbk`, not a scraper bug), so we synthesize
+        // it from 1С runtime semantics. Pushed BEFORE dimensions so a
+        // collision with a dimension named `Отбор` is resolved in
+        // favour of the synthetic Filter — matches 1С behaviour, where
+        // the platform property always wins (the dimension stays
+        // reachable as `<recordSet>.Отбор.Отбор`).
+        if is_record_set_kind(kind) {
+            let info = FieldInfo {
+                name: Name::new("Отбор"),
+                name_en: Some(Name::new("Filter")),
+                ty: Ty::MetadataRef {
+                    kind: MetadataKind::RegisterFilter { parent },
+                    name: register_name.clone(),
+                },
+                is_readonly: true,
+                origin: FieldOrigin::PlatformProperty,
+            };
+            push_unique(&mut out, &mut seen, info);
+        }
 
         for dim in register.dimensions() {
             let info = FieldInfo {
@@ -234,6 +278,54 @@ fn enumerate_register_fields(
                 ),
                 is_readonly: false,
                 origin: FieldOrigin::RegisterAttribute,
+            };
+            push_unique(&mut out, &mut seen, info);
+        }
+
+        return out;
+    }
+    Vec::new()
+}
+
+/// Enumerate the members of a record-set's `Отбор` (Filter) — one
+/// `ЭлементОтбора` (FilterItem) per register dimension.
+///
+/// 1С runtime exposes the register's dimensions as the keyed members
+/// of the Filter object on a record-set: `НаборЗаписей.Отбор.<Имя>`
+/// returns a FilterItem you can call `.Установить(...)` on. This is
+/// not declared in HBK (`platform_data.json` has no `Отбор` property
+/// on any RecordSet `type_name`), so we synthesize it directly from
+/// the register's XML metadata.
+///
+/// Resources / attributes are intentionally excluded — only dimensions
+/// participate in the Filter member surface.
+///
+/// Returns an empty `Vec` when the register name does not resolve
+/// against any visible configuration; same fallthrough policy as
+/// [`enumerate_register_fields`].
+fn enumerate_filter_fields(
+    configs: &[VisibleConfig],
+    parent: MdoType,
+    register_name: &Name,
+) -> Vec<FieldInfo> {
+    for cfg in configs.iter().rev() {
+        let Some(register) =
+            cfg.configuration.find_register_by_type_and_name(parent, register_name.as_str())
+        else {
+            continue;
+        };
+
+        let mut out = Vec::with_capacity(register.dimensions().len());
+        let mut seen: std::collections::HashSet<Name> =
+            std::collections::HashSet::with_capacity(register.dimensions().len() * 2);
+
+        for dim in register.dimensions() {
+            let info = FieldInfo {
+                name: Name::new(dim.name()),
+                name_en: None,
+                ty: Ty::PlatformObject(Name::new("ЭлементОтбора")),
+                is_readonly: false,
+                origin: FieldOrigin::RegisterDimension,
             };
             push_unique(&mut out, &mut seen, info);
         }
@@ -319,14 +411,18 @@ pub(crate) fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
             Some(MdoType::ChartOfAccounts)
         }
         MetadataKind::InformationRegisterRecordManager
+        | MetadataKind::InformationRegisterRecordSet
         | MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRecordSet
         | MetadataKind::AccumulationRegisterRef
+        | MetadataKind::AccountingRegisterRecordSet
         | MetadataKind::AccountingRegisterRef
+        | MetadataKind::CalculationRegisterRecordSet
         | MetadataKind::CalculationRegisterRef
         | MetadataKind::RegisterDimension { .. }
         | MetadataKind::RegisterResource { .. }
         | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::RegisterFilter { .. }
         | MetadataKind::TabularSection { .. }
         | MetadataKind::TabularSectionRow { .. } => None,
     }
@@ -334,18 +430,24 @@ pub(crate) fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
 
 /// Map a register-flavoured receiver `MetadataKind` to its register [`MdoType`].
 ///
-/// Returns `None` for non-register kinds and for leaf part kinds
-/// (`RegisterDimension` / `RegisterResource` / `RegisterAttribute`).
+/// Returns `None` for non-register kinds, leaf part kinds
+/// (`RegisterDimension` / `RegisterResource` / `RegisterAttribute`),
+/// and the synthetic `RegisterFilter` (which is dispatched separately
+/// in [`enumerate_fields`]).
 pub(crate) fn register_parent_for_kind(kind: MetadataKind) -> Option<MdoType> {
     match kind {
-        MetadataKind::InformationRegisterRecordManager | MetadataKind::InformationRegisterRef => {
-            Some(MdoType::InformationRegister)
-        }
+        MetadataKind::InformationRegisterRecordManager
+        | MetadataKind::InformationRegisterRecordSet
+        | MetadataKind::InformationRegisterRef => Some(MdoType::InformationRegister),
         MetadataKind::AccumulationRegisterRecordSet | MetadataKind::AccumulationRegisterRef => {
             Some(MdoType::AccumulationRegister)
         }
-        MetadataKind::AccountingRegisterRef => Some(MdoType::AccountingRegister),
-        MetadataKind::CalculationRegisterRef => Some(MdoType::CalculationRegister),
+        MetadataKind::AccountingRegisterRecordSet | MetadataKind::AccountingRegisterRef => {
+            Some(MdoType::AccountingRegister)
+        }
+        MetadataKind::CalculationRegisterRecordSet | MetadataKind::CalculationRegisterRef => {
+            Some(MdoType::CalculationRegister)
+        }
         _ => None,
     }
 }
