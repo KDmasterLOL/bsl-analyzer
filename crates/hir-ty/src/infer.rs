@@ -26,6 +26,7 @@
 //! - Shadowing detection
 //! - Diagnostic collection (UnresolvedMethodCall, MismatchedArgCount)
 
+use base_db::FileIdInput;
 use cfg_types::IdConversion;
 use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt, StmtIdx, UnaryOp};
@@ -2445,7 +2446,7 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     mdo_type_to_plural(mdo)
 }
 
-/// Salsa query: Infer types for all expressions in a file.
+/// Salsa tracked query: Infer types for all expressions in a file.
 ///
 /// This is the main entry point for type inference. It:
 /// 1. Gets the HIR bodies for the file via module_bodies query
@@ -2455,10 +2456,22 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
 ///
 /// # Caching
 ///
-/// Results are cached by Salsa. The query is invalidated when:
-/// - The file content changes (via parse query)
-/// - Dependencies change (via module_bodies query)
-pub fn infer_query(db: &dyn HirDatabase, file_id: FileId) -> Arc<InferenceResult> {
+/// Salsa memoizes the `Arc<InferenceResult>` keyed on `FileIdInput`,
+/// so repeated `db.infer(file_id)` calls inside one revision return the
+/// same Arc without re-running inference. Without this attribute the
+/// function ran in full for every caller — `narrow_query`,
+/// `type_of_expr_query`, `Semantics::type_of_expr`, hover, goto-def,
+/// completion — turning each interaction into a fresh whole-file pass.
+///
+/// Invalidation flows from the underlying tracked queries
+/// (`module_bodies`, configuration, etc.); we don't enumerate
+/// dependencies manually.
+#[salsa::tracked(lru = 256)]
+pub fn infer_query<'db>(
+    db: &'db dyn HirDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<InferenceResult> {
+    let file_id = file_id_input.file_id(db);
     let _p = tracing::info_span!("infer_query", ?file_id).entered();
 
     // Get HIR bodies from DefDatabase
