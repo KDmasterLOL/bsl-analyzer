@@ -938,9 +938,17 @@ fn parse_property_html(
 ) -> Result<Option<PropertyInfo>> {
     let html_content = fs::read_to_string(html_path)?;
 
-    // Title format: `Запрос.Параметры (Query.Parameters)`. Same two-step
-    // split as `parse_method_html`: dot separates the type prefix, parens
-    // separate the Russian and English sides.
+    // Title format:
+    // - Scalar type: `Запрос.Параметры (Query.Parameters)` — 1 dot per side.
+    // - Composite type: `РегистрСведенийНаборЗаписей.<Имя регистра сведений>.Отбор
+    //   (InformationRegisterRecordSet.<Information register name>.Filter)` —
+    //   2+ dots per side, with `<…>` placeholder segments inside.
+    //
+    // Use `rfind('.')` to anchor on the LAST dot — the property name is
+    // always the rightmost segment, regardless of how many composite
+    // qualifiers precede it. Splitting on the first dot would break
+    // composite types: the property fragment would start with `<Имя…`
+    // and the placeholder filter below would silently drop the entry.
     let Some(title_start) = html_content.find(r#"<h1 class="V8SH_pagetitle">"#) else {
         return Ok(None);
     };
@@ -950,27 +958,26 @@ fn parse_property_html(
     };
     let title = &after_title[..title_end];
 
-    let Some(dot_pos) = title.find('.') else {
-        return Ok(None);
-    };
-    let after_dot = &title[dot_pos + 1..];
-    let Some(space_pos) = after_dot.find(' ') else {
-        return Ok(None);
-    };
-    let russian_prop = after_dot[..space_pos].trim().to_string();
-
+    // Russian half: everything before the opening paren.
     let Some(paren_start) = title.find('(') else {
         return Ok(None);
     };
+    let russian_half = title[..paren_start].trim_end();
+    let Some(last_dot_ru) = russian_half.rfind('.') else {
+        return Ok(None);
+    };
+    let russian_prop = russian_half[last_dot_ru + 1..].trim().to_string();
+
+    // English half: between the opening paren and the matching close.
     let after_paren = &title[paren_start + 1..];
-    let Some(dot_in_paren) = after_paren.find('.') else {
+    let Some(paren_end) = after_paren.rfind(')') else {
         return Ok(None);
     };
-    let after_paren_dot = &after_paren[dot_in_paren + 1..];
-    let Some(paren_end) = after_paren_dot.find(')') else {
+    let english_half = after_paren[..paren_end].trim();
+    let Some(last_dot_en) = english_half.rfind('.') else {
         return Ok(None);
     };
-    let english_prop = after_paren_dot[..paren_end].trim().to_string();
+    let english_prop = english_half[last_dot_en + 1..].trim().to_string();
 
     if russian_prop.is_empty() || english_prop.is_empty() {
         return Ok(None);
@@ -1560,5 +1567,109 @@ mod ctor_tests {
             "Array's count-list ctor must mark its sole param as variadic"
         );
         fs::remove_dir_all(&dir).ok();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// `parse_property_html` tests — pin the rfind-anchored title parsing so that
+// composite type pages (`<Type>.<Имя>.<Property>`) emit real properties
+// instead of being silently dropped by the placeholder filter.
+// -----------------------------------------------------------------------------
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn unique_tmpdir(tag: &str) -> PathBuf {
+        let pid = std::process::id();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("html-parser-prop-{tag}-{pid}-{ts}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create tmp dir");
+        dir
+    }
+
+    fn synthetic_property_page(title: &str) -> String {
+        format!(
+            r#"<html><body>
+<h1 class="V8SH_pagetitle">{title}</h1>
+<p class="V8SH_chapter">Использование:</p><p>Чтение и запись.</p>
+<p class="V8SH_chapter">Описание:</p><p>Тип: Булево. Свойство для теста.</p>
+</body></html>"#
+        )
+    }
+
+    fn parse(title: &str, type_name_en: &str) -> Option<PropertyInfo> {
+        let dir = unique_tmpdir("title");
+        let path = dir.join("Prop.html");
+        fs::write(&path, synthetic_property_page(title)).unwrap();
+        let mut counter: u32 = 0;
+        let info = parse_property_html(&path, type_name_en, &mut counter).unwrap();
+        fs::remove_dir_all(&dir).ok();
+        info
+    }
+
+    #[test]
+    fn scalar_property_title_extracts_property_name() {
+        // Baseline: scalar `Запрос.Параметры (Query.Parameters)` page —
+        // single dot per side. Lock the rfind path on the simplest shape so
+        // a regression here surfaces immediately.
+        let info = parse("Запрос.Параметры (Query.Parameters)", "Query")
+            .expect("scalar property page must parse");
+        assert_eq!(info.name, "Параметры");
+        assert_eq!(info.english_name, "Parameters");
+        assert_eq!(info.type_name, "Query");
+    }
+
+    #[test]
+    fn composite_property_title_extracts_rightmost_segment() {
+        // Real HBK shape for register record-set / catalog-object / etc.:
+        // `<Type>.<Имя ...>.<PropertyName> (<TypeEn>.<NameEn>.<PropertyEn>)`.
+        // Anchor on the LAST dot so the property name doesn't degrade into
+        // the `<Имя ...>` placeholder fragment (which the placeholder
+        // filter would silently drop, hiding 7 real properties for every
+        // record-set type).
+        let info = parse(
+            "РегистрСведенийНаборЗаписей.&lt;Имя регистра сведений&gt;.ДополнительныеСвойства \
+             (InformationRegisterRecordSet.&lt;Information register name&gt;.AdditionalProperties)",
+            "InformationRegisterRecordSet",
+        )
+        .expect("composite property page must parse");
+        assert_eq!(info.name, "ДополнительныеСвойства");
+        assert_eq!(info.english_name, "AdditionalProperties");
+        assert_eq!(info.type_name, "InformationRegisterRecordSet");
+    }
+
+    #[test]
+    fn composite_property_with_placeholder_segment_still_parses_real_name() {
+        // The placeholder filter must only fire when the *property name*
+        // itself starts with `<` / `&lt;` (e.g. catalog manager's literal
+        // `<Имя>` member page). When the placeholder is the qualifier
+        // (`<Имя регистра сведений>`) and the rightmost segment is a real
+        // identifier, the entry must survive.
+        let info = parse(
+            "РегистрСведенийНаборЗаписей.&lt;Имя регистра сведений&gt;.Отбор \
+             (InformationRegisterRecordSet.&lt;Information register name&gt;.Filter)",
+            "InformationRegisterRecordSet",
+        )
+        .expect("composite property with bracketed qualifier must parse");
+        assert_eq!(info.name, "Отбор");
+        assert_eq!(info.english_name, "Filter");
+    }
+
+    #[test]
+    fn composite_placeholder_property_name_is_still_dropped() {
+        // Negative pin: when the property name itself IS a placeholder
+        // (`<Имя ключа>` on `Структура` / `Соответствие`-style synthetic
+        // pages), the filter must keep dropping it. Otherwise completion
+        // surfaces noise like `<Имя ключа` as a real property suggestion.
+        let info = parse(
+            "Структура.&lt;Имя ключа&gt; (Structure.&lt;Key name&gt;)",
+            "Structure",
+        );
+        assert!(info.is_none(), "placeholder-as-property-name must still be dropped");
     }
 }
