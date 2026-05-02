@@ -373,7 +373,8 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
 #[salsa::db]
 impl hir::HirDatabase for RootDatabaseImpl {
     fn infer(&self, file_id: FileId) -> Arc<hir::InferenceResult> {
-        hir::infer_query(self, file_id)
+        let file_id_input = FileIdInput::new(self, file_id);
+        hir::infer_query(self, file_id_input)
     }
 
     fn type_of_expr(
