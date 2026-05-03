@@ -351,6 +351,23 @@ impl SyntaxKind {
         )
     }
 
+    /// Returns true if this token can sit in a *name slot*: free-name
+    /// in an expression, field-tail after `.`, qualified-name segment, or
+    /// type-name child of `NEW_EXPR`.
+    ///
+    /// The parser accepts every `is_keyword()` token after `.` (see
+    /// `is_ident_or_keyword` in `crates/parser/src/grammar/expressions.rs`),
+    /// so name-resolution callers must accept the same set or the
+    /// keyword-shaped members (e.g. `Запрос.Выполнить`, where `Выполнить`
+    /// is `KW_EXECUTE`) silently fail to resolve.
+    ///
+    /// This is the single source of truth for "what counts as a name
+    /// token" — IDE-layer hover/goto/references/completion + HIR
+    /// lowering + symbol-info callee resolution all delegate here.
+    pub fn is_name_token(self) -> bool {
+        self == SyntaxKind::IDENT || self.is_keyword()
+    }
+
     /// Returns true if this is a literal token.
     pub fn is_literal(self) -> bool {
         matches!(
@@ -493,5 +510,22 @@ mod tests {
         assert!(SyntaxKind::STRING.is_literal());
         assert!(SyntaxKind::KW_TRUE.is_literal());
         assert!(!SyntaxKind::IDENT.is_literal());
+    }
+
+    #[test]
+    fn test_is_name_token() {
+        // Plain IDENT.
+        assert!(SyntaxKind::IDENT.is_name_token());
+        // Keyword tokens — every `is_keyword()` is a `is_name_token()`,
+        // because the parser accepts any keyword after `.`. Pin the
+        // headline collisions explicitly.
+        assert!(SyntaxKind::KW_EXECUTE.is_name_token());
+        assert!(SyntaxKind::KW_NEW.is_name_token());
+        assert!(SyntaxKind::KW_IF.is_name_token());
+        // Non-name tokens.
+        assert!(!SyntaxKind::WHITESPACE.is_name_token());
+        assert!(!SyntaxKind::DOT.is_name_token());
+        assert!(!SyntaxKind::DECIMAL.is_name_token());
+        assert!(!SyntaxKind::STRING.is_name_token());
     }
 }

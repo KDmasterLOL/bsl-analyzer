@@ -3,7 +3,7 @@
 //! This module provides helper functions for extracting information from syntax trees,
 //! particularly for working with comments and method documentation.
 
-use crate::SyntaxNode;
+use crate::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Extract leading comments before a syntax node from raw source text.
 ///
@@ -234,5 +234,64 @@ fn has_annotation_comments(
     false
 }
 
+/// Return the name token sitting in the field-tail slot of a `FIELD_EXPR`.
+///
+/// In BSL the parser accepts every keyword after `.` as a legal field
+/// name (`is_ident_or_keyword` in `crates/parser/src/grammar/expressions.rs`),
+/// so the field-tail token can be `IDENT` or any `is_keyword()` token —
+/// classic case is `Запрос.Выполнить()` where `Выполнить` is `KW_EXECUTE`.
+///
+/// The scan stays at *direct* `children_with_tokens()` and starts only
+/// **after** the `DOT`, so it cannot pull a token out of the receiver
+/// subtree even under parser error recovery.
+///
+/// Returns `None` when the input is not a `FIELD_EXPR`, has no `DOT`,
+/// or has no name token after the dot.
+pub fn field_tail_name_token(field_expr: &SyntaxNode) -> Option<SyntaxToken> {
+    if field_expr.kind() != SyntaxKind::FIELD_EXPR {
+        return None;
+    }
+    let mut saw_dot = false;
+    field_expr.children_with_tokens().filter_map(|el| el.into_token()).find(|tok| {
+        if !saw_dot {
+            saw_dot = tok.kind() == SyntaxKind::DOT;
+            return false;
+        }
+        tok.kind().is_name_token()
+    })
+}
+
+/// Return the type-name token of a `NEW_EXPR` (`Новый Запрос` →
+/// `Запрос`).
+///
+/// Same parser-permissive rule as `field_tail_name_token`: tokens after
+/// `KW_NEW` may in principle be any `is_name_token()`, including a
+/// keyword (the platform has no current keyword-typed constructors but
+/// the parser is permissive, and we keep the rule consistent across
+/// every name slot).
+///
+/// Walks direct children — never `descendants_with_tokens`, which would
+/// pull tokens out of constructor-argument subtrees under recovery.
+///
+/// Returns `None` when the input is not a `NEW_EXPR` or has no name
+/// token following `KW_NEW`.
+pub fn new_expr_type_name_token(new_expr: &SyntaxNode) -> Option<SyntaxToken> {
+    if new_expr.kind() != SyntaxKind::NEW_EXPR {
+        return None;
+    }
+    let mut saw_new = false;
+    new_expr.children_with_tokens().filter_map(|el| el.into_token()).find(|tok| {
+        if !saw_new {
+            saw_new = tok.kind() == SyntaxKind::KW_NEW;
+            return false;
+        }
+        tok.kind().is_name_token()
+    })
+}
+
 // Tests for extract_leading_comments are in ide-diagnostics
-// to avoid circular dependency (syntax <- parser <- syntax)
+// to avoid circular dependency (syntax <- parser <- syntax). The
+// `field_tail_name_token` / `new_expr_type_name_token` helpers also
+// need parsed input, so their behavioural tests live in
+// `crates/hir/tests/classify_token.rs` next to the classifier they
+// power.

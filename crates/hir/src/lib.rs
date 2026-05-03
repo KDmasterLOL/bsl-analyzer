@@ -3,10 +3,12 @@
 //! This crate provides a high-level API for semantic analysis.
 
 mod definition;
+pub mod name_classify;
 pub mod type_facade;
 
 pub use definition::Definition;
 pub use hir_ty::coerce_this_object_to_metadata_ref;
+pub use name_classify::{classify_token, NameClass};
 pub use type_facade::{Field, HirFieldOrigin, Type};
 
 // Re-export core types
