@@ -337,6 +337,92 @@ fn hover_on_constructor_name_does_not_leak_enclosing_new_type() {
     }
 }
 
+// ---------- keyword-as-method-name (Layer B regression guards) ----------
+
+/// Headline case from the user's bug report. `Выполнить` is lexed as
+/// `KW_EXECUTE` (BSL has a global eval-style statement of the same
+/// name), so the legacy IDENT-only gate in every hover handler killed
+/// hover for `Запрос.Выполнить()`. After the unified classifier
+/// migration, the token reaches the platform-method dispatch with the
+/// receiver type intact and the method renderer fires.
+#[test]
+fn hover_keyword_method_after_dot_resolves_to_platform_method() {
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ 1";
+    Результат = Запрос.Вып$0олнить();
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let h =
+        analysis.hover(file_id, offset).expect("hover on Запрос.Выполнить() must produce a result");
+    // Hard positive: bilingual platform-method header AND the method's
+    // documented return type.
+    assert!(
+        h.markup.contains("Выполнить") && h.markup.contains("Execute"),
+        "hover must include the bilingual method name, got: {}",
+        h.markup
+    );
+    assert!(
+        h.markup.contains("РезультатЗапроса"),
+        "hover must include Query.Execute return type, got: {}",
+        h.markup
+    );
+}
+
+/// Same keyword-as-method-name shape, but the receiver is itself a
+/// platform-method call result (`Запрос.Выполнить().Выгрузить()` —
+/// fluent chains). Pins that the classifier dispatch composes with the
+/// fluent-aware `lookup_method_with_key` resolver.
+#[test]
+fn hover_chained_keyword_method() {
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ 1";
+    тзнТоваров = Запрос.Вып$0олнить().Выгрузить();
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let h = analysis
+        .hover(file_id, offset)
+        .expect("hover on chained Запрос.Выполнить() must produce a result");
+    assert!(h.markup.contains("Выполнить") && h.markup.contains("Execute"), "got: {}", h.markup);
+    assert!(
+        h.markup.contains("РезультатЗапроса"),
+        "fluent receiver must not break Query.Execute return-type rendering, got: {}",
+        h.markup
+    );
+}
+
+/// Negative-direction guard: hovering the global `Выполнить("...")`
+/// statement form (no dot) must NOT route through the method
+/// dispatcher — it stays a keyword/global hover. The classifier's
+/// `FieldName` arm is gated on `FIELD_EXPR` parent, so the global form
+/// classifies as `Keyword` (or `FreeName` depending on how the parser
+/// shapes the call-callee) and goes through `hover_keyword`.
+#[test]
+fn hover_global_execute_statement_does_not_render_query_method() {
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    Вып$0олнить("Сообщить()");
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let h = analysis.hover(file_id, offset);
+    if let Some(h) = h {
+        // Whatever surface (keyword vs global function), it must NOT
+        // be the Query.Execute method markup — `РезультатЗапроса` is
+        // unique to that path.
+        assert!(
+            !h.markup.contains("РезультатЗапроса"),
+            "global Выполнить must not render Query.Execute hover, got: {}",
+            h.markup
+        );
+    }
+}
+
 // ---------- negative cases ----------
 
 #[test]

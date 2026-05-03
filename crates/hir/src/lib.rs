@@ -712,7 +712,12 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     ) -> Option<crate::definition::Definition> {
         use crate::definition::Definition;
 
-        if token.kind() != syntax::SyntaxKind::IDENT {
+        // Accept any name-token in this slot — keyword-shaped method
+        // names (`Запрос.Выполнить`, where `Выполнить` is `KW_EXECUTE`)
+        // must resolve here too. The slot itself is enforced by
+        // `field_name_receiver` below; consumers in the IDE layer also
+        // pre-filter via `Semantics::classify_at`.
+        if !token.kind().is_name_token() {
             return None;
         }
 

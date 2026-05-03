@@ -10,15 +10,23 @@ use bsl_platform::{
     type_methods_query, ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod,
     PlatformProperty, TypeNameInput,
 };
-use hir::{MetadataKind, Semantics, Ty};
+use hir::{classify_token, MetadataKind, NameClass, Semantics, Ty};
 use ide_db::RootDatabase;
 use symbol_info::{from_global_function, from_platform_method, render_hover_markdown, Lang};
-use syntax::{SyntaxKind, SyntaxToken, TextRange, TextSize};
+use syntax::{SyntaxNode, SyntaxToken, TextRange, TextSize};
 use vfs::FileId;
 
 use crate::HoverResult;
 
 /// Returns hover information at the specified position.
+///
+/// Dispatch is driven by the unified [`hir::classify_token`]
+/// name-position classifier — every consumer of token resolution in
+/// the IDE layer matches on the same `NameClass` taxonomy, so a
+/// keyword that sits in a name slot (e.g. `Запрос.Выполнить`, where
+/// `Выполнить` is `KW_EXECUTE`) is dispatched as `FieldName`, not
+/// `Keyword`. The previous chain of fall-through handlers each with
+/// its own `if token.kind() != IDENT` gate is gone.
 pub(crate) fn hover<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -26,104 +34,165 @@ pub(crate) fn hover<DB: RootDatabase>(
 ) -> Option<HoverResult> {
     let _span = tracing::info_span!("hover", ?file_id, ?offset).entered();
 
-    // Parse the file
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
-
-    // Find token at position
     let token = root.token_at_offset(offset).right_biased()?;
 
     tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "Hover token");
 
-    // Try user-defined symbols (via Definition API) FIRST
-    // This has higher priority than platform symbols (local shadowing)
-    if let Some(result) = hover_user_defined(db, file_id, &token) {
-        return Some(result);
+    match classify_token(&token) {
+        NameClass::FieldName { receiver, token, is_call } => {
+            hover_field(db, file_id, &receiver, &token, is_call)
+        }
+        NameClass::FreeName { token } => hover_free_name(db, file_id, &token),
+        NameClass::TypeRef { token } => {
+            hover_for_platform_type(db, token.text(), token.text_range())
+        }
+        NameClass::Keyword { token } => hover_keyword(&token),
+        // Future work: literal-aware hover. For now we stay silent —
+        // `Истина`/`Ложь`/`Неопределено`/`Null` already render fine in
+        // their assignment positions through other surfaces.
+        NameClass::Literal { .. } => None,
+        NameClass::Other => None,
+    }
+}
+
+/// Hover for a name in a `FieldName` slot (`receiver.name` or
+/// `receiver.name(...)`).
+///
+/// Precedence — `is_call` breaks ties on names that exist in both
+/// slots on the same receiver type:
+///
+/// - **`is_call = true`** (parens follow): try platform method first,
+///   fall back to platform property, then to qualified-name resolution
+///   for cross-module calls (`ОбщегоНазначения.МойМетод`).
+/// - **`is_call = false`** (bare field access): platform property
+///   first, then platform method, then qualified-name resolution.
+///
+/// The qualified-name fallback covers the `Документы.ПКО` /
+/// `ОбщегоНазначения.МойМетод` shapes that
+/// `Semantics::resolve_name_to_definition` already handles via
+/// `try_resolve_qualified_name_for_token` *before* its
+/// `field_name_receiver` guard.
+fn hover_field<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    receiver: &SyntaxNode,
+    token: &SyntaxToken,
+    is_call: bool,
+) -> Option<HoverResult> {
+    let sema = Semantics::new(db);
+    let receiver_ty = sema.type_of_expr(file_id, receiver);
+    let name = token.text();
+    let range = token.text_range();
+
+    let property = || hover_platform_property_on_ty(db, &receiver_ty, name, range);
+    let method = || hover_platform_method_on_token(db, &sema, file_id, token);
+
+    if is_call {
+        if let Some(r) = method() {
+            return Some(r);
+        }
+        if let Some(r) = property() {
+            return Some(r);
+        }
+    } else {
+        if let Some(r) = property() {
+            return Some(r);
+        }
+        if let Some(r) = method() {
+            return Some(r);
+        }
     }
 
-    // Try platform-property hover BEFORE `hover_platform`. The method/type
-    // hover in `hover_platform` uses the bare receiver IDENT text as the
-    // platform type key (`Строка.ВРег` works because `Строка` is literally
-    // the type), but platform-typed variables (`Зап = Новый Запрос; Зап.`)
-    // need `Semantics::type_of_expr` on the receiver. Keeping the property
-    // path separate keeps `hover_platform`'s purely-syntactic shortcut
-    // fast and reserves Salsa-backed type resolution for cases that
-    // actually need it.
-    if let Some(result) = hover_platform_property(db, file_id, &token) {
-        return Some(result);
+    // Fallback to qualified-name resolution. `resolve_name_to_definition`
+    // calls `try_resolve_qualified_name_for_token` first — that's how
+    // `Документы.ПКО`, `ОбщегоНазначения.МойМетод` and `Метаданные.Х`
+    // resolve. The `field_name_receiver` guard on the same function
+    // returns `None` only after the qualified-name branch fired, so we
+    // get the cross-module hover for free.
+    let inferred_ty = type_of_token(&sema, file_id, token);
+    if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
+        return definition_to_hover(db, &definition, range, inferred_ty.as_ref());
     }
-
-    // Type-aware platform-method hover for chained receivers like
-    // `Запрос.Выполнить().Выгрузить().ВыгрузитьКолонку(...)`. The
-    // syntactic `try_extract_method_call` inside `hover_platform`
-    // only handles `IDENT.method()`; for any chained / parenthesised /
-    // indexed receiver it bails out, which previously let
-    // `hover_user_defined` match the method name against an unrelated
-    // workspace free function (e.g. БСП's
-    // `ОбщегоНазначения.ВыгрузитьКолонку`). With the
-    // `field_name_receiver` guard in `Semantics::resolve_name_to_definition`
-    // the `hover_user_defined` branch above already returns `None` for
-    // such tokens — this branch then resolves the method by inferring
-    // the receiver's type and looking it up through the fluent-aware
-    // [`hir_ty::method_lookup::lookup_method_with_key`] dispatch.
-    if let Some(result) = hover_platform_method_via_ty(db, file_id, &token) {
-        return Some(result);
-    }
-
-    // Try platform type/method hover
-    if let Some(result) = hover_platform(db, &token) {
-        return Some(result);
-    }
-
-    // Try keyword hover
-    if let Some(result) = hover_keyword(&token) {
-        return Some(result);
-    }
-
-    // TODO: Add hover for literals
 
     None
 }
 
-/// Attempts to provide hover information for user-defined symbols (via Definition API).
+/// Hover for a name in a `FreeName` slot.
 ///
-/// This includes:
-/// - Methods (procedures and functions)
-/// - Variables (module-level and local)
-/// - Parameters
+/// Consolidates the previous `hover_user_defined` and the
+/// global-function / type-literal branches of `hover_platform`. Order:
 ///
-/// Returns `None` for symbols that aren't user-defined or can't be resolved.
-fn hover_user_defined<DB: RootDatabase>(
+/// 1. User-defined symbol via `Semantics::resolve_name_to_definition`
+///    (locals, parameters, module methods/variables, MDO plurals,
+///    builtin functions — locals shadow builtins per BSL).
+/// 2. Type-only fallback for implicit variables (BSL has no `Перем`
+///    decl for first-assignment locals, so `resolve_name_to_definition`
+///    misses them; the inferred type still tells the user what the
+///    expression is).
+/// 3. Global platform function (e.g. `НачатьТранзакцию()`).
+/// 4. Bare type literal in expression position (e.g. `Строка`).
+fn hover_free_name<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     token: &SyntaxToken,
 ) -> Option<HoverResult> {
-    // Only process identifiers
-    if token.kind() != SyntaxKind::IDENT {
-        return None;
-    }
-
-    // Use unified Semantics API
     let sema = Semantics::new(db);
-
-    // Resolve inferred type for the expression surrounding this token — used
-    // both to enrich named bindings (Variable / Local / Parameter) and to
-    // fall back to a type-only hover for implicit variables BSL creates at
-    // first assignment (those have no `Перем` in the item tree, so
-    // `resolve_name_to_definition` returns `None`).
     let inferred_ty = type_of_token(&sema, file_id, token);
 
-    match sema.resolve_name_to_definition(file_id, token) {
-        Some(definition) => {
+    if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
+        if let Some(r) =
             definition_to_hover(db, &definition, token.text_range(), inferred_ty.as_ref())
+        {
+            return Some(r);
         }
-        None => inferred_ty.as_ref().and_then(|ty| {
-            let mut markup = format!("**{}**\n\n", token.text());
-            let type_block = ty_info_markup(db, ty)?;
+    } else if let Some(ty) = inferred_ty.as_ref() {
+        // Implicit variable (no `Перем`) — surface its inferred type.
+        let mut markup = format!("**{}**\n\n", token.text());
+        if let Some(type_block) = ty_info_markup(db, ty) {
             markup.push_str(&type_block);
-            Some(HoverResult { markup, range: Some(token.text_range()) })
-        }),
+            return Some(HoverResult { markup, range: Some(token.text_range()) });
+        }
     }
+
+    if let Some(r) = hover_for_global_function(db, token.text(), token.text_range()) {
+        return Some(r);
+    }
+
+    hover_for_platform_type(db, token.text(), token.text_range())
+}
+
+/// Look up a property on `receiver_ty` and render its hover markup.
+/// No-op for unknown receivers or non-platform-value type shapes.
+fn hover_platform_property_on_ty<DB: RootDatabase>(
+    db: &DB,
+    receiver_ty: &Ty,
+    prop_name: &str,
+    range: TextRange,
+) -> Option<HoverResult> {
+    if receiver_ty.is_unknown() {
+        return None;
+    }
+    let type_key = receiver_ty.platform_type_name()?;
+    let input = MethodLookupInput::new(db, type_key.to_string(), prop_name.to_string());
+    let prop = platform_property_query(db, input)?;
+    Some(render_property_hover(&prop, range))
+}
+
+/// Look up a method on the receiver type via the type-aware Semantics
+/// API and render the platform-method hover markup.
+fn hover_platform_method_on_token<DB: RootDatabase>(
+    db: &DB,
+    sema: &Semantics<'_, DB>,
+    file_id: FileId,
+    token: &SyntaxToken,
+) -> Option<HoverResult> {
+    let definition = sema.resolve_method_call_to_definition(file_id, token)?;
+    let hir::Definition::BuiltinMethod { type_name, method_name } = definition else {
+        return None;
+    };
+    hover_for_platform_method(db, type_name.as_str(), method_name.as_str(), token.text_range())
 }
 
 /// Resolve the inferred [`Ty`] of a single identifier token.
@@ -328,98 +397,6 @@ fn definition_to_hover<DB: RootDatabase>(
     Some(HoverResult { markup, range: Some(range) })
 }
 
-/// Attempts to provide hover information for a platform-type property
-/// access (`Зап.Параметры`, `РезультатЗапроса.Колонки`, …).
-///
-/// Unlike [`hover_platform`], this path resolves the receiver's actual
-/// `Ty` via `Semantics::type_of_expr` instead of treating the bare
-/// identifier text as a type name — it has to, because the receiver is
-/// typically a variable (`Зап` in `Зап = Новый Запрос;`), not a type
-/// literal. Once the receiver type is known, the property is looked up
-/// through the bilingual platform index, and the hover markup includes
-/// the declared value type(s), the `[Только чтение]` marker, and the
-/// free-prose documentation from `PropertyDocs`.
-///
-/// Returns `None` when:
-/// - the token is not an identifier,
-/// - the token's parent is not a `FIELD_EXPR` (i.e. we're not actually
-///   hovering a property access),
-/// - the receiver's type is not a platform-value shape with a scalar
-///   key (managers / metadata refs go through their own adapters),
-/// - the property name does not exist on the resolved type.
-fn hover_platform_property<DB: RootDatabase>(
-    db: &DB,
-    file_id: FileId,
-    token: &SyntaxToken,
-) -> Option<HoverResult> {
-    if token.kind() != SyntaxKind::IDENT {
-        return None;
-    }
-
-    // Identify the property-access shape. The token must sit under a
-    // FIELD_EXPR whose first child is the receiver — mirrors what
-    // `platform_completion::find_receiver_expr` does for completion.
-    let parent = token.parent()?;
-    if parent.kind() != SyntaxKind::FIELD_EXPR {
-        return None;
-    }
-    let receiver_node = parent.children().next()?;
-
-    // Resolve the receiver's inferred type via Semantics. Anything
-    // unknown / not a platform value type stays silent.
-    let sema = Semantics::new(db);
-    let receiver_ty = sema.type_of_expr(file_id, &receiver_node);
-    if receiver_ty.is_unknown() {
-        return None;
-    }
-
-    // Route through the same bilingual property index the IDE
-    // completion path uses. `platform_type_name()` only yields a key
-    // for platform-value receivers (PlatformObject, Array, Map,
-    // Structure, ValueTable, primitives); managers / metadata refs
-    // return None, so we naturally skip those here.
-    let type_key = receiver_ty.platform_type_name()?;
-    let prop_name = token.text().to_string();
-    let input = MethodLookupInput::new(db, type_key.to_string(), prop_name.clone());
-    let prop = platform_property_query(db, input)?;
-
-    Some(render_property_hover(&prop, token.text_range()))
-}
-
-/// Type-aware hover for `recv.method(...)` calls where the receiver is
-/// not a bare identifier (chained calls, indexed access, etc.).
-///
-/// Resolves the receiver's inferred [`hir::Ty`] via
-/// [`hir::Semantics::resolve_method_call_to_definition`], which routes
-/// through `hir_ty::method_lookup::lookup_method_with_key` and gives us
-/// back a `(type_key, method_name)` pair when the method exists on the
-/// receiver type in [`bsl_platform::PlatformData`]. The actual hover
-/// markdown is produced by the existing [`hover_for_platform_method`]
-/// renderer so the output is identical to what users see for the
-/// syntactic-shortcut path (`Строка.ВРег()`).
-///
-/// Returns [`None`] when:
-/// - the token isn't an IDENT under a `FIELD_EXPR` field-name slot,
-/// - the receiver's inferred type is `Ty::Unknown`,
-/// - the receiver's type yields no scalar key (manager / metadata-ref
-///   shapes are served by their own paths),
-/// - the method name does not exist in platform data.
-fn hover_platform_method_via_ty<DB: RootDatabase>(
-    db: &DB,
-    file_id: FileId,
-    token: &SyntaxToken,
-) -> Option<HoverResult> {
-    if token.kind() != SyntaxKind::IDENT {
-        return None;
-    }
-    let sema = Semantics::new(db);
-    let definition = sema.resolve_method_call_to_definition(file_id, token)?;
-    let hir::Definition::BuiltinMethod { type_name, method_name } = definition else {
-        return None;
-    };
-    hover_for_platform_method(db, type_name.as_str(), method_name.as_str(), token.text_range())
-}
-
 /// Build the markdown block for a platform-property hover.
 ///
 /// Emits in this order:
@@ -451,87 +428,6 @@ fn render_property_hover(prop: &PlatformProperty, range: TextRange) -> HoverResu
         }
     }
     HoverResult { markup, range: Some(range) }
-}
-
-/// Attempts to provide hover information for platform types and methods.
-fn hover_platform<DB: RootDatabase>(db: &DB, token: &SyntaxToken) -> Option<HoverResult> {
-    let token_text = token.text();
-
-    // Check if this is an identifier
-    if token.kind() != SyntaxKind::IDENT {
-        return None;
-    }
-
-    // Try to determine context: is this a type reference or a method call?
-    let parent = token.parent()?;
-    let parent_kind = parent.kind();
-
-    tracing::debug!(?parent_kind, "Parent node kind");
-
-    // Check if it's a method call (e.g., Строка.ВРег())
-    if let Some((type_name, method_name)) = try_extract_method_call(token) {
-        return hover_for_platform_method(db, &type_name, &method_name, token.text_range());
-    }
-
-    // Check if it's a global function (e.g., НачатьТранзакцию())
-    if let Some(result) = hover_for_global_function(db, token_text, token.text_range()) {
-        return Some(result);
-    }
-
-    // Check if it's a type reference (e.g., variable declaration type)
-    // For now, just try to look it up as a platform type
-    hover_for_platform_type(db, token_text, token.text_range())
-}
-
-/// Attempts to extract method call context (receiver type + method name).
-///
-/// Example: `Строка.ВРег()` -> Some(("Строка", "ВРег"))
-fn try_extract_method_call(token: &SyntaxToken) -> Option<(String, String)> {
-    let _parent = token.parent()?;
-
-    // Check if we're in a method call expression
-    // AST structure: MethodCallExpr -> NameRef (method name)
-    // We need to traverse up to find the receiver
-
-    // For MVP, we'll use a simple heuristic:
-    // If there's a DOT before this identifier, check what's before the dot
-    let mut prev_sibling = token.prev_sibling_or_token();
-
-    // Skip whitespace
-    while let Some(sibling) = &prev_sibling {
-        if sibling.kind() == SyntaxKind::WHITESPACE {
-            prev_sibling = sibling.prev_sibling_or_token();
-        } else {
-            break;
-        }
-    }
-
-    // Check if previous is DOT
-    if let Some(sibling) = prev_sibling {
-        if sibling.kind() == SyntaxKind::DOT {
-            // Get what's before the dot
-            let mut prev = sibling.prev_sibling_or_token();
-
-            // Skip whitespace
-            while let Some(s) = &prev {
-                if s.kind() == SyntaxKind::WHITESPACE {
-                    prev = s.prev_sibling_or_token();
-                } else {
-                    break;
-                }
-            }
-
-            if let Some(receiver) = prev {
-                if receiver.kind() == SyntaxKind::IDENT {
-                    let receiver_text = receiver.as_token()?.text().to_string();
-                    let method_text = token.text().to_string();
-                    return Some((receiver_text, method_text));
-                }
-            }
-        }
-    }
-
-    None
 }
 
 /// Generates hover information for platform types.
