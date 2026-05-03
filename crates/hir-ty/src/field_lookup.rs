@@ -674,6 +674,269 @@ mod tests {
     }
 
     #[test]
+    fn field_lookup_information_register_record_set_synthesizes_filter() {
+        // `<recordSet>.Отбор` must resolve to the synthetic
+        // `RegisterFilter` receiver pinned to the parent register
+        // flavour. The HBK has no `Отбор` property on RecordSet rows;
+        // synthesis lives in `enumerate_register_fields`.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "Курсы",
+            MdoType::InformationRegister,
+            vec![dimension_typed(
+                "Валюта",
+                AttributeType::Ref { mdo_type: MdoType::Catalog, name: "Валюты".into() },
+            )],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRecordSet,
+            name: Name::new("Курсы"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("Отбор"))
+            .expect("synthetic .Отбор must resolve on InformationRegisterRecordSet");
+        assert_eq!(
+            info.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+                name: Name::new("Курсы"),
+            },
+        );
+
+        // English alias must also work (бilingual contract).
+        let info_en = lookup_field(&configs, &receiver, &Name::new("Filter"))
+            .expect("English alias `.Filter` must resolve too");
+        assert_eq!(info_en.ty, info.ty);
+    }
+
+    #[test]
+    fn field_lookup_register_filter_dimension_resolves_as_filter_item() {
+        // Inside the synthetic Filter, each register dimension is a
+        // member typed as `Ty::PlatformObject("ЭлементОтбора")` so
+        // platform `FilterItem` methods (`Установить`, …) can apply.
+        // Resources / attributes are intentionally excluded.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "Курсы",
+            MdoType::InformationRegister,
+            vec![dimension_typed(
+                "Валюта",
+                AttributeType::Ref { mdo_type: MdoType::Catalog, name: "Валюты".into() },
+            )],
+            vec![resource_typed("Курс", AttributeType::Number { precision: 15, scale: 4 })],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let filter_receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("Курсы"),
+        };
+        let dim_info = lookup_field(&configs, &filter_receiver, &Name::new("Валюта"))
+            .expect("dimension Валюта resolves through the synthetic Filter receiver");
+        assert_eq!(
+            dim_info.ty,
+            Ty::PlatformObject(Name::new("ЭлементОтбора")),
+            "Filter members must lower to platform `ЭлементОтбора` so FilterItem methods apply",
+        );
+
+        // Resources are NOT exposed as Filter members (only dimensions).
+        assert!(
+            lookup_field(&configs, &filter_receiver, &Name::new("Курс")).is_none(),
+            "resources must not appear as Filter members",
+        );
+    }
+
+    #[test]
+    fn field_lookup_register_filter_dim_named_otbor_loses_to_synthetic() {
+        // Collision contract: a register dimension named `Отбор` must
+        // NOT shadow the synthetic `.Отбор` Filter property — 1С
+        // semantics give the platform property priority. The dimension
+        // remains reachable as `<recordSet>.Отбор.Отбор` (through the
+        // Filter member surface).
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "РегСвед",
+            MdoType::InformationRegister,
+            vec![dimension_typed("Отбор", AttributeType::String { length: Some(50) })],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRecordSet,
+            name: Name::new("РегСвед"),
+        };
+        let info = lookup_field(&configs, &receiver, &Name::new("Отбор"))
+            .expect("synthetic .Отбор must win over a same-named dimension");
+        assert_eq!(
+            info.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+                name: Name::new("РегСвед"),
+            },
+            "synthetic Filter wins over a register dimension named `Отбор`",
+        );
+
+        // Dimension stays reachable through the Filter receiver.
+        let filter_receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("РегСвед"),
+        };
+        let dim_via_filter = lookup_field(&configs, &filter_receiver, &Name::new("Отбор"))
+            .expect("dimension stays reachable as <recordSet>.Отбор.Отбор");
+        assert_eq!(dim_via_filter.ty, Ty::PlatformObject(Name::new("ЭлементОтбора")));
+    }
+
+    #[test]
+    fn field_lookup_register_filter_unknown_dimension_returns_none() {
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "РегСвед",
+            MdoType::InformationRegister,
+            vec![dimension_typed("Валюта", AttributeType::String { length: Some(3) })],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let filter_receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("РегСвед"),
+        };
+        assert!(
+            lookup_field(&configs, &filter_receiver, &Name::new("НетТакогоИзмерения")).is_none(),
+            "unknown dimension on Filter receiver must return None",
+        );
+    }
+
+    #[test]
+    fn field_lookup_information_register_record_set_pulls_platform_properties() {
+        // After the html-parser fix lets composite-type properties land
+        // in `platform_data.json`, the field enumerator must surface them
+        // on every register record-set receiver. Pin three of the seven
+        // properties HBK declares for `InformationRegisterRecordSet.<Имя>`:
+        // - `Записывать` / `Write` (Boolean)
+        // - `ДополнительныеСвойства` / `AdditionalProperties` (Структура)
+        // - `ЗаписьИсторииДанных` / `WriteDataHistory` (Boolean)
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "Курсы",
+            MdoType::InformationRegister,
+            vec![dimension_typed("Валюта", AttributeType::String { length: Some(3) })],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRecordSet,
+            name: Name::new("Курсы"),
+        };
+        for prop in ["Записывать", "ДополнительныеСвойства", "ЗаписьИсторииДанных"]
+        {
+            assert!(
+                lookup_field(&configs, &receiver, &Name::new(prop)).is_some(),
+                "platform property `{prop}` must surface on InformationRegisterRecordSet",
+            );
+        }
+        // Bilingual contract: English alias resolves too.
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("Write")).is_some(),
+            "English alias `Write` must resolve via bilingual rsplit on english_name",
+        );
+
+        // Accounting-flavour-only property (`БлокироватьДляИзменения` /
+        // `LockForUpdate`) must NOT appear on InformationRegister, but
+        // MUST appear on AccountingRegisterRecordSet — proves per-flavour
+        // platform-prefix routing.
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("БлокироватьДляИзменения")).is_none(),
+            "Accounting-only property must not leak into InformationRegister surface",
+        );
+    }
+
+    #[test]
+    fn field_lookup_accounting_register_record_set_has_lock_for_update() {
+        // Cross-flavour pin: AccountingRegisterRecordSet's HBK page declares
+        // `БлокироватьДляИзменения` / `LockForUpdate`, which is absent on
+        // every other record-set flavour. The platform-prefix routing in
+        // `enumerate_register_fields` must thread the right prefix per
+        // receiver kind so these flavour-specific properties surface.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "Хозрасчетный",
+            MdoType::AccountingRegister,
+            vec![],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::AccountingRegisterRecordSet,
+            name: Name::new("Хозрасчетный"),
+        };
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("БлокироватьДляИзменения")).is_some(),
+            "AccountingRegisterRecordSet must expose БлокироватьДляИзменения from HBK",
+        );
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("LockForUpdate")).is_some(),
+            "English alias LockForUpdate must resolve via bilingual rsplit",
+        );
+    }
+
+    #[test]
+    fn field_lookup_register_filter_synthesized_for_all_record_set_flavours() {
+        // The synthetic `.Отбор` push must fire for every register
+        // record-set kind we declare today (Information / Accumulation
+        // / Accounting / Calculation), with the parent flavour
+        // threaded into RegisterFilter so dimension lookup hits the
+        // right register.
+        let mut config = Configuration::new("Test");
+        for (name, mdo_type) in [
+            ("РегСвед", MdoType::InformationRegister),
+            ("РегНак", MdoType::AccumulationRegister),
+            ("РегБух", MdoType::AccountingRegister),
+            ("РегРасч", MdoType::CalculationRegister),
+        ] {
+            config.add_register(register_with(
+                name,
+                mdo_type,
+                vec![dimension_typed("Дим", AttributeType::String { length: Some(10) })],
+                vec![],
+                vec![],
+            ));
+        }
+        let configs = wrap(config);
+
+        let cases = [
+            (MetadataKind::InformationRegisterRecordSet, "РегСвед", MdoType::InformationRegister),
+            (MetadataKind::AccumulationRegisterRecordSet, "РегНак", MdoType::AccumulationRegister),
+            (MetadataKind::AccountingRegisterRecordSet, "РегБух", MdoType::AccountingRegister),
+            (MetadataKind::CalculationRegisterRecordSet, "РегРасч", MdoType::CalculationRegister),
+        ];
+        for (kind, name, parent) in cases {
+            let receiver = Ty::MetadataRef { kind, name: Name::new(name) };
+            let info = lookup_field(&configs, &receiver, &Name::new("Отбор"))
+                .unwrap_or_else(|| panic!("{kind:?}/{name}: synthetic .Отбор must resolve"));
+            assert_eq!(
+                info.ty,
+                Ty::MetadataRef {
+                    kind: MetadataKind::RegisterFilter { parent },
+                    name: Name::new(name),
+                },
+                "{kind:?}/{name}: RegisterFilter parent must match register flavour",
+            );
+        }
+    }
+
+    #[test]
     fn field_lookup_extension_wins_on_collision() {
         let mut main = Configuration::new("Main");
         main.add_metadata_object(catalog(

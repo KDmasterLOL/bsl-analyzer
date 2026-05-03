@@ -174,6 +174,18 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
                     overloads: Vec::new(),
                 });
             }
+            // Scalar platform key fallback: synthetic kinds (e.g.
+            // `RegisterFilter`) wrap an existing scalar `type_name`
+            // (`"Filter"`) whose methods live under a flat HBK row, not a
+            // composite prefix. Route the lookup through the bilingual
+            // scalar index so e.g. `<recordSet>.Отбор.Сбросить()` resolves.
+            if let Some(scalar_key) = kind.scalar_platform_key() {
+                if let Some(method) =
+                    PlatformData::instance().get_method(scalar_key, method_name.as_str())
+                {
+                    return Some(to_method_info(method));
+                }
+            }
             // MetadataRef flavours without a platform surface (register
             // dimensions, the bare `TabularSectionRow` row receiver) fall
             // through `None`. Row methods do not exist in HBK data —
@@ -237,6 +249,19 @@ pub fn lookup_method_with_key(
         let (params, overloads) = chosen_signature.unwrap_or_default();
         return first_key
             .map(|k| (k, MethodInfo { return_ty: Ty::union(returns), params, overloads }));
+    }
+
+    // Synthetic `MetadataRef` kinds with a scalar platform key (e.g.
+    // `RegisterFilter` → `"Filter"`) need their hover/goto resolved
+    // through the same bilingual scalar index used for value-type
+    // receivers, so the IDE definition path matches the inference and
+    // completion paths wired in `lookup_method` / `collect_platform_items`.
+    if let Ty::MetadataRef { kind, .. } = receiver_ty {
+        if let Some(scalar_key) = kind.scalar_platform_key() {
+            let data = PlatformData::instance();
+            let method = data.get_method(scalar_key, method_name.as_str())?;
+            return Some((scalar_key.to_string(), to_method_info(method)));
+        }
     }
 
     if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::MetadataRef { .. }) {
@@ -697,11 +722,15 @@ mod tests {
         // string makes the whole union degenerate. Collapsing to
         // `Ty::Unknown` keeps the gradual rule firing on typed sinks; a
         // `Ty::union([Unknown, Undefined])` would *not* — `is_assignable`
-        // distributes on the left and `Undefined ≤ String` is false, so
-        // `ПустаяСтрока(...)` against a `"Произвольный, Неопределено"`
-        // return would still false-fire `TypeMismatch`. Pinned platform
-        // entries: `LoadDefaultSetting` and the second `Произвольный,
-        // Неопределено` site in platform_data.json.
+        // distributes on the left, and for any non-String typed sink
+        // (e.g. `НачалоДня(Дата - Дата)`) `Undefined ≤ Дата` is false,
+        // so `НачалоДня(LoadDefaultSetting())` would still false-fire
+        // `TypeMismatch`. (The bare `to == Ty::String` short-circuit in
+        // `subtype::is_coercible_to` masks this for String sinks
+        // specifically, but the collapse must hold for every typed sink,
+        // not just String.) Pinned platform entries: `LoadDefaultSetting`
+        // and the second `Произвольный, Неопределено` site in
+        // platform_data.json.
         assert_eq!(resolve_platform_type_union("Произвольный, Неопределено"), Ty::Unknown);
         assert_eq!(resolve_platform_type_union("Неопределено, Произвольный"), Ty::Unknown);
         assert_eq!(resolve_platform_type_union("Arbitrary, Undefined"), Ty::Unknown);
@@ -887,6 +916,40 @@ mod tests {
         };
         let info = lookup_method(&r, &Name::new("Записать"))
             .expect("MetadataRef CatalogObject.Записать must resolve");
+        assert_eq!(info.return_ty, Ty::Undefined);
+    }
+
+    #[test]
+    fn method_lookup_register_filter_resolves_filter_method_via_scalar_key() {
+        // `RegisterFilter` has no composite `platform_prefix`; its
+        // methods (`Сбросить`, `Получить`, …) live under scalar
+        // `type_name = "Filter"`. The scalar-key fallback must route
+        // there so `<recordSet>.Отбор.<method>()` resolves for
+        // inference. Pinned because regressing this would break the
+        // user-facing `НаборЗаписей.Отбор.Сбросить()` snippet.
+        let r = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("РегистрСведений1"),
+        };
+        let info = lookup_method(&r, &Name::new("Сбросить"))
+            .expect("Filter.Сбросить must resolve through scalar-key fallback");
+        // `Сбросить()` is a procedure → `Ty::Undefined`.
+        assert_eq!(info.return_ty, Ty::Undefined);
+    }
+
+    #[test]
+    fn method_lookup_with_key_register_filter_returns_filter_scalar_key() {
+        // Hover/goto path (`Semantics::resolve_method_call_to_definition`)
+        // consumes `lookup_method_with_key`. Without the scalar-key
+        // fallback there, hover on `<recordSet>.Отбор.Сбросить()`
+        // would silently fail even though inference resolves the type.
+        let r = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("РегистрСведений1"),
+        };
+        let (key, info) = lookup_method_with_key(&r, &Name::new("Сбросить"))
+            .expect("Filter.Сбросить hover key must resolve through scalar-key fallback");
+        assert_eq!(key, "Filter", "scalar key must be the bilingual `Filter` row");
         assert_eq!(info.return_ty, Ty::Undefined);
     }
 

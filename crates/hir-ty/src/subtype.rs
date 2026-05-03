@@ -185,6 +185,42 @@ fn is_tabular_row_bridge(a: &Ty, b: &Ty) -> bool {
         || (is_row_platform_object(a) && is_row_metadata_ref(b))
 }
 
+/// Argument-position coercion check.
+///
+/// Equivalent to [`is_assignable`] except that **any** value coerces
+/// to a bare [`Ty::String`] target. BSL implicitly stringifies values
+/// when a String slot is expected (`СтрШаблон`, `Сообщить`, log /
+/// trace writers, exception messages, …), so firing `TypeMismatch`
+/// on `Number → String` or `Union(Date, Number) → String` produces
+/// noise on real code without representing a runtime bug.
+///
+/// **Scope is intentionally narrow.** Call only from the call-site
+/// argument-mismatch emitter ([`crate::arg_diagnostics`]). All other
+/// subtype users — overload selection in [`crate::infer`], function
+/// variance, the public `hir::Type::is_assignable_to` facade — must
+/// keep using [`is_assignable`] so that:
+///
+/// - Overload picking in `infer_query` does **not** start preferring
+///   a String-accepting overload for non-String actuals (that would
+///   change inferred return types and cascade into hover / completion
+///   / downstream type flow).
+/// - `Fn(String)` does not silently start satisfying `Fn(Number)`
+///   slots through param contravariance.
+/// - The reverse direction (`String → Number`, `String → Date`, …)
+///   stays a real diagnostic — strings flowing into typed sinks is
+///   still a bug worth surfacing.
+///
+/// The rule fires only when `to` is bare [`Ty::String`] at the top
+/// level. A `Union(String, X)` slot keeps the existing union-right
+/// distribution; extend here with a recursive walk if real-code
+/// signal shows that's also too strict.
+pub fn is_coercible_to(from: &Ty, to: &Ty) -> bool {
+    if matches!(to, Ty::String) {
+        return true;
+    }
+    is_assignable(from, to)
+}
+
 /// Whether `ty` is one of the MDO reference variants — the set for
 /// which [`is_assignable`] accepts `Null ≤ ref-type`.
 ///
@@ -351,6 +387,54 @@ mod tests {
         let unrelated = Ty::PlatformObject(hir_def::Name::new("ТаблицаЗначений"));
         assert!(!is_assignable(&row, &unrelated));
         assert!(!is_assignable(&unrelated, &row));
+    }
+
+    #[test]
+    fn coercible_anything_to_string() {
+        // BSL implicitly stringifies any value that lands in a String
+        // slot. Pin both the simple primitive case and the Union case
+        // — the latter is the actual production trigger
+        // (`СтрШаблон(value)` where `value`'s inferred type is a
+        // disjunction of branch results) and would otherwise have to
+        // satisfy the strict union-left rule (every component ≤ String).
+        assert!(is_coercible_to(&Ty::Number, &Ty::String));
+        assert!(is_coercible_to(&Ty::Date, &Ty::String));
+        assert!(is_coercible_to(&Ty::Boolean, &Ty::String));
+        assert!(is_coercible_to(&Ty::Null, &Ty::String));
+        // `Undefined → String` matters because BSL's `СтрШаблон("…%1…",
+        // Undefined)` renders to "Undefined" without erroring; pinning
+        // it explicitly makes the bare `Ty::String` short-circuit's
+        // intent unambiguous instead of relying on the catch-all.
+        assert!(is_coercible_to(&Ty::Undefined, &Ty::String));
+        assert!(is_coercible_to(&Ty::union(vec![Ty::Number, Ty::Date]), &Ty::String));
+    }
+
+    #[test]
+    fn coercion_does_not_open_reverse_direction() {
+        // Regression guard: the rule is one-way. `String → Number` /
+        // `String → Date` must stay rejected — a string flowing into
+        // a typed sink is still a real bug worth surfacing, and the
+        // structural-equality fallthrough at the bottom of
+        // `is_assignable` is what catches it.
+        assert!(!is_coercible_to(&Ty::String, &Ty::Number));
+        assert!(!is_coercible_to(&Ty::String, &Ty::Date));
+        assert!(!is_coercible_to(&Ty::String, &Ty::Boolean));
+    }
+
+    #[test]
+    fn coercion_does_not_leak_into_is_assignable() {
+        // Critical isolation check: the coercion rule must NOT bleed
+        // into `is_assignable`. Overload selection in `infer_query`
+        // and the public `hir::Type::is_assignable_to` facade both
+        // depend on `is_assignable` rejecting `Number → String` —
+        // letting it through would change which overload wins for
+        // non-String actuals and silently shift inferred return types
+        // through hover / completion / downstream type flow. This
+        // test fires first if a future refactor accidentally folds
+        // `is_coercible_to` back into `is_assignable`.
+        assert!(!is_assignable(&Ty::Number, &Ty::String));
+        assert!(!is_assignable(&Ty::Date, &Ty::String));
+        assert!(!is_assignable(&Ty::union(vec![Ty::Number, Ty::Date]), &Ty::String));
     }
 
     #[test]

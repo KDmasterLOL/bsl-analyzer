@@ -190,9 +190,12 @@ fn metadata_kind_to_prefix_and_mdo(kind: MetadataKind) -> Option<(&'static str, 
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             MdoType::ChartOfAccounts
         }
-        // Register-record kinds — Phase C platform-side wiring.
-        MetadataKind::InformationRegisterRecordManager => MdoType::InformationRegister,
+        // Register-record kinds — manager / record-set platform surfaces.
+        MetadataKind::InformationRegisterRecordManager
+        | MetadataKind::InformationRegisterRecordSet => MdoType::InformationRegister,
         MetadataKind::AccumulationRegisterRecordSet => MdoType::AccumulationRegister,
+        MetadataKind::AccountingRegisterRecordSet => MdoType::AccountingRegister,
+        MetadataKind::CalculationRegisterRecordSet => MdoType::CalculationRegister,
         // `platform_prefix` already returned `None` for the remaining
         // variants via `?` above, so this arm is unreachable in
         // practice — the guard below documents the invariant and keeps
@@ -248,19 +251,31 @@ fn map_generic_metadata_return_type(raw: &str, mdo_type: MdoType, mdo_name: &Nam
         ("ПланСчетовОбъект" | "ChartOfAccountsObject", MdoType::ChartOfAccounts) => {
             MetadataKind::ChartOfAccountsObject
         }
-        // Register-record return forms (Phase C): manager methods like
+        // Register-record return forms: manager methods like
         // `РегистрыСведений.X.СоздатьМенеджерЗаписи()` and
         // `РегистрыНакопления.X.СоздатьНаборЗаписей()` produce a
-        // register-record receiver that the workspace
-        // `RecordSetModule.bsl` resolver can act on.
+        // register-record receiver that platform method lookup and the
+        // workspace `RecordSetModule.bsl` resolver can act on.
         (
             "РегистрСведенийМенеджерЗаписи" | "InformationRegisterRecordManager",
             MdoType::InformationRegister,
         ) => MetadataKind::InformationRegisterRecordManager,
         (
+            "РегистрСведенийНаборЗаписей" | "InformationRegisterRecordSet",
+            MdoType::InformationRegister,
+        ) => MetadataKind::InformationRegisterRecordSet,
+        (
             "РегистрНакопленияНаборЗаписей" | "AccumulationRegisterRecordSet",
             MdoType::AccumulationRegister,
         ) => MetadataKind::AccumulationRegisterRecordSet,
+        (
+            "РегистрБухгалтерииНаборЗаписей" | "AccountingRegisterRecordSet",
+            MdoType::AccountingRegister,
+        ) => MetadataKind::AccountingRegisterRecordSet,
+        (
+            "РегистрРасчетаНаборЗаписей" | "CalculationRegisterRecordSet",
+            MdoType::CalculationRegister,
+        ) => MetadataKind::CalculationRegisterRecordSet,
         _ => return None,
     };
     Some(Ty::MetadataRef { kind, name: mdo_name.clone() })
@@ -394,6 +409,96 @@ mod tests {
         )
         .expect("platform data indexes Write under InformationRegisterRecordManager");
         // `Записать` is a procedure → `Ty::Undefined` return.
+        assert_eq!(res.return_ty, Ty::Undefined);
+    }
+
+    #[test]
+    fn manager_create_record_set_on_information_register_returns_record_set() {
+        // `РегистрыСведений.<X>.СоздатьНаборЗаписей()` must rebind the
+        // generic `РегистрСведенийНаборЗаписей` return to a concrete
+        // `MetadataRef { InformationRegisterRecordSet, X }`. Without
+        // this rebinding the receiver type degrades to
+        // `Ty::PlatformObject("РегистрСведенийНаборЗаписей")` and the
+        // composite-prefixed methods (`Записать`, `Загрузить`, …)
+        // become unreachable.
+        let res = resolve_platform_manager_method(
+            MdoType::InformationRegister,
+            &Name::new("Курсы"),
+            &Name::new("СоздатьНаборЗаписей"),
+        )
+        .expect("platform data indexes CreateRecordSet under InformationRegisterManager");
+        assert_eq!(
+            res.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::InformationRegisterRecordSet,
+                name: Name::new("Курсы"),
+            }
+        );
+    }
+
+    #[test]
+    fn manager_create_record_set_on_accumulation_register_returns_record_set() {
+        let res = resolve_platform_manager_method(
+            MdoType::AccumulationRegister,
+            &Name::new("ПродажиОбороты"),
+            &Name::new("СоздатьНаборЗаписей"),
+        )
+        .expect("platform data indexes CreateRecordSet under AccumulationRegisterManager");
+        assert_eq!(
+            res.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::AccumulationRegisterRecordSet,
+                name: Name::new("ПродажиОбороты"),
+            }
+        );
+    }
+
+    #[test]
+    fn manager_create_record_set_on_accounting_register_returns_record_set() {
+        let res = resolve_platform_manager_method(
+            MdoType::AccountingRegister,
+            &Name::new("Хозрасчетный"),
+            &Name::new("СоздатьНаборЗаписей"),
+        )
+        .expect("platform data indexes CreateRecordSet under AccountingRegisterManager");
+        assert_eq!(
+            res.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::AccountingRegisterRecordSet,
+                name: Name::new("Хозрасчетный"),
+            }
+        );
+    }
+
+    #[test]
+    fn manager_create_record_set_on_calculation_register_returns_record_set() {
+        let res = resolve_platform_manager_method(
+            MdoType::CalculationRegister,
+            &Name::new("Начисления"),
+            &Name::new("СоздатьНаборЗаписей"),
+        )
+        .expect("platform data indexes CreateRecordSet under CalculationRegisterManager");
+        assert_eq!(
+            res.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::CalculationRegisterRecordSet,
+                name: Name::new("Начисления"),
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_ref_information_register_record_set_resolves_load() {
+        // After the new variant is wired through `platform_prefix`,
+        // platform-indexed methods on `InformationRegisterRecordSet.<X>`
+        // (e.g. `Загрузить`) must resolve via the metadata-ref path.
+        let res = resolve_platform_metadata_ref_method(
+            MetadataKind::InformationRegisterRecordSet,
+            &Name::new("Курсы"),
+            &Name::new("Загрузить"),
+        )
+        .expect("platform data indexes Load under InformationRegisterRecordSet");
+        // `Загрузить` is a procedure → `Ty::Undefined` return.
         assert_eq!(res.return_ty, Ty::Undefined);
     }
 }

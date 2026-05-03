@@ -2415,10 +2415,11 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         // workspace `RecordSetModule.bsl` path; the record-manager
         // kind does not (1С semantics — record-manager doesn't reach
         // record-set module exports).
-        MetadataKind::InformationRegisterRecordManager => {
-            bsl_metadata::MdoType::InformationRegister
-        }
+        MetadataKind::InformationRegisterRecordManager
+        | MetadataKind::InformationRegisterRecordSet => bsl_metadata::MdoType::InformationRegister,
         MetadataKind::AccumulationRegisterRecordSet => bsl_metadata::MdoType::AccumulationRegister,
+        MetadataKind::AccountingRegisterRecordSet => bsl_metadata::MdoType::AccountingRegister,
+        MetadataKind::CalculationRegisterRecordSet => bsl_metadata::MdoType::CalculationRegister,
         // `*RegisterRef` value kinds: no module-level call surface
         // (no `RecordSetModule.bsl` for the *Ref form), no platform
         // surface. Silence is the honest answer.
@@ -2435,13 +2436,16 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         MetadataKind::TabularSection { parent } | MetadataKind::TabularSectionRow { parent } => {
             parent
         }
-        // Register-part kinds carry a parent payload but no manager-style
-        // call surface. Returning `None` keeps the diagnostic silent on
-        // these — `lookup_method` itself returns `None`, so we never
-        // construct a misleading `Регистры…/<Раздел>` receiver name.
+        // Register-part kinds and the synthetic `RegisterFilter` carry
+        // a parent payload but no manager-style call surface. Returning
+        // `None` keeps the diagnostic silent on these — `lookup_method`
+        // either returns `None` or routes Filter methods through a
+        // scalar-key side channel, so we never construct a misleading
+        // `Регистры…/<Раздел>` receiver name.
         MetadataKind::RegisterDimension { .. }
         | MetadataKind::RegisterResource { .. }
-        | MetadataKind::RegisterAttribute { .. } => return None,
+        | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::RegisterFilter { .. } => return None,
     };
     mdo_type_to_plural(mdo)
 }

@@ -286,6 +286,9 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
         "informationregisterrecordmanager" | "регистрсведенийменеджерзаписи" => {
             Some(MetadataKind::InformationRegisterRecordManager)
         }
+        "informationregisterrecordset" | "регистрсведенийнаборзаписей" => {
+            Some(MetadataKind::InformationRegisterRecordSet)
+        }
         "informationregisterref" | "регистрсведенийключзаписи" => {
             Some(MetadataKind::InformationRegisterRef)
         }
@@ -295,8 +298,14 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
         "accumulationregisterref" | "регистрнакопленияключзаписи" => {
             Some(MetadataKind::AccumulationRegisterRef)
         }
+        "accountingregisterrecordset" | "регистрбухгалтериинаборзаписей" => {
+            Some(MetadataKind::AccountingRegisterRecordSet)
+        }
         "accountingregisterref" | "регистрбухгалтерииключзаписи" => {
             Some(MetadataKind::AccountingRegisterRef)
+        }
+        "calculationregisterrecordset" | "регистррасчетанаборзаписей" => {
+            Some(MetadataKind::CalculationRegisterRecordSet)
         }
         "calculationregisterref" | "регистррасчетаключзаписи" => {
             Some(MetadataKind::CalculationRegisterRef)

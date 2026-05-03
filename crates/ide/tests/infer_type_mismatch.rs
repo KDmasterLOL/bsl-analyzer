@@ -351,6 +351,60 @@ fn type_mismatch_does_not_double_fire_on_arg_count_mismatch() {
 }
 
 #[test]
+fn type_mismatch_silent_on_coercion_to_string_param() {
+    // BSL implicitly stringifies any value when a String slot is
+    // expected (`СтрШаблон`, `Сообщить`, log writers, …). The
+    // `is_coercible_to` predicate in the call-site emitter accepts
+    // `Number → String` (and analogously `Date`, `Boolean`, `Union(...)`,
+    // etc.) so legitimate platform calls don't paint red.
+    //
+    // Pin both directions to make sure we kept the asymmetry: a
+    // String arg flowing into a Number param must still fire — the
+    // coercion is one-way, the reverse direction is a real bug.
+    let fixture = format!(
+        "{COMMON_MODULE_TYPED_NUMBER_PARAM}\n\
+//- /CommonModules/ВторойОбщийМодуль/Ext/Module.bsl\n\
+// Параметры:\n\
+//   С - Строка - строковый аргумент\n\
+Процедура Принимает(С) Экспорт\n\
+КонецПроцедуры\n\
+\n\
+//- /test.bsl\n\
+Процедура Тест()\n\
+    ВторойОбщийМодуль.Принимает(42);\n\
+    ВторойОбщийМодуль.Принимает(Истина);\n\
+КонецПроцедуры\n"
+    );
+    let (db, file_id) = setup(&fixture);
+    assert!(
+        mismatches(&db, file_id).is_empty(),
+        "non-String arg flowing into a String param must coerce silently — got {:?}",
+        mismatches(&db, file_id)
+    );
+}
+
+#[test]
+fn type_mismatch_still_fires_on_string_to_number() {
+    // Regression guard for the one-way coercion rule: `String → Number`
+    // must stay a real diagnostic. If `is_coercible_to` ever drops the
+    // `to == Ty::String` gate (or starts symmetrising), this test
+    // catches it before the coercion silences a real bug.
+    let fixture = format!(
+        "{COMMON_MODULE_TYPED_NUMBER_PARAM}\n\
+//- /test.bsl\n\
+Процедура Тест()\n\
+    ПервыйОбщийМодуль.Привет(\"не число\");\n\
+КонецПроцедуры\n"
+    );
+    let (db, file_id) = setup(&fixture);
+    assert_eq!(
+        mismatches(&db, file_id),
+        vec![(Ty::Number, Ty::String)],
+        "String arg flowing into a Number param must still fire — coercion is one-way"
+    );
+}
+
+#[test]
 fn bare_identifier_matching_global_function_is_not_function_typed() {
     // Regression: a parameter (or any bare identifier) whose name
     // collides with a platform global function — here

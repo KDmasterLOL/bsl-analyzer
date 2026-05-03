@@ -258,8 +258,22 @@ pub enum MetadataKind {
     CatalogObject,
     /// Information register record manager (РегистрСведенийМенеджерЗаписи).
     InformationRegisterRecordManager,
+    /// Information register record set (РегистрСведенийНаборЗаписей).
+    ///
+    /// Returned by `РегистрыСведений.X.СоздатьНаборЗаписей()`. Companion
+    /// to [`Self::InformationRegisterRecordManager`]: that variant models
+    /// a single-record manager, this one models the multi-record set
+    /// receiver. Methods (`Записать`, `Загрузить`, `Очистить`, …) are
+    /// indexed under composite `InformationRegisterRecordSet.<Имя>` in
+    /// platform data; workspace `RecordSetModule.bsl` exports also flow
+    /// through this kind via [`record_set_kind_to_mdo`].
+    InformationRegisterRecordSet,
     /// Accumulation register record set (РегистрНакопленияНаборЗаписей).
     AccumulationRegisterRecordSet,
+    /// Accounting register record set (РегистрБухгалтерииНаборЗаписей).
+    AccountingRegisterRecordSet,
+    /// Calculation register record set (РегистрРасчетаНаборЗаписей).
+    CalculationRegisterRecordSet,
     /// Enum reference (ПеречислениеСсылка).
     EnumRef,
     /// Task reference (ЗадачаСсылка).
@@ -327,6 +341,33 @@ pub enum MetadataKind {
     /// flavour, name carries `"Register.Attribute"`.
     RegisterAttribute {
         /// Register flavour that owns the attribute.
+        parent: MdoType,
+    },
+    /// Per-record-set `Отбор` (Filter) — synthetic receiver.
+    ///
+    /// 1С runtime exposes a `.Отбор` property on every register record
+    /// set whose member NAMES are the owning register's dimensions and
+    /// each member is a `ЭлементОтбора` (FilterItem). The HBK shipped
+    /// in `bsl-platform/data/platform_data.json` does NOT declare this
+    /// property on any RecordSet `type_name` (gap of the source
+    /// archive, not a scraper bug), so we synthesize it here.
+    ///
+    /// `parent` pins the register flavour; the enclosing
+    /// `Ty::MetadataRef.name` carries the bare register name (no
+    /// `"Register.Filter"` composite — there is at most one `Отбор`
+    /// per record-set so a second segment would be redundant).
+    ///
+    /// Method/property surface:
+    /// - Members (dimensions) come from
+    ///   [`crate::field_enum::enumerate_filter_fields`] in `hir-ty`.
+    /// - The 10 platform `Filter` methods (`Сбросить`, `Получить`,
+    ///   `Найти`, …) are wired through a scalar-key side channel
+    ///   (`metadata_ref_scalar_key` returning `"Filter"`), NOT through
+    ///   `platform_prefix` — `Filter` is a scalar `type_name`, not a
+    ///   composite `Filter.<X>` prefix.
+    RegisterFilter {
+        /// Register flavour that owns the record set producing this
+        /// `Отбор`.
         parent: MdoType,
     },
     /// Tabular section of a metadata object (`ТабличнаяЧасть`).
@@ -409,15 +450,22 @@ impl MetadataKind {
             Self::ChartOfAccountsRef => Some("ChartOfAccountsRef"),
             Self::ChartOfAccountsObject => Some("ChartOfAccountsObject"),
             // Register-record kinds: platform data indexes their
-            // methods under `InformationRegisterRecordManager.<Имя>`
-            // and `AccumulationRegisterRecordSet.<Имя>` composite
-            // typenames. Wired here as part of Phase C so platform
-            // calls (`Записать`, `Прочитать`, …) on register-record
-            // receivers stay resolvable now that
-            // `map_generic_metadata_return_type` rebinds those return
-            // types to concrete `Ty::MetadataRef` shapes.
+            // methods under `<Flavour>RecordManager.<Имя>` and
+            // `<Flavour>RecordSet.<Имя>` composite typenames. Wired
+            // here so platform calls (`Записать`, `Прочитать`,
+            // `Загрузить`, …) on register-record receivers stay
+            // resolvable now that `map_generic_metadata_return_type`
+            // rebinds those return types to concrete `Ty::MetadataRef`
+            // shapes.
             Self::InformationRegisterRecordManager => Some("InformationRegisterRecordManager"),
+            Self::InformationRegisterRecordSet => Some("InformationRegisterRecordSet"),
             Self::AccumulationRegisterRecordSet => Some("AccumulationRegisterRecordSet"),
+            Self::AccountingRegisterRecordSet => Some("AccountingRegisterRecordSet"),
+            Self::CalculationRegisterRecordSet => Some("CalculationRegisterRecordSet"),
+            // `RegisterFilter` is a synthetic Filter receiver. Its
+            // platform methods (`Filter` scalar `type_name`) are routed
+            // through a scalar-key side channel, not a composite
+            // prefix, so `platform_prefix` returns `None` here.
             Self::InformationRegisterRef
             | Self::AccumulationRegisterRef
             | Self::AccountingRegisterRef
@@ -425,8 +473,33 @@ impl MetadataKind {
             | Self::RegisterDimension { .. }
             | Self::RegisterResource { .. }
             | Self::RegisterAttribute { .. }
+            | Self::RegisterFilter { .. }
             | Self::TabularSection { .. }
             | Self::TabularSectionRow { .. } => None,
+        }
+    }
+
+    /// Scalar `type_name` under which this kind's methods/properties are
+    /// indexed in `bsl-platform` when the surface is a flat platform
+    /// type (no `"<Prefix>.<MDO>"` composite).
+    ///
+    /// Companion to [`Self::platform_prefix`]: `platform_prefix` covers
+    /// composite indexing (`"CatalogObject.<Имя>"`); this method covers
+    /// scalar indexing (`"Filter"`). Used by:
+    ///
+    /// - `hir-ty::method_lookup::lookup_method` (after a
+    ///   `resolve_platform_metadata_ref_method` miss);
+    /// - `ide::completion::platform_completion` (dot-completion of
+    ///   methods and properties on synthetic receivers).
+    ///
+    /// Returns `Some` only for synthetic kinds that wrap an existing
+    /// scalar platform type. Today that is `RegisterFilter` → `"Filter"`
+    /// (the 1С `Отбор` object on a register record-set, member-typed
+    /// per-register but method-typed by the scalar `Filter` HBK row).
+    pub fn scalar_platform_key(self) -> Option<&'static str> {
+        match self {
+            Self::RegisterFilter { .. } => Some("Filter"),
+            _ => None,
         }
     }
 }

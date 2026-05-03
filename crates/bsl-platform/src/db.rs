@@ -381,6 +381,23 @@ impl PlatformDataInner {
             .collect()
     }
 
+    /// Get all properties indexed under a composite manager-style prefix
+    /// (case-insensitive).
+    ///
+    /// Companion to [`Self::get_manager_methods`]. Composite type pages
+    /// (`InformationRegisterRecordSet.<Information register name>`,
+    /// `CatalogObject.<Catalog name>`, …) carry their property rows with
+    /// the full composite `type_name`; per-MDO callers don't know the
+    /// concrete `<Имя>` placeholder text so they walk by `"{prefix}."`
+    /// the same way method lookup does.
+    ///
+    /// Example: `get_manager_properties("InformationRegisterRecordSet")`
+    /// returns `Отбор`, `Записывать`, `ЗаписьИсторииДанных`, …
+    pub fn get_manager_properties(&self, manager_prefix: &str) -> Vec<&PlatformProperty> {
+        let prefix = format!("{}.", manager_prefix.to_lowercase());
+        self.properties.iter().filter(|p| p.type_name.to_lowercase().starts_with(&prefix)).collect()
+    }
+
     /// Get all platform properties.
     pub fn all_properties(&self) -> &[PlatformProperty] {
         &self.properties
