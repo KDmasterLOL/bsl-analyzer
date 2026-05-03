@@ -44,20 +44,24 @@ pub fn goto_definition<DB: RootDatabase>(
 
     let definition = match classify_token(&token) {
         NameClass::FieldName { token, .. } => {
-            // Two stages — platform method first, then qualified-name
-            // resolution. The platform method path returns a
-            // `BuiltinMethod` definition for receiver-typed calls
-            // (`Запрос.Выполнить`); since platform methods have no
-            // source location, `definition_to_navigation_target`
-            // returns `None` for that variant. The qualified-name
-            // path resolves user-defined cross-module calls
+            // Platform-method dispatch is authoritative when it
+            // matches: a hit means we resolved the field tail through
+            // the type-aware platform index, and that target is final
+            // — even if it has no source to navigate to (`BuiltinMethod`
+            // for `Запрос.Выполнить`). Falling back to qualified-name
+            // resolution in that case would let the workspace path
+            // resolver match `[Запрос, Выполнить]` against an unrelated
+            // CommonModule that happens to share the receiver name and
+            // export a same-name method, jumping the user to an
+            // unrelated definition.
+            if let Some(d) = sema.resolve_method_call_to_definition(file_id, &token) {
+                return definition_to_navigation_target(db, &d);
+            }
+            // Platform-method dispatch missed entirely. Try the
+            // qualified-name path for cross-module
             // (`ОбщегоНазначения.МойМетод`), MDO objects
             // (`Документы.ПКО`), and manager-module methods.
-            let platform = sema.resolve_method_call_to_definition(file_id, &token);
-            match platform.and_then(|d| definition_to_navigation_target(db, &d)) {
-                Some(t) => return Some(t),
-                None => sema.resolve_name_to_definition(file_id, &token)?,
-            }
+            sema.resolve_name_to_definition(file_id, &token)?
         }
         NameClass::FreeName { token } => sema.resolve_name_to_definition(file_id, &token)?,
         NameClass::TypeRef { .. }
@@ -664,6 +668,52 @@ mod tests {
         let target = goto_definition(&db, file_id, offset);
         // Platform methods have no navigable source — None is correct.
         assert!(target.is_none(), "platform method navigation must be None, got: {target:?}");
+    }
+
+    /// Hard regression for the codex stop-time review: goto on
+    /// `Запрос.Выполнить()` must NOT jump to an unrelated CommonModule
+    /// that happens to share the receiver's name and exports a method
+    /// called `Выполнить`. The receiver is a typed local variable
+    /// (`Новый Запрос` — platform Query type), and the field-tail
+    /// must resolve through the platform-method dispatch, which
+    /// claims the slot exclusively. Pre-fix the goto fell back to
+    /// qualified-name resolution after the platform dispatch
+    /// returned a `BuiltinMethod` (no source), and the workspace
+    /// resolver matched `[Запрос, Выполнить]` against the bogus
+    /// CommonModule.
+    #[test]
+    fn test_goto_definition_platform_method_does_not_leak_to_workspace_module() {
+        let bogus = r#"
+Функция Выполнить() Экспорт
+    Возврат "не должно резолвиться";
+КонецФункции
+        "#;
+        let caller = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ 1";
+    Результат = Запрос.Выполнить();
+КонецПроцедуры
+        "#;
+
+        let files = &[
+            ("CommonModules/Запрос/Ext/Module.bsl", bogus),
+            ("Forms/Form1/Ext/Form/Module.bsl", caller),
+        ];
+        let (db, file_ids) = create_multi_file_db(files);
+
+        let offset = TextSize::from(caller.rfind("Выполнить").unwrap() as u32);
+        let target = goto_definition(&db, file_ids[1], offset);
+
+        // The bug we're guarding against is `Some(file_ids[0])` —
+        // jumping to the unrelated CommonModule. `None` (platform
+        // method, no source) or any non-bogus target is acceptable.
+        if let Some(t) = target {
+            assert_ne!(
+                t.file_id, file_ids[0],
+                "goto must not leak from platform method to a workspace module that happens to share the receiver's name"
+            );
+        }
     }
 
     #[test]
