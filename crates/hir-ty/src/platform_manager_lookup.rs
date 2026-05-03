@@ -41,7 +41,7 @@ use bsl_platform::{find_prefixed_method, PlatformMethod};
 use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 use hir_def::Name;
 
-use crate::method_lookup::{lower_param_type, resolve_platform_type_name};
+use crate::method_lookup::{lower_overloads, lower_param_type, resolve_platform_type_name};
 
 /// Outcome of a successful platform-method lookup.
 ///
@@ -59,6 +59,17 @@ pub struct PlatformMethodResolution {
     /// `MethodResolution.return_type` so inference call-sites can
     /// read without dereferencing the `Box`.
     pub return_ty: Ty,
+    /// Per-overload parameter lists for multi-overload composite methods
+    /// (`InformationRegisterManager.Get`,
+    /// `AccountingRegisterRecordSet.Move`,
+    /// `BusinessProcessManager.FindByNumber` …). Empty for
+    /// single-signature methods — `signature.params` already covers
+    /// them. Argument-type checks accept the call when ANY overload
+    /// accepts it; without this, `arg_diagnostics_query` saw composite
+    /// multi-overload methods as strictly typed against the first
+    /// signature only and false-fired on legitimate alternative call
+    /// shapes.
+    pub overloads: Vec<Vec<Ty>>,
 }
 
 /// Resolve `<manager-collective>.<mdo_name>.<method>()` through platform data.
@@ -125,7 +136,7 @@ pub(crate) fn build_resolution(
         .unwrap_or(Ty::Undefined);
 
     let signature = FunctionSignature::new_with_defaults(params, defaults, return_ty.clone());
-    PlatformMethodResolution { signature, return_ty }
+    PlatformMethodResolution { signature, return_ty, overloads: lower_overloads(method) }
 }
 
 /// Map a `MetadataKind` to `(prefix, parent_mdo)` for platform lookup.

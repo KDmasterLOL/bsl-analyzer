@@ -238,7 +238,7 @@ pub fn resolve_method(
                 },
                 return_ty: resolution.return_ty,
                 params: resolution.signature.params.to_vec(),
-                overloads: lower_overloads(&method),
+                overloads: resolution.overloads,
             })
         }
         Ty::MetadataRef { kind, name } => resolve_metadata_ref(db, *kind, name, method_name),
@@ -300,7 +300,7 @@ fn resolve_metadata_ref(
                 },
                 return_ty: resolution.return_ty,
                 params: resolution.signature.params.to_vec(),
-                overloads: lower_overloads(&method),
+                overloads: resolution.overloads,
             });
         }
     }
@@ -322,37 +322,6 @@ fn resolve_metadata_ref(
     }
 
     None
-}
-
-/// Lower per-variant parameter lists for multi-overload composite-prefix
-/// methods (e.g. `InformationRegisterManager.Get`,
-/// `AccountingRegisterRecordSet.Move`, `BusinessProcessManager.FindByNumber`).
-///
-/// Mirrors the per-overload lowering in
-/// [`crate::method_lookup::to_method_info`]: empty `Vec` for
-/// single-signature methods, populated for those whose platform JSON
-/// declares multiple `Вариант синтаксиса:` sections. Argument-type
-/// checks accept the call when ANY overload accepts it.
-///
-/// The composite-prefix routing in
-/// [`crate::platform_manager_lookup::build_resolution`] only computes
-/// the canonical params (no per-variant data), so the unified
-/// resolver fills in overloads here. Without this, multi-overload
-/// composite methods see their alternative signatures dropped — the
-/// same gap that the scalar `to_method_info` already covers for
-/// `Array.Найти` / `ЧтениеXML.ПолучитьАтрибут` / etc.
-fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
-    use crate::method_lookup::lower_param_type;
-    method
-        .variants
-        .iter()
-        .map(|v| {
-            v.parameters
-                .iter()
-                .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
-                .collect()
-        })
-        .collect()
 }
 
 fn lookup_scalar(

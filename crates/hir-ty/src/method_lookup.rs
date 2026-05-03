@@ -140,11 +140,7 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
                 return Some(MethodInfo {
                     return_ty: res.return_ty,
                     params: res.signature.params.to_vec(),
-                    // Manager-method resolution feeds `MethodResolution`
-                    // (single-signature); per-variant data lives only on
-                    // `PlatformMethod` and reaches us through the scalar
-                    // path below.
-                    overloads: Vec::new(),
+                    overloads: res.overloads,
                 });
             }
             return None;
@@ -171,7 +167,7 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
                 return Some(MethodInfo {
                     return_ty: res.return_ty,
                     params: res.signature.params.to_vec(),
-                    overloads: Vec::new(),
+                    overloads: res.overloads,
                 });
             }
             // Scalar platform key fallback: synthetic kinds (e.g.
@@ -297,16 +293,7 @@ pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     // Per-overload param lists for multi-overload methods
     // (`ЧтениеXML.ПолучитьАтрибут` etc.). Empty when the platform JSON
     // declares a single signature — `params` already covers it.
-    let overloads: Vec<Vec<Ty>> = method
-        .variants
-        .iter()
-        .map(|v| {
-            v.parameters
-                .iter()
-                .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
-                .collect()
-        })
-        .collect();
+    let overloads = lower_overloads(method);
 
     MethodInfo { return_ty, params, overloads }
 }
@@ -346,6 +333,32 @@ pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfo {
 /// a real type list, and routing them through `resolve_platform_type_union`
 /// would lift the whole raw string to a strict `Ty::PlatformObject` and
 /// false-fire `TypeMismatch`.
+/// Lower per-variant parameter lists for multi-overload methods.
+///
+/// Mirrors [`to_method_info`]'s overload computation but exposed as a
+/// stand-alone helper so the unified `resolve_method` use case and the
+/// composite-prefix `build_resolution` adapter can share one
+/// implementation.
+///
+/// Returns an empty `Vec` when the platform JSON declares a single
+/// signature; populated when multiple `Вариант синтаксиса:` sections
+/// exist (e.g. `Array.Найти`, `ЧтениеXML.ПолучитьАтрибут`,
+/// `InformationRegisterManager.Get`, `AccountingRegisterRecordSet.Move`,
+/// `BusinessProcessManager.FindByNumber`). Argument-type checks accept
+/// the call when ANY overload accepts it.
+pub(crate) fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
+    method
+        .variants
+        .iter()
+        .map(|v| {
+            v.parameters
+                .iter()
+                .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
+                .collect()
+        })
+        .collect()
+}
+
 pub(crate) fn lower_param_type(raw: &str) -> Ty {
     if !raw.contains(',') {
         return Ty::from_type_name(raw);
@@ -869,6 +882,37 @@ mod tests {
     // moved to `platform_resolution::tests::metadata_ref_register_filter_resolves_with_scalar_handle`
     // after `lookup_method_with_key` was replaced by the unified
     // `resolve_method` use case.
+
+    #[test]
+    fn method_lookup_composite_multi_overload_populates_overloads() {
+        // Inference-side regression: composite-prefix methods can declare
+        // multiple `Вариант синтаксиса:` sections in HBK
+        // (`InformationRegisterManager.Get`,
+        // `AccountingRegisterRecordSet.Move`,
+        // `BusinessProcessManager.FindByNumber`, …). The pre-fix
+        // `lookup_method` produced `overloads: Vec::new()` for these
+        // because `build_resolution` didn't compute per-variant params,
+        // and `arg_diagnostics_query` (which consumes
+        // `MethodInfo.overloads`) consequently saw composite multi-
+        // overload calls as strictly typed against the first signature
+        // only and false-fired on legitimate alternative call shapes.
+        // Pin the fix here — the IDE-side equivalent lives in
+        // `platform_resolution::tests::composite_multi_overload_method_populates_overloads`.
+        let r =
+            Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курсы") };
+        let Some(info) = lookup_method(&r, &Name::new("Получить")) else {
+            // Skip when running without platform data.
+            println!("Skipping: no platform data available");
+            return;
+        };
+        assert!(
+            !info.overloads.is_empty(),
+            "InformationRegisterManager.Получить must surface multi-overload variants \
+             through lookup_method (the inference path); got params={:?}, overloads={:?}",
+            info.params,
+            info.overloads,
+        );
+    }
 
     fn ts_receiver(parent: MdoType, name: &str) -> Ty {
         Ty::MetadataRef { kind: MetadataKind::TabularSection { parent }, name: Name::new(name) }
