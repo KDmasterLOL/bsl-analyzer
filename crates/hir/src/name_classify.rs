@@ -86,35 +86,26 @@ pub enum NameClass {
 ///
 /// The order of the rules is load-bearing:
 ///
-/// 1. **Literal** wins before any other keyword interpretation. Without
-///    it, `KW_TRUE` after a dot (which is invalid BSL but recoverable)
-///    would land in `FieldName` rather than `Literal`. The current
-///    parser doesn't accept literals after a dot, but the rule
-///    documents intent: a token whose semantic role is "value" is
-///    never a name.
-/// 2. **FieldName** — the token is the *tail* of a `FIELD_EXPR`. The
-///    [`field_tail_name_token`] helper guarantees the token sits
-///    strictly after the dot inside the field-expression node.
-///    `is_call` is checked here so callers (hover) can break
-///    property-vs-method ties.
-/// 3. **TypeRef** — the token is the type-name child of `NEW_EXPR`,
+/// 1. **FieldName** wins before `Literal`. The parser admits literal
+///    keywords (`KW_TRUE`, `KW_FALSE`, `KW_UNDEFINED`, `KW_NULL`) as
+///    field-tail tokens via `is_ident_or_keyword`
+///    (`crates/parser/src/grammar/expressions.rs:9-56,210-237`). A
+///    consumer that hovered `obj.Истина` would expect to look up
+///    `Истина` as a property/method on `obj`, not be told "this is a
+///    boolean literal." Field-name slot wins.
+/// 2. **TypeRef** — the token is the type-name child of `NEW_EXPR`,
 ///    sitting strictly after `KW_NEW`.
+/// 3. **Literal** — boolean / null / undefined keyword in non-name
+///    position. Wins over `Keyword` so future literal-aware hover /
+///    typing has a stable variant to dispatch on.
 /// 4. **Keyword** — `is_keyword()` and not in any name slot.
 /// 5. **FreeName** — `IDENT` and not in any name slot.
-/// 6. **Other** — everything else (trivia, punctuation, labels,
-///    preprocessor symbols).
+/// 6. **Other** — trivia, punctuation, labels, preprocessor symbols.
 pub fn classify_token(token: &SyntaxToken) -> NameClass {
-    // 1. Literal — beats keyword-as-name for `Истина`/`Ложь`/`Неопределено`/`Null`.
-    if token.kind().is_literal() {
-        return NameClass::Literal { token: token.clone() };
-    }
-
-    // 2. Field-tail of a `FIELD_EXPR`.
+    // 1. Field-tail of a `FIELD_EXPR`. Wins before any keyword
+    //    interpretation because the parser admits keyword field-tails.
     if let Some((field_expr, name_token)) = field_expr_for_tail(token) {
         if name_token == *token {
-            // Receiver is the first child of FIELD_EXPR; classifier
-            // hands it to consumers so they can `type_of_expr` it
-            // without re-walking the tree.
             if let Some(receiver) = field_expr.children().next() {
                 let is_call = is_call_callee(&field_expr);
                 return NameClass::FieldName { receiver, token: token.clone(), is_call };
@@ -122,12 +113,18 @@ pub fn classify_token(token: &SyntaxToken) -> NameClass {
         }
     }
 
-    // 3. Type-name child of a `NEW_EXPR`.
+    // 2. Type-name child of a `NEW_EXPR`.
     if let Some((new_expr, type_token)) = new_expr_for_type_name(token) {
         if type_token == *token {
             let _ = new_expr; // structurally validated; node not needed downstream
             return NameClass::TypeRef { token: token.clone() };
         }
+    }
+
+    // 3. Literal — `Истина`/`Ложь`/`Неопределено`/`Null` outside any
+    //    name slot.
+    if token.kind().is_literal() {
+        return NameClass::Literal { token: token.clone() };
     }
 
     // 4. Keyword in non-name position.
@@ -144,36 +141,23 @@ pub fn classify_token(token: &SyntaxToken) -> NameClass {
     NameClass::Other
 }
 
-/// If `token` is the field-tail of some `FIELD_EXPR` ancestor, return
+/// If `token` is the field-tail of a `FIELD_EXPR`, return
 /// `(field_expr_node, tail_token)`.
+///
+/// The parser places the tail token as a direct child of `FIELD_EXPR`
+/// — no name-ref wrapper — so we require `parent.kind() == FIELD_EXPR`
+/// and trust [`field_tail_name_token`] to enforce "after the dot,
+/// outside the receiver subtree." This matches the strict invariant
+/// of [`crate::field_name_receiver`] (used by
+/// [`Semantics::resolve_method_call_to_definition`]); diverging
+/// would silently mis-dispatch in cases the resolver can't follow.
 fn field_expr_for_tail(token: &SyntaxToken) -> Option<(SyntaxNode, SyntaxToken)> {
     let parent = token.parent()?;
-    // Walk at most one ancestor up — the parser places the tail token
-    // as a direct child of `FIELD_EXPR`, with no intervening name-ref
-    // wrapper.
-    let field_expr = if parent.kind() == SyntaxKind::FIELD_EXPR {
-        parent
-    } else {
-        // Defensive: some parser variants might wrap the tail in a
-        // single-child node. Step up once and re-check, never deeper —
-        // we must not pick up a `FIELD_EXPR` that contains the token in
-        // its receiver slot.
-        let grand = parent.parent()?;
-        if grand.kind() != SyntaxKind::FIELD_EXPR {
-            return None;
-        }
-        // Reject when the token's range falls inside the receiver
-        // (first child) — that would mean `token` is *part of* the
-        // receiver expression, not the tail.
-        let receiver = grand.children().next()?;
-        if receiver.text_range().contains_range(token.text_range()) {
-            return None;
-        }
-        grand
-    };
-
-    let tail = field_tail_name_token(&field_expr)?;
-    Some((field_expr, tail))
+    if parent.kind() != SyntaxKind::FIELD_EXPR {
+        return None;
+    }
+    let tail = field_tail_name_token(&parent)?;
+    Some((parent, tail))
 }
 
 /// True iff `field_expr` is the callee of an enclosing `CALL_EXPR`.

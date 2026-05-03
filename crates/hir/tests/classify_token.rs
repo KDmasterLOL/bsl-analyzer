@@ -192,6 +192,24 @@ fn whitespace_is_other() {
 }
 
 #[test]
+fn literal_keyword_after_dot_classifies_as_field_name_not_literal() {
+    // Codex review point 1: the parser admits `KW_TRUE`/`KW_FALSE`/
+    // `KW_UNDEFINED`/`KW_NULL` as field-tail tokens via
+    // `is_ident_or_keyword`. A user-defined property called `Истина`
+    // (rare but legal) must reach the field-name resolution path,
+    // not be classified as a boolean literal.
+    let src = r#"Процедура Тест()
+    Х = obj.Истина;
+КонецПроцедуры
+"#;
+    let class = classify_in(src, "Истина");
+    assert!(
+        matches!(class, NameClass::FieldName { .. }),
+        "literal-keyword in field-tail must classify as FieldName, got {class:?}"
+    );
+}
+
+#[test]
 fn nested_qualified_keyword_segment_classifies_as_field_name() {
     // `A.Выполнить.B` — middle keyword segment must classify as
     // `FieldName` so the qualified-name resolver sees it as a name

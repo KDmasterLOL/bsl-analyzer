@@ -468,6 +468,16 @@ mod tests {
             "signature must include the method name, got: {}",
             sig.signature
         );
+        // Hard positive — Query.Execute returns `РезультатЗапроса`
+        // (per `crates/bsl-platform/data/platform_data.json`). Pinning
+        // the return type proves we resolved as the platform-method
+        // overload, not as some other "Выполнить" surface (the global
+        // eval-statement form has no return type).
+        assert!(
+            sig.signature.contains("РезультатЗапроса"),
+            "signature must surface Query.Execute's return type — proves the platform-method overload was selected. got: {}",
+            sig.signature
+        );
     }
 
     #[test]

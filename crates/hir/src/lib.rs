@@ -369,17 +369,15 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         let _span = tracing::info_span!("resolve_name_to_definition").entered();
 
-        // Accept any name-token. Keyword-shaped names that happen to
-        // sit in field-tail slots (`Запрос.Выполнить`, where `Выполнить`
-        // is `KW_EXECUTE`) reach `try_resolve_qualified_name_for_token`
-        // below and resolve through the workspace path resolver.
-        // The downstream `field_name_receiver` guard at the end still
-        // rejects field-tail tokens that fail qualified-name resolution,
-        // so a free `KW_EXECUTE` in expression position never hijacks
-        // the global builtin (the classifier already routes it as
-        // `Keyword`, but this stays correct even if a direct caller
-        // skips classification).
-        if !token.kind().is_name_token() {
+        // Accept `IDENT` or a keyword that sits in a field-tail slot.
+        // The narrow gate keeps the public-API contract for direct
+        // callers (`syntax_highlighting.rs:234` already pre-filters to
+        // IDENT, but downstream callers can't be enumerated): a free
+        // keyword in expression position must never silently hijack
+        // a builtin lookup. Field-tail keywords still reach
+        // `try_resolve_qualified_name_for_token` below for
+        // cross-module / MDO chains (`Документы.ПКО.Выполнить`).
+        if token.kind() != syntax::SyntaxKind::IDENT && field_name_receiver(token).is_none() {
             return None;
         }
 
