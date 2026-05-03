@@ -109,17 +109,27 @@ pub enum PlatformMethodOrigin {
 }
 
 impl PlatformMethodHandle {
-    /// Re-fetch the underlying [`PlatformMethod`] through Salsa-cached
-    /// queries. Used by hover / signature help to obtain the method's
-    /// `id` for `get_method_docs` and the parameter list for rendering.
+    /// Re-fetch the underlying [`PlatformMethod`] from the platform-data
+    /// singleton by `method_id` walk.
+    ///
+    /// Used by hover / signature help to obtain the method's `id` for
+    /// `get_method_docs` and the parameter list for rendering. The walk
+    /// is O(n) over a prefix-filtered or type-filtered sub-list (≤ ~30
+    /// methods per prefix in HBK), and `PlatformDataInner` is loaded
+    /// once per process (`OnceCell` singleton), so this is effectively
+    /// constant-time per call site.
+    ///
+    /// `db` is currently unused — kept in the signature so a future
+    /// `platform_method_by_handle` Salsa query can swap in without an
+    /// API change. Marked `_ = db` rather than dropped so the symmetry
+    /// with `platform_method_query`/`prefixed_method_query` stays
+    /// visible at the call site.
     pub fn lookup(&self, db: &dyn salsa::Database) -> Option<PlatformMethod> {
+        let _ = db;
         match &self.origin {
             PlatformMethodOrigin::Scalar { type_name } => {
-                // Method-name lookup goes through the scalar bilingual index.
-                // We don't carry the method-name string in the handle (id
-                // is enough for hover), so we walk the cached method list
-                // and pick by id. For the common case the caller already
-                // has the method via the `resolve_method` return value.
+                // Try the type-keyed sub-list first — fast path for
+                // surfaced types (`Array`, `Запрос`, `ValueTable`, …).
                 let method = bsl_platform::PlatformDataInner::instance()
                     .get_type_methods(type_name.as_str())
                     .into_iter()
@@ -128,11 +138,11 @@ impl PlatformMethodHandle {
                 if method.is_some() {
                     return method;
                 }
-                // Fallback for synthetic types not surfaced through `get_type_methods`
-                // (`Tabular section`, `Filter`): walk all methods. Cheap
-                // because both the `instance()` table and `id` comparison
-                // are O(n) on a small sub-list — and we hit only when
-                // resolved-by-handle outside the resolve-method flow.
+                // Synthetic types like `"Tabular section"` and `"Filter"`
+                // are not surfaced through `get_type_methods` (no entry
+                // in `types_by_name`), so fall back to the full method
+                // table. Hit only on the synthetic-receiver paths;
+                // bounded by total platform method count.
                 bsl_platform::PlatformDataInner::instance()
                     .all_methods()
                     .iter()
@@ -140,13 +150,6 @@ impl PlatformMethodHandle {
                     .cloned()
             }
             PlatformMethodOrigin::Prefixed { prefix, .. } => {
-                // The Salsa-cached prefixed query keys on `(prefix,
-                // method_name)`; we have only the id here. Walk the
-                // prefix-filtered method list and pick by id — list
-                // size is bounded (≤ ~30 methods per prefix in HBK).
-                let _ = db; // Salsa db isn't needed for the id walk;
-                            // kept in the signature for symmetry with
-                            // future Salsa-cached id→method query.
                 bsl_platform::PlatformDataInner::instance()
                     .get_manager_methods(prefix.as_str())
                     .into_iter()
@@ -235,9 +238,7 @@ pub fn resolve_method(
                 },
                 return_ty: resolution.return_ty,
                 params: resolution.signature.params.to_vec(),
-                // Composite-prefix path doesn't surface multi-overload
-                // signatures today; mirrors `lookup_method`.
-                overloads: Vec::new(),
+                overloads: lower_overloads(&method),
             })
         }
         Ty::MetadataRef { kind, name } => resolve_metadata_ref(db, *kind, name, method_name),
@@ -299,7 +300,7 @@ fn resolve_metadata_ref(
                 },
                 return_ty: resolution.return_ty,
                 params: resolution.signature.params.to_vec(),
-                overloads: Vec::new(),
+                overloads: lower_overloads(&method),
             });
         }
     }
@@ -321,6 +322,37 @@ fn resolve_metadata_ref(
     }
 
     None
+}
+
+/// Lower per-variant parameter lists for multi-overload composite-prefix
+/// methods (e.g. `InformationRegisterManager.Get`,
+/// `AccountingRegisterRecordSet.Move`, `BusinessProcessManager.FindByNumber`).
+///
+/// Mirrors the per-overload lowering in
+/// [`crate::method_lookup::to_method_info`]: empty `Vec` for
+/// single-signature methods, populated for those whose platform JSON
+/// declares multiple `Вариант синтаксиса:` sections. Argument-type
+/// checks accept the call when ANY overload accepts it.
+///
+/// The composite-prefix routing in
+/// [`crate::platform_manager_lookup::build_resolution`] only computes
+/// the canonical params (no per-variant data), so the unified
+/// resolver fills in overloads here. Without this, multi-overload
+/// composite methods see their alternative signatures dropped — the
+/// same gap that the scalar `to_method_info` already covers for
+/// `Array.Найти` / `ЧтениеXML.ПолучитьАтрибут` / etc.
+fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
+    use crate::method_lookup::lower_param_type;
+    method
+        .variants
+        .iter()
+        .map(|v| {
+            v.parameters
+                .iter()
+                .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
+                .collect()
+        })
+        .collect()
 }
 
 fn lookup_scalar(
@@ -464,6 +496,85 @@ mod tests {
             (None, None) => println!("Skipping: no platform data available"),
             _ => panic!("Russian and English lookups must both succeed or both fail"),
         }
+    }
+
+    #[test]
+    fn object_manager_resolves_with_prefixed_handle() {
+        // `Справочники.<Имя>.СоздатьЭлемент()` — the receiver is
+        // `Ty::ObjectManager { kind: Catalog, name: "Номенклатура" }`,
+        // resolved through `manager_type_prefix() = Some("CatalogManager")`.
+        // Ensures the ObjectManager arm of `resolve_method` produces the
+        // same Prefixed origin shape as the MetadataRef composite-prefix
+        // arm.
+        let db = db();
+        let ty = Ty::ObjectManager {
+            kind: MdoType::Catalog, name: Name::new("Номенклатура")
+        };
+        let res = resolve_method(&db, &ty, &Name::new("СоздатьЭлемент"));
+        let Some(res) = res else {
+            println!("Skipping: no platform data available");
+            return;
+        };
+        match &res.handle.origin {
+            PlatformMethodOrigin::Prefixed { prefix, mdo_type, mdo_name } => {
+                assert_eq!(prefix.as_str(), "CatalogManager");
+                assert_eq!(*mdo_type, MdoType::Catalog);
+                assert_eq!(mdo_name.as_str(), "Номенклатура");
+            }
+            PlatformMethodOrigin::Scalar { .. } => {
+                panic!("ObjectManager must use Prefixed origin");
+            }
+        }
+        // `СоздатьЭлемент()` returns a `СправочникОбъект.Номенклатура` —
+        // generic-return rebinding (build_resolution) must produce a
+        // concrete `Ty::MetadataRef { CatalogObject, "Номенклатура" }`.
+        assert_eq!(
+            res.return_ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
+            }
+        );
+    }
+
+    #[test]
+    fn union_first_branch_owns_handle_returns_unioned() {
+        // Cohesion rule: for `Ty::Union([A, B])`, the FIRST successful
+        // branch's handle / params / overloads are bound wholesale;
+        // later branches contribute only their return types. Pin this
+        // because regressing the rule would silently change the params
+        // signature for fluent-style chains like
+        // `Запрос.Выполнить().Выгрузить()` whose receiver is
+        // `Ty::Union([QueryResult, Undefined])`.
+        let db = db();
+        let happy = Ty::PlatformObject(Name::new("РезультатЗапроса"));
+        let union = Ty::union(vec![happy.clone(), Ty::Undefined]);
+        let direct = resolve_method(&db, &happy, &Name::new("Выгрузить"));
+        let through_union = resolve_method(&db, &union, &Name::new("Выгрузить"));
+        match (direct, through_union) {
+            (Some(direct_res), Some(union_res)) => {
+                // First-branch handle: same id and origin.
+                assert_eq!(direct_res.handle.method_id, union_res.handle.method_id);
+                // Union return: must be unioned (Undefined didn't resolve,
+                // so the union has just one branch — equality with direct).
+                assert_eq!(union_res.return_ty, direct_res.return_ty);
+            }
+            (None, None) => {
+                println!("Skipping: no platform data available");
+            }
+            _ => panic!("Direct and union routes must agree on success/failure"),
+        }
+    }
+
+    #[test]
+    fn union_strips_undefined_and_null_sentinels() {
+        // `Ty::Union([Undefined, Null])` has no live branches —
+        // resolution must be `None` cleanly without panic, regardless
+        // of the method name. Mirrors `lookup_method`'s sentinel
+        // stripping (no instance methods on Undefined / Null).
+        let db = db();
+        let dead = Ty::union(vec![Ty::Undefined, Ty::Null]);
+        let res = resolve_method(&db, &dead, &Name::new("ЛюбоеИмя"));
+        assert!(res.is_none());
     }
 
     #[test]
