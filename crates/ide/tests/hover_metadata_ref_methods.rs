@@ -22,6 +22,7 @@
 //! by minimal-prefix matching (presence of the method name in the markup)
 //! to avoid breaking on HBK doc-text re-scrapes.
 
+use bsl_platform::PlatformDataInner;
 use ide::Analysis;
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -76,17 +77,24 @@ fn extract_cursor(fixture_text: &str) -> (String, String, u32) {
     (cleaned, path_line.to_string(), cursor_in_file)
 }
 
+/// Returns `true` when platform data was loaded (HBK present at build
+/// time). Tests that depend on a real method body must short-circuit
+/// when the table is empty — but they MUST NOT short-circuit on
+/// `hover.is_none()`, which would mask a regression where the method
+/// silently fails to resolve. The skip decision is taken before the
+/// hover call.
+fn has_platform_data() -> bool {
+    !PlatformDataInner::instance().all_methods().is_empty()
+}
+
 fn assert_hover_contains(fixture: &str, expected_substring: &str) {
-    let (analysis, file_id, offset) = setup(fixture);
-    let hover = analysis.hover(file_id, offset);
-    let Some(result) = hover else {
-        // Platform data may be absent in minimal test runs (no HBK build).
-        // Skip with an explicit message rather than fail — the unit-level
-        // routing tests in `hir_ty::platform_resolution` are the
-        // authoritative coverage when platform data is wired.
-        eprintln!("Skipping: hover returned None (likely no platform data); fixture \n{}", fixture);
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available (HBK not present at build time)");
         return;
-    };
+    }
+    let (analysis, file_id, offset) = setup(fixture);
+    let result =
+        analysis.hover(file_id, offset).expect("hover must resolve when platform data is present");
     assert!(
         result.markup.contains(expected_substring),
         "hover markup did not contain `{}`; got:\n{}",

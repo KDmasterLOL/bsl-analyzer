@@ -499,6 +499,35 @@ mod tests {
     }
 
     #[test]
+    fn composite_multi_overload_method_populates_overloads() {
+        // Composite-prefix methods can declare multiple `Вариант
+        // синтаксиса:` sections in HBK (e.g.
+        // `InformationRegisterManager.Get`,
+        // `AccountingRegisterRecordSet.Move`,
+        // `BusinessProcessManager.FindByNumber`). Pre-fix, the
+        // composite path produced `overloads: Vec::new()` because
+        // `build_resolution` doesn't compute per-variant params.
+        // After the `lower_overloads` lift this gap is closed; pin
+        // it so a regression of either the helper or `build_resolution`
+        // surfaces here.
+        let db = db();
+        let ty =
+            Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курсы") };
+        let res = resolve_method(&db, &ty, &Name::new("Получить"));
+        let Some(res) = res else {
+            println!("Skipping: no platform data available");
+            return;
+        };
+        assert!(
+            !res.overloads.is_empty(),
+            "InformationRegisterManager.Получить must surface multi-overload variants; \
+             got params={:?}, overloads={:?}",
+            res.params,
+            res.overloads,
+        );
+    }
+
+    #[test]
     fn object_manager_resolves_with_prefixed_handle() {
         // `Справочники.<Имя>.СоздатьЭлемент()` — the receiver is
         // `Ty::ObjectManager { kind: Catalog, name: "Номенклатура" }`,
