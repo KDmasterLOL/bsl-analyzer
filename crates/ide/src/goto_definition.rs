@@ -5,7 +5,7 @@
 //!
 //! Uses the unified Definition enum for resolution.
 
-use hir::{Definition, Semantics};
+use hir::{classify_token, Definition, NameClass, Semantics};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -17,10 +17,17 @@ use crate::{NavigationTarget, SymbolKind};
 /// Returns a navigation target pointing to the symbol's definition,
 /// or None if no symbol is found at the position.
 ///
+/// Dispatch is driven by [`hir::classify_token`] — every name-token
+/// resolves through the same classifier the rest of the IDE layer
+/// uses, so keyword-shaped names sitting in field-tail slots
+/// (`Запрос.Выполнить`, where `Выполнить` is `KW_EXECUTE`) reach the
+/// resolver instead of being rejected by an `IDENT`-only gate.
+///
 /// Supports:
 /// - Same-file navigation (methods, variables, parameters)
-/// - Cross-file navigation (qualified names like Module.Method)
-/// - Builtin functions and MDO types (no navigation, returns None)
+/// - Cross-file navigation (qualified names like `Module.Method`)
+/// - Builtin functions / platform methods / MDO types (no source
+///   target — returns `None`)
 pub fn goto_definition<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -29,24 +36,36 @@ pub fn goto_definition<DB: RootDatabase>(
     let _span =
         tracing::info_span!("goto_definition", ?file_id, offset = u32::from(offset)).entered();
 
-    // Parse the file and find the token at cursor position
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
     let token = root.token_at_offset(offset).right_biased()?;
 
-    // Check if it's an identifier
-    if token.kind() != syntax::SyntaxKind::IDENT {
-        return None;
-    }
-
-    // Use unified Semantics API for resolution
     let sema = Semantics::new(db);
-    let definition = {
-        let _span = tracing::debug_span!("resolve_name_to_definition").entered();
-        sema.resolve_name_to_definition(file_id, &token)?
+
+    let definition = match classify_token(&token) {
+        NameClass::FieldName { token, .. } => {
+            // Two stages — platform method first, then qualified-name
+            // resolution. The platform method path returns a
+            // `BuiltinMethod` definition for receiver-typed calls
+            // (`Запрос.Выполнить`); since platform methods have no
+            // source location, `definition_to_navigation_target`
+            // returns `None` for that variant. The qualified-name
+            // path resolves user-defined cross-module calls
+            // (`ОбщегоНазначения.МойМетод`), MDO objects
+            // (`Документы.ПКО`), and manager-module methods.
+            let platform = sema.resolve_method_call_to_definition(file_id, &token);
+            match platform.and_then(|d| definition_to_navigation_target(db, &d)) {
+                Some(t) => return Some(t),
+                None => sema.resolve_name_to_definition(file_id, &token)?,
+            }
+        }
+        NameClass::FreeName { token } => sema.resolve_name_to_definition(file_id, &token)?,
+        NameClass::TypeRef { .. }
+        | NameClass::Literal { .. }
+        | NameClass::Keyword { .. }
+        | NameClass::Other => return None,
     };
 
-    // Convert Definition to NavigationTarget
     definition_to_navigation_target(db, &definition)
 }
 
@@ -619,6 +638,32 @@ mod tests {
 
         // Should return None when metadata object not found
         assert!(result.is_none(), "Should not resolve non-existent metadata object");
+    }
+
+    /// Regression guard for Layer B: goto on `Запрос.Выполнить()`
+    /// must NOT panic and must return `None` (the platform method has
+    /// no source to navigate to). Pre-migration the IDENT-only entry
+    /// gate dropped `KW_EXECUTE` before classification — but the
+    /// codepath through `resolve_method_call_to_definition` is the
+    /// same one hover uses, so a goto request still has to resolve
+    /// the field-tail, just to a `BuiltinMethod` definition that
+    /// produces no nav target. This test pins both halves: the
+    /// resolution succeeds, the navigation returns `None`.
+    #[test]
+    fn test_goto_definition_keyword_method_after_dot_returns_none() {
+        let source = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ 1";
+    Результат = Запрос.Выполнить();
+КонецПроцедуры
+        "#;
+        let (db, file_id) = create_db_with_file(source);
+
+        let offset = TextSize::from(source.rfind("Выполнить").unwrap() as u32);
+        let target = goto_definition(&db, file_id, offset);
+        // Platform methods have no navigable source — None is correct.
+        assert!(target.is_none(), "platform method navigation must be None, got: {target:?}");
     }
 
     #[test]

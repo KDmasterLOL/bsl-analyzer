@@ -369,8 +369,17 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         let _span = tracing::info_span!("resolve_name_to_definition").entered();
 
-        // Check if it's an identifier
-        if token.kind() != syntax::SyntaxKind::IDENT {
+        // Accept any name-token. Keyword-shaped names that happen to
+        // sit in field-tail slots (`Запрос.Выполнить`, where `Выполнить`
+        // is `KW_EXECUTE`) reach `try_resolve_qualified_name_for_token`
+        // below and resolve through the workspace path resolver.
+        // The downstream `field_name_receiver` guard at the end still
+        // rejects field-tail tokens that fail qualified-name resolution,
+        // so a free `KW_EXECUTE` in expression position never hijacks
+        // the global builtin (the classifier already routes it as
+        // `Keyword`, but this stays correct even if a direct caller
+        // skips classification).
+        if !token.kind().is_name_token() {
             return None;
         }
 

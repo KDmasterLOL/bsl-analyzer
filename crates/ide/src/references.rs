@@ -17,10 +17,9 @@
 //! - **With WorkspaceIndex**: O(C×M) where C=10-100 files → ~3 seconds
 //! - **Speedup**: ~10-30x for large projects
 
-use hir::Name;
-use hir::Semantics;
+use hir::{classify_token, Name, NameClass, Semantics};
 use ide_db::RootDatabase;
-use syntax::{SyntaxKind, TextSize};
+use syntax::TextSize;
 use vfs::FileId;
 
 use crate::Location;
@@ -51,17 +50,40 @@ pub fn find_references<DB: RootDatabase>(
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    // Find token at position
+    // Find token at position. Accept any name-token — keyword-shaped
+    // names sitting in field-tail slots (`Запрос.Выполнить`, where
+    // `Выполнить` is `KW_EXECUTE`) reach the resolver via the
+    // classifier rather than being dropped by an `IDENT`-only gate.
     let token = match root.token_at_offset(offset).right_biased() {
-        Some(t) if t.kind() == SyntaxKind::IDENT => t,
+        Some(t) if t.kind().is_name_token() => t,
         _ => return Vec::new(),
     };
 
-    // Resolve to Definition
     let sema = Semantics::new(db);
-    let definition = match sema.resolve_name_to_definition(file_id, &token) {
-        Some(def) => def,
-        None => return Vec::new(),
+
+    let definition = match classify_token(&token) {
+        NameClass::FieldName { token, .. } => {
+            // Same precedence as goto: try platform-method first
+            // (`Запрос.Выполнить` resolves to a `BuiltinMethod`,
+            // which is then handled by the search-scope branch
+            // below — empty scope). Fall back to qualified-name
+            // resolution for cross-module / MDO targets.
+            match sema.resolve_method_call_to_definition(file_id, &token) {
+                Some(d) => d,
+                None => match sema.resolve_name_to_definition(file_id, &token) {
+                    Some(d) => d,
+                    None => return Vec::new(),
+                },
+            }
+        }
+        NameClass::FreeName { token } => match sema.resolve_name_to_definition(file_id, &token) {
+            Some(d) => d,
+            None => return Vec::new(),
+        },
+        NameClass::TypeRef { .. }
+        | NameClass::Literal { .. }
+        | NameClass::Keyword { .. }
+        | NameClass::Other => return Vec::new(),
     };
 
     let target_name = match definition.name(db) {
@@ -194,21 +216,37 @@ fn find_definition_references<DB: RootDatabase>(
 
     let mut references = Vec::new();
 
-    // Walk all IDENT tokens in the file
+    // Two-stage filter — name-token kind + case-insensitive text
+    // match are cheap (no parent walks, no salsa); classification
+    // and resolution only run on candidates that pass both gates.
+    // Without this layering, every token in every searched file
+    // would pay the classifier's parent-walk cost.
     for token in root.descendants_with_tokens().filter_map(|e| e.into_token()) {
-        if token.kind() != SyntaxKind::IDENT {
+        if !token.kind().is_name_token() {
             continue;
         }
 
         let token_name = Name::new(token.text());
-
-        // Quick filter: case-insensitive name match
         if !token_name.eq_ignore_case(&target_name) {
             continue;
         }
 
-        // Validate: does this token resolve to the same Definition?
-        if let Some(candidate_def) = sema.resolve_name_to_definition(file_id, &token) {
+        // Classify only matching candidates. Skip non-name slots
+        // (literal `Истина` if it shared a text with a user binding,
+        // bare keywords, etc.) — they would never resolve to the
+        // target definition anyway.
+        let candidate_def = match classify_token(&token) {
+            NameClass::FieldName { token, .. } => sema
+                .resolve_method_call_to_definition(file_id, &token)
+                .or_else(|| sema.resolve_name_to_definition(file_id, &token)),
+            NameClass::FreeName { token } => sema.resolve_name_to_definition(file_id, &token),
+            NameClass::TypeRef { .. }
+            | NameClass::Literal { .. }
+            | NameClass::Keyword { .. }
+            | NameClass::Other => None,
+        };
+
+        if let Some(candidate_def) = candidate_def {
             if &candidate_def == target_definition {
                 let range = token.text_range();
                 references.push(Location { file_id, range });
