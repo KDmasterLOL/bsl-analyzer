@@ -37,7 +37,7 @@
 //! always wins; platform fills the gap when no workspace method exists.
 
 use bsl_metadata::MdoType;
-use bsl_platform::{PlatformData, PlatformDataInner, PlatformMethod};
+use bsl_platform::{find_prefixed_method, PlatformMethod};
 use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 use hir_def::Name;
 
@@ -74,7 +74,7 @@ pub fn resolve_platform_manager_method(
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
     let prefix = mdo_type.manager_type_prefix()?;
-    let method = find_prefixed_method(prefix, method_name)?;
+    let method = find_prefixed_method(prefix, method_name.as_str())?;
     Some(build_resolution(&method, mdo_type, mdo_name))
 }
 
@@ -92,7 +92,7 @@ pub fn resolve_platform_metadata_ref_method(
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
     let (prefix, parent_mdo) = metadata_kind_to_prefix_and_mdo(kind)?;
-    let method = find_prefixed_method(prefix, method_name)?;
+    let method = find_prefixed_method(prefix, method_name.as_str())?;
     Some(build_resolution(&method, parent_mdo, mdo_name))
 }
 
@@ -126,42 +126,6 @@ pub(crate) fn build_resolution(
 
     let signature = FunctionSignature::new_with_defaults(params, defaults, return_ty.clone());
     PlatformMethodResolution { signature, return_ty }
-}
-
-/// Find one platform method whose `type_name` starts with `"{prefix}."`
-/// and whose name (bilingual) matches `method_name`.
-///
-/// Platform data stores manager / object / ref methods with composite
-/// `type_name` (`"CatalogManager.<Catalog name>"` etc.) and placeholder
-/// `name = "<Имя"`, so neither the (type_name, method_name) index nor
-/// a direct name comparison works. Two matchers are tried:
-///
-/// 1. `docs.syntax.split('(').next()` — the Russian method name is
-///    stored in the HBK-derived docs under "ИмяМенеджера.Метод(...)".
-/// 2. `english_name.rsplit_once('.')` — the English canonical name is
-///    `"ManagerType.Method"`, so the part after the last `.` is the
-///    bare method name.
-fn find_prefixed_method(prefix: &str, method_name: &Name) -> Option<PlatformMethod> {
-    let method_lower = method_name.as_str().to_lowercase();
-    let data = PlatformData::instance();
-    let docs_db = PlatformDataInner::instance();
-
-    data.get_manager_methods(prefix)
-        .into_iter()
-        .find(|m| {
-            let docs = docs_db.get_method_docs(m.id);
-            let ru_match = docs
-                .as_ref()
-                .and_then(|d| d.syntax.split('(').next())
-                .is_some_and(|ru| ru.to_lowercase() == method_lower);
-            if ru_match {
-                return true;
-            }
-            let en_name =
-                m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
-            en_name.to_lowercase() == method_lower
-        })
-        .cloned()
 }
 
 /// Map a `MetadataKind` to `(prefix, parent_mdo)` for platform lookup.
