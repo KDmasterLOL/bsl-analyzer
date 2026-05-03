@@ -157,10 +157,15 @@ fn classify_mdo_chain<DB: RootDatabase>(
         return None;
     }
 
+    // Accept any name-token for path segments. The parser admits
+    // keywords after `.` (e.g. `Документы.ПКО.Выполнить` with
+    // `KW_EXECUTE`), so an IDENT-only filter would silently drop
+    // keyword-shaped manager methods. Layer B unification — same
+    // predicate as `crates/syntax/src/syntax_kind.rs::is_name_token`.
     let idents: Vec<String> = callee
         .descendants_with_tokens()
         .filter_map(|it| it.into_token())
-        .filter(|t| t.kind() == SyntaxKind::IDENT)
+        .filter(|t| t.kind().is_name_token())
         .map(|t| t.text().to_string())
         .collect();
 
@@ -209,20 +214,14 @@ fn find_call_expr(arg_list: &SyntaxNode) -> Option<SyntaxNode> {
     arg_list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)
 }
 
-/// Extracts the single IDENT child of a `NEW_EXPR` (the constructor type
-/// name). Returns `None` when the parser emitted zero or more than one IDENT
-/// — the latter shouldn't happen for well-formed source but we stay defensive.
+/// Extracts the single name-token child of a `NEW_EXPR` (the
+/// constructor type name). Delegates to the syntax-tier
+/// `new_expr_type_name_token` helper so the predicate stays
+/// consistent with hover / classifier / hir-def lowering — accepting
+/// any `is_name_token()` (IDENT or keyword) future-proofs against
+/// keyword-typed platform types even though none ship today.
 fn extract_new_expr_type_name(new_expr: &SyntaxNode) -> Option<String> {
-    let mut idents = new_expr
-        .children_with_tokens()
-        .filter_map(|c| c.into_token())
-        .filter(|t| t.kind() == SyntaxKind::IDENT);
-
-    let first = idents.next()?;
-    if idents.next().is_some() {
-        return None;
-    }
-    Some(first.text().to_string())
+    Some(syntax::ast_utils::new_expr_type_name_token(new_expr)?.text().to_string())
 }
 
 /// Split `call_expr` into `(Option<(receiver_name, receiver_node)>, method_name)`.
@@ -237,18 +236,24 @@ fn extract_callee_info(call_expr: &SyntaxNode) -> Option<(Option<(String, Syntax
 
     match first_child.kind() {
         SyntaxKind::FIELD_EXPR => {
-            let mut idents: Vec<String> = Vec::new();
+            // Accept keyword-shaped name tokens — the parser admits any
+            // `is_keyword()` token after `.`, so `Запрос.Выполнить(...)`
+            // (where `Выполнить` is `KW_EXECUTE`) had its method name
+            // dropped by the legacy IDENT filter, leaving callers
+            // misclassified or routed without a receiver. Layer B
+            // unification.
+            let mut names: Vec<String> = Vec::new();
             for token in first_child.descendants_with_tokens().filter_map(|it| it.into_token()) {
-                if token.kind() == SyntaxKind::IDENT {
-                    idents.push(token.text().to_string());
+                if token.kind().is_name_token() {
+                    names.push(token.text().to_string());
                 }
             }
-            match idents.len() {
+            match names.len() {
                 0 => None,
-                1 => Some((None, idents.pop().unwrap())),
+                1 => Some((None, names.pop().unwrap())),
                 _ => {
-                    let method = idents.pop().unwrap();
-                    let receiver_name = idents.pop().unwrap();
+                    let method = names.pop().unwrap();
+                    let receiver_name = names.pop().unwrap();
                     let receiver_node = first_child.first_child()?;
                     Some((Some((receiver_name, receiver_node)), method))
                 }

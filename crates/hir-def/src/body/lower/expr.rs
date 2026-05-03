@@ -2,6 +2,7 @@
 //!
 //! This module handles lowering of BSL expressions from AST to HIR.
 
+use syntax::ast_utils::field_tail_name_token;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::body::{
@@ -14,28 +15,13 @@ use super::diagnostics::{is_deprecated_method, is_followed_by_loop_exit};
 use super::utils::{extract_string_content, looks_like_sdbl};
 use super::LoweringCtx;
 
-/// Whether a token kind is usable as the tail name of a `FIELD_EXPR`.
-///
-/// The parser accepts any keyword after `.` in addition to `IDENT`, so HIR
-/// lowering must mirror that rule or keyword-shaped members degrade to
-/// `Name::missing()`.
-fn is_field_name_token(kind: SyntaxKind) -> bool {
-    kind == SyntaxKind::IDENT || kind.is_keyword()
-}
-
-/// Return the first field-tail token that appears after `.` inside a `FIELD_EXPR`.
-///
-/// The scan is limited to direct `children_with_tokens()` of the field node, so
-/// it cannot descend into the base subtree.
+/// Local re-export so the existing `field_name_token(node)` callsites
+/// don't change signature. The promoted implementation lives in
+/// `crates/syntax/src/ast_utils.rs::field_tail_name_token`, shared with
+/// the IDE-layer name classifier and `symbol-info` callee resolution
+/// — see the Layer B unification plan.
 fn field_name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
-    let mut saw_dot = false;
-    node.children_with_tokens().filter_map(|el| el.into_token()).find(|tok| {
-        if !saw_dot {
-            saw_dot = tok.kind() == SyntaxKind::DOT;
-            return false;
-        }
-        is_field_name_token(tok.kind())
-    })
+    field_tail_name_token(node)
 }
 
 /// Lower an expression node (handles EXPR wrapper).

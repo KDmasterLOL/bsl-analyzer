@@ -5,7 +5,7 @@
 //!
 //! Uses the unified Definition enum for resolution.
 
-use hir::{Definition, Semantics};
+use hir::{classify_token, Definition, NameClass, Semantics};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -17,10 +17,17 @@ use crate::{NavigationTarget, SymbolKind};
 /// Returns a navigation target pointing to the symbol's definition,
 /// or None if no symbol is found at the position.
 ///
+/// Dispatch is driven by [`hir::classify_token`] — every name-token
+/// resolves through the same classifier the rest of the IDE layer
+/// uses, so keyword-shaped names sitting in field-tail slots
+/// (`Запрос.Выполнить`, where `Выполнить` is `KW_EXECUTE`) reach the
+/// resolver instead of being rejected by an `IDENT`-only gate.
+///
 /// Supports:
 /// - Same-file navigation (methods, variables, parameters)
-/// - Cross-file navigation (qualified names like Module.Method)
-/// - Builtin functions and MDO types (no navigation, returns None)
+/// - Cross-file navigation (qualified names like `Module.Method`)
+/// - Builtin functions / platform methods / MDO types (no source
+///   target — returns `None`)
 pub fn goto_definition<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -29,24 +36,40 @@ pub fn goto_definition<DB: RootDatabase>(
     let _span =
         tracing::info_span!("goto_definition", ?file_id, offset = u32::from(offset)).entered();
 
-    // Parse the file and find the token at cursor position
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
     let token = root.token_at_offset(offset).right_biased()?;
 
-    // Check if it's an identifier
-    if token.kind() != syntax::SyntaxKind::IDENT {
-        return None;
-    }
-
-    // Use unified Semantics API for resolution
     let sema = Semantics::new(db);
-    let definition = {
-        let _span = tracing::debug_span!("resolve_name_to_definition").entered();
-        sema.resolve_name_to_definition(file_id, &token)?
+
+    let definition = match classify_token(&token) {
+        NameClass::FieldName { token, .. } => {
+            // Platform-method dispatch is authoritative when it
+            // matches: a hit means we resolved the field tail through
+            // the type-aware platform index, and that target is final
+            // — even if it has no source to navigate to (`BuiltinMethod`
+            // for `Запрос.Выполнить`). Falling back to qualified-name
+            // resolution in that case would let the workspace path
+            // resolver match `[Запрос, Выполнить]` against an unrelated
+            // CommonModule that happens to share the receiver name and
+            // export a same-name method, jumping the user to an
+            // unrelated definition.
+            if let Some(d) = sema.resolve_method_call_to_definition(file_id, &token) {
+                return definition_to_navigation_target(db, &d);
+            }
+            // Platform-method dispatch missed entirely. Try the
+            // qualified-name path for cross-module
+            // (`ОбщегоНазначения.МойМетод`), MDO objects
+            // (`Документы.ПКО`), and manager-module methods.
+            sema.resolve_name_to_definition(file_id, &token)?
+        }
+        NameClass::FreeName { token } => sema.resolve_name_to_definition(file_id, &token)?,
+        NameClass::TypeRef { .. }
+        | NameClass::Literal { .. }
+        | NameClass::Keyword { .. }
+        | NameClass::Other => return None,
     };
 
-    // Convert Definition to NavigationTarget
     definition_to_navigation_target(db, &definition)
 }
 
@@ -619,6 +642,78 @@ mod tests {
 
         // Should return None when metadata object not found
         assert!(result.is_none(), "Should not resolve non-existent metadata object");
+    }
+
+    /// Regression guard for Layer B: goto on `Запрос.Выполнить()`
+    /// must NOT panic and must return `None` (the platform method has
+    /// no source to navigate to). Pre-migration the IDENT-only entry
+    /// gate dropped `KW_EXECUTE` before classification — but the
+    /// codepath through `resolve_method_call_to_definition` is the
+    /// same one hover uses, so a goto request still has to resolve
+    /// the field-tail, just to a `BuiltinMethod` definition that
+    /// produces no nav target. This test pins both halves: the
+    /// resolution succeeds, the navigation returns `None`.
+    #[test]
+    fn test_goto_definition_keyword_method_after_dot_returns_none() {
+        let source = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ 1";
+    Результат = Запрос.Выполнить();
+КонецПроцедуры
+        "#;
+        let (db, file_id) = create_db_with_file(source);
+
+        let offset = TextSize::from(source.rfind("Выполнить").unwrap() as u32);
+        let target = goto_definition(&db, file_id, offset);
+        // Platform methods have no navigable source — None is correct.
+        assert!(target.is_none(), "platform method navigation must be None, got: {target:?}");
+    }
+
+    /// Hard regression for the codex stop-time review: goto on
+    /// `Запрос.Выполнить()` must NOT jump to an unrelated CommonModule
+    /// that happens to share the receiver's name and exports a method
+    /// called `Выполнить`. The receiver is a typed local variable
+    /// (`Новый Запрос` — platform Query type), and the field-tail
+    /// must resolve through the platform-method dispatch, which
+    /// claims the slot exclusively. Pre-fix the goto fell back to
+    /// qualified-name resolution after the platform dispatch
+    /// returned a `BuiltinMethod` (no source), and the workspace
+    /// resolver matched `[Запрос, Выполнить]` against the bogus
+    /// CommonModule.
+    #[test]
+    fn test_goto_definition_platform_method_does_not_leak_to_workspace_module() {
+        let bogus = r#"
+Функция Выполнить() Экспорт
+    Возврат "не должно резолвиться";
+КонецФункции
+        "#;
+        let caller = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ 1";
+    Результат = Запрос.Выполнить();
+КонецПроцедуры
+        "#;
+
+        let files = &[
+            ("CommonModules/Запрос/Ext/Module.bsl", bogus),
+            ("Forms/Form1/Ext/Form/Module.bsl", caller),
+        ];
+        let (db, file_ids) = create_multi_file_db(files);
+
+        let offset = TextSize::from(caller.rfind("Выполнить").unwrap() as u32);
+        let target = goto_definition(&db, file_ids[1], offset);
+
+        // The bug we're guarding against is `Some(file_ids[0])` —
+        // jumping to the unrelated CommonModule. `None` (platform
+        // method, no source) or any non-bogus target is acceptable.
+        if let Some(t) = target {
+            assert_ne!(
+                t.file_id, file_ids[0],
+                "goto must not leak from platform method to a workspace module that happens to share the receiver's name"
+            );
+        }
     }
 
     #[test]

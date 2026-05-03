@@ -445,6 +445,41 @@ mod tests {
         );
     }
 
+    /// Regression guard for Layer B: signature help on
+    /// `Запрос.Выполнить(` must fire even though `Выполнить` is
+    /// `KW_EXECUTE`. Pre-migration `extract_callee_info` filtered the
+    /// callee path's tokens to `IDENT` only, so the keyword tail was
+    /// dropped. The collected list reduced to `["Запрос"]` and the
+    /// resolver classified the call as a global function with no
+    /// receiver — silently returning `None`.
+    #[test]
+    fn test_platform_method_signature_on_keyword_method_name() {
+        let code = "Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Выполнить($0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset)
+            .expect("signature help must resolve Запрос.Выполнить despite KW_EXECUTE token kind");
+        assert!(
+            sig.signature.contains("Выполнить"),
+            "signature must include the method name, got: {}",
+            sig.signature
+        );
+        // Hard positive — Query.Execute returns `РезультатЗапроса`
+        // (per `crates/bsl-platform/data/platform_data.json`). Pinning
+        // the return type proves we resolved as the platform-method
+        // overload, not as some other "Выполнить" surface (the global
+        // eval-statement form has no return type).
+        assert!(
+            sig.signature.contains("РезультатЗапроса"),
+            "signature must surface Query.Execute's return type — proves the platform-method overload was selected. got: {}",
+            sig.signature
+        );
+    }
+
     #[test]
     fn test_platform_method_on_instance_variable() {
         // Before the Ty-based resolver patch, `resolve_callee_at` resolved

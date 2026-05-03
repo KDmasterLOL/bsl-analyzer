@@ -282,6 +282,36 @@ fn completion_after_dot_on_number_variable_does_not_offer_array_methods() {
     );
 }
 
+// ---------- keyword-as-method-name (Layer B regression guards) ----------
+
+/// Pin completion when the cursor sits on a fully-typed keyword
+/// token after the dot. Pre-migration `resolve_dot_anchor` accepted
+/// only `IDENT` after `.`, so a `KW_EXECUTE` cursor
+/// (`Запрос.Выполнить$0`) bypassed the anchor and completion silently
+/// fell through to other providers.
+#[test]
+fn completion_with_cursor_on_keyword_method_name_after_dot() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Выполнить$0
+КонецПроцедуры
+"#,
+    );
+
+    assert!(
+        !items.is_empty(),
+        "completion must fire when cursor is on a keyword field-tail token (KW_EXECUTE)"
+    );
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        has_label(&items, "Выполнить"),
+        "method list must include `Выполнить` for a Query receiver; got: {:?}",
+        labels
+    );
+}
+
 // ---------- no-crash canary for unresolved receiver ----------
 
 #[test]
