@@ -47,10 +47,11 @@ pub use standard_mdo_attributes::{
 
 // Re-export public API
 pub use db::{
-    global_function_query, global_member_method_query, global_property_query,
+    find_prefixed_method, global_function_query, global_member_method_query, global_property_query,
     manager_methods_query, platform_constructors_query, platform_method_query,
-    platform_property_query, platform_type_query, type_methods_query, type_properties_query,
-    MethodLookupInput, PlatformData, PlatformDataInner, TypeNameInput, GLOBAL_CONTEXT_OWNER,
+    platform_property_query, platform_type_query, prefixed_method_query, type_methods_query,
+    type_properties_query, MethodLookupInput, PlatformData, PlatformDataInner,
+    PrefixedMethodLookupInput, TypeNameInput, GLOBAL_CONTEXT_OWNER,
 };
 pub use types::*;
 
