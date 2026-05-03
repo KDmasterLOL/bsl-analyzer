@@ -6,9 +6,9 @@
 //! - User-defined symbols (methods, variables, parameters)
 
 use bsl_platform::{
-    global_function_query, platform_method_query, platform_property_query, platform_type_query,
-    type_methods_query, ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod,
-    PlatformProperty, TypeNameInput,
+    global_function_query, platform_property_query, platform_type_query, type_methods_query,
+    ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod, PlatformProperty,
+    TypeNameInput,
 };
 use hir::{classify_token, MetadataKind, NameClass, Semantics, Ty};
 use ide_db::RootDatabase;
@@ -189,10 +189,10 @@ fn hover_platform_method_on_token<DB: RootDatabase>(
     token: &SyntaxToken,
 ) -> Option<HoverResult> {
     let definition = sema.resolve_method_call_to_definition(file_id, token)?;
-    let hir::Definition::BuiltinMethod { type_name, method_name } = definition else {
+    let hir::Definition::BuiltinMethodHandle { handle, .. } = definition else {
         return None;
     };
-    hover_for_platform_method(db, type_name.as_str(), method_name.as_str(), token.text_range())
+    hover_for_platform_method(db, &handle, token.text_range())
 }
 
 /// Resolve the inferred [`Ty`] of a single identifier token.
@@ -389,7 +389,7 @@ fn definition_to_hover<DB: RootDatabase>(
 
         // Don't show hover for builtins (they're handled by hover_platform)
         hir::Definition::BuiltinFunction(_)
-        | hir::Definition::BuiltinMethod { .. }
+        | hir::Definition::BuiltinMethodHandle { .. }
         | hir::Definition::VirtualTableField { .. }
         | hir::Definition::Unresolved => return None,
     }
@@ -650,12 +650,16 @@ fn metadata_kind_ru(kind: MetadataKind) -> &'static str {
 /// ```
 fn hover_for_platform_method<DB: RootDatabase>(
     db: &DB,
-    type_name: &str,
-    method_name: &str,
+    handle: &hir::PlatformMethodHandle,
     range: TextRange,
 ) -> Option<HoverResult> {
-    let input = MethodLookupInput::new(db, type_name.to_string(), method_name.to_string());
-    let method = platform_method_query(db, input)?;
+    // Use the handle's stable id-walk to fetch the underlying
+    // `PlatformMethod`. Covers both scalar (`(type_name, method_name)`)
+    // and composite-prefix (`<Prefix>.<MDO>` with placeholder name)
+    // shapes uniformly — the resolution path that produced the handle
+    // already disambiguated which index to consult, so handle.lookup
+    // re-fetches without re-routing.
+    let method = handle.lookup(db)?;
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
 
     let sig = from_platform_method(&method, docs.as_ref());

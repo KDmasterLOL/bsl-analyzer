@@ -20,6 +20,7 @@
 
 use crate::{MethodId, ModuleId, Name, VariableId};
 use hir_def::DefDatabase;
+use hir_ty::PlatformMethodHandle;
 use std::sync::Arc;
 use syntax::TextRange;
 use vfs::FileId;
@@ -76,10 +77,32 @@ pub enum Definition {
     /// Examples: `НачатьТранзакцию()`, `Формат()`, `Сообщить()`
     BuiltinFunction(Name),
 
-    /// Builtin method of a platform type
+    /// Builtin method addressed through a stable platform-method handle.
     ///
-    /// Examples: `Строка.ВРег()`, `Массив.Добавить()`
-    BuiltinMethod { type_name: Name, method_name: Name },
+    /// Examples: `Строка.ВРег()`, `Массив.Добавить()`,
+    /// `Набор.Прочитать()`, `Спр.Записать()`.
+    ///
+    /// Carries a [`PlatformMethodHandle`] that downstream IDE features
+    /// (hover, signature help, completion) convert back to a
+    /// [`bsl_platform::PlatformMethod`] via Salsa-cached queries.
+    /// `method_name` stays separate so display tokens and references
+    /// remain searchable by the BSL identifier the user typed.
+    ///
+    /// Covers all platform methods uniformly:
+    /// - scalar receivers (`Array`, `Filter`, `Запрос`) hit the
+    ///   `(type_name, method_name)` index;
+    /// - composite-prefix receivers (manager / metadata-ref shapes
+    ///   like `InformationRegisterRecordSet.<Имя>`,
+    ///   `CatalogManager.<Имя>`) hit the prefixed walk that the older
+    ///   scalar `(type_name, method_name)` shape could not represent
+    ///   (the placeholder `<Имя>` is part of the index key, not a
+    ///   parameter).
+    ///
+    /// Equality and hashing are inherited from [`PlatformMethodHandle`]
+    /// (keyed on `method_id` only), so two handles for the same
+    /// platform method always compare equal regardless of the
+    /// resolution route.
+    BuiltinMethodHandle { handle: PlatformMethodHandle, method_name: Name },
 
     /// MDO collection type (plural form)
     ///
@@ -141,7 +164,7 @@ impl Definition {
             }
             // Builtins, MDOs, virtual tables don't have a module
             Definition::BuiltinFunction(_)
-            | Definition::BuiltinMethod { .. }
+            | Definition::BuiltinMethodHandle { .. }
             | Definition::MdoCollectionType(_)
             | Definition::MdoObject { .. }
             | Definition::VirtualTableField { .. }
@@ -159,7 +182,7 @@ impl Definition {
             Definition::Parameter { param_name, .. } => Some(param_name.clone()),
             Definition::Local { var_name, .. } => Some(var_name.clone()),
             Definition::BuiltinFunction(name) => Some(name.clone()),
-            Definition::BuiltinMethod { method_name, .. } => Some(method_name.clone()),
+            Definition::BuiltinMethodHandle { method_name, .. } => Some(method_name.clone()),
             Definition::MdoObject { object_name, .. } => Some(object_name.clone()),
             Definition::Module(_) => None,
             Definition::VirtualTableField { field_name, .. } => Some(field_name.clone()),
@@ -253,8 +276,23 @@ impl Definition {
             Definition::BuiltinFunction(name) => {
                 format!("Builtin: {}()", name.as_str())
             }
-            Definition::BuiltinMethod { type_name, method_name } => {
-                format!("{}.{}()", type_name.as_str(), method_name.as_str())
+            Definition::BuiltinMethodHandle { handle, method_name } => {
+                // Render the qualifier from the handle's origin so the
+                // composite-prefix shape (`InformationRegisterRecordSet.<Имя>`)
+                // surfaces a meaningful display label rather than the
+                // raw composite key. Callers that need richer presentation
+                // (e.g. `Справочники.Номенклатура.СоздатьЭлемент()` plural
+                // form) should look up the underlying method through the
+                // handle and render it themselves; this is the fallback
+                // shape used by find-references / debug output.
+                use hir_ty::PlatformMethodOrigin;
+                let qualifier = match &handle.origin {
+                    PlatformMethodOrigin::Scalar { type_name } => type_name.to_string(),
+                    PlatformMethodOrigin::Prefixed { mdo_type, mdo_name, .. } => {
+                        format!("{}.{}", mdo_type.russian_name(), mdo_name.as_str())
+                    }
+                };
+                format!("{}.{}()", qualifier, method_name.as_str())
             }
             Definition::MdoCollectionType(mdo_type) => {
                 format!("MDO Collection: {}", mdo_type.russian_name())
@@ -297,7 +335,7 @@ impl Definition {
 
     /// Check if this is a builtin (function or method).
     pub fn is_builtin(&self) -> bool {
-        matches!(self, Definition::BuiltinFunction(_) | Definition::BuiltinMethod { .. })
+        matches!(self, Definition::BuiltinFunction(_) | Definition::BuiltinMethodHandle { .. })
     }
 
     /// Check if this is an MDO-related definition.

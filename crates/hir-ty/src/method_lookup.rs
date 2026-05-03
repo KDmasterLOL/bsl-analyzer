@@ -140,11 +140,7 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
                 return Some(MethodInfo {
                     return_ty: res.return_ty,
                     params: res.signature.params.to_vec(),
-                    // Manager-method resolution feeds `MethodResolution`
-                    // (single-signature); per-variant data lives only on
-                    // `PlatformMethod` and reaches us through the scalar
-                    // path below.
-                    overloads: Vec::new(),
+                    overloads: res.overloads,
                 });
             }
             return None;
@@ -171,7 +167,7 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
                 return Some(MethodInfo {
                     return_ty: res.return_ty,
                     params: res.signature.params.to_vec(),
-                    overloads: Vec::new(),
+                    overloads: res.overloads,
                 });
             }
             // Scalar platform key fallback: synthetic kinds (e.g.
@@ -200,78 +196,6 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
     let data = PlatformData::instance();
     let method = data.get_method(type_key, method_name.as_str())?;
     Some(to_method_info(method))
-}
-
-/// Like [`lookup_method`], but additionally returns the `PlatformData`
-/// type-name key that was used to resolve the method.
-///
-/// Consumers (IDE hover, goto, etc.) need the type-name string both to
-/// build a [`hir_def::Definition::BuiltinMethod`]-equivalent identifier
-/// and to feed `MethodLookupInput` for hover-markdown rendering. The
-/// public entry point is intentionally separate from [`lookup_method`]
-/// so the inference path keeps its narrow `Option<MethodInfo>` shape.
-///
-/// For [`Ty::Union`] receivers, returns the **first live member's** key
-/// alongside the unioned [`MethodInfo`] (matching `lookup_method`'s
-/// "first hit owns the params" semantics).
-///
-/// [`Ty::ObjectManager`] / [`Ty::MetadataRef`] receivers return [`None`]
-/// — those resolve through [`crate::platform_manager_lookup`] which
-/// keys on composite `"<Kind>Manager.<Имя>"` strings that the scalar
-/// hover path does not understand. Hover for those receivers is served
-/// by other paths (see `crates/ide/src/hover.rs`); this entry point is
-/// reserved for value-type receivers.
-pub fn lookup_method_with_key(
-    receiver_ty: &Ty,
-    method_name: &Name,
-) -> Option<(String, MethodInfo)> {
-    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
-    let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
-
-    if let Ty::Union(members) = receiver_ty {
-        let live: Vec<&Ty> =
-            members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
-        let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
-        // Same cohesion rule as in `lookup_method`: bind params /
-        // overloads / key to the FIRST successful union branch, so the
-        // signature shapes always match the receiver they describe.
-        let mut chosen_signature: Option<(Vec<Ty>, Vec<Vec<Ty>>)> = None;
-        let mut first_key: Option<String> = None;
-        for m in live {
-            if let Some((k, info)) = lookup_method_with_key(m, method_name) {
-                returns.push(info.return_ty);
-                if chosen_signature.is_none() {
-                    chosen_signature = Some((info.params, info.overloads));
-                    first_key = Some(k);
-                }
-            }
-        }
-        let (params, overloads) = chosen_signature.unwrap_or_default();
-        return first_key
-            .map(|k| (k, MethodInfo { return_ty: Ty::union(returns), params, overloads }));
-    }
-
-    // Synthetic `MetadataRef` kinds with a scalar platform key (e.g.
-    // `RegisterFilter` → `"Filter"`) need their hover/goto resolved
-    // through the same bilingual scalar index used for value-type
-    // receivers, so the IDE definition path matches the inference and
-    // completion paths wired in `lookup_method` / `collect_platform_items`.
-    if let Ty::MetadataRef { kind, .. } = receiver_ty {
-        if let Some(scalar_key) = kind.scalar_platform_key() {
-            let data = PlatformData::instance();
-            let method = data.get_method(scalar_key, method_name.as_str())?;
-            return Some((scalar_key.to_string(), to_method_info(method)));
-        }
-    }
-
-    if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::MetadataRef { .. }) {
-        return None;
-    }
-
-    let type_key = platform_type_key(receiver_ty)?;
-    let data = PlatformData::instance();
-    let method = data.get_method(type_key, method_name.as_str())?;
-    Some((type_key.to_string(), to_method_info(method)))
 }
 
 /// Pick the `PlatformData::get_method` key for a scalar receiver.
@@ -353,7 +277,7 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
 /// - Parameter types are kept as raw scalars for now; malformed comma-heavy
 ///   HBK prose stays a single `Ty::PlatformObject(...)` instead of poisoning
 ///   argument checks with bogus union members.
-fn to_method_info(method: &PlatformMethod) -> MethodInfo {
+pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     let return_ty = method
         .return_type
         .as_ref()
@@ -369,16 +293,7 @@ fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     // Per-overload param lists for multi-overload methods
     // (`ЧтениеXML.ПолучитьАтрибут` etc.). Empty when the platform JSON
     // declares a single signature — `params` already covers it.
-    let overloads: Vec<Vec<Ty>> = method
-        .variants
-        .iter()
-        .map(|v| {
-            v.parameters
-                .iter()
-                .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
-                .collect()
-        })
-        .collect();
+    let overloads = lower_overloads(method);
 
     MethodInfo { return_ty, params, overloads }
 }
@@ -418,6 +333,32 @@ fn to_method_info(method: &PlatformMethod) -> MethodInfo {
 /// a real type list, and routing them through `resolve_platform_type_union`
 /// would lift the whole raw string to a strict `Ty::PlatformObject` and
 /// false-fire `TypeMismatch`.
+/// Lower per-variant parameter lists for multi-overload methods.
+///
+/// Mirrors [`to_method_info`]'s overload computation but exposed as a
+/// stand-alone helper so the unified `resolve_method` use case and the
+/// composite-prefix `build_resolution` adapter can share one
+/// implementation.
+///
+/// Returns an empty `Vec` when the platform JSON declares a single
+/// signature; populated when multiple `Вариант синтаксиса:` sections
+/// exist (e.g. `Array.Найти`, `ЧтениеXML.ПолучитьАтрибут`,
+/// `InformationRegisterManager.Get`, `AccountingRegisterRecordSet.Move`,
+/// `BusinessProcessManager.FindByNumber`). Argument-type checks accept
+/// the call when ANY overload accepts it.
+pub(crate) fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
+    method
+        .variants
+        .iter()
+        .map(|v| {
+            v.parameters
+                .iter()
+                .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
+                .collect()
+        })
+        .collect()
+}
+
 pub(crate) fn lower_param_type(raw: &str) -> Ty {
     if !raw.contains(',') {
         return Ty::from_type_name(raw);
@@ -461,7 +402,7 @@ pub(crate) fn lower_param_type(raw: &str) -> Ty {
 /// (`ТЧ1.Индекс(ТЧ2.Получить(0))`) or possibly-Undefined `Ty::Union`
 /// argument (`ТЧ.Индекс(ТЧ.Найти(...))`) would be falsely rejected. The
 /// gradual-typing rule (`Unknown ≤ A`) keeps these calls quiet.
-fn build_tabular_section_method_info(
+pub(crate) fn build_tabular_section_method_info(
     method: &PlatformMethod,
     parent: MdoType,
     section_name: &Name,
@@ -937,20 +878,40 @@ mod tests {
         assert_eq!(info.return_ty, Ty::Undefined);
     }
 
+    // Hover/goto coverage for the `Filter.Сбросить` scalar-key fallback
+    // moved to `platform_resolution::tests::metadata_ref_register_filter_resolves_with_scalar_handle`
+    // after `lookup_method_with_key` was replaced by the unified
+    // `resolve_method` use case.
+
     #[test]
-    fn method_lookup_with_key_register_filter_returns_filter_scalar_key() {
-        // Hover/goto path (`Semantics::resolve_method_call_to_definition`)
-        // consumes `lookup_method_with_key`. Without the scalar-key
-        // fallback there, hover on `<recordSet>.Отбор.Сбросить()`
-        // would silently fail even though inference resolves the type.
-        let r = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("РегистрСведений1"),
+    fn method_lookup_composite_multi_overload_populates_overloads() {
+        // Inference-side regression: composite-prefix methods can declare
+        // multiple `Вариант синтаксиса:` sections in HBK
+        // (`InformationRegisterManager.Get`,
+        // `AccountingRegisterRecordSet.Move`,
+        // `BusinessProcessManager.FindByNumber`, …). The pre-fix
+        // `lookup_method` produced `overloads: Vec::new()` for these
+        // because `build_resolution` didn't compute per-variant params,
+        // and `arg_diagnostics_query` (which consumes
+        // `MethodInfo.overloads`) consequently saw composite multi-
+        // overload calls as strictly typed against the first signature
+        // only and false-fired on legitimate alternative call shapes.
+        // Pin the fix here — the IDE-side equivalent lives in
+        // `platform_resolution::tests::composite_multi_overload_method_populates_overloads`.
+        let r =
+            Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курсы") };
+        let Some(info) = lookup_method(&r, &Name::new("Получить")) else {
+            // Skip when running without platform data.
+            println!("Skipping: no platform data available");
+            return;
         };
-        let (key, info) = lookup_method_with_key(&r, &Name::new("Сбросить"))
-            .expect("Filter.Сбросить hover key must resolve through scalar-key fallback");
-        assert_eq!(key, "Filter", "scalar key must be the bilingual `Filter` row");
-        assert_eq!(info.return_ty, Ty::Undefined);
+        assert!(
+            !info.overloads.is_empty(),
+            "InformationRegisterManager.Получить must surface multi-overload variants \
+             through lookup_method (the inference path); got params={:?}, overloads={:?}",
+            info.params,
+            info.overloads,
+        );
     }
 
     fn ts_receiver(parent: MdoType, name: &str) -> Ty {

@@ -37,11 +37,11 @@
 //! always wins; platform fills the gap when no workspace method exists.
 
 use bsl_metadata::MdoType;
-use bsl_platform::{PlatformData, PlatformDataInner, PlatformMethod};
+use bsl_platform::{find_prefixed_method, PlatformMethod};
 use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 use hir_def::Name;
 
-use crate::method_lookup::{lower_param_type, resolve_platform_type_name};
+use crate::method_lookup::{lower_overloads, lower_param_type, resolve_platform_type_name};
 
 /// Outcome of a successful platform-method lookup.
 ///
@@ -59,6 +59,17 @@ pub struct PlatformMethodResolution {
     /// `MethodResolution.return_type` so inference call-sites can
     /// read without dereferencing the `Box`.
     pub return_ty: Ty,
+    /// Per-overload parameter lists for multi-overload composite methods
+    /// (`InformationRegisterManager.Get`,
+    /// `AccountingRegisterRecordSet.Move`,
+    /// `BusinessProcessManager.FindByNumber` …). Empty for
+    /// single-signature methods — `signature.params` already covers
+    /// them. Argument-type checks accept the call when ANY overload
+    /// accepts it; without this, `arg_diagnostics_query` saw composite
+    /// multi-overload methods as strictly typed against the first
+    /// signature only and false-fired on legitimate alternative call
+    /// shapes.
+    pub overloads: Vec<Vec<Ty>>,
 }
 
 /// Resolve `<manager-collective>.<mdo_name>.<method>()` through platform data.
@@ -74,7 +85,7 @@ pub fn resolve_platform_manager_method(
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
     let prefix = mdo_type.manager_type_prefix()?;
-    let method = find_prefixed_method(prefix, method_name)?;
+    let method = find_prefixed_method(prefix, method_name.as_str())?;
     Some(build_resolution(&method, mdo_type, mdo_name))
 }
 
@@ -92,7 +103,7 @@ pub fn resolve_platform_metadata_ref_method(
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
     let (prefix, parent_mdo) = metadata_kind_to_prefix_and_mdo(kind)?;
-    let method = find_prefixed_method(prefix, method_name)?;
+    let method = find_prefixed_method(prefix, method_name.as_str())?;
     Some(build_resolution(&method, parent_mdo, mdo_name))
 }
 
@@ -103,7 +114,7 @@ pub fn resolve_platform_metadata_ref_method(
 /// [`resolve_platform_type_name`] for the scalar cases and
 /// [`map_generic_metadata_return_type`] for the manager-relative
 /// generics (`"СправочникОбъект"` → `Ty::MetadataRef { CatalogObject, mdo_name }`).
-fn build_resolution(
+pub(crate) fn build_resolution(
     method: &PlatformMethod,
     mdo_type: MdoType,
     mdo_name: &Name,
@@ -125,43 +136,7 @@ fn build_resolution(
         .unwrap_or(Ty::Undefined);
 
     let signature = FunctionSignature::new_with_defaults(params, defaults, return_ty.clone());
-    PlatformMethodResolution { signature, return_ty }
-}
-
-/// Find one platform method whose `type_name` starts with `"{prefix}."`
-/// and whose name (bilingual) matches `method_name`.
-///
-/// Platform data stores manager / object / ref methods with composite
-/// `type_name` (`"CatalogManager.<Catalog name>"` etc.) and placeholder
-/// `name = "<Имя"`, so neither the (type_name, method_name) index nor
-/// a direct name comparison works. Two matchers are tried:
-///
-/// 1. `docs.syntax.split('(').next()` — the Russian method name is
-///    stored in the HBK-derived docs under "ИмяМенеджера.Метод(...)".
-/// 2. `english_name.rsplit_once('.')` — the English canonical name is
-///    `"ManagerType.Method"`, so the part after the last `.` is the
-///    bare method name.
-fn find_prefixed_method(prefix: &str, method_name: &Name) -> Option<PlatformMethod> {
-    let method_lower = method_name.as_str().to_lowercase();
-    let data = PlatformData::instance();
-    let docs_db = PlatformDataInner::instance();
-
-    data.get_manager_methods(prefix)
-        .into_iter()
-        .find(|m| {
-            let docs = docs_db.get_method_docs(m.id);
-            let ru_match = docs
-                .as_ref()
-                .and_then(|d| d.syntax.split('(').next())
-                .is_some_and(|ru| ru.to_lowercase() == method_lower);
-            if ru_match {
-                return true;
-            }
-            let en_name =
-                m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
-            en_name.to_lowercase() == method_lower
-        })
-        .cloned()
+    PlatformMethodResolution { signature, return_ty, overloads: lower_overloads(method) }
 }
 
 /// Map a `MetadataKind` to `(prefix, parent_mdo)` for platform lookup.
@@ -178,7 +153,9 @@ fn find_prefixed_method(prefix: &str, method_name: &Name) -> Option<PlatformMeth
 /// resources, attributes, tabular sections) or kinds whose platform
 /// methods are not yet covered by the generic table
 /// (`InformationRegisterRecordManager`, `AccumulationRegisterRecordSet`).
-fn metadata_kind_to_prefix_and_mdo(kind: MetadataKind) -> Option<(&'static str, MdoType)> {
+pub(crate) fn metadata_kind_to_prefix_and_mdo(
+    kind: MetadataKind,
+) -> Option<(&'static str, MdoType)> {
     let prefix = kind.platform_prefix()?;
     let parent_mdo = match kind {
         MetadataKind::CatalogObject | MetadataKind::CatalogRef => MdoType::Catalog,

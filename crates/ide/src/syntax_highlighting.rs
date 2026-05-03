@@ -298,7 +298,7 @@ fn highlight_ident_semantic<DB: RootDatabase>(
         hir::Definition::Parameter { .. } => HlTag::Parameter,
         hir::Definition::Local { .. } => HlTag::Variable,
         hir::Definition::BuiltinFunction(_) => HlTag::BuiltinFunction,
-        hir::Definition::BuiltinMethod { .. } => HlTag::Function,
+        hir::Definition::BuiltinMethodHandle { .. } => HlTag::Function,
         hir::Definition::MdoCollectionType(_) => HlTag::Class,
         hir::Definition::MdoObject { .. } => HlTag::Type,
         hir::Definition::MdoManagerModule { .. } => HlTag::Namespace,
@@ -332,7 +332,7 @@ fn highlight_ident_semantic<DB: RootDatabase>(
     // Add EXPORT modifier for builtin functions
     if matches!(
         definition,
-        hir::Definition::BuiltinFunction(_) | hir::Definition::BuiltinMethod { .. }
+        hir::Definition::BuiltinFunction(_) | hir::Definition::BuiltinMethodHandle { .. }
     ) {
         modifiers = modifiers.with(HlMod::EXPORT);
     }

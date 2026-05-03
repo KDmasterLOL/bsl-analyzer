@@ -599,6 +599,22 @@ pub struct MethodLookupInput {
     pub method_name: String,
 }
 
+/// Interned composite-prefix lookup key (`prefix` + `method_name`).
+///
+/// Used for methods whose `type_name` in platform data has the composite
+/// `"<Prefix>.<MDO>"` shape (`"CatalogManager.<Имя>"`,
+/// `"InformationRegisterRecordSet.<Имя>"`, …) and whose per-method `name`
+/// is the placeholder `"<Имя"`. The scalar `(type_name, method_name)`
+/// index in `MethodLookupInput` cannot serve these — the placeholder is
+/// part of the key, not a parameter — so a dedicated `(prefix, name)`
+/// input feeds [`prefixed_method_query`] which walks the prefixed-method
+/// list and matches against `docs.syntax` / `english_name`.
+#[salsa::interned(debug)]
+pub struct PrefixedMethodLookupInput {
+    pub prefix: String,
+    pub method_name: String,
+}
+
 // ============================================================================
 // Salsa Queries
 // ============================================================================
@@ -696,6 +712,63 @@ pub fn manager_methods_query<'db>(
     let prefix = input.name(db);
     let data = PlatformDataInner::instance();
     Arc::new(data.get_manager_methods(&prefix).into_iter().cloned().collect())
+}
+
+/// Resolve a single method on a composite-prefixed receiver.
+///
+/// Platform data stores manager / object / ref / record-set / record-manager
+/// methods with composite `type_name` (`"CatalogManager.<Имя>"`,
+/// `"InformationRegisterRecordSet.<Имя>"`, …) and placeholder per-method
+/// `name = "<Имя"`. Neither the `(type_name, method_name)` scalar index
+/// nor a direct name comparison hits, so the lookup walks
+/// [`PlatformDataInner::get_manager_methods`] for `prefix` and matches
+/// `method_name` against either:
+///
+/// 1. `docs.syntax.split('(').next()` — the Russian method name lives in
+///    HBK-derived docs as `"ИмяМенеджера.Метод(...)"`.
+/// 2. `english_name.rsplit_once('.')` — the English canonical name has
+///    `"ManagerType.Method"` shape.
+///
+/// Both matches are case-insensitive and bilingual.
+///
+/// `lru = 256` mirrors [`platform_method_query`]; platform data is loaded
+/// once at startup (`OnceCell` singleton) so the cache is stable for the
+/// process lifetime.
+#[salsa::tracked(lru = 256)]
+pub fn prefixed_method_query<'db>(
+    db: &'db dyn salsa::Database,
+    input: PrefixedMethodLookupInput<'db>,
+) -> Option<PlatformMethod> {
+    let prefix = input.prefix(db);
+    let method_name = input.method_name(db);
+    find_prefixed_method(&prefix, &method_name)
+}
+
+/// Bare composite-prefix lookup (not Salsa-tracked).
+///
+/// The single canonical implementation. [`prefixed_method_query`] caches
+/// repeated calls; non-Salsa contexts (inference fallbacks, unit tests)
+/// call this directly to avoid wiring a database. Both paths return
+/// equivalent results.
+pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformMethod> {
+    let method_lower = method_name.to_lowercase();
+    let data = PlatformDataInner::instance();
+    data.get_manager_methods(prefix)
+        .into_iter()
+        .find(|m| {
+            let docs = data.get_method_docs(m.id);
+            let ru_match = docs
+                .as_ref()
+                .and_then(|d| d.syntax.split('(').next())
+                .is_some_and(|ru| ru.to_lowercase() == method_lower);
+            if ru_match {
+                return true;
+            }
+            let en_name =
+                m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
+            en_name.to_lowercase() == method_lower
+        })
+        .cloned()
 }
 
 /// Lookup global function by name (case-insensitive, bilingual).
@@ -1345,5 +1418,63 @@ mod tests {
             let docs = data.get_constructor_docs(ctor.id).unwrap();
             assert_eq!(docs.constructor_id, ctor.id);
         }
+    }
+
+    #[test]
+    fn find_prefixed_method_resolves_information_register_record_set_read() {
+        // Composite-prefix lookup must hit a method whose
+        // `type_name = "InformationRegisterRecordSet.<Information register name>"`
+        // and whose `name = "<Имя"` placeholder. The Russian display name lives
+        // in `docs.syntax`, so the bare `(type_name, method_name)` index can't
+        // find it — only `find_prefixed_method` (and the Salsa wrapper) can.
+        let data = PlatformDataInner::instance();
+        if data.get_manager_methods("InformationRegisterRecordSet").is_empty() {
+            println!("Skipping test: no platform data available");
+            return;
+        }
+        let m = find_prefixed_method("InformationRegisterRecordSet", "Прочитать")
+            .expect("Прочитать must resolve under InformationRegisterRecordSet");
+        // Russian name lives in docs.syntax; the placeholder `name` field
+        // is intentionally meaningless ("<Имя"), so we assert via english_name
+        // which carries `<Information register name>.Read`.
+        assert!(
+            m.english_name.to_lowercase().ends_with(".read"),
+            "english_name must end with `.Read`, got `{}`",
+            m.english_name
+        );
+        assert_ne!(m.id, 0);
+
+        // Bilingual: lookup by English name resolves the same method id.
+        let m_en = find_prefixed_method("InformationRegisterRecordSet", "Read")
+            .expect("Read must resolve bilingually");
+        assert_eq!(m.id, m_en.id);
+    }
+
+    #[test]
+    fn prefixed_method_query_caches_through_salsa() {
+        let db = TestDatabase::default();
+        let data = PlatformDataInner::instance();
+        if data.get_manager_methods("InformationRegisterRecordSet").is_empty() {
+            println!("Skipping test: no platform data available");
+            return;
+        }
+
+        let input1 = PrefixedMethodLookupInput::new(
+            &db,
+            "InformationRegisterRecordSet".to_string(),
+            "Прочитать".to_string(),
+        );
+        let input2 = PrefixedMethodLookupInput::new(
+            &db,
+            "InformationRegisterRecordSet".to_string(),
+            "Прочитать".to_string(),
+        );
+        // Salsa interns identical (prefix, method_name) pairs to the same
+        // input handle — pin this so the cache key is stable.
+        assert_eq!(input1, input2);
+
+        let m1 = prefixed_method_query(&db, input1).expect("must resolve");
+        let m2 = prefixed_method_query(&db, input2).expect("must resolve");
+        assert_eq!(m1.id, m2.id);
     }
 }
