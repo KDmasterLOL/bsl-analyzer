@@ -359,28 +359,33 @@ fn resolve_dot_anchor(
     token: &SyntaxToken,
     offset: syntax::TextSize,
 ) -> Option<(SyntaxToken, String)> {
-    match token.kind() {
-        SyntaxKind::DOT => Some((token.clone(), String::new())),
-        SyntaxKind::IDENT => {
-            let mut cur = token.prev_token();
-            while let Some(t) = cur.clone() {
-                if t.kind().is_trivia() {
-                    cur = t.prev_token();
-                } else {
-                    break;
-                }
-            }
-            let dot = cur.filter(|t| t.kind() == SyntaxKind::DOT)?;
-            // Prefix = text from the IDENT start up to the cursor. For
-            // `Сп.В|` this is `"В"`; for `Сп.Вста|вить` it's `"Вста"`.
-            let token_start = token.text_range().start();
-            let cursor_in_token: usize = offset.checked_sub(token_start)?.into();
-            let text = token.text();
-            let prefix = text[..cursor_in_token.min(text.len())].to_string();
-            Some((dot, prefix))
-        }
-        _ => None,
+    if token.kind() == SyntaxKind::DOT {
+        return Some((token.clone(), String::new()));
     }
+    // Accept any name-token after `.` — keyword-shaped tails
+    // (`Запрос.Выполнить|`) must trigger completion just like
+    // `Запрос.Текст|` does. Layer B: same `is_name_token()`
+    // predicate as the rest of the IDE-layer dispatch.
+    if !token.kind().is_name_token() {
+        return None;
+    }
+    let mut cur = token.prev_token();
+    while let Some(t) = cur.clone() {
+        if t.kind().is_trivia() {
+            cur = t.prev_token();
+        } else {
+            break;
+        }
+    }
+    let dot = cur.filter(|t| t.kind() == SyntaxKind::DOT)?;
+    // Prefix = text from the name-token start up to the cursor. For
+    // `Сп.В|` this is `"В"`; for `Сп.Вста|вить` it's `"Вста"`; for
+    // `Зап.Выполнить|` it's `"Выполнить"`.
+    let token_start = token.text_range().start();
+    let cursor_in_token: usize = offset.checked_sub(token_start)?.into();
+    let text = token.text();
+    let prefix = text[..cursor_in_token.min(text.len())].to_string();
+    Some((dot, prefix))
 }
 
 /// Case-insensitive starts-with match against the method's Russian *or*
