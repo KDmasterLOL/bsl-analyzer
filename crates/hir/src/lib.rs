@@ -300,6 +300,23 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         Self { db }
     }
 
+    /// Classify the token at `(file_id, offset)` using the right-biased
+    /// token-at-offset rule the IDE-layer already uses for hover.
+    ///
+    /// IDE consumers (hover, goto-definition, references, completion,
+    /// `symbol-info` callee resolution) should `match` on the returned
+    /// [`NameClass`] and dispatch — see Layer B unification plan.
+    /// Returns [`NameClass::Other`] when the parse contains no token at
+    /// the offset.
+    pub fn classify_at(&self, file_id: FileId, offset: syntax::TextSize) -> NameClass {
+        let parse = self.db.parse(file_id);
+        let root = parse.syntax_node();
+        match root.token_at_offset(offset).right_biased() {
+            Some(token) => classify_token(&token),
+            None => NameClass::Other,
+        }
+    }
+
     pub fn module_from_file(&self, file_id: vfs::FileId) -> Module<'db, DB> {
         let module_id = ModuleId::new(file_id);
         Module::new(self.db, module_id)
@@ -578,16 +595,14 @@ impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         &self,
         field_expr: syntax::ast::FieldExpr,
     ) -> Option<QualifiedName> {
-        use syntax::SyntaxKind;
-
         let mut segments = Vec::new();
 
-        // Extract the field name (rightmost segment)
-        let field_token = field_expr
-            .syntax()
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .find(|it| it.kind() == SyntaxKind::IDENT)?;
+        // Extract the field name (rightmost segment). Uses the
+        // promoted `field_tail_name_token` helper so keyword-shaped
+        // tails (`Запрос.Выполнить`, where `Выполнить` is
+        // `KW_EXECUTE`) become legal segments — see Layer B
+        // unification plan.
+        let field_token = syntax::ast_utils::field_tail_name_token(field_expr.syntax())?;
         segments.push(Name::new(field_token.text()));
 
         // Walk up to extract base segments
@@ -747,6 +762,11 @@ fn field_name_receiver(token: &syntax::SyntaxToken) -> Option<syntax::SyntaxNode
 ///
 /// Appends segments in reverse order (rightmost first).
 /// This is a free function to avoid clippy::only_used_in_recursion warning.
+///
+/// All three branches use `is_name_token()` (the promoted predicate
+/// shared with the syntax-tier helpers and the IDE classifier) so a
+/// keyword in any segment of `A.Выполнить.B` resolves the same way as
+/// a plain IDENT — see Layer B unification plan.
 fn extract_segments_from_expr(
     expr_node: &syntax::SyntaxNode,
     segments: &mut Vec<Name>,
@@ -755,15 +775,13 @@ fn extract_segments_from_expr(
 
     match expr_node.kind() {
         SyntaxKind::FIELD_EXPR => {
-            // Nested field access (e.g., A.B in A.B.C)
+            // Nested field access (e.g., A.B in A.B.C). Use the
+            // promoted `field_tail_name_token` helper — it scans
+            // strictly *after* the dot at direct children, so it
+            // can't accidentally pick up a token from the receiver
+            // subtree under parser error recovery.
             let field_expr = syntax::ast::FieldExpr::cast(expr_node.clone())?;
-
-            // Extract the field name
-            let field_token = field_expr
-                .syntax()
-                .children_with_tokens()
-                .filter_map(|it| it.into_token())
-                .find(|it| it.kind() == SyntaxKind::IDENT)?;
+            let field_token = syntax::ast_utils::field_tail_name_token(field_expr.syntax())?;
             segments.push(Name::new(field_token.text()));
 
             // Recurse on base
@@ -772,20 +790,20 @@ fn extract_segments_from_expr(
         }
         SyntaxKind::IDENT | SyntaxKind::EXPR => {
             // Simple identifier or expression containing identifier (leftmost segment)
-            let ident_token = expr_node
+            let name_token = expr_node
                 .children_with_tokens()
                 .filter_map(|it| it.into_token())
-                .find(|it| it.kind() == SyntaxKind::IDENT)?;
-            segments.push(Name::new(ident_token.text()));
+                .find(|it| it.kind().is_name_token())?;
+            segments.push(Name::new(name_token.text()));
             Some(())
         }
         _ => {
-            // Fallback: check if this node directly contains an IDENT token
-            let ident_token = expr_node
+            // Fallback: check if this node directly contains a name token
+            let name_token = expr_node
                 .children_with_tokens()
                 .filter_map(|it| it.into_token())
-                .find(|it| it.kind() == SyntaxKind::IDENT)?;
-            segments.push(Name::new(ident_token.text()));
+                .find(|it| it.kind().is_name_token())?;
+            segments.push(Name::new(name_token.text()));
             Some(())
         }
     }
