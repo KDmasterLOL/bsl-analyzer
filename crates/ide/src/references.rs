@@ -175,7 +175,6 @@ fn get_search_scope<DB: RootDatabase>(
 
         // Builtin/MDO/Module - no file-based references
         Definition::BuiltinFunction(_)
-        | Definition::BuiltinMethod { .. }
         | Definition::BuiltinMethodHandle { .. }
         | Definition::MdoCollectionType(_)
         | Definition::MdoObject { .. }

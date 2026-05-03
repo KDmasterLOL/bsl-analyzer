@@ -187,7 +187,6 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         }
         // Builtins, MDO types, modules, etc. - no navigation target
         Definition::BuiltinFunction(_)
-        | Definition::BuiltinMethod { .. }
         | Definition::BuiltinMethodHandle { .. }
         | Definition::MdoCollectionType(_)
         | Definition::MdoObject { .. }

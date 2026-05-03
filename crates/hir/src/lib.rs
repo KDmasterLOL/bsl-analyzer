@@ -8,6 +8,7 @@ pub mod type_facade;
 
 pub use definition::Definition;
 pub use hir_ty::coerce_this_object_to_metadata_ref;
+pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
 pub use name_classify::{classify_token, NameClass};
 pub use type_facade::{Field, HirFieldOrigin, Type};
 
@@ -681,9 +682,9 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         Ty::Unknown
     }
 
-    /// Resolve `recv.method(...)` to a [`Definition::BuiltinMethod`] when
-    /// the receiver's inferred [`Ty`] yields a platform-method match
-    /// through [`hir_ty::method_lookup::lookup_method_with_key`].
+    /// Resolve `recv.method(...)` to a [`Definition::BuiltinMethodHandle`]
+    /// when the receiver's inferred [`Ty`] yields a platform-method match
+    /// through [`hir_ty::resolve_method`].
     ///
     /// This is the **type-aware** counterpart to
     /// [`Self::resolve_name_to_definition`], which is purely
@@ -695,20 +696,19 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// lexical resolver previously matched `ВыгрузитьКолонку` as a
     /// **free workspace function** — pulling in unrelated БСП modules.
     /// This method short-circuits that by consulting the inference
-    /// result for the receiver and routing through the fluent-aware
-    /// [`hir_ty::method_lookup::lookup_method`] dispatch (which already
-    /// handles `Ty::Union` member walks and `Undefined` / `Null`
-    /// stripping for the `Запрос.Выполнить()` style happy-path-plus-
-    /// sentinel return shape).
+    /// result for the receiver and routing through the unified
+    /// [`hir_ty::resolve_method`] use case (which handles `Ty::Union`
+    /// member walks, `Undefined` / `Null` stripping for the
+    /// `Запрос.Выполнить()` style happy-path-plus-sentinel return shape,
+    /// and composite-prefix dispatch for manager / metadata-ref
+    /// receivers like `Набор.Прочитать()`).
     ///
     /// Returns:
-    /// - `Some(Definition::BuiltinMethod { type_name, method_name })`
+    /// - `Some(Definition::BuiltinMethodHandle { handle, method_name })`
     ///   when the receiver type carries the named method in
     ///   [`bsl_platform::PlatformData`];
     /// - `None` for non-IDENT tokens, tokens that aren't a field-name
-    ///   under a `FIELD_EXPR`, receivers that don't yield a scalar
-    ///   platform key (manager / metadata-ref shapes go through their
-    ///   own paths), or methods that aren't in platform data.
+    ///   under a `FIELD_EXPR`, or methods that aren't in platform data.
     ///
     /// IDE callers (`hover`, `goto_definition`, `references`) should
     /// invoke this **before** [`Self::resolve_name_to_definition`].
@@ -735,10 +735,9 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         }
 
         let method_name = Name::new(token.text());
-        let (type_key, _info) =
-            hir_ty::method_lookup::lookup_method_with_key(&receiver_ty, &method_name)?;
+        let resolution = hir_ty::resolve_method(self.db, &receiver_ty, &method_name)?;
 
-        Some(Definition::BuiltinMethod { type_name: Name::new(&type_key), method_name })
+        Some(Definition::BuiltinMethodHandle { handle: resolution.handle, method_name })
     }
 }
 

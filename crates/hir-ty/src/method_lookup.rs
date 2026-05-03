@@ -202,78 +202,6 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
     Some(to_method_info(method))
 }
 
-/// Like [`lookup_method`], but additionally returns the `PlatformData`
-/// type-name key that was used to resolve the method.
-///
-/// Consumers (IDE hover, goto, etc.) need the type-name string both to
-/// build a [`hir_def::Definition::BuiltinMethod`]-equivalent identifier
-/// and to feed `MethodLookupInput` for hover-markdown rendering. The
-/// public entry point is intentionally separate from [`lookup_method`]
-/// so the inference path keeps its narrow `Option<MethodInfo>` shape.
-///
-/// For [`Ty::Union`] receivers, returns the **first live member's** key
-/// alongside the unioned [`MethodInfo`] (matching `lookup_method`'s
-/// "first hit owns the params" semantics).
-///
-/// [`Ty::ObjectManager`] / [`Ty::MetadataRef`] receivers return [`None`]
-/// — those resolve through [`crate::platform_manager_lookup`] which
-/// keys on composite `"<Kind>Manager.<Имя>"` strings that the scalar
-/// hover path does not understand. Hover for those receivers is served
-/// by other paths (see `crates/ide/src/hover.rs`); this entry point is
-/// reserved for value-type receivers.
-pub fn lookup_method_with_key(
-    receiver_ty: &Ty,
-    method_name: &Name,
-) -> Option<(String, MethodInfo)> {
-    let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
-    let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
-
-    if let Ty::Union(members) = receiver_ty {
-        let live: Vec<&Ty> =
-            members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
-        let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
-        // Same cohesion rule as in `lookup_method`: bind params /
-        // overloads / key to the FIRST successful union branch, so the
-        // signature shapes always match the receiver they describe.
-        let mut chosen_signature: Option<(Vec<Ty>, Vec<Vec<Ty>>)> = None;
-        let mut first_key: Option<String> = None;
-        for m in live {
-            if let Some((k, info)) = lookup_method_with_key(m, method_name) {
-                returns.push(info.return_ty);
-                if chosen_signature.is_none() {
-                    chosen_signature = Some((info.params, info.overloads));
-                    first_key = Some(k);
-                }
-            }
-        }
-        let (params, overloads) = chosen_signature.unwrap_or_default();
-        return first_key
-            .map(|k| (k, MethodInfo { return_ty: Ty::union(returns), params, overloads }));
-    }
-
-    // Synthetic `MetadataRef` kinds with a scalar platform key (e.g.
-    // `RegisterFilter` → `"Filter"`) need their hover/goto resolved
-    // through the same bilingual scalar index used for value-type
-    // receivers, so the IDE definition path matches the inference and
-    // completion paths wired in `lookup_method` / `collect_platform_items`.
-    if let Ty::MetadataRef { kind, .. } = receiver_ty {
-        if let Some(scalar_key) = kind.scalar_platform_key() {
-            let data = PlatformData::instance();
-            let method = data.get_method(scalar_key, method_name.as_str())?;
-            return Some((scalar_key.to_string(), to_method_info(method)));
-        }
-    }
-
-    if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::MetadataRef { .. }) {
-        return None;
-    }
-
-    let type_key = platform_type_key(receiver_ty)?;
-    let data = PlatformData::instance();
-    let method = data.get_method(type_key, method_name.as_str())?;
-    Some((type_key.to_string(), to_method_info(method)))
-}
-
 /// Pick the `PlatformData::get_method` key for a scalar receiver.
 ///
 /// The platform-data index uses **English** type names keyed through a
@@ -937,21 +865,10 @@ mod tests {
         assert_eq!(info.return_ty, Ty::Undefined);
     }
 
-    #[test]
-    fn method_lookup_with_key_register_filter_returns_filter_scalar_key() {
-        // Hover/goto path (`Semantics::resolve_method_call_to_definition`)
-        // consumes `lookup_method_with_key`. Without the scalar-key
-        // fallback there, hover on `<recordSet>.Отбор.Сбросить()`
-        // would silently fail even though inference resolves the type.
-        let r = Ty::MetadataRef {
-            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
-            name: Name::new("РегистрСведений1"),
-        };
-        let (key, info) = lookup_method_with_key(&r, &Name::new("Сбросить"))
-            .expect("Filter.Сбросить hover key must resolve through scalar-key fallback");
-        assert_eq!(key, "Filter", "scalar key must be the bilingual `Filter` row");
-        assert_eq!(info.return_ty, Ty::Undefined);
-    }
+    // Hover/goto coverage for the `Filter.Сбросить` scalar-key fallback
+    // moved to `platform_resolution::tests::metadata_ref_register_filter_resolves_with_scalar_handle`
+    // after `lookup_method_with_key` was replaced by the unified
+    // `resolve_method` use case.
 
     fn ts_receiver(parent: MdoType, name: &str) -> Ty {
         Ty::MetadataRef { kind: MetadataKind::TabularSection { parent }, name: Name::new(name) }
