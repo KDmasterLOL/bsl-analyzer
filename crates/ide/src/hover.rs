@@ -390,6 +390,7 @@ fn definition_to_hover<DB: RootDatabase>(
         // Don't show hover for builtins (they're handled by hover_platform)
         hir::Definition::BuiltinFunction(_)
         | hir::Definition::BuiltinMethod { .. }
+        | hir::Definition::BuiltinMethodHandle { .. }
         | hir::Definition::VirtualTableField { .. }
         | hir::Definition::Unresolved => return None,
     }
