@@ -353,7 +353,7 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
 /// - Parameter types are kept as raw scalars for now; malformed comma-heavy
 ///   HBK prose stays a single `Ty::PlatformObject(...)` instead of poisoning
 ///   argument checks with bogus union members.
-fn to_method_info(method: &PlatformMethod) -> MethodInfo {
+pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     let return_ty = method
         .return_type
         .as_ref()
@@ -461,7 +461,7 @@ pub(crate) fn lower_param_type(raw: &str) -> Ty {
 /// (`ТЧ1.Индекс(ТЧ2.Получить(0))`) or possibly-Undefined `Ty::Union`
 /// argument (`ТЧ.Индекс(ТЧ.Найти(...))`) would be falsely rejected. The
 /// gradual-typing rule (`Unknown ≤ A`) keeps these calls quiet.
-fn build_tabular_section_method_info(
+pub(crate) fn build_tabular_section_method_info(
     method: &PlatformMethod,
     parent: MdoType,
     section_name: &Name,

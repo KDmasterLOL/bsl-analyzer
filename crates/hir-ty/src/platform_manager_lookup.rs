@@ -103,7 +103,7 @@ pub fn resolve_platform_metadata_ref_method(
 /// [`resolve_platform_type_name`] for the scalar cases and
 /// [`map_generic_metadata_return_type`] for the manager-relative
 /// generics (`"СправочникОбъект"` → `Ty::MetadataRef { CatalogObject, mdo_name }`).
-fn build_resolution(
+pub(crate) fn build_resolution(
     method: &PlatformMethod,
     mdo_type: MdoType,
     mdo_name: &Name,
@@ -178,7 +178,9 @@ fn find_prefixed_method(prefix: &str, method_name: &Name) -> Option<PlatformMeth
 /// resources, attributes, tabular sections) or kinds whose platform
 /// methods are not yet covered by the generic table
 /// (`InformationRegisterRecordManager`, `AccumulationRegisterRecordSet`).
-fn metadata_kind_to_prefix_and_mdo(kind: MetadataKind) -> Option<(&'static str, MdoType)> {
+pub(crate) fn metadata_kind_to_prefix_and_mdo(
+    kind: MetadataKind,
+) -> Option<(&'static str, MdoType)> {
     let prefix = kind.platform_prefix()?;
     let parent_mdo = match kind {
         MetadataKind::CatalogObject | MetadataKind::CatalogRef => MdoType::Catalog,
