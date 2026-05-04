@@ -205,7 +205,11 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
 /// the `(raw, mdo_type) → MetadataKind` pair: producing an
 /// `ExchangePlanObject` for an `MdoType::Document` context would be
 /// a bug, so the match is keyed on both.
-fn map_generic_metadata_return_type(raw: &str, mdo_type: MdoType, mdo_name: &Name) -> Option<Ty> {
+pub(crate) fn map_generic_metadata_return_type(
+    raw: &str,
+    mdo_type: MdoType,
+    mdo_name: &Name,
+) -> Option<Ty> {
     let kind = match (raw, mdo_type) {
         ("СправочникОбъект" | "CatalogObject", MdoType::Catalog) => {
             MetadataKind::CatalogObject
@@ -263,6 +267,24 @@ fn map_generic_metadata_return_type(raw: &str, mdo_type: MdoType, mdo_name: &Nam
             "РегистрРасчетаНаборЗаписей" | "CalculationRegisterRecordSet",
             MdoType::CalculationRegister,
         ) => MetadataKind::CalculationRegisterRecordSet,
+        // Per-record element forms: yielded by `Для каждого … Из …`
+        // over a register record-set. `iteration_lookup` calls into
+        // this same table, threading the `(record_kind, mdo_name)`
+        // pair so iteration over a register-set produces the matching
+        // `Ty::MetadataRef { *Record, mdo_name }` element.
+        ("РегистрСведенийЗапись" | "InformationRegisterRecord", MdoType::InformationRegister) => {
+            MetadataKind::InformationRegisterRecord
+        }
+        (
+            "РегистрНакопленияЗапись" | "AccumulationRegisterRecord",
+            MdoType::AccumulationRegister,
+        ) => MetadataKind::AccumulationRegisterRecord,
+        ("РегистрБухгалтерииЗапись" | "AccountingRegisterRecord", MdoType::AccountingRegister) => {
+            MetadataKind::AccountingRegisterRecord
+        }
+        ("РегистрРасчетаЗапись" | "CalculationRegisterRecord", MdoType::CalculationRegister) => {
+            MetadataKind::CalculationRegisterRecord
+        }
         _ => return None,
     };
     Some(Ty::MetadataRef { kind, name: mdo_name.clone() })

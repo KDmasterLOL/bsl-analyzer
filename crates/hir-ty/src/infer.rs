@@ -642,8 +642,14 @@ impl<'db> InferenceContext<'db> {
                 self.infer_stmts(body);
             }
 
-            Stmt::ForEach { collection, body, .. } => {
-                self.infer_expr(ExprId::from_idx(*collection));
+            Stmt::ForEach { var, collection, body } => {
+                let coll_ty = self.infer_expr(ExprId::from_idx(*collection));
+                if let Some(elem_ty) = crate::iteration_lookup::resolve_iter_element_ty(&coll_ty) {
+                    if !elem_ty.is_unknown() {
+                        let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
+                        self.var_types.insert(var_name, elem_ty);
+                    }
+                }
                 self.infer_stmts(body);
             }
 

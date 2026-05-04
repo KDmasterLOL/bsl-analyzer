@@ -39,6 +39,7 @@ pub mod field_lookup;
 pub mod form_attr;
 pub mod form_self;
 pub mod infer;
+pub mod iteration_lookup;
 pub mod lower;
 pub mod manager_lookup;
 pub mod method_lookup;
