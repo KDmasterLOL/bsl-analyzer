@@ -186,21 +186,22 @@ pub(crate) fn add_register_period_attr(
         MdoType::InformationRegister => periodicity.unwrap_or("Nonperiodical") != "Nonperiodical",
         // AccumulationRegister: Period is ALWAYS present
         MdoType::AccumulationRegister => true,
-        // AccountingRegister: `Период` is a real standard property of
-        // `РегистрБухгалтерииЗапись.<Имя>` per HBK 8.3.27 (verified
-        // against `platform_data.json` — id 757).
-        MdoType::AccountingRegister => true,
-        // CalculationRegister has NO plain `Период` standard property —
-        // its time-axis surface is `ПериодРегистрации`,
-        // `ПериодДействияНачало/Конец`, and `БазовыйПериодНачало/Конец`,
-        // each a distinct field in `РегистрРасчётаЗапись.<Имя>` per HBK
-        // (verified in `platform_data.json` — `Период` is absent there).
-        // Adding a synthetic `Период` here would surface a phantom field
-        // that hovers/completion would resolve to nothing on the
-        // configuration side. Those CalcReg-specific period fields are
-        // out of scope for this PR and ship through a separate
-        // `add_calculation_register_specific_attrs` later.
-        MdoType::CalculationRegister => false,
+        // AccountingRegister and CalculationRegister: standard
+        // attributes (including AcctReg's `Период`) come from the
+        // platform composite-prefix `*Record.<Имя>` for `*Record`
+        // receivers. Pushing them here would land them in
+        // `register.attributes()`, which `enumerate_register_fields`
+        // iterates BEFORE the platform-properties branch and so
+        // shadows the richer platform metadata (notably
+        // `is_readonly: true` on `НомерСтроки` per HBK). Until the
+        // pre-existing InfoReg/AccumReg shadowing is reworked
+        // wholesale, intentionally do nothing here — `*Record`
+        // receivers still see the four common standards through the
+        // platform branch. CalcReg has no plain `Период` at all
+        // (`ПериодРегистрации` / `ПериодДействия*` / `БазовыйПериод*`
+        // are distinct), so this also avoids fabricating a phantom
+        // field on that flavour.
+        MdoType::AccountingRegister | MdoType::CalculationRegister => false,
         // Other register types: no Period handling yet
         _ => false,
     };
@@ -234,42 +235,19 @@ pub(crate) fn add_accumulation_register_standard_attrs(
     add_register_period_attr(attributes, object_name, MdoType::AccumulationRegister, None);
 }
 
-/// Add standard attributes for AccountingRegister.
-///
-/// Common four (`Активность`/`НомерСтроки`/`Период`/`Регистратор`); the
-/// register-specific surface (`СчётДт`/`СчётКт`/`Сумма`/`Содержание`/
-/// `ВидСубконтоДт/Кт`/`СубконтоДт/Кт`/`ВалютаДт/Кт`/`СуммаВалютнаяДт/Кт`)
-/// is out of scope for this PR and ships separately once the AcctReg
-/// kind owns its own field-resolution path.
-pub(crate) fn add_accounting_register_standard_attrs(
-    attributes: &mut Vec<RegisterAttribute>,
-    object_name: &str,
-) {
-    add_register_common_attrs(attributes, object_name, MdoType::AccountingRegister);
-    add_register_period_attr(attributes, object_name, MdoType::AccountingRegister, None);
-}
-
-/// Add standard attributes for CalculationRegister.
-///
-/// Common three only (`Активность`/`НомерСтроки`/`Регистратор`).
-/// CalcReg has no plain `Период` standard property — its time-axis
-/// surface is split across `ПериодРегистрации`,
-/// `ПериодДействияНачало/Конец`, and `БазовыйПериодНачало/Конец`, none
-/// of which is the basic `Период` that other register kinds expose.
-/// Those CalcReg-specific period fields plus `ВидРасчёта` are out of
-/// scope for this PR and ship separately once the CalcReg kind owns
-/// its own field-resolution path.
-pub(crate) fn add_calculation_register_standard_attrs(
-    attributes: &mut Vec<RegisterAttribute>,
-    object_name: &str,
-) {
-    add_register_common_attrs(attributes, object_name, MdoType::CalculationRegister);
-    // No-op for CalcReg by design (see `add_register_period_attr`); the
-    // call is left here for shape symmetry with the other register
-    // connectors and to make the ownership of "where Period lives"
-    // greppable from this single function.
-    add_register_period_attr(attributes, object_name, MdoType::CalculationRegister, None);
-}
+// AccountingRegister / CalculationRegister: deliberately no
+// configuration-side standard-attribute connectors. Their `*Record`
+// composite-prefix in HBK already declares the four common standards
+// (`Активность`/`НомерСтроки`/`Период`/`Регистратор` for AcctReg;
+// `Активность`/`НомерСтроки`/`Регистратор` for CalcReg — CalcReg has
+// no plain `Период`), with richer attributes (`is_readonly`,
+// documentation) than the symbolic `RegisterAttribute` shape we'd
+// build here. Surfacing them through `register.attributes()` would
+// cause `enumerate_register_fields` to iterate them BEFORE the
+// platform-properties branch and shadow the platform-side info
+// (notably flipping `НомерСтроки` from readonly to writable). The
+// pre-existing InfoReg/AccumReg connectors do the same — addressing
+// that shadowing wholesale is its own PR.
 
 // ============================================================================
 // Catalog/Document standard attributes (Vec<Attribute>) — wrapper API
