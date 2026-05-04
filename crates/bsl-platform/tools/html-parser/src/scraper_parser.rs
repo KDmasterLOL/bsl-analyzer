@@ -200,7 +200,13 @@ pub fn extract_iter_element_types(html_content: &str) -> Vec<String> {
             node = n.next_sibling();
         }
 
-        return content
+        // Some HBK pages list admissible element types separated by
+        // the Russian conjunction " или " (or English " or ") instead
+        // of a comma — e.g. `ОбластьЯчеекТабличногоДокумента или
+        // РисунокТабличногоДокумента`. Normalise both shapes to a
+        // comma so the split below treats them uniformly.
+        let normalised = content.replace(" или ", ", ").replace(" or ", ", ");
+        return normalised
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -1613,6 +1619,33 @@ mod tests {
         let html =
             "<p class=\"V8SH_chapter\">Элементы коллекции:</p>\u{00A0} КлючИЗначение \u{00A0}<br>";
         assert_eq!(extract_iter_element_types(html), vec!["КлючИЗначение".to_string()]);
+    }
+
+    #[test]
+    fn iter_elements_splits_on_russian_or_conjunction() {
+        // Some HBK pages use " или " (Russian "or") instead of `,` to
+        // list admissible element types — e.g. spreadsheet ranges that
+        // can carry either cells or pictures. Both halves must be
+        // captured as separate templates.
+        let html = r#"<p class="V8SH_chapter">Элементы коллекции:</p>ОбластьЯчеекТабличногоДокумента или РисунокТабличногоДокумента<br>"#;
+        assert_eq!(
+            extract_iter_element_types(html),
+            vec![
+                "ОбластьЯчеекТабличногоДокумента".to_string(),
+                "РисунокТабличногоДокумента".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn iter_elements_splits_on_english_or_conjunction() {
+        // Defensive symmetry: English HBK pages may use " or " in the
+        // same position. Mixed `,` + " or " should also normalise.
+        let html = r#"<p class="V8SH_chapter">Элементы коллекции:</p>A or B, C<br>"#;
+        assert_eq!(
+            extract_iter_element_types(html),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
     }
 }
 

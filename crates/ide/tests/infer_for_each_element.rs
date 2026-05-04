@@ -118,17 +118,19 @@ fn for_each_over_value_list_yields_list_item() {
 }
 
 #[test]
-fn for_each_over_array_does_not_pollute_var_types() {
-    // `Массив` iterates `Произвольный`, which lowers to `Ty::Unknown`.
-    // Inference deliberately skips the `var_types.insert` for Unknown
-    // element types so a later precise assignment to the same name
-    // (which BSL allows — locals are procedure-scoped) is not shadowed
-    // by the loop's pre-emptive Unknown.
+fn for_each_over_array_overwrites_prior_binding_with_unknown() {
+    // `Массив` iterates `Произвольный` → `Ty::Unknown`. BSL semantics
+    // rebinds the loop variable for the duration of the loop and the
+    // trailing tail (locals are procedure-scoped, no block scope), so
+    // any prior precise type on the same name MUST be shadowed by the
+    // loop's `Ty::Unknown` — leaking the prior `Number` into the body
+    // would mistype `Эл` for everything inside the loop.
     let (db, file_id) = setup(
         r#"
 //- /test.bsl
 Процедура Тест()
     А = Новый Массив;
+    Эл = 1;
     Для Каждого Эл Из А Цикл
         Х = Эл;
     КонецЦикла;
@@ -136,11 +138,9 @@ fn for_each_over_array_does_not_pollute_var_types() {
 "#,
     );
 
-    // Loop var stays out of var_types — the Произвольный → Unknown
-    // skip in infer.rs is intentional. Expressions referencing `Эл`
-    // resolve to `Ty::Unknown` through the same "unknown var" path
-    // they use for unannotated locals.
-    assert_eq!(var_ty(&db, file_id, "эл"), None);
+    // Prior `Эл = 1` set var_types["эл"] = Number; the loop overwrote
+    // it with the iteration element type (Unknown for Произвольный).
+    assert_eq!(var_ty(&db, file_id, "эл"), Some(Ty::Unknown));
 }
 
 #[test]
