@@ -63,6 +63,13 @@ struct TypeInfo {
     /// Context availability
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<ContextAvailability>,
+    /// Element types from the HBK `Элементы коллекции:` chapter, in
+    /// source order. Empty for non-iterable types — most platform
+    /// types. Multi-element pages like `ПоляКолонкиСхемыЗапроса`
+    /// produce all three names; placeholders like `<Имя регистра
+    /// сведений>` are kept verbatim and substituted in `hir-ty`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    iter_element_types: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -393,20 +400,13 @@ fn main() -> Result<()> {
     );
 
     // Generate JSON
-    let platform_data = PlatformData {
-        keywords,
-        types,
-        methods,
-        global_functions,
-        constructors,
-        properties,
-    };
+    let platform_data =
+        PlatformData { keywords, types, methods, global_functions, constructors, properties };
 
-    let json = serde_json::to_string_pretty(&platform_data)
-        .context("Failed to serialize to JSON")?;
+    let json =
+        serde_json::to_string_pretty(&platform_data).context("Failed to serialize to JSON")?;
 
-    fs::write(&output_path, json)
-        .context("Failed to write output JSON")?;
+    fs::write(&output_path, json).context("Failed to write output JSON")?;
 
     println!("Generated: {}", output_path.display());
     Ok(())
@@ -516,11 +516,8 @@ fn parse_shcntx_data(
         // `properties/` subdirectory has the same flat layout as for any other
         // type, and `parse_property_html` extracts the title shape
         // `Глобальный контекст.X (Global context.X)` via the same dot-split.
-        let global_properties = parse_type_properties(
-            &global_context_dir,
-            "Global context",
-            &mut prop_id_counter,
-        )?;
+        let global_properties =
+            parse_type_properties(&global_context_dir, "Global context", &mut prop_id_counter)?;
         println!("Parsed {} global context properties", global_properties.len());
         properties.extend(global_properties);
     }
@@ -614,21 +611,15 @@ fn parse_catalog_directory(
 
                 // Parse constructors for this type (not all types have them —
                 // missing ctors/ directory yields an empty Vec, not an error).
-                let type_ctors = parse_type_constructors(
-                    &entry_path,
-                    &type_info.english_name,
-                    ctor_id_counter,
-                )?;
+                let type_ctors =
+                    parse_type_constructors(&entry_path, &type_info.english_name, ctor_id_counter)?;
                 constructors.extend(type_ctors);
 
                 // Parse properties for this type. Same "missing directory is
                 // normal" contract as ctors — many primitives / purely-method
                 // types have no `properties/` at all.
-                let type_properties = parse_type_properties(
-                    &entry_path,
-                    &type_info.english_name,
-                    prop_id_counter,
-                )?;
+                let type_properties =
+                    parse_type_properties(&entry_path, &type_info.english_name, prop_id_counter)?;
                 properties.extend(type_properties);
 
                 types.push(type_info);
@@ -659,12 +650,15 @@ fn parse_type_html(html_path: &Path, _type_dir: &Path) -> Result<Option<TypeInfo
                     // Extract additional information using scraper
                     let min_version = scraper_parser::extract_version(&html_content);
                     let context = scraper_parser::extract_context(&html_content);
+                    let iter_element_types =
+                        scraper_parser::extract_iter_element_types(&html_content);
 
                     return Ok(Some(TypeInfo {
                         name: russian,
                         english_name: english,
                         min_version,
                         context,
+                        iter_element_types,
                     }));
                 }
             }
@@ -675,7 +669,11 @@ fn parse_type_html(html_path: &Path, _type_dir: &Path) -> Result<Option<TypeInfo
 }
 
 /// Parses methods for a platform type.
-fn parse_type_methods(type_dir: &Path, type_name: &str, method_id_counter: &mut u32) -> Result<Vec<MethodInfo>> {
+fn parse_type_methods(
+    type_dir: &Path,
+    type_name: &str,
+    method_id_counter: &mut u32,
+) -> Result<Vec<MethodInfo>> {
     let mut methods = Vec::new();
 
     let methods_dir = type_dir.join("methods");
@@ -702,7 +700,11 @@ fn parse_type_methods(type_dir: &Path, type_name: &str, method_id_counter: &mut 
 }
 
 /// Parses method HTML file to extract method information.
-fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut u32) -> Result<Option<MethodInfo>> {
+fn parse_method_html(
+    html_path: &Path,
+    type_name: &str,
+    method_id_counter: &mut u32,
+) -> Result<Option<MethodInfo>> {
     let html_content = fs::read_to_string(html_path)?;
 
     // Extract method names from <h1 class="V8SH_pagetitle">Массив.Найти (Array.Find)</h1>
@@ -745,12 +747,11 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                             // already covers them.
                             let raw_variants =
                                 scraper_parser::extract_parameter_variants(&html_content);
-                            let mut variants: Vec<MethodVariantInfo> =
-                                if raw_variants.len() > 1 {
-                                    raw_variants.into_iter().map(Into::into).collect()
-                                } else {
-                                    Vec::new()
-                                };
+                            let mut variants: Vec<MethodVariantInfo> = if raw_variants.len() > 1 {
+                                raw_variants.into_iter().map(Into::into).collect()
+                            } else {
+                                Vec::new()
+                            };
                             for variant in variants.iter_mut() {
                                 mark_trailing_variadic_from_syntax(
                                     &mut variant.parameters,
@@ -1135,7 +1136,9 @@ fn parse_global_functions(
                 continue;
             }
 
-            if let Some(function_info) = parse_global_function_html(&function_path, function_id_counter)? {
+            if let Some(function_info) =
+                parse_global_function_html(&function_path, function_id_counter)?
+            {
                 functions.push(function_info);
             }
         }
@@ -1193,12 +1196,12 @@ fn parse_global_function_html(
                         // covers it.
                         let raw_variants =
                             scraper_parser::extract_parameter_variants(&html_content);
-                        let mut variants: Vec<GlobalFunctionVariantInfo> =
-                            if raw_variants.len() > 1 {
-                                raw_variants.into_iter().map(Into::into).collect()
-                            } else {
-                                Vec::new()
-                            };
+                        let mut variants: Vec<GlobalFunctionVariantInfo> = if raw_variants.len() > 1
+                        {
+                            raw_variants.into_iter().map(Into::into).collect()
+                        } else {
+                            Vec::new()
+                        };
                         for variant in variants.iter_mut() {
                             mark_trailing_variadic_from_syntax(
                                 &mut variant.parameters,
@@ -1211,7 +1214,10 @@ fn parse_global_function_html(
                         // Extract full documentation
                         let documentation = extract_method_documentation(&html_content);
 
-                        println!("  Found global function: {} / {}", russian_function, english_function);
+                        println!(
+                            "  Found global function: {} / {}",
+                            russian_function, english_function
+                        );
 
                         return Ok(Some(GlobalFunctionInfo {
                             id,
@@ -1493,26 +1499,18 @@ mod ctor_tests {
     /// platform corpus.
     #[test]
     fn detector_skips_fixed_arity() {
-        let html = synthetic_page_with_syntax(
-            "Тест(&lt;Параметр&gt;)",
-            "&lt;Параметр&gt; (обязательный)",
-        );
+        let html =
+            synthetic_page_with_syntax("Тест(&lt;Параметр&gt;)", "&lt;Параметр&gt; (обязательный)");
         let mut params = scraper_parser::extract_parameters(&html);
         mark_trailing_variadic_from_syntax(&mut params, &html);
-        assert!(
-            !params.last().unwrap().is_variadic,
-            "fixed-arity must NOT lift is_variadic"
-        );
+        assert!(!params.last().unwrap().is_variadic, "fixed-arity must NOT lift is_variadic");
     }
 
     /// Empty parameter list — early-return guard: no last param to
     /// mark, no panic, no allocation churn.
     #[test]
     fn detector_handles_empty_params_list() {
-        let html = synthetic_page_with_syntax(
-            "Тест(&lt;X1&gt;,...,&lt;XN&gt;)",
-            "&lt;X&gt;",
-        );
+        let html = synthetic_page_with_syntax("Тест(&lt;X1&gt;,...,&lt;XN&gt;)", "&lt;X&gt;");
         let mut params: Vec<MethodParameter> = Vec::new();
         mark_trailing_variadic_from_syntax(&mut params, &html);
         assert!(params.is_empty(), "empty input must remain empty");
@@ -1558,9 +1556,8 @@ mod ctor_tests {
         let path = dir.join("ctor13.html");
         fs::write(&path, &html).unwrap();
         let mut counter: u32 = 0;
-        let info = parse_constructor_html(&path, "FakeType", &mut counter)
-            .unwrap()
-            .expect("ctor info");
+        let info =
+            parse_constructor_html(&path, "FakeType", &mut counter).unwrap().expect("ctor info");
         assert_eq!(info.parameters.len(), 1);
         assert!(
             info.parameters[0].is_variadic,
@@ -1666,10 +1663,7 @@ mod property_tests {
         // (`<Имя ключа>` on `Структура` / `Соответствие`-style synthetic
         // pages), the filter must keep dropping it. Otherwise completion
         // surfaces noise like `<Имя ключа` as a real property suggestion.
-        let info = parse(
-            "Структура.&lt;Имя ключа&gt; (Structure.&lt;Key name&gt;)",
-            "Structure",
-        );
+        let info = parse("Структура.&lt;Имя ключа&gt; (Structure.&lt;Key name&gt;)", "Structure");
         assert!(info.is_none(), "placeholder-as-property-name must still be dropped");
     }
 }

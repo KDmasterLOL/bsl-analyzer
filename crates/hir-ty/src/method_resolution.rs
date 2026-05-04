@@ -233,13 +233,20 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef => return None,
-        // Register record managers / record sets — RecordSetModule.bsl,
-        // not ObjectModule.bsl. Reject here so the gate stays strict.
+        // Register record managers / record sets / records — none of
+        // these have an ObjectModule.bsl surface. Reject here so the
+        // gate stays strict. Records (the per-record element kinds
+        // yielded by `Для каждого … Из …` over a record-set) are
+        // included for the same reason.
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRecordSet
+        | MetadataKind::InformationRegisterRecord
         | MetadataKind::AccumulationRegisterRecordSet
+        | MetadataKind::AccumulationRegisterRecord
         | MetadataKind::AccountingRegisterRecordSet
-        | MetadataKind::CalculationRegisterRecordSet => return None,
+        | MetadataKind::AccountingRegisterRecord
+        | MetadataKind::CalculationRegisterRecordSet
+        | MetadataKind::CalculationRegisterRecord => return None,
         // Register parts, the synthetic `RegisterFilter` receiver, and
         // tabular sections have no ObjectModule.bsl surface.
         MetadataKind::RegisterDimension { .. }
@@ -305,6 +312,13 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef => return None,
+        // `*Record` element kinds — yielded by iterating a record-set,
+        // but the record itself doesn't reach `RecordSetModule.bsl`
+        // (1С runtime: only the set receiver does). Reject like `*Ref`.
+        MetadataKind::InformationRegisterRecord
+        | MetadataKind::AccumulationRegisterRecord
+        | MetadataKind::AccountingRegisterRecord
+        | MetadataKind::CalculationRegisterRecord => return None,
         // Register parts, the synthetic `RegisterFilter` receiver, and
         // tabular sections have no RecordSetModule.bsl surface.
         MetadataKind::RegisterDimension { .. }

@@ -649,8 +649,38 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         }
     }
 
-    // Generate platform types array
+    // Generate platform types array.
+    //
+    // Per-type `iter_element_types` is flattened into `TYPE_ITER_ELEMENTS_{N}`
+    // const slices (mirrors `PROP_TYPES_{N}` for `RawPlatformProperty`) so
+    // `RawPlatformType::iter_element_types` stays a `&'static [&'static str]`
+    // and no SmolStr allocation happens at const-init time.
     if let Some(types) = data.get("types").and_then(|v| v.as_array()) {
+        let mut type_iter_elem_names: Vec<Option<String>> = Vec::with_capacity(types.len());
+        let mut type_iter_elem_counter = 0usize;
+
+        for ty in types.iter() {
+            if let Some(elems) = ty.get("iter_element_types").and_then(|v| v.as_array()) {
+                if !elems.is_empty() {
+                    let arr = format!("TYPE_ITER_ELEMENTS_{}", type_iter_elem_counter);
+                    type_iter_elem_counter += 1;
+                    code.push_str(&format!("const {}: &[&str] = &[", arr));
+                    for (i, e) in elems.iter().enumerate() {
+                        if i > 0 {
+                            code.push_str(", ");
+                        }
+                        code.push_str(&format!("{:?}", e.as_str().unwrap_or("")));
+                    }
+                    code.push_str("];\n\n");
+                    type_iter_elem_names.push(Some(arr));
+                } else {
+                    type_iter_elem_names.push(None);
+                }
+            } else {
+                type_iter_elem_names.push(None);
+            }
+        }
+
         code.push_str("pub const PLATFORM_TYPES: &[RawPlatformType] = &[\n");
         for (idx, ty) in types.iter().enumerate() {
             let name = ty.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -672,6 +702,13 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 code.push_str(&format!("        context: Some({}),\n", context_name));
             } else {
                 code.push_str("        context: None,\n");
+            }
+
+            // iter_element_types — empty for non-iterable types
+            if let Some(arr) = &type_iter_elem_names[idx] {
+                code.push_str(&format!("        iter_element_types: {},\n", arr));
+            } else {
+                code.push_str("        iter_element_types: &[],\n");
             }
 
             code.push_str("    },\n");

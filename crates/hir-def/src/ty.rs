@@ -274,6 +274,30 @@ pub enum MetadataKind {
     AccountingRegisterRecordSet,
     /// Calculation register record set (РегистрРасчетаНаборЗаписей).
     CalculationRegisterRecordSet,
+    /// Information register record (РегистрСведенийЗапись).
+    ///
+    /// The element type yielded when iterating an
+    /// [`Self::InformationRegisterRecordSet`] with `Для каждого … Из …`.
+    /// HBK names this composite `РегистрСведенийЗапись.<Имя регистра
+    /// сведений>` and indexes its methods (`Удалить`, `Установить…`,
+    /// access to dimensions/resources/attributes) under
+    /// `InformationRegisterRecord.<Имя>` in platform data. Today this
+    /// kind is a leaf receiver in `hir-ty`: field-resolution onto register
+    /// dimensions/resources is wired through `bsl-metadata` in a follow-up,
+    /// the same way [`Self::RegisterDimension`] is staged.
+    InformationRegisterRecord,
+    /// Accumulation register record (РегистрНакопленияЗапись). Element of
+    /// [`Self::AccumulationRegisterRecordSet`]; see
+    /// [`Self::InformationRegisterRecord`] for the full rationale.
+    AccumulationRegisterRecord,
+    /// Accounting register record (РегистрБухгалтерииЗапись). Element of
+    /// [`Self::AccountingRegisterRecordSet`]; see
+    /// [`Self::InformationRegisterRecord`] for the full rationale.
+    AccountingRegisterRecord,
+    /// Calculation register record (РегистрРасчетаЗапись). Element of
+    /// [`Self::CalculationRegisterRecordSet`]; see
+    /// [`Self::InformationRegisterRecord`] for the full rationale.
+    CalculationRegisterRecord,
     /// Enum reference (ПеречислениеСсылка).
     EnumRef,
     /// Task reference (ЗадачаСсылка).
@@ -462,6 +486,14 @@ impl MetadataKind {
             Self::AccumulationRegisterRecordSet => Some("AccumulationRegisterRecordSet"),
             Self::AccountingRegisterRecordSet => Some("AccountingRegisterRecordSet"),
             Self::CalculationRegisterRecordSet => Some("CalculationRegisterRecordSet"),
+            // Per-record kinds: HBK indexes their methods under
+            // `<Flavour>Record.<Имя>` (e.g. `InformationRegisterRecord`).
+            // Yielded as the element type of `Для каждого … Из …` over
+            // a register record-set; see `iteration_lookup` in hir-ty.
+            Self::InformationRegisterRecord => Some("InformationRegisterRecord"),
+            Self::AccumulationRegisterRecord => Some("AccumulationRegisterRecord"),
+            Self::AccountingRegisterRecord => Some("AccountingRegisterRecord"),
+            Self::CalculationRegisterRecord => Some("CalculationRegisterRecord"),
             // `RegisterFilter` is a synthetic Filter receiver. Its
             // platform methods (`Filter` scalar `type_name`) are routed
             // through a scalar-key side channel, not a composite

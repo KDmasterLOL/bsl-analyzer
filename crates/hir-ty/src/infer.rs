@@ -642,8 +642,23 @@ impl<'db> InferenceContext<'db> {
                 self.infer_stmts(body);
             }
 
-            Stmt::ForEach { collection, body, .. } => {
-                self.infer_expr(ExprId::from_idx(*collection));
+            Stmt::ForEach { var, collection, body } => {
+                let coll_ty = self.infer_expr(ExprId::from_idx(*collection));
+                if let Some(elem_ty) = crate::iteration_lookup::resolve_iter_element_ty(&coll_ty) {
+                    // BSL semantics: `Для каждого X Из Y Цикл` rebinds
+                    // X to elements of Y for the duration of the body
+                    // and leaves it as the last yielded element (or
+                    // `Undefined` for an empty collection) afterwards.
+                    // Locals are procedure-scoped, so any prior
+                    // assignment to the same name is shadowed by the
+                    // loop. We honour that by ALWAYS overwriting
+                    // `var_types` — including the `Ty::Unknown` case
+                    // for `Произвольный` element types — so a stale
+                    // prior binding cannot leak into the loop body or
+                    // the trailing tail.
+                    let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
+                    self.var_types.insert(var_name, elem_ty);
+                }
                 self.infer_stmts(body);
             }
 
@@ -2423,10 +2438,18 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         // `*RegisterRef` value kinds: no module-level call surface
         // (no `RecordSetModule.bsl` for the *Ref form), no platform
         // surface. Silence is the honest answer.
+        // `*RegisterRecord` element kinds (yielded by iterating a
+        // record-set with `Для каждого … Из …`): platform methods are
+        // wired via `platform_prefix`, but workspace doesn't expose a
+        // module-level call surface for individual records. Same answer.
         MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
-        | MetadataKind::CalculationRegisterRef => return None,
+        | MetadataKind::CalculationRegisterRef
+        | MetadataKind::InformationRegisterRecord
+        | MetadataKind::AccumulationRegisterRecord
+        | MetadataKind::AccountingRegisterRecord
+        | MetadataKind::CalculationRegisterRecord => return None,
         // Tabular-section kinds: `lookup_method` resolves their methods
         // through `PlatformData["Tabular section"]` and field_lookup
         // resolves their row properties through

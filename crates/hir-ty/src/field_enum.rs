@@ -444,12 +444,16 @@ pub(crate) fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
         }
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRecordSet
+        | MetadataKind::InformationRegisterRecord
         | MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRecordSet
+        | MetadataKind::AccumulationRegisterRecord
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRecordSet
+        | MetadataKind::AccountingRegisterRecord
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRecordSet
+        | MetadataKind::CalculationRegisterRecord
         | MetadataKind::CalculationRegisterRef
         | MetadataKind::RegisterDimension { .. }
         | MetadataKind::RegisterResource { .. }
