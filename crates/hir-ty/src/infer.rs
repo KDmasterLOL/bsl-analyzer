@@ -2423,10 +2423,18 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         // `*RegisterRef` value kinds: no module-level call surface
         // (no `RecordSetModule.bsl` for the *Ref form), no platform
         // surface. Silence is the honest answer.
+        // `*RegisterRecord` element kinds (yielded by iterating a
+        // record-set with `Для каждого … Из …`): platform methods are
+        // wired via `platform_prefix`, but workspace doesn't expose a
+        // module-level call surface for individual records. Same answer.
         MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
-        | MetadataKind::CalculationRegisterRef => return None,
+        | MetadataKind::CalculationRegisterRef
+        | MetadataKind::InformationRegisterRecord
+        | MetadataKind::AccumulationRegisterRecord
+        | MetadataKind::AccountingRegisterRecord
+        | MetadataKind::CalculationRegisterRecord => return None,
         // Tabular-section kinds: `lookup_method` resolves their methods
         // through `PlatformData["Tabular section"]` and field_lookup
         // resolves their row properties through

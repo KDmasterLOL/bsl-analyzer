@@ -310,6 +310,17 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
         "calculationregisterref" | "регистррасчетаключзаписи" => {
             Some(MetadataKind::CalculationRegisterRef)
         }
+        // Per-record element kinds — yielded by `Для каждого … Из …`
+        // over a record-set. JSDoc / XML refs of the form
+        // `РегистрСведенийЗапись.<Имя>` lower into the matching kind so
+        // platform method/property lookup keeps working on iterated
+        // records. Russian aliases below mirror the HBK syntax-help
+        // names verbatim (lowercased) — see the matching record-set
+        // arms above.
+        "informationregisterrecord" => Some(MetadataKind::InformationRegisterRecord),
+        "accumulationregisterrecord" => Some(MetadataKind::AccumulationRegisterRecord),
+        "accountingregisterrecord" => Some(MetadataKind::AccountingRegisterRecord),
+        "calculationregisterrecord" => Some(MetadataKind::CalculationRegisterRecord),
         _ => None,
     }
 }

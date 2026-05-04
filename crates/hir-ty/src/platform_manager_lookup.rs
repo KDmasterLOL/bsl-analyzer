@@ -167,12 +167,22 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             MdoType::ChartOfAccounts
         }
-        // Register-record kinds — manager / record-set platform surfaces.
+        // Register-record kinds — manager / record-set / record platform
+        // surfaces. The per-record variants (`*Record`) are the element
+        // types yielded by `Для каждого … Из …` over a record-set; their
+        // platform methods are indexed under `<Flavour>Record.<Имя>`.
         MetadataKind::InformationRegisterRecordManager
-        | MetadataKind::InformationRegisterRecordSet => MdoType::InformationRegister,
-        MetadataKind::AccumulationRegisterRecordSet => MdoType::AccumulationRegister,
-        MetadataKind::AccountingRegisterRecordSet => MdoType::AccountingRegister,
-        MetadataKind::CalculationRegisterRecordSet => MdoType::CalculationRegister,
+        | MetadataKind::InformationRegisterRecordSet
+        | MetadataKind::InformationRegisterRecord => MdoType::InformationRegister,
+        MetadataKind::AccumulationRegisterRecordSet | MetadataKind::AccumulationRegisterRecord => {
+            MdoType::AccumulationRegister
+        }
+        MetadataKind::AccountingRegisterRecordSet | MetadataKind::AccountingRegisterRecord => {
+            MdoType::AccountingRegister
+        }
+        MetadataKind::CalculationRegisterRecordSet | MetadataKind::CalculationRegisterRecord => {
+            MdoType::CalculationRegister
+        }
         // `platform_prefix` already returned `None` for the remaining
         // variants via `?` above, so this arm is unreachable in
         // practice — the guard below documents the invariant and keeps
