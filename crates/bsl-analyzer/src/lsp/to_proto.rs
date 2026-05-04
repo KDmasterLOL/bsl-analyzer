@@ -243,20 +243,42 @@ fn token_modifiers_bitset(mods: HlMod) -> u32 {
 ///
 /// **IMPORTANT**: The length field must be in UTF-16 code units, not bytes!
 /// This is critical for non-ASCII text like Cyrillic where 1 char = 2 bytes but 1 UTF-16 code unit.
+///
+/// Contract: `ide::highlight()` returns highlights sorted by `range.start()`
+/// and pairwise non-overlapping. This adapter is a dumb encoder: it does not
+/// make priority decisions about which highlight wins. As a transitional
+/// safety-net it skips any incoming highlight that violates the sort/non-overlap
+/// invariant and logs at WARN, rather than emitting an LSP-invalid token list
+/// (the delta encoder would underflow on a backwards-sorted token). The skip
+/// path is to be tightened to a `debug_assert!` once the IDE-layer contract has
+/// soaked in production.
 pub fn semantic_tokens(
     line_index: &LineIndex,
     text: &str,
     highlights: &[HlRange],
 ) -> Vec<SemanticToken> {
-    let mut tokens = Vec::new();
+    let mut tokens = Vec::with_capacity(highlights.len());
     let mut prev_line = 0;
     let mut prev_start = 0;
+    // Tracks the largest range-end we have already emitted. Any incoming
+    // highlight whose start sits below this value violates either the
+    // sortedness contract or the non-overlap contract (or both).
+    let mut prev_max_end: Option<TextSize> = None;
 
-    // Sort by position for delta encoding
-    let mut sorted: Vec<_> = highlights.iter().collect();
-    sorted.sort_by_key(|hl| hl.range.start());
+    for hl in highlights {
+        if let Some(prev_end) = prev_max_end {
+            if hl.range.start() < prev_end {
+                tracing::warn!(
+                    target: "bsl_analyzer::lsp::semantic_tokens",
+                    range = ?hl.range,
+                    tag = ?hl.tag,
+                    prev_max_end = ?prev_end,
+                    "ide::highlight() returned an out-of-order or overlapping HlRange — skipping (contract violation)"
+                );
+                continue;
+            }
+        }
 
-    for hl in sorted {
         // CRITICAL: Use UTF-16 positions, not byte positions!
         let start_pos = match position_utf16(line_index, text, hl.range.start()) {
             Some(pos) => pos,
@@ -267,7 +289,6 @@ pub fn semantic_tokens(
         // For Cyrillic: "ПрограммныйИнтерфейс" = 40 bytes but only 20 UTF-16 code units
         let length = LineIndex::utf16_len(text, hl.range);
 
-        // Calculate deltas
         let delta_line = start_pos.line - prev_line;
         let delta_start =
             if delta_line == 0 { start_pos.character - prev_start } else { start_pos.character };
@@ -282,6 +303,7 @@ pub fn semantic_tokens(
 
         prev_line = start_pos.line;
         prev_start = start_pos.character;
+        prev_max_end = Some(prev_max_end.map_or(hl.range.end(), |p| p.max(hl.range.end())));
     }
 
     tokens
@@ -335,6 +357,109 @@ mod tests {
         assert_eq!(lsp_diag.code, Some(NumberOrString::String("EmptyCodeBlock".to_string())));
         assert_eq!(lsp_diag.source, Some("bsl-analyzer".to_string()));
         assert_eq!(lsp_diag.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    }
+
+    /// Encoder behavior: tokens on different lines round-trip correctly via
+    /// delta encoding. Pure encoder test, no dedup involved.
+    #[test]
+    fn test_semantic_tokens_encodes_disjoint_tokens() {
+        let text = "abc\ndef\n";
+        let line_index = LineIndex::new(text);
+
+        let highlights = vec![
+            HlRange {
+                range: TextRange::new(0.into(), 3.into()),
+                tag: HlTag::Variable,
+                modifiers: HlMod::new(),
+            },
+            HlRange {
+                range: TextRange::new(4.into(), 7.into()),
+                tag: HlTag::Function,
+                modifiers: HlMod::new(),
+            },
+        ];
+
+        let tokens = semantic_tokens(&line_index, text, &highlights);
+
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].delta_line, 0);
+        assert_eq!(tokens[1].delta_line, 1);
+    }
+
+    /// End-to-end check: `ide::highlight()` on the Zed-regression example must
+    /// itself return overlap-free highlights (use-case-layer contract), and
+    /// the encoded LSP tokens must inherit that property.
+    #[test]
+    fn test_semantic_tokens_end_to_end_no_overlap_on_procedure_name() {
+        use ide::highlight;
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let code = "Процедура Тест()\n    Форма = ПолучитьФорму(\"Обработка.Тест.Форма\");\nКонецПроцедуры\n";
+
+        let mut db = RootDatabaseImpl::default();
+        let file_id = FileId(0);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, code);
+
+        let result = highlight(&db, file_id);
+
+        // 1. Use-case-layer contract: highlight() output is sorted and pairwise non-overlapping.
+        for window in result.highlights.windows(2) {
+            assert!(
+                window[0].range.start() <= window[1].range.start(),
+                "ide::highlight() must return highlights sorted by start; got {:?} then {:?}",
+                window[0],
+                window[1]
+            );
+            assert!(
+                window[0].range.end() <= window[1].range.start(),
+                "ide::highlight() must return non-overlapping highlights; got {:?} overlapping with {:?}",
+                window[0],
+                window[1]
+            );
+        }
+
+        // 2. Adapter passes the contract through to LSP wire format.
+        let line_index = LineIndex::new(code);
+        let tokens = semantic_tokens(&line_index, code, &result.highlights);
+
+        let mut absolute = Vec::with_capacity(tokens.len());
+        let (mut line, mut col) = (0u32, 0u32);
+        for tok in &tokens {
+            line += tok.delta_line;
+            if tok.delta_line != 0 {
+                col = 0;
+            }
+            col += tok.delta_start;
+            absolute.push((line, col, col + tok.length));
+        }
+
+        for window in absolute.windows(2) {
+            let (l1, _, e1) = window[0];
+            let (l2, s2, _) = window[1];
+            assert!(
+                l1 != l2 || e1 <= s2,
+                "LSP semantic tokens must not overlap; got {:?} then {:?}",
+                window[0],
+                window[1]
+            );
+        }
+
+        // 3. Procedure name 'Тест' occupies UTF-16 columns 10..14 on line 0; exactly one token.
+        let proc_name_tokens: Vec<_> = absolute
+            .iter()
+            .filter(|(line, start, end)| *line == 0 && *start == 10 && *end == 14)
+            .collect();
+        assert_eq!(
+            proc_name_tokens.len(),
+            1,
+            "expected exactly one token covering the procedure name range, got {proc_name_tokens:?}"
+        );
     }
 
     #[test]
