@@ -13,6 +13,18 @@ pub struct PlatformType {
     pub min_version: Option<SmolStr>,
     /// Context availability
     pub context: Option<ContextAvailability>,
+    /// Element types from the HBK `Элементы коллекции:` chapter, in source
+    /// order. Empty when the type is not iterable per the platform syntax
+    /// help (the vast majority of types). Single-element for collections
+    /// like `Массив` (`["Произвольный"]`) or `ТаблицаЗначений`
+    /// (`["СтрокаТаблицыЗначений"]`); multi-element for pages like
+    /// `ПоляКолонкиСхемыЗапроса`
+    /// (`["ВыражениеСхемыЗапроса", "ВложеннаяТаблицаСхемыЗапроса",
+    /// "Неопределено"]`). Strings are stored verbatim as scraped from the
+    /// HBK, including the `<Имя …>` placeholder used for parametric
+    /// element types like `РегистрСведенийЗапись.<Имя регистра>`.
+    /// Placeholder substitution and `Ty` resolution happen in `hir-ty`.
+    pub iter_element_types: Vec<SmolStr>,
 }
 
 /// Raw platform type for const initialization (internal use only)
@@ -23,6 +35,7 @@ pub struct RawPlatformType {
     pub english_name: &'static str,
     pub min_version: Option<&'static str>,
     pub context: Option<RawContextAvailability>,
+    pub iter_element_types: &'static [&'static str],
 }
 
 impl From<&RawPlatformType> for PlatformType {
@@ -32,6 +45,7 @@ impl From<&RawPlatformType> for PlatformType {
             english_name: raw.english_name.into(),
             min_version: raw.min_version.map(SmolStr::from),
             context: raw.context.as_ref().map(ContextAvailability::from),
+            iter_element_types: raw.iter_element_types.iter().map(|s| SmolStr::new(*s)).collect(),
         }
     }
 }
