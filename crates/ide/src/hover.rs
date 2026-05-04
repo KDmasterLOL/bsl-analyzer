@@ -229,7 +229,15 @@ fn type_of_token<DB: RootDatabase>(
         }
         node = node.parent()?;
     }
-    None
+    // Declaration-site fallback: identifiers like the loop variable in
+    // `Для Каждого X Из …`, the counter in classic `Для X = … По …`,
+    // procedure parameters, and `Перем X` are bound through `BindingId`
+    // and have no `Expr::Path` at their declaration site. The wrapper
+    // walk above never finds a typed expression for them. Reach into
+    // the per-body `var_types` (M3 Task 9 sibling map) by range and
+    // surface the loop-element / counter / param type so hover on the
+    // declaration matches hover at the use site.
+    sema.type_of_binding_at(file_id, token_range)
 }
 
 /// Converts a Definition to HoverResult.

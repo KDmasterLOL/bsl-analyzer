@@ -9,7 +9,8 @@ use crate::register::{
 
 use super::helpers::{child_bool, child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 use super::standard_attributes::{
-    add_accumulation_register_standard_attrs, add_information_register_standard_attrs,
+    add_accounting_register_standard_attrs, add_accumulation_register_standard_attrs,
+    add_calculation_register_standard_attrs, add_information_register_standard_attrs,
 };
 use super::type_parser::parse_type_xml;
 
@@ -70,9 +71,13 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
         MdoType::AccumulationRegister => {
             add_accumulation_register_standard_attrs(&mut attributes, &object_name);
         }
-        _ => {
-            // AccountingRegister and CalculationRegister - TODO: add standard attributes
+        MdoType::AccountingRegister => {
+            add_accounting_register_standard_attrs(&mut attributes, &object_name);
         }
+        MdoType::CalculationRegister => {
+            add_calculation_register_standard_attrs(&mut attributes, &object_name);
+        }
+        _ => {}
     }
 
     let mut dimensions = Vec::new();

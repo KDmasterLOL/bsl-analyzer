@@ -263,6 +263,8 @@ pub struct BodySourceMap {
     range_to_expr: FxHashMap<TextRange, ExprId>,
     /// Source range → Statement ID (for reverse lookup).
     range_to_stmt: FxHashMap<TextRange, StmtId>,
+    /// Source range → Binding ID (for reverse lookup).
+    range_to_binding: FxHashMap<TextRange, BindingId>,
 }
 
 impl BodySourceMap {
@@ -295,11 +297,13 @@ impl BodySourceMap {
 
     /// Record binding source range (accepts typed Idx during lowering).
     pub(crate) fn record_binding(&mut self, id: BindingIdx, range: TextRange) {
+        let opaque_id = BindingId::from_idx(id);
         let idx = id.into_raw().into_u32() as usize;
         if idx >= self.binding_ranges.len() {
             self.binding_ranges.resize(idx + 1, None);
         }
         self.binding_ranges[idx] = Some(range);
+        self.range_to_binding.insert(range, opaque_id);
     }
 
     /// Get source range for an expression.
@@ -328,6 +332,16 @@ impl BodySourceMap {
     /// Find statement at a given range.
     pub fn stmt_at_range(&self, range: TextRange) -> Option<StmtId> {
         self.range_to_stmt.get(&range).copied()
+    }
+
+    /// Find binding at a given range.
+    ///
+    /// Used by hover/goto on declaration-site identifiers (loop variable
+    /// in `Для Каждого X Из …`, classic `Для X = … По …`, `Перем X`,
+    /// procedure parameters) where no `Expr::Path` is created and the
+    /// range maps directly to the freshly allocated binding.
+    pub fn binding_at_range(&self, range: TextRange) -> Option<BindingId> {
+        self.range_to_binding.get(&range).copied()
     }
 }
 
@@ -1250,6 +1264,22 @@ mod tests {
 
         assert_eq!(source_map.expr_range(ExprId::from_idx(expr_id)), Some(range));
         assert_eq!(source_map.expr_at_range(range), Some(ExprId::from_idx(expr_id)));
+    }
+
+    #[test]
+    fn test_source_map_binding_at_range() {
+        let mut body = Body::new();
+        let mut source_map = BodySourceMap::new();
+
+        let binding_id = body.bindings.alloc(Binding::var(Name::new("Запись")));
+        let range = TextRange::new(10.into(), 16.into());
+        source_map.record_binding(binding_id, range);
+
+        assert_eq!(source_map.binding_range(BindingId::from_idx(binding_id)), Some(range));
+        assert_eq!(source_map.binding_at_range(range), Some(BindingId::from_idx(binding_id)));
+        // Unknown range yields None.
+        let other = TextRange::new(20.into(), 24.into());
+        assert_eq!(source_map.binding_at_range(other), None);
     }
 
     #[test]

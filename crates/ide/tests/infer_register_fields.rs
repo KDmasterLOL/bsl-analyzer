@@ -105,6 +105,107 @@ fn infer_register_dimension_resolves_to_catalog_ref() {
 }
 
 #[test]
+fn infer_for_each_over_record_set_yields_record_kind() {
+    // `Для Каждого Запись Из Набор Цикл` over an InformationRegister
+    // record-set receiver must bind the loop variable to
+    // `MetadataRef { InformationRegisterRecord, <ИмяРегистра> }` per
+    // HBK iteration spec. This is the receiver shape that lookups for
+    // dimensions/resources/attributes + standard properties + platform
+    // methods all key off of (now that `register_parent_for_kind` has
+    // the *Record arm).
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Возвращаемое значение:
+//   РегистрСведенийНаборЗаписей.РегистрСведений1
+Функция Набор() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Н = ПервыйОбщийМодуль.Набор();
+    Для Каждого Запись Из Н Цикл
+        Х = Запись;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "запись"),
+        Some(Ty::MetadataRef {
+            kind: hir::MetadataKind::InformationRegisterRecord,
+            name: Name::new("РегистрСведений1"),
+        }),
+        "Для Каждого X Из <RecordSet> must bind X to InformationRegisterRecord.<Имя>",
+    );
+}
+
+#[test]
+fn infer_register_record_dimension_resolves_through_field_lookup() {
+    // After `Для Каждого Запись Из Набор`, accessing
+    // `Запись.Справочник1` must resolve through the same
+    // `lookup_on_register` path as the *RecordSet/*Ref kinds — the new
+    // `*Record` arm in `register_parent_for_kind` is what unlocks this.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Возвращаемое значение:
+//   РегистрСведенийНаборЗаписей.РегистрСведений1
+Функция Набор() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Процедура Тест()
+    Н = ПервыйОбщийМодуль.Набор();
+    Для Каждого Запись Из Н Цикл
+        С = Запись.Справочник1;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "с"),
+        Some(Ty::MetadataRef {
+            kind: hir::MetadataKind::CatalogRef,
+            name: Name::new("Справочник1"),
+        }),
+        "dimension access on *Record must resolve through register_parent_for_kind",
+    );
+}
+
+#[test]
+fn infer_record_set_dimension_regression() {
+    // Insurance regression: the *RecordSet dimension path used to work
+    // before the *Record arm was added. Adding new match arms to
+    // `register_parent_for_kind` could regress its existing kinds, so
+    // this test pins the *RecordSet path explicitly.
+    let fixture = r#"
+//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
+// Возвращаемое значение:
+//   РегистрСведенийНаборЗаписей.РегистрСведений1
+Функция Набор() Экспорт
+    Возврат Неопределено;
+КонецФункции
+
+//- /test.bsl
+Функция Тест()
+    Н = ПервыйОбщийМодуль.Набор();
+    С = Н.Справочник1;
+    Возврат С;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "с"),
+        Some(Ty::MetadataRef {
+            kind: hir::MetadataKind::CatalogRef,
+            name: Name::new("Справочник1"),
+        }),
+        "*RecordSet dimension regression: must still resolve",
+    );
+}
+
+#[test]
 fn infer_register_missing_field_stays_unknown() {
     // Accessing a non-existent field on a register receiver must fall
     // through to `Ty::Unknown` — same contract as the regular MDO field

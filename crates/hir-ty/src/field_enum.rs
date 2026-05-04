@@ -474,16 +474,17 @@ pub(crate) fn register_parent_for_kind(kind: MetadataKind) -> Option<MdoType> {
     match kind {
         MetadataKind::InformationRegisterRecordManager
         | MetadataKind::InformationRegisterRecordSet
+        | MetadataKind::InformationRegisterRecord
         | MetadataKind::InformationRegisterRef => Some(MdoType::InformationRegister),
-        MetadataKind::AccumulationRegisterRecordSet | MetadataKind::AccumulationRegisterRef => {
-            Some(MdoType::AccumulationRegister)
-        }
-        MetadataKind::AccountingRegisterRecordSet | MetadataKind::AccountingRegisterRef => {
-            Some(MdoType::AccountingRegister)
-        }
-        MetadataKind::CalculationRegisterRecordSet | MetadataKind::CalculationRegisterRef => {
-            Some(MdoType::CalculationRegister)
-        }
+        MetadataKind::AccumulationRegisterRecordSet
+        | MetadataKind::AccumulationRegisterRecord
+        | MetadataKind::AccumulationRegisterRef => Some(MdoType::AccumulationRegister),
+        MetadataKind::AccountingRegisterRecordSet
+        | MetadataKind::AccountingRegisterRecord
+        | MetadataKind::AccountingRegisterRef => Some(MdoType::AccountingRegister),
+        MetadataKind::CalculationRegisterRecordSet
+        | MetadataKind::CalculationRegisterRecord
+        | MetadataKind::CalculationRegisterRef => Some(MdoType::CalculationRegister),
         _ => None,
     }
 }

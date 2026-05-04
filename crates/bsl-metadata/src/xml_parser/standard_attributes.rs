@@ -186,6 +186,12 @@ pub(crate) fn add_register_period_attr(
         MdoType::InformationRegister => periodicity.unwrap_or("Nonperiodical") != "Nonperiodical",
         // AccumulationRegister: Period is ALWAYS present
         MdoType::AccumulationRegister => true,
+        // AccountingRegister: Period is ALWAYS present per HBK 8.3.27
+        // (`РегистрБухгалтерииЗапись.<Имя>` -> Свойства).
+        MdoType::AccountingRegister => true,
+        // CalculationRegister: Period is ALWAYS present per HBK 8.3.27
+        // (`РегистрРасчётаЗапись.<Имя>` -> Свойства).
+        MdoType::CalculationRegister => true,
         // Other register types: no Period handling yet
         _ => false,
     };
@@ -217,6 +223,36 @@ pub(crate) fn add_accumulation_register_standard_attrs(
     add_register_common_attrs(attributes, object_name, MdoType::AccumulationRegister);
     // AccumulationRegister always has Period
     add_register_period_attr(attributes, object_name, MdoType::AccumulationRegister, None);
+}
+
+/// Add standard attributes for AccountingRegister.
+///
+/// Common four (`Активность`/`НомерСтроки`/`Период`/`Регистратор`); the
+/// register-specific surface (`СчётДт`/`СчётКт`/`Сумма`/`Содержание`/
+/// `ВидСубконтоДт/Кт`/`СубконтоДт/Кт`/`ВалютаДт/Кт`/`СуммаВалютнаяДт/Кт`)
+/// is out of scope for this PR and ships separately once the AcctReg
+/// kind owns its own field-resolution path.
+pub(crate) fn add_accounting_register_standard_attrs(
+    attributes: &mut Vec<RegisterAttribute>,
+    object_name: &str,
+) {
+    add_register_common_attrs(attributes, object_name, MdoType::AccountingRegister);
+    add_register_period_attr(attributes, object_name, MdoType::AccountingRegister, None);
+}
+
+/// Add standard attributes for CalculationRegister.
+///
+/// Common four (`Активность`/`НомерСтроки`/`Период`/`Регистратор`); the
+/// register-specific surface (`ВидРасчёта`/`ПериодДействияНачало/Конец`/
+/// `ПериодРегистрации`/`БазовыйПериодНачало/Конец`) is out of scope for
+/// this PR and ships separately once the CalcReg kind owns its own
+/// field-resolution path.
+pub(crate) fn add_calculation_register_standard_attrs(
+    attributes: &mut Vec<RegisterAttribute>,
+    object_name: &str,
+) {
+    add_register_common_attrs(attributes, object_name, MdoType::CalculationRegister);
+    add_register_period_attr(attributes, object_name, MdoType::CalculationRegister, None);
 }
 
 // ============================================================================

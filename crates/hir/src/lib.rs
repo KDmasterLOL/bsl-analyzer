@@ -682,6 +682,48 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         Ty::Unknown
     }
 
+    /// Resolve a syntax range to the inferred [`Ty`] of the binding declared
+    /// at that range.
+    ///
+    /// Used by hover/goto on **declaration-site** identifiers where no
+    /// `Expr::Path` is created and the range maps directly to a freshly
+    /// allocated `BindingId`:
+    /// - `Для Каждого X Из …` loop variable
+    /// - `Для X = … По …` classic-for counter
+    /// - `Перем X` declarations
+    /// - procedure parameters
+    ///
+    /// Lookup is keyed by the freshly allocated `BindingId` (not by
+    /// lowercase name), so two `Для Каждого X Из …` in the same
+    /// procedure with different collection types — or `Перем X` shadowed
+    /// by a `Для X = …` later in the body — return the type of the
+    /// specific declaration, never another binding's stored type. This
+    /// is what `var_types`-by-name lookup cannot promise.
+    ///
+    /// Returns `None` when the range doesn't map to a binding in any body
+    /// of `file_id`, or when inference produced no entry for the
+    /// binding (e.g. a bare `Перем X` with no subsequent assignment, or
+    /// a parameter — those aren't pinned by the declaration-site arms).
+    pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<Ty> {
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.db.module_bodies(module_id);
+        let infer = self.db.infer(file_id);
+
+        if let Some(result) = module_bodies.module_code_result() {
+            if let Some(binding_id) = result.source_map.binding_at_range(range) {
+                return infer.binding_type_in(DefWithBodyId::ModuleCode, binding_id).cloned();
+            }
+        }
+
+        for (local_id, _body, source_map) in module_bodies.method_bodies() {
+            if let Some(binding_id) = source_map.binding_at_range(range) {
+                return infer.binding_type_in(DefWithBodyId::Method(local_id), binding_id).cloned();
+            }
+        }
+
+        None
+    }
+
     /// Resolve `recv.method(...)` to a [`Definition::BuiltinMethodHandle`]
     /// when the receiver's inferred [`Ty`] yields a platform-method match
     /// through [`hir_ty::resolve_method`].
