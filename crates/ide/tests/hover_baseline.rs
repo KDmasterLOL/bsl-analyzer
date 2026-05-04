@@ -423,6 +423,123 @@ fn hover_global_execute_statement_does_not_render_query_method() {
     }
 }
 
+// ---------- declaration-site loop variables ----------
+
+#[test]
+fn hover_for_each_loop_var_at_declaration_shows_element_type() {
+    // `Для Каждого X Из Y Цикл` lowers `X` only as a `BindingId` — there
+    // is no `Expr::Path` at the declaration site, so the wrapper-walk in
+    // `type_of_token` finds nothing. The fallback through
+    // `Semantics::type_of_binding_at` reaches into per-body `var_types`
+    // and surfaces the iter element type the same way hover at a use
+    // site does.
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    М = Новый Соответствие;
+    Для Каждого К$0З Из М Цикл
+        Х = КЗ;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover = analysis
+        .hover(file_id, offset)
+        .expect("hover on declaration-site loop variable must produce a result");
+    assert!(
+        hover.markup.contains("КлючИЗначение"),
+        "hover on Для Каждого declaration-site var over Соответствие must show КлючИЗначение, got: {:?}",
+        hover.markup
+    );
+}
+
+#[test]
+fn hover_classic_for_counter_at_declaration_shows_number() {
+    // `Для I = 1 По 10 Цикл` binds `I` to `Ty::Number` per BSL semantics
+    // (the counter is always Number; runtime errors on non-Number
+    // bounds). Declaration-site hover must show that, mirroring the
+    // ForEach declaration-site fix. Counter name `СчётчикЦикла` keeps
+    // the cursor anchored inside an IDENT token (single-letter names
+    // are too short to land mid-token without ambiguity).
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    Для Счёт$0чикЦикла = 1 По 10 Цикл
+        Х = СчётчикЦикла;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover = analysis
+        .hover(file_id, offset)
+        .expect("hover on classic-for counter declaration must produce a result");
+    assert!(
+        hover.markup.contains("Число") || hover.markup.contains("Number"),
+        "hover on classic-for counter must show Number, got: {:?}",
+        hover.markup
+    );
+}
+
+#[test]
+fn hover_for_each_loop_var_same_body_shadowing() {
+    // Two `Для Каждого` loops in the **same** procedure with the same
+    // lowercase variable name and different element types. With
+    // name-keyed `var_types`, the file-global last-write-wins would
+    // surface the second loop's type on hover at the first
+    // declaration. Per-binding `binding_types_by_body` keys by the
+    // freshly allocated `BindingId`, so each declaration site shows
+    // its own type.
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    М = Новый Соответствие;
+    Т = Новый ТаблицаЗначений;
+    Для Каждого Эле$0м Из М Цикл
+    КонецЦикла;
+    Для Каждого Элем Из Т Цикл
+    КонецЦикла;
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover = analysis
+        .hover(file_id, offset)
+        .expect("hover at first declaration in same-body shadowing fixture must produce a result");
+    assert!(
+        hover.markup.contains("КлючИЗначение"),
+        "first declaration must resolve to КлючИЗначение (its own collection's element), \
+         not СтрокаТаблицыЗначений from the second loop, got: {:?}",
+        hover.markup
+    );
+}
+
+#[test]
+fn hover_for_each_loop_var_per_body_isolation() {
+    // Two procedures with the same loop variable name but different
+    // collection types must not collide. With per-body `var_types_by_body`,
+    // hover in each body resolves to the correct element type. Without
+    // it, the file-global `var_types` would carry only the
+    // last-inferred body's type and the first body would mis-render.
+    let fixture = r#"//- /test.bsl
+Процедура ПерваяПроцедура()
+    М = Новый Соответствие;
+    Для Каждого Эле$0м Из М Цикл
+    КонецЦикла;
+КонецПроцедуры
+
+Процедура ВтораяПроцедура()
+    Т = Новый ТаблицаЗначений;
+    Для Каждого Элем Из Т Цикл
+    КонецЦикла;
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+    let hover =
+        analysis.hover(file_id, offset).expect("hover in first procedure must produce a result");
+    assert!(
+        hover.markup.contains("КлючИЗначение"),
+        "first procedure's loop var must resolve to КлючИЗначение (Соответствие element), \
+         not СтрокаТаблицыЗначений from the sibling procedure, got: {:?}",
+        hover.markup
+    );
+}
+
 // ---------- negative cases ----------
 
 #[test]

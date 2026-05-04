@@ -186,6 +186,22 @@ pub(crate) fn add_register_period_attr(
         MdoType::InformationRegister => periodicity.unwrap_or("Nonperiodical") != "Nonperiodical",
         // AccumulationRegister: Period is ALWAYS present
         MdoType::AccumulationRegister => true,
+        // AccountingRegister and CalculationRegister: standard
+        // attributes (including AcctReg's `Период`) come from the
+        // platform composite-prefix `*Record.<Имя>` for `*Record`
+        // receivers. Pushing them here would land them in
+        // `register.attributes()`, which `enumerate_register_fields`
+        // iterates BEFORE the platform-properties branch and so
+        // shadows the richer platform metadata (notably
+        // `is_readonly: true` on `НомерСтроки` per HBK). Until the
+        // pre-existing InfoReg/AccumReg shadowing is reworked
+        // wholesale, intentionally do nothing here — `*Record`
+        // receivers still see the four common standards through the
+        // platform branch. CalcReg has no plain `Период` at all
+        // (`ПериодРегистрации` / `ПериодДействия*` / `БазовыйПериод*`
+        // are distinct), so this also avoids fabricating a phantom
+        // field on that flavour.
+        MdoType::AccountingRegister | MdoType::CalculationRegister => false,
         // Other register types: no Period handling yet
         _ => false,
     };
@@ -218,6 +234,20 @@ pub(crate) fn add_accumulation_register_standard_attrs(
     // AccumulationRegister always has Period
     add_register_period_attr(attributes, object_name, MdoType::AccumulationRegister, None);
 }
+
+// AccountingRegister / CalculationRegister: deliberately no
+// configuration-side standard-attribute connectors. Their `*Record`
+// composite-prefix in HBK already declares the four common standards
+// (`Активность`/`НомерСтроки`/`Период`/`Регистратор` for AcctReg;
+// `Активность`/`НомерСтроки`/`Регистратор` for CalcReg — CalcReg has
+// no plain `Период`), with richer attributes (`is_readonly`,
+// documentation) than the symbolic `RegisterAttribute` shape we'd
+// build here. Surfacing them through `register.attributes()` would
+// cause `enumerate_register_fields` to iterate them BEFORE the
+// platform-properties branch and shadow the platform-side info
+// (notably flipping `НомерСтроки` from readonly to writable). The
+// pre-existing InfoReg/AccumReg connectors do the same — addressing
+// that shadowing wholesale is its own PR.
 
 // ============================================================================
 // Catalog/Document standard attributes (Vec<Attribute>) — wrapper API

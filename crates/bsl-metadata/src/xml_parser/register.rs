@@ -71,7 +71,13 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
             add_accumulation_register_standard_attrs(&mut attributes, &object_name);
         }
         _ => {
-            // AccountingRegister and CalculationRegister - TODO: add standard attributes
+            // AccountingRegister and CalculationRegister deliberately
+            // have no configuration-side standard-attribute connector
+            // — see `standard_attributes.rs` for the rationale (shadow
+            // risk against richer platform-side composite-prefix
+            // properties). The four common standards still surface
+            // through the platform-properties branch of
+            // `enumerate_register_fields` for `*Record` receivers.
         }
     }
 

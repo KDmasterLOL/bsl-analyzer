@@ -27,7 +27,7 @@
 //! - Diagnostic collection (UnresolvedMethodCall, MismatchedArgCount)
 
 use base_db::FileIdInput;
-use cfg_types::IdConversion;
+use cfg_types::{BindingId, IdConversion};
 use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
@@ -76,7 +76,28 @@ pub struct InferenceResult {
     /// Maps lowercase variable name to its last inferred type.
     /// Populated by tracking `Stmt::Assign { target: Path(name), value }` during inference.
     /// Used by completion to resolve receiver types for method lookup.
+    ///
+    /// File-global merge across all bodies (last-write-wins on lowercase
+    /// name). Useful for name-based completion which has no body context.
+    /// For binding-anchored lookups (hover on `Для Каждого X Из …`
+    /// declaration site, classic-for counter, parameter), prefer
+    /// [`InferenceResult::binding_type_in`]: this map collides on
+    /// shadowing (same name across procedures or repeated within one
+    /// body), `binding_types_by_body` does not.
     pub var_types: FxHashMap<String, Ty>,
+
+    /// Per-body, per-binding inferred types.
+    ///
+    /// Keyed by [`BindingId`] (allocated by `Body`'s arena) rather than
+    /// lowercase name, so two bindings with the same name in the same
+    /// body or in sibling bodies stay isolated. Required for hover at
+    /// **declaration-site** identifiers — `Для Каждого X Из …`, classic
+    /// `Для X = … По …`, procedure parameters — where there is no
+    /// `Expr::Path` for the wrapper-walk to land on. Populated alongside
+    /// [`InferenceResult::var_types`] from `Stmt::ForEach` and
+    /// `Stmt::For`. Mirrors the per-body shape of
+    /// [`InferenceResult::expr_types_by_body`].
+    pub binding_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<BindingId, Ty>>,
 
     /// Diagnostics collected during type inference, paired with the body that
     /// produced them.
@@ -117,6 +138,16 @@ impl InferenceResult {
     /// for that `(owner, expr)` pair.
     pub fn type_of_expr_in(&self, owner: DefWithBodyId, expr: ExprId) -> Option<&Ty> {
         self.expr_types_by_body.get(&owner)?.get(&expr)
+    }
+
+    /// Get the inferred type of a specific binding in `owner`'s body.
+    ///
+    /// Used by hover on declaration-site identifiers (loop variables,
+    /// classic-for counters, parameters) to avoid name shadowing across
+    /// or within bodies — two bindings with the same lowercase name
+    /// resolve to distinct entries here.
+    pub fn binding_type_in(&self, owner: DefWithBodyId, id: BindingId) -> Option<&Ty> {
+        self.binding_types_by_body.get(&owner)?.get(&id)
     }
 
     /// Check if there are any diagnostics.
@@ -321,6 +352,12 @@ pub struct InferenceContext<'db> {
     /// Variable types tracked from assignments (lowercase name → Ty).
     var_types: FxHashMap<String, Ty>,
 
+    /// Per-binding types written by declaration-site arms
+    /// (`Stmt::ForEach`, `Stmt::For`). Keyed by `BindingId` so name
+    /// shadowing within the body does not collide. Surfaced through
+    /// [`InferenceResult::binding_type_in`] for hover.
+    binding_types: FxHashMap<BindingId, Ty>,
+
     /// Per-body `ExprId -> Ty` cache. Doubles as the memoisation table
     /// (`infer_expr` short-circuits when the entry already exists) and
     /// as the payload we hand to the merged result keyed by `owner`.
@@ -346,6 +383,9 @@ pub struct BodyInferenceResult {
     pub owner: DefWithBodyId,
     /// Variable types discovered during inference (lowercase name → Ty).
     pub var_types: FxHashMap<String, Ty>,
+    /// Per-binding inferred types (declaration-site arms). Folded into
+    /// [`InferenceResult::binding_types_by_body`] keyed by `owner`.
+    pub binding_types: FxHashMap<BindingId, Ty>,
     /// Expression types keyed by body-local `ExprId`.
     pub expr_types: FxHashMap<ExprId, Ty>,
     /// Diagnostics collected during inference.
@@ -373,6 +413,7 @@ impl<'db> InferenceContext<'db> {
             owner,
             body: Arc::clone(body),
             var_types: FxHashMap::default(),
+            binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
@@ -413,6 +454,7 @@ impl<'db> InferenceContext<'db> {
         BodyInferenceResult {
             owner: self.owner,
             var_types: self.var_types,
+            binding_types: self.binding_types,
             expr_types: self.expr_types,
             diagnostics: self.diagnostics,
             call_arg_bindings: self.call_arg_bindings,
@@ -636,9 +678,26 @@ impl<'db> InferenceContext<'db> {
                 self.infer_stmts(body);
             }
 
-            Stmt::For { from, to, body, .. } => {
+            Stmt::For { var, from, to, body } => {
                 self.infer_expr(ExprId::from_idx(*from));
                 self.infer_expr(ExprId::from_idx(*to));
+                // BSL semantics: `Для I = … По … Цикл` always binds `I`
+                // to `Number`. The loop boundaries themselves are not
+                // narrowed — runtime errors on non-Number `from`/`to` —
+                // so we mirror the constant-binding shape and pin
+                // `Ty::Number` on the loop variable for hover/goto and
+                // body inference. ALWAYS overwrite, mirroring the
+                // ForEach arm: locals are procedure-scoped and the
+                // counter must shadow any prior binding for the
+                // duration of the loop and the trailing tail.
+                let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
+                self.var_types.insert(var_name, Ty::Number);
+                // Per-binding pin for declaration-site hover. The
+                // `BindingId` is fresh for each `Для I = … По …`, so
+                // hover on a specific `I` declaration cannot pick up
+                // another loop's stored type even when the lowercase
+                // name collides.
+                self.binding_types.insert(BindingId::from_idx(*var), Ty::Number);
                 self.infer_stmts(body);
             }
 
@@ -657,7 +716,15 @@ impl<'db> InferenceContext<'db> {
                     // prior binding cannot leak into the loop body or
                     // the trailing tail.
                     let var_name = self.body.binding_idx(*var).name.as_str().to_lowercase();
-                    self.var_types.insert(var_name, elem_ty);
+                    self.var_types.insert(var_name, elem_ty.clone());
+                    // Per-binding pin: each `Для каждого X` allocates a
+                    // fresh `BindingId`, so two loops with the same
+                    // lowercase name (or one shadowing a prior `Перем
+                    // X`) keep distinct entries here. Hover at the
+                    // declaration site routes through this map and
+                    // therefore returns the type of the *specific*
+                    // declaration, never another binding's type.
+                    self.binding_types.insert(BindingId::from_idx(*var), elem_ty);
                 }
                 self.infer_stmts(body);
             }
@@ -2513,6 +2580,11 @@ pub fn infer_query<'db>(
         // the merge dropped `expr_types` entirely and every syntax-node
         // lookup returned `Ty::Unknown`.
         result.expr_types_by_body.insert(body_result.owner, body_result.expr_types);
+        // Per-binding map: keyed by `BindingId` so name shadowing within
+        // or across bodies does not collide. Used by binding-anchored
+        // hover (declaration-site loop variable, classic-for counter,
+        // parameter).
+        result.binding_types_by_body.insert(body_result.owner, body_result.binding_types);
         // `var_types` stays file-global: completion matches variables by name
         // across bodies. `diagnostics` is flat file-wide but each entry is
         // paired with its `DefWithBodyId` owner so ide-diagnostics can resolve

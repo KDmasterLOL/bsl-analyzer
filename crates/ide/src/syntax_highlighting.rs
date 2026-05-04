@@ -214,6 +214,8 @@ pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> HighlightResult 
 
     traverse_node(&mut ctx, &root, &mut highlights);
 
+    let highlights = normalize_highlights(highlights);
+
     HighlightResult {
         highlights,
         resolved_external_files: ctx.resolved_external_files.into_iter().collect(),
@@ -230,7 +232,13 @@ fn traverse_node<DB: RootDatabase>(
     for token in node.children_with_tokens() {
         match token {
             syntax::NodeOrToken::Token(token) => {
-                // Try semantic highlighting for IDENT tokens first
+                // 1. Definition site (proc/func/param/var name; handles keyword-recovery).
+                if let Some(hl) = highlight_def_site_token(&token) {
+                    highlights.push(hl);
+                    continue;
+                }
+
+                // 2. Resolved semantic highlighting for IDENT tokens at use sites.
                 if token.kind() == SyntaxKind::IDENT {
                     if let Some(hl) = highlight_ident_semantic(ctx, &token) {
                         highlights.push(hl);
@@ -238,7 +246,7 @@ fn traverse_node<DB: RootDatabase>(
                     }
                 }
 
-                // Fall back to syntactic highlighting
+                // 3. Syntactic fallback.
                 if let Some(hl) = highlight_token(&token, ctx) {
                     highlights.push(hl);
                 }
@@ -254,10 +262,8 @@ fn traverse_node<DB: RootDatabase>(
                     }
                 }
 
-                // Check for special nodes that need specific highlighting
-                highlight_node(&node, highlights);
-
-                // Recurse into children
+                // Recurse into children. Definition-site highlights are handled
+                // per-token above, so no node-level highlighter is needed here.
                 traverse_node(ctx, &node, highlights);
             }
         }
@@ -381,57 +387,137 @@ fn highlight_token<DB: RootDatabase>(
     Some(HlRange { range, tag, modifiers: HlMod::new() })
 }
 
-/// Highlight specific AST nodes that need special handling.
-fn highlight_node(node: &SyntaxNode, highlights: &mut Vec<HlRange>) {
-    // Highlight function/procedure names
-    if let Some(func) = ast::FunctionDef::cast(node.clone()) {
-        if let Some(name) = func.name() {
-            highlights.push(HlRange {
-                range: name.text_range(),
-                tag: HlTag::Function,
-                modifiers: if func.export_keyword().is_some() {
-                    HlMod::new().with(HlMod::EXPORT).with(HlMod::DEFINITION)
-                } else {
-                    HlMod::new().with(HlMod::DEFINITION)
-                },
-            });
+/// Detects whether a token is the name token of a definition site
+/// (ProcedureDef/FunctionDef/Param/VarDef) and produces the corresponding highlight.
+///
+/// Runs before `highlight_ident_semantic` and `highlight_token` in the traversal.
+/// At definition sites the syntactic role (Procedure, Function, Parameter, Variable
+/// with DEFINITION or DECLARATION modifier) is the source of truth, so we don't
+/// pay for name resolution here. EXPORT comes from the AST `export_keyword()`
+/// directly, which lets the modifier survive parser recovery when the resolver fails.
+///
+/// Handles keyword-as-name parser recovery for procedures and functions via
+/// `name_or_keyword()`.
+fn highlight_def_site_token(token: &SyntaxToken) -> Option<HlRange> {
+    let parent = token.parent()?;
+    let range = token.text_range();
+    match parent.kind() {
+        SyntaxKind::PROCEDURE_DEF => {
+            let proc = ast::ProcedureDef::cast(parent)?;
+            if proc.name_or_keyword()?.text_range() != range {
+                return None;
+            }
+            let mut modifiers = HlMod::new().with(HlMod::DEFINITION);
+            if proc.export_keyword().is_some() {
+                modifiers = modifiers.with(HlMod::EXPORT);
+            }
+            Some(HlRange { range, tag: HlTag::Procedure, modifiers })
         }
-    }
-
-    if let Some(proc) = ast::ProcedureDef::cast(node.clone()) {
-        if let Some(name) = proc.name() {
-            highlights.push(HlRange {
-                range: name.text_range(),
-                tag: HlTag::Procedure,
-                modifiers: if proc.export_keyword().is_some() {
-                    HlMod::new().with(HlMod::EXPORT).with(HlMod::DEFINITION)
-                } else {
-                    HlMod::new().with(HlMod::DEFINITION)
-                },
-            });
+        SyntaxKind::FUNCTION_DEF => {
+            let func = ast::FunctionDef::cast(parent)?;
+            if func.name_or_keyword()?.text_range() != range {
+                return None;
+            }
+            let mut modifiers = HlMod::new().with(HlMod::DEFINITION);
+            if func.export_keyword().is_some() {
+                modifiers = modifiers.with(HlMod::EXPORT);
+            }
+            Some(HlRange { range, tag: HlTag::Function, modifiers })
         }
-    }
-
-    // Highlight parameters
-    if let Some(param) = ast::Param::cast(node.clone()) {
-        if let Some(name) = param.name() {
-            highlights.push(HlRange {
-                range: name.text_range(),
+        SyntaxKind::PARAM => {
+            let param = ast::Param::cast(parent)?;
+            if param.name()?.text_range() != range {
+                return None;
+            }
+            Some(HlRange {
+                range,
                 tag: HlTag::Parameter,
                 modifiers: HlMod::new().with(HlMod::DECLARATION),
-            });
+            })
         }
+        SyntaxKind::VAR_DEF => {
+            let var_def = ast::VarDef::cast(parent)?;
+            if !var_def.names().any(|n| n.text_range() == range) {
+                return None;
+            }
+            let mut modifiers = HlMod::new().with(HlMod::DECLARATION);
+            if var_def.export_keyword().is_some() {
+                modifiers = modifiers.with(HlMod::EXPORT);
+            }
+            Some(HlRange { range, tag: HlTag::Variable, modifiers })
+        }
+        _ => None,
+    }
+}
+
+/// Final normalization pass for `highlight()`: sorts highlights and removes
+/// any overlapping entries.
+///
+/// The use-case-layer contract is that consumers (LSP semantic-tokens encoder,
+/// future TextMate/HTML dumps, tests) receive a `Vec<HlRange>` where:
+/// - ranges are sorted by start offset;
+/// - no two ranges overlap.
+///
+/// `highlight_def_site_token` already eliminates the systematic Procedure/Function/
+/// Param/Variable producer dup; this pass is defense-in-depth against future
+/// producers (annotation handling, region-name highlighting, async modifiers, etc.).
+///
+/// Conflict resolution priority for equal or partially-overlapping ranges:
+/// DEFINITION > DECLARATION > resolved-semantic > syntactic fallback.
+fn normalize_highlights(highlights: Vec<HlRange>) -> Vec<HlRange> {
+    if highlights.len() < 2 {
+        return highlights;
     }
 
-    // Highlight variable declarations
-    if let Some(var_def) = ast::VarDef::cast(node.clone()) {
-        for name in var_def.names() {
-            highlights.push(HlRange {
-                range: name.text_range(),
-                tag: HlTag::Variable,
-                modifiers: HlMod::new().with(HlMod::DECLARATION),
-            });
+    let mut sorted = highlights;
+    sorted.sort_by(|a, b| {
+        a.range
+            .start()
+            .cmp(&b.range.start())
+            .then_with(|| b.range.end().cmp(&a.range.end()))
+            .then_with(|| highlight_priority(b).cmp(&highlight_priority(a)))
+    });
+
+    let mut result: Vec<HlRange> = Vec::with_capacity(sorted.len());
+    for hl in sorted {
+        if let Some(last) = result.last() {
+            if hl.range.start() < last.range.end() {
+                tracing::debug!(
+                    target: "ide::syntax_highlighting",
+                    dropped = ?hl,
+                    kept = ?last,
+                    "normalize_highlights: dropping overlapping highlight"
+                );
+                continue;
+            }
         }
+        result.push(hl);
+    }
+    result
+}
+
+fn highlight_priority(hl: &HlRange) -> u8 {
+    if hl.modifiers.contains(HlMod::DEFINITION) {
+        4
+    } else if hl.modifiers.contains(HlMod::DECLARATION) {
+        3
+    } else if matches!(
+        hl.tag,
+        HlTag::Function
+            | HlTag::Procedure
+            | HlTag::BuiltinFunction
+            | HlTag::Variable
+            | HlTag::Parameter
+            | HlTag::Type
+            | HlTag::Class
+            | HlTag::Namespace
+            | HlTag::EnumMember
+            | HlTag::Property
+            | HlTag::UnresolvedReference
+    ) {
+        2
+    } else {
+        1
     }
 }
 
@@ -1821,5 +1907,265 @@ EndFunction
 
         assert!(inner_join_highlighted, "INNER JOIN table ЧекККМ should be highlighted");
         assert!(left_join_highlighted, "LEFT JOIN table ЗаказКлиента should be highlighted");
+    }
+
+    // ---------------------------------------------------------------------
+    // Invariant tests for the use-case-layer non-overlap contract
+    // ---------------------------------------------------------------------
+
+    /// Returns the (line, byte-start, byte-end) tuple of every highlight that
+    /// covers the given source substring, helping locate-then-assert checks.
+    fn highlights_for(highlights: &[HlRange], code: &str, needle: &str) -> Vec<HlRange> {
+        highlights
+            .iter()
+            .filter(|hl| {
+                let s: usize = hl.range.start().into();
+                let e: usize = hl.range.end().into();
+                &code[s..e] == needle
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn assert_sorted_non_overlapping(highlights: &[HlRange]) {
+        for window in highlights.windows(2) {
+            assert!(
+                window[0].range.start() <= window[1].range.start(),
+                "highlights must be sorted by start; got {:?} then {:?}",
+                window[0],
+                window[1]
+            );
+            assert!(
+                window[0].range.end() <= window[1].range.start(),
+                "highlights must be pairwise non-overlapping; got {:?} overlapping with {:?}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_highlight_procedure_def_single_definition() {
+        let code = "Процедура Тест()\nКонецПроцедуры\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        let name_hls = highlights_for(&result.highlights, code, "Тест");
+        assert_eq!(name_hls.len(), 1, "expected exactly one HlRange on procedure name");
+        let hl = &name_hls[0];
+        assert_eq!(hl.tag, HlTag::Procedure);
+        assert!(hl.modifiers.contains(HlMod::DEFINITION));
+        assert!(!hl.modifiers.contains(HlMod::EXPORT));
+    }
+
+    #[test]
+    fn test_highlight_function_export_definition_export() {
+        let code = "Функция Тест() Экспорт\n    Возврат 1;\nКонецФункции\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        let name_hls = highlights_for(&result.highlights, code, "Тест");
+        assert_eq!(name_hls.len(), 1);
+        assert_eq!(name_hls[0].tag, HlTag::Function);
+        assert!(name_hls[0].modifiers.contains(HlMod::DEFINITION));
+        assert!(name_hls[0].modifiers.contains(HlMod::EXPORT));
+    }
+
+    #[test]
+    fn test_highlight_param_def_emits_declaration() {
+        let code = "Процедура Х(А, Б)\nКонецПроцедуры\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        for needle in ["А", "Б"] {
+            let hls = highlights_for(&result.highlights, code, needle);
+            assert_eq!(hls.len(), 1, "param {needle}: expected one HlRange, got {hls:?}");
+            assert_eq!(hls[0].tag, HlTag::Parameter);
+            assert!(hls[0].modifiers.contains(HlMod::DECLARATION));
+        }
+    }
+
+    #[test]
+    fn test_highlight_multi_var_decl_module_export() {
+        let code = "Перем A, B Экспорт;\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        for needle in ["A", "B"] {
+            let hls = highlights_for(&result.highlights, code, needle);
+            assert_eq!(hls.len(), 1);
+            assert_eq!(hls[0].tag, HlTag::Variable);
+            assert!(hls[0].modifiers.contains(HlMod::DECLARATION));
+            assert!(
+                hls[0].modifiers.contains(HlMod::EXPORT),
+                "module-level VarDef with `Экспорт` keyword must propagate EXPORT to every name"
+            );
+        }
+    }
+
+    #[test]
+    fn test_highlight_local_var_decl_no_export() {
+        let code = "Процедура Х()\n    Перем Л1, Л2;\n    Л1 = 1;\n    Л2 = Л1;\nКонецПроцедуры\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        let l1_decl = highlights_for(&result.highlights, code, "Л1")
+            .into_iter()
+            .find(|hl| hl.modifiers.contains(HlMod::DECLARATION))
+            .expect("expected DECLARATION on Л1");
+        assert_eq!(l1_decl.tag, HlTag::Variable);
+        assert!(!l1_decl.modifiers.contains(HlMod::EXPORT));
+    }
+
+    #[test]
+    fn test_highlight_def_site_unresolved_falls_back_to_ast() {
+        // Truncated body: parser recovers, name resolution may fail at def site,
+        // but the AST-driven classifier must still emit DEFINITION.
+        let code = "Процедура Тест(\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        let name_hls = highlights_for(&result.highlights, code, "Тест");
+        assert_eq!(name_hls.len(), 1, "AST classifier must still highlight name on broken code");
+        assert_eq!(name_hls[0].tag, HlTag::Procedure);
+        assert!(name_hls[0].modifiers.contains(HlMod::DEFINITION));
+    }
+
+    #[test]
+    fn test_highlight_annotated_procedure_no_overlap() {
+        let code = "&НаКлиенте\nПроцедура Тест()\nКонецПроцедуры\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        let name_hls = highlights_for(&result.highlights, code, "Тест");
+        assert_eq!(name_hls.len(), 1);
+        assert_eq!(name_hls[0].tag, HlTag::Procedure);
+        assert!(name_hls[0].modifiers.contains(HlMod::DEFINITION));
+    }
+
+    /// Mixed corpus: procedures, functions, params, vars, SDBL literal, annotation.
+    /// Asserts the use-case-layer non-overlap contract end-to-end.
+    #[test]
+    fn test_highlight_no_overlap_corpus() {
+        let code = r#"
+Перем МодульнаяПеременная Экспорт;
+
+&НаКлиенте
+Процедура Обработать(Параметр1, Параметр2 = 0)
+    Перем Локальная;
+    Локальная = Параметр1 + Параметр2 + МодульнаяПеременная;
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Валюты";
+    Возврат Локальная;
+КонецПроцедуры
+
+Функция Тест() Экспорт
+    Возврат 42;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        // Spot-check: each named definition lands exactly once.
+        for needle in
+            ["Обработать", "Тест", "МодульнаяПеременная", "Локальная", "Параметр1", "Параметр2"]
+        {
+            let hls = highlights_for(&result.highlights, code, needle);
+            // At least the declaration; usage sites add more, but the *declaration*
+            // must be unique (no dup with DEFINITION/DECLARATION mod).
+            let decl_hls: Vec<_> = hls
+                .iter()
+                .filter(|hl| {
+                    hl.modifiers.contains(HlMod::DEFINITION)
+                        || hl.modifiers.contains(HlMod::DECLARATION)
+                })
+                .collect();
+            assert_eq!(
+                decl_hls.len(),
+                1,
+                "{needle}: expected exactly one declaration highlight, got {decl_hls:?}"
+            );
+        }
+    }
+
+    /// Probe: parser accepts `Асинх Процедура` (async modifier). The async
+    /// keyword is excluded from `name_or_keyword()` so the def-site classifier
+    /// must still find the IDENT and the result must be overlap-free.
+    #[test]
+    fn test_highlight_async_procedure_no_overlap() {
+        let code = "Асинх Процедура Х()\nКонецПроцедуры\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        let name_hls = highlights_for(&result.highlights, code, "Х");
+        assert_eq!(name_hls.len(), 1, "expected one HlRange on async proc name");
+        assert_eq!(name_hls[0].tag, HlTag::Procedure);
+        assert!(name_hls[0].modifiers.contains(HlMod::DEFINITION));
+    }
+
+    /// Probe: `&Перед(...)` extension annotation. Annotation arguments are a
+    /// separate node (LITERAL etc.) inside the annotation; the def-site
+    /// classifier should still correctly mark the procedure name.
+    #[test]
+    fn test_highlight_extension_annotation_no_overlap() {
+        let code = "&Перед(\"ОригинальныйМетод\")\nПроцедура НовыйМетод()\nКонецПроцедуры\n";
+        let (db, file_id) = create_db_with_file(code);
+        let result = highlight(&db, file_id);
+        assert_sorted_non_overlapping(&result.highlights);
+
+        let name_hls = highlights_for(&result.highlights, code, "НовыйМетод");
+        assert_eq!(name_hls.len(), 1);
+        assert_eq!(name_hls[0].tag, HlTag::Procedure);
+        assert!(name_hls[0].modifiers.contains(HlMod::DEFINITION));
+    }
+
+    #[test]
+    fn test_normalize_highlights_dedupes_exact_overlap() {
+        let r = TextRange::new(0.into(), 4.into());
+        let input = vec![
+            HlRange { range: r, tag: HlTag::Function, modifiers: HlMod::new() },
+            HlRange {
+                range: r,
+                tag: HlTag::Procedure,
+                modifiers: HlMod::new().with(HlMod::DEFINITION),
+            },
+        ];
+        let out = normalize_highlights(input);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].modifiers.contains(HlMod::DEFINITION));
+        assert_eq!(out[0].tag, HlTag::Procedure);
+    }
+
+    #[test]
+    fn test_normalize_highlights_drops_partial_overlap() {
+        let outer = TextRange::new(0.into(), 6.into());
+        let inner = TextRange::new(3.into(), 9.into());
+        let input = vec![
+            HlRange { range: outer, tag: HlTag::Variable, modifiers: HlMod::new() },
+            HlRange { range: inner, tag: HlTag::Function, modifiers: HlMod::new() },
+        ];
+        let out = normalize_highlights(input);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].range, outer);
+    }
+
+    #[test]
+    fn test_normalize_highlights_keeps_disjoint() {
+        let a = TextRange::new(0.into(), 3.into());
+        let b = TextRange::new(4.into(), 7.into());
+        let input = vec![
+            HlRange { range: a, tag: HlTag::Variable, modifiers: HlMod::new() },
+            HlRange { range: b, tag: HlTag::Function, modifiers: HlMod::new() },
+        ];
+        let out = normalize_highlights(input);
+        assert_eq!(out.len(), 2);
     }
 }
