@@ -3,8 +3,8 @@
 //! This module provides improved parsing functions using CSS selectors
 //! instead of manual string searching.
 
-use scraper::{Html, Selector, ElementRef};
 use crate::{ContextAvailability, MethodParameter};
+use scraper::{ElementRef, Html, Selector};
 
 /// CSS selector for chapter headers (e.g., "Доступность:", "Возвращаемое значение:")
 const CHAPTER_SELECTOR: &str = "p.V8SH_chapter";
@@ -25,7 +25,8 @@ pub fn extract_version(html_content: &str) -> Option<String> {
                 // Find the period at the end of the sentence, not in version number
                 // Version can be "8.0", "8.3.6", etc.
                 // Look for pattern: numbers and dots until period + space or end
-                let version_end = after.find(". ")
+                let version_end = after
+                    .find(". ")
                     .or_else(|| {
                         // If no ". " found, look for period at end
                         if after.ends_with('.') {
@@ -60,11 +61,8 @@ pub fn extract_context(html_content: &str) -> Option<ContextAvailability> {
             while let Some(n) = node {
                 if let Some(elem) = n.value().as_element() {
                     if elem.name() == "p" {
-                        let context_text = ElementRef::wrap(n)
-                            .unwrap()
-                            .text()
-                            .collect::<String>()
-                            .to_lowercase();
+                        let context_text =
+                            ElementRef::wrap(n).unwrap().text().collect::<String>().to_lowercase();
 
                         return Some(parse_context_flags(&context_text));
                     }
@@ -84,8 +82,7 @@ fn parse_context_flags(text: &str) -> ContextAvailability {
         web_client: text.contains("веб-клиент"),
         server: text.contains("сервер"),
         mobile_client: text.contains("мобильный клиент"),
-        external_connection: text.contains("внешнее соединение")
-            || text.contains("интеграция"),
+        external_connection: text.contains("внешнее соединение") || text.contains("интеграция"),
     }
 }
 
@@ -130,10 +127,7 @@ pub fn extract_return_type(html_content: &str) -> Option<String> {
             if let Some(type_pos) = content.find("Тип: ") {
                 let after = &content[type_pos + "Тип: ".len()..];
                 // Find end: period, <br>, or newline
-                let end = after
-                    .find('.')
-                    .or_else(|| after.find('\n'))
-                    .unwrap_or(after.len());
+                let end = after.find('.').or_else(|| after.find('\n')).unwrap_or(after.len());
                 let type_str = after[..end].trim();
                 if !type_str.is_empty() {
                     return Some(type_str.to_string());
@@ -153,6 +147,66 @@ pub fn extract_return_type(html_content: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extracts the `Элементы коллекции:` chapter — names of element types
+/// that the type iterates over with `Для каждого … Из … Цикл`.
+///
+/// HBK shape: the chapter header is followed by inline text (or `<a>`
+/// links) up to the first `<br>`, after which the iteration prose
+/// ("Для объекта доступен обход коллекции…") begins. The element list
+/// is comma-separated when several types are admissible.
+///
+/// Examples (verbatim from `/tmp/hbk-1c-8.3.27/shcntx_extracted/`):
+/// - `Array.html`: `Произвольный` → `["Произвольный"]`
+/// - `Map.html`: `КлючИЗначение` → `["КлючИЗначение"]`
+/// - `RegisterRecordSet/object181.html`:
+///   `<a>РегистрСведенийЗапись.&lt;Имя регистра сведений&gt;</a>` →
+///   `["РегистрСведенийЗапись.<Имя регистра сведений>"]`
+/// - `QuerySchemaColumnFields.html`:
+///   `<a>A</a>, <a>B</a>, <a>Неопределено</a>` →
+///   `["A", "B", "Неопределено"]`
+///
+/// Returns an empty `Vec` when the page has no `Элементы коллекции:`
+/// chapter (the vast majority of platform types are non-iterable).
+pub fn extract_iter_element_types(html_content: &str) -> Vec<String> {
+    let html = Html::parse_fragment(html_content);
+    let chapter_sel = Selector::parse(CHAPTER_SELECTOR).unwrap();
+
+    for chapter in html.select(&chapter_sel) {
+        let text = chapter.text().collect::<String>();
+        if !text.contains("Элементы коллекции") {
+            continue;
+        }
+
+        // Collect text from siblings until the first <br> or next chapter.
+        // Text inside <a>-links is unwrapped via ElementRef::text().
+        let mut content = String::new();
+        let mut node = chapter.next_sibling();
+        while let Some(n) = node {
+            if let Some(elem) = n.value().as_element() {
+                if elem.name() == "br" {
+                    break;
+                }
+                if elem.name() == "p" && elem.attr("class") == Some("V8SH_chapter") {
+                    break;
+                }
+            }
+            if let Some(text_node) = n.value().as_text() {
+                content.push_str(&text_node.text);
+            } else if let Some(elem_ref) = ElementRef::wrap(n) {
+                content.push_str(&elem_ref.text().collect::<String>());
+            }
+            node = n.next_sibling();
+        }
+
+        return content
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    Vec::new()
 }
 
 /// Extracts type from HTML section by finding type links
@@ -179,13 +233,15 @@ fn extract_type_from_html_section(html: &str) -> Option<String> {
             || trimmed == "Неопределено" // This is a value, not a type
             || trimmed == "Undefined"
             || trimmed.contains("если") // Skip conditional text
-            || trimmed.contains("if") {
+            || trimmed.contains("if")
+        {
             continue;
         }
 
         // If link is to a type definition, return it
         if href.contains("SyntaxHelperContext/objects")
-            || href.contains("SyntaxHelperLanguage/def_") {
+            || href.contains("SyntaxHelperLanguage/def_")
+        {
             return Some(trimmed.to_string());
         }
     }
@@ -245,8 +301,7 @@ pub struct ParameterVariant {
 /// document order, which matches the source layout.
 pub fn extract_parameter_variants(html_content: &str) -> Vec<ParameterVariant> {
     let html = Html::parse_fragment(html_content);
-    let combined_sel =
-        Selector::parse("p.V8SH_chapter, div.V8SH_rubric").unwrap();
+    let combined_sel = Selector::parse("p.V8SH_chapter, div.V8SH_rubric").unwrap();
 
     let mut variants: Vec<ParameterVariant> = Vec::new();
     let mut current: Option<ParameterVariant> = None;
@@ -262,15 +317,8 @@ pub fn extract_parameter_variants(html_content: &str) -> Vec<ParameterVariant> {
                     variants.push(v);
                 }
                 let name = rest.trim();
-                let variant_name = if name.is_empty() {
-                    None
-                } else {
-                    Some(name.to_string())
-                };
-                current = Some(ParameterVariant {
-                    variant_name,
-                    parameters: Vec::new(),
-                });
+                let variant_name = if name.is_empty() { None } else { Some(name.to_string()) };
+                current = Some(ParameterVariant { variant_name, parameters: Vec::new() });
             } else if is_variant_end_marker(trimmed) {
                 if let Some(v) = current.take() {
                     variants.push(v);
@@ -427,10 +475,7 @@ fn extract_param_type(element: &ElementRef) -> Option<String> {
 fn extract_type_from_text(text: &str) -> Option<String> {
     let pos = text.find("Тип: ")?;
     let after = &text[pos + "Тип: ".len()..];
-    let end = after
-        .find('.')
-        .or_else(|| after.find('\n'))
-        .or_else(|| after.find("<br"))?;
+    let end = after.find('.').or_else(|| after.find('\n')).or_else(|| after.find("<br"))?;
     finalize_type_substring(&after[..end])
 }
 
@@ -452,13 +497,10 @@ fn extract_type_from_text(text: &str) -> Option<String> {
 fn extract_type_from_text_unterminated(text: &str) -> Option<String> {
     let pos = text.find("Тип: ")?;
     let after = &text[pos + "Тип: ".len()..];
-    let end = after
-        .find('.')
-        .or_else(|| after.find('\n'))
-        .or_else(|| after.find("<br"))
-        .unwrap_or_else(|| {
-            after.char_indices().nth(200).map(|(idx, _)| idx).unwrap_or(after.len())
-        });
+    let end =
+        after.find('.').or_else(|| after.find('\n')).or_else(|| after.find("<br")).unwrap_or_else(
+            || after.char_indices().nth(200).map(|(idx, _)| idx).unwrap_or(after.len()),
+        );
     finalize_type_substring(&after[..end])
 }
 
@@ -597,10 +639,7 @@ fn extract_default_value(text: &str) -> Option<String> {
         if let Some(pos) = text.find(pattern) {
             let after = &text[pos + pattern.len()..];
             // Find end: period, newline, or end of string
-            let end = after
-                .find('.')
-                .or_else(|| after.find('\n'))
-                .unwrap_or(after.len());
+            let end = after.find('.').or_else(|| after.find('\n')).unwrap_or(after.len());
             let value = after[..end].trim();
             if !value.is_empty() {
                 return Some(value.to_string());
@@ -737,8 +776,9 @@ pub fn extract_examples(html_content: &str) -> Vec<CodeExample> {
                 // Check for code tables or pre tags
                 if let Some(elem_ref) = ElementRef::wrap(n) {
                     // Check if this is a TABLE with code
-                    if elem_ref.value().name() == "table" ||
-                       elem_ref.value().attr("bgcolor") == Some("#f7f7f7") {
+                    if elem_ref.value().name() == "table"
+                        || elem_ref.value().attr("bgcolor") == Some("#f7f7f7")
+                    {
                         // First try to extract from <pre> tags inside table
                         let mut found_code = false;
                         for pre in elem_ref.select(&pre_sel) {
@@ -949,10 +989,7 @@ mod tests {
         let params = extract_parameters(html);
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].name, "Колонка");
-        assert_eq!(
-            params[0].param_type,
-            Some("Число, Строка, КолонкаТаблицыЗначений".to_string()),
-        );
+        assert_eq!(params[0].param_type, Some("Число, Строка, КолонкаТаблицыЗначений".to_string()),);
     }
 
     /// Single-overload page (no `Вариант синтаксиса:` chapter): the
@@ -1114,8 +1151,10 @@ mod tests {
         let params = extract_parameters(html);
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].name, "Режим");
-        assert_eq!(params[0].param_type, None,
-            "literal empty type (Тип: .) must surface as None, not corrupt prose");
+        assert_eq!(
+            params[0].param_type, None,
+            "literal empty type (Тип: .) must surface as None, not corrupt prose"
+        );
     }
 
     /// Strict mode: `extract_type_from_text` must return `None` when
@@ -1127,10 +1166,7 @@ mod tests {
         // Single token after `Тип: ` with no terminator → None.
         assert_eq!(extract_type_from_text("Тип: Число"), None);
         // Terminated by period → matches.
-        assert_eq!(
-            extract_type_from_text("Тип: Число."),
-            Some("Число".to_string())
-        );
+        assert_eq!(extract_type_from_text("Тип: Число."), Some("Число".to_string()));
         // Multi-type, terminated → matches in full.
         assert_eq!(
             extract_type_from_text("Тип: Число, Строка."),
@@ -1524,6 +1560,60 @@ mod tests {
         assert!(examples[0].code.contains("НачатьТранзакцию"));
         assert!(examples[0].code.contains("ЗафиксироватьТранзакцию"));
     }
+
+    // -------- extract_iter_element_types --------
+
+    #[test]
+    fn iter_elements_array_returns_arbitrary() {
+        // Verbatim shape from `Array.html`: bare text after the chapter,
+        // no <a>-wrappers, single element.
+        let html = r#"<p class="V8SH_chapter">Элементы коллекции:</p>Произвольный<br>"#;
+        assert_eq!(extract_iter_element_types(html), vec!["Произвольный".to_string()]);
+    }
+
+    #[test]
+    fn iter_elements_register_record_set_with_placeholder() {
+        // Verbatim shape from `objects/catalog125/catalog161/object181.html`
+        // (`РегистрСведенийНаборЗаписей.<Имя регистра сведений>`):
+        // single element wrapped in <a>, with HTML-escaped angle brackets
+        // around the placeholder.
+        let html = r#"<p class="V8SH_chapter">Элементы коллекции:</p><a href="x">РегистрСведенийЗапись.&lt;Имя регистра сведений&gt;</a><br>Для объекта доступен обход коллекции…<br>"#;
+        assert_eq!(
+            extract_iter_element_types(html),
+            vec!["РегистрСведенийЗапись.<Имя регистра сведений>".to_string()]
+        );
+    }
+
+    #[test]
+    fn iter_elements_multi_type_with_links() {
+        // Verbatim shape from `QuerySchemaColumnFields.html`:
+        // three <a>-wrapped types separated by ", ".
+        let html = r#"<p class="V8SH_chapter">Элементы коллекции:</p><a href="x">ВыражениеСхемыЗапроса</a>, <a href="y">ВложеннаяТаблицаСхемыЗапроса</a>, <a href="z">Неопределено</a><br>Для объекта доступен обход коллекции…<br>"#;
+        assert_eq!(
+            extract_iter_element_types(html),
+            vec![
+                "ВыражениеСхемыЗапроса".to_string(),
+                "ВложеннаяТаблицаСхемыЗапроса".to_string(),
+                "Неопределено".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn iter_elements_no_chapter_returns_empty() {
+        // Pages without «Элементы коллекции:» (e.g. `Строка`) return empty.
+        let html = r#"<p class="V8SH_chapter">Описание:</p><p>Тип строки.</p>"#;
+        assert!(extract_iter_element_types(html).is_empty());
+    }
+
+    #[test]
+    fn iter_elements_trims_nbsp_and_whitespace() {
+        // Defensive: chapter content may contain &nbsp; (U+00A0) or
+        // double spaces. trim() must collapse them.
+        let html =
+            "<p class=\"V8SH_chapter\">Элементы коллекции:</p>\u{00A0} КлючИЗначение \u{00A0}<br>";
+        assert_eq!(extract_iter_element_types(html), vec!["КлючИЗначение".to_string()]);
+    }
 }
 
 /// Extracts "See also" references from HTML content.
@@ -1699,10 +1789,7 @@ pub fn extract_property_types(html_content: &str) -> Vec<String> {
         return Vec::new();
     };
     let after = &desc[pos + "Тип:".len()..];
-    let end = after
-        .find('.')
-        .or_else(|| after.find('\n'))
-        .unwrap_or(after.len());
+    let end = after.find('.').or_else(|| after.find('\n')).unwrap_or(after.len());
     let segment = after[..end].trim();
     segment
         .split(',')
@@ -1725,12 +1812,5 @@ pub fn parse_keyword_html(html_content: &str) -> Option<KeywordDocumentation> {
         return None;
     }
 
-    Some(KeywordDocumentation {
-        keyword_ru,
-        keyword_en,
-        syntax,
-        description,
-        params,
-        min_version,
-    })
+    Some(KeywordDocumentation { keyword_ru, keyword_en, syntax, description, params, min_version })
 }
