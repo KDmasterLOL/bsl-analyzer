@@ -470,6 +470,22 @@ pub(crate) fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
 /// (`RegisterDimension` / `RegisterResource` / `RegisterAttribute`),
 /// and the synthetic `RegisterFilter` (which is dispatched separately
 /// in [`enumerate_fields`]).
+///
+/// # Per-flavour platform surface
+///
+/// All four `*Record` kinds route through this function so the
+/// platform-properties / platform-methods arms of [`enumerate_fields`]
+/// resolve their composite prefix (`InformationRegisterRecord.<Имя>`,
+/// etc.). The platform method `МоментВремени()` is exposed by HBK
+/// 8.3.27 on three of the four record flavours —
+/// `InformationRegisterRecord`, `AccumulationRegisterRecord`,
+/// `AccountingRegisterRecord` — but **not** on
+/// `CalculationRegisterRecord`, whose only composite-prefix methods
+/// are `ПолучитьДанныеГрафика` / `ПолучитьБазу`. The asymmetry comes
+/// from the syntax help, not from anything we do here; this comment
+/// documents the upstream divergence so a future contributor doesn't
+/// look for `МоментВремени()` coverage on CalcReg records and
+/// (mis)conclude that something is missing locally.
 pub(crate) fn register_parent_for_kind(kind: MetadataKind) -> Option<MdoType> {
     match kind {
         MetadataKind::InformationRegisterRecordManager
@@ -1011,5 +1027,44 @@ mod tests {
         let fields = enumerate_fields(&configs, &receiver);
         let цена = fields.iter().find(|f| f.name.as_str() == "Цена").expect("Цена must appear");
         assert_eq!(цена.ty, Ty::String, "extension type must win over main config");
+    }
+
+    /// HBK 8.3.27 documents the platform method `МоментВремени()`
+    /// (`PointInTime()`) for three of the four `*Record` flavours but
+    /// **not** for `CalculationRegisterRecord` — its only composite
+    /// methods are `ПолучитьДанныеГрафика` / `ПолучитьБазу`. This test
+    /// pins that asymmetry so a future regeneration of
+    /// `platform_data.json` (or a refactor of how composite methods
+    /// load) can't silently start surfacing a phantom `МоментВремени()`
+    /// on CalcReg records, or — in the other direction — drop it from
+    /// the three flavours that legitimately expose it.
+    #[test]
+    fn point_in_time_present_on_three_record_flavours_absent_on_calc() {
+        let pd = PlatformData::instance();
+        // The HBK page header for these methods lives in the
+        // composite-prefix block: their `name` is the truncated
+        // placeholder `<Имя` and the resolvable token is the english
+        // suffix after the last `.` (`PointInTime`). That suffix is
+        // what `english_name.rsplit('.').next()` exposes everywhere
+        // else in the resolver, so the regression check applies the
+        // same projection here.
+        let has_pit = |prefix: &str| {
+            pd.get_manager_methods(prefix).iter().any(|m| {
+                m.english_name
+                    .as_str()
+                    .rsplit('.')
+                    .next()
+                    .map(|tail| tail == "PointInTime")
+                    .unwrap_or(false)
+            })
+        };
+        assert!(has_pit("InformationRegisterRecord"), "InfoReg record must expose МоментВремени");
+        assert!(has_pit("AccumulationRegisterRecord"), "AccumReg record must expose МоментВремени");
+        assert!(has_pit("AccountingRegisterRecord"), "AcctReg record must expose МоментВремени");
+        assert!(
+            !has_pit("CalculationRegisterRecord"),
+            "CalcReg record must NOT expose МоментВремени per HBK 8.3.27 — \
+             surfacing one indicates a regression in platform_data or a wrong-prefix lookup",
+        );
     }
 }
