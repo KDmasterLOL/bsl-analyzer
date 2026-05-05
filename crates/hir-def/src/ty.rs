@@ -7,6 +7,7 @@ pub mod doc_types;
 
 use std::sync::Arc;
 
+pub use bsl_metadata::FormElementKind;
 use bsl_metadata::MdoType;
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;
@@ -42,6 +43,31 @@ pub enum Ty {
 
     /// Array (Массив).
     Array,
+
+    /// Array parameterised by its element type (`Массив из X`).
+    ///
+    /// Construction sites:
+    /// - JSDoc `// Возвращаемое значение: Массив из Строка` lowers
+    ///   `TypeRef::Array(Some(elem))` → `Ty::TypedArray(Box::new(<elem>))`
+    ///   in `TyLoweringContext::lower_type_ref`.
+    /// - Form-control refinement (`Элементы.X.ВыделенныеСтроки`)
+    ///   produces `Ty::TypedArray(Box::new(row_ty))` so `.Количество()`
+    ///   and iteration stay consistent across both surfaces.
+    ///
+    /// Method lookup keys this under `"Array"` (same as the legacy
+    /// [`Self::Array`] variant), so `.Добавить()`, `.Количество()`, … all
+    /// resolve through the bilingual `Массив` page. Iteration yields the
+    /// inner element directly, bypassing the platform
+    /// `iter_element_types` table whose only entry for `Массив` is
+    /// `"Произвольный"` → `Ty::Unknown` — this is the whole point of
+    /// carrying the element type.
+    ///
+    /// `Ty::Array` (unparameterised) stays as the lowering target for
+    /// `Новый Массив(...)` literals and `TypeRef::Array(None)` forms,
+    /// where no element type is recoverable. The two variants compare
+    /// distinct under [`PartialEq`] / `Ord` so the smart constructor
+    /// [`Self::union`] dedupes correctly.
+    TypedArray(Box<Ty>),
 
     /// Structure (Структура).
     Structure,
@@ -147,6 +173,33 @@ pub enum Ty {
         underlying: Option<(MdoType, crate::Name)>,
     },
 
+    /// Managed-form UI control receiver — the platform wrapper that
+    /// `Элементы.<имя>` resolves to inside FormModule code.
+    ///
+    /// `kind` is the coarse XML-tag taxonomy from `bsl-metadata`
+    /// ([`FormElementKind`]); it picks the platform method table
+    /// (`Table → ТаблицаФормы`, `Field → ПолеФормы`, `Button → КнопкаФормы`,
+    /// `Group → ГруппаФормы`, `Decoration → ДекорацияФормы`,
+    /// `Addition → ДополнениеЭлементаФормы`, `Other → нет таблицы`).
+    ///
+    /// `binding` carries the resolved `<DataPath>` provenance when the
+    /// control's path traces back to a form attribute. Phase 5 uses it
+    /// to refine `Элементы.Переприемка.ВыделенныеСтроки` into a
+    /// [`Ty::TypedArray`] of the actual tabular-section row instead of
+    /// the platform's bare `Массив`.
+    /// `None` covers controls with no `<DataPath>`, with a deleted
+    /// (`~`-prefixed) path, or whose first segment does not resolve to
+    /// a form attribute. In that case method/property lookup still
+    /// works through the platform `kind` table, but row-aware
+    /// refinements degrade gracefully to `Unknown`.
+    FormControl {
+        /// Coarse XML-tag taxonomy — picks the platform method/property
+        /// table for the control.
+        kind: FormElementKind,
+        /// Optional resolved DataPath provenance for row-aware refinement.
+        binding: Option<FormDataBinding>,
+    },
+
     /// Function or procedure type — used internally to carry a
     /// signature through call resolution. **BSL has no first-class
     /// function values**: a bare identifier without parentheses cannot
@@ -226,6 +279,104 @@ impl FormDataKind {
             Self::Collection => "ДанныеФормыКоллекция",
             Self::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
         }
+    }
+}
+
+/// Resolved DataPath provenance for a [`Ty::FormControl`] — the chain
+/// of segments and what the chain's tail actually points at.
+///
+/// Constructed only by `hir-ty::form_items::resolve_data_path` after
+/// walking `<DataPath>` through `Form::find_attribute` + `lookup_field`.
+/// `path` is the original chain (case-preserving but case-insensitively
+/// equal under [`Name`] folding); `target` is the lowering of the tail.
+///
+/// Carrying both lets hover render `«ТаблицаФормы (Объект.Переприемка)»`
+/// without a second resolution pass, and lets Phase 5 row-aware lookup
+/// distinguish `Объект.Переприемка` (TabularSection) from `Объект.Дата`
+/// (scalar Attribute) without re-parsing the path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FormDataBinding {
+    /// Segments of the original `<DataPath>`, in declaration order.
+    /// **Invariant:** always non-empty. Enforced by the only
+    /// constructor [`Self::new`]; the field is private so callers can
+    /// not bypass it via struct-literal syntax.
+    path: Box<[crate::Name]>,
+    /// What the chain's tail resolves to.
+    target: FormDataTarget,
+}
+
+impl FormDataBinding {
+    /// Construct a binding, enforcing the non-empty-`path` invariant.
+    /// Returns `None` for an empty path so callers must surface
+    /// `binding: None` on the enclosing [`Ty::FormControl`] rather
+    /// than carry a vacuous binding — `TyDisplay` would then render
+    /// a bare `«ТаблицаФормы ()»` with no provenance.
+    ///
+    /// This is the **only** constructor: the struct's fields are
+    /// private to keep the invariant enforced from every call site,
+    /// including future ones in `hir-ty` and tests.
+    pub fn new(path: Box<[crate::Name]>, target: FormDataTarget) -> Option<Self> {
+        if path.is_empty() {
+            None
+        } else {
+            Some(Self { path, target })
+        }
+    }
+
+    /// Resolved DataPath segments, in declaration order. Always
+    /// non-empty per the [`Self::new`] invariant.
+    pub fn path(&self) -> &[crate::Name] {
+        &self.path
+    }
+
+    /// What the path's tail resolves to (tabular section / scalar
+    /// attribute Ty).
+    pub fn target(&self) -> &FormDataTarget {
+        &self.target
+    }
+}
+
+/// What a [`FormDataBinding::path`] resolves to at its tail.
+///
+/// Discriminates the two row-aware cases Phase 5 cares about:
+/// - [`Self::TabularSection`] — the path ends in a tabular section
+///   (`Объект.Переприемка`); refined `.ВыделенныеСтроки` returns
+///   `Ty::TypedArray(row)` where row is the section's row Ty.
+/// - [`Self::Attribute`] — the path ends in a scalar attribute
+///   (`Объект.Дата`, `Замечание`); the bound type is whatever
+///   `lookup_field` produced for the path tail.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FormDataTarget {
+    /// DataPath terminates at a tabular section of an MDO. `mdo_type` /
+    /// `owner` identify the MDO carrying the section; `section` is the
+    /// section name (e.g. `(Document, "ПКО", "Переприемка")`).
+    TabularSection { mdo_type: MdoType, owner: crate::Name, section: crate::Name },
+    /// DataPath terminates at a scalar attribute. `ty` is the resolved
+    /// attribute type — `Ty::String`, `Ty::Number`, `Ty::MetadataRef{…}`,
+    /// or any other Ty `lookup_field` produces.
+    Attribute { ty: Box<Ty> },
+}
+
+/// Russian platform type name backing the control's method table —
+/// `bsl-platform`'s entry for the corresponding form-control wrapper.
+/// [`FormElementKind::Other`] returns `None`: the kind is unrecognised,
+/// so there is no platform table to query and method lookup falls
+/// through to `Ty::Unknown` instead of mis-classifying.
+///
+/// Free function rather than inherent impl because [`FormElementKind`]
+/// is defined in `bsl-metadata` (orphan rule). The mapping itself is
+/// platform-specific (`Table → "ТаблицаФормы"`), which conceptually
+/// belongs alongside other platform-name lookups in this module rather
+/// than with the XML-tag taxonomy.
+pub fn form_control_platform_type_name(kind: FormElementKind) -> Option<&'static str> {
+    match kind {
+        FormElementKind::Table => Some("ТаблицаФормы"),
+        FormElementKind::Group => Some("ГруппаФормы"),
+        FormElementKind::Field => Some("ПолеФормы"),
+        FormElementKind::Button => Some("КнопкаФормы"),
+        FormElementKind::Decoration => Some("ДекорацияФормы"),
+        FormElementKind::Addition => Some("ДополнениеЭлементаФормы"),
+        FormElementKind::Other => None,
     }
 }
 
@@ -776,6 +927,14 @@ impl Ty {
             (Ty::Null, _) => "Null",
             (Ty::Array, Locale::Ru) => "Массив",
             (Ty::Array, Locale::En) => "Array",
+            // Coarse label only — the fully parameterised render
+            // (`Массив из Строка`) lives on the [`TyDisplay`] wrapper so
+            // the cheap `&str` API stays cheap. Method/property lookup
+            // never goes through `display_name`; it uses
+            // `platform_type_name` which returns `"Array"` (canonical
+            // English) via the catch-all arm.
+            (Ty::TypedArray(_), Locale::Ru) => "Массив",
+            (Ty::TypedArray(_), Locale::En) => "Array",
             (Ty::Structure, Locale::Ru) => "Структура",
             (Ty::Structure, Locale::En) => "Structure",
             (Ty::Map, Locale::Ru) => "Соответствие",
@@ -811,6 +970,17 @@ impl Ty {
             // platform_data canonicalises to one form per type). Yielding
             // whatever the platform declared keeps method lookup happy.
             (Ty::FormData { kind, .. }, _) => kind.platform_type_name(),
+            // Form-control kinds map to the Russian `*Формы` platform type
+            // names — same locale-agnostic strategy as `FormData`. `Other`
+            // has no backing platform table; surface a generic label so
+            // diagnostics never panic on an unknown XML tag.
+            (Ty::FormControl { kind, .. }, _) => match form_control_platform_type_name(*kind) {
+                Some(name) => name,
+                None => match locale {
+                    Locale::Ru => "ЭлементФормы",
+                    Locale::En => "FormElement",
+                },
+            },
             (Ty::Function { .. }, Locale::Ru) => "Функция",
             (Ty::Function { .. }, Locale::En) => "Function",
             (Ty::PlatformObject(name), _) => name.as_str(),
@@ -874,6 +1044,14 @@ impl Ty {
             // lookup on a `Structure` / `StructureWithCollection` peels off
             // the wrapper through `underlying` (handled in `field_lookup`).
             Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
+            // Form controls (`Элементы.<имя>`) wrap one of the per-kind
+            // platform tables (`ТаблицаФормы`, `ПолеФормы`, …). Method
+            // and non-refined property lookup goes through these names;
+            // refined lookup on `FormControl{Table, Some(binding)}` for
+            // `.ВыделенныеСтроки` / `.ТекущаяСтрока` is layered on top in
+            // `hir-ty::field_lookup`. `Other` has no platform table, so
+            // method dispatch falls through to `Ty::Unknown`.
+            Ty::FormControl { kind, .. } => form_control_platform_type_name(*kind),
             // Unions have no single platform type by construction — a
             // caller that wants methods on `Ty::Union([Number, String])`
             // must narrow first (M4) or intersect method tables explicitly.
@@ -939,6 +1117,16 @@ impl std::fmt::Display for TyDisplay<'_> {
                 };
                 write!(f, "{}.{}", label, name.as_str())
             }
+            // Parameterised array — `Массив из Строка` / `Array of String`.
+            // The element renders with the same locale as the outer
+            // wrapper so a Russian hover stays in Russian end-to-end and
+            // an English one stays in English. Composite shapes
+            // (`Массив из Массив из Число`) recurse naturally through
+            // `elem.display(locale)`.
+            Ty::TypedArray(elem) => match self.locale {
+                Locale::Ru => write!(f, "Массив из {}", elem.display(self.locale)),
+                Locale::En => write!(f, "Array of {}", elem.display(self.locale)),
+            },
             // Form-data wrapper — `ДанныеФормыСтруктура (ДокументОбъект.ПКО)`.
             // Wrapper name comes from `bsl-platform` (locale-agnostic
             // platform identifier); the parenthetical projects the
@@ -959,6 +1147,30 @@ impl std::fmt::Display for TyDisplay<'_> {
                         object_kind.display_label(self.locale),
                         name.as_str(),
                     ),
+                    None => f.write_str(wrapper),
+                }
+            }
+            // Form control — `ТаблицаФормы (Объект.Переприемка)` /
+            // `FormTable (Объект.Переприемка)` when a DataPath binding
+            // is present, or just the wrapper name otherwise. The path
+            // is rendered as the original chain joined by `.` so the
+            // reader sees which form attribute the control is bound to.
+            Ty::FormControl { binding, .. } => {
+                let wrapper = self.ty.display_name(self.locale);
+                match binding {
+                    Some(b) => {
+                        f.write_str(wrapper)?;
+                        f.write_str(" (")?;
+                        let mut it = b.path.iter();
+                        if let Some(first) = it.next() {
+                            f.write_str(first.as_str())?;
+                            for seg in it {
+                                f.write_str(".")?;
+                                f.write_str(seg.as_str())?;
+                            }
+                        }
+                        f.write_str(")")
+                    }
                     None => f.write_str(wrapper),
                 }
             }
@@ -1359,6 +1571,90 @@ mod tests {
     }
 
     #[test]
+    fn typed_array_canonical_name_matches_array() {
+        // Method/property lookup keys this through `canonical_name`
+        // (English machine-name). Both variants share the same platform
+        // page, so the key must collide on `"Array"`.
+        let ta = Ty::TypedArray(Box::new(Ty::String));
+        assert_eq!(ta.canonical_name(), "Array");
+        assert_eq!(ta.canonical_name(), Ty::Array.canonical_name());
+    }
+
+    #[test]
+    fn typed_array_platform_type_name_resolves_via_array_page() {
+        // Falls through the catch-all in `platform_type_name`, which
+        // returns canonical English — matching the legacy `Ty::Array`
+        // route into `bsl-platform`.
+        let ta = Ty::TypedArray(Box::new(Ty::Number));
+        assert_eq!(ta.platform_type_name(), Some("Array"));
+    }
+
+    #[test]
+    fn typed_array_display_renders_element_type_bilingual() {
+        use base_db::Locale;
+        let ta = Ty::TypedArray(Box::new(Ty::String));
+        assert_eq!(ta.display(Locale::Ru).to_string(), "Массив из Строка");
+        assert_eq!(ta.display(Locale::En).to_string(), "Array of String");
+    }
+
+    #[test]
+    fn typed_array_display_recurses_into_nested_element() {
+        use base_db::Locale;
+        // Nested parameterisation renders end-to-end without losing
+        // locale: `Массив из Массив из Число`.
+        let inner = Ty::TypedArray(Box::new(Ty::Number));
+        let outer = Ty::TypedArray(Box::new(inner));
+        assert_eq!(outer.display(Locale::Ru).to_string(), "Массив из Массив из Число");
+        assert_eq!(outer.display(Locale::En).to_string(), "Array of Array of Number");
+    }
+
+    #[test]
+    fn typed_array_display_name_is_coarse_label() {
+        use base_db::Locale;
+        // The `&str`-returning `display_name` API is a coarse label —
+        // it must match `Ty::Array`'s label so existing callers that
+        // only look at the variant tag don't see drift. Detailed
+        // rendering (`Массив из X`) lives on the `TyDisplay` wrapper.
+        let ta = Ty::TypedArray(Box::new(Ty::String));
+        assert_eq!(ta.display_name(Locale::Ru), "Массив");
+        assert_eq!(ta.display_name(Locale::En), "Array");
+    }
+
+    #[test]
+    fn typed_array_union_dedups_by_element_type() {
+        // Smart-constructor invariant: identical `TypedArray(T)` instances
+        // dedup; `TypedArray(T)` and `TypedArray(U)` (different elements)
+        // stay distinct so the union renders both arms.
+        let a = Ty::TypedArray(Box::new(Ty::Number));
+        let b = Ty::TypedArray(Box::new(Ty::Number));
+        assert_eq!(Ty::union(vec![a.clone(), b]), a);
+
+        let c = Ty::TypedArray(Box::new(Ty::String));
+        let union = Ty::union(vec![a, c]);
+        match union {
+            Ty::Union(ref parts) => {
+                assert_eq!(parts.len(), 2, "TypedArray with different elements must not dedup");
+            }
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_array_distinct_from_unparameterised_array() {
+        // The two variants are deliberately distinct under `PartialEq`.
+        // `Ty::union` must keep both alive so a callsite that observes
+        // both shapes (`Массив` literal flowing alongside a typed JSDoc
+        // result) doesn't lose the element refinement.
+        let a = Ty::Array;
+        let ta = Ty::TypedArray(Box::new(Ty::Number));
+        assert_ne!(a, ta);
+        match Ty::union(vec![a, ta]) {
+            Ty::Union(ref parts) => assert_eq!(parts.len(), 2),
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn metadata_kind_object_kind_for_covers_ship_set() {
         // Ships the 4 `*Object` coercions used by `Ty::ThisObject`.
         // If one of these regresses, the resolver would stop promoting
@@ -1398,5 +1694,177 @@ mod tests {
         assert!(MetadataKind::object_kind_for(MdoType::BusinessProcess).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::Enum).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::CommonModule).is_none());
+    }
+
+    // ---- Phase 3: Ty::FormControl ----
+
+    #[test]
+    fn form_control_platform_type_name_per_kind() {
+        // The kind→platform-type mapping is the contract that links the
+        // XML taxonomy in `bsl-metadata` to the per-control method
+        // tables in `bsl-platform`. A drift here silently breaks
+        // method/property dispatch on `Элементы.<имя>`.
+        assert_eq!(form_control_platform_type_name(FormElementKind::Table), Some("ТаблицаФормы"));
+        assert_eq!(form_control_platform_type_name(FormElementKind::Group), Some("ГруппаФормы"));
+        assert_eq!(form_control_platform_type_name(FormElementKind::Field), Some("ПолеФормы"));
+        assert_eq!(form_control_platform_type_name(FormElementKind::Button), Some("КнопкаФормы"));
+        assert_eq!(
+            form_control_platform_type_name(FormElementKind::Decoration),
+            Some("ДекорацияФормы")
+        );
+        assert_eq!(
+            form_control_platform_type_name(FormElementKind::Addition),
+            Some("ДополнениеЭлементаФормы")
+        );
+        assert_eq!(form_control_platform_type_name(FormElementKind::Other), None);
+    }
+
+    #[test]
+    fn form_control_display_name_uses_platform_table_per_kind() {
+        use base_db::Locale;
+        let table = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let field = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        let other = Ty::FormControl { kind: FormElementKind::Other, binding: None };
+
+        // Per-kind labels are locale-agnostic Russian platform names —
+        // identical strategy as `Ty::FormData`.
+        assert_eq!(table.display_name(Locale::Ru), "ТаблицаФормы");
+        assert_eq!(table.display_name(Locale::En), "ТаблицаФормы");
+        assert_eq!(field.display_name(Locale::Ru), "ПолеФормы");
+
+        // `Other` falls back to a localised generic — no platform table.
+        assert_eq!(other.display_name(Locale::Ru), "ЭлементФормы");
+        assert_eq!(other.display_name(Locale::En), "FormElement");
+    }
+
+    #[test]
+    fn form_control_platform_type_name_routes_method_lookup_per_kind() {
+        let table = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let button = Ty::FormControl { kind: FormElementKind::Button, binding: None };
+        let other = Ty::FormControl { kind: FormElementKind::Other, binding: None };
+
+        // The `&self` API (used by method/property lookup in `hir-ty`)
+        // must agree with the free function — both come from the same
+        // table.
+        assert_eq!(table.platform_type_name(), Some("ТаблицаФормы"));
+        assert_eq!(button.platform_type_name(), Some("КнопкаФормы"));
+        // `Other` returns `None` so dispatch falls through to `Unknown`
+        // rather than mis-classifying.
+        assert_eq!(other.platform_type_name(), None);
+    }
+
+    #[test]
+    fn form_control_display_with_binding_renders_path() {
+        use base_db::Locale;
+        // Binding renders as `«ТаблицаФормы (Объект.Переприемка)»` —
+        // path joined by `.` so hover shows which form attribute the
+        // control is bound to without a second resolution pass.
+        let binding = FormDataBinding::new(
+            Box::new([crate::Name::new("Объект"), crate::Name::new("Переприемка")]),
+            FormDataTarget::TabularSection {
+                mdo_type: MdoType::Document,
+                owner: crate::Name::new("ПКО"),
+                section: crate::Name::new("Переприемка"),
+            },
+        )
+        .expect("path is non-empty");
+        let ty = Ty::FormControl { kind: FormElementKind::Table, binding: Some(binding) };
+        assert_eq!(ty.display(Locale::Ru).to_string(), "ТаблицаФормы (Объект.Переприемка)");
+        assert_eq!(ty.display(Locale::En).to_string(), "ТаблицаФормы (Объект.Переприемка)");
+    }
+
+    #[test]
+    fn form_control_display_without_binding_is_just_wrapper() {
+        use base_db::Locale;
+        let ty = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        assert_eq!(ty.display(Locale::Ru).to_string(), "ПолеФормы");
+        assert_eq!(ty.display(Locale::En).to_string(), "ПолеФормы");
+    }
+
+    #[test]
+    fn form_control_union_dedups_identical_kind_and_binding() {
+        // Smart-constructor invariant: identical `(kind, binding)` pairs
+        // dedup; different `kind` or `binding` stay distinct so the
+        // union still surfaces every Ty alternative.
+        let a = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let b = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        assert_eq!(Ty::union(vec![a.clone(), b]), a);
+
+        let other_kind = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        match Ty::union(vec![a, other_kind]) {
+            Ty::Union(parts) => assert_eq!(parts.len(), 2),
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn form_control_ord_is_stable_by_kind_then_binding() {
+        // `Ord` participates in `Ty::union`'s sort+dedup. The current
+        // contract is "kind first, binding second" via derived Ord on
+        // pinned `FormElementKind` discriminants — pin the observable
+        // shape so a future refactor doesn't silently shuffle Salsa
+        // cache keys.
+        let a = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let b = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        // Table = 0 < Field = 2 (per pinned discriminants in Phase 1).
+        assert!(a < b);
+    }
+
+    #[test]
+    fn form_data_binding_hash_stable_for_salsa_keys() {
+        // `FormDataBinding` participates in Ty's `Hash` derivation.
+        // Equal bindings must hash equally so Salsa-cached lookups on
+        // `Ty::FormControl{kind, Some(binding)}` collide on a single
+        // cache entry. A bug here surfaces as cache thrashing, not a
+        // wrong answer — easy to miss without an explicit pin.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn h(b: &FormDataBinding) -> u64 {
+            let mut s = DefaultHasher::new();
+            b.hash(&mut s);
+            s.finish()
+        }
+
+        let mk = || {
+            FormDataBinding::new(
+                Box::new([crate::Name::new("Объект"), crate::Name::new("Переприемка")]),
+                FormDataTarget::TabularSection {
+                    mdo_type: MdoType::Document,
+                    owner: crate::Name::new("ПКО"),
+                    section: crate::Name::new("Переприемка"),
+                },
+            )
+            .expect("path is non-empty")
+        };
+
+        let a = mk();
+        let b = mk();
+        assert_eq!(a, b);
+        assert_eq!(h(&a), h(&b));
+    }
+
+    #[test]
+    fn form_data_binding_new_rejects_empty_path() {
+        // Empty path is meaningless — the enclosing `Ty::FormControl`
+        // should carry `binding: None` instead. Pinning this guards
+        // against Phase 4 accidentally producing vacuous `Some(...)`
+        // bindings that render as `ТаблицаФормы ()` in hover.
+        let target = FormDataTarget::Attribute { ty: Box::new(Ty::Unknown) };
+        assert!(FormDataBinding::new(Box::new([]), target.clone()).is_none());
+        let ok = FormDataBinding::new(Box::new([crate::Name::new("Объект")]), target);
+        assert!(ok.is_some());
+    }
+
+    #[test]
+    fn form_data_target_attribute_carries_resolved_ty() {
+        // Scalar attribute branch — Phase 4 will produce these for
+        // `Замечание` (String) or `Объект.Code` (String) via
+        // `lookup_field` on each path segment.
+        let target = FormDataTarget::Attribute { ty: Box::new(Ty::String) };
+        match target {
+            FormDataTarget::Attribute { ty } => assert_eq!(*ty, Ty::String),
+            other => panic!("expected Attribute, got {other:?}"),
+        }
     }
 }

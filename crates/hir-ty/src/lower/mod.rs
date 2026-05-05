@@ -77,8 +77,12 @@ impl<'a> TyLoweringContext<'a> {
     ///
     /// Dispatches over the `TypeRef` variants:
     /// - `Builtin(b)` → the fixed primitive from [`builtin_names::builtin_to_ty`].
-    /// - `Array(_)` / `Map(_)` → `Ty::Array` / `Ty::Map` (element types are
-    ///   dropped in M2 — `Ty` does not carry them yet).
+    /// - `Array(Some(elem))` → `Ty::TypedArray(Box::new(<elem>))` (Phase 0):
+    ///   carries the element through to iteration / field lookup.
+    /// - `Array(None)` → `Ty::Array` (no element witness, e.g. `Новый Массив`).
+    /// - `Map(_)` → `Ty::Map` (element types still dropped — `Ty::Map` is
+    ///   not yet parameterised; a future `Ty::TypedMap(K, V)` mirrors
+    ///   `TypedArray`).
     /// - `Name(qname)` → [`Self::lower_qualified`] for 2+ segments, else
     ///   [`Self::lower_bare_name`].
     /// - `Union(parts)` → [`Ty::union`] after recursive lowering of each
@@ -96,7 +100,18 @@ impl<'a> TyLoweringContext<'a> {
     fn lower_type_ref_inner(&self, type_ref: &TypeRef, visited: &mut HashSet<String>) -> Ty {
         match type_ref {
             TypeRef::Builtin(b) => builtin_names::builtin_to_ty(*b),
-            TypeRef::Array(_) => Ty::Array,
+            // `Array(Some(elem))` carries an element type — typically a
+            // JSDoc `Массив из X` or a refined form-control payload —
+            // and lowers to `Ty::TypedArray(Box::new(<elem ty>))`. The
+            // unparameterised `Array(None)` (e.g. `Новый Массив`,
+            // bare-name `Массив`) stays `Ty::Array`. Keeping the two
+            // variants distinct lets `iteration_lookup` and field/method
+            // lookup refine through `TypedArray` while the legacy table
+            // still serves callers without a known element.
+            TypeRef::Array(Some(elem)) => {
+                Ty::TypedArray(Box::new(self.lower_type_ref_inner(elem, visited)))
+            }
+            TypeRef::Array(None) => Ty::Array,
             TypeRef::Map(_) => Ty::Map,
             TypeRef::Name(qname) => match qname.len() {
                 0 => Ty::Unknown,
@@ -350,14 +365,41 @@ mod tests {
     }
 
     #[test]
-    fn ty_lowering_bare_array_and_map_drop_element_types() {
-        // Element types inside `TypeRef::Array` / `::Map` are deliberately
-        // dropped in M2: `Ty::Array` / `Ty::Map` do not yet carry them. Once
-        // parameterised collections land, this test will be replaced.
+    fn ty_lowering_array_with_elem_lowers_to_typed_array() {
+        // `TypeRef::Array(Some(elem))` lowers to `Ty::TypedArray(<elem ty>)`
+        // so JSDoc `Массив из X` and refined form-control payloads carry
+        // the element through to iteration / field lookup. The
+        // unparameterised `TypeRef::Array(None)` keeps the legacy
+        // `Ty::Array` lowering — see `ty_lowering_array_none_stays_unparameterised`.
         let array_with_elem =
             TypeRef::Array(Some(Box::new(TypeRef::Builtin(BuiltinTypeRef::Number))));
-        assert_eq!(ctx().lower_type_ref(&array_with_elem), Ty::Array);
+        assert_eq!(ctx().lower_type_ref(&array_with_elem), Ty::TypedArray(Box::new(Ty::Number)));
+    }
 
+    #[test]
+    fn ty_lowering_jsdoc_array_of_string_round_trip() {
+        // End-to-end: parsing `// Возвращаемое значение: Массив из Строка`
+        // produces `TypeRef::Array(Some(Builtin(String)))`, and lowering
+        // it must surface `Ty::TypedArray(String)` so downstream
+        // iteration / method lookup see the element type.
+        let doc = "// Возвращаемое значение:\n//   Массив из Строка - результат\n";
+        let hints = hir_def::ty::doc_types::parse_method_doc_types(doc).unwrap();
+        assert_eq!(ctx().lower_type_ref(&hints.ret), Ty::TypedArray(Box::new(Ty::String)));
+    }
+
+    #[test]
+    fn ty_lowering_array_none_stays_unparameterised() {
+        // `TypeRef::Array(None)` (e.g. `Новый Массив`, bare-name `Массив`)
+        // has no recoverable element type — stays `Ty::Array` so platform
+        // method lookup still resolves through the unparameterised page.
+        assert_eq!(ctx().lower_type_ref(&TypeRef::Array(None)), Ty::Array);
+    }
+
+    #[test]
+    fn ty_lowering_map_drops_kv_pairs() {
+        // `Ty::Map` is not parameterised yet — element types in
+        // `TypeRef::Map(Some((k, v)))` are dropped. A future
+        // `Ty::TypedMap(K, V)` would mirror `Ty::TypedArray`.
         let map_with_kv = TypeRef::Map(Some((
             Box::new(TypeRef::Builtin(BuiltinTypeRef::String)),
             Box::new(TypeRef::Builtin(BuiltinTypeRef::Number)),

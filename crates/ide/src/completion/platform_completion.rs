@@ -1007,4 +1007,180 @@ mod tests {
             labels
         );
     }
+
+    // ---------- Phase 6: form-control completion guards ----------
+    //
+    // The completion guard is enforced *by construction*:
+    //   1. `complete_prefix_methods_for_receiver` only fires for
+    //      `MetadataRef`, `ObjectManager`, or `ManagerCollection` receivers.
+    //      `Ty::FormControl` is none of those — no MDO row-column branch
+    //      runs for `Элементы.Переприемка.|`.
+    //   2. The fall-through in `platform_completions` then calls
+    //      `complete_platform_methods("ТаблицаФормы", …)`, which surfaces
+    //      the FormTable's platform members (Видимость, Заголовок,
+    //      ВыделенныеСтроки, …) and *only* those — never the bound
+    //      tabular-section's column list.
+    //
+    // The tests below pin both halves: the guard returns `None`, and the
+    // FormTable platform pull-up is non-empty and includes the refined
+    // members so the user-visible completion stays informative.
+
+    fn form_table_binding() -> hir::FormDataBinding {
+        use bsl_metadata::MdoType;
+        use hir::{FormDataBinding, FormDataTarget, Name};
+        FormDataBinding::new(
+            Box::new([Name::new("Объект"), Name::new("Переприемка")]),
+            FormDataTarget::TabularSection {
+                mdo_type: MdoType::Document,
+                owner: Name::new("ПКО"),
+                section: Name::new("Переприемка"),
+            },
+        )
+        .expect("non-empty path")
+    }
+
+    fn make_db_with_file() -> (ide_db::RootDatabaseImpl, vfs::FileId) {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        db.set_file_text(file_id, "");
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        (db, file_id)
+    }
+
+    #[test]
+    fn complete_prefix_methods_returns_none_for_form_control_table_with_binding() {
+        // GUARD: a bound `Ty::FormControl{Table, Some(b)}` (e.g.
+        // `Элементы.Переприемка` whose DataPath is `Объект.Переприемка`)
+        // must NOT enter the MDO-field path. Otherwise completion would
+        // leak the tabular section's row columns (`ШтрихКод`, …) onto the
+        // control receiver — those columns belong on the row Ty, surfaced
+        // only via `вСтрока.|` / `.ТекущаяСтрока.|` / `.ВыделенныеСтроки[i].|`.
+        let (db, file_id) = make_db_with_file();
+        let ty = hir::Ty::FormControl {
+            kind: hir::FormElementKind::Table,
+            binding: Some(form_table_binding()),
+        };
+
+        let result =
+            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+        assert!(
+            result.is_none(),
+            "FormControl{{Table, Some(_)}} must not trigger MDO-field completion; got {:?}",
+            result.as_ref().map(|v| v.iter().map(|i| &i.label).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn complete_prefix_methods_returns_none_for_form_control_table_no_binding() {
+        // Same guard for the unbound case (DataPath unresolved or
+        // `~prefix` deleted attr): `FormControl{Table, None}` falls
+        // through to the platform `ТаблицаФормы` properties — never to
+        // an MDO branch.
+        let (db, file_id) = make_db_with_file();
+        let ty = hir::Ty::FormControl { kind: hir::FormElementKind::Table, binding: None };
+
+        let result =
+            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+        assert!(
+            result.is_none(),
+            "FormControl{{Table, None}} must not trigger MDO-field completion"
+        );
+    }
+
+    #[test]
+    fn complete_prefix_methods_returns_none_for_typed_array() {
+        // GUARD for Phase-0 `Ty::TypedArray(_)`: the parameterised
+        // element type is *not* a property the user can dot through to
+        // get row columns. Completion on `Элементы.Переприемка
+        // .ВыделенныеСтроки.|` must surface `Массив` platform methods
+        // (`Количество`, `Получить`, …), never the row schema directly.
+        // Iteration / indexing is what unwraps to the row Ty.
+        let (db, file_id) = make_db_with_file();
+        let ty = hir::Ty::TypedArray(Box::new(hir::Ty::PlatformObject(hir::Name::new(
+            "СтрокаТаблицыФормы",
+        ))));
+
+        let result =
+            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+        assert!(result.is_none(), "TypedArray(_) must not trigger MDO-field completion");
+    }
+
+    #[test]
+    fn complete_platform_methods_for_form_table_surfaces_refined_members() {
+        // Sanity: when completion falls through to
+        // `complete_platform_methods("ТаблицаФормы", …)` for a FormControl
+        // receiver, the bilingual lookup in `get_type_properties` resolves
+        // `ТаблицаФормы`→`FormTable` and surfaces the refined members
+        // (`ВыделенныеСтроки`, `ТекущаяСтрока`, `ТекущиеДанные`) plus
+        // generic chrome (`Видимость`, `Заголовок`).
+        //
+        // This pins the *user-visible* half of the guard: with the row
+        // columns suppressed, the popup is still informative.
+        use bsl_platform::PlatformDataInner;
+        let data = PlatformDataInner::instance();
+        if data.all_properties().is_empty() {
+            println!("Skipping: no platform property data available");
+            return;
+        }
+
+        let (db, _) = make_db_with_file();
+        let items = complete_platform_methods(&db, "ТаблицаФормы", ide_db::base_db::Locale::Ru);
+        assert!(
+            !items.is_empty(),
+            "ТаблицаФормы platform members must not be empty; bilingual lookup misroute?"
+        );
+        let labels: std::collections::HashSet<&str> =
+            items.iter().map(|i| i.label.as_str()).collect();
+        // Refined row-aware members (Phase 5) plus the generic FormTable
+        // chrome that `Элементы.Переприемка.|` also wants to surface.
+        // `Видимость`/`Заголовок` are the canary platform properties: if
+        // the bilingual `ТаблицаФормы`→`FormTable` lookup ever loses its
+        // alignment with `platform_data.json`, this test catches it
+        // before users see an empty popup.
+        for expected in
+            ["ВыделенныеСтроки", "ТекущаяСтрока", "ТекущиеДанные", "Видимость", "Заголовок"]
+        {
+            assert!(
+                labels.contains(expected),
+                "expected platform property `{expected}` in completion; got: {:?}",
+                labels
+            );
+        }
+    }
+
+    #[test]
+    fn complete_platform_methods_for_typed_array_surfaces_massiv_members() {
+        // Sanity for Phase-0: `Ty::TypedArray(_).platform_type_name()`
+        // returns `Some("Массив")`, so completion on
+        // `… .ВыделенныеСтроки.|` surfaces `Массив`'s platform methods
+        // (`Количество`, `Добавить`, `Получить`, …). Together with the
+        // TypedArray guard above, this locks the array-method
+        // continuation that motivated parameterising the type in the
+        // first place (was: bare `.ВыделенныеСтроки → row` would have
+        // dropped `.Количество()` on the floor).
+        use bsl_platform::PlatformDataInner;
+        let data = PlatformDataInner::instance();
+        if data.all_methods().is_empty() {
+            println!("Skipping: no platform method data available");
+            return;
+        }
+
+        let (db, _) = make_db_with_file();
+        let items = complete_platform_methods(&db, "Массив", ide_db::base_db::Locale::Ru);
+        assert!(!items.is_empty(), "Массив platform members must not be empty");
+        let labels: std::collections::HashSet<&str> =
+            items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains("Количество"),
+            "expected `Количество` (collection size) in Массив completion; got: {:?}",
+            labels
+        );
+    }
 }

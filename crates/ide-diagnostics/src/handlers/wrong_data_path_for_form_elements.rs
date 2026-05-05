@@ -96,11 +96,11 @@ mod tests {
             "ФормаЭлемента".to_string(),
             bsl_metadata::FormType::Managed,
             uuid::Uuid::nil(),
-            vec![bsl_metadata::FormElement {
-                name: "НесуществующийРеквизит".to_string(),
-                id: 1,
-                data_path: Some("~Объект.НесуществующийРеквизит".to_string()),
-            }],
+            vec![bsl_metadata::FormElement::new(
+                "НесуществующийРеквизит",
+                1,
+                Some("~Объект.НесуществующийРеквизит".to_string()),
+            )],
         );
 
         let metadata = make_metadata_with_form(form);
@@ -119,11 +119,7 @@ mod tests {
             "ФормаЭлемента".to_string(),
             bsl_metadata::FormType::Managed,
             uuid::Uuid::nil(),
-            vec![bsl_metadata::FormElement {
-                name: "Код".to_string(),
-                id: 1,
-                data_path: Some("Объект.Code".to_string()),
-            }],
+            vec![bsl_metadata::FormElement::new("Код", 1, Some("Объект.Code".to_string()))],
         );
 
         let metadata = make_metadata_with_form(form);
@@ -141,26 +137,22 @@ mod tests {
             bsl_metadata::FormType::Managed,
             uuid::Uuid::nil(),
             vec![
-                bsl_metadata::FormElement {
-                    name: "Код".to_string(),
-                    id: 1,
-                    data_path: Some("Объект.Code".to_string()),
-                },
-                bsl_metadata::FormElement {
-                    name: "НесуществующийРеквизит1".to_string(),
-                    id: 2,
-                    data_path: Some("~Объект.НесуществующийРеквизит1".to_string()),
-                },
-                bsl_metadata::FormElement {
-                    name: "Наименование".to_string(),
-                    id: 3,
-                    data_path: Some("Объект.Description".to_string()),
-                },
-                bsl_metadata::FormElement {
-                    name: "НесуществующийРеквизит2".to_string(),
-                    id: 4,
-                    data_path: Some("~Объект.НесуществующийРеквизит2".to_string()),
-                },
+                bsl_metadata::FormElement::new("Код", 1, Some("Объект.Code".to_string())),
+                bsl_metadata::FormElement::new(
+                    "НесуществующийРеквизит1",
+                    2,
+                    Some("~Объект.НесуществующийРеквизит1".to_string()),
+                ),
+                bsl_metadata::FormElement::new(
+                    "Наименование",
+                    3,
+                    Some("Объект.Description".to_string()),
+                ),
+                bsl_metadata::FormElement::new(
+                    "НесуществующийРеквизит2",
+                    4,
+                    Some("~Объект.НесуществующийРеквизит2".to_string()),
+                ),
             ],
         );
 
@@ -216,11 +208,11 @@ mod tests {
             "ФормаЭлемента".to_string(),
             bsl_metadata::FormType::Managed,
             uuid::Uuid::nil(),
-            vec![bsl_metadata::FormElement {
-                name: "НесуществующийРеквизит".to_string(),
-                id: 1,
-                data_path: Some("~Объект.НесуществующийРеквизит".to_string()),
-            }],
+            vec![bsl_metadata::FormElement::new(
+                "НесуществующийРеквизит",
+                1,
+                Some("~Объект.НесуществующийРеквизит".to_string()),
+            )],
         );
 
         let metadata = make_metadata_with_form(form);

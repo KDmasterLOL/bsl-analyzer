@@ -7,6 +7,47 @@ use uuid::Uuid;
 use crate::enums::FormType;
 use crate::metadata_object::AttributeType;
 
+/// Coarse taxonomy of form elements (XML tag → kind).
+///
+/// Mirrors the «Элементы коллекции» section of the BSL platform docs:
+/// every concrete UI control belongs to exactly one of these buckets.
+/// Used by [`FormElement::kind`] to drive type resolution of
+/// `Элементы.<имя>`: a `<Table>` lowers to `ТаблицаФормы`, a `<Button>`
+/// to `КнопкаФормы`, a `<UsualGroup>` to `ГруппаФормы`, etc.
+///
+/// `Other` is a fail-safe for tags the parser does not recognise; a
+/// future tag must be classified explicitly rather than inheriting
+/// silent platform-control semantics.
+///
+/// **Ordering:** discriminants are pinned (`Table = 0` … `Other = 6`) so
+/// that derived `Ord` is stable across reshuffles of declaration order —
+/// `Ty` derives `Ord` and a later phase wraps `FormElementKind` inside
+/// `Ty::FormControl`, where ordering changes would invalidate the Salsa
+/// cache silently. Reordering variants is now safe; renumbering is the
+/// breaking operation, and the canonical-ordering test below pins it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum FormElementKind {
+    /// `<Table>` — UI table control bound to a tabular section.
+    Table = 0,
+    /// `<UsualGroup>`, `<Pages>`, `<Page>`, `<CommandBar>`, `<ButtonGroup>`.
+    Group = 1,
+    /// `<InputField>`, `<LabelField>`, `<CheckBoxField>`, `<RadioButtonField>`,
+    /// `<HTMLField>`, `<PictureField>`, `<SpreadsheetDocumentField>`, etc.
+    Field = 2,
+    /// `<Button>`.
+    Button = 3,
+    /// `<Decoration>`.
+    Decoration = 4,
+    /// `<ContextMenu>`, `<ExtendedTooltip>`, `<SearchStringAddition>`,
+    /// `<ViewStatusAddition>`, `<SearchControlAddition>`, `<AutoCommandBar>`.
+    Addition = 5,
+    /// Unknown XML tag — keeps form parsing fail-safe; element is still
+    /// surfaced (its name participates in `Элементы.<имя>` lookup) but
+    /// type resolution falls through to `Unknown`.
+    Other = 6,
+}
+
 /// Form element with data path information.
 ///
 /// Represents form controls (InputField, LabelField, CheckBoxField, etc.)
@@ -19,6 +60,12 @@ pub struct FormElement {
     pub id: u32,
     /// Data path (may start with `~` for unresolved references)
     pub data_path: Option<String>,
+    /// Coarse taxonomy of the underlying XML tag (Table/Group/Field/...).
+    pub kind: FormElementKind,
+    /// ID of the immediate parent element when the control sits inside
+    /// `<ChildItems>` of another container (group, table, page).
+    /// `None` for top-level elements.
+    pub parent_id: Option<u32>,
 }
 
 /// Form event handler metadata.
@@ -31,6 +78,28 @@ pub struct FormEventHandler {
 }
 
 impl FormElement {
+    /// Construct an element with a sensible default kind ([`FormElementKind::Other`])
+    /// and no parent. Reserved for tests and legacy call-sites that have
+    /// no XML tag context. **Production code paths from the XML parser
+    /// must use [`FormElement::with_kind`]** — passing through `new`
+    /// silently degrades type resolution to fall-through (`Other` → no
+    /// `Ty::FormControl` mapping).
+    pub fn new(name: impl Into<String>, id: u32, data_path: Option<String>) -> Self {
+        Self { name: name.into(), id, data_path, kind: FormElementKind::Other, parent_id: None }
+    }
+
+    /// Construct an element with the kind decoded from the XML tag and
+    /// the parent's element id. Used by `xml_parser::form::collect_child_items`.
+    pub fn with_kind(
+        name: impl Into<String>,
+        id: u32,
+        data_path: Option<String>,
+        kind: FormElementKind,
+        parent_id: Option<u32>,
+    ) -> Self {
+        Self { name: name.into(), id, data_path, kind, parent_id }
+    }
+
     /// Check if the element has a wrong (unresolved) data path.
     ///
     /// Returns true if data_path starts with `~`, which indicates
@@ -173,6 +242,23 @@ impl Form {
         self.elements.iter().filter(|e| e.has_wrong_data_path())
     }
 
+    /// Find an element by name (case-insensitive — BSL identifiers are
+    /// case-insensitive, so `Элементы.переприемка` and `Элементы.Переприемка`
+    /// must resolve to the same control).
+    pub fn find_element(&self, name: &str) -> Option<&FormElement> {
+        let name_lower = name.to_lowercase();
+        self.elements.iter().find(|e| e.name.to_lowercase() == name_lower)
+    }
+
+    /// Iterate over the immediate children of `parent_id` in declaration order.
+    ///
+    /// Used to walk a `<Table>`'s columns or a `<UsualGroup>`'s controls
+    /// without re-parsing XML — the hierarchy is captured during parsing
+    /// and stored as parent links on each [`FormElement`].
+    pub fn children_of(&self, parent_id: u32) -> impl Iterator<Item = &FormElement> {
+        self.elements.iter().filter(move |e| e.parent_id == Some(parent_id))
+    }
+
     /// Get form name.
     pub fn name(&self) -> &str {
         &self.name
@@ -281,38 +367,60 @@ mod tests {
 
     #[test]
     fn test_form_element_has_wrong_data_path() {
-        let wrong = FormElement {
-            name: "НесуществующийРеквизит".to_string(),
-            id: 1,
-            data_path: Some("~Объект.НесуществующийРеквизит".to_string()),
-        };
+        let wrong = FormElement::new(
+            "НесуществующийРеквизит",
+            1,
+            Some("~Объект.НесуществующийРеквизит".to_string()),
+        );
         assert!(wrong.has_wrong_data_path());
 
-        let ok = FormElement {
-            name: "Код".to_string(),
-            id: 2,
-            data_path: Some("Объект.Code".to_string()),
-        };
+        let ok = FormElement::new("Код", 2, Some("Объект.Code".to_string()));
         assert!(!ok.has_wrong_data_path());
 
-        let no_path = FormElement { name: "Кнопка".to_string(), id: 3, data_path: None };
+        let no_path = FormElement::new("Кнопка", 3, None);
         assert!(!no_path.has_wrong_data_path());
+    }
+
+    #[test]
+    fn test_form_element_new_defaults_to_other_kind_and_no_parent() {
+        let elem = FormElement::new("Код", 1, Some("Объект.Code".to_string()));
+        assert_eq!(elem.kind, FormElementKind::Other);
+        assert_eq!(elem.parent_id, None);
+    }
+
+    #[test]
+    fn test_form_element_kind_discriminants_are_pinned() {
+        // Discriminants are part of the public ordering contract: `Ty` derives
+        // `Ord` and Phase 3 wraps `FormElementKind` inside `Ty::FormControl`.
+        // If a future variant renumbers these values, Salsa caches keyed on
+        // `Ty` would silently invalidate. This test fails the build instead.
+        assert_eq!(FormElementKind::Table as u8, 0);
+        assert_eq!(FormElementKind::Group as u8, 1);
+        assert_eq!(FormElementKind::Field as u8, 2);
+        assert_eq!(FormElementKind::Button as u8, 3);
+        assert_eq!(FormElementKind::Decoration as u8, 4);
+        assert_eq!(FormElementKind::Addition as u8, 5);
+        assert_eq!(FormElementKind::Other as u8, 6);
+
+        // Derived `Ord` follows the discriminants.
+        assert!(FormElementKind::Table < FormElementKind::Group);
+        assert!(FormElementKind::Group < FormElementKind::Field);
+        assert!(FormElementKind::Field < FormElementKind::Button);
+        assert!(FormElementKind::Button < FormElementKind::Decoration);
+        assert!(FormElementKind::Decoration < FormElementKind::Addition);
+        assert!(FormElementKind::Addition < FormElementKind::Other);
     }
 
     #[test]
     fn test_form_with_elements() {
         let uuid = Uuid::parse_str("12345678-1234-1234-1234-123456789012").unwrap();
         let elements = vec![
-            FormElement {
-                name: "Код".to_string(),
-                id: 1,
-                data_path: Some("Объект.Code".to_string()),
-            },
-            FormElement {
-                name: "НесуществующийРеквизит".to_string(),
-                id: 2,
-                data_path: Some("~Объект.НесуществующийРеквизит".to_string()),
-            },
+            FormElement::new("Код", 1, Some("Объект.Code".to_string())),
+            FormElement::new(
+                "НесуществующийРеквизит",
+                2,
+                Some("~Объект.НесуществующийРеквизит".to_string()),
+            ),
         ];
 
         let form =
@@ -322,5 +430,68 @@ mod tests {
         let wrong: Vec<_> = form.elements_with_wrong_data_path().collect();
         assert_eq!(wrong.len(), 1);
         assert_eq!(wrong[0].name, "НесуществующийРеквизит");
+    }
+
+    #[test]
+    fn test_find_element_case_insensitive() {
+        let uuid = Uuid::parse_str("12345678-1234-1234-1234-123456789012").unwrap();
+        let elements = vec![
+            FormElement {
+                name: "Переприемка".to_string(),
+                id: 255,
+                data_path: Some("Объект.Переприемка".to_string()),
+                kind: FormElementKind::Table,
+                parent_id: None,
+            },
+            FormElement {
+                name: "ШтрихКод".to_string(),
+                id: 256,
+                data_path: Some("Объект.Переприемка.ШтрихКод".to_string()),
+                kind: FormElementKind::Field,
+                parent_id: Some(255),
+            },
+        ];
+        let form = Form::with_elements("Ф".to_string(), FormType::Managed, uuid, elements);
+
+        // BSL identifiers are case-insensitive.
+        assert_eq!(form.find_element("Переприемка").map(|e| e.id), Some(255));
+        assert_eq!(form.find_element("переприемка").map(|e| e.id), Some(255));
+        assert_eq!(form.find_element("ПЕРЕПРИЕМКА").map(|e| e.id), Some(255));
+        assert!(form.find_element("Несуществующий").is_none());
+    }
+
+    #[test]
+    fn test_children_of_returns_immediate_children() {
+        let uuid = Uuid::parse_str("12345678-1234-1234-1234-123456789012").unwrap();
+        let elements = vec![
+            FormElement {
+                name: "ГруппаОбщая".to_string(),
+                id: 100,
+                data_path: None,
+                kind: FormElementKind::Group,
+                parent_id: None,
+            },
+            FormElement {
+                name: "ПолеВГруппе".to_string(),
+                id: 101,
+                data_path: Some("Объект.Code".to_string()),
+                kind: FormElementKind::Field,
+                parent_id: Some(100),
+            },
+            FormElement {
+                name: "КнопкаТопЛевел".to_string(),
+                id: 200,
+                data_path: None,
+                kind: FormElementKind::Button,
+                parent_id: None,
+            },
+        ];
+        let form = Form::with_elements("Ф".to_string(), FormType::Managed, uuid, elements);
+
+        let group_kids: Vec<_> = form.children_of(100).map(|e| e.id).collect();
+        assert_eq!(group_kids, vec![101]);
+
+        // Top-level elements are not children of any container.
+        assert!(form.children_of(200).next().is_none());
     }
 }

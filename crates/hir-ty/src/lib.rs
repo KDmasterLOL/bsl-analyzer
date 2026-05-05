@@ -37,6 +37,7 @@ pub mod db;
 pub mod field_enum;
 pub mod field_lookup;
 pub mod form_attr;
+pub mod form_items;
 pub mod form_self;
 pub mod infer;
 pub mod iteration_lookup;
@@ -54,7 +55,10 @@ pub mod this_object;
 // Re-export main types for convenience
 pub use field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
 pub use field_lookup::lookup_field;
-pub use hir_def::ty::{FormDataKind, FunctionSignature, MetadataKind, Ty};
+pub use hir_def::ty::{
+    form_control_platform_type_name, FormDataBinding, FormDataKind, FormDataTarget,
+    FormElementKind, FunctionSignature, MetadataKind, Ty,
+};
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use infer::{

@@ -62,6 +62,12 @@ pub(crate) fn resolve_iter_element_ty(collection: &Ty) -> Option<Ty> {
     let templates = match collection {
         Ty::PlatformObject(name) => lookup_by_type_name(name.as_str())?,
         Ty::MetadataRef { kind, .. } => lookup_by_metadata_kind(*kind)?,
+        // Parameterised array bypasses the platform `iter_element_types`
+        // table whose only declared element for `Массив` is
+        // `"Произвольный"` (→ `Ty::Unknown`). The element type the
+        // caller threaded through `Ty::TypedArray` is precisely the
+        // information that table is missing — surface it directly.
+        Ty::TypedArray(elem) => return Some((**elem).clone()),
         Ty::Array => lookup_by_type_name("Массив")?,
         Ty::Map => lookup_by_type_name("Соответствие")?,
         Ty::ValueTable => lookup_by_type_name("ТаблицаЗначений")?,
@@ -215,6 +221,45 @@ mod tests {
                 name: Name::new("ОстаткиТоваров"),
             })
         );
+    }
+
+    #[test]
+    fn typed_array_yields_inner_element_directly() {
+        // `Ty::TypedArray(t)` bypasses the platform `iter_element_types`
+        // table (which only declares `"Произвольный"` for `Массив`) and
+        // surfaces `t` directly. This is the whole point of carrying
+        // the element type through the new variant.
+        let elem = resolve_iter_element_ty(&Ty::TypedArray(Box::new(Ty::String)));
+        assert_eq!(elem, Some(Ty::String));
+    }
+
+    #[test]
+    fn union_of_array_and_typed_array_iterates_to_union_with_unknown() {
+        // Pre-Phase-5 guard: a `Union(Ty::Array, Ty::TypedArray(String))`
+        // collection iterates to `Union(Ty::Unknown, Ty::String)`.
+        // `Ty::Array` resolves through the platform `iter_element_types`
+        // table (`["Произвольный"]` → `Ty::Unknown`); `Ty::TypedArray`
+        // surfaces its element directly. The smart constructor unions
+        // both and keeps `Unknown` because losing a member would erase
+        // the warning that one arm has no element witness. Phase 5
+        // (row-typed arrays) must keep this conservative.
+        let arms: Vec<Ty> = vec![Ty::Array, Ty::TypedArray(Box::new(Ty::String))];
+        let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
+        let elem = resolve_iter_element_ty(&union);
+        assert_eq!(elem, Some(Ty::union(vec![Ty::Unknown, Ty::String])));
+    }
+
+    #[test]
+    fn typed_array_with_metadata_ref_element_passes_through_unchanged() {
+        // The element can be any `Ty`. Iteration must not touch it —
+        // the wrapper only owns the array semantics.
+        let row = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
+            name: Name::new("ПКО.Товары"),
+        };
+        let collection = Ty::TypedArray(Box::new(row.clone()));
+        let elem = resolve_iter_element_ty(&collection);
+        assert_eq!(elem, Some(row));
     }
 
     #[test]

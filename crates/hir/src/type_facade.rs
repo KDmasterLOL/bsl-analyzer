@@ -312,13 +312,22 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
 /// keeps `.methods()` and `.method_return_type()` consistent.
 fn platform_type_key(ty: &Ty) -> Option<&str> {
     match ty {
-        Ty::Array => Some("Array"),
+        // `TypedArray` shares the platform method/property surface with
+        // `Array` (`.Добавить`, `.Количество`, …) — the element type
+        // refines field/iteration only.
+        Ty::Array | Ty::TypedArray(_) => Some("Array"),
         Ty::Structure => Some("Structure"),
         Ty::Map => Some("Map"),
         Ty::ValueTable => Some("ValueTable"),
         Ty::ValueList => Some("ValueList"),
         Ty::Type => Some("Type"),
         Ty::PlatformObject(name) => Some(name.as_str()),
+        // FormData / FormControl wrap per-kind platform tables — same
+        // routing as `method_lookup::platform_type_key`. Without these
+        // arms, `.methods()` would return empty on a `Ty::FormData`
+        // receiver that `lookup_method` already serves correctly.
+        Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
+        Ty::FormControl { kind, .. } => hir_def::ty::form_control_platform_type_name(*kind),
         _ => None,
     }
 }

@@ -102,6 +102,41 @@ pub fn is_assignable(from: &Ty, to: &Ty) -> bool {
         return true;
     }
 
+    // Array ↔ TypedArray bridge (bidirectional) + covariant element.
+    //
+    // `Ty::Array` and `Ty::TypedArray(_)` denote the same BSL value
+    // — a runtime array — but differ in whether an element witness
+    // is recoverable. `Новый Массив(...)` literals always lower to
+    // unparameterised `Ty::Array`; JSDoc `Массив из X` and the
+    // form-control refinement (`Элементы.X.ВыделенныеСтроки`,
+    // Phase 5) produce `Ty::TypedArray(X)`. The two forms must
+    // cross the slot boundary freely:
+    //
+    // - `TypedArray(X) ≤ Array` — drop the element witness at the
+    //   slot. Always safe; the runtime value is still an array and
+    //   the receiver of a bare `Массив` does not consult elements.
+    // - `Array ≤ TypedArray(X)` — accept a witness-less array where
+    //   a typed array is expected. BSL has no element-typed runtime,
+    //   so a bare `Новый Массив` may legally hold any element; the
+    //   gradual stance (same rationale as `Unknown ≤ A` above) keeps
+    //   the diagnostic permissive on under-annotated code. A future
+    //   strict mode would flip this to `false`.
+    // - `TypedArray(A) ≤ TypedArray(B)` — covariant on the element
+    //   type. Matches the function-return-covariance rule: an
+    //   "array of A" satisfies "array of B" iff every `A ≤ B`. Pure
+    //   invariance would reject `TypedArray(Number) ≤
+    //   TypedArray(Number | String)`, which is the exact JSDoc-
+    //   widening pattern this variant was introduced to support.
+    //
+    // Without this branch, lowering a JSDoc `Массив из Строка`
+    // through `Ty::TypedArray(String)` and passing the result to an
+    // unannotated callee (whose param Ty stays `Ty::Array` at M4)
+    // would fire a spurious `TypeMismatch` — Phase 0 must not
+    // regress assignability for already-working code.
+    if is_array_typed_array_bridge(from, to) {
+        return true;
+    }
+
     // ThisObject → MetadataRef{*Object} coercion (one direction only):
     // `ЭтотОбъект` is accepted where the explicit
     // `CatalogObject.Товары` is expected. Delegates to the M3 coercion
@@ -183,6 +218,20 @@ fn is_tabular_row_bridge(a: &Ty, b: &Ty) -> bool {
     }
     (is_row_metadata_ref(a) && is_row_platform_object(b))
         || (is_row_platform_object(a) && is_row_metadata_ref(b))
+}
+
+/// Bidirectional bridge between [`Ty::Array`] and [`Ty::TypedArray`]
+/// + covariant element comparison for `TypedArray → TypedArray`.
+///
+/// See the call site in [`is_assignable`] for the full rationale.
+/// Recurses through [`is_assignable`] on the element pair so that
+/// `Ty::union` / `Ty::Unknown` rules apply uniformly.
+fn is_array_typed_array_bridge(from: &Ty, to: &Ty) -> bool {
+    match (from, to) {
+        (Ty::TypedArray(_), Ty::Array) | (Ty::Array, Ty::TypedArray(_)) => true,
+        (Ty::TypedArray(a), Ty::TypedArray(b)) => is_assignable(a, b),
+        _ => false,
+    }
 }
 
 /// Argument-position coercion check.
@@ -435,6 +484,77 @@ mod tests {
         assert!(!is_assignable(&Ty::Number, &Ty::String));
         assert!(!is_assignable(&Ty::Date, &Ty::String));
         assert!(!is_assignable(&Ty::union(vec![Ty::Number, Ty::Date]), &Ty::String));
+    }
+
+    #[test]
+    fn typed_array_assignable_to_unparameterised_array() {
+        // Drop-the-witness direction: a `TypedArray(X)` value must
+        // satisfy a bare `Massiv` slot. Otherwise a JSDoc-typed
+        // `Массив из Строка` returned from one helper would fire
+        // `TypeMismatch` when passed to an unannotated callee whose
+        // param Ty stays `Ty::Array`.
+        let typed = Ty::TypedArray(Box::new(Ty::String));
+        assert!(is_assignable(&typed, &Ty::Array));
+    }
+
+    #[test]
+    fn unparameterised_array_assignable_to_typed_array_gradual() {
+        // Gradual direction: `Новый Массив` (Ty::Array, no element
+        // witness) must satisfy a `TypedArray(X)` slot — BSL arrays
+        // are heterogeneous at runtime, and rejecting this would
+        // fire false positives across every untyped helper that
+        // builds an array literal and hands it to a JSDoc-annotated
+        // callee. Same gradual stance as `Unknown ≤ A`.
+        assert!(is_assignable(&Ty::Array, &Ty::TypedArray(Box::new(Ty::Number))));
+    }
+
+    #[test]
+    fn typed_array_covariant_on_element() {
+        // Element covariance: `TypedArray(Number)` satisfies
+        // `TypedArray(Number | String)` because every Number is a
+        // valid member of the wider union. Matches the
+        // function-return covariance rule and is the exact
+        // JSDoc-widening pattern this variant was introduced to
+        // support.
+        let narrow = Ty::TypedArray(Box::new(Ty::Number));
+        let wide = Ty::TypedArray(Box::new(Ty::union(vec![Ty::Number, Ty::String])));
+        assert!(is_assignable(&narrow, &wide), "TypedArray covariant: Number ≤ Number|String");
+        assert!(
+            !is_assignable(&wide, &narrow),
+            "TypedArray covariant: Number|String ≰ Number — String leg cannot satisfy Number callers"
+        );
+    }
+
+    #[test]
+    fn typed_array_unrelated_elements_rejected() {
+        // Element rule must reject genuinely unrelated types. A
+        // permissive bridge that always accepts would erase real
+        // type errors (`TypedArray(String) → TypedArray(Number)`
+        // is a bug worth surfacing).
+        let str_arr = Ty::TypedArray(Box::new(Ty::String));
+        let num_arr = Ty::TypedArray(Box::new(Ty::Number));
+        assert!(!is_assignable(&str_arr, &num_arr));
+        assert!(!is_assignable(&num_arr, &str_arr));
+    }
+
+    #[test]
+    fn typed_array_reflexivity_holds() {
+        // Sanity: identical TypedArray instances must still be
+        // assignable. The new bridge recurses through `is_assignable`
+        // for the element pair, which catches reflexivity at the
+        // bottom of the recursive call.
+        let ta = Ty::TypedArray(Box::new(Ty::String));
+        assert!(is_assignable(&ta, &ta));
+    }
+
+    #[test]
+    fn typed_array_bridge_does_not_open_unrelated_ty_pairs() {
+        // The bridge is intentionally narrow: only `Array` /
+        // `TypedArray` cells activate. Non-array `Ty` pairs must
+        // not start passing assignability through this branch.
+        assert!(!is_assignable(&Ty::String, &Ty::Array));
+        assert!(!is_assignable(&Ty::Array, &Ty::String));
+        assert!(!is_assignable(&Ty::Number, &Ty::TypedArray(Box::new(Ty::Number))));
     }
 
     #[test]
