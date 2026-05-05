@@ -270,6 +270,134 @@ impl SdblType {
     }
 }
 
+impl SdblType {
+    /// Locale-aware human-readable rendering of this query-language type.
+    ///
+    /// Mirrors [`hir_def::ty::Ty::display_name`] for the BSL side: lets a
+    /// future SDBL-diagnostic frame substitute Russian or English type
+    /// names per `[output] display_language` without re-parsing the
+    /// `Display`-formatted output. Today's [`std::fmt::Display`] impl on
+    /// `SdblType` keeps producing Russian (the historic single-locale
+    /// behaviour), so the only callers that benefit from this method are
+    /// new ones that want to render `expected: <T>` / `actual: <T>` in
+    /// the client locale.
+    ///
+    /// Parametric forms (`String(17)`, `Number(10, 2)`,
+    /// `Catalog.Товары`, `ОпределяемыйТип.X`) keep their parenthesised /
+    /// dotted suffixes verbatim so the IDE still shows the precision,
+    /// length, or referenced name regardless of locale.
+    pub fn display_name(&self, locale: base_db::Locale) -> String {
+        use base_db::Locale;
+        match self {
+            Self::Boolean => match locale {
+                Locale::Ru => "Булево".into(),
+                Locale::En => "Boolean".into(),
+            },
+            Self::String { length } => {
+                let head = match locale {
+                    Locale::Ru => "Строка",
+                    Locale::En => "String",
+                };
+                match length {
+                    Some(len) => format!("{head}({len})"),
+                    None => head.into(),
+                }
+            }
+            Self::Number { precision, scale } => {
+                let head = match locale {
+                    Locale::Ru => "Число",
+                    Locale::En => "Number",
+                };
+                match (precision, scale) {
+                    (Some(p), Some(s)) => format!("{head}({p}, {s})"),
+                    _ => head.into(),
+                }
+            }
+            Self::Date => match locale {
+                Locale::Ru => "Дата".into(),
+                Locale::En => "Date".into(),
+            },
+            Self::DateTime => match locale {
+                Locale::Ru => "ДатаВремя".into(),
+                Locale::En => "DateTime".into(),
+            },
+            Self::Ref(mdo_ref) => {
+                // MdoRef is rendered as `<MdoLabel>.<Name>`. The MDO label
+                // switches per locale, but the source-declared `name` is
+                // surfaced verbatim so the IDE still pinpoints the
+                // referenced object even when its identifier is Russian.
+                let label = match locale {
+                    Locale::Ru => mdo_ref.mdo_type.russian_name(),
+                    Locale::En => mdo_ref.mdo_type.english_name(),
+                };
+                format!("{}.{}", label, mdo_ref.name)
+            }
+            Self::AnyRef => match locale {
+                Locale::Ru => "ЛюбаяСсылка".into(),
+                Locale::En => "AnyRef".into(),
+            },
+            Self::AnyObjectRef { mdo_type } => match locale {
+                Locale::Ru => mdo_type.russian_name().into(),
+                Locale::En => mdo_type.english_name().into(),
+            },
+            Self::Uuid => match locale {
+                Locale::Ru => "УникальныйИдентификатор".into(),
+                Locale::En => "Uuid".into(),
+            },
+            Self::ValueStorage => match locale {
+                Locale::Ru => "ХранилищеЗначения".into(),
+                Locale::En => "ValueStorage".into(),
+            },
+            Self::DefinedType { name, .. } => match locale {
+                Locale::Ru => format!("ОпределяемыйТип.{name}"),
+                Locale::En => format!("DefinedType.{name}"),
+            },
+            Self::ValueTable => match locale {
+                Locale::Ru => "ТаблицаЗначений".into(),
+                Locale::En => "ValueTable".into(),
+            },
+            Self::Null => "NULL".into(),
+            Self::Aggregate(inner) => {
+                let head = match locale {
+                    Locale::Ru => "Агрегат",
+                    Locale::En => "Aggregate",
+                };
+                format!("{head}({})", inner.display_name(locale))
+            }
+            Self::Composite { types } => {
+                if types.is_empty() {
+                    match locale {
+                        Locale::Ru => "Составной тип (пусто)".into(),
+                        Locale::En => "Composite type (empty)".into(),
+                    }
+                } else if types.len() == 1 {
+                    types[0].display_name(locale)
+                } else {
+                    match locale {
+                        Locale::Ru => "Составной тип:".into(),
+                        Locale::En => "Composite type:".into(),
+                    }
+                }
+            }
+            Self::TabularSectionRef { parent_mdo_type, parent_mdo_name, ts_name } => {
+                let parent_label = match locale {
+                    Locale::Ru => parent_mdo_type.russian_name(),
+                    Locale::En => parent_mdo_type.english_name(),
+                };
+                format!("{parent_label}.{parent_mdo_name}.{ts_name}")
+            }
+            Self::Unknown => match locale {
+                Locale::Ru => "Неизвестно".into(),
+                Locale::En => "Unknown".into(),
+            },
+            Self::Error => match locale {
+                Locale::Ru => "Ошибка".into(),
+                Locale::En => "Error".into(),
+            },
+        }
+    }
+}
+
 impl std::fmt::Display for SdblType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -393,6 +521,43 @@ mod tests {
         );
 
         assert_eq!(SdblType::Unknown.to_string(), "Неизвестно");
+    }
+
+    #[test]
+    fn display_name_localizes_primitive_and_parametric_forms() {
+        use base_db::Locale;
+
+        // Primitive: same length suffix in either locale.
+        assert_eq!(SdblType::Boolean.display_name(Locale::Ru), "Булево");
+        assert_eq!(SdblType::Boolean.display_name(Locale::En), "Boolean");
+        assert_eq!(SdblType::string_with_length(17).display_name(Locale::Ru), "Строка(17)");
+        assert_eq!(SdblType::string_with_length(17).display_name(Locale::En), "String(17)");
+        assert_eq!(SdblType::number_with_precision(10, 2).display_name(Locale::Ru), "Число(10, 2)");
+        assert_eq!(
+            SdblType::number_with_precision(10, 2).display_name(Locale::En),
+            "Number(10, 2)"
+        );
+
+        // MDO ref: label switches per locale, source-declared `name` stays
+        // verbatim so the IDE still pinpoints the referenced object.
+        let mdo_ref = SdblType::reference(MdoType::Catalog, "Валюты");
+        assert_eq!(mdo_ref.display_name(Locale::Ru), "Справочник.Валюты");
+        assert_eq!(mdo_ref.display_name(Locale::En), "Catalog.Валюты");
+
+        // Special types.
+        assert_eq!(SdblType::AnyRef.display_name(Locale::Ru), "ЛюбаяСсылка");
+        assert_eq!(SdblType::AnyRef.display_name(Locale::En), "AnyRef");
+        assert_eq!(SdblType::Uuid.display_name(Locale::En), "Uuid");
+        assert_eq!(
+            SdblType::DefinedType {
+                name: "ОтметкаВремени".into(), underlying_type: None
+            }
+            .display_name(Locale::En),
+            "DefinedType.ОтметкаВремени"
+        );
+
+        // Display impl is unchanged: still Russian regardless of new API.
+        assert_eq!(SdblType::Boolean.to_string(), "Булево");
     }
 
     #[test]

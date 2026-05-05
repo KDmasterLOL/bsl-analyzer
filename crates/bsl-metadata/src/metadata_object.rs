@@ -263,6 +263,37 @@ impl MdoType {
         }
     }
 
+    /// Russian-localized companion to [`Self::manager_type_prefix`].
+    ///
+    /// Returns the manager-collection name 1С users see in BSL code
+    /// (`Документы` collection element type → `ДокументМенеджер`).
+    /// Mirrors `manager_type_prefix` 1:1 — same set of `Some` arms,
+    /// same `None` set (`Cube`, `DimensionTable`, `CommonModule` have no
+    /// manager form). Used by `Ty::display_name(Locale::Ru)` for the
+    /// `Ty::ManagerCollection` variant.
+    pub fn manager_type_prefix_ru(&self) -> Option<&'static str> {
+        match self {
+            Self::Catalog => Some("СправочникМенеджер"),
+            Self::Document => Some("ДокументМенеджер"),
+            Self::InformationRegister => Some("РегистрСведенийМенеджер"),
+            Self::AccumulationRegister => Some("РегистрНакопленияМенеджер"),
+            Self::AccountingRegister => Some("РегистрБухгалтерииМенеджер"),
+            Self::CalculationRegister => Some("РегистрРасчетаМенеджер"),
+            Self::ChartOfCharacteristicTypes => Some("ПланВидовХарактеристикМенеджер"),
+            Self::ChartOfAccounts => Some("ПланСчетовМенеджер"),
+            Self::ChartOfCalculationTypes => Some("ПланВидовРасчетаМенеджер"),
+            Self::BusinessProcess => Some("БизнесПроцессМенеджер"),
+            Self::Task => Some("ЗадачаМенеджер"),
+            Self::Enum => Some("ПеречислениеМенеджер"),
+            Self::ExchangePlan => Some("ПланОбменаМенеджер"),
+            Self::ExternalDataSource => Some("ВнешнийИсточникДанныхМенеджер"),
+            Self::Constant => Some("КонстантаМенеджер"),
+            Self::DataProcessor => Some("ОбработкаМенеджер"),
+            Self::Report => Some("ОтчетМенеджер"),
+            Self::Cube | Self::DimensionTable | Self::CommonModule => None,
+        }
+    }
+
     /// Check if a given name is an MDO plural form (case-insensitive).
     /// Uses O(1) lookup via FxHashSet with lazy static initialization.
     ///

@@ -13,6 +13,7 @@ tracing.workspace = true
 chrono.workspace = true
 url.workspace = true
 toml = "1"
+base-db.workspace = true
 bsl-metadata = { path = "../bsl-metadata" }
 
 [dev-dependencies]

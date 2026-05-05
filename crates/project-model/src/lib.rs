@@ -237,6 +237,9 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub features: FeaturesConfig,
+
+    #[serde(default)]
+    pub output: OutputConfig,
 }
 
 impl ProjectConfig {
@@ -424,6 +427,62 @@ pub struct FeaturesConfig {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self { type_narrowing: true }
+    }
+}
+
+/// User-facing output configuration.
+///
+/// Controls how analyzer-produced strings (diagnostic messages, hover
+/// labels, completion details) are rendered. Currently exposes only the
+/// display language; future settings (e.g. severity-label style) would
+/// land here.
+///
+/// Loaded from the `[output]` section of `bsl-analyzer.toml`:
+/// ```toml
+/// [output]
+/// display_language = "ru"   # or "en"
+/// ```
+///
+/// The string is kept raw at this layer; consumers call
+/// [`Self::resolve_locale`] to turn it into a `base_db::Locale`, which
+/// reports unknown values via `tracing::warn!` and returns `None` so the
+/// caller can fall back to other locale signals (LSP, default).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputConfig {
+    /// Display language for analyzer output. Accepts `"ru"`/`"en"` and
+    /// common aliases (see `base_db::Locale::from_config_str`). `None`
+    /// means "no project preference" — the LSP layer falls back to the
+    /// IDE's locale signal or to the analyzer default.
+    #[serde(default, alias = "display_language")]
+    pub display_language: Option<String>,
+}
+
+impl OutputConfig {
+    /// Resolve `display_language` into a [`base_db::Locale`].
+    ///
+    /// - `None` → field unset, no project preference.
+    /// - `Some(_)` with a recognised value → the parsed locale.
+    /// - `Some(_)` with an unknown value → logs `warn!` and returns `None`
+    ///   so the caller can fall back (LSP locale, then analyzer default)
+    ///   instead of failing project load on a typo.
+    ///
+    /// Single source of truth for `[output] display_language` parsing,
+    /// shared between the LSP main-loop path
+    /// (`bsl-analyzer::diagnostics_state`) and the CLI / streaming path
+    /// (`ide::streaming::orchestrator`).
+    pub fn resolve_locale(&self) -> Option<base_db::Locale> {
+        let raw = self.display_language.as_deref()?;
+        match base_db::Locale::from_config_str(raw) {
+            Ok(locale) => Some(locale),
+            Err(e) => {
+                tracing::warn!(
+                    value = %e.0,
+                    "[output] display_language has unknown value; ignoring (will use other locale signals)"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -871,6 +930,8 @@ struct TomlConfig {
     search: TomlSearchConfig,
     #[serde(default)]
     features: FeaturesConfig,
+    #[serde(default)]
+    output: OutputConfig,
 }
 
 impl Default for TomlConfig {
@@ -882,6 +943,7 @@ impl Default for TomlConfig {
             formatting: FormattingConfig::default(),
             search: TomlSearchConfig::default(),
             features: FeaturesConfig::default(),
+            output: OutputConfig::default(),
         }
     }
 }
@@ -971,6 +1033,7 @@ impl From<TomlConfig> for ProjectConfig {
                 },
             },
             features: toml.features,
+            output: toml.output,
         }
     }
 }

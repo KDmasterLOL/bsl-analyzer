@@ -3,7 +3,7 @@
 use crate::handlers;
 use crate::metadata::{DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
 use crate::{DiagnosticCode, Severity};
-use base_db::DiagnosticsConfigInput;
+use base_db::{DiagnosticsConfigInput, Locale};
 use std::collections::HashMap;
 
 /// Configuration for diagnostics.
@@ -98,6 +98,13 @@ pub struct DiagnosticsConfig {
     /// Exclusive mode: if Some, ONLY these diagnostics are enabled.
     /// Set via --only-diagnostic CLI flag. Overrides disabled/enabled lists.
     pub only_enabled: Option<Vec<DiagnosticCode>>,
+    /// User-facing output locale.
+    ///
+    /// Resolved at the LSP layer from `[output] display_language` (TOML) or
+    /// `InitializeParams.locale` (LSP). Diagnostic emitters consult it via
+    /// [`crate::DiagnosticsContext::locale`] when rendering type names and
+    /// other localized labels.
+    pub locale: Locale,
 }
 
 impl Default for DiagnosticsConfig {
@@ -110,6 +117,7 @@ impl Default for DiagnosticsConfig {
             dataflow_max_iterations: hir::dataflow::DEFAULT_MAX_ITERATIONS,
             metadata_overrides: HashMap::new(),
             only_enabled: None,
+            locale: Locale::default(),
         }
     }
 }
@@ -150,6 +158,7 @@ impl DiagnosticsConfig {
             dataflow_max_iterations: hir::dataflow::DEFAULT_MAX_ITERATIONS,
             metadata_overrides: HashMap::new(),
             only_enabled: None,
+            locale: Locale::default(),
         }
     }
 
@@ -241,6 +250,11 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                     dataflow_max_iterations,
                     metadata_overrides: HashMap::new(),
                     only_enabled: None,
+                    // The JSON shape under `diagnostics:` does not carry locale —
+                    // it lives in the project-level `[output]` section. Visitor
+                    // gets a default; the canonical value flows through
+                    // `from_input` (Salsa input → DiagnosticsConfig).
+                    locale: Locale::default(),
                 })
             }
         }
@@ -358,6 +372,7 @@ impl DiagnosticsConfig {
             dataflow_max_iterations: input.dataflow_max_iterations,
             metadata_overrides: HashMap::new(),
             only_enabled: None,
+            locale: input.locale,
         }
     }
 

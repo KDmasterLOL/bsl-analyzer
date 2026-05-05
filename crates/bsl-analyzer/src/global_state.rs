@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
-use base_db::DiagnosticsConfigInput;
+use base_db::{DiagnosticsConfigInput, Locale};
 use crossbeam_channel::{Receiver, Sender};
 use ide::Analysis;
 use lsp_server::{Message, ReqQueue, Response};
@@ -111,6 +111,13 @@ pub struct GlobalState {
     /// Current diagnostics configuration (hashable, for Salsa caching).
     pub(crate) diagnostics_config: DiagnosticsConfigInput,
 
+    /// IDE-supplied locale from `InitializeParams.locale` (RFC 4646).
+    ///
+    /// `None` if the client did not advertise a locale during the LSP
+    /// handshake. Read by `update_diagnostics_config` as the LSP-layer
+    /// fallback after the project's `[output] display_language` setting.
+    pub(crate) lsp_locale: Option<Locale>,
+
     /// Monotonically increasing generation counter for background diagnostics.
     pub diagnostics_generation: u64,
 
@@ -171,6 +178,7 @@ impl GlobalState {
             task_pool: task_pool::TaskPool::new_with_handle(),
             next_request_id: AtomicI32::new(1),
             diagnostics_config: DiagnosticsConfigInput::new(),
+            lsp_locale: None,
             diagnostics_generation: 0,
             pending_diagnostics_uri: None,
             diagnostics_tokens: HashMap::new(),

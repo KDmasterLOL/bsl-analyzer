@@ -16,6 +16,7 @@ mod syntax_highlighting;
 pub use completion::{CompletionItem, CompletionItemKind};
 pub use formatting::{FormattingConfig, FormattingResult};
 pub use ide_assists::{Assist, AssistId, SourceChange};
+pub use ide_db::base_db::Locale;
 pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
 pub use ide_diagnostics::{
     all_diagnostic_codes, diagnostics as compute_diagnostics, docs, file_diagnostics_query,
@@ -88,14 +89,20 @@ impl Analysis {
     /// * `file_id` - File identifier
     /// * `offset` - Byte offset in the file
     /// * `workspace_root` - Workspace root for metadata loading
+    /// * `locale` - User-facing locale for renderable details (type names,
+    ///   the `[Только чтение]` / `[Read-only]` marker). Threaded through
+    ///   from the LSP / TOML driver layer; tests typically pass
+    ///   [`Locale::default`] (Russian) which mirrors the historical
+    ///   single-locale behaviour.
     pub fn completions(
         &self,
         file_id: FileId,
         offset: u32,
         workspace_root: Option<PathBuf>,
+        locale: Locale,
     ) -> Vec<CompletionItem> {
         let offset = TextSize::from(offset);
-        let position = completion::CompletionPosition { file_id, offset, workspace_root };
+        let position = completion::CompletionPosition { file_id, offset, workspace_root, locale };
         completion::completions(&self.db, position)
     }
 
@@ -110,9 +117,13 @@ impl Analysis {
     ///
     /// * `file_id` - File identifier
     /// * `offset` - Byte offset in the file (0-based)
-    pub fn hover(&self, file_id: FileId, offset: u32) -> Option<HoverResult> {
+    /// * `locale` - User-facing locale for renderable type labels. The
+    ///   surrounding hover frame stays Russian (single-locale message
+    ///   templates are out of scope for the bilingual-display refactor),
+    ///   but `Ty` rendering switches per locale.
+    pub fn hover(&self, file_id: FileId, offset: u32, locale: Locale) -> Option<HoverResult> {
         let offset = TextSize::from(offset);
-        hover::hover(&self.db, file_id, offset)
+        hover::hover(&self.db, file_id, offset, locale)
     }
 
     /// Returns document symbols (procedures, functions, variables, regions).

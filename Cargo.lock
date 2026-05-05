@@ -2843,6 +2843,7 @@ name = "project-model"
 version = "0.1.171"
 dependencies = [
  "anyhow",
+ "base-db",
  "bsl-metadata",
  "chrono",
  "expect-test",
@@ -3479,6 +3480,7 @@ checksum = "d68f2ec51b097e4c1a75b681a8bec621909b5e91f15bb7b840c4f2f7b01148b2"
 name = "sdbl-hir"
 version = "0.1.171"
 dependencies = [
+ "base-db",
  "bsl-metadata",
  "expect-test",
  "parser",

@@ -11,6 +11,7 @@ mod new_expr_completion;
 mod platform_completion;
 mod sdbl;
 
+use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
 use std::path::PathBuf;
 use syntax::TextSize;
@@ -22,6 +23,10 @@ pub struct CompletionPosition {
     pub file_id: FileId,
     pub offset: TextSize,
     pub workspace_root: Option<PathBuf>,
+    /// User-facing locale for renderable completion details (type names,
+    /// the `[Только чтение]` / `[Read-only]` marker). Threaded down from
+    /// [`crate::Analysis::completions`].
+    pub locale: Locale,
 }
 
 /// A single completion item.

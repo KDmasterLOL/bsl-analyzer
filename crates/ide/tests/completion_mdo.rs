@@ -78,7 +78,7 @@ fn extract_cursor(fixture_text: &str) -> (String, String, u32) {
 
 fn complete(fixture: &str) -> Vec<CompletionItem> {
     let (analysis, file_id, offset) = setup_with_config(fixture);
-    analysis.completions(file_id, offset, None)
+    analysis.completions(file_id, offset, None, ide::Locale::Ru)
 }
 
 fn has_label(items: &[CompletionItem], label: &str) -> bool {

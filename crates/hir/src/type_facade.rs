@@ -130,11 +130,27 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
         &self.ty
     }
 
-    /// Short human-readable name, e.g. "Number", "CatalogRef.Номенклатура",
-    /// "Number | String" for a union. Delegates to [`Ty::display_name`]
-    /// and owns a fresh `String` so callers can format freely.
-    pub fn display_name(&self) -> String {
-        self.ty.display_name().to_string()
+    /// Short human-readable name in the given locale, e.g.
+    /// `"Number"` / `"Число"`, `"Number | String"` / `"Число | Строка"` for
+    /// a union. Delegates to [`Ty::display_name`] and owns a fresh `String`
+    /// so callers can format freely.
+    pub fn display_name(&self, locale: base_db::Locale) -> String {
+        self.ty.display_name(locale).to_string()
+    }
+
+    /// Stable English machine-name; equivalent to
+    /// `display_name(Locale::En)`. Use in tests, logs, and any other
+    /// context where the canonical English label is intentional rather
+    /// than locale-dependent.
+    pub fn canonical_name(&self) -> String {
+        self.ty.canonical_name().to_string()
+    }
+
+    /// `Display`-able wrapper that knows the locale. Equivalent to
+    /// `Ty::display`, exposed on the facade for IDE-layer convenience —
+    /// emitters write `format!("{}", ty.display(locale))`.
+    pub fn display(&self, locale: base_db::Locale) -> hir_def::ty::TyDisplay<'_> {
+        self.ty.display(locale)
     }
 
     /// `true` for types that carry an MDO reference — `CatalogRef`,
@@ -436,9 +452,14 @@ mod tests {
     fn display_name_matches_ty() {
         // Facade's `display_name` owns a String but must equal the
         // underlying `Ty::display_name` (`&str`) — pins the passthrough.
+        // Also pins the locale propagation: `display_name(Ru)` on the
+        // facade must agree with `Ty::display_name(Ru)`.
+        use base_db::Locale;
         let (db, file_id) = empty_db();
         let t = Type::new(&db, file_id, Ty::Number);
-        assert_eq!(t.display_name(), Ty::Number.display_name());
+        assert_eq!(t.display_name(Locale::En), Ty::Number.display_name(Locale::En));
+        assert_eq!(t.display_name(Locale::Ru), Ty::Number.display_name(Locale::Ru));
+        assert_eq!(t.canonical_name(), Ty::Number.canonical_name());
     }
 
     #[test]

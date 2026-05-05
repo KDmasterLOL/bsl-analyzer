@@ -10,7 +10,8 @@ use bsl_platform::{
     ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod, PlatformProperty,
     TypeNameInput,
 };
-use hir::{classify_token, MetadataKind, NameClass, Semantics, Ty};
+use hir::{classify_token, NameClass, Semantics, Ty};
+use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
 use symbol_info::{from_global_function, from_platform_method, render_hover_markdown, Lang};
 use syntax::{SyntaxNode, SyntaxToken, TextRange, TextSize};
@@ -31,8 +32,9 @@ pub(crate) fn hover<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     offset: TextSize,
+    locale: Locale,
 ) -> Option<HoverResult> {
-    let _span = tracing::info_span!("hover", ?file_id, ?offset).entered();
+    let _span = tracing::info_span!("hover", ?file_id, ?offset, ?locale).entered();
 
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
@@ -42,9 +44,9 @@ pub(crate) fn hover<DB: RootDatabase>(
 
     match classify_token(&token) {
         NameClass::FieldName { receiver, token, is_call } => {
-            hover_field(db, file_id, &receiver, &token, is_call)
+            hover_field(db, file_id, &receiver, &token, is_call, locale)
         }
-        NameClass::FreeName { token } => hover_free_name(db, file_id, &token),
+        NameClass::FreeName { token } => hover_free_name(db, file_id, &token, locale),
         NameClass::TypeRef { token } => {
             hover_for_platform_type(db, token.text(), token.text_range())
         }
@@ -80,6 +82,7 @@ fn hover_field<DB: RootDatabase>(
     receiver: &SyntaxNode,
     token: &SyntaxToken,
     is_call: bool,
+    locale: Locale,
 ) -> Option<HoverResult> {
     let sema = Semantics::new(db);
     let receiver_ty = sema.type_of_expr(file_id, receiver);
@@ -113,7 +116,7 @@ fn hover_field<DB: RootDatabase>(
     // get the cross-module hover for free.
     let inferred_ty = type_of_token(&sema, file_id, token);
     if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
-        return definition_to_hover(db, &definition, range, inferred_ty.as_ref());
+        return definition_to_hover(db, &definition, range, inferred_ty.as_ref(), locale);
     }
 
     None
@@ -137,20 +140,21 @@ fn hover_free_name<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     token: &SyntaxToken,
+    locale: Locale,
 ) -> Option<HoverResult> {
     let sema = Semantics::new(db);
     let inferred_ty = type_of_token(&sema, file_id, token);
 
     if let Some(definition) = sema.resolve_name_to_definition(file_id, token) {
         if let Some(r) =
-            definition_to_hover(db, &definition, token.text_range(), inferred_ty.as_ref())
+            definition_to_hover(db, &definition, token.text_range(), inferred_ty.as_ref(), locale)
         {
             return Some(r);
         }
     } else if let Some(ty) = inferred_ty.as_ref() {
         // Implicit variable (no `Перем`) — surface its inferred type.
         let mut markup = format!("**{}**\n\n", token.text());
-        if let Some(type_block) = ty_info_markup(db, ty) {
+        if let Some(type_block) = ty_info_markup(db, ty, locale) {
             markup.push_str(&type_block);
             return Some(HoverResult { markup, range: Some(token.text_range()) });
         }
@@ -252,6 +256,7 @@ fn definition_to_hover<DB: RootDatabase>(
     definition: &hir::Definition,
     range: TextRange,
     inferred_ty: Option<&Ty>,
+    locale: Locale,
 ) -> Option<HoverResult> {
     let mut markup = String::new();
 
@@ -344,7 +349,7 @@ fn definition_to_hover<DB: RootDatabase>(
             }
 
             if let Some(ty) = inferred_ty {
-                if let Some(block) = ty_info_markup(db, ty) {
+                if let Some(block) = ty_info_markup(db, ty, locale) {
                     markup.push_str(&block);
                 }
             }
@@ -353,7 +358,7 @@ fn definition_to_hover<DB: RootDatabase>(
         hir::Definition::Parameter { param_name, .. } => {
             markup.push_str(&format!("**Параметр {}**\n\n", param_name.as_str()));
             if let Some(ty) = inferred_ty {
-                if let Some(block) = ty_info_markup(db, ty) {
+                if let Some(block) = ty_info_markup(db, ty, locale) {
                     markup.push_str(&block);
                 }
             }
@@ -362,7 +367,7 @@ fn definition_to_hover<DB: RootDatabase>(
         hir::Definition::Local { var_name, .. } => {
             markup.push_str(&format!("**Локальная переменная {}**\n\n", var_name.as_str()));
             if let Some(ty) = inferred_ty {
-                if let Some(block) = ty_info_markup(db, ty) {
+                if let Some(block) = ty_info_markup(db, ty, locale) {
                     markup.push_str(&block);
                 }
             }
@@ -510,9 +515,12 @@ fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<St
 ///   bare `**Тип:** name` line when the platform data has no entry for
 ///   `name`, so IDE output stays informative even if the index is
 ///   incomplete.
-/// - Anything else → bilingual `**Тип:** Русское / English` line built
-///   from [`render_ty_ru`] and [`Ty::display_name`].
-fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty) -> Option<String> {
+/// - Anything else → single locale-aware `**Тип:** <label>` line via
+///   [`Ty::display`]. Renders unions, MDO refs, manager refs, and
+///   form-data wrappers richly (`СправочникСсылка.Товары` /
+///   `CatalogRef.Товары`, `Справочник.Товары` / `Catalog.Товары`,
+///   `ДанныеФормыСтруктура (ДокументОбъект.ПКО)`).
+fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<String> {
     if ty.is_unknown() {
         return None;
     }
@@ -524,120 +532,7 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty) -> Option<String> {
         return Some(format!("**Тип:** {}\n\n", name.as_str()));
     }
 
-    let ru = render_ty_ru(ty);
-    let en = ty.display_name();
-    if ru == en {
-        Some(format!("**Тип:** {}\n\n", ru))
-    } else {
-        Some(format!("**Тип:** {} / {}\n\n", ru, en))
-    }
-}
-
-/// Render a [`Ty`] using Russian BSL type names.
-///
-/// `Ty::display_name` returns English identifiers ("Number", "String") that
-/// match the platform metadata keys but feel foreign in hover text for a
-/// Russian-first language. This helper flips the leaf variants to their
-/// idiomatic Russian spelling and builds fully-qualified labels for MDO
-/// variants (`ДокументСсылка.ПКО`, `Справочник.Валюты`). Union rendering
-/// joins components with " | " in the smart-constructor-imposed order.
-///
-/// `PlatformObject` is not expected to reach this path — `ty_info_markup`
-/// handles it directly with richer platform-data enrichment.
-fn render_ty_ru(ty: &Ty) -> String {
-    match ty {
-        Ty::Number => "Число".into(),
-        Ty::String => "Строка".into(),
-        Ty::Boolean => "Булево".into(),
-        Ty::Date => "Дата".into(),
-        Ty::Undefined => "Неопределено".into(),
-        Ty::Null => "Null".into(),
-        Ty::Array => "Массив".into(),
-        Ty::Structure => "Структура".into(),
-        Ty::Map => "Соответствие".into(),
-        Ty::Type => "Тип".into(),
-        Ty::ValueTable => "ТаблицаЗначений".into(),
-        Ty::ValueList => "СписокЗначений".into(),
-        Ty::Function { .. } => "Функция".into(),
-        Ty::ThisObject { .. } => "ЭтотОбъект".into(),
-        Ty::FormData { kind, underlying } => {
-            // Surface the projected MDO so hover on `Объект` reads
-            // "ДанныеФормыСтруктура (ДокументОбъект.ПКО)" — the wrapper
-            // name explains method semantics, the parenthetical reminds
-            // the reader which catalog/document fields are visible.
-            // The `*Object` MetadataKind is the same surface a manual
-            // `ЭтотОбъект` cast would expose, so we reuse `metadata_kind_ru`
-            // for consistency with `Ty::MetadataRef` rendering.
-            let wrapper = kind.platform_type_name();
-            match underlying
-                .as_ref()
-                .and_then(|(mdo, name)| MetadataKind::object_kind_for(*mdo).map(|k| (k, name)))
-            {
-                Some((object_kind, name)) => {
-                    format!("{} ({}.{})", wrapper, metadata_kind_ru(object_kind), name.as_str())
-                }
-                None => wrapper.into(),
-            }
-        }
-        Ty::MetadataRef { kind, name } => {
-            format!("{}.{}", metadata_kind_ru(*kind), name.as_str())
-        }
-        Ty::ObjectManager { kind, name } => {
-            format!("{}.{}", kind.russian_name(), name.as_str())
-        }
-        Ty::ManagerCollection(kind) => kind.russian_name().into(),
-        Ty::PlatformObject(name) => name.as_str().into(),
-        Ty::Union(types) => {
-            let mut parts = Vec::with_capacity(types.len());
-            for t in types.iter() {
-                parts.push(render_ty_ru(t));
-            }
-            parts.join(" | ")
-        }
-        Ty::Unknown => ty.display_name().into(),
-    }
-}
-
-/// Map a [`MetadataKind`] to the canonical Russian BSL type name.
-///
-/// Parametric variants (`TabularSection { parent }`, `RegisterDimension { parent }`,
-/// …) carry the parent [`bsl_metadata::MdoType`] in the value itself; the
-/// enclosing `Ty::MetadataRef`'s `name` already encodes the `"Parent.Section"`
-/// suffix, so the label stays focused on the kind tag and the full path is
-/// still visible as `{label}.{name}`.
-fn metadata_kind_ru(kind: MetadataKind) -> &'static str {
-    match kind {
-        MetadataKind::CatalogRef => "СправочникСсылка",
-        MetadataKind::CatalogObject => "СправочникОбъект",
-        MetadataKind::DocumentRef => "ДокументСсылка",
-        MetadataKind::DocumentObject => "ДокументОбъект",
-        MetadataKind::EnumRef => "ПеречислениеСсылка",
-        MetadataKind::TaskRef => "ЗадачаСсылка",
-        MetadataKind::BusinessProcessRef => "БизнесПроцессСсылка",
-        MetadataKind::ExchangePlanRef => "ПланОбменаСсылка",
-        MetadataKind::ExchangePlanObject => "ПланОбменаОбъект",
-        MetadataKind::ChartOfAccountsRef => "ПланСчетовСсылка",
-        MetadataKind::ChartOfAccountsObject => "ПланСчетовОбъект",
-        MetadataKind::InformationRegisterRef => "РегистрСведенийКлючЗаписи",
-        MetadataKind::InformationRegisterRecordManager => "РегистрСведенийМенеджерЗаписи",
-        MetadataKind::InformationRegisterRecordSet => "РегистрСведенийНаборЗаписей",
-        MetadataKind::InformationRegisterRecord => "РегистрСведенийЗапись",
-        MetadataKind::AccumulationRegisterRef => "РегистрНакопленияКлючЗаписи",
-        MetadataKind::AccumulationRegisterRecordSet => "РегистрНакопленияНаборЗаписей",
-        MetadataKind::AccumulationRegisterRecord => "РегистрНакопленияЗапись",
-        MetadataKind::AccountingRegisterRef => "РегистрБухгалтерииКлючЗаписи",
-        MetadataKind::AccountingRegisterRecordSet => "РегистрБухгалтерииНаборЗаписей",
-        MetadataKind::AccountingRegisterRecord => "РегистрБухгалтерииЗапись",
-        MetadataKind::CalculationRegisterRef => "РегистрРасчётаКлючЗаписи",
-        MetadataKind::CalculationRegisterRecordSet => "РегистрРасчетаНаборЗаписей",
-        MetadataKind::CalculationRegisterRecord => "РегистрРасчетаЗапись",
-        MetadataKind::RegisterDimension { .. } => "Измерение",
-        MetadataKind::RegisterResource { .. } => "Ресурс",
-        MetadataKind::RegisterAttribute { .. } => "Реквизит",
-        MetadataKind::RegisterFilter { .. } => "Отбор",
-        MetadataKind::TabularSection { .. } => "ТабличнаяЧасть",
-        MetadataKind::TabularSectionRow { .. } => "СтрокаТабличнойЧасти",
-    }
+    Some(format!("**Тип:** {}\n\n", ty.display(locale)))
 }
 
 /// Generates hover information for platform methods.

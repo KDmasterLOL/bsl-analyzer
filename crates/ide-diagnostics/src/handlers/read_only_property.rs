@@ -36,7 +36,7 @@ pub fn from_hir(
     let message = format!(
         "Свойство '{}' типа '{}' доступно только для чтения",
         field_name.as_str(),
-        receiver_ty.display_name()
+        receiver_ty.display_name(ctx.locale())
     );
     crate::simple_hir_diagnostic(DiagnosticCode::ReadOnlyPropertyAssignment, message, range, ctx)
 }

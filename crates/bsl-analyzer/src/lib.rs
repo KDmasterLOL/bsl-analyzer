@@ -12,6 +12,7 @@ pub mod features_state;
 pub mod frozen_context;
 pub mod global_state;
 pub mod handlers;
+pub mod locale;
 pub mod lsp;
 pub mod mcp_install;
 pub mod mem_docs;
