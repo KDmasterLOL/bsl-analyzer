@@ -357,26 +357,113 @@ pub enum FormDataTarget {
     Attribute { ty: Box<Ty> },
 }
 
-/// Russian platform type name backing the control's method table —
-/// `bsl-platform`'s entry for the corresponding form-control wrapper.
-/// [`FormElementKind::Other`] returns `None`: the kind is unrecognised,
-/// so there is no platform table to query and method lookup falls
+/// Ordered chain of platform type names for the control's property and
+/// method tables — `[base, extension?]`. Every consumer (field lookup,
+/// method lookup, hover, completion, `hir::Type` facade) walks this
+/// chain reversed (extension first, base second) so extension-only
+/// members (`<Pages>.ТекущаяСтраница`, `<UsualGroup>.Скрыть`,
+/// `<Page>` page-specific properties, …) reach the user.
+///
+/// `chain[0]` is the user-facing display key (the base wrapper name);
+/// `chain.last()` is the most specific extension. `Other` returns the
+/// empty slice — no platform table to query and method lookup falls
 /// through to `Ty::Unknown` instead of mis-classifying.
 ///
+/// The five group sub-kinds (`UsualGroup`, `Pages`, `Page`,
+/// `CommandBar`, `ButtonGroup`) carry both the base `ГруппаФормы` and
+/// their dedicated platform extension. The catch-all `Group` keeps a
+/// single-element chain — extensions are optional.
+///
 /// Free function rather than inherent impl because [`FormElementKind`]
-/// is defined in `bsl-metadata` (orphan rule). The mapping itself is
-/// platform-specific (`Table → "ТаблицаФормы"`), which conceptually
-/// belongs alongside other platform-name lookups in this module rather
-/// than with the XML-tag taxonomy.
-pub fn form_control_platform_type_name(kind: FormElementKind) -> Option<&'static str> {
+/// is defined in `bsl-metadata` (orphan rule).
+pub fn form_control_platform_type_chain(kind: FormElementKind) -> &'static [&'static str] {
     match kind {
-        FormElementKind::Table => Some("ТаблицаФормы"),
-        FormElementKind::Group => Some("ГруппаФормы"),
-        FormElementKind::Field => Some("ПолеФормы"),
-        FormElementKind::Button => Some("КнопкаФормы"),
-        FormElementKind::Decoration => Some("ДекорацияФормы"),
-        FormElementKind::Addition => Some("ДополнениеЭлементаФормы"),
-        FormElementKind::Other => None,
+        FormElementKind::Table => &["ТаблицаФормы"],
+        FormElementKind::Group => &["ГруппаФормы"],
+        FormElementKind::UsualGroup => {
+            &["ГруппаФормы", "Расширение группы формы для обычной группы"]
+        }
+        FormElementKind::Pages => &["ГруппаФормы", "Расширение группы формы для страниц"],
+        FormElementKind::Page => &["ГруппаФормы", "Расширение группы формы для страницы"],
+        FormElementKind::CommandBar => {
+            &["ГруппаФормы", "Расширение группы формы для командной панели"]
+        }
+        FormElementKind::ButtonGroup => {
+            &["ГруппаФормы", "Расширение группы формы для группы кнопок"]
+        }
+        FormElementKind::Field => &["ПолеФормы"],
+        FormElementKind::Button => &["КнопкаФормы"],
+        FormElementKind::Decoration => &["ДекорацияФормы"],
+        FormElementKind::Addition => &["ДополнениеЭлементаФормы"],
+        FormElementKind::Other => &[],
+    }
+}
+
+/// Primary platform type name (the base wrapper, e.g. `ТаблицаФормы` /
+/// `ГруппаФормы`) — kept as a thin convenience over
+/// [`form_control_platform_type_chain`] so display callers (hover label,
+/// `Ty::display_name`) don't allocate a slice walk for one entry.
+///
+/// `Other` returns `None`. All other kinds return `Some(chain[0])`.
+pub fn form_control_platform_type_name(kind: FormElementKind) -> Option<&'static str> {
+    form_control_platform_type_chain(kind).first().copied()
+}
+
+/// Human-facing label for a form-element kind, bilingual.
+///
+/// Single source of truth for completion item details, hover badges and
+/// any other UI surface that needs to name a kind. Lives in `hir-def`
+/// rather than `bsl-metadata` because `Locale` is an interface-adapter
+/// concern (i18n) and the entity layer should not depend on it (Clean
+/// Architecture decision in plan v3.1, table row #5).
+pub fn form_element_kind_label(kind: FormElementKind, locale: base_db::Locale) -> &'static str {
+    use base_db::Locale;
+    match (kind, locale) {
+        (FormElementKind::Table, Locale::Ru) => "Таблица",
+        (FormElementKind::Table, Locale::En) => "Table",
+        (FormElementKind::Group, Locale::Ru) => "Группа",
+        (FormElementKind::Group, Locale::En) => "Group",
+        (FormElementKind::UsualGroup, Locale::Ru) => "Обычная группа",
+        (FormElementKind::UsualGroup, Locale::En) => "Usual group",
+        (FormElementKind::Pages, Locale::Ru) => "Страницы",
+        (FormElementKind::Pages, Locale::En) => "Pages",
+        (FormElementKind::Page, Locale::Ru) => "Страница",
+        (FormElementKind::Page, Locale::En) => "Page",
+        (FormElementKind::CommandBar, Locale::Ru) => "Командная панель",
+        (FormElementKind::CommandBar, Locale::En) => "Command bar",
+        (FormElementKind::ButtonGroup, Locale::Ru) => "Группа кнопок",
+        (FormElementKind::ButtonGroup, Locale::En) => "Button group",
+        (FormElementKind::Field, Locale::Ru) => "Поле",
+        (FormElementKind::Field, Locale::En) => "Field",
+        (FormElementKind::Button, Locale::Ru) => "Кнопка",
+        (FormElementKind::Button, Locale::En) => "Button",
+        (FormElementKind::Decoration, Locale::Ru) => "Декорация",
+        (FormElementKind::Decoration, Locale::En) => "Decoration",
+        (FormElementKind::Addition, Locale::Ru) => "Дополнение",
+        (FormElementKind::Addition, Locale::En) => "Addition",
+        (FormElementKind::Other, _) => "Элемент формы",
+    }
+}
+
+/// Sort band for completion popups. Tables (`10`) → groups (`20`) →
+/// fields (`30`) → buttons (`40`) → decorations (`50`) → additions
+/// (`60`) → other (`70`). Decoupled from `derive(Ord)` because the
+/// append-only discriminant policy puts new variants AFTER `Other`,
+/// which is the wrong UI order.
+pub fn form_element_kind_sort_band(kind: FormElementKind) -> u8 {
+    match kind {
+        FormElementKind::Table => 10,
+        FormElementKind::Group
+        | FormElementKind::UsualGroup
+        | FormElementKind::Pages
+        | FormElementKind::Page
+        | FormElementKind::CommandBar
+        | FormElementKind::ButtonGroup => 20,
+        FormElementKind::Field => 30,
+        FormElementKind::Button => 40,
+        FormElementKind::Decoration => 50,
+        FormElementKind::Addition => 60,
+        FormElementKind::Other => 70,
     }
 }
 
@@ -1717,6 +1804,134 @@ mod tests {
             Some("ДополнениеЭлементаФормы")
         );
         assert_eq!(form_control_platform_type_name(FormElementKind::Other), None);
+
+        // New variants from Phase 9 of v3.1: each carries its own
+        // platform extension but the *primary* (display) key stays the
+        // shared `ГруппаФормы` base — extension lives at chain[1].
+        assert_eq!(
+            form_control_platform_type_name(FormElementKind::UsualGroup),
+            Some("ГруппаФормы")
+        );
+        assert_eq!(form_control_platform_type_name(FormElementKind::Pages), Some("ГруппаФормы"));
+        assert_eq!(form_control_platform_type_name(FormElementKind::Page), Some("ГруппаФормы"));
+        assert_eq!(
+            form_control_platform_type_name(FormElementKind::CommandBar),
+            Some("ГруппаФормы")
+        );
+        assert_eq!(
+            form_control_platform_type_name(FormElementKind::ButtonGroup),
+            Some("ГруппаФормы")
+        );
+    }
+
+    #[test]
+    fn form_control_platform_type_chain_carries_extension_for_group_subkinds() {
+        // The chain returned by `form_control_platform_type_chain` is the
+        // load-bearing API for property/method lookup. Reading order is
+        // [base, extension] — but lookup walks reversed (extension first)
+        // so e.g. `<Pages>.ТекущаяСтраница` resolves on the extension hit.
+        // This test pins the slice contents per kind.
+        assert_eq!(form_control_platform_type_chain(FormElementKind::Table), &["ТаблицаФормы"]);
+        assert_eq!(form_control_platform_type_chain(FormElementKind::Group), &["ГруппаФормы"]);
+        assert_eq!(
+            form_control_platform_type_chain(FormElementKind::UsualGroup),
+            &["ГруппаФормы", "Расширение группы формы для обычной группы"]
+        );
+        assert_eq!(
+            form_control_platform_type_chain(FormElementKind::Pages),
+            &["ГруппаФормы", "Расширение группы формы для страниц"]
+        );
+        assert_eq!(
+            form_control_platform_type_chain(FormElementKind::Page),
+            &["ГруппаФормы", "Расширение группы формы для страницы"]
+        );
+        assert_eq!(
+            form_control_platform_type_chain(FormElementKind::CommandBar),
+            &["ГруппаФормы", "Расширение группы формы для командной панели"]
+        );
+        assert_eq!(
+            form_control_platform_type_chain(FormElementKind::ButtonGroup),
+            &["ГруппаФормы", "Расширение группы формы для группы кнопок"]
+        );
+        assert_eq!(form_control_platform_type_chain(FormElementKind::Field), &["ПолеФормы"]);
+        assert_eq!(form_control_platform_type_chain(FormElementKind::Button), &["КнопкаФормы"]);
+        assert_eq!(
+            form_control_platform_type_chain(FormElementKind::Decoration),
+            &["ДекорацияФормы"]
+        );
+        assert_eq!(
+            form_control_platform_type_chain(FormElementKind::Addition),
+            &["ДополнениеЭлементаФормы"]
+        );
+        assert_eq!(
+            form_control_platform_type_chain(FormElementKind::Other),
+            &[] as &[&'static str]
+        );
+    }
+
+    #[test]
+    fn form_control_platform_type_name_equals_chain_first_for_all_kinds() {
+        // Invariant: the scalar primary key is exactly chain[0]. If this
+        // ever drifts, display labels and lookup primary key disagree —
+        // the kind of bug that wastes hours.
+        for kind in [
+            FormElementKind::Table,
+            FormElementKind::Group,
+            FormElementKind::UsualGroup,
+            FormElementKind::Pages,
+            FormElementKind::Page,
+            FormElementKind::CommandBar,
+            FormElementKind::ButtonGroup,
+            FormElementKind::Field,
+            FormElementKind::Button,
+            FormElementKind::Decoration,
+            FormElementKind::Addition,
+            FormElementKind::Other,
+        ] {
+            assert_eq!(
+                form_control_platform_type_name(kind),
+                form_control_platform_type_chain(kind).first().copied(),
+                "scalar key must equal chain[0] for kind {:?}",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn form_element_kind_label_is_bilingual_and_total() {
+        // Every kind has both Ru and En labels (Other deliberately
+        // shares a single label with no English glossary entry).
+        use base_db::Locale;
+        assert_eq!(form_element_kind_label(FormElementKind::Table, Locale::Ru), "Таблица");
+        assert_eq!(form_element_kind_label(FormElementKind::Table, Locale::En), "Table");
+        assert_eq!(form_element_kind_label(FormElementKind::Pages, Locale::Ru), "Страницы");
+        assert_eq!(form_element_kind_label(FormElementKind::Pages, Locale::En), "Pages");
+        assert_eq!(
+            form_element_kind_label(FormElementKind::UsualGroup, Locale::Ru),
+            "Обычная группа"
+        );
+        assert_eq!(form_element_kind_label(FormElementKind::UsualGroup, Locale::En), "Usual group");
+        assert_eq!(form_element_kind_label(FormElementKind::Other, Locale::Ru), "Элемент формы");
+        assert_eq!(form_element_kind_label(FormElementKind::Other, Locale::En), "Элемент формы");
+    }
+
+    #[test]
+    fn form_element_kind_sort_band_groups_share_one_band() {
+        // All group sub-kinds share band 20 — the popup orders groups
+        // together regardless of which extension chain they carry.
+        // Tables come before, fields after; Other lands at the bottom.
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Table), 10);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Group), 20);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::UsualGroup), 20);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Pages), 20);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Page), 20);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::CommandBar), 20);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::ButtonGroup), 20);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Field), 30);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Button), 40);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Decoration), 50);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Addition), 60);
+        assert_eq!(form_element_kind_sort_band(FormElementKind::Other), 70);
     }
 
     #[test]

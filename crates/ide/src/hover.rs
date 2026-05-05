@@ -178,6 +178,19 @@ fn hover_platform_property_on_ty<DB: RootDatabase>(
     if receiver_ty.is_unknown() {
         return None;
     }
+    // Form-control receivers carry an ordered platform-type chain
+    // `[base, extension?]` — walk reversed (extension first) so
+    // hover for `<Pages>.ТекущаяСтраница` finds the extension docs,
+    // and falls back to base for shared properties (`Видимость`, …).
+    if let Ty::FormControl { kind, .. } = receiver_ty {
+        for type_name in hir::form_control_platform_type_chain(*kind).iter().rev() {
+            let input = MethodLookupInput::new(db, type_name.to_string(), prop_name.to_string());
+            if let Some(prop) = platform_property_query(db, input) {
+                return Some(render_property_hover(&prop, range));
+            }
+        }
+        return None;
+    }
     let type_key = receiver_ty.platform_type_name()?;
     let input = MethodLookupInput::new(db, type_key.to_string(), prop_name.to_string());
     let prop = platform_property_query(db, input)?;

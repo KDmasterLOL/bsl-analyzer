@@ -45,9 +45,20 @@ use crate::field_lookup;
 use crate::form_attr::lower_form_attribute_to_ty;
 
 /// Russian platform type name for the form-elements collection.
-pub(crate) const FORM_ITEMS_TYPE_RU: &str = "ВсеЭлементыФормы";
+pub const FORM_ITEMS_TYPE_RU: &str = "ВсеЭлементыФормы";
 /// English platform type name for the form-elements collection.
-pub(crate) const FORM_ITEMS_TYPE_EN: &str = "FormAllItems";
+pub const FORM_ITEMS_TYPE_EN: &str = "FormAllItems";
+
+/// `true` if `ty` is the form-elements collection (`Элементы` / `Items`
+/// receiver). Mirrors the receiver gate used by [`lookup_form_item_field`]
+/// so completion can offer the same suggestion list that the field-access
+/// pipeline resolves against — single source of truth, no IDE-side
+/// duplicate of the bilingual case-folding rule.
+pub fn is_form_items_collection_ty(ty: &Ty) -> bool {
+    let Ty::PlatformObject(name) = ty else { return false };
+    name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_RU))
+        || name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_EN))
+}
 
 /// Resolve `Элементы.<field>` against the form's XML element table.
 ///
@@ -484,6 +495,11 @@ mod tests {
         let form = empty_form("Ф");
         for k in [
             FormElementKind::Group,
+            FormElementKind::UsualGroup,
+            FormElementKind::Pages,
+            FormElementKind::Page,
+            FormElementKind::CommandBar,
+            FormElementKind::ButtonGroup,
             FormElementKind::Decoration,
             FormElementKind::Addition,
             FormElementKind::Other,
@@ -648,6 +664,11 @@ mod tests {
             FormElementKind::Field,
             FormElementKind::Button,
             FormElementKind::Group,
+            FormElementKind::UsualGroup,
+            FormElementKind::Pages,
+            FormElementKind::Page,
+            FormElementKind::CommandBar,
+            FormElementKind::ButtonGroup,
             FormElementKind::Decoration,
             FormElementKind::Addition,
             FormElementKind::Other,

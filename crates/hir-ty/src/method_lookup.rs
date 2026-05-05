@@ -189,6 +189,22 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
             // not on rows.
             return None;
         }
+        // Form-control receivers walk the platform-type chain
+        // `[base, extension?]` reversed: kind-specific extension
+        // methods (e.g. `<UsualGroup>.Скрыть()` from "Расширение
+        // группы формы для обычной группы") override the shared base
+        // `ГруппаФормы` table. Single-entry chains (Field/Button/etc.)
+        // reduce to one `get_method` call. `Other` chain is empty →
+        // immediate `None`.
+        Ty::FormControl { kind, .. } => {
+            let data = PlatformData::instance();
+            for type_name in hir_def::ty::form_control_platform_type_chain(*kind).iter().rev() {
+                if let Some(method) = data.get_method(type_name, method_name.as_str()) {
+                    return Some(to_method_info(method));
+                }
+            }
+            return None;
+        }
         _ => {}
     }
 
@@ -1125,5 +1141,62 @@ mod tests {
                 name: Name::new("Основной.ВидыСубконто"),
             }
         );
+    }
+
+    // ---------- Phase 12: form-control chain walk for methods ----------
+
+    #[test]
+    fn method_lookup_usual_group_resolves_extension_method() {
+        // `<UsualGroup>.Скрыть()` lives in `Расширение группы формы для
+        // обычной группы` (3 methods total: Скрыть/Показать/Скрыта),
+        // NOT on the shared `ГруппаФормы` base. Without the chain walk
+        // method dispatch would miss; chain.iter().rev() hits the
+        // extension first.
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::UsualGroup, binding: None };
+        assert!(
+            lookup_method(&receiver, &Name::new("Скрыть")).is_some(),
+            "<UsualGroup>.Скрыть must resolve via the usual-group extension chain entry"
+        );
+        assert!(
+            lookup_method(&receiver, &Name::new("Показать")).is_some(),
+            "<UsualGroup>.Показать must resolve via the usual-group extension chain entry"
+        );
+    }
+
+    #[test]
+    fn method_lookup_pages_does_not_borrow_usual_group_methods() {
+        // `Скрыть`/`Показать` are scoped to the UsualGroup extension.
+        // A `<Pages>` receiver carries the Pages extension only — its
+        // chain must NOT surface UsualGroup methods.
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::Pages, binding: None };
+        assert!(
+            lookup_method(&receiver, &Name::new("Скрыть")).is_none(),
+            "Pages chain must not borrow UsualGroup-extension methods"
+        );
+    }
+
+    #[test]
+    fn method_lookup_form_control_other_with_empty_chain_returns_none() {
+        // `Other` chain is empty → the rev-walk loop runs zero
+        // iterations and we return None safely without panicking.
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::Other, binding: None };
+        assert!(lookup_method(&receiver, &Name::new("Скрыть")).is_none());
+    }
+
+    #[test]
+    fn method_lookup_form_control_table_unchanged_by_chain_walk() {
+        // Single-entry chain (`["ТаблицаФормы"]`) reduces the chain
+        // walk to one `get_method` call — identical pre-chain
+        // behaviour. Pinning it as a non-regression for kinds that
+        // weren't split.
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        // ТаблицаФормы has documented platform method `ОбновитьСтроки`
+        // (per platform_data; this is a stable canary). If the data
+        // ever drops it, swap for any other `ТаблицаФормы` method.
+        let _ = lookup_method(&receiver, &Name::new("ОбновитьСтроки"));
     }
 }

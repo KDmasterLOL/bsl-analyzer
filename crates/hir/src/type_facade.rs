@@ -272,6 +272,28 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     ///   their method tables (predefined / manager methods) are covered
     ///   by the M4 adapter.
     pub fn methods(&self) -> Vec<Method> {
+        // Form-control receivers carry an ordered platform-type chain
+        // `[base, extension?]` — merge methods across the chain so
+        // extension members (`<UsualGroup>.Скрыть`, …) appear next to
+        // shared base methods. Single-entry chains reduce to one
+        // platform-data lookup, identical to the pre-chain shape.
+        if let Ty::FormControl { kind, .. } = &self.ty {
+            let chain = hir_def::ty::form_control_platform_type_chain(*kind);
+            let mut methods: Vec<Method> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Walk reversed so extension members win on collision —
+            // matches `lookup_method` precedence.
+            for type_name in chain.iter().rev() {
+                for m in PlatformData::instance().get_type_methods(type_name) {
+                    let dto = method_dto_from_platform(m);
+                    if seen.insert(dto.name.as_str().to_lowercase()) {
+                        methods.push(dto);
+                    }
+                }
+            }
+            return methods;
+        }
+
         let Some(type_key) = platform_type_key(&self.ty) else {
             return Vec::new();
         };

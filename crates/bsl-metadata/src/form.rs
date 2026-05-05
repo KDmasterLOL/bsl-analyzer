@@ -30,7 +30,9 @@ use crate::metadata_object::AttributeType;
 pub enum FormElementKind {
     /// `<Table>` — UI table control bound to a tabular section.
     Table = 0,
-    /// `<UsualGroup>`, `<Pages>`, `<Page>`, `<CommandBar>`, `<ButtonGroup>`.
+    /// Catch-all for group-shaped tags not in the dedicated set below
+    /// (`<Popup>`, `<ColumnGroup>`, future shapes). Falls back to plain
+    /// `ГруппаФормы` platform members — no extension chain.
     Group = 1,
     /// `<InputField>`, `<LabelField>`, `<CheckBoxField>`, `<RadioButtonField>`,
     /// `<HTMLField>`, `<PictureField>`, `<SpreadsheetDocumentField>`, etc.
@@ -46,6 +48,21 @@ pub enum FormElementKind {
     /// surfaced (its name participates in `Элементы.<имя>` lookup) but
     /// type resolution falls through to `Unknown`.
     Other = 6,
+    /// `<UsualGroup>` — has its own platform extension
+    /// `Расширение группы формы для обычной группы` carrying 23
+    /// extension properties and 3 methods (`Скрыть`/`Показать`/`Скрыта`).
+    UsualGroup = 7,
+    /// `<Pages>` — has the platform extension
+    /// `Расширение группы формы для страниц` (carries `ТекущаяСтраница`).
+    Pages = 8,
+    /// `<Page>` — has the platform extension
+    /// `Расширение группы формы для страницы` (carries 15 page-specific properties).
+    Page = 9,
+    /// `<CommandBar>` and `<AutoCommandBar>` — extension
+    /// `Расширение группы формы для командной панели`.
+    CommandBar = 10,
+    /// `<ButtonGroup>` — extension `Расширение группы формы для группы кнопок`.
+    ButtonGroup = 11,
 }
 
 /// Form element with data path information.
@@ -394,6 +411,10 @@ mod tests {
         // `Ord` and Phase 3 wraps `FormElementKind` inside `Ty::FormControl`.
         // If a future variant renumbers these values, Salsa caches keyed on
         // `Ty` would silently invalidate. This test fails the build instead.
+        //
+        // 0..6 are pinned by the original Phase 1 design; 7..11 were appended
+        // in Phase 9 of v3.1 (group-tag disambiguation) and must keep these
+        // exact discriminants going forward — see plan v3.1 decision #2.
         assert_eq!(FormElementKind::Table as u8, 0);
         assert_eq!(FormElementKind::Group as u8, 1);
         assert_eq!(FormElementKind::Field as u8, 2);
@@ -401,14 +422,27 @@ mod tests {
         assert_eq!(FormElementKind::Decoration as u8, 4);
         assert_eq!(FormElementKind::Addition as u8, 5);
         assert_eq!(FormElementKind::Other as u8, 6);
+        assert_eq!(FormElementKind::UsualGroup as u8, 7);
+        assert_eq!(FormElementKind::Pages as u8, 8);
+        assert_eq!(FormElementKind::Page as u8, 9);
+        assert_eq!(FormElementKind::CommandBar as u8, 10);
+        assert_eq!(FormElementKind::ButtonGroup as u8, 11);
 
-        // Derived `Ord` follows the discriminants.
+        // Derived `Ord` follows the discriminants. New variants sort AFTER
+        // `Other` — a deliberate consequence of append-only discriminants.
+        // UI sort order (Tables → groups → Fields → …) is decoupled from
+        // this and lives on `form_element_kind_sort_band` (Phase 11).
         assert!(FormElementKind::Table < FormElementKind::Group);
         assert!(FormElementKind::Group < FormElementKind::Field);
         assert!(FormElementKind::Field < FormElementKind::Button);
         assert!(FormElementKind::Button < FormElementKind::Decoration);
         assert!(FormElementKind::Decoration < FormElementKind::Addition);
         assert!(FormElementKind::Addition < FormElementKind::Other);
+        assert!(FormElementKind::Other < FormElementKind::UsualGroup);
+        assert!(FormElementKind::UsualGroup < FormElementKind::Pages);
+        assert!(FormElementKind::Pages < FormElementKind::Page);
+        assert!(FormElementKind::Page < FormElementKind::CommandBar);
+        assert!(FormElementKind::CommandBar < FormElementKind::ButtonGroup);
     }
 
     #[test]
