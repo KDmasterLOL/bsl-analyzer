@@ -498,15 +498,23 @@ impl AnalysisOrchestrator {
             return DiagnosticsConfig::default();
         };
 
+        // Apply `[output] display_language` so CLI / streaming output is
+        // localized identically to the LSP path. The streaming pipeline
+        // does not see an LSP `InitializeParams.locale`, so the project
+        // setting and the analyzer default are the only signals — with
+        // no project preference, `Locale::default()` (= Ru) wins.
+        let output_locale = proj_config.output.resolve_locale().unwrap_or_default();
+
         // Deserialize diagnostics field into DiagnosticsConfig
-        match serde_json::from_value(proj_config.diagnostics) {
-            Ok(config) => {
+        match serde_json::from_value::<DiagnosticsConfig>(proj_config.diagnostics) {
+            Ok(mut config) => {
                 info!("Loaded diagnostics config from project file");
+                config.locale = output_locale;
                 config
             }
             Err(e) => {
                 warn!(error = %e, "Failed to parse diagnostics config, using default");
-                DiagnosticsConfig::default()
+                DiagnosticsConfig { locale: output_locale, ..Default::default() }
             }
         }
     }

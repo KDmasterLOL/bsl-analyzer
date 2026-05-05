@@ -390,7 +390,7 @@ fn completion_after_create_item_offers_catalog_object_methods() {
     let fixture_text = format!("//- /test.bsl\n{}", cleaned);
     let (db, file_id) = setup(&fixture_text);
     let analysis = ide::Analysis::from_database(db);
-    let items = analysis.completions(file_id, offset, None);
+    let items = analysis.completions(file_id, offset, None, ide::Locale::Ru);
 
     let has = |label: &str| items.iter().any(|i| i.label.eq_ignore_ascii_case(label));
     assert!(

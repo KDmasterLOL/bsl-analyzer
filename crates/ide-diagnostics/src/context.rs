@@ -35,6 +35,19 @@ impl<'a> DiagnosticsContext<'a> {
         Self { config, file_id, provider }
     }
 
+    /// User-facing output locale.
+    ///
+    /// Diagnostic emitters consult this when rendering primitive type names
+    /// and other localized labels (e.g. `"Число"` vs `"Number"`). Resolved at
+    /// the LSP layer from `[output] display_language` (TOML) or
+    /// `InitializeParams.locale` (LSP), defaulting to [`Locale::Ru`] when
+    /// neither is set.
+    ///
+    /// [`Locale::Ru`]: base_db::Locale::Ru
+    pub fn locale(&self) -> base_db::Locale {
+        self.config.locale
+    }
+
     /// Load configuration metadata via provider.
     ///
     /// Returns `None` if no configuration is available.

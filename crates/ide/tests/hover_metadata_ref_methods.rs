@@ -93,8 +93,9 @@ fn assert_hover_contains(fixture: &str, expected_substring: &str) {
         return;
     }
     let (analysis, file_id, offset) = setup(fixture);
-    let result =
-        analysis.hover(file_id, offset).expect("hover must resolve when platform data is present");
+    let result = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover must resolve when platform data is present");
     assert!(
         result.markup.contains(expected_substring),
         "hover markup did not contain `{}`; got:\n{}",

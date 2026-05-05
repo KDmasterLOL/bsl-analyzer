@@ -56,7 +56,7 @@ fn completions_at(code: &str) -> Vec<CompletionItem> {
     let cursor = code.find("$0").expect("fixture must mark cursor with $0");
     let without_cursor: String = format!("{}{}", &code[..cursor], &code[cursor + 2..]);
     let (db, file_id) = setup_inline(&without_cursor);
-    Analysis::from_database(db).completions(file_id, cursor as u32, None)
+    Analysis::from_database(db).completions(file_id, cursor as u32, None, ide::Locale::Ru)
 }
 
 #[test]
@@ -241,7 +241,7 @@ fn hover_on_query_parameters_renders_readonly_structure_block() {
     let (db, file_id) = setup_inline(code);
     // Place the hover cursor on the first character of `Параметры`.
     let hover = Analysis::from_database(db)
-        .hover(file_id, cursor as u32)
+        .hover(file_id, cursor as u32, ide::Locale::Ru)
         .expect("hover must return a result for Зап.Параметры");
     let markup = &hover.markup;
     assert!(
@@ -381,7 +381,7 @@ fn hover_on_chained_method_resolves_platform_method() {
     let cursor = code.rfind("ВыгрузитьКолонку").expect("fixture must contain ВыгрузитьКолонку");
     let (db, file_id) = setup_inline(code);
     let hover = Analysis::from_database(db)
-        .hover(file_id, cursor as u32)
+        .hover(file_id, cursor as u32, ide::Locale::Ru)
         .expect("hover must produce a result on chained ВыгрузитьКолонку");
     let markup = &hover.markup;
     assert!(
@@ -422,7 +422,7 @@ fn hover_on_chained_method_does_not_match_workspace_free_function() {
         .rfind("ВыгрузитьКолонку(\"Ссылка")
         .expect("fixture must contain the chained call site");
     let (db, file_id) = setup_inline(code);
-    let result = Analysis::from_database(db).hover(file_id, cursor as u32);
+    let result = Analysis::from_database(db).hover(file_id, cursor as u32, ide::Locale::Ru);
     match result {
         Some(hover) => {
             assert!(
@@ -475,7 +475,7 @@ fn hover_on_chained_method_ignores_local_var_with_same_name() {
         .expect("fixture must contain the chained call site");
     let (db, file_id) = setup_inline(code);
     let hover = Analysis::from_database(db)
-        .hover(file_id, cursor as u32)
+        .hover(file_id, cursor as u32, ide::Locale::Ru)
         .expect("hover must produce a result");
     assert!(
         hover.markup.contains("ВыгрузитьКолонку") && hover.markup.contains("UnloadColumn"),

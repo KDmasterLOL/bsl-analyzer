@@ -152,13 +152,15 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     // `type_name` prefixes (`"CatalogManager."`, `"CatalogObject."`,
     // …). Route them through `manager_methods_query` with the
     // `bsl-metadata` / `hir::MetadataKind` prefix tables.
-    if let Some(items) = complete_prefix_methods_for_receiver(db, &receiver_ty, position.file_id) {
+    if let Some(items) =
+        complete_prefix_methods_for_receiver(db, &receiver_ty, position.file_id, position.locale)
+    {
         return Some(apply_prefix_filter(items, &prefix, db));
     }
 
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
-        let items = complete_platform_methods(db, type_name);
+        let items = complete_platform_methods(db, type_name, position.locale);
         return Some(apply_prefix_filter(items, &prefix, db));
     }
 
@@ -174,7 +176,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
         let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
         for m in members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)) {
             let Some(type_name) = m.platform_type_name() else { continue };
-            for item in complete_platform_methods(db, type_name) {
+            for item in complete_platform_methods(db, type_name, position.locale) {
                 if seen_labels.insert(item.label.clone()) {
                     items.push(item);
                 }
@@ -206,10 +208,11 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     db: &DB,
     receiver_ty: &Ty,
     file_id: FileId,
+    locale: ide_db::base_db::Locale,
 ) -> Option<Vec<CompletionItem>> {
     // Fast path: ObjectManager / ManagerCollection have no MDO fields.
     if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::ManagerCollection(_)) {
-        return collect_platform_items_or_none(db, receiver_ty);
+        return collect_platform_items_or_none(db, receiver_ty, locale);
     }
 
     // Coerce `ЭтотОбъект` so a catalog/document object module surfaces
@@ -235,13 +238,14 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     }
 
     let mdo_fields = HirType::new(db, file_id, effective_ty.clone()).fields();
-    let platform_items = collect_platform_items_for_effective(db, effective_ty);
+    let platform_items = collect_platform_items_for_effective(db, effective_ty, locale);
 
     if mdo_fields.is_empty() && platform_items.is_empty() {
         return None;
     }
 
-    let mut items: Vec<CompletionItem> = mdo_fields.iter().map(render_mdo_field).collect();
+    let mut items: Vec<CompletionItem> =
+        mdo_fields.iter().map(|f| render_mdo_field(f, locale)).collect();
     // Dedup keyed on the visible Russian label only. An MDO attribute and
     // a platform method are conceptually distinct symbols even when they
     // share an English alias (the platform method's English form is not
@@ -269,14 +273,15 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
 fn collect_platform_items_for_effective<DB: RootDatabase>(
     db: &DB,
     effective_ty: &Ty,
+    locale: ide_db::base_db::Locale,
 ) -> Vec<CompletionItem> {
     let Ty::Union(arms) = effective_ty else {
-        return collect_platform_items(db, effective_ty);
+        return collect_platform_items(db, effective_ty, locale);
     };
     let mut out: Vec<CompletionItem> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for arm in arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)) {
-        for item in collect_platform_items(db, arm) {
+        for item in collect_platform_items(db, arm, locale) {
             if seen.insert(item.label.to_lowercase()) {
                 out.push(item);
             }
@@ -296,15 +301,19 @@ fn collect_platform_items_for_effective<DB: RootDatabase>(
 /// - `ObjectManager` → manager prefix.
 /// - `MetadataRef` with a known [`hir::MetadataKind::platform_prefix`] →
 ///   manager prefix.
-fn collect_platform_items<DB: RootDatabase>(db: &DB, receiver_ty: &Ty) -> Vec<CompletionItem> {
+fn collect_platform_items<DB: RootDatabase>(
+    db: &DB,
+    receiver_ty: &Ty,
+    locale: ide_db::base_db::Locale,
+) -> Vec<CompletionItem> {
     if let Ty::MetadataRef { kind, .. } = receiver_ty {
         if let Some(scalar_key) = tabular_section_scalar_key(*kind) {
             tracing::debug!(scalar_key, "Tabular section scalar completion");
-            return complete_platform_methods(db, scalar_key);
+            return complete_platform_methods(db, scalar_key, locale);
         }
         if let Some(scalar_key) = kind.scalar_platform_key() {
             tracing::debug!(scalar_key, "Synthetic-kind scalar completion");
-            return complete_platform_methods(db, scalar_key);
+            return complete_platform_methods(db, scalar_key, locale);
         }
     }
     let prefix = match receiver_ty {
@@ -325,8 +334,9 @@ fn collect_platform_items<DB: RootDatabase>(db: &DB, receiver_ty: &Ty) -> Vec<Co
 fn collect_platform_items_or_none<DB: RootDatabase>(
     db: &DB,
     receiver_ty: &Ty,
+    locale: ide_db::base_db::Locale,
 ) -> Option<Vec<CompletionItem>> {
-    let items = collect_platform_items(db, receiver_ty);
+    let items = collect_platform_items(db, receiver_ty, locale);
     if items.is_empty() {
         None
     } else {
@@ -614,7 +624,11 @@ fn fallback_item(method: &MethodSymbol) -> CompletionItem {
 /// Keeping both lookups behind a single salsa-cached pair of queries
 /// (`type_methods_query` + `type_properties_query`) means completion
 /// doesn't pay for a live walk of `PlatformData` on every keystroke.
-fn complete_platform_methods(db: &dyn RootDatabase, receiver_type: &str) -> Vec<CompletionItem> {
+fn complete_platform_methods(
+    db: &dyn RootDatabase,
+    receiver_type: &str,
+    locale: ide_db::base_db::Locale,
+) -> Vec<CompletionItem> {
     let methods_input = TypeNameInput::new(db, receiver_type.to_string());
     let methods = type_methods_query(db, methods_input);
     let props_input = TypeNameInput::new(db, receiver_type.to_string());
@@ -627,7 +641,7 @@ fn complete_platform_methods(db: &dyn RootDatabase, receiver_type: &str) -> Vec<
     );
 
     let mut items: Vec<CompletionItem> = methods.iter().map(render_platform_method).collect();
-    items.extend(properties.iter().map(render_platform_property));
+    items.extend(properties.iter().map(|p| render_platform_property(p, locale)));
     items
 }
 
@@ -656,8 +670,9 @@ pub(super) fn render_platform_method(method: &PlatformMethod) -> CompletionItem 
 /// Unlike methods, properties don't go through the `symbol_info` signature
 /// pipeline: there are no parameters to format, no parentheses to insert,
 /// and their `detail` only needs the value-type summary plus the optional
-/// `[Только чтение]` marker. Keeping the renderer local keeps the
-/// property item shape obvious at the call site.
+/// `[Только чтение]` / `[Read-only]` marker (driven by `locale`). Keeping
+/// the renderer local keeps the property item shape obvious at the call
+/// site.
 ///
 /// - `label` — Russian name (primary display).
 /// - `filter_text` — `"{russian} {english}"` so typing either language
@@ -668,14 +683,17 @@ pub(super) fn render_platform_method(method: &PlatformMethod) -> CompletionItem 
 /// - `insert_text` — just the Russian name. Properties have no parens.
 /// - `kind` — `CompletionItemKind::Property`, distinguishing them from
 ///   methods in the editor's completion popup.
-pub(super) fn render_platform_property(prop: &PlatformProperty) -> CompletionItem {
+pub(super) fn render_platform_property(
+    prop: &PlatformProperty,
+    locale: ide_db::base_db::Locale,
+) -> CompletionItem {
     let type_summary = if prop.property_types.is_empty() {
         String::from("Произвольный")
     } else {
         prop.property_types.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
     };
     let detail = if prop.is_readonly {
-        format!("{type_summary} [Только чтение]")
+        format!("{type_summary} {}", read_only_marker(locale))
     } else {
         type_summary
     };
@@ -716,11 +734,11 @@ pub(super) fn render_platform_property(prop: &PlatformProperty) -> CompletionIte
 /// - `sort_text` uses a short prefix (`"10_"`, `"20_"`, …) so MDO fields
 ///   sort before platform methods in the popup: user attributes first, then
 ///   tabular sections, then standard attributes, then register parts.
-fn render_mdo_field(field: &Field) -> CompletionItem {
+fn render_mdo_field(field: &Field, locale: ide_db::base_db::Locale) -> CompletionItem {
     let filter_text = format!("{} {}", field.name, field.english_name);
     CompletionItem {
         label: field.name.to_string(),
-        detail: Some(render_field_detail(&field.ty, field.is_readonly)),
+        detail: Some(render_field_detail(&field.ty, field.is_readonly, locale)),
         kind: CompletionItemKind::Field,
         insert_text: field.name.to_string(),
         documentation: None,
@@ -732,29 +750,44 @@ fn render_mdo_field(field: &Field) -> CompletionItem {
 
 /// Build the `detail` string for an MDO field.
 ///
-/// - TabularSection fields render as `"ТабличнаяЧасть"`.
-/// - Other `MetadataRef` fields render as `"Prefix.Name"` when the kind
-///   carries a platform prefix, otherwise fall back to `Ty::display_name`.
-/// - Primitive types (`Число`, `Строка`, …) render via `Ty::display_name`.
-/// - Appends `" [Только чтение]"` for read-only fields.
-fn render_field_detail(ty: &Ty, is_readonly: bool) -> String {
+/// - TabularSection fields render with the locale-aware kind label
+///   (`"ТабличнаяЧасть"` / `"TabularSection"`).
+/// - Other `MetadataRef` fields render as `"<KindLabel>.<Name>"` via
+///   [`hir::MetadataKind::display_label`] so hover and completion stay
+///   aligned in either locale (no more silent `CatalogRef.Товары` leak
+///   into a Russian IDE).
+/// - Primitive types (`Число`, `Строка`, …) render via `Ty::display_name`
+///   in the chosen locale.
+/// - Appends `" [Только чтение]"` / `" [Read-only]"` for read-only
+///   fields, mirroring the marker [`render_platform_property`] uses.
+fn render_field_detail(ty: &Ty, is_readonly: bool, locale: ide_db::base_db::Locale) -> String {
     use hir::MetadataKind;
     let body = match ty {
         Ty::MetadataRef { kind, name } => {
             if matches!(kind, MetadataKind::TabularSection { .. }) {
-                "ТабличнаяЧасть".to_string()
-            } else if let Some(prefix) = kind.platform_prefix() {
-                format!("{}.{}", prefix, name.as_str())
+                kind.display_label(locale).to_string()
             } else {
-                ty.display_name().to_string()
+                format!("{}.{}", kind.display_label(locale), name.as_str())
             }
         }
-        _ => ty.display_name().to_string(),
+        _ => ty.display_name(locale).to_string(),
     };
     if is_readonly {
-        format!("{body} [Только чтение]")
+        format!("{body} {}", read_only_marker(locale))
     } else {
         body
+    }
+}
+
+/// Locale-aware "[Только чтение]" / "[Read-only]" marker shared by
+/// platform-property and MDO-field completion details.
+///
+/// Centralised so the two renderers don't drift if either tweaks the
+/// punctuation later.
+fn read_only_marker(locale: ide_db::base_db::Locale) -> &'static str {
+    match locale {
+        ide_db::base_db::Locale::Ru => "[Только чтение]",
+        ide_db::base_db::Locale::En => "[Read-only]",
     }
 }
 
@@ -867,7 +900,12 @@ mod tests {
         let offset = TextSize::from(dot_end as u32);
 
         // Request completions at the DOT position
-        let position = CompletionPosition { file_id, offset, workspace_root: None };
+        let position = CompletionPosition {
+            file_id,
+            offset,
+            workspace_root: None,
+            locale: ide_db::base_db::Locale::Ru,
+        };
 
         let items = platform_completions(&db, position);
 
@@ -950,7 +988,12 @@ mod tests {
 
         let dot_end = code.find("ОбработкаОшибок.").unwrap() + "ОбработкаОшибок.".len();
         let offset = TextSize::from(dot_end as u32);
-        let position = CompletionPosition { file_id, offset, workspace_root: None };
+        let position = CompletionPosition {
+            file_id,
+            offset,
+            workspace_root: None,
+            locale: ide_db::base_db::Locale::Ru,
+        };
 
         let items = platform_completions(&db, position).expect(
             "platform_completions must surface МенеджерОбработкиОшибок methods after global property",
@@ -961,6 +1004,182 @@ mod tests {
         assert!(
             labels.contains(&"КраткоеПредставлениеОшибки"),
             "expected КраткоеПредставлениеОшибки in {:?}",
+            labels
+        );
+    }
+
+    // ---------- Phase 6: form-control completion guards ----------
+    //
+    // The completion guard is enforced *by construction*:
+    //   1. `complete_prefix_methods_for_receiver` only fires for
+    //      `MetadataRef`, `ObjectManager`, or `ManagerCollection` receivers.
+    //      `Ty::FormControl` is none of those — no MDO row-column branch
+    //      runs for `Элементы.Переприемка.|`.
+    //   2. The fall-through in `platform_completions` then calls
+    //      `complete_platform_methods("ТаблицаФормы", …)`, which surfaces
+    //      the FormTable's platform members (Видимость, Заголовок,
+    //      ВыделенныеСтроки, …) and *only* those — never the bound
+    //      tabular-section's column list.
+    //
+    // The tests below pin both halves: the guard returns `None`, and the
+    // FormTable platform pull-up is non-empty and includes the refined
+    // members so the user-visible completion stays informative.
+
+    fn form_table_binding() -> hir::FormDataBinding {
+        use bsl_metadata::MdoType;
+        use hir::{FormDataBinding, FormDataTarget, Name};
+        FormDataBinding::new(
+            Box::new([Name::new("Объект"), Name::new("Переприемка")]),
+            FormDataTarget::TabularSection {
+                mdo_type: MdoType::Document,
+                owner: Name::new("ПКО"),
+                section: Name::new("Переприемка"),
+            },
+        )
+        .expect("non-empty path")
+    }
+
+    fn make_db_with_file() -> (ide_db::RootDatabaseImpl, vfs::FileId) {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        db.set_file_text(file_id, "");
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        (db, file_id)
+    }
+
+    #[test]
+    fn complete_prefix_methods_returns_none_for_form_control_table_with_binding() {
+        // GUARD: a bound `Ty::FormControl{Table, Some(b)}` (e.g.
+        // `Элементы.Переприемка` whose DataPath is `Объект.Переприемка`)
+        // must NOT enter the MDO-field path. Otherwise completion would
+        // leak the tabular section's row columns (`ШтрихКод`, …) onto the
+        // control receiver — those columns belong on the row Ty, surfaced
+        // only via `вСтрока.|` / `.ТекущаяСтрока.|` / `.ВыделенныеСтроки[i].|`.
+        let (db, file_id) = make_db_with_file();
+        let ty = hir::Ty::FormControl {
+            kind: hir::FormElementKind::Table,
+            binding: Some(form_table_binding()),
+        };
+
+        let result =
+            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+        assert!(
+            result.is_none(),
+            "FormControl{{Table, Some(_)}} must not trigger MDO-field completion; got {:?}",
+            result.as_ref().map(|v| v.iter().map(|i| &i.label).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn complete_prefix_methods_returns_none_for_form_control_table_no_binding() {
+        // Same guard for the unbound case (DataPath unresolved or
+        // `~prefix` deleted attr): `FormControl{Table, None}` falls
+        // through to the platform `ТаблицаФормы` properties — never to
+        // an MDO branch.
+        let (db, file_id) = make_db_with_file();
+        let ty = hir::Ty::FormControl { kind: hir::FormElementKind::Table, binding: None };
+
+        let result =
+            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+        assert!(
+            result.is_none(),
+            "FormControl{{Table, None}} must not trigger MDO-field completion"
+        );
+    }
+
+    #[test]
+    fn complete_prefix_methods_returns_none_for_typed_array() {
+        // GUARD for Phase-0 `Ty::TypedArray(_)`: the parameterised
+        // element type is *not* a property the user can dot through to
+        // get row columns. Completion on `Элементы.Переприемка
+        // .ВыделенныеСтроки.|` must surface `Массив` platform methods
+        // (`Количество`, `Получить`, …), never the row schema directly.
+        // Iteration / indexing is what unwraps to the row Ty.
+        let (db, file_id) = make_db_with_file();
+        let ty = hir::Ty::TypedArray(Box::new(hir::Ty::PlatformObject(hir::Name::new(
+            "СтрокаТаблицыФормы",
+        ))));
+
+        let result =
+            complete_prefix_methods_for_receiver(&db, &ty, file_id, ide_db::base_db::Locale::Ru);
+        assert!(result.is_none(), "TypedArray(_) must not trigger MDO-field completion");
+    }
+
+    #[test]
+    fn complete_platform_methods_for_form_table_surfaces_refined_members() {
+        // Sanity: when completion falls through to
+        // `complete_platform_methods("ТаблицаФормы", …)` for a FormControl
+        // receiver, the bilingual lookup in `get_type_properties` resolves
+        // `ТаблицаФормы`→`FormTable` and surfaces the refined members
+        // (`ВыделенныеСтроки`, `ТекущаяСтрока`, `ТекущиеДанные`) plus
+        // generic chrome (`Видимость`, `Заголовок`).
+        //
+        // This pins the *user-visible* half of the guard: with the row
+        // columns suppressed, the popup is still informative.
+        use bsl_platform::PlatformDataInner;
+        let data = PlatformDataInner::instance();
+        if data.all_properties().is_empty() {
+            println!("Skipping: no platform property data available");
+            return;
+        }
+
+        let (db, _) = make_db_with_file();
+        let items = complete_platform_methods(&db, "ТаблицаФормы", ide_db::base_db::Locale::Ru);
+        assert!(
+            !items.is_empty(),
+            "ТаблицаФормы platform members must not be empty; bilingual lookup misroute?"
+        );
+        let labels: std::collections::HashSet<&str> =
+            items.iter().map(|i| i.label.as_str()).collect();
+        // Refined row-aware members (Phase 5) plus the generic FormTable
+        // chrome that `Элементы.Переприемка.|` also wants to surface.
+        // `Видимость`/`Заголовок` are the canary platform properties: if
+        // the bilingual `ТаблицаФормы`→`FormTable` lookup ever loses its
+        // alignment with `platform_data.json`, this test catches it
+        // before users see an empty popup.
+        for expected in
+            ["ВыделенныеСтроки", "ТекущаяСтрока", "ТекущиеДанные", "Видимость", "Заголовок"]
+        {
+            assert!(
+                labels.contains(expected),
+                "expected platform property `{expected}` in completion; got: {:?}",
+                labels
+            );
+        }
+    }
+
+    #[test]
+    fn complete_platform_methods_for_typed_array_surfaces_massiv_members() {
+        // Sanity for Phase-0: `Ty::TypedArray(_).platform_type_name()`
+        // returns `Some("Массив")`, so completion on
+        // `… .ВыделенныеСтроки.|` surfaces `Массив`'s platform methods
+        // (`Количество`, `Добавить`, `Получить`, …). Together with the
+        // TypedArray guard above, this locks the array-method
+        // continuation that motivated parameterising the type in the
+        // first place (was: bare `.ВыделенныеСтроки → row` would have
+        // dropped `.Количество()` on the floor).
+        use bsl_platform::PlatformDataInner;
+        let data = PlatformDataInner::instance();
+        if data.all_methods().is_empty() {
+            println!("Skipping: no platform method data available");
+            return;
+        }
+
+        let (db, _) = make_db_with_file();
+        let items = complete_platform_methods(&db, "Массив", ide_db::base_db::Locale::Ru);
+        assert!(!items.is_empty(), "Массив platform members must not be empty");
+        let labels: std::collections::HashSet<&str> =
+            items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains("Количество"),
+            "expected `Количество` (collection size) in Массив completion; got: {:?}",
             labels
         );
     }

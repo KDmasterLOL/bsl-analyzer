@@ -627,9 +627,12 @@ impl<'db> InferenceContext<'db> {
                         // covers the Authoritative-receiver case).
                         let base_ty = self.infer_expr(ExprId::from_idx(*base));
                         let configs = self.db.configurations(self.file_id);
-                        if let Some(info) =
-                            crate::field_lookup::lookup_field(&configs, &base_ty, field)
-                        {
+                        let resolver = self.get_resolver();
+                        let info = crate::form_items::lookup_form_item_field(
+                            self.db, &resolver, &base_ty, field,
+                        )
+                        .or_else(|| crate::field_lookup::lookup_field(&configs, &base_ty, field));
+                        if let Some(info) = info {
                             if info.is_readonly {
                                 self.push_inference_diagnostic(
                                     InferenceDiagnostic::ReadOnlyPropertyAssignment {
@@ -849,12 +852,31 @@ impl<'db> InferenceContext<'db> {
             }
 
             Expr::Index { base, index } => {
-                self.infer_expr(ExprId::from_idx(*base));
+                let base_ty = self.infer_expr(ExprId::from_idx(*base));
                 self.infer_expr(ExprId::from_idx(*index));
 
-                // Phase 1: Return Unknown
-                // Phase 2+: Could infer element type for arrays
-                Ty::Unknown
+                // Parameterised arrays carry their element schema in the
+                // type itself, so `arr[i]` resolves to the element Ty
+                // directly. The motivating chain is the form-control row
+                // path: `Элементы.Переприемка.ВыделенныеСтроки[i]` —
+                // the receiver is `TypedArray(row)` (Phase 5 refined
+                // property + Phase 0 parameterised-array variant), so
+                // indexing surfaces the row's tabular-section schema and
+                // downstream `.ШтрихКод` access typechecks the same way
+                // it does for the loop-variable spelling.
+                //
+                // All other receivers — including the legacy
+                // `Ty::Array` (no element schema) and platform value
+                // collections (`СписокЗначений`, `ТаблицаЗначений`) —
+                // keep returning `Unknown`. Those carry their element
+                // type only via the `Элементы коллекции:` chapter
+                // surfaced by `iteration_lookup`, which is a different
+                // axis from indexing and is not parameterised at the
+                // `Ty` level today.
+                match base_ty {
+                    Ty::TypedArray(elem) => *elem,
+                    _ => Ty::Unknown,
+                }
             }
 
             Expr::Field { base, field } => {
@@ -879,7 +901,14 @@ impl<'db> InferenceContext<'db> {
                 // one configuration XML re-runs inference exactly for
                 // the bodies that observed it.
                 let configs = self.db.configurations(self.file_id);
-                if let Some(info) = crate::field_lookup::lookup_field(&configs, &base_ty, field) {
+                let resolver = self.get_resolver();
+                if let Some(info) =
+                    crate::form_items::lookup_form_item_field(self.db, &resolver, &base_ty, field)
+                {
+                    info.ty
+                } else if let Some(info) =
+                    crate::field_lookup::lookup_field(&configs, &base_ty, field)
+                {
                     info.ty
                 } else if let Some(info) =
                     crate::manager_lookup::lookup_manager_field(&configs, &base_ty, field)

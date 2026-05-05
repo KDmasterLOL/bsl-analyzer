@@ -94,7 +94,8 @@ fn test_completion_for_nested_union_with_into_clause() {
     let cursor_offset_1 = code.find("Вложенный.Поле1").expect("Should find 'Вложенный.Поле1'");
     let cursor_offset_1 = cursor_offset_1 + "Вложенный.".len();
 
-    let completions_1 = analysis.completions(file_id, cursor_offset_1.try_into().unwrap(), None);
+    let completions_1 =
+        analysis.completions(file_id, cursor_offset_1.try_into().unwrap(), None, ide::Locale::Ru);
 
     // Проверяем что completion работает (не fallback на keywords)
     assert!(
@@ -114,7 +115,8 @@ fn test_completion_for_nested_union_with_into_clause() {
         code.rfind("ВТ_Результат.Поле1").expect("Should find second 'ВТ_Результат.Поле1'");
     let cursor_offset_2 = cursor_offset_2 + "ВТ_Результат.".len();
 
-    let completions_2 = analysis.completions(file_id, cursor_offset_2.try_into().unwrap(), None);
+    let completions_2 =
+        analysis.completions(file_id, cursor_offset_2.try_into().unwrap(), None, ide::Locale::Ru);
 
     assert!(
         completions_2.iter().any(|c| c.label == "Поле1"),

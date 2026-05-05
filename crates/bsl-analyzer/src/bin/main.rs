@@ -2658,6 +2658,11 @@ fn analyze_salsa(
     // Load diagnostics config from project config (unified with streaming mode)
     let mut config: DiagnosticsConfig =
         serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
+    // Project-level `[output] display_language` only takes effect once
+    // explicitly applied to the typed config — JSON deserialization carries
+    // no locale signal. CLI mode has no LSP `InitializeParams.locale`, so the
+    // resolved value (or the analyzer default) is the only locale source.
+    config.locale = proj_config.output.resolve_locale().unwrap_or_default();
 
     // Apply --only-diagnostic filter (enables profiling mode)
     if let Some(ref diag_name) = only_diagnostic {
@@ -2668,6 +2673,7 @@ fn analyze_salsa(
         disabled = config.disabled.len(),
         only_enabled = ?config.only_enabled.as_ref().map(|v| v.len()),
         params = config.parameters.len(),
+        locale = ?config.locale,
         "Loaded DiagnosticsConfig"
     );
     let config = Arc::new(config);
@@ -2883,6 +2889,8 @@ fn analyze_streaming(
     // Load diagnostics config from project config and apply CLI filters
     let mut diag_config: DiagnosticsConfig =
         serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
+    // Apply `[output] display_language` (CLI streaming has no LSP locale).
+    diag_config.locale = proj_config.output.resolve_locale().unwrap_or_default();
 
     if let Some(ref diag_name) = only_diagnostic {
         diag_config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
@@ -2892,6 +2900,7 @@ fn analyze_streaming(
         disabled = diag_config.disabled.len(),
         only_enabled = ?diag_config.only_enabled.as_ref().map(|v| v.len()),
         params = diag_config.parameters.len(),
+        locale = ?diag_config.locale,
         "Loaded DiagnosticsConfig (streaming mode)"
     );
 
@@ -3268,17 +3277,24 @@ fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send +
 fn diagnostics_config_from_project(
     project_config: &project_model::ProjectConfig,
 ) -> Result<ide::DiagnosticsConfig, Box<dyn Error + Send + Sync>> {
+    let locale = project_config.output.resolve_locale().unwrap_or_default();
+
     if project_config.diagnostics.is_null() {
-        return Ok(ide::DiagnosticsConfig::default());
+        return Ok(ide::DiagnosticsConfig { locale, ..Default::default() });
     }
 
-    serde_json::from_value(project_config.diagnostics.clone()).map_err(|error| {
+    let mut cfg: ide::DiagnosticsConfig = serde_json::from_value(
+        project_config.diagnostics.clone(),
+    )
+    .map_err(|error| -> Box<dyn Error + Send + Sync> {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("failed to parse diagnostics section: {error}"),
         )
         .into()
-    })
+    })?;
+    cfg.locale = locale;
+    Ok(cfg)
 }
 
 fn baseline_diagnostics_have_issues(

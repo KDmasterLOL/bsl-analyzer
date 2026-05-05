@@ -32,7 +32,7 @@ pub fn from_hir(
     let message = format!(
         "Поле '{}' не найдено у типа '{}'",
         field_name.as_str(),
-        receiver_ty.display_name()
+        receiver_ty.display_name(ctx.locale())
     );
     crate::simple_hir_diagnostic(DiagnosticCode::UnresolvedField, message, range, ctx)
 }

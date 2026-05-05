@@ -218,7 +218,10 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
 pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
     match ty {
         // Value types — English canonical names hit the bilingual index.
-        Ty::Array => Some("Array"),
+        // `TypedArray` shares the platform method table with `Array`:
+        // method lookup is structural (`.Добавить()`, `.Количество()`,
+        // …), the element type only refines field/iteration surfaces.
+        Ty::Array | Ty::TypedArray(_) => Some("Array"),
         Ty::Structure => Some("Structure"),
         Ty::Map => Some("Map"),
         Ty::ValueTable => Some("ValueTable"),
@@ -258,6 +261,15 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
         // object-level methods like `Записать()` that don't apply to a
         // form-data projection — see [`Ty::FormData`] docs.
         Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
+        // Form-control receivers (`Элементы.<имя>`) route through the
+        // per-kind platform tables (`ТаблицаФормы` / `ПолеФормы` /
+        // `КнопкаФормы` / `ГруппаФормы` / `ДекорацияФормы` /
+        // `ДополнениеЭлементаФормы`). `binding` is irrelevant for
+        // method dispatch — it only refines a handful of properties
+        // (`.ВыделенныеСтроки`, `.ТекущаяСтрока`) handled in
+        // `field_lookup`. `Other` returns `None`: unrecognised XML tag,
+        // no platform table to query.
+        Ty::FormControl { kind, .. } => hir_def::ty::form_control_platform_type_name(*kind),
     }
 }
 
@@ -570,6 +582,24 @@ mod tests {
             .expect("Массив.Добавить must resolve in platform data");
         // Returns nothing (procedure) in platform data.
         assert_eq!(info.return_ty, Ty::Undefined);
+    }
+
+    #[test]
+    fn method_lookup_typed_array_shares_array_method_table() {
+        // `Ty::TypedArray(_)` keys through the same `"Array"` page as
+        // `Ty::Array` — the element type only refines field/iteration,
+        // method dispatch is structural.
+        let receiver = Ty::TypedArray(Box::new(Ty::String));
+        let info = lookup_method(&receiver, &Name::new("Добавить"))
+            .expect("TypedArray must expose Массив.Добавить through the Array platform page");
+        assert_eq!(info.return_ty, Ty::Undefined);
+
+        // `.Количество()` returns Число — proves arithmetic-friendly
+        // chaining (`.ВыделенныеСтроки.Количество()` in the form-control
+        // refinement targeted by Phase 5) survives the new variant.
+        let count = lookup_method(&receiver, &Name::new("Количество"))
+            .expect("TypedArray.Количество must resolve via the Array platform page");
+        assert_eq!(count.return_ty, Ty::Number);
     }
 
     #[test]

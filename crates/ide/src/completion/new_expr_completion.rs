@@ -143,7 +143,7 @@ mod tests {
     Х = Новый $0
 КонецПроцедуры";
         let (analysis, file_id, offset) = setup(code);
-        let items = analysis.completions(file_id, offset, None);
+        let items = analysis.completions(file_id, offset, None, crate::Locale::Ru);
         assert!(!items.is_empty(), "must offer at least one platform type");
         assert!(
             items.iter().all(|i| i.kind == CompletionItemKind::Constructor),
@@ -161,7 +161,7 @@ mod tests {
     Х = Новый Масс$0
 КонецПроцедуры";
         let (analysis, file_id, offset) = setup(code);
-        let items = analysis.completions(file_id, offset, None);
+        let items = analysis.completions(file_id, offset, None, crate::Locale::Ru);
         let labels = all_labels(&items);
         assert!(
             labels.iter().all(|l| l.to_lowercase().starts_with("масс")),
@@ -177,7 +177,7 @@ mod tests {
     Х = $0
 КонецПроцедуры";
         let (analysis, file_id, offset) = setup(code);
-        let items = analysis.completions(file_id, offset, None);
+        let items = analysis.completions(file_id, offset, None, crate::Locale::Ru);
         // Must NOT all be Constructor — regular BSL/keyword/global-fn completion
         // should be kicking in here.
         let constructor_only =

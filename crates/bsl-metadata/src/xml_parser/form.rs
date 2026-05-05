@@ -6,7 +6,9 @@
 
 use crate::enums::FormType;
 use crate::error::{MetadataError, Result};
-use crate::form::{Form, FormAttribute, FormAttributeColumn, FormElement, FormEventHandler};
+use crate::form::{
+    Form, FormAttribute, FormAttributeColumn, FormElement, FormElementKind, FormEventHandler,
+};
 use crate::metadata_object::AttributeType;
 
 use super::helpers::parse_uuid;
@@ -79,7 +81,7 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
     if let Some(child_items) =
         form_node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
     {
-        collect_child_items(child_items, &mut elements);
+        collect_child_items(child_items, &mut elements, None);
     }
 
     let event_handlers = collect_all_events(form_node);
@@ -202,11 +204,62 @@ fn collect_events_recursive(node: roxmltree::Node<'_, '_>, handlers: &mut Vec<Fo
     }
 }
 
+/// Map an XML tag name from `<ChildItems>` to the coarse [`FormElementKind`]
+/// taxonomy. Unknown tags fall through to [`FormElementKind::Other`] —
+/// the element is still surfaced (its name participates in `Элементы.<имя>`
+/// lookup), but `Ty::FormControl` mapping in later phases collapses to
+/// `Unknown` rather than mis-classifying as a known control.
+///
+/// The mapping mirrors the «Элементы коллекции» section of the BSL
+/// platform documentation. The table is the canonical contract; new
+/// tags must be classified explicitly here rather than inheriting silent
+/// platform-control semantics.
+///
+/// Tags observed in this repo's fixtures and known to the platform
+/// «Элементы коллекции» section are listed below. Anything else falls to
+/// `Other` deliberately — adding a tag without fixture or doc evidence
+/// risks mis-classifying as a control that does not exist.
+fn tag_to_kind(tag: &str) -> FormElementKind {
+    match tag {
+        "Table" => FormElementKind::Table,
+        "UsualGroup" | "Pages" | "Page" | "CommandBar" | "ButtonGroup" => FormElementKind::Group,
+        "InputField"
+        | "LabelField"
+        | "CheckBoxField"
+        | "RadioButtonField"
+        | "HTMLField"
+        | "PictureField"
+        | "SpreadsheetDocumentField"
+        | "TextField"
+        | "ProgressBarField"
+        | "TrackBarField"
+        | "CalendarField"
+        | "TabField"
+        | "Switch" => FormElementKind::Field,
+        "Button" => FormElementKind::Button,
+        "Decoration" => FormElementKind::Decoration,
+        "ContextMenu"
+        | "ExtendedTooltip"
+        | "SearchStringAddition"
+        | "ViewStatusAddition"
+        | "SearchControlAddition"
+        | "AutoCommandBar" => FormElementKind::Addition,
+        _ => FormElementKind::Other,
+    }
+}
+
 /// Recursively collect `FormElement`s from a `<ChildItems>` node.
 ///
 /// Any element with both `name` and `id` attributes is collected.
-/// Elements with a `<ChildItems>` child are recursed into.
-fn collect_child_items(child_items: roxmltree::Node<'_, '_>, elements: &mut Vec<FormElement>) {
+/// Elements with a `<ChildItems>` child are recursed into. The XML tag
+/// name is decoded into [`FormElementKind`] and the immediate parent's
+/// id is threaded through the recursion so that `Form::children_of`
+/// can answer column/control hierarchy queries without re-parsing XML.
+fn collect_child_items(
+    child_items: roxmltree::Node<'_, '_>,
+    elements: &mut Vec<FormElement>,
+    parent_id: Option<u32>,
+) {
     for node in child_items.children().filter(|n| n.is_element()) {
         let name = match node.attribute("name") {
             Some(n) if !n.is_empty() => n.to_string(),
@@ -222,12 +275,13 @@ fn collect_child_items(child_items: roxmltree::Node<'_, '_>, elements: &mut Vec<
             .and_then(|n| n.text())
             .map(|t| t.to_string());
 
-        elements.push(FormElement { name, id, data_path });
+        let kind = tag_to_kind(node.tag_name().name());
+        elements.push(FormElement::with_kind(name, id, data_path, kind, parent_id));
 
         if let Some(nested) =
             node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
         {
-            collect_child_items(nested, elements);
+            collect_child_items(nested, elements, Some(id));
         }
     }
 }
@@ -878,5 +932,195 @@ mod tests {
         assert_eq!(form.form_type(), FormType::Ordinary);
         assert!(form.is_handler("ПриСозданииНаСервере"));
         assert!(form.is_handler("КомандаОК"));
+    }
+
+    /// Pure function-level table for [`tag_to_kind`]. One row per tag the
+    /// platform docs name in «Элементы коллекции» plus a fallback for an
+    /// unknown tag — guards against silent regressions if a future edit
+    /// moves a tag between buckets.
+    #[test]
+    fn test_tag_to_kind_table() {
+        let cases = [
+            ("Table", FormElementKind::Table),
+            ("UsualGroup", FormElementKind::Group),
+            ("Pages", FormElementKind::Group),
+            ("Page", FormElementKind::Group),
+            ("CommandBar", FormElementKind::Group),
+            ("ButtonGroup", FormElementKind::Group),
+            ("InputField", FormElementKind::Field),
+            ("LabelField", FormElementKind::Field),
+            ("CheckBoxField", FormElementKind::Field),
+            ("RadioButtonField", FormElementKind::Field),
+            ("HTMLField", FormElementKind::Field),
+            ("PictureField", FormElementKind::Field),
+            ("SpreadsheetDocumentField", FormElementKind::Field),
+            ("TextField", FormElementKind::Field),
+            ("ProgressBarField", FormElementKind::Field),
+            ("TrackBarField", FormElementKind::Field),
+            ("CalendarField", FormElementKind::Field),
+            ("TabField", FormElementKind::Field),
+            ("Switch", FormElementKind::Field),
+            ("Button", FormElementKind::Button),
+            ("Decoration", FormElementKind::Decoration),
+            ("ContextMenu", FormElementKind::Addition),
+            ("ExtendedTooltip", FormElementKind::Addition),
+            ("SearchStringAddition", FormElementKind::Addition),
+            ("ViewStatusAddition", FormElementKind::Addition),
+            ("SearchControlAddition", FormElementKind::Addition),
+            ("AutoCommandBar", FormElementKind::Addition),
+            ("CompletelyUnknownTag", FormElementKind::Other),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(
+                tag_to_kind(tag),
+                expected,
+                "tag {tag:?} expected {expected:?}, got {:?}",
+                tag_to_kind(tag)
+            );
+        }
+    }
+
+    /// `<UsualGroup>` containing `<InputField>` — kind decoded from the
+    /// XML tag and `parent_id` of the inner field points at the group.
+    #[test]
+    fn test_collect_child_items_kind_and_parent_id() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <ChildItems>
+        <UsualGroup name="Группа1" id="1">
+            <ChildItems>
+                <InputField name="ПолеВГруппе" id="2">
+                    <DataPath>Объект.Code</DataPath>
+                </InputField>
+                <Button name="КнопкаВГруппе" id="3"/>
+            </ChildItems>
+        </UsualGroup>
+        <Decoration name="Картинка" id="4"/>
+    </ChildItems>
+</Form>"#;
+
+        let form = parse_form_xml(xml).unwrap();
+        assert_eq!(form.elements().len(), 4);
+
+        let group = form.find_element("Группа1").unwrap();
+        assert_eq!(group.kind, FormElementKind::Group);
+        assert_eq!(group.parent_id, None);
+
+        let inner_field = form.find_element("ПолеВГруппе").unwrap();
+        assert_eq!(inner_field.kind, FormElementKind::Field);
+        assert_eq!(inner_field.parent_id, Some(1));
+
+        let inner_button = form.find_element("КнопкаВГруппе").unwrap();
+        assert_eq!(inner_button.kind, FormElementKind::Button);
+        assert_eq!(inner_button.parent_id, Some(1));
+
+        let decoration = form.find_element("Картинка").unwrap();
+        assert_eq!(decoration.kind, FormElementKind::Decoration);
+        assert_eq!(decoration.parent_id, None);
+
+        // `children_of` recovers the hierarchy without re-parsing XML.
+        let group_children: Vec<_> = form.children_of(1).map(|e| e.name.as_str()).collect();
+        assert_eq!(group_children, vec!["ПолеВГруппе", "КнопкаВГруппе"]);
+    }
+
+    /// Multi-level nesting: `<UsualGroup>` → `<UsualGroup>` → `<Table>`
+    /// → `<InputField>`. Each step must record `parent_id = enclosing.id`
+    /// so that `Form::children_of` can walk back up the chain. Pins the
+    /// recursive descent against accidental flattening.
+    #[test]
+    fn test_collect_child_items_multilevel_parent_chain() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <ChildItems>
+        <UsualGroup name="Внешняя" id="1">
+            <ChildItems>
+                <UsualGroup name="Внутренняя" id="2">
+                    <ChildItems>
+                        <Table name="ТабВнутри" id="3">
+                            <ChildItems>
+                                <InputField name="КолонкаА" id="4">
+                                    <DataPath>Объект.Таб.А</DataPath>
+                                </InputField>
+                            </ChildItems>
+                        </Table>
+                    </ChildItems>
+                </UsualGroup>
+            </ChildItems>
+        </UsualGroup>
+    </ChildItems>
+</Form>"#;
+        let form = parse_form_xml(xml).unwrap();
+        assert_eq!(form.elements().len(), 4);
+
+        let outer = form.find_element("Внешняя").unwrap();
+        assert_eq!(outer.kind, FormElementKind::Group);
+        assert_eq!(outer.parent_id, None);
+
+        let inner = form.find_element("Внутренняя").unwrap();
+        assert_eq!(inner.kind, FormElementKind::Group);
+        assert_eq!(inner.parent_id, Some(outer.id));
+
+        let table = form.find_element("ТабВнутри").unwrap();
+        assert_eq!(table.kind, FormElementKind::Table);
+        assert_eq!(table.parent_id, Some(inner.id));
+
+        let column = form.find_element("КолонкаА").unwrap();
+        assert_eq!(column.kind, FormElementKind::Field);
+        assert_eq!(column.parent_id, Some(table.id));
+
+        // children_of returns immediate (single-level) descendants only.
+        assert_eq!(form.children_of(outer.id).count(), 1);
+        assert_eq!(form.children_of(inner.id).count(), 1);
+        assert_eq!(form.children_of(table.id).count(), 1);
+        assert_eq!(form.children_of(column.id).count(), 0);
+    }
+
+    /// End-to-end on a real fixture: `<Table>` with column fields nested
+    /// inside its `<ChildItems>`. The parent_id chain is what Phase 5
+    /// will walk for column lookup.
+    ///
+    /// Note: per platform layout, decoration elements like `<ContextMenu>`,
+    /// `<AutoCommandBar>`, `<ExtendedTooltip>` sit *directly* under
+    /// `<Table>` (siblings of `<ChildItems>`, not inside it). They are
+    /// intentionally not surfaced as `FormElement`s — only items inside
+    /// `<ChildItems>` are collected. Adding them would require a
+    /// separate parser pass and is out of scope for Phase 2.
+    #[test]
+    fn test_parse_real_form_with_table_kind_propagation() {
+        let xml = include_str!(
+            "../../fixtures/designer/Documents/Документ1/Forms/ФормаДокумента/Ext/Form.xml"
+        );
+        let form = parse_form_xml(xml).unwrap();
+
+        let table = form
+            .find_element("ТабличнаяЧасть1")
+            .expect("fixture has <Table name=\"ТабличнаяЧасть1\">");
+        assert_eq!(table.kind, FormElementKind::Table);
+        assert_eq!(table.parent_id, None, "table is top-level under form's <ChildItems>");
+
+        // Columns inside Table's <ChildItems> must point back to the table.
+        let table_children: Vec<_> = form.children_of(table.id).collect();
+        assert!(
+            !table_children.is_empty(),
+            "table id={} has no children in <ChildItems>",
+            table.id
+        );
+        assert!(
+            table_children.iter().all(|c| c.parent_id == Some(table.id)),
+            "every child of Table must carry parent_id=Some(table.id)"
+        );
+        // At least one column field is expected (LabelField / InputField).
+        assert!(
+            table_children.iter().any(|c| c.kind == FormElementKind::Field),
+            "table must have at least one Field column inside its <ChildItems>"
+        );
+
+        // Confirm fixture contains top-level Field controls outside the table.
+        assert!(
+            form.elements()
+                .iter()
+                .any(|e| e.kind == FormElementKind::Field && e.parent_id.is_none()),
+            "fixture must contain at least one top-level <InputField>"
+        );
     }
 }

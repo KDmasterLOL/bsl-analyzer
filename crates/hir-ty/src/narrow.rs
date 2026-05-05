@@ -440,7 +440,20 @@ impl NarrowingTransfer {
         match guard {
             Guard::TypeCheck { var, type_name } => {
                 let matched = Ty::from_type_name(type_name);
-                let narrowed = if on_true { matched } else { self.complement_of(var, &matched) };
+                let narrowed = if on_true {
+                    // True branch: take the matched type, but refine it
+                    // with the base when the base is strictly more
+                    // precise. Today the only such pair is
+                    // `matched = Ty::Array` ↔ `base = Ty::TypedArray(_)`:
+                    // `Ty::from_type_name("Массив")` cannot reconstruct
+                    // an element witness from the surface name, so a
+                    // direct write would clobber `TypedArray(String)`
+                    // back to bare `Array`. Promoting the base preserves
+                    // the element through the guard.
+                    self.refine_matched_with_base(matched, var)
+                } else {
+                    self.complement_of(var, &matched)
+                };
                 insert_if_informative(state, var, narrowed);
             }
             Guard::IsUndefined { var } => {
@@ -461,17 +474,71 @@ impl NarrowingTransfer {
         }
     }
 
+    /// Refine the matched guard type with the variable's recorded base
+    /// when the base is strictly more precise.
+    ///
+    /// `Ty::from_type_name` resolves surface names like `"Массив"` /
+    /// `"Array"` to bare [`Ty::Array`] — it has no element witness to
+    /// reconstruct. If the base for `var` is a [`Ty::TypedArray`], the
+    /// guard `Если ТипЗнч(М) = Тип("Массив") Тогда …` should narrow to
+    /// the typed form (so iteration / field access inside the branch
+    /// still see the element type), not downgrade to bare `Array`.
+    ///
+    /// **Soundness rule.** When the base is a union that mixes
+    /// `Ty::Array` and `Ty::TypedArray(_)` (and possibly non-array
+    /// arms), the true branch must keep **all** array-shaped arms,
+    /// not only the typed ones. Dropping the bare `Array` arm would
+    /// claim more precision than the guard actually established —
+    /// the runtime value could still be the un-witnessed array, and
+    /// pretending it is `TypedArray(X)` would let iteration emit a
+    /// fictitious element type.
+    ///
+    /// Other matched/base pairs are left alone today; widen the rule
+    /// here when a similar precision gap surfaces (e.g. a future
+    /// `Ty::TypedMap`).
+    fn refine_matched_with_base(&self, matched: Ty, var: &Name) -> Ty {
+        match (&matched, self.base_types.get(&fold_name(var))) {
+            (Ty::Array, Some(base @ Ty::TypedArray(_))) => base.clone(),
+            (Ty::Array, Some(Ty::Union(arms))) => {
+                let array_arms: Vec<Ty> = arms
+                    .iter()
+                    .filter(|a| matches!(a, Ty::Array | Ty::TypedArray(_)))
+                    .cloned()
+                    .collect();
+                if array_arms.is_empty() {
+                    matched
+                } else {
+                    Ty::union(array_arms)
+                }
+            }
+            _ => matched,
+        }
+    }
+
     /// Compute `base_types[var] \ matched` via [`ty_difference`].
     /// Returns `Ty::Unknown` when the variable has no recorded base type.
     ///
     /// Folds `var` so mixed-case sources (`Х` / `х`) hit the same seed
     /// entry — the overlay already round-trips through [`fold_name`] on
     /// every write, so the base map must honour the same invariant.
+    ///
+    /// When `matched` is [`Ty::Array`], the difference is computed with
+    /// the Array ↔ TypedArray subtype relation: a `TypedArray(_)` arm
+    /// IS an array (Phase 0 algebra), so it must be removed from the
+    /// false branch alongside any bare `Array` arms. Structural
+    /// `ty_difference` would otherwise treat the two variants as
+    /// disjoint and leave a `TypedArray(_)` arm on the false branch,
+    /// which the overlay would then surface as "value definitely
+    /// exists and is a typed array" — an unsound contradiction with
+    /// the guard's "is NOT an array" claim.
     fn complement_of(&self, var: &Name, matched: &Ty) -> Ty {
-        match self.base_types.get(&fold_name(var)) {
-            Some(base) => ty_difference(base, matched),
-            None => Ty::Unknown,
+        let Some(base) = self.base_types.get(&fold_name(var)) else {
+            return Ty::Unknown;
+        };
+        if matches!(matched, Ty::Array) {
+            return ty_difference_array_aware(base);
         }
+        ty_difference(base, matched)
     }
 
     /// Minimal, pure inference for the rhs of a `Stmt::Assign` — enough
@@ -612,6 +679,39 @@ fn ty_difference(base: &Ty, matched: &Ty) -> Ty {
             let remaining: Vec<Ty> = members.iter().filter(|m| *m != matched).cloned().collect();
             Ty::union(remaining)
         }
+        _ => Ty::Unknown,
+    }
+}
+
+/// `base \ Ty::Array` with the Array ↔ TypedArray subtype relation
+/// honoured: any `Ty::Array` or `Ty::TypedArray(_)` arm is removed.
+///
+/// Structural [`ty_difference`] treats `Ty::Array` and
+/// `Ty::TypedArray(X)` as disjoint variants because Rust `PartialEq`
+/// compares them by tag. Phase 0 introduced the algebraic rule
+/// `TypedArray(_) ≤ Array`; the false branch of `Если ТипЗнч(М) =
+/// Тип("Массив")` must therefore exclude **both** Array and
+/// TypedArray arms — otherwise a `Union(TypedArray(String), Number)`
+/// base would survive the false branch unchanged, surfacing
+/// `TypedArray(String)` to consumers that asked for "definitely not
+/// an array" and silently contradicting the guard.
+///
+/// Non-union, non-array bases collapse to [`Ty::Unknown`] (overlay
+/// no-op) just like the structural fallback. A non-union *array*
+/// base (`Ty::Array` or `Ty::TypedArray(_)`) collapses to `Ty::Unknown`
+/// because the false branch is dead — there is no remainder to
+/// surface.
+fn ty_difference_array_aware(base: &Ty) -> Ty {
+    match base {
+        Ty::Union(members) => {
+            let remaining: Vec<Ty> = members
+                .iter()
+                .filter(|m| !matches!(m, Ty::Array | Ty::TypedArray(_)))
+                .cloned()
+                .collect();
+            Ty::union(remaining)
+        }
+        Ty::Array | Ty::TypedArray(_) => Ty::Unknown,
         _ => Ty::Unknown,
     }
 }
@@ -1627,6 +1727,116 @@ mod tests {
             true,
         );
         assert_eq!(s.get(&Name::new("Х")), Some(&Ty::String));
+    }
+
+    #[test]
+    fn apply_guard_type_check_true_promotes_array_to_typed_array_base() {
+        // Phase 0 regression guard: `Если ТипЗнч(М) = Тип("Массив")`
+        // must NOT downgrade a `TypedArray(String)` base to bare
+        // `Ty::Array`. The matched type from `Ty::from_type_name`
+        // ("Массив") is `Ty::Array` (no element witness), so without
+        // the refinement the overlay would clobber the element type
+        // and iteration inside the branch would lose `String`.
+        let tr = transfer_with_bases(&[("М", Ty::TypedArray(Box::new(Ty::String)))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
+            true,
+        );
+        assert_eq!(s.get(&Name::new("М")), Some(&Ty::TypedArray(Box::new(Ty::String))));
+    }
+
+    #[test]
+    fn apply_guard_type_check_true_promotes_array_through_union_base() {
+        // Base `Union(TypedArray(Number), Undefined)` ∩ guard `Массив`
+        // should narrow to `TypedArray(Number)` — the typed-array arm
+        // of the union, not bare `Array`. Otherwise the JSDoc-typed
+        // `Параметры.Список` (lowered to TypedArray ∪ Undefined) would
+        // lose element info on every `Если ТипЗнч(…) = Тип("Массив")`
+        // probe.
+        let typed = Ty::TypedArray(Box::new(Ty::Number));
+        let tr = transfer_with_bases(&[("М", Ty::union(vec![typed.clone(), Ty::Undefined]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
+            true,
+        );
+        assert_eq!(s.get(&Name::new("М")), Some(&typed));
+    }
+
+    #[test]
+    fn apply_guard_type_check_true_preserves_both_array_and_typed_array_arms() {
+        // Soundness: `Union(TypedArray(String), Array, Number)` ∩
+        // `Array` must keep BOTH array-shaped arms. Dropping the
+        // bare `Array` arm would claim "definitely a typed array of
+        // strings" when the runtime value could still be the
+        // un-witnessed array, leading iteration to emit a
+        // fictitious element type.
+        let typed = Ty::TypedArray(Box::new(Ty::String));
+        let tr =
+            transfer_with_bases(&[("М", Ty::union(vec![typed.clone(), Ty::Array, Ty::Number]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
+            true,
+        );
+        let expected = Ty::union(vec![typed, Ty::Array]);
+        assert_eq!(s.get(&Name::new("М")), Some(&expected));
+    }
+
+    #[test]
+    fn apply_guard_type_check_false_removes_typed_array_arm() {
+        // Soundness for the FALSE branch: `Union(TypedArray(String),
+        // Number) \ Array` must remove `TypedArray(String)` because
+        // a typed array IS an array (Phase 0 subtype rule). The
+        // structural `ty_difference` would have left it intact —
+        // surfacing "definitely a typed array of strings" to
+        // consumers who asked for "definitely not an array."
+        let typed = Ty::TypedArray(Box::new(Ty::String));
+        let tr = transfer_with_bases(&[("М", Ty::union(vec![typed, Ty::Number]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
+            false,
+        );
+        assert_eq!(s.get(&Name::new("М")), Some(&Ty::Number));
+    }
+
+    #[test]
+    fn apply_guard_type_check_false_drops_typed_array_only_base_to_dead() {
+        // Non-union TypedArray base, false branch: dead. Overlay
+        // no-op (Ty::Unknown contract). Pre-Phase-0 the structural
+        // `ty_difference` already returned Unknown for non-union
+        // bases — preserve the existing dead-branch behaviour.
+        let typed = Ty::TypedArray(Box::new(Ty::String));
+        let tr = transfer_with_bases(&[("М", typed)]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
+            false,
+        );
+        assert_eq!(s.get(&Name::new("М")), None);
+    }
+
+    #[test]
+    fn apply_guard_type_check_true_keeps_array_when_base_has_no_typed_array() {
+        // Negative: when no TypedArray sits in the base, the guard
+        // type wins as before. Pins that the refinement is scoped
+        // exclusively to Array ↔ TypedArray and does not perturb
+        // other narrowing paths.
+        let tr = transfer_with_bases(&[("М", Ty::union(vec![Ty::Number, Ty::String]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(
+            &mut s,
+            &Guard::TypeCheck { var: Name::new("М"), type_name: "Массив".to_string() },
+            true,
+        );
+        assert_eq!(s.get(&Name::new("М")), Some(&Ty::Array));
     }
 
     #[test]

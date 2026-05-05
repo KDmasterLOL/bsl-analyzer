@@ -156,7 +156,7 @@ pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<O
 
     let offset = crate::lsp::offset(line_index, text, position)?;
 
-    let hover_result = ctx.analysis.hover(file_id, offset.into());
+    let hover_result = ctx.analysis.hover(file_id, offset.into(), ctx.diagnostics_config.locale);
 
     match hover_result {
         Some(result) => {
@@ -230,7 +230,12 @@ pub fn handle_completion(
     };
     tracing::info!("Converted position to offset: {:?}", offset);
 
-    let items = ctx.analysis.completions(file_id, offset.into(), ctx.workspace_root.clone());
+    let items = ctx.analysis.completions(
+        file_id,
+        offset.into(),
+        ctx.workspace_root.clone(),
+        ctx.diagnostics_config.locale,
+    );
     tracing::info!("IDE API returned {} completion items", items.len());
 
     // Convert results

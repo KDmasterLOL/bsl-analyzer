@@ -37,10 +37,11 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
+    let locale = ctx.locale();
     let message = format!(
         "Несоответствие типов: ожидалось '{}', получено '{}'",
-        expected.display_name(),
-        actual.display_name()
+        expected.display_name(locale),
+        actual.display_name(locale)
     );
     crate::simple_hir_diagnostic(DiagnosticCode::TypeMismatch, message, range, ctx)
 }

@@ -126,6 +126,19 @@ pub fn lookup_field(
         });
     }
 
+    // Phase 5 row-aware refinement on `Ty::FormControl{Table, Some(b)}`:
+    // `.ВыделенныеСтроки` / `.ТекущаяСтрока` / `.ТекущиеДанные` and
+    // their English aliases override the platform's bare `Массив`
+    // (or row-shaped) property types with `TypedArray(row)` / `row`.
+    // Non-refined properties (`.Видимость`, `.Заголовок`,
+    // `.УсловноеОформление`, …) fall through to the platform-property
+    // adapter below, which resolves them through `ТаблицаФормы` via
+    // [`Ty::platform_type_name`].
+    if let Some(refined) = crate::form_items::refine_form_control_property(receiver_ty, field_name)
+    {
+        return Some(refined);
+    }
+
     // Every other receiver type delegates to the platform-property adapter.
     // `lookup_platform_property` decides whether the shape is supported
     // (primitives return `None`), so we can safely call it for any

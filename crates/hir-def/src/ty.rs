@@ -7,6 +7,7 @@ pub mod doc_types;
 
 use std::sync::Arc;
 
+pub use bsl_metadata::FormElementKind;
 use bsl_metadata::MdoType;
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;
@@ -42,6 +43,31 @@ pub enum Ty {
 
     /// Array (Массив).
     Array,
+
+    /// Array parameterised by its element type (`Массив из X`).
+    ///
+    /// Construction sites:
+    /// - JSDoc `// Возвращаемое значение: Массив из Строка` lowers
+    ///   `TypeRef::Array(Some(elem))` → `Ty::TypedArray(Box::new(<elem>))`
+    ///   in `TyLoweringContext::lower_type_ref`.
+    /// - Form-control refinement (`Элементы.X.ВыделенныеСтроки`)
+    ///   produces `Ty::TypedArray(Box::new(row_ty))` so `.Количество()`
+    ///   and iteration stay consistent across both surfaces.
+    ///
+    /// Method lookup keys this under `"Array"` (same as the legacy
+    /// [`Self::Array`] variant), so `.Добавить()`, `.Количество()`, … all
+    /// resolve through the bilingual `Массив` page. Iteration yields the
+    /// inner element directly, bypassing the platform
+    /// `iter_element_types` table whose only entry for `Массив` is
+    /// `"Произвольный"` → `Ty::Unknown` — this is the whole point of
+    /// carrying the element type.
+    ///
+    /// `Ty::Array` (unparameterised) stays as the lowering target for
+    /// `Новый Массив(...)` literals and `TypeRef::Array(None)` forms,
+    /// where no element type is recoverable. The two variants compare
+    /// distinct under [`PartialEq`] / `Ord` so the smart constructor
+    /// [`Self::union`] dedupes correctly.
+    TypedArray(Box<Ty>),
 
     /// Structure (Структура).
     Structure,
@@ -147,6 +173,33 @@ pub enum Ty {
         underlying: Option<(MdoType, crate::Name)>,
     },
 
+    /// Managed-form UI control receiver — the platform wrapper that
+    /// `Элементы.<имя>` resolves to inside FormModule code.
+    ///
+    /// `kind` is the coarse XML-tag taxonomy from `bsl-metadata`
+    /// ([`FormElementKind`]); it picks the platform method table
+    /// (`Table → ТаблицаФормы`, `Field → ПолеФормы`, `Button → КнопкаФормы`,
+    /// `Group → ГруппаФормы`, `Decoration → ДекорацияФормы`,
+    /// `Addition → ДополнениеЭлементаФормы`, `Other → нет таблицы`).
+    ///
+    /// `binding` carries the resolved `<DataPath>` provenance when the
+    /// control's path traces back to a form attribute. Phase 5 uses it
+    /// to refine `Элементы.Переприемка.ВыделенныеСтроки` into a
+    /// [`Ty::TypedArray`] of the actual tabular-section row instead of
+    /// the platform's bare `Массив`.
+    /// `None` covers controls with no `<DataPath>`, with a deleted
+    /// (`~`-prefixed) path, or whose first segment does not resolve to
+    /// a form attribute. In that case method/property lookup still
+    /// works through the platform `kind` table, but row-aware
+    /// refinements degrade gracefully to `Unknown`.
+    FormControl {
+        /// Coarse XML-tag taxonomy — picks the platform method/property
+        /// table for the control.
+        kind: FormElementKind,
+        /// Optional resolved DataPath provenance for row-aware refinement.
+        binding: Option<FormDataBinding>,
+    },
+
     /// Function or procedure type — used internally to carry a
     /// signature through call resolution. **BSL has no first-class
     /// function values**: a bare identifier without parentheses cannot
@@ -226,6 +279,104 @@ impl FormDataKind {
             Self::Collection => "ДанныеФормыКоллекция",
             Self::StructureWithCollection => "ДанныеФормыСтруктураСКоллекцией",
         }
+    }
+}
+
+/// Resolved DataPath provenance for a [`Ty::FormControl`] — the chain
+/// of segments and what the chain's tail actually points at.
+///
+/// Constructed only by `hir-ty::form_items::resolve_data_path` after
+/// walking `<DataPath>` through `Form::find_attribute` + `lookup_field`.
+/// `path` is the original chain (case-preserving but case-insensitively
+/// equal under [`Name`] folding); `target` is the lowering of the tail.
+///
+/// Carrying both lets hover render `«ТаблицаФормы (Объект.Переприемка)»`
+/// without a second resolution pass, and lets Phase 5 row-aware lookup
+/// distinguish `Объект.Переприемка` (TabularSection) from `Объект.Дата`
+/// (scalar Attribute) without re-parsing the path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FormDataBinding {
+    /// Segments of the original `<DataPath>`, in declaration order.
+    /// **Invariant:** always non-empty. Enforced by the only
+    /// constructor [`Self::new`]; the field is private so callers can
+    /// not bypass it via struct-literal syntax.
+    path: Box<[crate::Name]>,
+    /// What the chain's tail resolves to.
+    target: FormDataTarget,
+}
+
+impl FormDataBinding {
+    /// Construct a binding, enforcing the non-empty-`path` invariant.
+    /// Returns `None` for an empty path so callers must surface
+    /// `binding: None` on the enclosing [`Ty::FormControl`] rather
+    /// than carry a vacuous binding — `TyDisplay` would then render
+    /// a bare `«ТаблицаФормы ()»` with no provenance.
+    ///
+    /// This is the **only** constructor: the struct's fields are
+    /// private to keep the invariant enforced from every call site,
+    /// including future ones in `hir-ty` and tests.
+    pub fn new(path: Box<[crate::Name]>, target: FormDataTarget) -> Option<Self> {
+        if path.is_empty() {
+            None
+        } else {
+            Some(Self { path, target })
+        }
+    }
+
+    /// Resolved DataPath segments, in declaration order. Always
+    /// non-empty per the [`Self::new`] invariant.
+    pub fn path(&self) -> &[crate::Name] {
+        &self.path
+    }
+
+    /// What the path's tail resolves to (tabular section / scalar
+    /// attribute Ty).
+    pub fn target(&self) -> &FormDataTarget {
+        &self.target
+    }
+}
+
+/// What a [`FormDataBinding::path`] resolves to at its tail.
+///
+/// Discriminates the two row-aware cases Phase 5 cares about:
+/// - [`Self::TabularSection`] — the path ends in a tabular section
+///   (`Объект.Переприемка`); refined `.ВыделенныеСтроки` returns
+///   `Ty::TypedArray(row)` where row is the section's row Ty.
+/// - [`Self::Attribute`] — the path ends in a scalar attribute
+///   (`Объект.Дата`, `Замечание`); the bound type is whatever
+///   `lookup_field` produced for the path tail.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FormDataTarget {
+    /// DataPath terminates at a tabular section of an MDO. `mdo_type` /
+    /// `owner` identify the MDO carrying the section; `section` is the
+    /// section name (e.g. `(Document, "ПКО", "Переприемка")`).
+    TabularSection { mdo_type: MdoType, owner: crate::Name, section: crate::Name },
+    /// DataPath terminates at a scalar attribute. `ty` is the resolved
+    /// attribute type — `Ty::String`, `Ty::Number`, `Ty::MetadataRef{…}`,
+    /// or any other Ty `lookup_field` produces.
+    Attribute { ty: Box<Ty> },
+}
+
+/// Russian platform type name backing the control's method table —
+/// `bsl-platform`'s entry for the corresponding form-control wrapper.
+/// [`FormElementKind::Other`] returns `None`: the kind is unrecognised,
+/// so there is no platform table to query and method lookup falls
+/// through to `Ty::Unknown` instead of mis-classifying.
+///
+/// Free function rather than inherent impl because [`FormElementKind`]
+/// is defined in `bsl-metadata` (orphan rule). The mapping itself is
+/// platform-specific (`Table → "ТаблицаФормы"`), which conceptually
+/// belongs alongside other platform-name lookups in this module rather
+/// than with the XML-tag taxonomy.
+pub fn form_control_platform_type_name(kind: FormElementKind) -> Option<&'static str> {
+    match kind {
+        FormElementKind::Table => Some("ТаблицаФормы"),
+        FormElementKind::Group => Some("ГруппаФормы"),
+        FormElementKind::Field => Some("ПолеФормы"),
+        FormElementKind::Button => Some("КнопкаФормы"),
+        FormElementKind::Decoration => Some("ДекорацияФормы"),
+        FormElementKind::Addition => Some("ДополнениеЭлементаФормы"),
+        FormElementKind::Other => None,
     }
 }
 
@@ -534,6 +685,88 @@ impl MetadataKind {
             _ => None,
         }
     }
+
+    /// User-facing label for this kind in the chosen locale.
+    ///
+    /// Used by [`TyDisplay`] to render `Ty::MetadataRef { kind, name }` as
+    /// a fully-qualified `"<label>.<name>"` (`"СправочникСсылка.Товары"` /
+    /// `"CatalogRef.Товары"`). The English form matches
+    /// [`Self::platform_prefix`] for kinds that have one, so hover and
+    /// completion stay aligned with the canonical platform-data names that
+    /// power method lookup.
+    ///
+    /// Parametric variants (`TabularSection { parent }`, `RegisterDimension { parent }`,
+    /// …) carry the parent flavour in the value itself; the enclosing
+    /// `Ty::MetadataRef`'s `name` already encodes the `"Parent.Section"`
+    /// suffix, so the label stays focused on the kind tag and the full
+    /// path is still visible as `{label}.{name}`.
+    pub fn display_label(self, locale: base_db::Locale) -> &'static str {
+        use base_db::Locale;
+        match (self, locale) {
+            (Self::CatalogRef, Locale::Ru) => "СправочникСсылка",
+            (Self::CatalogRef, Locale::En) => "CatalogRef",
+            (Self::CatalogObject, Locale::Ru) => "СправочникОбъект",
+            (Self::CatalogObject, Locale::En) => "CatalogObject",
+            (Self::DocumentRef, Locale::Ru) => "ДокументСсылка",
+            (Self::DocumentRef, Locale::En) => "DocumentRef",
+            (Self::DocumentObject, Locale::Ru) => "ДокументОбъект",
+            (Self::DocumentObject, Locale::En) => "DocumentObject",
+            (Self::EnumRef, Locale::Ru) => "ПеречислениеСсылка",
+            (Self::EnumRef, Locale::En) => "EnumRef",
+            (Self::TaskRef, Locale::Ru) => "ЗадачаСсылка",
+            (Self::TaskRef, Locale::En) => "TaskRef",
+            (Self::BusinessProcessRef, Locale::Ru) => "БизнесПроцессСсылка",
+            (Self::BusinessProcessRef, Locale::En) => "BusinessProcessRef",
+            (Self::ExchangePlanRef, Locale::Ru) => "ПланОбменаСсылка",
+            (Self::ExchangePlanRef, Locale::En) => "ExchangePlanRef",
+            (Self::ExchangePlanObject, Locale::Ru) => "ПланОбменаОбъект",
+            (Self::ExchangePlanObject, Locale::En) => "ExchangePlanObject",
+            (Self::ChartOfAccountsRef, Locale::Ru) => "ПланСчетовСсылка",
+            (Self::ChartOfAccountsRef, Locale::En) => "ChartOfAccountsRef",
+            (Self::ChartOfAccountsObject, Locale::Ru) => "ПланСчетовОбъект",
+            (Self::ChartOfAccountsObject, Locale::En) => "ChartOfAccountsObject",
+            (Self::InformationRegisterRef, Locale::Ru) => "РегистрСведенийКлючЗаписи",
+            (Self::InformationRegisterRef, Locale::En) => "InformationRegisterRef",
+            (Self::InformationRegisterRecordManager, Locale::Ru) => "РегистрСведенийМенеджерЗаписи",
+            (Self::InformationRegisterRecordManager, Locale::En) => {
+                "InformationRegisterRecordManager"
+            }
+            (Self::InformationRegisterRecordSet, Locale::Ru) => "РегистрСведенийНаборЗаписей",
+            (Self::InformationRegisterRecordSet, Locale::En) => "InformationRegisterRecordSet",
+            (Self::InformationRegisterRecord, Locale::Ru) => "РегистрСведенийЗапись",
+            (Self::InformationRegisterRecord, Locale::En) => "InformationRegisterRecord",
+            (Self::AccumulationRegisterRef, Locale::Ru) => "РегистрНакопленияКлючЗаписи",
+            (Self::AccumulationRegisterRef, Locale::En) => "AccumulationRegisterRef",
+            (Self::AccumulationRegisterRecordSet, Locale::Ru) => "РегистрНакопленияНаборЗаписей",
+            (Self::AccumulationRegisterRecordSet, Locale::En) => "AccumulationRegisterRecordSet",
+            (Self::AccumulationRegisterRecord, Locale::Ru) => "РегистрНакопленияЗапись",
+            (Self::AccumulationRegisterRecord, Locale::En) => "AccumulationRegisterRecord",
+            (Self::AccountingRegisterRef, Locale::Ru) => "РегистрБухгалтерииКлючЗаписи",
+            (Self::AccountingRegisterRef, Locale::En) => "AccountingRegisterRef",
+            (Self::AccountingRegisterRecordSet, Locale::Ru) => "РегистрБухгалтерииНаборЗаписей",
+            (Self::AccountingRegisterRecordSet, Locale::En) => "AccountingRegisterRecordSet",
+            (Self::AccountingRegisterRecord, Locale::Ru) => "РегистрБухгалтерииЗапись",
+            (Self::AccountingRegisterRecord, Locale::En) => "AccountingRegisterRecord",
+            (Self::CalculationRegisterRef, Locale::Ru) => "РегистрРасчётаКлючЗаписи",
+            (Self::CalculationRegisterRef, Locale::En) => "CalculationRegisterRef",
+            (Self::CalculationRegisterRecordSet, Locale::Ru) => "РегистрРасчетаНаборЗаписей",
+            (Self::CalculationRegisterRecordSet, Locale::En) => "CalculationRegisterRecordSet",
+            (Self::CalculationRegisterRecord, Locale::Ru) => "РегистрРасчетаЗапись",
+            (Self::CalculationRegisterRecord, Locale::En) => "CalculationRegisterRecord",
+            (Self::RegisterDimension { .. }, Locale::Ru) => "Измерение",
+            (Self::RegisterDimension { .. }, Locale::En) => "Dimension",
+            (Self::RegisterResource { .. }, Locale::Ru) => "Ресурс",
+            (Self::RegisterResource { .. }, Locale::En) => "Resource",
+            (Self::RegisterAttribute { .. }, Locale::Ru) => "Реквизит",
+            (Self::RegisterAttribute { .. }, Locale::En) => "Attribute",
+            (Self::RegisterFilter { .. }, Locale::Ru) => "Отбор",
+            (Self::RegisterFilter { .. }, Locale::En) => "Filter",
+            (Self::TabularSection { .. }, Locale::Ru) => "ТабличнаяЧасть",
+            (Self::TabularSection { .. }, Locale::En) => "TabularSection",
+            (Self::TabularSectionRow { .. }, Locale::Ru) => "СтрокаТабличнойЧасти",
+            (Self::TabularSectionRow { .. }, Locale::En) => "TabularSectionRow",
+        }
+    }
 }
 
 impl Ty {
@@ -662,24 +895,62 @@ impl Ty {
         }
     }
 
-    /// Get a human-readable display name for this type.
-    pub fn display_name(&self) -> &str {
-        match self {
-            Ty::Unknown => "Unknown",
-            Ty::Number => "Number",
-            Ty::String => "String",
-            Ty::Boolean => "Boolean",
-            Ty::Date => "Date",
-            Ty::Undefined => "Undefined",
-            Ty::Null => "Null",
-            Ty::Array => "Array",
-            Ty::Structure => "Structure",
-            Ty::Map => "Map",
-            Ty::Type => "Type",
-            Ty::ValueTable => "ValueTable",
-            Ty::ValueList => "ValueList",
-            Ty::MetadataRef { .. } => "MetadataRef",
-            Ty::ManagerCollection(kind) => {
+    /// Get a human-readable display name for this type in the given locale.
+    ///
+    /// Used by user-facing emitters (diagnostics, hover, completion details)
+    /// to render primitive type names (`Число` / `Number`) and generic
+    /// labels (`СсылкаМетаданных` / `MetadataRef`) in the user's
+    /// language. For machine-internal callers (logs, tests, debug, platform
+    /// method lookup) prefer [`Self::canonical_name`] which always returns
+    /// the stable English label and lets the reader see at the call site
+    /// that locale-independence is intentional.
+    ///
+    /// Lifetime is tied to `&self` rather than `'static` because the
+    /// `Ty::PlatformObject` / `Ty::FormData` arms borrow from the type's
+    /// own data — those carry their original BSL spelling (already either
+    /// Russian or English depending on how the source / platform-data
+    /// declared it) and don't switch on `locale`.
+    pub fn display_name(&self, locale: base_db::Locale) -> &str {
+        use base_db::Locale;
+        match (self, locale) {
+            (Ty::Unknown, _) => "Unknown",
+            (Ty::Number, Locale::Ru) => "Число",
+            (Ty::Number, Locale::En) => "Number",
+            (Ty::String, Locale::Ru) => "Строка",
+            (Ty::String, Locale::En) => "String",
+            (Ty::Boolean, Locale::Ru) => "Булево",
+            (Ty::Boolean, Locale::En) => "Boolean",
+            (Ty::Date, Locale::Ru) => "Дата",
+            (Ty::Date, Locale::En) => "Date",
+            (Ty::Undefined, Locale::Ru) => "Неопределено",
+            (Ty::Undefined, Locale::En) => "Undefined",
+            (Ty::Null, _) => "Null",
+            (Ty::Array, Locale::Ru) => "Массив",
+            (Ty::Array, Locale::En) => "Array",
+            // Coarse label only — the fully parameterised render
+            // (`Массив из Строка`) lives on the [`TyDisplay`] wrapper so
+            // the cheap `&str` API stays cheap. Method/property lookup
+            // never goes through `display_name`; it uses
+            // `platform_type_name` which returns `"Array"` (canonical
+            // English) via the catch-all arm.
+            (Ty::TypedArray(_), Locale::Ru) => "Массив",
+            (Ty::TypedArray(_), Locale::En) => "Array",
+            (Ty::Structure, Locale::Ru) => "Структура",
+            (Ty::Structure, Locale::En) => "Structure",
+            (Ty::Map, Locale::Ru) => "Соответствие",
+            (Ty::Map, Locale::En) => "Map",
+            (Ty::Type, Locale::Ru) => "Тип",
+            (Ty::Type, Locale::En) => "Type",
+            (Ty::ValueTable, Locale::Ru) => "ТаблицаЗначений",
+            (Ty::ValueTable, Locale::En) => "ValueTable",
+            (Ty::ValueList, Locale::Ru) => "СписокЗначений",
+            (Ty::ValueList, Locale::En) => "ValueList",
+            (Ty::MetadataRef { .. }, Locale::Ru) => "СсылкаМетаданных",
+            (Ty::MetadataRef { .. }, Locale::En) => "MetadataRef",
+            (Ty::ManagerCollection(kind), Locale::Ru) => {
+                kind.manager_type_prefix_ru().unwrap_or("МенеджерКоллекция")
+            }
+            (Ty::ManagerCollection(kind), Locale::En) => {
                 // `manager_type_prefix` is the canonical display
                 // ("DocumentManager", …). The [`Ty::manager_collection`]
                 // factory rejects `MdoType`s without a manager form, so the
@@ -689,17 +960,61 @@ impl Ty {
                 // lowering bug.
                 kind.manager_type_prefix().unwrap_or("ManagerCollection")
             }
-            Ty::ObjectManager { .. } => "ObjectManager",
-            Ty::ThisObject { .. } => "ThisObject",
-            Ty::FormData { kind, .. } => kind.platform_type_name(),
-            Ty::Function { .. } => "Function",
-            Ty::PlatformObject(name) => name.as_str(),
+            (Ty::ObjectManager { .. }, Locale::Ru) => "МенеджерОбъекта",
+            (Ty::ObjectManager { .. }, Locale::En) => "ObjectManager",
+            (Ty::ThisObject { .. }, Locale::Ru) => "ЭтотОбъект",
+            (Ty::ThisObject { .. }, Locale::En) => "ThisObject",
+            // FormData wrapper names live in `bsl-platform` (already locale-
+            // agnostic; both `ДанныеФормыСтруктура` and the EN-named
+            // `FormDataStructure` are valid platform identifiers, but
+            // platform_data canonicalises to one form per type). Yielding
+            // whatever the platform declared keeps method lookup happy.
+            (Ty::FormData { kind, .. }, _) => kind.platform_type_name(),
+            // Form-control kinds map to the Russian `*Формы` platform type
+            // names — same locale-agnostic strategy as `FormData`. `Other`
+            // has no backing platform table; surface a generic label so
+            // diagnostics never panic on an unknown XML tag.
+            (Ty::FormControl { kind, .. }, _) => match form_control_platform_type_name(*kind) {
+                Some(name) => name,
+                None => match locale {
+                    Locale::Ru => "ЭлементФормы",
+                    Locale::En => "FormElement",
+                },
+            },
+            (Ty::Function { .. }, Locale::Ru) => "Функция",
+            (Ty::Function { .. }, Locale::En) => "Function",
+            (Ty::PlatformObject(name), _) => name.as_str(),
             // Coarse label mirrors `MetadataRef` / `ObjectManager`: the
-            // member-by-member rendering lives on `impl fmt::Display` so
-            // callers that need "Число | Строка" go through `to_string()`
+            // member-by-member rendering lives on the [`TyDisplay`]
+            // wrapper accessed via [`Self::display`], so callers that
+            // need "Число | Строка" use `format!("{}", ty.display(locale))`
             // while APIs that only need a `&str` tag stay cheap.
-            Ty::Union(_) => "Union",
+            (Ty::Union(_), _) => "Union",
         }
+    }
+
+    /// Stable English machine-name for logs, tests, `Debug`, and platform
+    /// method lookups.
+    ///
+    /// Equivalent to `display_name(Locale::En)`, but the dedicated name
+    /// makes the EN-on-purpose intent visible at the call site — important
+    /// in tests where mismatched assertions would otherwise look like a
+    /// localization bug.
+    pub fn canonical_name(&self) -> &str {
+        self.display_name(base_db::Locale::En)
+    }
+
+    /// Locale-aware [`std::fmt::Display`]-able wrapper for `format!` /
+    /// `write!` / `to_string()`.
+    ///
+    /// `Ty` itself does NOT implement `Display` (deliberate — see the
+    /// migration in commit 2 of the bilingual-display refactor): a bare
+    /// `format!("{}", ty)` cannot pick a locale and would silently leak
+    /// English type names into Russian-IDE output. Callers must opt into a
+    /// locale by going through `ty.display(locale)`, which makes the
+    /// presentation choice explicit.
+    pub fn display(&self, locale: base_db::Locale) -> TyDisplay<'_> {
+        TyDisplay { ty: self, locale }
     }
 
     /// Get the platform type name for method/property lookup via bsl-platform.
@@ -729,35 +1044,137 @@ impl Ty {
             // lookup on a `Structure` / `StructureWithCollection` peels off
             // the wrapper through `underlying` (handled in `field_lookup`).
             Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
+            // Form controls (`Элементы.<имя>`) wrap one of the per-kind
+            // platform tables (`ТаблицаФормы`, `ПолеФормы`, …). Method
+            // and non-refined property lookup goes through these names;
+            // refined lookup on `FormControl{Table, Some(binding)}` for
+            // `.ВыделенныеСтроки` / `.ТекущаяСтрока` is layered on top in
+            // `hir-ty::field_lookup`. `Other` has no platform table, so
+            // method dispatch falls through to `Ty::Unknown`.
+            Ty::FormControl { kind, .. } => form_control_platform_type_name(*kind),
             // Unions have no single platform type by construction — a
             // caller that wants methods on `Ty::Union([Number, String])`
             // must narrow first (M4) or intersect method tables explicitly.
             Ty::Union(_) => None,
             Ty::PlatformObject(name) => Some(name.as_str()),
-            _ => Some(self.display_name()),
+            // Platform method lookup is keyed by canonical English type
+            // names (`get_type_methods("Number")`), not localized ones —
+            // platform_data.json stores both `name` (RU) and `english_name`
+            // (EN) and the lookup index normalises both, so EN here is
+            // a deliberate machine-name choice, not user-facing output.
+            _ => Some(self.canonical_name()),
         }
     }
 }
 
-/// Human-readable type rendering.
+/// `Display`-able wrapper for [`Ty`] that knows the user-facing locale.
 ///
-/// Simple variants delegate to [`Ty::display_name`]. [`Ty::Union`] is the only
-/// variant whose rendering depends on its payload — the smart constructor
-/// imposes a stable order, so the output is deterministic.
-impl std::fmt::Display for Ty {
+/// `Ty` deliberately does not implement [`std::fmt::Display`] directly so
+/// that any `format!("{}", ty)` becomes a compile error and forces the
+/// caller to specify a locale via [`Ty::display`]. That keeps presentation
+/// choices explicit at the call site instead of silently leaking the
+/// canonical English label into Russian-IDE output.
+///
+/// Constructed only via [`Ty::display`].
+pub struct TyDisplay<'a> {
+    ty: &'a Ty,
+    locale: base_db::Locale,
+}
+
+impl std::fmt::Display for TyDisplay<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
+        use base_db::Locale;
+        match self.ty {
+            // Render union members one by one so each component picks up the
+            // same locale as the surrounding format. Member order is fixed
+            // by `Ty::union`'s smart constructor (deterministic via `Ord`).
             Ty::Union(types) => {
                 let mut it = types.iter();
                 if let Some(first) = it.next() {
-                    write!(f, "{first}")?;
+                    write!(f, "{}", first.display(self.locale))?;
                     for t in it {
-                        write!(f, " | {t}")?;
+                        write!(f, " | {}", t.display(self.locale))?;
                     }
                 }
                 Ok(())
             }
-            other => f.write_str(other.display_name()),
+            // Fully-qualified MDO references — `СправочникСсылка.Товары` /
+            // `CatalogRef.Товары`. The kind label switches per locale; the
+            // `name` is whatever the source / metadata declared (typically
+            // Russian) and stays as-is so it still matches the project's
+            // identifier of record.
+            Ty::MetadataRef { kind, name } => {
+                write!(f, "{}.{}", kind.display_label(self.locale), name.as_str())
+            }
+            // Object manager — `Справочник.Товары` / `Catalog.Товары`. The
+            // MDO flavour label uses `MdoType::russian_name` /
+            // `MdoType::english_name`, mirroring the way `bsl-metadata`
+            // already names the manager surface in either language.
+            Ty::ObjectManager { kind, name } => {
+                let label = match self.locale {
+                    Locale::Ru => kind.russian_name(),
+                    Locale::En => kind.english_name(),
+                };
+                write!(f, "{}.{}", label, name.as_str())
+            }
+            // Parameterised array — `Массив из Строка` / `Array of String`.
+            // The element renders with the same locale as the outer
+            // wrapper so a Russian hover stays in Russian end-to-end and
+            // an English one stays in English. Composite shapes
+            // (`Массив из Массив из Число`) recurse naturally through
+            // `elem.display(locale)`.
+            Ty::TypedArray(elem) => match self.locale {
+                Locale::Ru => write!(f, "Массив из {}", elem.display(self.locale)),
+                Locale::En => write!(f, "Array of {}", elem.display(self.locale)),
+            },
+            // Form-data wrapper — `ДанныеФормыСтруктура (ДокументОбъект.ПКО)`.
+            // Wrapper name comes from `bsl-platform` (locale-agnostic
+            // platform identifier); the parenthetical projects the
+            // underlying MDO so the reader sees which catalog/document
+            // fields are visible. The `*Object` flavour drops in via
+            // `MetadataKind::object_kind_for`, identical to the surface a
+            // manual `ЭтотОбъект` cast would expose.
+            Ty::FormData { kind, underlying } => {
+                let wrapper = kind.platform_type_name();
+                match underlying
+                    .as_ref()
+                    .and_then(|(mdo, name)| MetadataKind::object_kind_for(*mdo).map(|k| (k, name)))
+                {
+                    Some((object_kind, name)) => write!(
+                        f,
+                        "{} ({}.{})",
+                        wrapper,
+                        object_kind.display_label(self.locale),
+                        name.as_str(),
+                    ),
+                    None => f.write_str(wrapper),
+                }
+            }
+            // Form control — `ТаблицаФормы (Объект.Переприемка)` /
+            // `FormTable (Объект.Переприемка)` when a DataPath binding
+            // is present, or just the wrapper name otherwise. The path
+            // is rendered as the original chain joined by `.` so the
+            // reader sees which form attribute the control is bound to.
+            Ty::FormControl { binding, .. } => {
+                let wrapper = self.ty.display_name(self.locale);
+                match binding {
+                    Some(b) => {
+                        f.write_str(wrapper)?;
+                        f.write_str(" (")?;
+                        let mut it = b.path.iter();
+                        if let Some(first) = it.next() {
+                            f.write_str(first.as_str())?;
+                            for seg in it {
+                                f.write_str(".")?;
+                                f.write_str(seg.as_str())?;
+                            }
+                        }
+                        f.write_str(")")
+                    }
+                    None => f.write_str(wrapper),
+                }
+            }
+            other => f.write_str(other.display_name(self.locale)),
         }
     }
 }
@@ -904,11 +1321,12 @@ mod tests {
 
     #[test]
     fn test_display_name() {
-        assert_eq!(Ty::Number.display_name(), "Number");
-        assert_eq!(Ty::String.display_name(), "String");
-        assert_eq!(Ty::Boolean.display_name(), "Boolean");
-        assert_eq!(Ty::Unknown.display_name(), "Unknown");
-        assert_eq!(Ty::Array.display_name(), "Array");
+        // Stable English canonical labels — pinned by `canonical_name()`.
+        assert_eq!(Ty::Number.canonical_name(), "Number");
+        assert_eq!(Ty::String.canonical_name(), "String");
+        assert_eq!(Ty::Boolean.canonical_name(), "Boolean");
+        assert_eq!(Ty::Unknown.canonical_name(), "Unknown");
+        assert_eq!(Ty::Array.canonical_name(), "Array");
         assert_eq!(
             Ty::Function {
                 params: Box::new([]),
@@ -916,9 +1334,75 @@ mod tests {
                 max_args: Some(0),
                 ret: Box::new(Ty::Undefined),
             }
-            .display_name(),
+            .canonical_name(),
             "Function"
         );
+    }
+
+    #[test]
+    fn display_name_localizes_primitives() {
+        use base_db::Locale;
+        assert_eq!(Ty::Number.display_name(Locale::Ru), "Число");
+        assert_eq!(Ty::String.display_name(Locale::Ru), "Строка");
+        assert_eq!(Ty::Boolean.display_name(Locale::Ru), "Булево");
+        assert_eq!(Ty::Date.display_name(Locale::Ru), "Дата");
+        assert_eq!(Ty::Type.display_name(Locale::Ru), "Тип");
+        assert_eq!(Ty::Array.display_name(Locale::Ru), "Массив");
+        assert_eq!(Ty::Structure.display_name(Locale::Ru), "Структура");
+        assert_eq!(Ty::Map.display_name(Locale::Ru), "Соответствие");
+        assert_eq!(Ty::Undefined.display_name(Locale::Ru), "Неопределено");
+        assert_eq!(Ty::Null.display_name(Locale::Ru), "Null");
+        assert_eq!(Ty::ValueTable.display_name(Locale::Ru), "ТаблицаЗначений");
+        assert_eq!(Ty::ValueList.display_name(Locale::Ru), "СписокЗначений");
+
+        // English side stays in lockstep with `canonical_name`.
+        assert_eq!(Ty::Number.display_name(Locale::En), "Number");
+        assert_eq!(Ty::Number.canonical_name(), Ty::Number.display_name(Locale::En));
+    }
+
+    #[test]
+    fn display_name_localizes_manager_collection() {
+        use base_db::Locale;
+        let cat = Ty::manager_collection(MdoType::Catalog).expect("Catalog has a manager");
+        assert_eq!(cat.display_name(Locale::En), "CatalogManager");
+        assert_eq!(cat.display_name(Locale::Ru), "СправочникМенеджер");
+    }
+
+    #[test]
+    fn ty_display_metadata_ref_localizes() {
+        use crate::Name;
+        use base_db::Locale;
+
+        let ty =
+            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("Товары") };
+        // RU: kind label switches; the source-declared `name` stays
+        // verbatim so the IDE still pinpoints the catalog.
+        assert_eq!(ty.display(Locale::Ru).to_string(), "СправочникСсылка.Товары");
+        // EN: kind label flips to platform-prefix shape (`CatalogRef`).
+        assert_eq!(ty.display(Locale::En).to_string(), "CatalogRef.Товары");
+    }
+
+    #[test]
+    fn ty_display_object_manager_localizes() {
+        use crate::Name;
+        use base_db::Locale;
+
+        let ty = Ty::ObjectManager { kind: MdoType::Catalog, name: Name::new("Товары") };
+        assert_eq!(ty.display(Locale::Ru).to_string(), "Справочник.Товары");
+        assert_eq!(ty.display(Locale::En).to_string(), "Catalog.Товары");
+    }
+
+    #[test]
+    fn ty_display_union_localizes_each_arm() {
+        use base_db::Locale;
+        // Member order is fixed by `Ty::union` (deterministic via the derived
+        // `Ord` on `Ty`): Number, String, Undefined under the current variant
+        // declaration order. The localised label flips per locale, but the
+        // ordering stays identical so callers (snapshots, hover) get a stable
+        // string.
+        let u = Ty::union(vec![Ty::Undefined, Ty::String, Ty::Number]);
+        assert_eq!(u.display(Locale::Ru).to_string(), "Число | Строка | Неопределено");
+        assert_eq!(u.display(Locale::En).to_string(), "Number | String | Undefined");
     }
 
     #[test]
@@ -948,15 +1432,15 @@ mod tests {
 
     #[test]
     fn ty_display_manager_collection() {
-        // Manager-collection display name matches the canonical manager
-        // prefix in `bsl-metadata::MdoType::manager_type_prefix`, so hover
-        // and completion pick up a name consumers already recognise.
+        // Manager-collection canonical (English) name matches the platform
+        // manager prefix in `bsl-metadata::MdoType::manager_type_prefix`, so
+        // tests / logs see the same labels platform_data uses.
         let doc = Ty::manager_collection(MdoType::Document).expect("Document has a manager");
-        assert_eq!(doc.display_name(), "DocumentManager");
+        assert_eq!(doc.canonical_name(), "DocumentManager");
         let cat = Ty::manager_collection(MdoType::Catalog).expect("Catalog has a manager");
-        assert_eq!(cat.display_name(), "CatalogManager");
+        assert_eq!(cat.canonical_name(), "CatalogManager");
         let enm = Ty::manager_collection(MdoType::Enum).expect("Enum has a manager");
-        assert_eq!(enm.display_name(), "EnumManager");
+        assert_eq!(enm.canonical_name(), "EnumManager");
     }
 
     #[test]
@@ -973,7 +1457,7 @@ mod tests {
     #[test]
     fn ty_display_object_manager() {
         let ty = Ty::ObjectManager { kind: MdoType::Document, name: crate::Name::new("ПКО") };
-        assert_eq!(ty.display_name(), "ObjectManager");
+        assert_eq!(ty.canonical_name(), "ObjectManager");
     }
 
     #[test]
@@ -1054,22 +1538,29 @@ mod tests {
 
     #[test]
     fn ty_union_display_sorted() {
-        // `impl Display` renders union members in the smart-constructor
-        // order (deterministic via the `Debug`-keyed BTreeMap). Test pins the
-        // shape so hover / completion output is stable across runs.
+        // `TyDisplay` renders union members in the smart-constructor order
+        // (deterministic via `Ord`). Pin the shape in English so the test is
+        // language-agnostic; locale-specific component names are exercised
+        // by `display_name_localizes_primitives` above.
+        use base_db::Locale;
         let u = Ty::union(vec![Ty::String, Ty::Number]);
-        let rendered = u.to_string();
+        let rendered = format!("{}", u.display(Locale::En));
         assert!(rendered.contains(" | "), "union render must join with ` | `, got {rendered:?}");
-        // Simple variants appear verbatim.
         assert!(rendered.contains("Number"));
         assert!(rendered.contains("String"));
+
+        // Russian locale propagates into each component.
+        let rendered_ru = format!("{}", u.display(Locale::Ru));
+        assert!(rendered_ru.contains("Число"));
+        assert!(rendered_ru.contains("Строка"));
     }
 
     #[test]
     fn ty_union_display_name_is_coarse_label() {
-        // `display_name()` stays as a cheap `&str` tag; nuanced rendering is
-        // `Display`'s job. Matches the MetadataRef / ObjectManager pattern.
-        assert_eq!(Ty::union(vec![Ty::Number, Ty::String]).display_name(), "Union");
+        // `canonical_name()` stays as a cheap `&str` tag; nuanced rendering
+        // goes through `Ty::display(locale)`. Matches the MetadataRef /
+        // ObjectManager pattern.
+        assert_eq!(Ty::union(vec![Ty::Number, Ty::String]).canonical_name(), "Union");
     }
 
     #[test]
@@ -1077,6 +1568,90 @@ mod tests {
         // No single platform type corresponds to a union — method lookup must
         // narrow first before consulting `bsl-platform`.
         assert_eq!(Ty::union(vec![Ty::Number, Ty::String]).platform_type_name(), None);
+    }
+
+    #[test]
+    fn typed_array_canonical_name_matches_array() {
+        // Method/property lookup keys this through `canonical_name`
+        // (English machine-name). Both variants share the same platform
+        // page, so the key must collide on `"Array"`.
+        let ta = Ty::TypedArray(Box::new(Ty::String));
+        assert_eq!(ta.canonical_name(), "Array");
+        assert_eq!(ta.canonical_name(), Ty::Array.canonical_name());
+    }
+
+    #[test]
+    fn typed_array_platform_type_name_resolves_via_array_page() {
+        // Falls through the catch-all in `platform_type_name`, which
+        // returns canonical English — matching the legacy `Ty::Array`
+        // route into `bsl-platform`.
+        let ta = Ty::TypedArray(Box::new(Ty::Number));
+        assert_eq!(ta.platform_type_name(), Some("Array"));
+    }
+
+    #[test]
+    fn typed_array_display_renders_element_type_bilingual() {
+        use base_db::Locale;
+        let ta = Ty::TypedArray(Box::new(Ty::String));
+        assert_eq!(ta.display(Locale::Ru).to_string(), "Массив из Строка");
+        assert_eq!(ta.display(Locale::En).to_string(), "Array of String");
+    }
+
+    #[test]
+    fn typed_array_display_recurses_into_nested_element() {
+        use base_db::Locale;
+        // Nested parameterisation renders end-to-end without losing
+        // locale: `Массив из Массив из Число`.
+        let inner = Ty::TypedArray(Box::new(Ty::Number));
+        let outer = Ty::TypedArray(Box::new(inner));
+        assert_eq!(outer.display(Locale::Ru).to_string(), "Массив из Массив из Число");
+        assert_eq!(outer.display(Locale::En).to_string(), "Array of Array of Number");
+    }
+
+    #[test]
+    fn typed_array_display_name_is_coarse_label() {
+        use base_db::Locale;
+        // The `&str`-returning `display_name` API is a coarse label —
+        // it must match `Ty::Array`'s label so existing callers that
+        // only look at the variant tag don't see drift. Detailed
+        // rendering (`Массив из X`) lives on the `TyDisplay` wrapper.
+        let ta = Ty::TypedArray(Box::new(Ty::String));
+        assert_eq!(ta.display_name(Locale::Ru), "Массив");
+        assert_eq!(ta.display_name(Locale::En), "Array");
+    }
+
+    #[test]
+    fn typed_array_union_dedups_by_element_type() {
+        // Smart-constructor invariant: identical `TypedArray(T)` instances
+        // dedup; `TypedArray(T)` and `TypedArray(U)` (different elements)
+        // stay distinct so the union renders both arms.
+        let a = Ty::TypedArray(Box::new(Ty::Number));
+        let b = Ty::TypedArray(Box::new(Ty::Number));
+        assert_eq!(Ty::union(vec![a.clone(), b]), a);
+
+        let c = Ty::TypedArray(Box::new(Ty::String));
+        let union = Ty::union(vec![a, c]);
+        match union {
+            Ty::Union(ref parts) => {
+                assert_eq!(parts.len(), 2, "TypedArray with different elements must not dedup");
+            }
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_array_distinct_from_unparameterised_array() {
+        // The two variants are deliberately distinct under `PartialEq`.
+        // `Ty::union` must keep both alive so a callsite that observes
+        // both shapes (`Массив` literal flowing alongside a typed JSDoc
+        // result) doesn't lose the element refinement.
+        let a = Ty::Array;
+        let ta = Ty::TypedArray(Box::new(Ty::Number));
+        assert_ne!(a, ta);
+        match Ty::union(vec![a, ta]) {
+            Ty::Union(ref parts) => assert_eq!(parts.len(), 2),
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1119,5 +1694,177 @@ mod tests {
         assert!(MetadataKind::object_kind_for(MdoType::BusinessProcess).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::Enum).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::CommonModule).is_none());
+    }
+
+    // ---- Phase 3: Ty::FormControl ----
+
+    #[test]
+    fn form_control_platform_type_name_per_kind() {
+        // The kind→platform-type mapping is the contract that links the
+        // XML taxonomy in `bsl-metadata` to the per-control method
+        // tables in `bsl-platform`. A drift here silently breaks
+        // method/property dispatch on `Элементы.<имя>`.
+        assert_eq!(form_control_platform_type_name(FormElementKind::Table), Some("ТаблицаФормы"));
+        assert_eq!(form_control_platform_type_name(FormElementKind::Group), Some("ГруппаФормы"));
+        assert_eq!(form_control_platform_type_name(FormElementKind::Field), Some("ПолеФормы"));
+        assert_eq!(form_control_platform_type_name(FormElementKind::Button), Some("КнопкаФормы"));
+        assert_eq!(
+            form_control_platform_type_name(FormElementKind::Decoration),
+            Some("ДекорацияФормы")
+        );
+        assert_eq!(
+            form_control_platform_type_name(FormElementKind::Addition),
+            Some("ДополнениеЭлементаФормы")
+        );
+        assert_eq!(form_control_platform_type_name(FormElementKind::Other), None);
+    }
+
+    #[test]
+    fn form_control_display_name_uses_platform_table_per_kind() {
+        use base_db::Locale;
+        let table = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let field = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        let other = Ty::FormControl { kind: FormElementKind::Other, binding: None };
+
+        // Per-kind labels are locale-agnostic Russian platform names —
+        // identical strategy as `Ty::FormData`.
+        assert_eq!(table.display_name(Locale::Ru), "ТаблицаФормы");
+        assert_eq!(table.display_name(Locale::En), "ТаблицаФормы");
+        assert_eq!(field.display_name(Locale::Ru), "ПолеФормы");
+
+        // `Other` falls back to a localised generic — no platform table.
+        assert_eq!(other.display_name(Locale::Ru), "ЭлементФормы");
+        assert_eq!(other.display_name(Locale::En), "FormElement");
+    }
+
+    #[test]
+    fn form_control_platform_type_name_routes_method_lookup_per_kind() {
+        let table = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let button = Ty::FormControl { kind: FormElementKind::Button, binding: None };
+        let other = Ty::FormControl { kind: FormElementKind::Other, binding: None };
+
+        // The `&self` API (used by method/property lookup in `hir-ty`)
+        // must agree with the free function — both come from the same
+        // table.
+        assert_eq!(table.platform_type_name(), Some("ТаблицаФормы"));
+        assert_eq!(button.platform_type_name(), Some("КнопкаФормы"));
+        // `Other` returns `None` so dispatch falls through to `Unknown`
+        // rather than mis-classifying.
+        assert_eq!(other.platform_type_name(), None);
+    }
+
+    #[test]
+    fn form_control_display_with_binding_renders_path() {
+        use base_db::Locale;
+        // Binding renders as `«ТаблицаФормы (Объект.Переприемка)»` —
+        // path joined by `.` so hover shows which form attribute the
+        // control is bound to without a second resolution pass.
+        let binding = FormDataBinding::new(
+            Box::new([crate::Name::new("Объект"), crate::Name::new("Переприемка")]),
+            FormDataTarget::TabularSection {
+                mdo_type: MdoType::Document,
+                owner: crate::Name::new("ПКО"),
+                section: crate::Name::new("Переприемка"),
+            },
+        )
+        .expect("path is non-empty");
+        let ty = Ty::FormControl { kind: FormElementKind::Table, binding: Some(binding) };
+        assert_eq!(ty.display(Locale::Ru).to_string(), "ТаблицаФормы (Объект.Переприемка)");
+        assert_eq!(ty.display(Locale::En).to_string(), "ТаблицаФормы (Объект.Переприемка)");
+    }
+
+    #[test]
+    fn form_control_display_without_binding_is_just_wrapper() {
+        use base_db::Locale;
+        let ty = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        assert_eq!(ty.display(Locale::Ru).to_string(), "ПолеФормы");
+        assert_eq!(ty.display(Locale::En).to_string(), "ПолеФормы");
+    }
+
+    #[test]
+    fn form_control_union_dedups_identical_kind_and_binding() {
+        // Smart-constructor invariant: identical `(kind, binding)` pairs
+        // dedup; different `kind` or `binding` stay distinct so the
+        // union still surfaces every Ty alternative.
+        let a = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let b = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        assert_eq!(Ty::union(vec![a.clone(), b]), a);
+
+        let other_kind = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        match Ty::union(vec![a, other_kind]) {
+            Ty::Union(parts) => assert_eq!(parts.len(), 2),
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn form_control_ord_is_stable_by_kind_then_binding() {
+        // `Ord` participates in `Ty::union`'s sort+dedup. The current
+        // contract is "kind first, binding second" via derived Ord on
+        // pinned `FormElementKind` discriminants — pin the observable
+        // shape so a future refactor doesn't silently shuffle Salsa
+        // cache keys.
+        let a = Ty::FormControl { kind: FormElementKind::Table, binding: None };
+        let b = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        // Table = 0 < Field = 2 (per pinned discriminants in Phase 1).
+        assert!(a < b);
+    }
+
+    #[test]
+    fn form_data_binding_hash_stable_for_salsa_keys() {
+        // `FormDataBinding` participates in Ty's `Hash` derivation.
+        // Equal bindings must hash equally so Salsa-cached lookups on
+        // `Ty::FormControl{kind, Some(binding)}` collide on a single
+        // cache entry. A bug here surfaces as cache thrashing, not a
+        // wrong answer — easy to miss without an explicit pin.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn h(b: &FormDataBinding) -> u64 {
+            let mut s = DefaultHasher::new();
+            b.hash(&mut s);
+            s.finish()
+        }
+
+        let mk = || {
+            FormDataBinding::new(
+                Box::new([crate::Name::new("Объект"), crate::Name::new("Переприемка")]),
+                FormDataTarget::TabularSection {
+                    mdo_type: MdoType::Document,
+                    owner: crate::Name::new("ПКО"),
+                    section: crate::Name::new("Переприемка"),
+                },
+            )
+            .expect("path is non-empty")
+        };
+
+        let a = mk();
+        let b = mk();
+        assert_eq!(a, b);
+        assert_eq!(h(&a), h(&b));
+    }
+
+    #[test]
+    fn form_data_binding_new_rejects_empty_path() {
+        // Empty path is meaningless — the enclosing `Ty::FormControl`
+        // should carry `binding: None` instead. Pinning this guards
+        // against Phase 4 accidentally producing vacuous `Some(...)`
+        // bindings that render as `ТаблицаФормы ()` in hover.
+        let target = FormDataTarget::Attribute { ty: Box::new(Ty::Unknown) };
+        assert!(FormDataBinding::new(Box::new([]), target.clone()).is_none());
+        let ok = FormDataBinding::new(Box::new([crate::Name::new("Объект")]), target);
+        assert!(ok.is_some());
+    }
+
+    #[test]
+    fn form_data_target_attribute_carries_resolved_ty() {
+        // Scalar attribute branch — Phase 4 will produce these for
+        // `Замечание` (String) or `Объект.Code` (String) via
+        // `lookup_field` on each path segment.
+        let target = FormDataTarget::Attribute { ty: Box::new(Ty::String) };
+        match target {
+            FormDataTarget::Attribute { ty } => assert_eq!(*ty, Ty::String),
+            other => panic!("expected Attribute, got {other:?}"),
+        }
     }
 }

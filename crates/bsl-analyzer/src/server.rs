@@ -19,6 +19,7 @@ use lsp_types::{
 use crate::{
     global_state::GlobalState,
     handlers::{NotificationDispatcher, RequestDispatcher},
+    locale::parse_lsp_locale,
     lsp::Progress,
 };
 
@@ -68,14 +69,31 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     // are opened via LSP before VFS loader finishes
     state.init_empty_source_root();
 
+    // Capture the IDE-supplied locale (RFC 4646) so that diagnostics_state
+    // can use it as a fallback when `[output] display_language` is unset.
+    // Must run BEFORE `set_workspace_root`, which triggers
+    // `update_diagnostics_config` and freezes the locale into the Salsa
+    // input.
+    state.lsp_locale = initialize_params.locale.as_deref().map(parse_lsp_locale);
+    if let Some(locale) = state.lsp_locale {
+        tracing::info!(?locale, "client supplied LSP locale");
+    }
+
     // Extract workspace root from initialize params
     let workspace_root = extract_workspace_root(&initialize_params);
 
-    // Set workspace root in LSP state
+    // Set workspace root in LSP state. `set_workspace_root` is what
+    // triggers `update_diagnostics_config` and folds the LSP-supplied
+    // locale into the Salsa input — without it, `diagnostics_config`
+    // stays at its default (`Locale::Ru`) and the client's `"en-US"`
+    // is silently ignored. The no-workspace-root branch must therefore
+    // still run `update_diagnostics_config` so hover and completion
+    // (which read `diagnostics_config.locale`) see the LSP fallback.
     if let Some(ref root) = workspace_root {
         state.set_workspace_root(root.clone());
     } else {
         tracing::warn!("No workspace root provided by client");
+        state.update_diagnostics_config();
     }
 
     // Run event loop

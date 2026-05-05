@@ -70,13 +70,14 @@ fn extract_cursor(fixture_text: &str) -> (String, String, u32) {
 
 fn check_hover(fixture: &str, expected: Expect) {
     let (analysis, file_id, offset) = setup(fixture);
-    let hover = analysis.hover(file_id, offset).expect("hover should produce a result");
+    let hover =
+        analysis.hover(file_id, offset, ide::Locale::Ru).expect("hover should produce a result");
     expected.assert_eq(&hover.markup);
 }
 
 fn check_no_hover(fixture: &str) {
     let (analysis, file_id, offset) = setup(fixture);
-    assert!(analysis.hover(file_id, offset).is_none(), "expected no hover result");
+    assert!(analysis.hover(file_id, offset, ide::Locale::Ru).is_none(), "expected no hover result");
 }
 
 // ---------- user-defined symbols ----------
@@ -203,7 +204,7 @@ fn hover_platform_global_function() {
 КонецПроцедуры
 "#;
     let (analysis, file_id, offset) = setup(fixture);
-    let hover = analysis.hover(file_id, offset);
+    let hover = analysis.hover(file_id, offset, ide::Locale::Ru);
     // Platform data may be absent in minimal test runs; accept either state
     // so we pin the call path without forcing a specific markup fingerprint.
     if let Some(result) = hover {
@@ -222,7 +223,7 @@ fn hover_keyword_процедура() {
 КонецПроцедуры
 "#;
     let (analysis, file_id, offset) = setup(fixture);
-    let hover = analysis.hover(file_id, offset);
+    let hover = analysis.hover(file_id, offset, ide::Locale::Ru);
     if let Some(result) = hover {
         assert!(
             result.markup.contains("Процедура"),
@@ -246,8 +247,9 @@ fn hover_implicit_module_var_after_new_constructor() {
 КомпоновщикНас$0троек = Новый КомпоновщикНастроекКомпоновкиДанных;
 "#;
     let (analysis, file_id, offset) = setup(fixture);
-    let hover =
-        analysis.hover(file_id, offset).expect("hover on implicit var must produce a result");
+    let hover = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover on implicit var must produce a result");
     assert!(
         hover.markup.contains("КомпоновщикНастроекКомпоновкиДанных"),
         "hover must surface inferred type name, got: {:?}",
@@ -270,7 +272,9 @@ fn hover_local_var_carries_inferred_primitive_type() {
 КонецПроцедуры
 "#;
     let (analysis, file_id, offset) = setup(fixture);
-    let hover = analysis.hover(file_id, offset).expect("hover on local var must produce a result");
+    let hover = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover on local var must produce a result");
     assert!(
         hover.markup.contains("Локальная переменная Результат"),
         "hover must keep the local-variable header, got: {:?}",
@@ -296,7 +300,7 @@ fn hover_on_unknown_platform_type_in_new_falls_back_to_name_only() {
 "#;
     let (analysis, file_id, offset) = setup(fixture);
     let hover = analysis
-        .hover(file_id, offset)
+        .hover(file_id, offset, ide::Locale::Ru)
         .expect("hover on implicit var with unknown platform object must still produce a result");
     assert!(
         hover.markup.contains("КонвейерДанныхЗаказов"),
@@ -318,7 +322,7 @@ fn hover_on_constructor_name_does_not_leak_enclosing_new_type() {
 КонецПроцедуры
 "#;
     let (analysis, file_id, offset) = setup(fixture);
-    let hover = analysis.hover(file_id, offset);
+    let hover = analysis.hover(file_id, offset, ide::Locale::Ru);
     // Platform data may or may not be loaded in minimal test runs; the
     // negative guard (no unresolved-ident fallback header) runs always,
     // the positive check (right path fired) only when hover produced a
@@ -355,8 +359,9 @@ fn hover_keyword_method_after_dot_resolves_to_platform_method() {
 КонецПроцедуры
 "#;
     let (analysis, file_id, offset) = setup(fixture);
-    let h =
-        analysis.hover(file_id, offset).expect("hover on Запрос.Выполнить() must produce a result");
+    let h = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover on Запрос.Выполнить() must produce a result");
     // Hard positive: bilingual platform-method header AND the method's
     // documented return type.
     assert!(
@@ -386,7 +391,7 @@ fn hover_chained_keyword_method() {
 "#;
     let (analysis, file_id, offset) = setup(fixture);
     let h = analysis
-        .hover(file_id, offset)
+        .hover(file_id, offset, ide::Locale::Ru)
         .expect("hover on chained Запрос.Выполнить() must produce a result");
     assert!(h.markup.contains("Выполнить") && h.markup.contains("Execute"), "got: {}", h.markup);
     assert!(
@@ -410,7 +415,7 @@ fn hover_global_execute_statement_does_not_render_query_method() {
 КонецПроцедуры
 "#;
     let (analysis, file_id, offset) = setup(fixture);
-    let h = analysis.hover(file_id, offset);
+    let h = analysis.hover(file_id, offset, ide::Locale::Ru);
     if let Some(h) = h {
         // Whatever surface (keyword vs global function), it must NOT
         // be the Query.Execute method markup — `РезультатЗапроса` is
@@ -443,7 +448,7 @@ fn hover_for_each_loop_var_at_declaration_shows_element_type() {
 "#;
     let (analysis, file_id, offset) = setup(fixture);
     let hover = analysis
-        .hover(file_id, offset)
+        .hover(file_id, offset, ide::Locale::Ru)
         .expect("hover on declaration-site loop variable must produce a result");
     assert!(
         hover.markup.contains("КлючИЗначение"),
@@ -469,7 +474,7 @@ fn hover_classic_for_counter_at_declaration_shows_number() {
 "#;
     let (analysis, file_id, offset) = setup(fixture);
     let hover = analysis
-        .hover(file_id, offset)
+        .hover(file_id, offset, ide::Locale::Ru)
         .expect("hover on classic-for counter declaration must produce a result");
     assert!(
         hover.markup.contains("Число") || hover.markup.contains("Number"),
@@ -499,7 +504,7 @@ fn hover_for_each_loop_var_same_body_shadowing() {
 "#;
     let (analysis, file_id, offset) = setup(fixture);
     let hover = analysis
-        .hover(file_id, offset)
+        .hover(file_id, offset, ide::Locale::Ru)
         .expect("hover at first declaration in same-body shadowing fixture must produce a result");
     assert!(
         hover.markup.contains("КлючИЗначение"),
@@ -530,8 +535,9 @@ fn hover_for_each_loop_var_per_body_isolation() {
 КонецПроцедуры
 "#;
     let (analysis, file_id, offset) = setup(fixture);
-    let hover =
-        analysis.hover(file_id, offset).expect("hover in first procedure must produce a result");
+    let hover = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover in first procedure must produce a result");
     assert!(
         hover.markup.contains("КлючИЗначение"),
         "first procedure's loop var must resolve to КлючИЗначение (Соответствие element), \
@@ -552,5 +558,55 @@ fn hover_on_unknown_identifier() {
     Результат = НеизвестныйСим$0вол;
 КонецПроцедуры
 "#,
+    );
+}
+
+// ---------- bilingual display ----------
+
+/// `Ty::display(locale)` flips the rendered type label per locale. The
+/// hover frame stays Russian (single-locale message templates are out
+/// of scope for the bilingual-display refactor), but the
+/// `**Тип:** <T>` line picks up the user's selected locale so a
+/// Russian-only IDE no longer reads "Number" when the surrounding text
+/// says "Тип:".
+///
+/// Hits the `definition_to_hover` → `ty_info_markup` path on a local
+/// variable: a literal `42` infers to `Ty::Number`, which `display(Ru)`
+/// renders as "Число" and `display(En)` as "Number".
+#[test]
+fn hover_local_variable_type_label_localizes() {
+    let fixture = r#"//- /test.bsl
+Процедура Тест()
+    Сч$0етчик = 42;
+КонецПроцедуры
+"#;
+    let (analysis, file_id, offset) = setup(fixture);
+
+    let hover_ru = analysis
+        .hover(file_id, offset, ide::Locale::Ru)
+        .expect("hover on Russian-locale must produce a result");
+    assert!(
+        hover_ru.markup.contains("**Тип:** Число"),
+        "Russian hover must label the local as Число, got: {:?}",
+        hover_ru.markup
+    );
+    assert!(
+        !hover_ru.markup.contains("Number"),
+        "Russian hover must not surface the English label, got: {:?}",
+        hover_ru.markup
+    );
+
+    let hover_en = analysis
+        .hover(file_id, offset, ide::Locale::En)
+        .expect("hover on English-locale must produce a result");
+    assert!(
+        hover_en.markup.contains("**Тип:** Number"),
+        "English hover must label the local as Number, got: {:?}",
+        hover_en.markup
+    );
+    assert!(
+        !hover_en.markup.contains("Число"),
+        "English hover must not surface the Russian label, got: {:?}",
+        hover_en.markup
     );
 }

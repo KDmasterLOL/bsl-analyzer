@@ -147,6 +147,7 @@ pub struct FileIdInput {
 ///     ],
 ///     ordinary_app_support: false,
 ///     dataflow_max_iterations: 10000,
+///     locale: Locale::Ru,
 /// };
 /// let config_id = DiagnosticsConfigId::new(db, config);
 /// ```
@@ -181,6 +182,14 @@ pub struct DiagnosticsConfigInput {
     /// Used by flow-sensitive diagnostics to limit computation.
     /// Default: 10000 (sync with dataflow::DEFAULT_MAX_ITERATIONS).
     pub dataflow_max_iterations: usize,
+
+    /// User-facing output locale (for diagnostic message rendering).
+    ///
+    /// Determines which language is used for primitive type names and other
+    /// localized labels in diagnostic messages. Resolved at the LSP layer
+    /// from `[output] display_language` (TOML) or `InitializeParams.locale`
+    /// (LSP), with `Locale::default()` (= Ru) as a fallback.
+    pub locale: crate::Locale,
 }
 
 impl DiagnosticsConfigInput {
@@ -192,6 +201,7 @@ impl DiagnosticsConfigInput {
             parameters: Vec::new(),
             ordinary_app_support: false,
             dataflow_max_iterations: 10000,
+            locale: crate::Locale::default(),
         }
     }
 
@@ -206,6 +216,7 @@ impl DiagnosticsConfigInput {
         parameters: impl IntoIterator<Item = (String, String)>,
         ordinary_app_support: bool,
         dataflow_max_iterations: usize,
+        locale: crate::Locale,
     ) -> Self {
         let mut disabled: Vec<String> = disabled.into_iter().collect();
         disabled.sort();
@@ -219,7 +230,14 @@ impl DiagnosticsConfigInput {
         parameters.sort_by(|a, b| a.0.cmp(&b.0));
         parameters.dedup_by(|a, b| a.0 == b.0);
 
-        Self { disabled, enabled, parameters, ordinary_app_support, dataflow_max_iterations }
+        Self {
+            disabled,
+            enabled,
+            parameters,
+            ordinary_app_support,
+            dataflow_max_iterations,
+            locale,
+        }
     }
 
     /// Check if a diagnostic code is disabled.
