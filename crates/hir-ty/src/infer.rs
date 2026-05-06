@@ -1424,116 +1424,18 @@ impl<'db> InferenceContext<'db> {
 
     /// Infer type from a function call.
     fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> Ty {
-        // Qualified callees dispatch by segment count:
-        //   2 → `CommonModule.Method()`  → resolve_qualified_call
-        //   3 → `Документы.ПКО.Метод()` → resolve_three_level_call
-        // Everything else falls through to the generic function-type path.
+        // Qualified callees come from body lowering only for
+        // three-segment manager calls (`Документы.ПКО.Метод()`).
+        // Two-segment `Module.Method()` was lifted out of `QualifiedPath`
+        // in Phase 2 of the qualified-call refactor — those calls now
+        // travel as `Expr::Call { callee: Expr::Field, … }` and dispatch
+        // through `dispatch_bare_ident_field_call` in the Field branch
+        // below. The form-self disambiguation that used to live here
+        // moved to `infer_path_name`'s step 4 (no QualifiedPath shape
+        // remains for it to gate).
         let callee_expr = self.body.expr(callee);
         if let Expr::QualifiedPath(qualified_path) = callee_expr {
             match qualified_path.segments().len() {
-                2 => {
-                    let module_name = qualified_path.first().clone();
-                    let method_name = qualified_path.last().clone();
-
-                    // Managed-form Self property method-call dispatch.
-                    // HIR lowering (`analyze_qualified_call`) cannot
-                    // distinguish a CommonModule call (`М.Метод()`) from a
-                    // method on a managed-form Self property
-                    // (`Элементы.Найти()`) — both lower to a 2-segment
-                    // `QualifiedPath` because lowering has no `db`. So the
-                    // disambiguation runs here in Phase B: if the first
-                    // segment names a property of `ФормаКлиентскогоПриложения`
-                    // **and** the enclosing module is a managed form
-                    // **and** the receiver name is NOT also a real user
-                    // CommonModule (a user `Метаданные` CommonModule
-                    // shadowing the platform global must keep its
-                    // CommonModule semantics — same precedence rule as
-                    // `missing_common_module_method::from_hir`), the call
-                    // is `<property>.<method>` and routes through the
-                    // platform `lookup_method` adapter on the property's
-                    // declared `Ty`. Otherwise it falls through to the
-                    // CommonModule resolver as before.
-                    let resolver = self.get_resolver();
-                    // Full shadowing gate, mirroring `infer_path_name`'s
-                    // step 4 and the assignment handler:
-                    //   * `user_common_module_exists` — visibility-aware
-                    //     CommonModule precedence (a raw `module_index`
-                    //     probe would falsely shadow a config-hidden
-                    //     module and silently miss when the CommonModule
-                    //     path can't see the receiver);
-                    //   * module-level `Метод()` / `Перем` declared in
-                    //     the current module overrides the form-self
-                    //     property (BSL: explicit user declaration wins
-                    //     over implicit Self);
-                    //   * any parameter or `Перем` declared in this body
-                    //     covers the gap left by `Resolver::resolve_name`
-                    //     (no ExprScope) and `var_types` (no entry until
-                    //     first assign).
-                    // Lowering already drops `local_vars`/`param_names`
-                    // before classifying as `QualifiedPath`, but the
-                    // module-level / declared-binding checks here close
-                    // the cases lowering cannot see.
-                    let module_level_shadow = matches!(
-                        resolver.resolve_name(self.db, &module_name),
-                        Some(hir_def::resolver::Resolution::Method(_))
-                            | Some(hir_def::resolver::Resolution::Variable(_))
-                    );
-                    let body_shadow = self.body_declares_binding(&module_name);
-                    if !resolver.user_common_module_exists(self.db, &module_name)
-                        && !module_level_shadow
-                        && !body_shadow
-                    {
-                        if let Some(prop_resolution) = crate::form_self::resolve_form_self_property(
-                            self.db,
-                            &resolver,
-                            &module_name,
-                        ) {
-                            for arg in args {
-                                self.infer_expr(*arg);
-                            }
-                            let receiver_ty = prop_resolution.return_ty;
-                            if let Some(info) =
-                                crate::method_lookup::lookup_method(&receiver_ty, &method_name)
-                            {
-                                // Argument binding mirrors the
-                                // `Expr::Field`-callee platform path on
-                                // line ~1453: without it, narrow / arg
-                                // diagnostics silently drop for
-                                // form-self method calls.
-                                self.record_call_arg_binding(
-                                    callee,
-                                    args,
-                                    ParamsShape::Overloaded {
-                                        flat: Arc::<[Ty]>::from(&info.params[..]),
-                                        overloads: info
-                                            .overloads
-                                            .iter()
-                                            .map(|ov| Arc::<[Ty]>::from(&ov[..]))
-                                            .collect::<Vec<Arc<[Ty]>>>()
-                                            .into(),
-                                    },
-                                );
-                                trace!(
-                                    "resolved form-self call {}.{} as {:?}",
-                                    module_name,
-                                    method_name,
-                                    info.return_ty
-                                );
-                                return info.return_ty;
-                            }
-                            // Form-self property exists, but the method
-                            // is missing on its type — silent for now
-                            // (mirrors the Authoritative-receiver gate
-                            // in the Expr::Field path: we don't fire
-                            // UnresolvedMethodCall here so the user
-                            // doesn't see two error sources for one
-                            // misspelled member name).
-                            return Ty::Unknown;
-                        }
-                    }
-
-                    return self.infer_qualified_call(&module_name, &method_name, args, callee);
-                }
                 3 => {
                     let mdo_type_plural = qualified_path.segments()[0].clone();
                     let mdo_name = qualified_path.segments()[1].clone();
@@ -1546,7 +1448,25 @@ impl<'db> InferenceContext<'db> {
                         callee,
                     );
                 }
-                _ => {}
+                other => {
+                    // Invariant: only 3-segment QualifiedPath is
+                    // currently constructed by lowering. 2-segment
+                    // moved to Field-shape in Phase 2; 0/1/4+ never
+                    // existed. A `debug_assert!` traps a future
+                    // regression in tests; in release the call is
+                    // demoted to `Ty::Unknown` (silent skip) rather
+                    // than panicking inside the IDE process.
+                    debug_assert!(
+                        false,
+                        "unexpected QualifiedPath segment count {other} in infer_call",
+                    );
+                    tracing::debug!(
+                        segments = other,
+                        ?qualified_path,
+                        "QualifiedPath with unexpected segment count reached infer_call; \
+                         falling through to Ty::Unknown"
+                    );
+                }
             }
         }
 

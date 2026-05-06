@@ -17,9 +17,11 @@
 //! the user-facing docs and the SonarQube rules export all stay in
 //! place — downstream consumers (LSP clients, BSL-LS compatibility
 //! layers, user `bsl-analyzer.toml` files) keep accepting the
-//! identifier without breaking. Phase 4 of the plan removes the
-//! deprecated infrastructure entirely; until then `from_hir` is
-//! kept as a no-op stub so dispatch round-trips don't panic.
+//! identifier without breaking. Retention is intentional and
+//! open-ended: full removal of the variant, dispatch wiring, and
+//! handler stub is deferred until the deprecation window closes —
+//! a separate breaking-change PR. Phase 5 of the plan only covers
+//! regression coverage (E2E + manual smoke), not removal.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -100,13 +102,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: Requires Configuration.xml setup for CommonModule resolution
-    fn test_with_common_module_fixture() {
-        // Test that diagnostic is created when calling a non-existent CommonModule method
-        // NOTE: This test is currently ignored because CommonModule resolution requires
-        // Configuration.xml metadata, which is not yet set up in test fixtures.
-        // The diagnostic is created in HIR lowering only when analyze_qualified_call()
-        // identifies the call as a CommonModule call (not a local variable).
+    #[ignore] // TODO Phase 5 — re-enable as a workspace-level e2e in
+              // `crates/ide/tests/resolve_qualified_call.rs` once Configuration.xml
+              // wiring is in place; `check_hir_diagnostic_with_fixtures` builds a
+              // module index from disk paths but doesn't register a Configuration,
+              // so the cascade gate's `user_common_module_exists` cannot positively
+              // claim the receiver.
+    fn registered_common_module_with_missing_method_emits_method_not_found() {
         use crate::test_utils::check_hir_diagnostic_with_fixtures;
         let fixture = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Module.bsl
@@ -120,15 +122,17 @@ mod tests {
 "#;
 
         let diagnostics = check_hir_diagnostic_with_fixtures(fixture);
-        let diags: Vec<_> = diagnostics
+        let umc: Vec<_> = diagnostics
             .iter()
-            .filter(|d| d.code == crate::DiagnosticCode::MissingCommonModuleMethod)
+            .filter(|d| d.code == crate::DiagnosticCode::UnresolvedMethodCall)
             .collect();
 
-        // With proper Configuration.xml, diagnostic should be created
-        assert_eq!(diags.len(), 1, "Expected 1 diagnostic for missing CommonModule method");
-        assert!(diags[0].message.contains("МетодНесуществующий"));
-        assert!(diags[0].message.contains("ПервыйОбщийМодуль"));
+        // Expected: cascade gate 3 confirms the CommonModule, delegates
+        // to `infer_qualified_call`, which emits MethodNotFound for the
+        // missing method.
+        assert_eq!(umc.len(), 1, "Expected one UnresolvedMethodCall, got: {:?}", diagnostics);
+        assert!(umc[0].message.contains("МетодНесуществующий"));
+        assert!(umc[0].message.contains("ПервыйОбщийМодуль"));
     }
 
     #[test]
@@ -197,13 +201,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: requires Configuration.xml fixture wiring (same as test_with_common_module_fixture above).
-    fn test_user_module_shadows_platform_global() {
-        // Edge case flagged by Codex pair-mode review: a user CommonModule
-        // sharing a name with a platform global must not have its real
-        // missing-method diagnostic swallowed by the platform fallback.
-        // The narrowing in `from_hir` checks `find_common_module_files_anywhere`
-        // before consulting the platform catalogue.
+    #[ignore] // TODO Phase 5 — re-enable as a workspace-level e2e once
+              // Configuration.xml wiring is in place (same gating as
+              // `registered_common_module_with_missing_method_emits_method_not_found`
+              // above).
+    fn user_common_module_shadows_platform_global() {
+        // Phase 2 cascade gate ordering pins this invariant: gate 3
+        // (`user_common_module_exists`) runs BEFORE gate 4 (platform
+        // global fallback). The discriminating fixture below picks a
+        // method (`Найти`) that DOES exist on the platform global
+        // `Метаданные` (`КонфигурацияМетаданныеОбъект.Найти`) but is
+        // ABSENT from the user's CommonModule with the same name —
+        // so the two cascade paths diverge:
+        //   - gate 3 wins ⇒ workspace miss ⇒ UMC fires.
+        //   - gate 4 wins ⇒ platform `Resolved` ⇒ silent.
+        // Asserting "UMC fires" therefore proves user-shadows-platform
+        // ordering, not just "some diagnostic exists".
         use crate::test_utils::check_hir_diagnostic_with_fixtures;
         let fixture = r#"
 //- /CommonModules/Метаданные/Module.bsl
@@ -212,21 +225,25 @@ mod tests {
 
 //- /test.bsl
 Процедура Тест()
-    Метаданные.ЗаведомоОтсутствующийМетод();
+    Метаданные.Найти("КакаяТоТаблица");
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic_with_fixtures(fixture);
-        let diags: Vec<_> = diagnostics
+        let umc: Vec<_> = diagnostics
             .iter()
-            .filter(|d| d.code == crate::DiagnosticCode::MissingCommonModuleMethod)
+            .filter(|d| d.code == crate::DiagnosticCode::UnresolvedMethodCall)
             .collect();
-        // The user's CommonModule (named like a platform global) must keep
-        // its diagnostic — `КонфигурацияМетаданныеОбъект` having a
-        // coincidentally-named method must NOT silence it.
         assert_eq!(
-            diags.len(),
+            umc.len(),
             1,
-            "user CommonModule shadowing a platform global must keep its missing-method diagnostic"
+            "user-shadows-platform must surface a UMC; if this is silent the cascade fell \
+             through to gate 4 (platform `Найти` Resolved). got: {:?}",
+            diagnostics
+        );
+        assert!(
+            umc[0].message.contains("Метаданные") && umc[0].message.contains("Найти"),
+            "UMC must name the user's missing method, got: {}",
+            umc[0].message
         );
     }
 

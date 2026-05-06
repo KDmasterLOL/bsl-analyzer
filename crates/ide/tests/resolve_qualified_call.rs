@@ -209,13 +209,16 @@ const SHADOWING_FIXTURE: &str = r#"
 
 #[test]
 fn local_shadowing_skips_qualified_resolution() {
-    // When a local variable shadows a CommonModule name, HIR lowering
-    // refuses to promote the call into `Expr::QualifiedPath` (see
-    // `maybe_lower_as_qualified_call` in hir-def), so `resolve_qualified_call`
-    // is never invoked for the shadowed receiver and no `UnresolvedMethodCall`
-    // diagnostic is produced. The `resolver.resolve_local()` guard inside
-    // `resolve_qualified_call` is therefore defensive — this test pins down
-    // the observable behaviour from the inference layer.
+    // When a local variable shadows a CommonModule name, the cascade
+    // gate in `dispatch_bare_ident_field_call` short-circuits silent
+    // at gate 1 / gate 2 — `resolver.resolve_name` returns the
+    // declared local (or `body_declares_binding` /
+    // `assigned_var_names` covers an implicit one), so the gate
+    // never reaches the `user_common_module_exists` step and
+    // `UnresolvedMethodCall` is not emitted. Phase 2 of the
+    // qualified-call refactor moved this disambiguation out of
+    // lowering's `maybe_lower_as_qualified_call`; the observable
+    // behaviour is the same — no diagnostic on a shadowed receiver.
     let (db, file_id) = setup_fixture(SHADOWING_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(

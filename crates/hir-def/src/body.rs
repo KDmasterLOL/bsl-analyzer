@@ -410,9 +410,6 @@ pub enum BodyDiagnostic {
     /// Function should have return.
     FunctionShouldHaveReturn { range: TextRange },
 
-    // NOTE: MissingCommonModuleMethod removed (Phase 4)
-    // Now collected via AST-based check() with path resolution instead of during lowering.
-    // This provides more accurate diagnostics using workspace symbols.
     /// BeginTransaction/НачатьТранзакцию call not immediately followed by Try statement.
     /// Detects three violation patterns:
     /// 1. Code between BeginTransaction and Try
