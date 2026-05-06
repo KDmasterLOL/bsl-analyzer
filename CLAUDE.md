@@ -1,153 +1,99 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working with bsl-analyzer codebase.
+Guidance for Claude Code working in the bsl-analyzer codebase.
 
-## Project Overview
+## Project
 
-**BSL Analyzer** - High-performance production ready LSP for BSL (1C:Enterprise) in Rust.
+LSP server for BSL (1C:Enterprise), written in Rust.
 
-**Performance:** 2.5x faster, 3.1x less memory than bsl-language-server (12,578 files, 500 MB)
-
-## Quick Reference
+## Quick reference
 
 ```bash
-# Build & Test
 cargo build --release
-cargo test --all
+cargo test --workspace
 cargo clippy --all-targets --all-features -- -D warnings
 
-# Development
-./scripts/setup-hooks.sh          # Install pre-commit hooks (fmt + clippy)
-UPDATE_EXPECT=1 cargo test        # Update snapshot tests
+./scripts/setup-hooks.sh           # install pre-commit hooks (fmt + clippy + tests)
+UPDATE_EXPECT=1 cargo test         # accept new snapshot baselines
 
-# Debugging
-BSL_LOG=debug cargo run           # Enable debug logs
-BSL_PROFILE=* cargo run           # Enable profiling
+# Run the LSP server locally
+cargo run -p bsl-analyzer --bin bsl-analyzer-app -- lsp
+BSL_LOG=debug cargo run -p bsl-analyzer --bin bsl-analyzer-app -- lsp
+BSL_PROFILE='*' cargo run -p bsl-analyzer --bin bsl-analyzer-app -- lsp
 ```
 
 ## Architecture
 
 ```
-bsl-analyzer (LSP Server)
-  └── ide (High-level API)
-      ├── ide-diagnostics (180/181 diagnostics, 99%)
-      ├── ide-assists (Code actions)
-      └── ide-db (Salsa database)
-          └── hir / hir-def / hir-ty (Semantic analysis)
-              ├── cfg + dataflow (CFG, reaching defs)
-              ├── sdbl-hir (Query language HIR)
-              └── syntax (Rowan CST/AST)
-                  └── parser (Event-based) → lexer (logos)
+bsl-analyzer (LSP server / CLI binary)
+  └── ide                     — high-level API (hover, completion, refs, …)
+      ├── ide-diagnostics     — diagnostic registry (HIR + AST + dataflow)
+      ├── ide-assists         — code actions
+      └── ide-db              — Salsa database
+          └── hir / hir-def / hir-ty   — semantics (ItemTree, SymbolTree, infer)
+              ├── cfg + dataflow       — CFG, reaching defs, liveness
+              ├── sdbl-hir             — query language HIR
+              └── syntax (Rowan)       — full-fidelity AST/CST
+                  └── parser → lexer
 ```
 
-### Key Components
+| Layer    | Crates                                            |
+|----------|---------------------------------------------------|
+| Analysis | `lexer`, `parser`, `syntax`                       |
+| Semantic | `hir-def`, `hir-ty`, `hir`                        |
+| IDE      | `ide-db`, `ide-diagnostics`, `ide-assists`, `ide` |
+| SDBL     | `sdbl-hir`                                        |
+| Dataflow | `cfg`, `dataflow`                                 |
+| Metadata | `bsl-metadata`, `bsl-platform`                    |
+| Infra    | `base-db`, `vfs`, `project-model`                 |
 
-**Salsa 0.25.2** - Incremental computation, automatic cache invalidation, LRU eviction (128-512 files)
+- **Salsa 0.26.x** drives incremental computation (auto-invalidate on input change, LRU eviction).
+- **Rowan** for the syntax tree (immutable, full-fidelity, typed AST wrappers).
+- **`bsl-platform`** is a process-wide singleton seeded from HBK dumps (`shcntx_ru.hbk`, `shlang_ru.hbk`). The generated `crates/bsl-platform/data/platform_data.json` is checked in; regeneration steps are in `crates/bsl-platform/data/PROVENANCE.md` and `docs/contributing/DEVELOPMENT_RULES.md`.
+- **`DiagnosticMetadata`** — compile-time const metadata per diagnostic; never hardcode severity / tags inline, always `ctx.severity(code)` / `ctx.tags(code)`.
 
-**Rowan** - Immutable CST, full-fidelity parsing, typed AST wrappers
+Detailed reference: `docs/architecture/ARCHITECTURE.md`, `docs/contributing/DEVELOPMENT_RULES.md`.
 
-**DiagnosticMetadata** - Zero-cost metadata system (180 const definitions, 100% coverage):
-- Compile-time const metadata + runtime JSON overrides
-- `ctx.severity(code)`, `ctx.tags(code)` instead of hardcoded values
-- Automatic LSP severity mapping from type+severity
-- Metadata annotations compatible with BSL diagnostic tooling
+## Development rules
 
-**HIR Diagnostics** - Collected during HIR lowering, cached by Salsa, see `docs/architecture/ARCHITECTURE.md`
+0. **Commit format — Conventional Commits**. `feat:` / `fix:` / `chore:` / `test:` / `docs:` / `refactor:`, scope in parens (`feat(ide-diagnostics): …`). Full convention in `CONTRIBUTING.md`.
 
-**Metadata** - `bsl-metadata` crate: Configuration, CommonModule, XML parsing, Salsa integration
+1. **Library docs first**. Before reaching for an unfamiliar external crate, use Context7 (`resolve-library-id` → `query-docs`). Key crates worth re-checking: `rowan`, `salsa`, `logos`, `lsp-types`.
 
-**Dataflow** - `cfg` + `dataflow` crates: CFG construction, reaching definitions, liveness analysis
+2. **LSP for navigation**. Hover / goto-definition / find-references / document-symbol / call-hierarchy beat grep when LSP can answer. Use Read for known paths and Grep only for true text search.
 
-### Crate Structure
+3. **Logging via `tracing` only**. `println!`, `eprintln!`, `dbg!` are forbidden in library crates (CLI binaries are the exception). Use spans for hot paths:
+   ```rust
+   let _span = tracing::info_span!("parse_file", len = input.len()).entered();
+   ```
 
-| Layer | Crates | Purpose |
-|-------|--------|---------|
-| **Analysis** | lexer, parser, syntax | Tokenization (80+ BSL, 150+ SDBL), Rowan CST |
-| **Semantic** | hir-def, hir-ty, hir | ItemTree, SymbolTree, type inference |
-| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | Database, 180 diagnostics, code actions |
-| **SDBL** | sdbl-hir | Query language HIR + type inference |
-| **Dataflow** | cfg, dataflow | CFG, reaching defs, liveness |
-| **Metadata** | bsl-metadata, bsl-platform | Configuration, platform types |
-| **Infra** | base-db, vfs, project-model | Salsa, VFS, config |
+4. **Self-documenting code**. Comments explain WHY, not WHAT. Doc-comments (`///`) for public API. No commented-out code, no obvious-restate-of-code comments.
 
-## Development Rules
+5. **Tests are mandatory** for new functionality. Use `expect-test` snapshots for parser/AST output. Fixtures live in the repo (`include_str!("fixtures/...")`) — no absolute paths, no per-machine references. **New diagnostic** = handler module + `DiagnosticMetadata` registration + test fixture + `crates/ide-diagnostics/docs/{en,ru}/<Code>.md`; full route in `CONTRIBUTING.md`.
 
-### 1. Use Library Docs First
-Before using external crates: `resolve-library-id` → `query-docs` (Context7 MCP). Key libs: rowan, salsa, logos, lsp-types.
+6. **No warnings, no hook bypass**:
+   - `cargo clippy --all-targets --all-features -- -D warnings` must pass.
+   - `git commit --no-verify` / `git push --no-verify` are forbidden — fix the hook failure.
+   - `#[allow(...)]` requires a written rationale right next to it.
 
-### 2. LSP for Navigation
-**Use:** hover (types), goToDefinition, findReferences, documentSymbol, workspaceSymbol, call hierarchy
-**Don't use:** when you know exact path (use Read), text search (Grep), patterns (Glob)
+## BSL language
 
-### 3. Logging: tracing only
-```rust
-use tracing::{debug, info, warn, error};
-let _span = tracing::info_span!("parse_file", len = input.len()).entered();
-```
-**Forbidden:** `println!`, `eprintln!`, `dbg!` (except CLI output in binaries)
-
-### 5. Self-Documenting Code
-**Allowed comments:** non-obvious logic, SAFETY, issue refs, doc comments (`///`)
-**Forbidden:** duplicating code, obvious statements, commented-out code
-
-### 6. Tests Mandatory
-- All new functionality requires tests
-- Use snapshot tests (`expect-test`) for parser/AST
-- Copy fixtures into repo (no external paths)
-
-**Test diagnostics with helpers:**
-```rust
-assert_diagnostic_range_multiline(&code, &diagnostics[0], 3, 0, 5, 13);
-assert_diagnostic_range(&code, &diagnostics[0], 5, 1, 6);  // single line
-check_hir_diagnostic(code)  // run HIR diagnostics
-```
-
-### 7. No Warnings, No Bypassing Hooks
-```bash
-cargo clippy --all-targets --all-features -- -D warnings  # Must pass
-```
-Use `#[allow(...)]` only with explanation.
-
-**FORBIDDEN:** `git commit --no-verify` or `git push --no-verify`
-- Pre-commit hooks are protection against bad code/text in git
-- If hooks fail, FIX THE ISSUES, don't bypass them
-- Bypassing hooks is NEVER acceptable
-
-### 8. Self-Contained
-All test files in repo. Never use absolute paths: `include_str!("fixtures/Module.bsl")` ✅
-
-## BSL Language Specifics
-
-- **Bilingual:** `Процедура` = `Procedure`, case-insensitive
-- **Preprocessor:** `#Если`, `#Область`, `#Использовать`
-- **Annotations:** `&НаКлиенте`, `&НаСервере`, `&До`, `&После`, `&Вместо`
-
-## Status & Files
-
-**Completed:** Lexer, Parser, Syntax, HIR, SDBL, Metadata, Dataflow, 180/181 diagnostics (99%), DiagnosticMetadata architecture, LSP server
-
-**Next:** CrazyMultilineString diagnostic, SonarQube integration, IDE features (formatting, refactoring)
-
-**Key Files:**
-- `docs/architecture/ARCHITECTURE.md` - Architecture details
-- `docs/contributing/DEVELOPMENT_RULES.md` - Guidelines
-- `docs/METADATA_COMPATIBILITY.md` - Metadata compatibility
-
-## Architecture Highlights
-
-**Configuration format:** `bsl-analyzer.toml`
-
-**Diagnostic metadata system:**
-- ✅ **DiagnosticMetadata:** Compile-time const + runtime JSON overrides
-- ✅ **HIR-based diagnostics:** Collected during lowering, Salsa-cached
-- ✅ **Text-based single pass:** One traversal for all text diagnostics
-- ✅ **Dataflow analysis:** CFG + liveness for intra-procedural checks
-- 🚧 **CallGraph (planned):** Inter-procedural analysis infrastructure
+- **Bilingual** identifiers, case-insensitive: `Процедура` ≡ `Procedure`.
+- **Preprocessor**: `#Если`, `#Область`, `#Использовать`.
+- **Annotations**: `&НаКлиенте`, `&НаСервере`, `&До`, `&После`, `&Вместо`.
 
 ## Общие правила
 
-- Менять код только с согласия пользователя
-- Запрашивать установку пакетов, не искать альтернативы самостоятельно
-- Чистая архитектура, единая точка истины, не дублировать код
-- Удалять неиспользуемый код
-- Использовать regexp нельзя, кроме случаев когда иначе решить задачу нельзя
+- Менять код только с согласия пользователя.
+- Запрашивать установку пакетов — не искать альтернативы самостоятельно.
+- **Слойная архитектура (Martin clean)**. Каждое решение живёт в одном слое из диаграммы выше — никакого дублирования логики между слоями.
+  Где что лежит:
+  - синтаксис → `lexer` / `parser` / `syntax`;
+  - семантика, резолюция имён, инференс типов → `hir-ty` / `hir-def`;
+  - эмиссия диагностик и форматирование сообщений → `ide-diagnostics`;
+  - IDE-фичи (hover / completion / refs / actions) → `ide` / `ide-assists`.
+  Перед написанием кода ответь себе: "в каком слое это решение и почему?". Если ответ "в нескольких" — это запах: либо логика принадлежит одному из них, либо нужен helper в общем нижнем слое.
+- **Lowering работает без `db`**. `hir-def/body/lower` принимает **только синтаксические** решения. Любое решение, которое требует типа receiver'а, резолвера или конфигурации, живёт в `hir-ty` (см. cascade gate в `infer.rs::dispatch_bare_ident_field_call` как образец). Адаптеры (`ide-diagnostics`, `ide-completion`, …) — тонкие проекции, без собственной бизнес-логики.
+- Удалять неиспользуемый код, не оставлять заглушки.
+- Не использовать regex для парсинга / семантики BSL — есть AST / HIR / SDBL API. Regex допустим только для инфраструктурных утилит (поиск по тексту, форматтеры вывода).
+- Push только на `origin` (не на `github` mirror).
