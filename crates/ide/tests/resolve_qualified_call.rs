@@ -278,6 +278,37 @@ fn for_iterator_property_chain_does_not_emit_unresolved() {
     );
 }
 
+const IMPLICIT_LOCAL_UNKNOWN_RHS_FIXTURE: &str = r#"
+//- /test.bsl
+Процедура Тест()
+    Х = НеизвестнаяФункция();
+    Х.Метод();
+КонецПроцедуры
+"#;
+
+#[test]
+fn implicit_local_with_unknown_rhs_is_not_misclassified_as_common_module() {
+    // Regression for cascade-gate gate 2 in
+    // `dispatch_bare_ident_field_call`: an implicit local from
+    // `Stmt::Assign` whose RHS infers to `Ty::Unknown` must not be
+    // mistaken for an unresolved CommonModule receiver.
+    //
+    // `Х` lives in `InferenceContext::var_types` only — it is neither
+    // a `Body::Binding` (so `body_declares_binding` misses) nor a
+    // `Resolver::resolve_local` hit (no `Scope::ExprScope` in the
+    // body resolver). Without a `var_types` probe in gate 2 the
+    // cascade falls through to gate 5 and emits a misleading
+    // `ReceiverNotResolved` for an entirely valid local-variable
+    // call.
+    let (db, file_id) = setup_fixture(IMPLICIT_LOCAL_UNKNOWN_RHS_FIXTURE);
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "implicit local must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+}
+
 const NON_MDO_LEADING_IDENT_FIXTURE: &str = r#"
 //- /test.bsl
 Процедура Тест()

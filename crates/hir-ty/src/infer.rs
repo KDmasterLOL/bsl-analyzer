@@ -389,7 +389,33 @@ pub struct InferenceContext<'db> {
     body: Arc<Body>,
 
     /// Variable types tracked from assignments (lowercase name → Ty).
+    ///
+    /// **Conservative**: an `X = …` whose RHS infers to `Ty::Unknown`
+    /// is NOT inserted here — keeping the entry from a previous,
+    /// more informative assignment (`X = "string"; X = НеизвестнаяФункция()`
+    /// keeps `X` typed as `String`). The companion
+    /// [`Self::assigned_var_names`] set is the cheap probe for
+    /// "is this name an implicit local at all?", regardless of
+    /// whether we have a useful type for it.
     var_types: FxHashMap<String, Ty>,
+
+    /// Lowercase names of every implicit local seen on the LHS of a
+    /// `Stmt::Assign`, regardless of the RHS's inferred type.
+    ///
+    /// `var_types` is intentionally type-aware (only inserts when
+    /// the RHS yields a non-`Unknown` `Ty`), but the cascade-gate in
+    /// `dispatch_bare_ident_field_call` needs to know whether a
+    /// name is a body-local — even an "untyped" one whose RHS came
+    /// back `Ty::Unknown` — so it can short-circuit silent in
+    /// gate 2 instead of walking all the way to gate 5 and
+    /// emitting a misleading `ReceiverNotResolved` for an entirely
+    /// normal local-variable call (e.g.
+    /// `Х = НеизвестнаяФункция(); Х.Метод()`).
+    ///
+    /// This set is write-only inside `infer_stmt`'s `Stmt::Assign`
+    /// arm and read-only in the cascade gate; nothing else needs to
+    /// observe it, so we don't fold it into [`BodyInferenceResult`].
+    assigned_var_names: rustc_hash::FxHashSet<String>,
 
     /// Per-binding types written by declaration-site arms
     /// (`Stmt::ForEach`, `Stmt::For`). Keyed by `BindingId` so name
@@ -452,6 +478,7 @@ impl<'db> InferenceContext<'db> {
             owner,
             body: Arc::clone(body),
             var_types: FxHashMap::default(),
+            assigned_var_names: rustc_hash::FxHashSet::default(),
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
@@ -648,8 +675,13 @@ impl<'db> InferenceContext<'db> {
                                 }
                             }
                             None => {
+                                let key = name.as_str().to_lowercase();
+                                // Always remember the name as a body-local
+                                // (cascade-gate gate 2 needs this even when
+                                // the RHS yields no useful type info).
+                                self.assigned_var_names.insert(key.clone());
                                 if !value_ty.is_unknown() {
-                                    self.var_types.insert(name.as_str().to_lowercase(), value_ty);
+                                    self.var_types.insert(key, value_ty);
                                 }
                             }
                         }
@@ -2311,8 +2343,9 @@ impl<'db> InferenceContext<'db> {
     /// 1. `Resolver::resolve_name` returns `Local | Variable | Method`
     ///    — bound name; caller's existing Field-call path handles the
     ///    typed receiver. Return `None` (silent).
-    /// 2. `Body::body_declares_binding` — module-level `Перем` /
-    ///    parameter without a prior assignment. Same: silent.
+    /// 2. Body-side bindings invisible to the resolver — declared
+    ///    `Перем X;` (via `body_declares_binding`) AND implicit
+    ///    locals from `Stmt::Assign` (via `var_types`). Both: silent.
     /// 3. `Resolver::user_common_module_exists` — workspace owns the
     ///    receiver name as a CommonModule. Delegate to
     ///    `infer_qualified_call`, which itself runs workspace-first
@@ -2352,11 +2385,30 @@ impl<'db> InferenceContext<'db> {
             Some(Resolution::Builtin(_)) | None => {}
         }
 
-        // Gate 2 — declared but not-yet-assigned `Перем` / parameter.
-        // `Resolver::resolve_name` cannot see these (no
-        // `Scope::ExprScope` in the body resolver), so probe `Body`
-        // bindings directly.
+        // Gate 2 — body-side bindings invisible to `Resolver::resolve_name`.
+        //
+        //   (a) Declared `Перем X;` / parameter without a prior
+        //       assignment: lives in `Body::Binding` but never reaches
+        //       `var_types` / `Scope::ExprScope`. `body_declares_binding`
+        //       covers it.
+        //
+        //   (b) Implicit local from `Stmt::Assign`
+        //       (`X = НеизвестнаяФункция(); X.Метод()`): tracked through
+        //       `InferenceContext::var_types` only — not a `Body::Binding`,
+        //       not reachable through `resolver.resolve_local`. Without
+        //       this probe the cascade would walk all the way to gate 5
+        //       and falsely emit `ReceiverNotResolved` for a perfectly
+        //       normal implicit local whose RHS happens to type to
+        //       `Ty::Unknown`.
+        //
+        // Both subcases must short-circuit silent — the call is on a
+        // local value, not a CommonModule or platform global. Lowercase
+        // probe matches BSL's case-insensitive identifier semantics
+        // (same key normalisation `infer_path_name` uses on `var_types`).
         if self.body_declares_binding(module_name) {
+            return None;
+        }
+        if self.assigned_var_names.contains(&module_name.as_str().to_lowercase()) {
             return None;
         }
 
