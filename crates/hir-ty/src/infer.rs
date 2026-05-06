@@ -2270,11 +2270,53 @@ impl<'db> InferenceContext<'db> {
 
         // Gate 3 — user CommonModule. Precedence over platform
         // (gate 4) per `test_user_module_shadows_platform_global`.
-        // `infer_qualified_call` already runs workspace-first and
-        // emits `UnresolvedMethodCall { MethodNotFound |
-        // MethodNotExport }` on its own when resolution fails — so
-        // we just delegate and return its result type.
+        //
+        // When the receiver positively resolves to a workspace
+        // CommonModule, emit the two body-side family diagnostics
+        // (RedundantAccessToObjectTwoLevel,
+        // MissedRequiredParameterCommonModule) BEFORE delegating to
+        // `infer_qualified_call`. The handlers run their own filters
+        // — the redundant-access handler keeps the diagnostic only
+        // when the receiver name matches the *enclosing* CommonModule
+        // (and `ReturnValueReuse == DontUse`), and the missed-required
+        // handler resolves the method through the SymbolTree and
+        // surfaces only genuinely missing required slots — so over-
+        // emission here is filtered downstream. The two channels are
+        // intentional: lowering used to fire them eagerly without a
+        // receiver type, which false-positived for form attributes,
+        // module-level `Перем`, and platform globals; lifting them
+        // here gates emission on `user_common_module_exists`.
+        //
+        // `infer_qualified_call` itself already runs workspace-first
+        // and emits `UnresolvedMethodCall { MethodNotFound |
+        // MethodNotExport }` on resolution failure — we just delegate
+        // for the type and any further diagnostics it owns.
         if resolver.user_common_module_exists(self.db, module_name) {
+            // `args: Vec<bool>` — per-slot presence flag for the
+            // missed-required-parameter handler. Mirrors lowering's
+            // `extract_arg_presence` but reads from `Body` directly:
+            // an `Expr::Missing` placeholder sits in the slot when
+            // the parser dropped a skipped positional argument
+            // (`Foo(1,,3)`).
+            let arg_presence: Vec<bool> = args
+                .iter()
+                .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
+                .collect();
+
+            self.push_inference_diagnostic(InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
+                expr: call_expr,
+                module: module_name.clone(),
+            });
+
+            self.push_inference_diagnostic(
+                InferenceDiagnostic::MissedRequiredParameterCommonModule {
+                    expr: call_expr,
+                    callee: method_name.clone(),
+                    module: module_name.clone(),
+                    args: arg_presence,
+                },
+            );
+
             return Some(self.infer_qualified_call(module_name, method_name, args, call_expr));
         }
 
