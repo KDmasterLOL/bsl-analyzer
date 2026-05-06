@@ -916,33 +916,6 @@ mod tests {
         }
     }
 
-    /// Manual smoke against the user-supplied niagara_ut configuration —
-    /// exercises the same parser → loader → schema chain on the actual
-    /// `БУС_ПомощникИмпортаТоваровБитрикс` DataProcessor whose form
-    /// motivated this work. Ignored by default (path is per-machine);
-    /// run with `cargo test -p bsl-metadata --lib loads_niagara -- --ignored`.
-    #[test]
-    #[ignore]
-    fn loads_niagara_data_processor_with_attributes() {
-        let path = concat!(env!("HOME"), "/src/niagara_ut/src/cfe/BMS_RU_UT");
-        if !std::path::Path::new(path).exists() {
-            eprintln!("Skipping: niagara_ut not present at {path}");
-            return;
-        }
-        let config = load_from_directory(path).expect("load niagara_ut/BMS_RU_UT");
-        let mdo = config
-            .find_metadata_object(
-                crate::metadata_object::MdoType::DataProcessor,
-                "БУС_ПомощникИмпортаТоваровБитрикс",
-            )
-            .expect("DataProcessor not loaded");
-        assert!(mdo.find_attribute("АдресСайта").is_some(), "expected `АдресСайта` user attribute");
-        assert!(
-            mdo.find_attribute("СоздаватьГруппы").is_some(),
-            "expected `СоздаватьГруппы` user attribute"
-        );
-    }
-
     #[test]
     fn loads_data_processors_with_attributes() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
