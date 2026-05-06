@@ -46,6 +46,7 @@ pub mod manager_lookup;
 pub mod method_lookup;
 pub mod method_resolution;
 pub mod narrow;
+pub mod platform_global_lookup;
 pub mod platform_manager_lookup;
 pub mod platform_property_lookup;
 pub mod platform_resolution;
