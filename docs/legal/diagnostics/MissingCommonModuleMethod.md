@@ -1,5 +1,13 @@
 # Provenance: MissingCommonModuleMethod
 
+> **Deprecated since v0.1.176.** Replaced by `UnresolvedMethodCall`
+> (`BSL-TY-UnresolvedMethodCall`). Phase 2 of the qualified-call
+> clean-architecture refactor lifted classification into hir-ty
+> inference, which has the resolver and the receiver type. The
+> diagnostic is no longer emitted; the rule definition stays for
+> downstream compatibility (SonarQube rule export, user
+> `bsl-analyzer.toml`) until full removal in Phase 4.
+
 ## Status
 
 Strong candidate for `MIT OR Apache-2.0`.
@@ -21,20 +29,27 @@ direct standard mapping.
 
 ### Production code
 
-Current implementation in
+Current implementation (Phase 3 of the qualified-call refactor): the
+diagnostic is **deprecated and no longer emitted**. The handler in
 `crates/ide-diagnostics/src/handlers/missing_common_module_method.rs`
-is local and semantic-analysis based:
+keeps a no-op `from_hir` stub solely so the dispatch round-trip
+doesn't panic on a stale `BodyDiagnostic` value. Replacement is
+`UnresolvedMethodCall` (`BSL-TY-UnresolvedMethodCall`), emitted by
+hir-ty's `dispatch_bare_ident_field_call` cascade gate — the
+classification was lifted out of body lowering into type inference
+because lowering had no `db` / receiver type and was producing
+false-positives for form attributes, implicit form globals,
+module-level `Перем` declarations, and platform globals.
 
-- HIR lowering emits a body diagnostic for a qualified call that looks like a
-  common-module access;
-- the handler resolves the pair `(module, method)` through local metadata-aware
-  path resolution;
-- the diagnostic is reported only when resolution does not produce an exported
-  method.
+The deprecated rule definition (`DiagnosticCode::MissingCommonModuleMethod`,
+SonarQube rule entry, user-facing docs, `bsl-analyzer.toml`
+acceptance) stays in place so existing downstream profiles keep
+validating; full removal lands in Phase 4.
 
-This strongly favors permissive treatment because the current behavior is based
-on local HIR/path-resolution infrastructure rather than on copied parser or doc
-logic.
+This still favors permissive licensing treatment: the
+implementation is local, semantic-analysis based, with no copied
+parser or upstream documentation logic — and the active replacement
+follows the same architectural pattern.
 
 ### Documentation
 
@@ -43,14 +58,15 @@ behavior directly instead of reusing placeholder or upstream wording.
 
 ### Tests
 
-Current tests are local inline fixtures focused on:
-
-- unresolved qualified calls;
-- local-variable and parameter shadowing;
-- mixed scenarios where only the real common-module access should be reported.
-
-One ignored fixture still documents future metadata-backed resolution through
-`Configuration.xml`, but it does not introduce a licensing concern by itself.
+Current tests are local inline fixtures kept under
+`crates/ide-diagnostics/src/handlers/missing_common_module_method.rs::tests`,
+migrated to the `UnresolvedMethodCall` channel in Phase 2 — they pin
+both directions of the deprecation: the legacy `MissingCommonModuleMethod`
+code stays silent, and the active replacement
+`UnresolvedMethodCall` fires with the right `kind`
+(`MethodNotFound` vs `ReceiverNotResolved`). Two fixtures remain
+`#[ignore]`d pending Phase 5 e2e setup
+(`crates/ide/tests/diagnostics_form_attribute_call.rs`).
 
 ## Remaining caveats
 

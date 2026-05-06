@@ -1,5 +1,25 @@
 # Calling a missing common module method (MissingCommonModuleMethod)
 
+> **Deprecated since v0.1.176.** Replaced by
+> [`UnresolvedMethodCall`](UnresolvedMethodCall.md) (`BSL-TY-UnresolvedMethodCall`).
+>
+> Phase 2 of the qualified-call clean-architecture refactor lifted the
+> "this is a CommonModule call" classification out of body lowering
+> and into hir-ty's `dispatch_bare_ident_field_call`, which has the
+> resolver and the receiver's inferred type. Instead of two
+> overlapping diagnostics (`MissingCommonModuleMethod` and
+> `UnresolvedMethodCall`) the user now sees a single, more precise
+> `UnresolvedMethodCall`: `kind: MethodNotFound` when the module is
+> registered but the method is missing or non-exported,
+> `kind: ReceiverNotResolved` when the receiver name doesn't resolve
+> anywhere.
+>
+> The public surface (`DiagnosticCode` enum, SonarQube rule export,
+> `bsl-analyzer.toml` parser) is intentionally kept so existing
+> downstream configurations don't break — the rule never fires, but
+> mentioning it in `disabled` / `enabled` is still valid. Full removal
+> is scheduled for Phase 4 of the refactor.
+
 ## Description
 
 This diagnostic reports calls to common module methods that cannot be resolved

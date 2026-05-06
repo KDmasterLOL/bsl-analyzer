@@ -1,12 +1,30 @@
-//! MissingCommonModuleMethod diagnostic.
+//! `MissingCommonModuleMethod` diagnostic — **DEPRECATED since v0.1.176**.
 //!
-//! Reports calls to common-module methods that cannot be resolved as exported
-//! methods of the referenced module.
+//! Replaced by `UnresolvedMethodCall` (`BSL-TY-UnresolvedMethodCall`).
+//! Phase 2 of the qualified-call clean-architecture refactor lifted the
+//! "this is a CommonModule call" classification from body lowering into
+//! `hir-ty::dispatch_bare_ident_field_call`, which has the resolver and
+//! the receiver type and can decide positively. The user-facing
+//! diagnostic is now `UnresolvedMethodCall { kind: MethodNotFound }`
+//! when the receiver IS a registered CommonModule but the method
+//! is missing/non-exported, or `UnresolvedMethodCall { kind:
+//! ReceiverNotResolved }` when the receiver name doesn't resolve at all
+//! (precise replacement for the legacy collapse).
+//!
+//! ## Compatibility
+//!
+//! The enum variant `DiagnosticCode::MissingCommonModuleMethod`,
+//! the user-facing docs and the SonarQube rules export all stay in
+//! place — downstream consumers (LSP clients, BSL-LS compatibility
+//! layers, user `bsl-analyzer.toml` files) keep accepting the
+//! identifier without breaking. Phase 4 of the plan removes the
+//! deprecated infrastructure entirely; until then `from_hir` is
+//! kept as a no-op stub so dispatch round-trips don't panic.
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Name, PathResolution};
+use hir::Name;
 use syntax::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -23,113 +41,25 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from HIR when a qualified common-module call cannot be
-/// resolved to an exported method.
-pub fn from_hir(
-    module: &str,
-    method: &str,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
-    let code = DiagnosticCode::MissingCommonModuleMethod;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    // Resolve using DiagnosticsContext helper (provider-first pattern)
-    let module_name = Name::new(module);
-    let method_name = Name::new(method);
-    let resolution = ctx.resolve_qualified_path(&module_name, &method_name);
-
-    tracing::trace!(
-        module_name = module,
-        method_name = method,
-        resolution = ?resolution,
-        "Path resolution result in HIR diagnostic"
-    );
-
-    match resolution {
-        PathResolution::Method(_) => {
-            // Valid exported method found
-            None
-        }
-        PathResolution::Unresolved(_) => {
-            // Before reporting "method does not exist on common module" — the
-            // identifier on the left may not be a CommonModule at all but a
-            // built-in 1C platform global (e.g. `ОбработкаОшибок` of type
-            // `МенеджерОбработкиОшибок`). Suppress the diagnostic when the
-            // call resolves against the platform global-context catalogue.
-            // Kept distinct from `PathResolution::Method` because platform
-            // globals are NOT CommonModules — collapsing them would leak
-            // CommonModule assumptions into goto/hover/completion.
-            //
-            // Important narrowing: only fall back to the platform catalogue
-            // when the receiver is NOT a real user CommonModule. A user may
-            // legitimately ship a CommonModule named e.g. `Метаданные` that
-            // shadows a platform global; in that case `Unresolved` means
-            // "method on the user module is missing or non-exported" and
-            // must not be silently swallowed by a coincidental platform
-            // member with the same name.
-            let module_is_user_common_module =
-                !ctx.find_common_module_files_anywhere(module).is_empty();
-            if !module_is_user_common_module
-                && ctx.resolve_platform_global_member(&module_name, &method_name).is_some()
-            {
-                return None;
-            }
-
-            // Managed-form Self property suppression.
-            // HIR lowering classifies `Элементы.Найти(...)` as a
-            // 2-segment qualified call because the lowerer has no `db`
-            // and cannot ask "is `Элементы` a property of the enclosing
-            // form?". Phase B does have the answer: when the file is a
-            // managed form module *and* the receiver name is a property
-            // of `ФормаКлиентскогоПриложения`, the call is a method on
-            // the form's Self property — `infer_call`'s form-self
-            // dispatch handles it — so this CommonModule diagnostic is
-            // a false positive and must be silenced. Kept narrow: only
-            // managed forms (ordinary forms have a different platform
-            // type), only when the receiver name is in the form's
-            // platform property index, and only when the receiver is
-            // NOT also a real user CommonModule (a user may legitimately
-            // ship a CommonModule named like a form property).
-            if !module_is_user_common_module && hir::is_form_self_property_name(module) {
-                let metadata = ctx.module_metadata();
-                let is_managed_form = metadata.module_type == bsl_metadata::ModuleType::FormModule
-                    && metadata.form.as_ref().is_some_and(|f| f.is_managed());
-                if is_managed_form {
-                    return None;
-                }
-            }
-
-            Some(create_diagnostic_from_hir(range, method, module, code, ctx))
-        }
-        _ => None,
-    }
-}
-
-/// Create a diagnostic for a missing CommonModule method (HIR-based).
+/// Deprecated no-op stub — see module docs.
 ///
-/// Note: Both "method not found" and "method not exported" cases result
-/// in Unresolved from resolve_qualified_path. The message covers both.
-fn create_diagnostic_from_hir(
-    range: TextRange,
-    method_name: &str,
-    module_name: &str,
-    code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Diagnostic {
-    let message = format!("Метод {} общего модуля {} не существует", method_name, module_name);
-
-    Diagnostic {
-        code,
-        message,
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    }
+/// Kept so the `BodyDiagnostic::MissingCommonModuleMethod` dispatch
+/// arm in `hir_dispatch::dispatch_hir_diagnostic` round-trips without
+/// a panic should any stale `BodyDiagnostic` value reach the
+/// dispatcher (the variant is no longer constructed by lowering since
+/// Phase 2 of the qualified-call refactor). Always returns `None`.
+///
+/// User-facing replacement: `UnresolvedMethodCall` (`BSL-TY-UnresolvedMethodCall`).
+pub fn from_hir(
+    _module: &str,
+    _method: &str,
+    _range: TextRange,
+    _ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    // Force-touch references so the items stay reachable while the
+    // deprecated public surface is documented but not driven by lowering.
+    let _ = (Name::new(""), DiagnosticCode::MissingCommonModuleMethod);
+    None
 }
 
 #[cfg(test)]

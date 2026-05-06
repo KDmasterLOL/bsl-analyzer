@@ -427,8 +427,16 @@ impl PlatformDataInner {
 
     /// Resolve `(global_name, member_name)` to a method on the declared type
     /// of the global identifier. This is the centralised lookup that
-    /// suppresses the false-positive `MissingCommonModuleMethod` for
-    /// `ОбработкаОшибок.КраткоеПредставлениеОшибки(...)`-shaped calls.
+    /// powers `hir-ty::platform_global_lookup::try_resolve_platform_global_member`.
+    /// Used by inference's bare-IDENT cascade gate to type
+    /// `ОбработкаОшибок.КраткоеПредставлениеОшибки(...)`-shaped calls
+    /// (gate 4 `Resolved`) and to surface a precise
+    /// `UnresolvedMethodCall { MethodNotFound }` when the receiver IS
+    /// a known platform global but the member is missing
+    /// (`KnownContainerMissingMember`). Pre-Phase-2 callers
+    /// suppressed the legacy `MissingCommonModuleMethod` diagnostic
+    /// here — that diagnostic is now deprecated; see
+    /// `crates/ide-diagnostics/src/handlers/missing_common_module_method.rs`.
     ///
     /// Returns `None` when the global is unknown, when its declared
     /// `property_types` is empty, or when no method with that name exists on
