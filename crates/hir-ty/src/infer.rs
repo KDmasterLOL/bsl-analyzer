@@ -252,6 +252,45 @@ pub enum InferenceDiagnostic {
     /// editor underlines `.Параметры` rather than the whole statement;
     /// `receiver_ty` and `field_name` feed the message body.
     ReadOnlyPropertyAssignment { lhs: ExprId, receiver_ty: Ty, field_name: Name },
+
+    /// Redundant `<CommonModule>.<Method>()` self-quoted call inside the
+    /// owning CommonModule body — counterpart to `BodyDiagnostic::
+    /// RedundantAccessToObject { kind: TwoLevel }`, but emitted from
+    /// inference instead of body lowering.
+    ///
+    /// Lifted into the inference layer so the lowering decision
+    /// "this is a CommonModule call" no longer happens without the
+    /// receiver's resolved type — the lowering layer cannot tell a
+    /// CommonModule receiver apart from a form attribute, an implicit
+    /// form global, or a module-level `Перем` declaration. Inference
+    /// has the resolver and the type, so this variant fires only when
+    /// the cascade gate confirms `user_common_module_exists`.
+    ///
+    /// Adapter in `ide-diagnostics` reuses the existing
+    /// `handlers::redundant_access_to_object::from_hir` by reconstructing
+    /// `RedundantAccessKind::TwoLevel { module: <Name as String> }`.
+    RedundantAccessToObjectTwoLevel { expr: ExprId, module: Name },
+
+    /// `MissedRequiredParameter` for a `<CommonModule>.<Method>(...)` call
+    /// — counterpart to `BodyDiagnostic::MissedRequiredParameter` with
+    /// `module: Some(...)` (two-level shape), but emitted from inference.
+    ///
+    /// Same lift rationale as `RedundantAccessToObjectTwoLevel`: only
+    /// inference can confirm the receiver actually resolves to a
+    /// CommonModule before validating the parameter set against its
+    /// signature. Three-level (`Документы.ПКО.Method`) calls keep using
+    /// the `BodyDiagnostic` path since the lowering positive
+    /// `MdoType::from_plural` gate is sufficient there.
+    ///
+    /// `args` reconstruction mirrors lowering's `extract_arg_presence`
+    /// but operates on `&[ExprId]` already available to `infer_call`:
+    /// `args.iter().map(|id| !matches!(body.expr(*id), Expr::Missing))`.
+    MissedRequiredParameterCommonModule {
+        expr: ExprId,
+        callee: Name,
+        module: Name,
+        args: Vec<bool>,
+    },
 }
 
 /// Kind of unresolved method call error.
@@ -350,7 +389,33 @@ pub struct InferenceContext<'db> {
     body: Arc<Body>,
 
     /// Variable types tracked from assignments (lowercase name → Ty).
+    ///
+    /// **Conservative**: an `X = …` whose RHS infers to `Ty::Unknown`
+    /// is NOT inserted here — keeping the entry from a previous,
+    /// more informative assignment (`X = "string"; X = НеизвестнаяФункция()`
+    /// keeps `X` typed as `String`). The companion
+    /// [`Self::assigned_var_names`] set is the cheap probe for
+    /// "is this name an implicit local at all?", regardless of
+    /// whether we have a useful type for it.
     var_types: FxHashMap<String, Ty>,
+
+    /// Lowercase names of every implicit local seen on the LHS of a
+    /// `Stmt::Assign`, regardless of the RHS's inferred type.
+    ///
+    /// `var_types` is intentionally type-aware (only inserts when
+    /// the RHS yields a non-`Unknown` `Ty`), but the cascade-gate in
+    /// `dispatch_bare_ident_field_call` needs to know whether a
+    /// name is a body-local — even an "untyped" one whose RHS came
+    /// back `Ty::Unknown` — so it can short-circuit silent in
+    /// gate 2 instead of walking all the way to gate 5 and
+    /// emitting a misleading `ReceiverNotResolved` for an entirely
+    /// normal local-variable call (e.g.
+    /// `Х = НеизвестнаяФункция(); Х.Метод()`).
+    ///
+    /// This set is write-only inside `infer_stmt`'s `Stmt::Assign`
+    /// arm and read-only in the cascade gate; nothing else needs to
+    /// observe it, so we don't fold it into [`BodyInferenceResult`].
+    assigned_var_names: rustc_hash::FxHashSet<String>,
 
     /// Per-binding types written by declaration-site arms
     /// (`Stmt::ForEach`, `Stmt::For`). Keyed by `BindingId` so name
@@ -413,6 +478,7 @@ impl<'db> InferenceContext<'db> {
             owner,
             body: Arc::clone(body),
             var_types: FxHashMap::default(),
+            assigned_var_names: rustc_hash::FxHashSet::default(),
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
@@ -442,6 +508,8 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
             InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
             InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+            InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
+            InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
         };
         if self.body.is_recovered(key) {
             return;
@@ -607,8 +675,13 @@ impl<'db> InferenceContext<'db> {
                                 }
                             }
                             None => {
+                                let key = name.as_str().to_lowercase();
+                                // Always remember the name as a body-local
+                                // (cascade-gate gate 2 needs this even when
+                                // the RHS yields no useful type info).
+                                self.assigned_var_names.insert(key.clone());
                                 if !value_ty.is_unknown() {
-                                    self.var_types.insert(name.as_str().to_lowercase(), value_ty);
+                                    self.var_types.insert(key, value_ty);
                                 }
                             }
                         }
@@ -1258,11 +1331,18 @@ impl<'db> InferenceContext<'db> {
         //    chains. Only non-MDO globals (`ОбработкаОшибок`,
         //    `БиблиотекаКартинок`, `WSСсылки`, …) reach this step.
         // Narrowing: skip the platform fallback when the resolver already
-        // sees the name as a module-level method or variable. The user has
-        // shadowed the platform global (e.g. `Процедура ОбработкаОшибок()
-        // Экспорт`); BSL semantics give the local definition priority and
-        // we must not silently retype a reference to it as `PlatformObject`.
-        if !user_shadows {
+        // sees the name as a module-level method or variable, or when the
+        // workspace owns it as a CommonModule. The user has shadowed the
+        // platform global (e.g. `Процедура ОбработкаОшибок() Экспорт` or
+        // a `CommonModules/Метаданные/` user module); BSL semantics give
+        // the local / workspace definition priority and we must not
+        // silently retype a reference to it as `PlatformObject`.
+        // Mirrors the cascade-gate ordering in
+        // `dispatch_bare_ident_field_call` (gate 3 user-CM precedes gate
+        // 4 platform) so both the bare-IDENT and the typed-receiver
+        // paths agree on user-shadows-platform.
+        let workspace_owns_common_module = resolver.user_common_module_exists(self.db, name);
+        if !user_shadows && !workspace_owns_common_module {
             if let Some(prop) =
                 bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
             {
@@ -1351,116 +1431,18 @@ impl<'db> InferenceContext<'db> {
 
     /// Infer type from a function call.
     fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> Ty {
-        // Qualified callees dispatch by segment count:
-        //   2 → `CommonModule.Method()`  → resolve_qualified_call
-        //   3 → `Документы.ПКО.Метод()` → resolve_three_level_call
-        // Everything else falls through to the generic function-type path.
+        // Qualified callees come from body lowering only for
+        // three-segment manager calls (`Документы.ПКО.Метод()`).
+        // Two-segment `Module.Method()` was lifted out of `QualifiedPath`
+        // in Phase 2 of the qualified-call refactor — those calls now
+        // travel as `Expr::Call { callee: Expr::Field, … }` and dispatch
+        // through `dispatch_bare_ident_field_call` in the Field branch
+        // below. The form-self disambiguation that used to live here
+        // moved to `infer_path_name`'s step 4 (no QualifiedPath shape
+        // remains for it to gate).
         let callee_expr = self.body.expr(callee);
         if let Expr::QualifiedPath(qualified_path) = callee_expr {
             match qualified_path.segments().len() {
-                2 => {
-                    let module_name = qualified_path.first().clone();
-                    let method_name = qualified_path.last().clone();
-
-                    // Managed-form Self property method-call dispatch.
-                    // HIR lowering (`analyze_qualified_call`) cannot
-                    // distinguish a CommonModule call (`М.Метод()`) from a
-                    // method on a managed-form Self property
-                    // (`Элементы.Найти()`) — both lower to a 2-segment
-                    // `QualifiedPath` because lowering has no `db`. So the
-                    // disambiguation runs here in Phase B: if the first
-                    // segment names a property of `ФормаКлиентскогоПриложения`
-                    // **and** the enclosing module is a managed form
-                    // **and** the receiver name is NOT also a real user
-                    // CommonModule (a user `Метаданные` CommonModule
-                    // shadowing the platform global must keep its
-                    // CommonModule semantics — same precedence rule as
-                    // `missing_common_module_method::from_hir`), the call
-                    // is `<property>.<method>` and routes through the
-                    // platform `lookup_method` adapter on the property's
-                    // declared `Ty`. Otherwise it falls through to the
-                    // CommonModule resolver as before.
-                    let resolver = self.get_resolver();
-                    // Full shadowing gate, mirroring `infer_path_name`'s
-                    // step 4 and the assignment handler:
-                    //   * `user_common_module_exists` — visibility-aware
-                    //     CommonModule precedence (a raw `module_index`
-                    //     probe would falsely shadow a config-hidden
-                    //     module and silently miss when the CommonModule
-                    //     path can't see the receiver);
-                    //   * module-level `Метод()` / `Перем` declared in
-                    //     the current module overrides the form-self
-                    //     property (BSL: explicit user declaration wins
-                    //     over implicit Self);
-                    //   * any parameter or `Перем` declared in this body
-                    //     covers the gap left by `Resolver::resolve_name`
-                    //     (no ExprScope) and `var_types` (no entry until
-                    //     first assign).
-                    // Lowering already drops `local_vars`/`param_names`
-                    // before classifying as `QualifiedPath`, but the
-                    // module-level / declared-binding checks here close
-                    // the cases lowering cannot see.
-                    let module_level_shadow = matches!(
-                        resolver.resolve_name(self.db, &module_name),
-                        Some(hir_def::resolver::Resolution::Method(_))
-                            | Some(hir_def::resolver::Resolution::Variable(_))
-                    );
-                    let body_shadow = self.body_declares_binding(&module_name);
-                    if !resolver.user_common_module_exists(self.db, &module_name)
-                        && !module_level_shadow
-                        && !body_shadow
-                    {
-                        if let Some(prop_resolution) = crate::form_self::resolve_form_self_property(
-                            self.db,
-                            &resolver,
-                            &module_name,
-                        ) {
-                            for arg in args {
-                                self.infer_expr(*arg);
-                            }
-                            let receiver_ty = prop_resolution.return_ty;
-                            if let Some(info) =
-                                crate::method_lookup::lookup_method(&receiver_ty, &method_name)
-                            {
-                                // Argument binding mirrors the
-                                // `Expr::Field`-callee platform path on
-                                // line ~1453: without it, narrow / arg
-                                // diagnostics silently drop for
-                                // form-self method calls.
-                                self.record_call_arg_binding(
-                                    callee,
-                                    args,
-                                    ParamsShape::Overloaded {
-                                        flat: Arc::<[Ty]>::from(&info.params[..]),
-                                        overloads: info
-                                            .overloads
-                                            .iter()
-                                            .map(|ov| Arc::<[Ty]>::from(&ov[..]))
-                                            .collect::<Vec<Arc<[Ty]>>>()
-                                            .into(),
-                                    },
-                                );
-                                trace!(
-                                    "resolved form-self call {}.{} as {:?}",
-                                    module_name,
-                                    method_name,
-                                    info.return_ty
-                                );
-                                return info.return_ty;
-                            }
-                            // Form-self property exists, but the method
-                            // is missing on its type — silent for now
-                            // (mirrors the Authoritative-receiver gate
-                            // in the Expr::Field path: we don't fire
-                            // UnresolvedMethodCall here so the user
-                            // doesn't see two error sources for one
-                            // misspelled member name).
-                            return Ty::Unknown;
-                        }
-                    }
-
-                    return self.infer_qualified_call(&module_name, &method_name, args, callee);
-                }
                 3 => {
                     let mdo_type_plural = qualified_path.segments()[0].clone();
                     let mdo_name = qualified_path.segments()[1].clone();
@@ -1473,7 +1455,25 @@ impl<'db> InferenceContext<'db> {
                         callee,
                     );
                 }
-                _ => {}
+                other => {
+                    // Invariant: only 3-segment QualifiedPath is
+                    // currently constructed by lowering. 2-segment
+                    // moved to Field-shape in Phase 2; 0/1/4+ never
+                    // existed. A `debug_assert!` traps a future
+                    // regression in tests; in release the call is
+                    // demoted to `Ty::Unknown` (silent skip) rather
+                    // than panicking inside the IDE process.
+                    debug_assert!(
+                        false,
+                        "unexpected QualifiedPath segment count {other} in infer_call",
+                    );
+                    tracing::debug!(
+                        segments = other,
+                        ?qualified_path,
+                        "QualifiedPath with unexpected segment count reached infer_call; \
+                         falling through to Ty::Unknown"
+                    );
+                }
             }
         }
 
@@ -1490,6 +1490,46 @@ impl<'db> InferenceContext<'db> {
             let base_id = ExprId::from_idx(*base);
             let method_name = field.clone();
             let receiver_ty = self.infer_expr(base_id);
+
+            // Bare-IDENT cascade gate: when the receiver is a plain
+            // `Expr::Path(name)` whose `infer_path_name` produced
+            // `Ty::Unknown` — i.e. the name is neither a typed
+            // binding nor a managed-form Self property, nor any
+            // platform global — `dispatch_bare_ident_field_call`
+            // takes over. It owns the resolution decision lowering
+            // used to make from syntax alone (`M.Method()` ⇒
+            // CommonModule), now done with the resolver and the
+            // receiver type in hand. See
+            // `dispatch_bare_ident_field_call` for the 5-gate
+            // rationale (resolve_name → body_declares_binding →
+            // user_common_module_exists → platform global →
+            // ReceiverNotResolved).
+            //
+            // The gate is intentionally narrow to `Ty::Unknown` —
+            // typed receivers (including `Ty::PlatformObject`) keep
+            // going through the existing workspace + `lookup_method`
+            // path below. `PlatformObject` reached from a typed
+            // local (e.g. `Зап = Новый Запрос; Зап.Выполнить()`)
+            // would otherwise tumble into gate 5's
+            // `ReceiverNotResolved` because `Зап` is an implicit
+            // local invisible to `Resolver::resolve_name`. The
+            // `PlatformObject`-shaped miss case (e.g.
+            // `ОбработкаОшибок.НеизвестныйМетод()`) is covered
+            // separately at the `lookup_method` miss site below
+            // (look for `try_resolve_platform_global_member` next to
+            // `receiver_display_name`).
+            if matches!(receiver_ty, Ty::Unknown) {
+                let base_expr = self.body.expr(base_id).clone();
+                if let Expr::Path(path_name) = base_expr {
+                    if let Some(return_ty) =
+                        self.dispatch_bare_ident_field_call(&path_name, &method_name, args, callee)
+                    {
+                        self.expr_types.insert(callee, Ty::Unknown);
+                        return return_ty;
+                    }
+                }
+            }
+
             for arg in args {
                 self.infer_expr(*arg);
             }
@@ -1809,6 +1849,48 @@ impl<'db> InferenceContext<'db> {
                             method_name: method_name.clone(),
                             kind: UnresolvedMethodKind::MethodNotFound,
                         });
+                    } else if let Ty::PlatformObject(_) = &receiver_ty {
+                        // PlatformObject bridge — replaces the Phase 1
+                        // legacy `MissingCommonModuleMethod` coverage
+                        // for `<Global>.<Method>` shapes where
+                        // `<Global>` resolves through
+                        // `infer_path_name`'s step 5 (e.g.
+                        // `ОбработкаОшибок.НеизвестныйМетод()`).
+                        // `receiver_display_name` keeps its general
+                        // `None` for `PlatformObject` (the type tag
+                        // alone is unsuitable as a user-facing receiver
+                        // name; e.g. it would render `МенеджерОбработкиОшибок`,
+                        // not `ОбработкаОшибок`). When the base is a
+                        // bare `Expr::Path(name)` we have the original
+                        // identifier — and the platform global tri-state
+                        // tells us whether the receiver is a known
+                        // container with a missing member (⇒
+                        // `MethodNotFound`) or a typed value coming
+                        // from somewhere else (⇒ stay silent — typed
+                        // locals like `Зап = Новый Запрос; Зап.X()`
+                        // get a `PlatformObject`-typed receiver too,
+                        // and surfacing a diagnostic on those would be
+                        // a regression the cascade gate carefully
+                        // avoids).
+                        let base_expr = self.body.expr(base_id).clone();
+                        if let Expr::Path(receiver_path_name) = base_expr {
+                            if matches!(
+                                crate::platform_global_lookup::try_resolve_platform_global_member(
+                                    &receiver_path_name,
+                                    &method_name,
+                                ),
+                                crate::platform_global_lookup::PlatformGlobalLookup::KnownContainerMissingMember
+                            ) {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::UnresolvedMethodCall {
+                                        expr: callee,
+                                        receiver_name: receiver_path_name,
+                                        method_name: method_name.clone(),
+                                        kind: UnresolvedMethodKind::MethodNotFound,
+                                    },
+                                );
+                            }
+                        }
                     }
                     Ty::Unknown
                 }
@@ -2127,17 +2209,20 @@ impl<'db> InferenceContext<'db> {
                         .is_some();
 
                     if !module_in_workspace {
-                        if let Some(method) = bsl_platform::PlatformDataInner::instance()
-                            .resolve_global_member(module_name.as_str(), method_name.as_str())
-                        {
-                            let return_ty = method
-                                .return_type
-                                .as_ref()
-                                .map(|s| {
-                                    let lowering = crate::lower::TyLoweringContext::new();
-                                    lowering.lower_bare_name(&hir_def::Name::new(s.as_str()))
-                                })
-                                .unwrap_or(Ty::Unknown);
+                        // Only the `Resolved` outcome short-circuits
+                        // the Err arm here; `KnownContainerMissingMember`
+                        // and `NotAContainer` keep the diagnostic
+                        // emission below (preserves the legacy
+                        // QualifiedPath path's behaviour — only
+                        // `dispatch_bare_ident_field_call`'s gate 4
+                        // splits the two miss outcomes into distinct
+                        // kinds).
+                        if let crate::platform_global_lookup::PlatformGlobalLookup::Resolved(
+                            return_ty,
+                        ) = crate::platform_global_lookup::try_resolve_platform_global_member(
+                            module_name,
+                            method_name,
+                        ) {
                             self.expr_types.insert(call_expr, Ty::Unknown);
                             return return_ty;
                         }
@@ -2155,6 +2240,202 @@ impl<'db> InferenceContext<'db> {
                 Ty::Unknown
             }
         }
+    }
+
+    /// Cascade-gate dispatcher for bare-IDENT receiver in
+    /// `Expr::Call { callee: Expr::Field { base: Expr::Path(name), field } }`.
+    ///
+    /// Wired into `infer_call`'s Field branch in Phase 2 of the
+    /// clean-architecture refactor. Body lowering no longer rewrites
+    /// `M.Method()` into `Expr::Call{QualifiedPath}` (the eager
+    /// TwoLevel arm in `hir-def/src/body/lower/expr.rs` was removed
+    /// in the same commit), so 2-segment `Module.Method()` calls
+    /// reach inference as `Expr::Call { callee: Expr::Field { base:
+    /// Expr::Path(name), field } }` and route through this dispatcher
+    /// when `infer_expr(base) == Ty::Unknown`. The earlier
+    /// `Expr::Call { callee: QualifiedPath }` shape is now reserved
+    /// for callers that build it directly (none today) — the legacy
+    /// `infer_qualified_call` is invoked only as gate 3's delegate.
+    ///
+    /// ## Cascade gate (clean-architecture rationale)
+    ///
+    /// Lowering classified `M.Method()` as a CommonModule call by
+    /// negative inference (`not local var, not param`). That fired
+    /// false positives for form attributes, implicit form globals,
+    /// module-level `Перем` declarations, and platform globals.
+    /// Inference owns the resolver and the receiver type, so it can
+    /// classify positively. The 5 gates run in order; the first hit
+    /// wins:
+    ///
+    /// 1. `Resolver::resolve_name` returns `Local | Variable | Method`
+    ///    — bound name; caller's existing Field-call path handles the
+    ///    typed receiver. Return `None` (silent).
+    /// 2. Body-side bindings invisible to the resolver — declared
+    ///    `Перем X;` (via `body_declares_binding`) AND implicit
+    ///    locals from `Stmt::Assign` (via `var_types`). Both: silent.
+    /// 3. `Resolver::user_common_module_exists` — workspace owns the
+    ///    receiver name as a CommonModule. Delegate to
+    ///    `infer_qualified_call`, which itself runs workspace-first
+    ///    and falls through to platform globals when appropriate.
+    ///    User shadows platform per BSL semantics — gate 3 runs
+    ///    BEFORE gate 4, mirroring the existing
+    ///    `infer_qualified_call:2056` workspace-first invariant and
+    ///    the `test_user_module_shadows_platform_global` regression.
+    /// 4. Platform global member (`ОбработкаОшибок.Краткое…`, …) via
+    ///    `platform_global_lookup::try_resolve_platform_global_member`.
+    /// 5. None of the above — emit `UnresolvedMethodCall {
+    ///    ReceiverNotResolved }` and return `Ty::Unknown`.
+    ///
+    /// `Resolution::Builtin` from gate 1 falls through (a builtin
+    /// container — like `ОбработкаОшибок` — is precisely the case
+    /// gate 4 covers; treating it as "bound" would mask the method
+    /// resolution).
+    fn dispatch_bare_ident_field_call(
+        &mut self,
+        module_name: &Name,
+        method_name: &Name,
+        args: &[ExprId],
+        call_expr: ExprId,
+    ) -> Option<Ty> {
+        use hir_def::resolver::Resolution;
+
+        let resolver = self.get_resolver();
+
+        // Gate 1 — known scope binding (parameter / local / module
+        // method / module variable). `Builtin` falls through: it
+        // names a platform global container that gate 4 will resolve
+        // as a method receiver.
+        match resolver.resolve_name(self.db, module_name) {
+            Some(Resolution::Local(_) | Resolution::Variable(_) | Resolution::Method(_)) => {
+                return None;
+            }
+            Some(Resolution::Builtin(_)) | None => {}
+        }
+
+        // Gate 2 — body-side bindings invisible to `Resolver::resolve_name`.
+        //
+        //   (a) Declared `Перем X;` / parameter without a prior
+        //       assignment: lives in `Body::Binding` but never reaches
+        //       `var_types` / `Scope::ExprScope`. `body_declares_binding`
+        //       covers it.
+        //
+        //   (b) Implicit local from `Stmt::Assign`
+        //       (`X = НеизвестнаяФункция(); X.Метод()`): tracked through
+        //       `InferenceContext::var_types` only — not a `Body::Binding`,
+        //       not reachable through `resolver.resolve_local`. Without
+        //       this probe the cascade would walk all the way to gate 5
+        //       and falsely emit `ReceiverNotResolved` for a perfectly
+        //       normal implicit local whose RHS happens to type to
+        //       `Ty::Unknown`.
+        //
+        // Both subcases must short-circuit silent — the call is on a
+        // local value, not a CommonModule or platform global. Lowercase
+        // probe matches BSL's case-insensitive identifier semantics
+        // (same key normalisation `infer_path_name` uses on `var_types`).
+        if self.body_declares_binding(module_name) {
+            return None;
+        }
+        if self.assigned_var_names.contains(&module_name.as_str().to_lowercase()) {
+            return None;
+        }
+
+        // Gate 3 — user CommonModule. Precedence over platform
+        // (gate 4) per `test_user_module_shadows_platform_global`.
+        //
+        // When the receiver positively resolves to a workspace
+        // CommonModule, emit the two body-side family diagnostics
+        // (RedundantAccessToObjectTwoLevel,
+        // MissedRequiredParameterCommonModule) BEFORE delegating to
+        // `infer_qualified_call`. The handlers run their own filters
+        // — the redundant-access handler keeps the diagnostic only
+        // when the receiver name matches the *enclosing* CommonModule
+        // (and `ReturnValueReuse == DontUse`), and the missed-required
+        // handler resolves the method through the SymbolTree and
+        // surfaces only genuinely missing required slots — so over-
+        // emission here is filtered downstream. The two channels are
+        // intentional: lowering used to fire them eagerly without a
+        // receiver type, which false-positived for form attributes,
+        // module-level `Перем`, and platform globals; lifting them
+        // here gates emission on `user_common_module_exists`.
+        //
+        // `infer_qualified_call` itself already runs workspace-first
+        // and emits `UnresolvedMethodCall { MethodNotFound |
+        // MethodNotExport }` on resolution failure — we just delegate
+        // for the type and any further diagnostics it owns.
+        if resolver.user_common_module_exists(self.db, module_name) {
+            // `args: Vec<bool>` — per-slot presence flag for the
+            // missed-required-parameter handler. Mirrors lowering's
+            // `extract_arg_presence` but reads from `Body` directly:
+            // an `Expr::Missing` placeholder sits in the slot when
+            // the parser dropped a skipped positional argument
+            // (`Foo(1,,3)`).
+            let arg_presence: Vec<bool> = args
+                .iter()
+                .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
+                .collect();
+
+            self.push_inference_diagnostic(InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
+                expr: call_expr,
+                module: module_name.clone(),
+            });
+
+            self.push_inference_diagnostic(
+                InferenceDiagnostic::MissedRequiredParameterCommonModule {
+                    expr: call_expr,
+                    callee: method_name.clone(),
+                    module: module_name.clone(),
+                    args: arg_presence,
+                },
+            );
+
+            return Some(self.infer_qualified_call(module_name, method_name, args, call_expr));
+        }
+
+        // Gate 4 — platform global container. Tri-state: a `Resolved`
+        // outcome wins; `KnownContainerMissingMember` ⇒ MethodNotFound
+        // (the receiver IS a real platform global like `ОбработкаОшибок`,
+        // the user just typo'd the method); `NotAContainer` falls through
+        // to gate 5's `ReceiverNotResolved`.
+        match crate::platform_global_lookup::try_resolve_platform_global_member(
+            module_name,
+            method_name,
+        ) {
+            crate::platform_global_lookup::PlatformGlobalLookup::Resolved(return_ty) => {
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+                self.expr_types.insert(call_expr, Ty::Unknown);
+                return Some(return_ty);
+            }
+            crate::platform_global_lookup::PlatformGlobalLookup::KnownContainerMissingMember => {
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                    expr: call_expr,
+                    receiver_name: module_name.clone(),
+                    method_name: method_name.clone(),
+                    kind: UnresolvedMethodKind::MethodNotFound,
+                });
+                return Some(Ty::Unknown);
+            }
+            crate::platform_global_lookup::PlatformGlobalLookup::NotAContainer => {}
+        }
+
+        // Gate 5 — receiver is unknown to every layer. Emit
+        // `ReceiverNotResolved` so the user gets a single, accurate
+        // diagnostic instead of the misleading "method missing on
+        // CommonModule" pair lowering used to produce.
+        for arg in args {
+            self.infer_expr(*arg);
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+            expr: call_expr,
+            receiver_name: module_name.clone(),
+            method_name: method_name.clone(),
+            kind: UnresolvedMethodKind::ReceiverNotResolved,
+        });
+        Some(Ty::Unknown)
     }
 
     /// Infer type from a three-segment manager-chain call
@@ -2512,8 +2793,12 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         MetadataKind::CatalogObject | MetadataKind::CatalogRef => bsl_metadata::MdoType::Catalog,
         MetadataKind::DocumentObject | MetadataKind::DocumentRef => bsl_metadata::MdoType::Document,
         MetadataKind::EnumRef => bsl_metadata::MdoType::Enum,
-        MetadataKind::TaskRef => bsl_metadata::MdoType::Task,
-        MetadataKind::BusinessProcessRef => bsl_metadata::MdoType::BusinessProcess,
+        MetadataKind::TaskRef | MetadataKind::TaskObject => bsl_metadata::MdoType::Task,
+        MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
+            bsl_metadata::MdoType::BusinessProcess
+        }
+        MetadataKind::DataProcessorObject => bsl_metadata::MdoType::DataProcessor,
+        MetadataKind::ReportObject => bsl_metadata::MdoType::Report,
         MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
             bsl_metadata::MdoType::ExchangePlan
         }

@@ -158,6 +158,48 @@ pub(super) fn platform_completions<DB: RootDatabase>(
         return Some(apply_prefix_filter(items, &prefix, db));
     }
 
+    // `Элементы.|` / `Items.|` — the form-elements collection is a
+    // platform object (`ВсеЭлементыФормы` / `FormAllItems`), but its
+    // *useful* members are the form's own elements (Pages / Tables /
+    // Buttons / …) named in `Form.xml`, not the (mostly empty)
+    // platform member list. Surface both: form elements first (Field,
+    // sorted by kind), then platform members so collection helpers
+    // (`Найти` / `Insert`) stay reachable. Use-case wrapper
+    // `Semantics::form` is the only entry point — IDE never reads
+    // `module_metadata` directly (Clean Architecture, plan v3.1
+    // decision #4).
+    if hir::is_form_items_collection_ty(&receiver_ty) {
+        if let Some(items) =
+            complete_form_elements_collection(db, position.file_id, position.locale)
+        {
+            return Some(apply_prefix_filter(items, &prefix, db));
+        }
+    }
+
+    // Form-control receivers (e.g. `Элементы.<Pages>.|`) carry an
+    // ordered platform-type chain `[base, extension?]`. Merge member
+    // lists across the chain so kind-specific extension members
+    // (`<Pages>.ТекущаяСтраница`, `<UsualGroup>.Скрыть`) appear
+    // alongside the shared base properties (`Видимость`, `Заголовок`).
+    // Extension labels win over base labels on a tie (rev iteration +
+    // case-insensitive `seen` set), matching the precedence
+    // `lookup_platform_property` enforces for type resolution.
+    if let Ty::FormControl { kind, .. } = &receiver_ty {
+        let chain = hir::form_control_platform_type_chain(*kind);
+        if !chain.is_empty() {
+            let mut items: Vec<CompletionItem> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for type_name in chain.iter().rev() {
+                for item in complete_platform_methods(db, type_name, position.locale) {
+                    if seen.insert(item.label.to_lowercase()) {
+                        items.push(item);
+                    }
+                }
+            }
+            return Some(apply_prefix_filter(items, &prefix, db));
+        }
+    }
+
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
         let items = complete_platform_methods(db, type_name, position.locale);
@@ -233,7 +275,15 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
         _ => false,
     };
     let is_metadata_ref = matches!(effective_ty, Ty::MetadataRef { .. });
-    if !is_metadata_ref && !is_union_with_metadata_ref {
+    // `Ty::FormData{Structure | StructureWithCollection, underlying: Some(..)}`
+    // routes here too: `Type::fields()` projects it to `MetadataRef{*Object,..}`
+    // and enumerates the underlying MDO's attributes (`Объект.<attr>` in a
+    // managed form). Platform members come from the FormData wrapper's
+    // `platform_type_name()` (`ДанныеФормыСтруктура` etc.) via the existing
+    // `collect_platform_items_for_effective` path below.
+    let is_form_data_with_underlying =
+        matches!(effective_ty, Ty::FormData { underlying: Some(_), .. });
+    if !is_metadata_ref && !is_union_with_metadata_ref && !is_form_data_with_underlying {
         return None;
     }
 
@@ -315,6 +365,13 @@ fn collect_platform_items<DB: RootDatabase>(
             tracing::debug!(scalar_key, "Synthetic-kind scalar completion");
             return complete_platform_methods(db, scalar_key, locale);
         }
+    }
+    // FormData receivers carry a flat platform name (`ДанныеФормыСтруктура`
+    // etc.) — wrapper methods come from the scalar `complete_platform_methods`
+    // path, not the manager-prefix table. Field projection happens elsewhere
+    // (via `Type::fields()` on the projected MetadataRef).
+    if let Ty::FormData { kind, .. } = receiver_ty {
+        return complete_platform_methods(db, kind.platform_type_name(), locale);
     }
     let prefix = match receiver_ty {
         Ty::ObjectManager { kind, .. } => kind.manager_type_prefix(),
@@ -720,6 +777,76 @@ pub(super) fn render_platform_property(
         documentation,
         sort_text: None,
         filter_text: Some(format!("{} {}", prop.name, prop.english_name)),
+        source: None,
+    }
+}
+
+/// Surface the form's own elements (Pages / Tables / Buttons / Fields /
+/// Decorations / Additions) plus the platform `ВсеЭлементыФормы`
+/// member list as a single completion popup for `Элементы.|`.
+///
+/// Form elements come from [`hir::Semantics::form`] — same authoritative
+/// table the field-resolution path
+/// (`hir_ty::form_items::lookup_form_item_field`) reads — so the labels
+/// here always match what [`hir::Semantics::type_of_expr`] would resolve
+/// once the user picks one. They render as `Field` items with a
+/// kind-keyed `sort_text` (`"10_"` table → `"70_"` other) and
+/// locale-aware detail label, both sourced from
+/// [`hir::form_element_kind_sort_band`] and
+/// [`hir::form_element_kind_label`] — single source of truth on the
+/// `hir-def::ty` layer (plan v3.1 decision #5).
+///
+/// Platform members are appended afterwards (case-insensitive label
+/// dedup, user-defined element names win on collision).
+///
+/// Returns `None` (rather than `Some(empty)`) when the module has no
+/// form metadata yet — caller falls through to the standard
+/// `platform_type_name()` path so a no-op platform popup is still
+/// possible while the metadata bridge spins up.
+fn complete_form_elements_collection<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    locale: ide_db::base_db::Locale,
+) -> Option<Vec<CompletionItem>> {
+    let sema = Semantics::new(db);
+    let form = sema.form(file_id)?;
+
+    let mut items: Vec<CompletionItem> =
+        form.elements.iter().map(|el| render_form_element(el, locale)).collect();
+
+    let mut seen: std::collections::HashSet<String> =
+        items.iter().map(|i| i.label.to_lowercase()).collect();
+    for p in complete_platform_methods(db, hir::FORM_ITEMS_TYPE_RU, locale) {
+        if seen.insert(p.label.to_lowercase()) {
+            items.push(p);
+        }
+    }
+
+    Some(items)
+}
+
+/// Render one [`bsl_metadata::FormElement`] as a completion item.
+///
+/// All locale- / kind-dependent details are sourced from `hir-def::ty`
+/// helpers so this function holds zero business logic — only shape
+/// assembly. Drift between the type-resolution layer and the
+/// completion popup is structurally impossible: both consult the same
+/// [`hir::form_element_kind_label`] / [`hir::form_element_kind_sort_band`].
+fn render_form_element(
+    element: &bsl_metadata::FormElement,
+    locale: ide_db::base_db::Locale,
+) -> CompletionItem {
+    let detail = hir::form_element_kind_label(element.kind, locale).to_string();
+    let sort_text = format!("{}_", hir::form_element_kind_sort_band(element.kind));
+
+    CompletionItem {
+        label: element.name.clone(),
+        detail: Some(detail),
+        kind: CompletionItemKind::Field,
+        insert_text: element.name.clone(),
+        documentation: None,
+        sort_text: Some(sort_text),
+        filter_text: Some(element.name.clone()),
         source: None,
     }
 }
@@ -1182,5 +1309,74 @@ mod tests {
             "expected `Количество` (collection size) in Массив completion; got: {:?}",
             labels
         );
+    }
+
+    // ---------- Phase 13: form-element renderer (single source of truth) ----------
+
+    #[test]
+    fn render_form_element_uses_entity_level_label_and_sort_band() {
+        // Detail and sort_text MUST come from the entity-level helpers
+        // (`hir::form_element_kind_label`, `hir::form_element_kind_sort_band`)
+        // — no local kind→label mapping in IDE. This test pins the
+        // contract so any drift between hir-def and IDE crashes the build.
+        use bsl_metadata::{FormElement, FormElementKind};
+        use ide_db::base_db::Locale;
+
+        let cases = [
+            (FormElementKind::Table, Locale::Ru, "Таблица", "10_"),
+            (FormElementKind::Table, Locale::En, "Table", "10_"),
+            (FormElementKind::Pages, Locale::Ru, "Страницы", "20_"),
+            (FormElementKind::Pages, Locale::En, "Pages", "20_"),
+            (FormElementKind::UsualGroup, Locale::Ru, "Обычная группа", "20_"),
+            (FormElementKind::Field, Locale::Ru, "Поле", "30_"),
+            (FormElementKind::Button, Locale::Ru, "Кнопка", "40_"),
+            (FormElementKind::Decoration, Locale::Ru, "Декорация", "50_"),
+            (FormElementKind::Addition, Locale::Ru, "Дополнение", "60_"),
+            (FormElementKind::Other, Locale::Ru, "Элемент формы", "70_"),
+        ];
+
+        for (kind, locale, expected_detail, expected_sort) in cases {
+            let element = FormElement::with_kind("X".to_string(), 1, None, kind, None);
+            let item = render_form_element(&element, locale);
+            assert_eq!(item.kind, CompletionItemKind::Field);
+            assert_eq!(item.label, "X");
+            assert_eq!(item.insert_text, "X");
+            assert_eq!(
+                item.detail.as_deref(),
+                Some(expected_detail),
+                "detail mismatch for {kind:?}"
+            );
+            assert_eq!(
+                item.sort_text.as_deref(),
+                Some(expected_sort),
+                "sort_text mismatch for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_form_items_collection_ty_round_trips_bilingual() {
+        // `Элементы.|` resolves to `Ty::PlatformObject("ВсеЭлементыФормы")`
+        // by Phase 4 wiring. The completion entry-gate uses the same
+        // predicate the field-resolution path uses — single source of
+        // truth (`hir::is_form_items_collection_ty`). Pinning here so a
+        // future rename of the platform key breaks the build instead of
+        // silently disabling completion.
+        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
+            hir::FORM_ITEMS_TYPE_RU
+        ))));
+        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
+            hir::FORM_ITEMS_TYPE_EN
+        ))));
+        // Cyrillic case-insensitive — confirms predicate is bilingual
+        // AND case-folded for Cyrillic (not just ASCII).
+        assert!(hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
+            "всеЭлементыФормы"
+        ))));
+        // Non-form-items receivers must NOT match.
+        assert!(!hir::is_form_items_collection_ty(&hir::Ty::PlatformObject(hir::Name::new(
+            "Запрос"
+        ))));
+        assert!(!hir::is_form_items_collection_ty(&hir::Ty::Number));
     }
 }

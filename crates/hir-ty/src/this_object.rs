@@ -12,11 +12,13 @@
 //!
 //! # Coverage
 //!
-//! Only MDO kinds that have a dedicated `*Object` companion in
-//! [`MetadataKind`] are coercible: `Catalog`, `Document`, `ExchangePlan`,
-//! `ChartOfAccounts`. Forms, record sets, command modules, and common
-//! modules all fall through to `None` — their receiver surfaces are out
-//! of scope for Task 5 and land as `Ty::Unknown`.
+//! Coercible MDO kinds — those with a dedicated `*Object` companion in
+//! [`MetadataKind`] (single source of truth: [`MetadataKind::object_kind_for`]):
+//! `Catalog`, `Document`, `ExchangePlan`, `ChartOfAccounts`, `Task`,
+//! `BusinessProcess`, `DataProcessor`, `Report`. Form modules, record
+//! sets, command modules, common modules, registers, and enums all fall
+//! through to `None` — their receiver surfaces don't have an `*Object`
+//! shape and land as `Ty::Unknown`.
 //!
 //! # Why a helper
 //!
@@ -39,8 +41,7 @@ use hir_def::ty::{MetadataKind, Ty};
 /// [`MetadataKind::object_kind_for`] — same table the resolver uses to
 /// gate `Ty::ThisObject` construction. Keeping both sides of the
 /// coercion pipeline on a single table means a new `*Object` variant
-/// (future `TaskObject`, `BusinessProcessObject`, …) needs exactly one
-/// edit instead of two.
+/// needs exactly one edit instead of two.
 pub fn coerce_to_metadata_ref(receiver_ty: &Ty) -> Option<Ty> {
     let Ty::ThisObject { owner: (kind, name) } = receiver_ty else {
         return None;
@@ -112,16 +113,45 @@ mod tests {
     #[test]
     fn no_coercion_for_non_object_kinds() {
         // Register flavours have `*RecordSet` / `*RecordManager`, not
-        // `*Object`. Task 5 deliberately leaves them out of scope —
-        // the coercion must stay `None` until a dedicated receiver
+        // `*Object`, and `MetadataKind::object_kind_for` rejects them.
+        // The coercion must stay `None` until a dedicated receiver
         // surface lands.
-        let owner = (MdoType::InformationRegister, Name::new("РС"));
-        assert!(coerce_to_metadata_ref(&Ty::ThisObject { owner }).is_none());
+        for mdo in [
+            MdoType::InformationRegister,
+            MdoType::AccumulationRegister,
+            MdoType::AccountingRegister,
+            MdoType::CalculationRegister,
+            MdoType::Enum,
+        ] {
+            let owner = (mdo, Name::new("X"));
+            assert!(
+                coerce_to_metadata_ref(&Ty::ThisObject { owner }).is_none(),
+                "expected no coercion for {mdo:?}"
+            );
+        }
+    }
 
-        // BusinessProcess / Task have `*Ref` but no `*Object` — again
-        // out of scope.
-        let owner_bp = (MdoType::BusinessProcess, Name::new("Процесс"));
-        assert!(coerce_to_metadata_ref(&Ty::ThisObject { owner: owner_bp }).is_none());
+    #[test]
+    fn coerces_business_process_and_task_and_data_processor_and_report_this_object() {
+        // The four MDO kinds that joined the *Object set together with
+        // form `Объект` projection: each must coerce to its `*Object`
+        // MetadataRef so field/method dispatch works inside ObjectModule
+        // and through the FormData wrapper.
+        for (mdo, expected_kind) in [
+            (MdoType::BusinessProcess, MetadataKind::BusinessProcessObject),
+            (MdoType::Task, MetadataKind::TaskObject),
+            (MdoType::DataProcessor, MetadataKind::DataProcessorObject),
+            (MdoType::Report, MetadataKind::ReportObject),
+        ] {
+            let owner = (mdo, Name::new("X"));
+            let coerced = coerce_to_metadata_ref(&Ty::ThisObject { owner })
+                .unwrap_or_else(|| panic!("must coerce {mdo:?}"));
+            assert_eq!(
+                coerced,
+                Ty::MetadataRef { kind: expected_kind, name: Name::new("X") },
+                "{mdo:?} must coerce to {expected_kind:?}"
+            );
+        }
     }
 
     #[test]

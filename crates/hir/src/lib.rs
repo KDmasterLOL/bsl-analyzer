@@ -8,6 +8,7 @@ pub mod type_facade;
 
 pub use definition::Definition;
 pub use hir_ty::coerce_this_object_to_metadata_ref;
+pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
 pub use name_classify::{classify_token, NameClass};
 pub use type_facade::{Field, HirFieldOrigin, Type};
@@ -99,9 +100,9 @@ pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
 pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowState};
 pub use hir_ty::{
-    form_control_platform_type_name, CallArgBinding, FormDataBinding, FormDataTarget,
-    FormElementKind, InferenceDiagnostic, InferenceResult, MetadataKind, ParamsShape, Ty,
-    UnresolvedMethodKind,
+    form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
+    form_element_kind_sort_band, CallArgBinding, FormDataBinding, FormDataTarget, FormElementKind,
+    InferenceDiagnostic, InferenceResult, MetadataKind, ParamsShape, Ty, UnresolvedMethodKind,
 };
 
 use syntax::{ast::AstNode, TextRange};
@@ -300,6 +301,22 @@ pub struct Semantics<'db, DB> {
 impl<'db, DB: ConfigsDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     pub fn new(db: &'db DB) -> Self {
         Self { db }
+    }
+
+    /// Parsed `Form.xml` payload for a `FormModule` file.
+    ///
+    /// Thin pass-through over `db.module_metadata(...)` — the gateway
+    /// IDE features (completion source for `Элементы.|`, future
+    /// goto-definition for form elements, hover on form items) use
+    /// instead of dipping into the entity-level metadata directly. Per
+    /// Clean Architecture (plan v3.1 decision #4) interface adapters
+    /// consume use-cases, not entities; this method IS the use case.
+    ///
+    /// Returns `None` for files that aren't FormModule.bsl or whose
+    /// metadata bridge has not yet loaded the XML payload.
+    pub fn form(&self, file_id: FileId) -> Option<std::sync::Arc<bsl_metadata::Form>> {
+        let module_id = ModuleId::new(file_id);
+        self.db.module_metadata(module_id).form.clone()
     }
 
     /// Classify the token at `(file_id, offset)` using the right-biased

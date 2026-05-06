@@ -736,9 +736,25 @@ mod tests {
         }
 
         // Codes intentionally in multiple collectors (non-overlapping detection paths:
-        // HIR handles literals, dataflow handles variables)
-        let known_dual_registration: &[DiagnosticCode] =
-            &[DiagnosticCode::IncorrectUseOfStrTemplate];
+        // HIR handles literals, dataflow handles variables).
+        //
+        // RedundantAccessToObject and MissedRequiredParameter are dual-registered
+        // because their detection is split across two channels with non-overlapping
+        // responsibilities:
+        //   - HIR_DIAGNOSTICS  — three-level (`Документы.ПКО.Method`) and
+        //                        ЭтотОбъект/local-call shapes, classified at body
+        //                        lowering time via the positive `MdoType::from_plural`
+        //                        gate.
+        //   - INFERENCE_DIAGNOSTICS — two-level CommonModule shape, classified at
+        //                        inference time via `Resolver::user_common_module_exists`
+        //                        (clean-architecture lift — lowering can no longer
+        //                        decide "this is a CommonModule call" without the
+        //                        receiver type, see `dispatch_bare_ident_field_call`).
+        let known_dual_registration: &[DiagnosticCode] = &[
+            DiagnosticCode::IncorrectUseOfStrTemplate,
+            DiagnosticCode::RedundantAccessToObject,
+            DiagnosticCode::MissedRequiredParameter,
+        ];
 
         // Check for unexpected duplicates
         let mut duplicates = Vec::new();

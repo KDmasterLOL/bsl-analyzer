@@ -220,10 +220,11 @@ impl Resolver {
     ///    coercion target the downstream `FieldLookup` /
     ///    `MethodLookup` adapters have nothing to resolve against,
     ///    so a `Ty::ThisObject` constructed here would dangle.
-    ///    `Task`, `BusinessProcess`, and
-    ///    `ChartOfCharacteristicTypes` all sit in this gap today —
-    ///    their ObjectModule `ЭтотОбъект` stays `Ty::Unknown` until
-    ///    dedicated `*Object` variants land.
+    ///    Covered kinds today: `Catalog`, `Document`, `ExchangePlan`,
+    ///    `ChartOfAccounts`, `Task`, `BusinessProcess`, `DataProcessor`,
+    ///    `Report`. `ChartOfCharacteristicTypes`, registers, and enums
+    ///    still sit in this gap — their ObjectModule `ЭтотОбъект`
+    ///    stays `Ty::Unknown` until dedicated `*Object` variants land.
     ///
     /// # Why in `Resolver`
     ///

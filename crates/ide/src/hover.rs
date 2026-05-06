@@ -119,6 +119,26 @@ fn hover_field<DB: RootDatabase>(
         return definition_to_hover(db, &definition, range, inferred_ty.as_ref(), locale);
     }
 
+    // Final fallback: ask `type_of_expr` on the surrounding FieldExpr
+    // (parent of the field-name token). Catches form-element names —
+    // `Элементы.<X>` resolves to `Ty::FormControl{kind, binding}` via
+    // `infer.rs`'s `form_items::lookup_form_item_field`, but the
+    // platform property/method lookups above don't see X (it lives in
+    // `Form.xml`, not platform_data) and `resolve_name_to_definition`
+    // doesn't classify form elements as definitions. Without this
+    // fallback hover would silently say "No information available" on
+    // every form-element name.
+    if let Some(parent) = token.parent() {
+        let ty = sema.type_of_expr(file_id, &parent);
+        if !ty.is_unknown() {
+            let mut markup = format!("**{}**\n\n", name);
+            if let Some(type_block) = ty_info_markup(db, &ty, locale) {
+                markup.push_str(&type_block);
+                return Some(HoverResult { markup, range: Some(range) });
+            }
+        }
+    }
+
     None
 }
 
@@ -176,6 +196,19 @@ fn hover_platform_property_on_ty<DB: RootDatabase>(
     range: TextRange,
 ) -> Option<HoverResult> {
     if receiver_ty.is_unknown() {
+        return None;
+    }
+    // Form-control receivers carry an ordered platform-type chain
+    // `[base, extension?]` — walk reversed (extension first) so
+    // hover for `<Pages>.ТекущаяСтраница` finds the extension docs,
+    // and falls back to base for shared properties (`Видимость`, …).
+    if let Ty::FormControl { kind, .. } = receiver_ty {
+        for type_name in hir::form_control_platform_type_chain(*kind).iter().rev() {
+            let input = MethodLookupInput::new(db, type_name.to_string(), prop_name.to_string());
+            if let Some(prop) = platform_property_query(db, input) {
+                return Some(render_property_hover(&prop, range));
+            }
+        }
         return None;
     }
     let type_key = receiver_ty.platform_type_name()?;

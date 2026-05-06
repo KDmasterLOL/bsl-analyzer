@@ -222,7 +222,16 @@ fn collect_events_recursive(node: roxmltree::Node<'_, '_>, handlers: &mut Vec<Fo
 fn tag_to_kind(tag: &str) -> FormElementKind {
     match tag {
         "Table" => FormElementKind::Table,
-        "UsualGroup" | "Pages" | "Page" | "CommandBar" | "ButtonGroup" => FormElementKind::Group,
+        // Each group sub-tag has its own platform extension type (Phase 9
+        // of v3.1 — see `form_control_platform_type_chain` in hir-def).
+        // Mapping every sub-tag to a single `Group` would collapse 5
+        // distinct property/method tables into one, missing
+        // `<Pages>.ТекущаяСтраница`, `<UsualGroup>.Скрыть`, etc.
+        "UsualGroup" => FormElementKind::UsualGroup,
+        "Pages" => FormElementKind::Pages,
+        "Page" => FormElementKind::Page,
+        "CommandBar" => FormElementKind::CommandBar,
+        "ButtonGroup" => FormElementKind::ButtonGroup,
         "InputField"
         | "LabelField"
         | "CheckBoxField"
@@ -942,11 +951,15 @@ mod tests {
     fn test_tag_to_kind_table() {
         let cases = [
             ("Table", FormElementKind::Table),
-            ("UsualGroup", FormElementKind::Group),
-            ("Pages", FormElementKind::Group),
-            ("Page", FormElementKind::Group),
-            ("CommandBar", FormElementKind::Group),
-            ("ButtonGroup", FormElementKind::Group),
+            // Each group sub-tag now maps to its own kind — Phase 9 of
+            // v3.1 split the catch-all `Group` so the chain mechanism in
+            // `field_lookup`/`method_lookup` can reach extension members
+            // (`<Pages>.ТекущаяСтраница`, `<UsualGroup>.Скрыть`, etc.).
+            ("UsualGroup", FormElementKind::UsualGroup),
+            ("Pages", FormElementKind::Pages),
+            ("Page", FormElementKind::Page),
+            ("CommandBar", FormElementKind::CommandBar),
+            ("ButtonGroup", FormElementKind::ButtonGroup),
             ("InputField", FormElementKind::Field),
             ("LabelField", FormElementKind::Field),
             ("CheckBoxField", FormElementKind::Field),
@@ -1003,7 +1016,7 @@ mod tests {
         assert_eq!(form.elements().len(), 4);
 
         let group = form.find_element("Группа1").unwrap();
-        assert_eq!(group.kind, FormElementKind::Group);
+        assert_eq!(group.kind, FormElementKind::UsualGroup);
         assert_eq!(group.parent_id, None);
 
         let inner_field = form.find_element("ПолеВГруппе").unwrap();
@@ -1053,11 +1066,11 @@ mod tests {
         assert_eq!(form.elements().len(), 4);
 
         let outer = form.find_element("Внешняя").unwrap();
-        assert_eq!(outer.kind, FormElementKind::Group);
+        assert_eq!(outer.kind, FormElementKind::UsualGroup);
         assert_eq!(outer.parent_id, None);
 
         let inner = form.find_element("Внутренняя").unwrap();
-        assert_eq!(inner.kind, FormElementKind::Group);
+        assert_eq!(inner.kind, FormElementKind::UsualGroup);
         assert_eq!(inner.parent_id, Some(outer.id));
 
         let table = form.find_element("ТабВнутри").unwrap();

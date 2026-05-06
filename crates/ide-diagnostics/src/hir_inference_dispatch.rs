@@ -20,16 +20,26 @@
 //! `BodyDiagnostic` channel.
 
 use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{BodySourceMap, DefWithBodyId, ExprId, InferenceDiagnostic};
+use hir::{BodySourceMap, DefWithBodyId, ExprId, InferenceDiagnostic, RedundantAccessKind};
 use ide_db::TextRange;
 
 /// Diagnostic codes produced by the type-inference collector.
+///
+/// `RedundantAccessToObject` and `MissedRequiredParameter` also appear
+/// in `HIR_DIAGNOSTICS` (the `BodyDiagnostic` channel — three-level and
+/// `ЭтотОбъект`/local shapes), and are listed here additionally because
+/// inference now also emits the two-level CommonModule variant after
+/// the body-lowering classification was lifted into the inference
+/// layer (see `InferenceDiagnostic::RedundantAccessToObjectTwoLevel`
+/// and `MissedRequiredParameterCommonModule`).
 pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnresolvedMethodCall,
     DiagnosticCode::MismatchedArgCount,
     DiagnosticCode::TypeMismatch,
     DiagnosticCode::UnresolvedField,
     DiagnosticCode::ReadOnlyPropertyAssignment,
+    DiagnosticCode::RedundantAccessToObject,
+    DiagnosticCode::MissedRequiredParameter,
 ];
 
 /// Collect inference-produced diagnostics for the current file.
@@ -119,6 +129,8 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
         InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
         InferenceDiagnostic::ReadOnlyPropertyAssignment { lhs, .. } => *lhs,
+        InferenceDiagnostic::RedundantAccessToObjectTwoLevel { expr, .. } => *expr,
+        InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
     }
 }
 
@@ -163,6 +175,43 @@ fn dispatch_inference_diagnostic(
         }
         InferenceDiagnostic::ReadOnlyPropertyAssignment { receiver_ty, field_name, .. } => {
             handlers::read_only_property::from_hir(receiver_ty, field_name, range, ctx)
+        }
+        InferenceDiagnostic::RedundantAccessToObjectTwoLevel { module, .. } => {
+            // Reuse the existing handler that already validates against
+            // module metadata (CommonModule type + DontUse reuse +
+            // matching name). Inference promises the receiver resolves
+            // to a CommonModule via `user_common_module_exists`, so
+            // the handler's CommonModule gate is the right second
+            // check — same shape as the lowering-emitted ThreeLevel /
+            // ThisObject siblings.
+            //
+            // `RedundantAccessKind::TwoLevel { module: String }` lives
+            // in hir-def (re-exported as `hir::RedundantAccessKind`);
+            // converting `Name → String` here keeps the inference
+            // payload `Name`-typed (cheap clone, interned) while the
+            // body-diagnostic schema stays `String`.
+            let kind = RedundantAccessKind::TwoLevel { module: module.as_str().to_string() };
+            handlers::redundant_access_to_object::from_hir(&kind, range, ctx)
+        }
+        InferenceDiagnostic::MissedRequiredParameterCommonModule {
+            callee, module, args, ..
+        } => {
+            // CommonModule shape: `module = Some(name)`, `mdo_type` and
+            // `mdo_name` both `None`. The handler routes to
+            // `check_qualified_call`, which resolves the method via
+            // SymbolTree and validates each required parameter slot
+            // against the boolean presence array — identical to how
+            // the lowering-emitted version flows, just sourced from
+            // inference.
+            handlers::missed_required_parameter::from_hir(
+                callee.as_str(),
+                Some(module.as_str()),
+                None,
+                None,
+                args,
+                range,
+                ctx,
+            )
         }
     }
 }

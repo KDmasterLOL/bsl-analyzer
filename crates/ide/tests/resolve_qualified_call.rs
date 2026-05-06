@@ -152,13 +152,22 @@ const MISSING_MODULE_FIXTURE: &str = r#"
 "#;
 
 #[test]
-fn missing_module_reports_method_not_found() {
+fn missing_module_reports_receiver_not_resolved() {
+    // Phase 2 of the qualified-call refactor split the previous
+    // `MethodNotFound` collapse into two kinds: `ReceiverNotResolved`
+    // when the module name doesn't resolve anywhere (the cascade
+    // gate's gate-5 exhaustion), `MethodNotFound` when the module
+    // is reachable but the method is missing (gate 3 →
+    // `infer_qualified_call`). The fixture's
+    // `НесуществующийМодуль` is the former case — see
+    // `infer_invalidation::infer_invalidates_when_config_set_changes`
+    // for the same observation under the visibility gate.
     let (db, file_id) = setup_fixture(MISSING_MODULE_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert_eq!(
         kinds,
-        vec![UnresolvedMethodKind::MethodNotFound],
-        "Expected MethodNotFound when module_index has no entry"
+        vec![UnresolvedMethodKind::ReceiverNotResolved],
+        "Expected ReceiverNotResolved when module_index has no entry"
     );
 }
 
@@ -200,13 +209,16 @@ const SHADOWING_FIXTURE: &str = r#"
 
 #[test]
 fn local_shadowing_skips_qualified_resolution() {
-    // When a local variable shadows a CommonModule name, HIR lowering
-    // refuses to promote the call into `Expr::QualifiedPath` (see
-    // `maybe_lower_as_qualified_call` in hir-def), so `resolve_qualified_call`
-    // is never invoked for the shadowed receiver and no `UnresolvedMethodCall`
-    // diagnostic is produced. The `resolver.resolve_local()` guard inside
-    // `resolve_qualified_call` is therefore defensive — this test pins down
-    // the observable behaviour from the inference layer.
+    // When a local variable shadows a CommonModule name, the cascade
+    // gate in `dispatch_bare_ident_field_call` short-circuits silent
+    // at gate 1 / gate 2 — `resolver.resolve_name` returns the
+    // declared local (or `body_declares_binding` /
+    // `assigned_var_names` covers an implicit one), so the gate
+    // never reaches the `user_common_module_exists` step and
+    // `UnresolvedMethodCall` is not emitted. Phase 2 of the
+    // qualified-call refactor moved this disambiguation out of
+    // lowering's `maybe_lower_as_qualified_call`; the observable
+    // behaviour is the same — no diagnostic on a shadowed receiver.
     let (db, file_id) = setup_fixture(SHADOWING_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert!(
@@ -265,6 +277,37 @@ fn for_iterator_property_chain_does_not_emit_unresolved() {
     assert!(
         kinds.is_empty(),
         "For iterator chain must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+}
+
+const IMPLICIT_LOCAL_UNKNOWN_RHS_FIXTURE: &str = r#"
+//- /test.bsl
+Процедура Тест()
+    Х = НеизвестнаяФункция();
+    Х.Метод();
+КонецПроцедуры
+"#;
+
+#[test]
+fn implicit_local_with_unknown_rhs_is_not_misclassified_as_common_module() {
+    // Regression for cascade-gate gate 2 in
+    // `dispatch_bare_ident_field_call`: an implicit local from
+    // `Stmt::Assign` whose RHS infers to `Ty::Unknown` must not be
+    // mistaken for an unresolved CommonModule receiver.
+    //
+    // `Х` lives in `InferenceContext::var_types` only — it is neither
+    // a `Body::Binding` (so `body_declares_binding` misses) nor a
+    // `Resolver::resolve_local` hit (no `Scope::ExprScope` in the
+    // body resolver). Without a `var_types` probe in gate 2 the
+    // cascade falls through to gate 5 and emits a misleading
+    // `ReceiverNotResolved` for an entirely valid local-variable
+    // call.
+    let (db, file_id) = setup_fixture(IMPLICIT_LOCAL_UNKNOWN_RHS_FIXTURE);
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "implicit local must not produce UnresolvedMethodCall, got: {:?}",
         kinds
     );
 }
@@ -352,5 +395,55 @@ fn russian_layout_resolves() {
         vec![(1, 1, 0)],
         "Russian-layout lookup must reach arg-count check; got: {:?}",
         mismatches
+    );
+}
+
+const USER_MODULE_SHADOWS_PLATFORM_GLOBAL_FIXTURE: &str = r#"
+//- /CommonModules/Метаданные/Ext/Module.bsl
+Процедура ОдинЭкспортируемыйМетод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Метаданные.ЗаведомоОтсутствующийМетод();
+КонецПроцедуры
+"#;
+
+#[test]
+fn user_common_module_shadows_same_named_platform_global() {
+    // Phase 5 follow-up — codex stop-time review surfaced a regression
+    // window where `infer_path_name` step 5 resolved a name like
+    // `Метаданные` (a known platform global container) into
+    // `Ty::PlatformObject(КонфигурацияМетаданныеОбъект)` even when the
+    // workspace shipped a CommonModule with the same name. Result:
+    // `Метаданные.МойМетод()` would type-check against the platform
+    // catalogue instead of the user CommonModule's SymbolTree, and a
+    // typo'd call would be silenced (no UMC) because lookup_method
+    // resolved the wrong `Ty`.
+    //
+    // The fix mirrors the cascade gate's gate 3 ordering inside
+    // `infer_path_name`: skip the platform fallback when
+    // `Resolver::user_common_module_exists` claims the receiver. The
+    // call now flows through the cascade gate (Field-shape, gate 3
+    // → infer_qualified_call) and emits MethodNotFound for the
+    // missing method.
+    //
+    // Discriminating shape: the user CM has `ОдинЭкспортируемыйМетод`
+    // (NOT `ЗаведомоОтсутствующийМетод`) and the platform global
+    // `Метаданные` does NOT expose `ЗаведомоОтсутствующийМетод`
+    // either — but if step 5 wins, `lookup_method` on
+    // `Ty::PlatformObject` returns None silently (gate `receiver_display_name`
+    // skips PlatformObject), no diagnostic. If gate 3 wins,
+    // `MethodNotFound` fires.
+    let (db, file_id) = setup_fixture(USER_MODULE_SHADOWS_PLATFORM_GLOBAL_FIXTURE);
+    let kinds = unresolved_kinds(&db, file_id);
+    assert_eq!(
+        kinds,
+        vec![UnresolvedMethodKind::MethodNotFound],
+        "user CommonModule named like a platform global must keep its missing-method \
+         diagnostic; if this fails, `infer_path_name` step 5 retyped the receiver as \
+         PlatformObject before the cascade gate could route it through the workspace. \
+         got: {:?}",
+        kinds
     );
 }

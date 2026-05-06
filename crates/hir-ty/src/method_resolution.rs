@@ -21,11 +21,13 @@
 //!
 //! ## Shadowing
 //!
-//! Shadowing (a local variable named identically to a CommonModule) is
-//! handled during HIR lowering (`maybe_lower_as_qualified_call` in
-//! `crates/hir-def/src/body/lower/expr.rs`): the call is not promoted to
-//! `Expr::QualifiedPath`, so this function is never reached for a
-//! shadowed receiver.
+//! Shadowing (a local variable / parameter / module-level `Перем` named
+//! identically to a CommonModule) is handled at inference time in
+//! `dispatch_bare_ident_field_call`'s cascade gate (gates 1 and 2 —
+//! `Resolver::resolve_name`, `body_declares_binding`,
+//! `assigned_var_names`). Those gates short-circuit silent before
+//! reaching gate 3, so this function is invoked only when the
+//! receiver positively resolves to a workspace CommonModule.
 
 use hir_def::resolver::{QualifiedMethodError, Resolver};
 use hir_def::symbol_tree::MethodSymbol;
@@ -221,6 +223,10 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
         MetadataKind::DocumentObject => MdoType::Document,
         MetadataKind::ExchangePlanObject => MdoType::ExchangePlan,
         MetadataKind::ChartOfAccountsObject => MdoType::ChartOfAccounts,
+        MetadataKind::TaskObject => MdoType::Task,
+        MetadataKind::BusinessProcessObject => MdoType::BusinessProcess,
+        MetadataKind::DataProcessorObject => MdoType::DataProcessor,
+        MetadataKind::ReportObject => MdoType::Report,
         // `*Ref` kinds — reference values, no ObjectModule.bsl call surface.
         MetadataKind::CatalogRef
         | MetadataKind::DocumentRef
@@ -299,7 +305,11 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
         MetadataKind::CatalogObject
         | MetadataKind::DocumentObject
         | MetadataKind::ExchangePlanObject
-        | MetadataKind::ChartOfAccountsObject => return None,
+        | MetadataKind::ChartOfAccountsObject
+        | MetadataKind::TaskObject
+        | MetadataKind::BusinessProcessObject
+        | MetadataKind::DataProcessorObject
+        | MetadataKind::ReportObject => return None,
         // `*Ref` kinds — reference values, no module-level call surface.
         MetadataKind::CatalogRef
         | MetadataKind::DocumentRef

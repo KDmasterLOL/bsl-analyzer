@@ -2104,6 +2104,12 @@ fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
 
     let is_ru = lang == "ru";
 
+    // Includes deprecated rules (e.g. `MissingCommonModuleMethod` —
+    // superseded by `UnresolvedMethodCall` in Phase 2 of the
+    // qualified-call refactor). The rule entries are kept in the
+    // SonarQube export so existing downstream profiles keep validating;
+    // the rules themselves never fire any more. Full removal lands in
+    // Phase 4.
     let rules: Vec<serde_json::Value> = all_diagnostic_codes()
         .filter_map(|code| {
             let metadata = get_metadata(code)?;

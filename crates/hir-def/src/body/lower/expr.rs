@@ -1012,8 +1012,18 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
-    // For qualified calls (Module.Method, MdoType.MdoName.Method) promote HIR
-    // to `Expr::Call { callee: QualifiedPath }` and emit qualified-call diagnostics.
+    // For three-level manager calls (`MdoType.MdoName.Method()`) promote
+    // HIR to `Expr::Call { callee: QualifiedPath }` and emit the
+    // associated diagnostics. Two-level CommonModule calls
+    // (`Module.Method()`) are NO LONGER promoted here — Phase 2 of the
+    // qualified-call refactor lifted that classification into hir-ty's
+    // `dispatch_bare_ident_field_call`, which has the resolver and the
+    // receiver type and can decide positively rather than by negative
+    // syntactic inference. The `ЭтотОбъект.Method()` shape stays
+    // classified at this layer (handled inside
+    // `maybe_lower_as_qualified_call`), but it returns `None` so the
+    // body keeps its original `Expr::Field` callee — only the
+    // missed-required-parameter diagnostic is pushed in the body.
     if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
         if let Some(replacement) =
             maybe_lower_as_qualified_call(ctx, node, &actual_callee, arg_list_node.as_ref(), &args)
@@ -1025,16 +1035,40 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     Expr::Call { callee, args: args.into_boxed_slice() }
 }
 
-/// Rewrite `a.b()` / `a.b.c()` into `Expr::Call { callee: QualifiedPath, args }`
-/// and emit the diagnostics that depend on the call shape.
+/// Classify and possibly rewrite `a.b()` / `a.b.c()` calls.
 ///
-/// - Returns `Some(Expr::Call{QualifiedPath,args})` for CommonModule calls and
-///   manager-object calls where `analyze_qualified_call` recognises the pattern.
-/// - For `ЭтотОбъект.Method()` the diagnostic is emitted as a *local* call
-///   (`module = None`) and `None` is returned so the caller keeps the original
-///   `Expr::Call { callee: Expr::Field, args }` shape.
-/// - Returns `None` for anything else (e.g. `obj.Method()` on a local variable),
-///   leaving HIR shape untouched.
+/// Phase 2 of the qualified-call refactor narrowed this function:
+///
+/// - **`MdoType.MdoName.Method()` (ThreeLevel)** — still recognised by
+///   `analyze_qualified_call`'s positive `MdoType::from_plural` gate.
+///   Returns `Some(Expr::Call { callee: QualifiedPath, args })` and
+///   pushes `RedundantAccessToObject::ThreeLevel` /
+///   `MissedRequiredParameter` (with `mdo_type/mdo_name` set) /
+///   `ExternalRef::ManagerAccess`.
+///
+/// - **`ЭтотОбъект.Method()` (TwoLevel + sub-case)** — pushes
+///   `MissedRequiredParameter` with `module = None` (local-call shape
+///   so the handler resolves through the current module's
+///   SymbolTree). Returns `None` so the body keeps its original
+///   `Expr::Call { callee: Expr::Field, args }` shape — inference
+///   then routes the `Ty::ThisObject` receiver through
+///   `coerce_to_metadata_ref` → `resolve_object_module_call`.
+///   `RedundantAccessToObject::ThisObject` is already pushed by
+///   `lower_field_expr`.
+///
+/// - **`Module.Method()` (TwoLevel CommonModule)** — NO LONGER
+///   classified here. The eager negative gate ("not a local var or
+///   param ⇒ CommonModule") false-positived for form attributes,
+///   implicit form globals (`Параметры`), module-level `Перем`
+///   declarations, and platform globals. Classification has been
+///   lifted into hir-ty's `dispatch_bare_ident_field_call`, which
+///   has the resolver and the receiver type. This branch returns
+///   `None`; emitter for `RedundantAccessToObjectTwoLevel` /
+///   `MissedRequiredParameterCommonModule` is the inference-side
+///   gate 3 there.
+///
+/// - **Anything else** (e.g. `obj.Method()` on a local variable, or
+///   `func().Method()`): returns `None`.
 fn maybe_lower_as_qualified_call(
     ctx: &mut LoweringCtx,
     call_node: &SyntaxNode,
@@ -1058,18 +1092,18 @@ fn maybe_lower_as_qualified_call(
             };
 
             if is_this_object {
-                // ThisObject.Method() is NOT promoted to a QualifiedPath
-                // (which is the CommonModule lookup shape). Per 1С
-                // semantics, `ЭтотОбъект` is an external object
-                // reference: chained `.Method()` on it is the same
-                // surface as `Об.Method()` on a *Object MetadataRef
-                // and only sees `Экспорт` methods. Phase B routes the
-                // resulting `Expr::Field`-callee call through
-                // `infer_call`, which coerces `Ty::ThisObject` to its
-                // matching `*Object` `Ty::MetadataRef` and consults
-                // the workspace `ObjectModule.bsl` resolver.
-                // RedundantAccessToObject::ThisObject is already emitted
-                // in lower_field_expr.
+                // `ЭтотОбъект.Method()` is the only TwoLevel shape still
+                // classified at lowering time. The call is treated as a
+                // local-module call (`module: None`) so the
+                // missed-required-parameter handler resolves the method
+                // through the current module's SymbolTree — same answer
+                // the body would give for a bare `Method()` callee.
+                // Inference's Field path then routes the
+                // `Expr::Field { base: Path("ЭтотОбъект"), … }` shape
+                // through `coerce_to_metadata_ref` →
+                // `resolve_object_module_call` for typing and
+                // `MethodNotExport` checks. `RedundantAccessToObject::ThisObject`
+                // is already emitted by `lower_field_expr`.
                 ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
                     callee: field_name.as_str().to_string(),
                     module: None,
@@ -1081,32 +1115,33 @@ fn maybe_lower_as_qualified_call(
                 return None;
             }
 
-            ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
-                kind: RedundantAccessKind::TwoLevel { module: module.clone() },
-                range: call_node.text_range(),
-            });
-
-            ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
-                callee: field_name.as_str().to_string(),
-                module: Some(module.clone()),
-                mdo_type: None,
-                mdo_name: None,
-                args: arg_presence,
-                range: call_node.text_range(),
-            });
-
-            ctx.diagnostics.push(BodyDiagnostic::MissingCommonModuleMethod {
-                module: module.clone(),
-                method: field_name.as_str().to_string(),
-                range: call_node.text_range(),
-            });
-
-            let qualified_path =
-                QualifiedName::from_segments([Name::new(&module), field_name.clone()]);
-            let new_callee = ctx
-                .alloc_expr(Expr::QualifiedPath(Box::new(qualified_path)), call_node.text_range());
-
-            Some(Expr::Call { callee: new_callee, args: args.to_vec().into_boxed_slice() })
+            // CommonModule TwoLevel shape (`ОбщийМодуль.Метод()`) is no
+            // longer classified at lowering time. The eager negative
+            // gate (`module is not a local var or param ⇒
+            // CommonModule`) false-positived for form attributes,
+            // implicit form globals (`Параметры`), module-level
+            // `Перем` declarations, and platform globals. The
+            // classification has been lifted into hir-ty's
+            // `dispatch_bare_ident_field_call`, which has the resolver
+            // and the receiver type and can decide positively.
+            //
+            // Body lowering keeps the original `Expr::Call { callee:
+            // Expr::Field, … }` shape (this branch returns `None`),
+            // and the redundant-access / missed-required / missing-
+            // method diagnostics are now emitted from inference
+            // through the new `InferenceDiagnostic::
+            // RedundantAccessToObjectTwoLevel` and
+            // `MissedRequiredParameterCommonModule` variants gated on
+            // `Resolver::user_common_module_exists`. `UnresolvedMethodCall`
+            // continues to cover the missing-method case (it has
+            // covered both branches since the dispatcher started
+            // emitting it; the body-side `MissingCommonModuleMethod`
+            // was a duplicate and is deprecated in Phase 3).
+            //
+            // `ExternalRef::QualifiedCall` (already pushed earlier in
+            // `lower_call_expr`) and `DeprecatedMethodCall` (likewise)
+            // stay — they are syntactic hints, not classification.
+            None
         }
         QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
             ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {

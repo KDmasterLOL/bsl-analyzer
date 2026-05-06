@@ -104,6 +104,8 @@ struct LoadedMetadata {
     external_data_sources: Vec<MetadataObject>,
     http_services: Vec<crate::http_service::HTTPService>,
     web_services: Vec<crate::web_service::WebService>,
+    data_processors: Vec<MetadataObject>,
+    reports: Vec<MetadataObject>,
 }
 
 /// Load all metadata types in parallel using rayon::scope.
@@ -131,6 +133,8 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
     let external_data_sources = Mutex::new(Vec::new());
     let http_services = Mutex::new(Vec::new());
     let web_services = Mutex::new(Vec::new());
+    let data_processors = Mutex::new(Vec::new());
+    let reports = Mutex::new(Vec::new());
 
     rayon::scope(|s| {
         s.spawn(|_| {
@@ -205,6 +209,11 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
         s.spawn(|_| {
             *web_services.lock().unwrap() = load_web_services_parallel(&path.join("WebServices"))
         });
+        s.spawn(|_| {
+            *data_processors.lock().unwrap() =
+                load_data_processors_parallel(&path.join("DataProcessors"))
+        });
+        s.spawn(|_| *reports.lock().unwrap() = load_reports_parallel(&path.join("Reports")));
     });
 
     let result = LoadedMetadata {
@@ -230,6 +239,8 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
         external_data_sources: external_data_sources.into_inner().unwrap(),
         http_services: http_services.into_inner().unwrap(),
         web_services: web_services.into_inner().unwrap(),
+        data_processors: data_processors.into_inner().unwrap(),
+        reports: reports.into_inner().unwrap(),
     };
 
     tracing::info!(
@@ -238,6 +249,8 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
         common_modules = result.common_modules.len(),
         catalogs = result.catalogs.len(),
         documents = result.documents.len(),
+        data_processors = result.data_processors.len(),
+        reports = result.reports.len(),
         "load_all_metadata_parallel complete",
     );
 
@@ -306,6 +319,12 @@ fn build_configuration(loaded: LoadedMetadata) -> Configuration {
         config.add_metadata_object(obj);
     }
     for obj in loaded.external_data_sources {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.data_processors {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.reports {
         config.add_metadata_object(obj);
     }
     for svc in loaded.http_services {
@@ -426,6 +445,16 @@ fn load_charts_of_characteristic_types_parallel(dir: &Path) -> Vec<MetadataObjec
 /// Load ChartsOfAccounts in parallel.
 fn load_charts_of_accounts_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_accounts_xml)
+}
+
+/// Load DataProcessors in parallel.
+fn load_data_processors_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_data_processor_xml)
+}
+
+/// Load Reports in parallel.
+fn load_reports_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_report_xml)
 }
 
 /// Generic parallel loader for metadata objects.
@@ -885,6 +914,38 @@ mod tests {
             let ts = &cat.tabular_sections[0];
             assert_eq!(ts.name(), "ТабличнаяЧасть1");
         }
+    }
+
+    #[test]
+    fn loads_data_processors_with_attributes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+        let config = load_from_directory(path).unwrap();
+
+        let mdo = config
+            .find_metadata_object(
+                crate::metadata_object::MdoType::DataProcessor,
+                "ТестоваяОбработка",
+            )
+            .expect("ТестоваяОбработка not loaded");
+        assert_eq!(
+            mdo.attributes.len(),
+            2,
+            "expected 2 user attributes (no standard for DataProcessor)"
+        );
+        assert!(mdo.find_attribute("АдресСайта").is_some());
+        assert!(mdo.find_attribute("СоздаватьГруппы").is_some());
+    }
+
+    #[test]
+    fn loads_reports_with_attributes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+        let config = load_from_directory(path).unwrap();
+
+        let mdo = config
+            .find_metadata_object(crate::metadata_object::MdoType::Report, "ТестовыйОтчёт")
+            .expect("ТестовыйОтчёт not loaded");
+        assert_eq!(mdo.attributes.len(), 1);
+        assert!(mdo.find_attribute("ПериодОтчёта").is_some());
     }
 
     #[test]

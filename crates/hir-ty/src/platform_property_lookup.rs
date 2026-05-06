@@ -76,6 +76,23 @@ pub fn lookup_platform_property(
     receiver_ty: &Ty,
     prop_name: &Name,
 ) -> Option<PlatformPropertyResolution> {
+    // Form-control receivers carry an ordered platform-type chain
+    // `[base, extension?]` (e.g. `Pages → ["ГруппаФормы", "Расширение
+    // группы формы для страниц"]`). Walk reversed (extension first)
+    // so kind-specific properties like `<Pages>.ТекущаяСтраница`
+    // override base members; fall through to base for shared props
+    // (`Видимость`, `Заголовок`, …). Single-entry chains (e.g. Field,
+    // Button, the catch-all `Group`) reduce to one lookup, identical
+    // to the pre-chain behaviour. `Other` returns an empty chain →
+    // immediate `None`.
+    if let Ty::FormControl { kind, .. } = receiver_ty {
+        for type_name in hir_def::ty::form_control_platform_type_chain(*kind).iter().rev() {
+            if let Some(res) = lookup_platform_property_by_type(type_name, prop_name) {
+                return Some(res);
+            }
+        }
+        return None;
+    }
     let type_key = platform_type_key(receiver_ty)?;
     lookup_platform_property_by_type(type_key, prop_name)
 }
@@ -220,5 +237,69 @@ mod tests {
         assert!(lookup_platform_property(&Ty::String, &Name::new("Любая")).is_none());
         assert!(lookup_platform_property(&Ty::Boolean, &Name::new("Любая")).is_none());
         assert!(lookup_platform_property(&Ty::Date, &Name::new("Любая")).is_none());
+    }
+
+    // ---------- Phase 12: form-control chain walk ----------
+
+    #[test]
+    fn form_control_pages_resolves_extension_only_property() {
+        // `<Pages>.ТекущаяСтраница` lives in the extension type
+        // `Расширение группы формы для страниц` (5 props), NOT in the
+        // shared `ГруппаФормы` base. Without the chain walk this would
+        // miss — chain.iter().rev() hits the extension first and wins.
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::Pages, binding: None };
+        let res = lookup_platform_property(&receiver, &Name::new("ТекущаяСтраница"))
+            .expect("<Pages>.ТекущаяСтраница must resolve through extension chain");
+        // ТекущаяСтраница on Pages is writable (per platform_data.json).
+        assert!(!res.is_readonly);
+    }
+
+    #[test]
+    fn form_control_pages_falls_through_to_base_for_shared_property() {
+        // `Видимость` lives on the base `ГруппаФормы` — chain walk's
+        // extension hit misses, fall through to base wins. Confirms the
+        // chain doesn't *only* surface extension members.
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::Pages, binding: None };
+        let res = lookup_platform_property(&receiver, &Name::new("Видимость"))
+            .expect("<Pages>.Видимость must fall through to ГруппаФормы base");
+        assert_eq!(res.return_ty, Ty::Boolean);
+    }
+
+    #[test]
+    fn form_control_usual_group_does_not_see_pages_extension() {
+        // `ТекущаяСтраница` is exclusive to `<Pages>` extension. A
+        // `<UsualGroup>` receiver must NOT resolve it — its chain only
+        // includes "Расширение группы формы для обычной группы" which
+        // doesn't carry the property.
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::UsualGroup, binding: None };
+        assert!(
+            lookup_platform_property(&receiver, &Name::new("ТекущаяСтраница")).is_none(),
+            "UsualGroup chain must not borrow Pages-extension properties"
+        );
+    }
+
+    #[test]
+    fn form_control_input_field_still_resolves_base_only() {
+        // Non-regression for scope guard #11 in plan v3.1: kinds that
+        // were NOT split (Field/Decoration/Button/Addition) must keep
+        // their pre-chain behaviour. `<InputField>.Видимость` resolves
+        // through the base `ПолеФормы` table — single-entry chain.
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::Field, binding: None };
+        let res = lookup_platform_property(&receiver, &Name::new("Видимость"))
+            .expect("<InputField>.Видимость must resolve via base ПолеФормы");
+        assert_eq!(res.return_ty, Ty::Boolean);
+    }
+
+    #[test]
+    fn form_control_other_returns_none_with_empty_chain() {
+        // `Other` chain is &[] — the rev-walk loop runs zero iterations
+        // and we return None safely (no panic on empty chain).
+        use hir_def::ty::FormElementKind;
+        let receiver = Ty::FormControl { kind: FormElementKind::Other, binding: None };
+        assert!(lookup_platform_property(&receiver, &Name::new("Видимость")).is_none());
     }
 }

@@ -215,8 +215,19 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
                     MetadataKind::CatalogRef | MetadataKind::CatalogObject => MdoType::Catalog,
                     MetadataKind::DocumentRef | MetadataKind::DocumentObject => MdoType::Document,
                     MetadataKind::EnumRef => MdoType::Enum,
-                    MetadataKind::TaskRef => MdoType::Task,
-                    MetadataKind::BusinessProcessRef => MdoType::BusinessProcess,
+                    // *Object companions of MDOs reach the same Manager
+                    // (`Обработки.X`, `Отчёты.X`, `БизнесПроцессы.X`,
+                    // `Задачи.X`) — the form-attribute projection lands
+                    // on `MetadataRef{*Object}` and the user may then
+                    // navigate `Объект.Manager`-style paths through the
+                    // facade. Mapping to MDO here is symmetric with the
+                    // *Ref / *Object union arms for Catalog / Document.
+                    MetadataKind::TaskRef | MetadataKind::TaskObject => MdoType::Task,
+                    MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
+                        MdoType::BusinessProcess
+                    }
+                    MetadataKind::DataProcessorObject => MdoType::DataProcessor,
+                    MetadataKind::ReportObject => MdoType::Report,
                     MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
                         MdoType::ExchangePlan
                     }
@@ -227,7 +238,28 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
                     MetadataKind::AccumulationRegisterRef => MdoType::AccumulationRegister,
                     MetadataKind::AccountingRegisterRef => MdoType::AccountingRegister,
                     MetadataKind::CalculationRegisterRef => MdoType::CalculationRegister,
-                    _ => return None,
+                    // No-manager kinds: enumerated explicitly (no wildcard)
+                    // so a new `MetadataKind` variant becomes a compile
+                    // error here instead of silently returning None.
+                    // Tabular sections, register parts, and the Filter
+                    // synthetic don't have a Manager surface; record-set
+                    // and record-manager kinds reach managers through
+                    // their parent register, not the kind directly.
+                    MetadataKind::InformationRegisterRecordManager
+                    | MetadataKind::InformationRegisterRecordSet
+                    | MetadataKind::InformationRegisterRecord
+                    | MetadataKind::AccumulationRegisterRecordSet
+                    | MetadataKind::AccumulationRegisterRecord
+                    | MetadataKind::AccountingRegisterRecordSet
+                    | MetadataKind::AccountingRegisterRecord
+                    | MetadataKind::CalculationRegisterRecordSet
+                    | MetadataKind::CalculationRegisterRecord
+                    | MetadataKind::RegisterDimension { .. }
+                    | MetadataKind::RegisterResource { .. }
+                    | MetadataKind::RegisterAttribute { .. }
+                    | MetadataKind::RegisterFilter { .. }
+                    | MetadataKind::TabularSection { .. }
+                    | MetadataKind::TabularSectionRow { .. } => return None,
                 };
                 (mdo, name.clone())
             }
@@ -272,6 +304,28 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     ///   their method tables (predefined / manager methods) are covered
     ///   by the M4 adapter.
     pub fn methods(&self) -> Vec<Method> {
+        // Form-control receivers carry an ordered platform-type chain
+        // `[base, extension?]` — merge methods across the chain so
+        // extension members (`<UsualGroup>.Скрыть`, …) appear next to
+        // shared base methods. Single-entry chains reduce to one
+        // platform-data lookup, identical to the pre-chain shape.
+        if let Ty::FormControl { kind, .. } = &self.ty {
+            let chain = hir_def::ty::form_control_platform_type_chain(*kind);
+            let mut methods: Vec<Method> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Walk reversed so extension members win on collision —
+            // matches `lookup_method` precedence.
+            for type_name in chain.iter().rev() {
+                for m in PlatformData::instance().get_type_methods(type_name) {
+                    let dto = method_dto_from_platform(m);
+                    if seen.insert(dto.name.as_str().to_lowercase()) {
+                        methods.push(dto);
+                    }
+                }
+            }
+            return methods;
+        }
+
         let Some(type_key) = platform_type_key(&self.ty) else {
             return Vec::new();
         };

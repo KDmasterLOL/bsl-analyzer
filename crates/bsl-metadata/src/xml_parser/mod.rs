@@ -22,8 +22,8 @@ mod web_service;
 // Re-export public API
 pub use catalog::{
     parse_business_process_xml, parse_catalog_xml, parse_chart_of_accounts_xml,
-    parse_chart_of_characteristic_types_xml, parse_document_xml, parse_exchange_plan_xml,
-    parse_task_xml,
+    parse_chart_of_characteristic_types_xml, parse_data_processor_xml, parse_document_xml,
+    parse_exchange_plan_xml, parse_report_xml, parse_task_xml,
 };
 pub use common_module::parse_common_module_xml;
 pub use constant::parse_constant_xml;
@@ -600,6 +600,148 @@ mod tests {
         assert_eq!(
             attr3.attr_type,
             AttributeType::Ref { mdo_type: MdoType::Enum, name: "Статусы".to_string() }
+        );
+    }
+
+    #[test]
+    fn data_processor_parses_full_xml() {
+        use crate::metadata_object::AttributeType;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.10">
+    <DataProcessor uuid="11111111-1111-1111-1111-111111111111">
+        <Properties>
+            <Name>Помощник</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="22222222-2222-2222-2222-222222222222">
+                <Properties>
+                    <Name>АдресСайта</Name>
+                    <Type>
+                        <v8:Type>xs:string</v8:Type>
+                        <v8:StringQualifiers>
+                            <v8:Length>200</v8:Length>
+                        </v8:StringQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="33333333-3333-3333-3333-333333333333">
+                <Properties>
+                    <Name>Флаг</Name>
+                    <Type>
+                        <v8:Type>xs:boolean</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </DataProcessor>
+</MetaDataObject>"#;
+
+        let mdo = parse_data_processor_xml(xml).unwrap();
+        assert_eq!(mdo.name, "Помощник");
+        assert_eq!(mdo.mdo_type, MdoType::DataProcessor);
+        assert_eq!(mdo.attributes.len(), 2);
+        assert!(matches!(
+            mdo.find_attribute("АдресСайта").unwrap().attr_type,
+            AttributeType::String { length: Some(200) }
+        ));
+        assert!(matches!(mdo.find_attribute("Флаг").unwrap().attr_type, AttributeType::Boolean));
+    }
+
+    #[test]
+    fn report_parses_full_xml() {
+        use crate::metadata_object::AttributeType;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.10">
+    <Report uuid="44444444-4444-4444-4444-444444444444">
+        <Properties>
+            <Name>Анализ</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="55555555-5555-5555-5555-555555555555">
+                <Properties>
+                    <Name>ПериодОтчёта</Name>
+                    <Type>
+                        <v8:Type>xs:dateTime</v8:Type>
+                        <v8:DateQualifiers>
+                            <v8:DateFractions>Date</v8:DateFractions>
+                        </v8:DateQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Report>
+</MetaDataObject>"#;
+
+        let mdo = parse_report_xml(xml).unwrap();
+        assert_eq!(mdo.name, "Анализ");
+        assert_eq!(mdo.mdo_type, MdoType::Report);
+        assert_eq!(mdo.attributes.len(), 1);
+        assert_eq!(mdo.find_attribute("ПериодОтчёта").unwrap().attr_type, AttributeType::Date);
+    }
+
+    #[test]
+    fn parses_data_processor_object_type() {
+        use crate::metadata_object::AttributeType;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <Catalog uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">
+        <Properties>
+            <Name>Тест</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+                <Properties>
+                    <Name>Обработка</Name>
+                    <Type>
+                        <v8:Type>cfg:DataProcessorObject.Помощник</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+        let attr = catalog.find_attribute("Обработка").unwrap();
+        assert_eq!(
+            attr.attr_type,
+            AttributeType::Ref {
+                mdo_type: MdoType::DataProcessor, name: "Помощник".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_report_object_type() {
+        use crate::metadata_object::AttributeType;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <Catalog uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">
+        <Properties>
+            <Name>Тест</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="cccccccc-cccc-cccc-cccc-cccccccccccc">
+                <Properties>
+                    <Name>Отчёт</Name>
+                    <Type>
+                        <v8:Type>cfg:ReportObject.Анализ</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+        let attr = catalog.find_attribute("Отчёт").unwrap();
+        assert_eq!(
+            attr.attr_type,
+            AttributeType::Ref { mdo_type: MdoType::Report, name: "Анализ".to_string() }
         );
     }
 

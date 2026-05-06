@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.10">
+	<Report uuid="44444444-4444-4444-4444-444444444444">
+		<Properties>
+			<Name>ТестовыйОтчёт</Name>
+		</Properties>
+		<ChildObjects>
+			<Attribute uuid="55555555-5555-5555-5555-555555555555">
+				<Properties>
+					<Name>ПериодОтчёта</Name>
+					<Type>
+						<v8:Type>xs:dateTime</v8:Type>
+						<v8:DateQualifiers>
+							<v8:DateFractions>Date</v8:DateFractions>
+						</v8:DateQualifiers>
+					</Type>
+				</Properties>
+			</Attribute>
+		</ChildObjects>
+	</Report>
+</MetaDataObject>

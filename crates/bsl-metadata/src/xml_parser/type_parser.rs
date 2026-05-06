@@ -27,6 +27,8 @@ static REF_TYPE_MAP: &[(&str, MdoType)] = &[
     ("cfg:ChartOfAccountsObject", MdoType::ChartOfAccounts),
     ("cfg:ChartOfCalculationTypesRef", MdoType::ChartOfCalculationTypes),
     ("cfg:ChartOfCalculationTypesObject", MdoType::ChartOfCalculationTypes),
+    ("cfg:DataProcessorObject", MdoType::DataProcessor),
+    ("cfg:ReportObject", MdoType::Report),
     ("cfg:ConstantValueManager", MdoType::Constant),
     ("cfg:InformationRegisterRecordSet", MdoType::InformationRegister),
     ("cfg:AccumulationRegisterRecordSet", MdoType::AccumulationRegister),
@@ -57,6 +59,8 @@ static OBJECT_TYPE_MAP: &[(&str, MdoType)] = &[
     ("cfg:DocumentObject", MdoType::Document),
     ("cfg:BusinessProcessObject", MdoType::BusinessProcess),
     ("cfg:TaskObject", MdoType::Task),
+    ("cfg:DataProcessorObject", MdoType::DataProcessor),
+    ("cfg:ReportObject", MdoType::Report),
     ("cfg:BusinessProcessRoutePointRef", MdoType::BusinessProcess),
 ];
 
