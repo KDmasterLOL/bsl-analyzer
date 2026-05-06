@@ -221,6 +221,10 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
         MetadataKind::DocumentObject => MdoType::Document,
         MetadataKind::ExchangePlanObject => MdoType::ExchangePlan,
         MetadataKind::ChartOfAccountsObject => MdoType::ChartOfAccounts,
+        MetadataKind::TaskObject => MdoType::Task,
+        MetadataKind::BusinessProcessObject => MdoType::BusinessProcess,
+        MetadataKind::DataProcessorObject => MdoType::DataProcessor,
+        MetadataKind::ReportObject => MdoType::Report,
         // `*Ref` kinds — reference values, no ObjectModule.bsl call surface.
         MetadataKind::CatalogRef
         | MetadataKind::DocumentRef
@@ -299,7 +303,11 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
         MetadataKind::CatalogObject
         | MetadataKind::DocumentObject
         | MetadataKind::ExchangePlanObject
-        | MetadataKind::ChartOfAccountsObject => return None,
+        | MetadataKind::ChartOfAccountsObject
+        | MetadataKind::TaskObject
+        | MetadataKind::BusinessProcessObject
+        | MetadataKind::DataProcessorObject
+        | MetadataKind::ReportObject => return None,
         // `*Ref` kinds — reference values, no module-level call surface.
         MetadataKind::CatalogRef
         | MetadataKind::DocumentRef

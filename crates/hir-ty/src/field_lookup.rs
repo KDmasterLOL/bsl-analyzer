@@ -43,7 +43,7 @@ use hir_def::Name;
 /// - `None` for `Collection` (no name-keyed fields), for `Structure`s with
 ///   no `underlying` (e.g. `ValueTable` attribute without an MDO), and for
 ///   underlying MDO kinds without an `*Object` surface.
-fn project_form_data_for_fields(ty: &Ty) -> Option<Ty> {
+pub(crate) fn project_form_data_for_fields(ty: &Ty) -> Option<Ty> {
     let Ty::FormData { kind, underlying: Some((mdo, name)) } = ty else {
         return None;
     };

@@ -540,8 +540,24 @@ pub enum MetadataKind {
     EnumRef,
     /// Task reference (ЗадачаСсылка).
     TaskRef,
+    /// Task object (ЗадачаОбъект). Companion to [`Self::TaskRef`] —
+    /// emitted from `<Type>cfg:TaskObject.X</Type>` and used as the
+    /// underlying MDO behind a Task form's `Объект`.
+    TaskObject,
     /// Business process reference (БизнесПроцессСсылка).
     BusinessProcessRef,
+    /// Business process object (БизнесПроцессОбъект). Companion to
+    /// [`Self::BusinessProcessRef`] — emitted from
+    /// `<Type>cfg:BusinessProcessObject.X</Type>` and used as the
+    /// underlying MDO behind a BusinessProcess form's `Объект`.
+    BusinessProcessObject,
+    /// DataProcessor object (ОбработкаОбъект). DataProcessors only have
+    /// an Object form (no `*Ref` companion) — used as the underlying
+    /// MDO behind a DataProcessor form's `Объект`.
+    DataProcessorObject,
+    /// Report object (ОтчётОбъект). Symmetric to
+    /// [`Self::DataProcessorObject`] — Reports only have an Object form.
+    ReportObject,
     /// Exchange plan reference (ПланОбменаСсылка).
     ExchangePlanRef,
     /// Exchange plan object (ПланОбменаОбъект).
@@ -679,6 +695,10 @@ impl MetadataKind {
             MdoType::Document => Some(MetadataKind::DocumentObject),
             MdoType::ExchangePlan => Some(MetadataKind::ExchangePlanObject),
             MdoType::ChartOfAccounts => Some(MetadataKind::ChartOfAccountsObject),
+            MdoType::Task => Some(MetadataKind::TaskObject),
+            MdoType::BusinessProcess => Some(MetadataKind::BusinessProcessObject),
+            MdoType::DataProcessor => Some(MetadataKind::DataProcessorObject),
+            MdoType::Report => Some(MetadataKind::ReportObject),
             _ => None,
         }
     }
@@ -706,7 +726,11 @@ impl MetadataKind {
             Self::DocumentRef => Some("DocumentRef"),
             Self::EnumRef => Some("EnumRef"),
             Self::TaskRef => Some("TaskRef"),
+            Self::TaskObject => Some("TaskObject"),
             Self::BusinessProcessRef => Some("BusinessProcessRef"),
+            Self::BusinessProcessObject => Some("BusinessProcessObject"),
+            Self::DataProcessorObject => Some("DataProcessorObject"),
+            Self::ReportObject => Some("ReportObject"),
             Self::ExchangePlanRef => Some("ExchangePlanRef"),
             Self::ExchangePlanObject => Some("ExchangePlanObject"),
             Self::ChartOfAccountsRef => Some("ChartOfAccountsRef"),
@@ -802,8 +826,16 @@ impl MetadataKind {
             (Self::EnumRef, Locale::En) => "EnumRef",
             (Self::TaskRef, Locale::Ru) => "ЗадачаСсылка",
             (Self::TaskRef, Locale::En) => "TaskRef",
+            (Self::TaskObject, Locale::Ru) => "ЗадачаОбъект",
+            (Self::TaskObject, Locale::En) => "TaskObject",
             (Self::BusinessProcessRef, Locale::Ru) => "БизнесПроцессСсылка",
             (Self::BusinessProcessRef, Locale::En) => "BusinessProcessRef",
+            (Self::BusinessProcessObject, Locale::Ru) => "БизнесПроцессОбъект",
+            (Self::BusinessProcessObject, Locale::En) => "BusinessProcessObject",
+            (Self::DataProcessorObject, Locale::Ru) => "ОбработкаОбъект",
+            (Self::DataProcessorObject, Locale::En) => "DataProcessorObject",
+            (Self::ReportObject, Locale::Ru) => "ОтчётОбъект",
+            (Self::ReportObject, Locale::En) => "ReportObject",
             (Self::ExchangePlanRef, Locale::Ru) => "ПланОбменаСсылка",
             (Self::ExchangePlanRef, Locale::En) => "ExchangePlanRef",
             (Self::ExchangePlanObject, Locale::Ru) => "ПланОбменаОбъект",
@@ -1743,42 +1775,41 @@ mod tests {
 
     #[test]
     fn metadata_kind_object_kind_for_covers_ship_set() {
-        // Ships the 4 `*Object` coercions used by `Ty::ThisObject`.
-        // If one of these regresses, the resolver would stop promoting
-        // `ЭтотОбъект` in that MDO's ObjectModule and hover / completion
-        // would silently drop type information.
-        assert_eq!(
-            MetadataKind::object_kind_for(MdoType::Catalog),
-            Some(MetadataKind::CatalogObject)
-        );
-        assert_eq!(
-            MetadataKind::object_kind_for(MdoType::Document),
-            Some(MetadataKind::DocumentObject)
-        );
-        assert_eq!(
-            MetadataKind::object_kind_for(MdoType::ExchangePlan),
-            Some(MetadataKind::ExchangePlanObject)
-        );
-        assert_eq!(
-            MetadataKind::object_kind_for(MdoType::ChartOfAccounts),
-            Some(MetadataKind::ChartOfAccountsObject)
-        );
+        // Ships every `*Object` coercion used by `Ty::ThisObject` and the
+        // FormData main-attribute projection. If one of these regresses,
+        // the resolver / form_attr lowering would stop producing the
+        // matching `*Object` MetadataRef and hover / completion would
+        // silently drop type information for `Объект.<attr>`.
+        for (mdo, expected) in [
+            (MdoType::Catalog, MetadataKind::CatalogObject),
+            (MdoType::Document, MetadataKind::DocumentObject),
+            (MdoType::ExchangePlan, MetadataKind::ExchangePlanObject),
+            (MdoType::ChartOfAccounts, MetadataKind::ChartOfAccountsObject),
+            (MdoType::Task, MetadataKind::TaskObject),
+            (MdoType::BusinessProcess, MetadataKind::BusinessProcessObject),
+            (MdoType::DataProcessor, MetadataKind::DataProcessorObject),
+            (MdoType::Report, MetadataKind::ReportObject),
+        ] {
+            assert_eq!(
+                MetadataKind::object_kind_for(mdo),
+                Some(expected),
+                "object_kind_for({mdo:?}) must yield {expected:?}"
+            );
+        }
     }
 
     #[test]
     fn metadata_kind_object_kind_for_rejects_non_object_mdo_kinds() {
-        // Register flavours, Task, BusinessProcess, and
-        // ChartOfCharacteristicTypes have no `*Object` companion yet.
-        // `resolve_this_object` keys off this to refuse promotion on
-        // those kinds — so a regression that starts returning `Some`
-        // here would let the resolver surface dangling `Ty::ThisObject`
-        // receivers with no downstream coercion surface.
+        // Register flavours, Enum, ChartOfCharacteristicTypes, and
+        // CommonModule have no `*Object` companion. `resolve_this_object`
+        // and FormData main-attribute lowering both key off this to
+        // refuse promotion — a regression that starts returning `Some`
+        // here would let downstream code surface dangling MetadataRef
+        // receivers with no field/method enumeration surface.
         assert!(MetadataKind::object_kind_for(MdoType::InformationRegister).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::AccumulationRegister).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::AccountingRegister).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::CalculationRegister).is_none());
-        assert!(MetadataKind::object_kind_for(MdoType::Task).is_none());
-        assert!(MetadataKind::object_kind_for(MdoType::BusinessProcess).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::Enum).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::CommonModule).is_none());
     }

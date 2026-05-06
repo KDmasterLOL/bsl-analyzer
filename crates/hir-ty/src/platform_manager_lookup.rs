@@ -150,9 +150,9 @@ pub(crate) fn build_resolution(
 ///   `MetadataRef { CatalogRef, "Валюты" }`.
 ///
 /// `None` for kinds without a platform surface (register dimensions,
-/// resources, attributes, tabular sections) or kinds whose platform
-/// methods are not yet covered by the generic table
-/// (`InformationRegisterRecordManager`, `AccumulationRegisterRecordSet`).
+/// resources, attributes, tabular sections, the synthetic
+/// `RegisterFilter`, and the bare `*Ref` register reference forms whose
+/// methods are not indexed under a composite prefix).
 pub(crate) fn metadata_kind_to_prefix_and_mdo(
     kind: MetadataKind,
 ) -> Option<(&'static str, MdoType)> {
@@ -161,8 +161,12 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
         MetadataKind::CatalogObject | MetadataKind::CatalogRef => MdoType::Catalog,
         MetadataKind::DocumentObject | MetadataKind::DocumentRef => MdoType::Document,
         MetadataKind::EnumRef => MdoType::Enum,
-        MetadataKind::TaskRef => MdoType::Task,
-        MetadataKind::BusinessProcessRef => MdoType::BusinessProcess,
+        MetadataKind::TaskRef | MetadataKind::TaskObject => MdoType::Task,
+        MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
+            MdoType::BusinessProcess
+        }
+        MetadataKind::DataProcessorObject => MdoType::DataProcessor,
+        MetadataKind::ReportObject => MdoType::Report,
         MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => MdoType::ExchangePlan,
         MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
             MdoType::ChartOfAccounts
@@ -183,11 +187,22 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
         MetadataKind::CalculationRegisterRecordSet | MetadataKind::CalculationRegisterRecord => {
             MdoType::CalculationRegister
         }
-        // `platform_prefix` already returned `None` for the remaining
-        // variants via `?` above, so this arm is unreachable in
-        // practice — the guard below documents the invariant and keeps
-        // the match exhaustive.
-        _ => return None,
+        // No-platform-prefix kinds: `platform_prefix` already returned
+        // `None` for these via `?` above, so these arms are unreachable
+        // in practice. Listed explicitly (no wildcard) so a new
+        // `MetadataKind` variant surfaces as a compiler error here and
+        // forces an authorial decision rather than silently bypassing
+        // the manager-prefix dispatch.
+        MetadataKind::InformationRegisterRef
+        | MetadataKind::AccumulationRegisterRef
+        | MetadataKind::AccountingRegisterRef
+        | MetadataKind::CalculationRegisterRef
+        | MetadataKind::RegisterDimension { .. }
+        | MetadataKind::RegisterResource { .. }
+        | MetadataKind::RegisterAttribute { .. }
+        | MetadataKind::RegisterFilter { .. }
+        | MetadataKind::TabularSection { .. }
+        | MetadataKind::TabularSectionRow { .. } => return None,
     };
     Some((prefix, parent_mdo))
 }
@@ -241,6 +256,16 @@ pub(crate) fn map_generic_metadata_return_type(
         }
         ("ПланСчетовОбъект" | "ChartOfAccountsObject", MdoType::ChartOfAccounts) => {
             MetadataKind::ChartOfAccountsObject
+        }
+        ("ЗадачаОбъект" | "TaskObject", MdoType::Task) => MetadataKind::TaskObject,
+        ("БизнесПроцессОбъект" | "BusinessProcessObject", MdoType::BusinessProcess) => {
+            MetadataKind::BusinessProcessObject
+        }
+        ("ОбработкаОбъект" | "DataProcessorObject", MdoType::DataProcessor) => {
+            MetadataKind::DataProcessorObject
+        }
+        ("ОтчётОбъект" | "ОтчетОбъект" | "ReportObject", MdoType::Report) => {
+            MetadataKind::ReportObject
         }
         // Register-record return forms: manager methods like
         // `РегистрыСведений.X.СоздатьМенеджерЗаписи()` and

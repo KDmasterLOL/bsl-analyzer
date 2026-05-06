@@ -191,6 +191,83 @@ mod tests {
     }
 
     #[test]
+    fn main_attribute_data_processor_projects_to_form_data_structure() {
+        // DataProcessor form's MainAttribute lowers to FormData{Structure}
+        // with underlying — same shape as Document, so field_lookup peels
+        // it for `Объект.<attr>` enumeration.
+        let attr = main_attr(
+            "Объект",
+            AttributeType::Ref {
+                mdo_type: MdoType::DataProcessor,
+                name: "БУС_ПомощникИмпортаТоваровБитрикс".to_string(),
+            },
+        );
+        match lower_form_attribute_to_ty(&attr, &[]) {
+            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
+                assert_eq!(mdo, MdoType::DataProcessor);
+                assert_eq!(name.as_str(), "БУС_ПомощникИмпортаТоваровБитрикс");
+            }
+            other => {
+                panic!("expected FormData{{Structure,Some((DataProcessor,..))}}, got {:?}", other)
+            }
+        }
+    }
+
+    #[test]
+    fn main_attribute_report_projects_to_form_data_structure() {
+        let attr = main_attr(
+            "Объект",
+            AttributeType::Ref { mdo_type: MdoType::Report, name: "Анализ".to_string() },
+        );
+        match lower_form_attribute_to_ty(&attr, &[]) {
+            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
+                assert_eq!(mdo, MdoType::Report);
+                assert_eq!(name.as_str(), "Анализ");
+            }
+            other => {
+                panic!("expected FormData{{Structure,Some((Report,Анализ))}}, got {:?}", other)
+            }
+        }
+    }
+
+    #[test]
+    fn main_attribute_business_process_projects_to_form_data_structure() {
+        let attr = main_attr(
+            "Объект",
+            AttributeType::Ref {
+                mdo_type: MdoType::BusinessProcess,
+                name: "Согласование".to_string(),
+            },
+        );
+        match lower_form_attribute_to_ty(&attr, &[]) {
+            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
+                assert_eq!(mdo, MdoType::BusinessProcess);
+                assert_eq!(name.as_str(), "Согласование");
+            }
+            other => {
+                panic!("expected FormData{{Structure,Some((BusinessProcess,..))}}, got {:?}", other)
+            }
+        }
+    }
+
+    #[test]
+    fn main_attribute_task_projects_to_form_data_structure() {
+        let attr = main_attr(
+            "Объект",
+            AttributeType::Ref {
+                mdo_type: MdoType::Task, name: "ЗадачаИсполнителя".to_string()
+            },
+        );
+        match lower_form_attribute_to_ty(&attr, &[]) {
+            Ty::FormData { kind: FormDataKind::Structure, underlying: Some((mdo, name)) } => {
+                assert_eq!(mdo, MdoType::Task);
+                assert_eq!(name.as_str(), "ЗадачаИсполнителя");
+            }
+            other => panic!("expected FormData{{Structure,Some((Task,..))}}, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn main_attribute_with_unsupported_mdo_falls_through() {
         // Register MDOs have no `*Object` MetadataKind companion (see
         // `MetadataKind::object_kind_for`). Falling through to the generic
@@ -334,6 +411,30 @@ mod tests {
         // And Collection lands on the form-data collection wrapper.
         let table = Ty::FormData { kind: FormDataKind::Collection, underlying: None };
         assert_eq!(platform_type_key(&table), Some("ДанныеФормыКоллекция"));
+
+        // Same invariant for the four new MDO families: DataProcessor /
+        // Report / BusinessProcess / Task — methods route through the
+        // form-data wrapper, NOT through the object's HBK surface (which
+        // would expose `Записать()` etc. that the platform deliberately
+        // hides on form data).
+        for (mdo, name) in [
+            (MdoType::DataProcessor, "Помощник"),
+            (MdoType::Report, "Анализ"),
+            (MdoType::BusinessProcess, "Согласование"),
+            (MdoType::Task, "ЗадачаИсполнителя"),
+        ] {
+            let receiver = Ty::FormData {
+                kind: FormDataKind::Structure,
+                underlying: Some((mdo, Name::new(name))),
+            };
+            assert_eq!(
+                platform_type_key(&receiver),
+                Some("ДанныеФормыСтруктура"),
+                "FormData wrapper for {:?} must NOT route through {:?}'s HBK surface",
+                mdo,
+                mdo
+            );
+        }
     }
 
     /// Companion to `form_data_structure_blocks_object_methods`: the

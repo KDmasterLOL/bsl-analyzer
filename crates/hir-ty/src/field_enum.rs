@@ -75,6 +75,15 @@ pub struct FieldInfo {
 /// (`Ty::Unknown`, primitives, `Ty::PlatformObject`, managers, plain
 /// `TabularSection` collection receivers).
 pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<FieldInfo> {
+    // Symmetric with `lookup_field`: `Ty::FormData{Structure | StructureWithCollection,
+    // underlying: Some((mdo, name))}` projects to `MetadataRef{*Object, name}`
+    // so the MDO's attributes/tabular sections are enumerable for hover and
+    // completion on `Объект.|`. Without this projection `Type::fields()`
+    // would return empty for FormData receivers, and IDE would only see the
+    // bare `ДанныеФормыСтруктура` platform properties.
+    let projected_form_data = crate::field_lookup::project_form_data_for_fields(receiver_ty);
+    let receiver_ty = projected_form_data.as_ref().unwrap_or(receiver_ty);
+
     let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
     let ty = coerced.as_ref().unwrap_or(receiver_ty);
 
@@ -434,8 +443,12 @@ pub(crate) fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
         MetadataKind::CatalogRef | MetadataKind::CatalogObject => Some(MdoType::Catalog),
         MetadataKind::DocumentRef | MetadataKind::DocumentObject => Some(MdoType::Document),
         MetadataKind::EnumRef => Some(MdoType::Enum),
-        MetadataKind::TaskRef => Some(MdoType::Task),
-        MetadataKind::BusinessProcessRef => Some(MdoType::BusinessProcess),
+        MetadataKind::TaskRef | MetadataKind::TaskObject => Some(MdoType::Task),
+        MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
+            Some(MdoType::BusinessProcess)
+        }
+        MetadataKind::DataProcessorObject => Some(MdoType::DataProcessor),
+        MetadataKind::ReportObject => Some(MdoType::Report),
         MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
             Some(MdoType::ExchangePlan)
         }

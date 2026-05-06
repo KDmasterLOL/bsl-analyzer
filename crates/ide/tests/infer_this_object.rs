@@ -53,6 +53,15 @@ fn common_module_path() -> PathBuf {
     designer_fixture_path().join("CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl")
 }
 
+/// Task ObjectModule path — exercises the new `*Object` companions
+/// (`TaskObject`) added together with form `Объект` projection. The
+/// fixture has a single user attribute (`Комментарий`) so a coercion
+/// regression on the new variants would surface as a missing field
+/// type at the `ЭтотОбъект.Комментарий` field-access site.
+fn task_object_module_path() -> PathBuf {
+    designer_fixture_path().join("Tasks/ТестоваяЗадача/Ext/ObjectModule.bsl")
+}
+
 fn setup_at(path: PathBuf, text: &str) -> (RootDatabaseImpl, FileId) {
     let file_id = FileId::from_raw(1);
     let mut db = RootDatabaseImpl::new();
@@ -227,5 +236,35 @@ fn infer_this_object_coercion_pins_object_kind() {
         Some(Ty::MetadataRef {
             kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
         }),
+    );
+}
+
+#[test]
+fn infer_this_object_resolves_in_task_object_module() {
+    // Coverage for the new `*Object` companions added together with
+    // form `Объект` projection. `MetadataKind::object_kind_for` now
+    // returns `Some(TaskObject)` for `MdoType::Task`, so a Task's
+    // `ObjectModule.bsl` must produce `Ty::ThisObject {(Task, name)}`
+    // and `ЭтотОбъект.<attr>` must coerce through the same path the
+    // Catalog cases above exercise — proving the new variants are
+    // wired end-to-end (resolver gate → ThisObject → coerce →
+    // field_lookup), not just compiled in.
+    let text = r#"
+Функция Тест()
+    Э = ЭтотОбъект;
+    К = ЭтотОбъект.Комментарий;
+    Возврат Э;
+КонецФункции
+"#;
+    let (db, file_id) = setup_at(task_object_module_path(), text);
+    assert_eq!(
+        var_ty(&db, file_id, "э"),
+        Some(Ty::ThisObject { owner: (MdoType::Task, Name::new("ТестоваяЗадача")) }),
+        "ЭтотОбъект in TaskObject must resolve to Ty::ThisObject(Task)",
+    );
+    assert_eq!(
+        var_ty(&db, file_id, "к"),
+        Some(Ty::String),
+        "ЭтотОбъект.Комментарий in TaskObject must coerce to MetadataRef and resolve to String",
     );
 }

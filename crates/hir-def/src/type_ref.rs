@@ -213,14 +213,18 @@ fn mdo_ref_prefix(mdo: MdoType) -> Option<&'static str> {
         // Constants carry a value-manager form (`cfg:ConstantValueManager`) —
         // keep the XML-original token so lowering can match it.
         MdoType::Constant => Some("ConstantValueManager"),
+        // DataProcessor and Report exist in XML only as `cfg:*Object` (no
+        // ref form) — `REF_TYPE_MAP` carries those tokens so attribute
+        // types referencing a data processor / report from a form's main
+        // attribute round-trip through the same `Ref` shape.
+        MdoType::DataProcessor => Some("DataProcessorObject"),
+        MdoType::Report => Some("ReportObject"),
         // The remaining kinds have no reference form in XML; if `AttributeType`
         // ever carries them through `Ref`/`AnyObjectRef` we prefer Unknown over
         // an invented name that the resolver would fail on anyway.
         MdoType::ExternalDataSource
         | MdoType::Cube
         | MdoType::DimensionTable
-        | MdoType::DataProcessor
-        | MdoType::Report
         | MdoType::CommonModule => None,
     }
 }
@@ -441,16 +445,16 @@ mod tests {
 
     #[test]
     fn typeref_from_attribute_unreachable_mdo_kinds_fall_to_unknown() {
-        // `AttributeType::Ref { mdo_type: <kind> }` should never reach here
-        // for these kinds — the XML parser has no token for them. If it ever
-        // does (parser extension), Unknown is the safe default: the resolver
-        // would fail on an invented name anyway.
+        // These MDO kinds have no XML reference token at all (parser would
+        // never emit `Ref{ExternalDataSource,..}` etc.). If a future parser
+        // extension produced one, Unknown is the safe default. DataProcessor
+        // and Report are NOT in this list anymore — they round-trip through
+        // `cfg:DataProcessorObject` / `cfg:ReportObject` (see
+        // `mdo_ref_prefix` for the mapping).
         for mdo in [
             MdoType::ExternalDataSource,
             MdoType::Cube,
             MdoType::DimensionTable,
-            MdoType::DataProcessor,
-            MdoType::Report,
             MdoType::CommonModule,
         ] {
             let attr = AttributeType::Ref { mdo_type: mdo, name: "Х".to_string() };
@@ -459,6 +463,26 @@ mod tests {
                 TypeRef::Unknown,
                 "expected Unknown for {mdo:?}"
             );
+        }
+    }
+
+    #[test]
+    fn typeref_from_attribute_data_processor_and_report_round_trip_via_object_token() {
+        // `cfg:DataProcessorObject.X` → `Ref{DataProcessor, X}` → on the way
+        // back through `mdo_ref_prefix` we emit `DataProcessorObject` so
+        // lowering can find the resolver entry and `MetadataKind::object_kind_for`
+        // can promote to a usable Object kind. Symmetric for Report.
+        for (mdo, prefix) in
+            [(MdoType::DataProcessor, "DataProcessorObject"), (MdoType::Report, "ReportObject")]
+        {
+            let attr = AttributeType::Ref { mdo_type: mdo, name: "Х".to_string() };
+            match TypeRef::from_attribute_type(&attr) {
+                TypeRef::Name(qname) => {
+                    assert_eq!(qname.first().as_str(), prefix, "mdo_ref_prefix({mdo:?})");
+                    assert_eq!(qname.last().as_str(), "Х");
+                }
+                other => panic!("expected TypeRef::Name({prefix}.Х) for {mdo:?}, got {other:?}"),
+            }
         }
     }
 

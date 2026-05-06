@@ -283,8 +283,18 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
         "documentobject" | "документобъект" => Some(MetadataKind::DocumentObject),
         "enumref" | "перечислениессылка" => Some(MetadataKind::EnumRef),
         "taskref" | "задачассылка" => Some(MetadataKind::TaskRef),
+        "taskobject" | "задачаобъект" => Some(MetadataKind::TaskObject),
         "businessprocessref" | "бизнеспроцессссылка" => {
             Some(MetadataKind::BusinessProcessRef)
+        }
+        "businessprocessobject" | "бизнеспроцессобъект" => {
+            Some(MetadataKind::BusinessProcessObject)
+        }
+        "dataprocessorobject" | "обработкаобъект" => {
+            Some(MetadataKind::DataProcessorObject)
+        }
+        "reportobject" | "отчётобъект" | "отчетобъект" => {
+            Some(MetadataKind::ReportObject)
         }
         "exchangeplanref" | "планобменассылка" => {
             Some(MetadataKind::ExchangePlanRef)

@@ -2512,8 +2512,12 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         MetadataKind::CatalogObject | MetadataKind::CatalogRef => bsl_metadata::MdoType::Catalog,
         MetadataKind::DocumentObject | MetadataKind::DocumentRef => bsl_metadata::MdoType::Document,
         MetadataKind::EnumRef => bsl_metadata::MdoType::Enum,
-        MetadataKind::TaskRef => bsl_metadata::MdoType::Task,
-        MetadataKind::BusinessProcessRef => bsl_metadata::MdoType::BusinessProcess,
+        MetadataKind::TaskRef | MetadataKind::TaskObject => bsl_metadata::MdoType::Task,
+        MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
+            bsl_metadata::MdoType::BusinessProcess
+        }
+        MetadataKind::DataProcessorObject => bsl_metadata::MdoType::DataProcessor,
+        MetadataKind::ReportObject => bsl_metadata::MdoType::Report,
         MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
             bsl_metadata::MdoType::ExchangePlan
         }

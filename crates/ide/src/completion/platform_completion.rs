@@ -275,7 +275,15 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
         _ => false,
     };
     let is_metadata_ref = matches!(effective_ty, Ty::MetadataRef { .. });
-    if !is_metadata_ref && !is_union_with_metadata_ref {
+    // `Ty::FormData{Structure | StructureWithCollection, underlying: Some(..)}`
+    // routes here too: `Type::fields()` projects it to `MetadataRef{*Object,..}`
+    // and enumerates the underlying MDO's attributes (`Объект.<attr>` in a
+    // managed form). Platform members come from the FormData wrapper's
+    // `platform_type_name()` (`ДанныеФормыСтруктура` etc.) via the existing
+    // `collect_platform_items_for_effective` path below.
+    let is_form_data_with_underlying =
+        matches!(effective_ty, Ty::FormData { underlying: Some(_), .. });
+    if !is_metadata_ref && !is_union_with_metadata_ref && !is_form_data_with_underlying {
         return None;
     }
 
@@ -357,6 +365,13 @@ fn collect_platform_items<DB: RootDatabase>(
             tracing::debug!(scalar_key, "Synthetic-kind scalar completion");
             return complete_platform_methods(db, scalar_key, locale);
         }
+    }
+    // FormData receivers carry a flat platform name (`ДанныеФормыСтруктура`
+    // etc.) — wrapper methods come from the scalar `complete_platform_methods`
+    // path, not the manager-prefix table. Field projection happens elsewhere
+    // (via `Type::fields()` on the projected MetadataRef).
+    if let Ty::FormData { kind, .. } = receiver_ty {
+        return complete_platform_methods(db, kind.platform_type_name(), locale);
     }
     let prefix = match receiver_ty {
         Ty::ObjectManager { kind, .. } => kind.manager_type_prefix(),

@@ -1,4 +1,8 @@
-//! Catalog, Document, BusinessProcess, ChartOfCharacteristicTypes, ChartOfAccounts XML parser
+//! Generic MDO XML parser — handles Catalog, Document, BusinessProcess,
+//! Task, ExchangePlan, ChartOfCharacteristicTypes, ChartOfAccounts,
+//! DataProcessor, and Report. All wrappers delegate to
+//! [`parse_metadata_object_xml`] which is the single-source-of-truth for
+//! `MetaDataObject/<flavour>/Properties + ChildObjects` lowering.
 
 use crate::enums::CodeSeries;
 use crate::error::{MetadataError, Result};
@@ -72,6 +76,22 @@ pub fn parse_exchange_plan_xml(xml: &str) -> Result<MetadataObject> {
 pub fn parse_chart_of_accounts_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_chart_of_accounts_xml").entered();
     parse_metadata_object_xml(xml, MdoType::ChartOfAccounts)
+}
+
+/// Parse DataProcessor XML from Designer format. DataProcessors carry no
+/// standard attributes — only user-declared `<Attribute>` and
+/// `<TabularSection>` children, which the generic helper already handles.
+pub fn parse_data_processor_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_data_processor_xml").entered();
+    parse_metadata_object_xml(xml, MdoType::DataProcessor)
+}
+
+/// Parse Report XML from Designer format. Symmetric to DataProcessor —
+/// no standard attributes, only user-declared `<Attribute>` and
+/// `<TabularSection>` children.
+pub fn parse_report_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_report_xml").entered();
+    parse_metadata_object_xml(xml, MdoType::Report)
 }
 
 /// Internal helper to parse metadata object XML using roxmltree
