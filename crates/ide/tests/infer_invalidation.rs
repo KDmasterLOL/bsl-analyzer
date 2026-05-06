@@ -20,9 +20,13 @@
 //!    that resolution succeeded).
 //! 2. **Non-existent config registered** — `load_configuration` returns an
 //!    empty `Configuration`; the visibility gate in the Resolver refuses
-//!    the undeclared module → `UnresolvedMethodCall { MethodNotFound }`
+//!    the undeclared module → `UnresolvedMethodCall { ReceiverNotResolved }`
 //!    and no `MismatchedArgCount` (resolution didn't get far enough to
-//!    check arity).
+//!    check arity). Phase 2 of the qualified-call refactor split the
+//!    pre-existing `MethodNotFound` into two kinds: `ReceiverNotResolved`
+//!    when the module name resolves nowhere (cascade-gate exhaustion),
+//!    `MethodNotFound` only when the module is reachable but lacks the
+//!    method — what we're observing here is the first case.
 //! 3. **Reset to empty config list** — back to the baseline from state (1).
 //!
 //! Each transition can only flip the diagnostic surface if `db.infer` was
@@ -124,11 +128,15 @@ fn infer_invalidates_when_config_set_changes() {
     let kinds = unresolved_kinds(&db, file_id);
     assert_eq!(
         kinds,
-        vec![UnresolvedMethodKind::MethodNotFound],
+        vec![UnresolvedMethodKind::ReceiverNotResolved],
         "after registering bogus config: the visibility gate must flip \
-         resolution to UnresolvedMethodCall(MethodNotFound); if this fails, \
-         `db.infer` is not invalidated by `set_all_config_paths` — the \
-         metadata bridge is not wired through Salsa"
+         resolution to UnresolvedMethodCall(ReceiverNotResolved); if this \
+         fails, `db.infer` is not invalidated by `set_all_config_paths` — \
+         the metadata bridge is not wired through Salsa. The kind is \
+         ReceiverNotResolved (not MethodNotFound) because the cascade gate \
+         in `dispatch_bare_ident_field_call` distinguishes \"module \
+         doesn't resolve anywhere\" from \"module reachable but method \
+         missing\" — the invisible-module case is the former."
     );
     assert!(
         mismatched_arg_counts(&db, file_id).is_empty(),

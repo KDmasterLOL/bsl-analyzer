@@ -1531,6 +1531,46 @@ impl<'db> InferenceContext<'db> {
             let base_id = ExprId::from_idx(*base);
             let method_name = field.clone();
             let receiver_ty = self.infer_expr(base_id);
+
+            // Bare-IDENT cascade gate: when the receiver is a plain
+            // `Expr::Path(name)` whose `infer_path_name` produced
+            // `Ty::Unknown` — i.e. the name is neither a typed
+            // binding nor a managed-form Self property, nor any
+            // platform global — `dispatch_bare_ident_field_call`
+            // takes over. It owns the resolution decision lowering
+            // used to make from syntax alone (`M.Method()` ⇒
+            // CommonModule), now done with the resolver and the
+            // receiver type in hand. See
+            // `dispatch_bare_ident_field_call` for the 5-gate
+            // rationale (resolve_name → body_declares_binding →
+            // user_common_module_exists → platform global →
+            // ReceiverNotResolved).
+            //
+            // The gate is intentionally narrow to `Ty::Unknown` —
+            // typed receivers (including `Ty::PlatformObject`) keep
+            // going through the existing workspace + `lookup_method`
+            // path below. `PlatformObject` reached from a typed
+            // local (e.g. `Зап = Новый Запрос; Зап.Выполнить()`)
+            // would otherwise tumble into gate 5's
+            // `ReceiverNotResolved` because `Зап` is an implicit
+            // local invisible to `Resolver::resolve_name`. The
+            // `PlatformObject`-shaped miss case (e.g.
+            // `ОбработкаОшибок.НеизвестныйМетод()`) is covered
+            // separately at the `lookup_method` miss site below
+            // (look for `try_resolve_platform_global_member` next to
+            // `receiver_display_name`).
+            if matches!(receiver_ty, Ty::Unknown) {
+                let base_expr = self.body.expr(base_id).clone();
+                if let Expr::Path(path_name) = base_expr {
+                    if let Some(return_ty) =
+                        self.dispatch_bare_ident_field_call(&path_name, &method_name, args, callee)
+                    {
+                        self.expr_types.insert(callee, Ty::Unknown);
+                        return return_ty;
+                    }
+                }
+            }
+
             for arg in args {
                 self.infer_expr(*arg);
             }
@@ -1850,6 +1890,48 @@ impl<'db> InferenceContext<'db> {
                             method_name: method_name.clone(),
                             kind: UnresolvedMethodKind::MethodNotFound,
                         });
+                    } else if let Ty::PlatformObject(_) = &receiver_ty {
+                        // PlatformObject bridge — replaces the Phase 1
+                        // legacy `MissingCommonModuleMethod` coverage
+                        // for `<Global>.<Method>` shapes where
+                        // `<Global>` resolves through
+                        // `infer_path_name`'s step 5 (e.g.
+                        // `ОбработкаОшибок.НеизвестныйМетод()`).
+                        // `receiver_display_name` keeps its general
+                        // `None` for `PlatformObject` (the type tag
+                        // alone is unsuitable as a user-facing receiver
+                        // name; e.g. it would render `МенеджерОбработкиОшибок`,
+                        // not `ОбработкаОшибок`). When the base is a
+                        // bare `Expr::Path(name)` we have the original
+                        // identifier — and the platform global tri-state
+                        // tells us whether the receiver is a known
+                        // container with a missing member (⇒
+                        // `MethodNotFound`) or a typed value coming
+                        // from somewhere else (⇒ stay silent — typed
+                        // locals like `Зап = Новый Запрос; Зап.X()`
+                        // get a `PlatformObject`-typed receiver too,
+                        // and surfacing a diagnostic on those would be
+                        // a regression the cascade gate carefully
+                        // avoids).
+                        let base_expr = self.body.expr(base_id).clone();
+                        if let Expr::Path(receiver_path_name) = base_expr {
+                            if matches!(
+                                crate::platform_global_lookup::try_resolve_platform_global_member(
+                                    &receiver_path_name,
+                                    &method_name,
+                                ),
+                                crate::platform_global_lookup::PlatformGlobalLookup::KnownContainerMissingMember
+                            ) {
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::UnresolvedMethodCall {
+                                        expr: callee,
+                                        receiver_name: receiver_path_name,
+                                        method_name: method_name.clone(),
+                                        kind: UnresolvedMethodKind::MethodNotFound,
+                                    },
+                                );
+                            }
+                        }
                     }
                     Ty::Unknown
                 }
@@ -2168,12 +2250,20 @@ impl<'db> InferenceContext<'db> {
                         .is_some();
 
                     if !module_in_workspace {
-                        if let Some(return_ty) =
-                            crate::platform_global_lookup::try_resolve_platform_global_member(
-                                module_name,
-                                method_name,
-                            )
-                        {
+                        // Only the `Resolved` outcome short-circuits
+                        // the Err arm here; `KnownContainerMissingMember`
+                        // and `NotAContainer` keep the diagnostic
+                        // emission below (preserves the legacy
+                        // QualifiedPath path's behaviour — only
+                        // `dispatch_bare_ident_field_call`'s gate 4
+                        // splits the two miss outcomes into distinct
+                        // kinds).
+                        if let crate::platform_global_lookup::PlatformGlobalLookup::Resolved(
+                            return_ty,
+                        ) = crate::platform_global_lookup::try_resolve_platform_global_member(
+                            module_name,
+                            method_name,
+                        ) {
                             self.expr_types.insert(call_expr, Ty::Unknown);
                             return return_ty;
                         }
@@ -2196,14 +2286,17 @@ impl<'db> InferenceContext<'db> {
     /// Cascade-gate dispatcher for bare-IDENT receiver in
     /// `Expr::Call { callee: Expr::Field { base: Expr::Path(name), field } }`.
     ///
-    /// **DORMANT in Phase 1** — added but not wired into `infer_call`
-    /// yet (`#[allow(dead_code)]`). Phase 2's atomic switch will both
-    /// (a) drop the eager TwoLevel `QualifiedPath` rewrite in
-    /// `hir-def/src/body/lower/expr.rs:1054-1109` and (b) call this
-    /// helper from the Field-call branch, so the call shape never
-    /// reaches `infer_qualified_call` again — only true 2-segment
-    /// `QualifiedPath` callees (lowered to that shape outside this
-    /// dispatcher path) keep going through `infer_qualified_call`.
+    /// Wired into `infer_call`'s Field branch in Phase 2 of the
+    /// clean-architecture refactor. Body lowering no longer rewrites
+    /// `M.Method()` into `Expr::Call{QualifiedPath}` (the eager
+    /// TwoLevel arm in `hir-def/src/body/lower/expr.rs` was removed
+    /// in the same commit), so 2-segment `Module.Method()` calls
+    /// reach inference as `Expr::Call { callee: Expr::Field { base:
+    /// Expr::Path(name), field } }` and route through this dispatcher
+    /// when `infer_expr(base) == Ty::Unknown`. The earlier
+    /// `Expr::Call { callee: QualifiedPath }` shape is now reserved
+    /// for callers that build it directly (none today) — the legacy
+    /// `infer_qualified_call` is invoked only as gate 3's delegate.
     ///
     /// ## Cascade gate (clean-architecture rationale)
     ///
@@ -2237,7 +2330,6 @@ impl<'db> InferenceContext<'db> {
     /// container — like `ОбработкаОшибок` — is precisely the case
     /// gate 4 covers; treating it as "bound" would mask the method
     /// resolution).
-    #[allow(dead_code)]
     fn dispatch_bare_ident_field_call(
         &mut self,
         module_name: &Name,
@@ -2320,20 +2412,35 @@ impl<'db> InferenceContext<'db> {
             return Some(self.infer_qualified_call(module_name, method_name, args, call_expr));
         }
 
-        // Gate 4 — platform global container. `try_resolve_platform_global_member`
-        // returns `None` when the catalogue has no member matching
-        // `(receiver, method)`; we keep falling through to gate 5.
-        if let Some(return_ty) = crate::platform_global_lookup::try_resolve_platform_global_member(
+        // Gate 4 — platform global container. Tri-state: a `Resolved`
+        // outcome wins; `KnownContainerMissingMember` ⇒ MethodNotFound
+        // (the receiver IS a real platform global like `ОбработкаОшибок`,
+        // the user just typo'd the method); `NotAContainer` falls through
+        // to gate 5's `ReceiverNotResolved`.
+        match crate::platform_global_lookup::try_resolve_platform_global_member(
             module_name,
             method_name,
         ) {
-            // Infer args for completeness (caller-side responsibility
-            // is `infer_expr`-on-base; arg inference is ours).
-            for arg in args {
-                self.infer_expr(*arg);
+            crate::platform_global_lookup::PlatformGlobalLookup::Resolved(return_ty) => {
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+                self.expr_types.insert(call_expr, Ty::Unknown);
+                return Some(return_ty);
             }
-            self.expr_types.insert(call_expr, Ty::Unknown);
-            return Some(return_ty);
+            crate::platform_global_lookup::PlatformGlobalLookup::KnownContainerMissingMember => {
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+                self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                    expr: call_expr,
+                    receiver_name: module_name.clone(),
+                    method_name: method_name.clone(),
+                    kind: UnresolvedMethodKind::MethodNotFound,
+                });
+                return Some(Ty::Unknown);
+            }
+            crate::platform_global_lookup::PlatformGlobalLookup::NotAContainer => {}
         }
 
         // Gate 5 — receiver is unknown to every layer. Emit

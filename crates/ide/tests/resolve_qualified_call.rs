@@ -152,13 +152,22 @@ const MISSING_MODULE_FIXTURE: &str = r#"
 "#;
 
 #[test]
-fn missing_module_reports_method_not_found() {
+fn missing_module_reports_receiver_not_resolved() {
+    // Phase 2 of the qualified-call refactor split the previous
+    // `MethodNotFound` collapse into two kinds: `ReceiverNotResolved`
+    // when the module name doesn't resolve anywhere (the cascade
+    // gate's gate-5 exhaustion), `MethodNotFound` when the module
+    // is reachable but the method is missing (gate 3 →
+    // `infer_qualified_call`). The fixture's
+    // `НесуществующийМодуль` is the former case — see
+    // `infer_invalidation::infer_invalidates_when_config_set_changes`
+    // for the same observation under the visibility gate.
     let (db, file_id) = setup_fixture(MISSING_MODULE_FIXTURE);
     let kinds = unresolved_kinds(&db, file_id);
     assert_eq!(
         kinds,
-        vec![UnresolvedMethodKind::MethodNotFound],
-        "Expected MethodNotFound when module_index has no entry"
+        vec![UnresolvedMethodKind::ReceiverNotResolved],
+        "Expected ReceiverNotResolved when module_index has no entry"
     );
 }
 
