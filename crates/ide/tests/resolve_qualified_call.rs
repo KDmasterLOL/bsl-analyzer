@@ -397,3 +397,53 @@ fn russian_layout_resolves() {
         mismatches
     );
 }
+
+const USER_MODULE_SHADOWS_PLATFORM_GLOBAL_FIXTURE: &str = r#"
+//- /CommonModules/Метаданные/Ext/Module.bsl
+Процедура ОдинЭкспортируемыйМетод() Экспорт
+КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Метаданные.ЗаведомоОтсутствующийМетод();
+КонецПроцедуры
+"#;
+
+#[test]
+fn user_common_module_shadows_same_named_platform_global() {
+    // Phase 5 follow-up — codex stop-time review surfaced a regression
+    // window where `infer_path_name` step 5 resolved a name like
+    // `Метаданные` (a known platform global container) into
+    // `Ty::PlatformObject(КонфигурацияМетаданныеОбъект)` even when the
+    // workspace shipped a CommonModule with the same name. Result:
+    // `Метаданные.МойМетод()` would type-check against the platform
+    // catalogue instead of the user CommonModule's SymbolTree, and a
+    // typo'd call would be silenced (no UMC) because lookup_method
+    // resolved the wrong `Ty`.
+    //
+    // The fix mirrors the cascade gate's gate 3 ordering inside
+    // `infer_path_name`: skip the platform fallback when
+    // `Resolver::user_common_module_exists` claims the receiver. The
+    // call now flows through the cascade gate (Field-shape, gate 3
+    // → infer_qualified_call) and emits MethodNotFound for the
+    // missing method.
+    //
+    // Discriminating shape: the user CM has `ОдинЭкспортируемыйМетод`
+    // (NOT `ЗаведомоОтсутствующийМетод`) and the platform global
+    // `Метаданные` does NOT expose `ЗаведомоОтсутствующийМетод`
+    // either — but if step 5 wins, `lookup_method` on
+    // `Ty::PlatformObject` returns None silently (gate `receiver_display_name`
+    // skips PlatformObject), no diagnostic. If gate 3 wins,
+    // `MethodNotFound` fires.
+    let (db, file_id) = setup_fixture(USER_MODULE_SHADOWS_PLATFORM_GLOBAL_FIXTURE);
+    let kinds = unresolved_kinds(&db, file_id);
+    assert_eq!(
+        kinds,
+        vec![UnresolvedMethodKind::MethodNotFound],
+        "user CommonModule named like a platform global must keep its missing-method \
+         diagnostic; if this fails, `infer_path_name` step 5 retyped the receiver as \
+         PlatformObject before the cascade gate could route it through the workspace. \
+         got: {:?}",
+        kinds
+    );
+}

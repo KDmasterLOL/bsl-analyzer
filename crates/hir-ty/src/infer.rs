@@ -1331,11 +1331,18 @@ impl<'db> InferenceContext<'db> {
         //    chains. Only non-MDO globals (`ОбработкаОшибок`,
         //    `БиблиотекаКартинок`, `WSСсылки`, …) reach this step.
         // Narrowing: skip the platform fallback when the resolver already
-        // sees the name as a module-level method or variable. The user has
-        // shadowed the platform global (e.g. `Процедура ОбработкаОшибок()
-        // Экспорт`); BSL semantics give the local definition priority and
-        // we must not silently retype a reference to it as `PlatformObject`.
-        if !user_shadows {
+        // sees the name as a module-level method or variable, or when the
+        // workspace owns it as a CommonModule. The user has shadowed the
+        // platform global (e.g. `Процедура ОбработкаОшибок() Экспорт` or
+        // a `CommonModules/Метаданные/` user module); BSL semantics give
+        // the local / workspace definition priority and we must not
+        // silently retype a reference to it as `PlatformObject`.
+        // Mirrors the cascade-gate ordering in
+        // `dispatch_bare_ident_field_call` (gate 3 user-CM precedes gate
+        // 4 platform) so both the bare-IDENT and the typed-receiver
+        // paths agree on user-shadows-platform.
+        let workspace_owns_common_module = resolver.user_common_module_exists(self.db, name);
+        if !user_shadows && !workspace_owns_common_module {
             if let Some(prop) =
                 bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
             {
