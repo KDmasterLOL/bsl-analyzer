@@ -58,6 +58,44 @@ fn hover_on_data_processor_object_attribute_renders_type() {
 }
 
 #[test]
+fn hover_after_findrows_index_renders_column_type() {
+    // Chained `Объект.<TabularSection>.НайтиСтроки(Отбор)[0].<column>`
+    // hover must resolve through the TypedArray(Row) rebind in
+    // `build_tabular_section_method_info` — without it the column
+    // sits on `Ty::Unknown` and hover reports "no info".
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    let bsl = "Процедура Тест(Отбор)\n    Х = Объект.НастройкиЭксель.НайтиСтроки(Отбор)[0].Значение;\nКонецПроцедуры\n";
+    // Cursor on `Значение` — the column whose type we want hover to render.
+    let cursor = bsl.rfind("Значение").expect("anchor") as u32;
+
+    let (analysis, file_id, offset) = setup_form_module(
+        designer_fixture_path()
+            .join("DataProcessors/ТестоваяОбработка/Forms/Форма/Ext/Form/Module.bsl"),
+        bsl,
+        cursor,
+    );
+    let result = analysis.hover(file_id, offset, ide::Locale::Ru).expect("hover must resolve");
+
+    // Tighter than substring — assert the canonical type heading appears
+    // verbatim. `Строка` standalone could match unrelated markup
+    // ("Строка табличной части", a synonym, etc.); the bold heading
+    // form is the contract `ty_info_markup` produces for resolved
+    // primitive types.
+    assert!(
+        result.markup.contains("**Тип:** Строка")
+            || result.markup.contains("**Type:** Строка")
+            || result.markup.contains("Type: Строка")
+            || result.markup.contains("Тип: Строка"),
+        "hover must render `Строка` as the column type for `[0].Значение`; got:\n{}",
+        result.markup
+    );
+}
+
+#[test]
 fn hover_on_report_object_attribute_renders_type() {
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");

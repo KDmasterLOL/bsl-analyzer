@@ -113,6 +113,43 @@ fn completion_on_object_dot_in_data_processor_form_hides_object_methods() {
 }
 
 #[test]
+fn completion_after_findrows_index_lists_row_columns() {
+    // Chained access pattern from a real DataProcessor form:
+    //   `Объект.НастройкиЭксель.НайтиСтроки(Отбор)[0].<cursor>`
+    //
+    // Pipeline:
+    // 1. `Объект` → FormData{Structure, Some((DataProcessor, ТестоваяОбработка))}
+    // 2. `.НастройкиЭксель` → MetadataRef{TabularSection{DataProcessor}, "ТестоваяОбработка.НастройкиЭксель"}
+    // 3. `.НайтиСтроки(Отбор)` → TypedArray(MetadataRef{TabularSectionRow, ..})
+    //    (NOT bare Ty::Array — `build_tabular_section_method_info`
+    //    rebinds the HBK `"Массив"` return for НайтиСтроки/FindRows to
+    //    a row-typed array)
+    // 4. `[0]` → MetadataRef{TabularSectionRow, ..} (Expr::Index unwraps TypedArray)
+    // 5. `.<cursor>` → row columns via `enumerate_fields`
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    let bsl = "Процедура Тест(Отбор)\n    Х = Объект.НастройкиЭксель.НайтиСтроки(Отбор)[0].;\nКонецПроцедуры\n";
+    let cursor = bsl.find("[0].").expect("anchor") as u32 + "[0].".len() as u32;
+
+    let (analysis, file_id, offset) = setup_form_module(data_processor_module_path(), bsl, cursor);
+    let items = analysis.completions(file_id, offset, None, ide::Locale::Ru);
+
+    assert!(
+        contains_label(&items, "Значение"),
+        "row column `Значение` must surface; got: {:?}",
+        items.iter().map(label).collect::<Vec<_>>()
+    );
+    assert!(
+        contains_label(&items, "Активна"),
+        "row column `Активна` must surface; got: {:?}",
+        items.iter().map(label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn completion_on_object_dot_in_report_form_lists_attributes() {
     if !has_platform_data() {
         eprintln!("Skipping: no platform data available");

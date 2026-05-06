@@ -24,6 +24,32 @@
 					</Type>
 				</Properties>
 			</Attribute>
+			<TabularSection uuid="44444444-4444-4444-4444-444444444444">
+				<Properties>
+					<Name>НастройкиЭксель</Name>
+				</Properties>
+				<ChildObjects>
+					<Attribute uuid="55555555-5555-5555-5555-555555555555">
+						<Properties>
+							<Name>Значение</Name>
+							<Type>
+								<v8:Type>xs:string</v8:Type>
+								<v8:StringQualifiers>
+									<v8:Length>100</v8:Length>
+								</v8:StringQualifiers>
+							</Type>
+						</Properties>
+					</Attribute>
+					<Attribute uuid="66666666-6666-6666-6666-666666666666">
+						<Properties>
+							<Name>Активна</Name>
+							<Type>
+								<v8:Type>xs:boolean</v8:Type>
+							</Type>
+						</Properties>
+					</Attribute>
+				</ChildObjects>
+			</TabularSection>
 		</ChildObjects>
 	</DataProcessor>
 </MetaDataObject>

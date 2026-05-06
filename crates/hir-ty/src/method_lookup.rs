@@ -438,7 +438,20 @@ pub(crate) fn build_tabular_section_method_info(
     let return_ty = method
         .return_type
         .as_ref()
-        .map(|ret| rewrite_row_generic(resolve_platform_type_union(ret), parent, section_name))
+        .map(|ret| {
+            let lowered =
+                rewrite_row_generic(resolve_platform_type_union(ret), parent, section_name);
+            // Methods like `НайтиСтроки` / `FindRows` carry a HBK return
+            // string of `"Массив"` with no element-type schema — the
+            // platform JSON has no slot for typed-array witnesses. The
+            // bare `Ty::Array` makes `arr[i]` and `Для каждого row Из …`
+            // surface `Ty::Unknown` for the row, which collapses every
+            // downstream column lookup. Rewrite to `Ty::TypedArray(Row)`
+            // when the method is one of the row-array-returning kind so
+            // chained access (`ТЧ.НайтиСтроки(От)[0].Колонка`,
+            // iteration body field-access) stays typed.
+            rewrite_row_array_for_method(lowered, method.name.as_str(), parent, section_name)
+        })
         .unwrap_or(Ty::Undefined);
 
     // Same conservative param lowering as `to_method_info` — see
@@ -485,6 +498,52 @@ fn rewrite_row_generic(ty: Ty, parent: MdoType, section_name: &Name) -> Ty {
         ),
         other => other,
     }
+}
+
+/// Promote a bare [`Ty::Array`] return to [`Ty::TypedArray`] of the
+/// matching tabular-section row when the method is one of the
+/// row-array-returning kind on a tabular section receiver.
+///
+/// Companion to [`rewrite_row_generic`]: that one rewrites the scalar
+/// `Строка табличной части` PlatformObject; this one rewrites the
+/// element-less `Массив` for methods whose semantics are "find / collect
+/// rows". The platform JSON cannot encode "Array of Row" so the rebind
+/// has to happen in code, keyed on the method name.
+///
+/// The set of row-array methods is intentionally minimal — only HBK
+/// methods whose contract is unambiguously "return array of this
+/// section's rows". Other Array-returning methods on the same receiver
+/// — `ВыгрузитьКолонку` / `UnloadColumn` is the concrete same-receiver
+/// example, returning an array of heterogeneous column values, NOT row
+/// objects — keep their bare `Ty::Array` so subtyping stays gradual and
+/// chained `.<row-field>` access on them correctly stays `Unknown`
+/// rather than being rebound to a row schema that wouldn't apply.
+fn rewrite_row_array_for_method(
+    ty: Ty,
+    method_name: &str,
+    parent: MdoType,
+    section_name: &Name,
+) -> Ty {
+    if !is_row_array_method(method_name) {
+        return ty;
+    }
+    let row = Ty::MetadataRef {
+        kind: MetadataKind::TabularSectionRow { parent },
+        name: section_name.clone(),
+    };
+    match ty {
+        Ty::Array => Ty::TypedArray(Box::new(row)),
+        // Already typed by the JSON / earlier rewrite — leave it.
+        Ty::TypedArray(_) => ty,
+        other => other,
+    }
+}
+
+/// Method names whose return on a tabular section receiver is
+/// semantically "array of rows of THIS section". Bilingual + lowercase.
+fn is_row_array_method(name: &str) -> bool {
+    let lc = name.to_lowercase();
+    matches!(lc.as_str(), "найтистроки" | "findrows")
 }
 
 /// Match the platform return / param string for a TS row, accepting both
@@ -1028,11 +1087,41 @@ mod tests {
     }
 
     #[test]
-    fn method_lookup_tabular_section_findrows_returns_array() {
+    fn method_lookup_tabular_section_findrows_returns_typed_array_of_rows() {
+        // НайтиСтроки's HBK contract is "Массив" (no element witness).
+        // `build_tabular_section_method_info` rebinds that to
+        // `TypedArray(Row)` so chained `НайтиСтроки(...)[0].Колонка`
+        // resolves the column instead of falling into Unknown.
         let r = ts_receiver(MdoType::Catalog, "X.Y");
         let info = lookup_method(&r, &Name::new("НайтиСтроки"))
             .expect("TabularSection.НайтиСтроки must resolve");
-        assert_eq!(info.return_ty, Ty::Array);
+        match info.return_ty {
+            Ty::TypedArray(elem) => match *elem {
+                Ty::MetadataRef {
+                    kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+                    ref name,
+                } => assert_eq!(name.as_str(), "X.Y"),
+                other => panic!(
+                    "expected TypedArray(MetadataRef{{TabularSectionRow,X.Y}}), got element {other:?}"
+                ),
+            },
+            other => panic!("expected TypedArray, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn method_lookup_tabular_section_findrows_english_alias_typed_array() {
+        let r = ts_receiver(MdoType::Document, "ПКО.Товары");
+        let info = lookup_method(&r, &Name::new("FindRows"))
+            .expect("TabularSection.FindRows must resolve via bilingual platform index");
+        assert!(matches!(
+            info.return_ty,
+            Ty::TypedArray(ref elem)
+                if matches!(**elem, Ty::MetadataRef {
+                    kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
+                    ..
+                }),
+        ));
     }
 
     #[test]
