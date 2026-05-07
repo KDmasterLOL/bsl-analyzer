@@ -1111,9 +1111,12 @@ any of those mappings:
   `TokenKind`. The companion NULL literal owned by Slice 2's
   `LitNull` maps the other way (`LitNull → Ident` at line 57
   with `at_keyword("NULL")` text probe). The LitUndefined /
-  LitNull asymmetry is recorded in the C2 LitUndefined rustdoc
-  and pinned by the C3 acceptance suite test
-  `undefined_predicate_position_english`.
+  LitNull converter asymmetry is recorded in the C2
+  `LitUndefined` rustdoc as contextual prose; the C3 acceptance
+  suite test `undefined_predicate_position_english` pins only
+  the lexer-side contract (`UNDEFINED` emits `LitUndefined`,
+  `NULL` emits `LitNull`, distinct kinds emitted side-by-side),
+  not the parser-side converter mapping itself.
 
 The Pre-existing parser-side stale-classification follow-up
 documented in the Slice 2-addendum attestation

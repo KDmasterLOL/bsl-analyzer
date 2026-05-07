@@ -204,9 +204,18 @@ treats the seven Slice 3a variants asymmetrically:
 
 All seven mappings are pre-existing converter properties —
 Slice 3a does not modify any of them. The byte-identity golden
-corpus + the C3-born `sdbl_slice3a_types.rs` LitUndefined /
-LitNull predicate-position asymmetry test pin both the
-PRESERVE-shape behaviour and the asymmetry contract.
+corpus pins the PRESERVE-shape behaviour at the lexer surface,
+and the C3-born `sdbl_slice3a_types.rs` test
+`undefined_predicate_position_english` pins the lexer-side
+contract that `UNDEFINED` and `NULL` emit as distinct
+`SdblTokenKind` values (`LitUndefined` and `LitNull`
+respectively, not `Ident`) when adjacent in the same source.
+The downstream converter asymmetry itself
+(`LitNull → T::Ident` at `:57` vs `LitUndefined → T::KwUndefined`
+at `:196`) is documented in the C2 `LitUndefined` rustdoc and
+in the test docstring as contextual prose, but is not enforced
+by an automated test in this slice — the converter mapping is
+parser-side surface, out of scope for the lexer-only Slice 3a.
 
 The lexer-level disambiguation between `Period*` tokens and `Fn*`
 tokens that "double as period types in TOTALS BY ... PERIODS(...)"

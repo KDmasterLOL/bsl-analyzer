@@ -286,10 +286,21 @@ fn type_function_with_primitive_argument_english() {
 
 /// LitUndefined and LitNull side-by-side in `<Значение>` predicate
 /// positions. Both are typed-literal slots in the v8327doc Глава 8
-/// `<Значение>` EBNF; the converter at
-/// `crates/parser/src/sdbl_token_converter.rs` treats them
-/// asymmetrically (LitNull → Ident with text probe; LitUndefined →
-/// dedicated KwUndefined kind).
+/// `<Значение>` EBNF.
+///
+/// What this test pins (lexer-side): `UNDEFINED` emits
+/// `SdblTokenKind::LitUndefined` and `NULL` emits
+/// `SdblTokenKind::LitNull` as distinct kinds, neither shadowed by
+/// `Ident`, when adjacent in a realistic SDBL clause fragment.
+///
+/// What this test does **not** pin (parser-side, out of scope for
+/// the lexer-only Slice 3a): the downstream converter at
+/// `crates/parser/src/sdbl_token_converter.rs` treats the two
+/// literals asymmetrically (`LitNull → T::Ident` with text probe
+/// at line 57; `LitUndefined → T::KwUndefined` dedicated kind at
+/// line 196). That mapping behaviour is parser-side surface and
+/// is documented in the C2 `LitUndefined` rustdoc rather than
+/// enforced by this lexer-side acceptance test.
 #[test]
 fn undefined_predicate_position_english() {
     use SdblTokenKind::*;
