@@ -1096,15 +1096,24 @@ shape conclusion.
 The slice is a **lexer-only** clean-room — parser-side files
 (`crates/parser/src/grammar/sdbl/**`, `crates/sdbl-hir/**`) are
 not modified. The converter at
-`crates/parser/src/sdbl_token_converter.rs` already maps the seven
-Slice 3a variants onto their downstream parser kinds (`Type*`,
-`LitUndefined`, `Period*` get individual `KwBoolean / KwNumber /
-KwString / KwDate / KwUndefined / KwTenDays / KwHalfYear` mappings
-or fall through to `Ident`); none of those mappings change. The
-LitUndefined / LitNull asymmetry recorded in the C2 LitUndefined
-docstring (`LitNull → Ident` with `at_keyword("NULL")` text probe;
-`LitUndefined → KwUndefined` dedicated kind) is a pre-existing
-converter property — Slice 3a documents it but does not modify it.
+`crates/parser/src/sdbl_token_converter.rs` maps the seven
+Slice 3a variants asymmetrically and Slice 3a does not modify
+any of those mappings:
+
+- `TypeBoolean | TypeNumber | TypeString | TypeDate → Ident`
+  (shared arm at line 125) — parser disambiguates by text in
+  the CAST `<Тип значения>` and `<Значение>` slots.
+- `PeriodTenDays | PeriodHalfYear → Ident` (shared arm at
+  line 168) — parser disambiguates by text in the TOTALS BY
+  ПЕРИОДАМИ list.
+- `LitUndefined → KwUndefined` (single arm at line 196) — the
+  only Slice 3a variant with a dedicated downstream
+  `TokenKind`. The companion NULL literal owned by Slice 2's
+  `LitNull` maps the other way (`LitNull → Ident` at line 57
+  with `at_keyword("NULL")` text probe). The LitUndefined /
+  LitNull asymmetry is recorded in the C2 LitUndefined rustdoc
+  and pinned by the C3 acceptance suite test
+  `undefined_predicate_position_english`.
 
 The Pre-existing parser-side stale-classification follow-up
 documented in the Slice 2-addendum attestation

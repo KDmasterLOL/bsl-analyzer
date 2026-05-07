@@ -184,12 +184,29 @@ Option-A-fixed at C2 of that addendum). The full audit trail is
 documented in § C0a discrepancy audit below.
 
 The token converter at `crates/parser/src/sdbl_token_converter.rs`
-maps `TypeBoolean / TypeNumber / TypeString / TypeDate` and
-`LitUndefined` and `PeriodTenDays / PeriodHalfYear` onto
-`TokenKind::Ident` so the parser grammar disambiguates them by text
-in the relevant slots (CAST `<Тип значения>`, `<Значение>`,
-TOTALS BY ПЕРИОДАМИ list). This converter mapping is preserved
-unchanged by Slice 3a.
+treats the seven Slice 3a variants asymmetrically:
+
+- `TypeBoolean | TypeNumber | TypeString | TypeDate → T::Ident`
+  (single shared arm at `sdbl_token_converter.rs:125`) — the
+  parser disambiguates the four primitive type literals by text
+  in the CAST `<Тип значения>` and `<Значение>` slots.
+- `PeriodTenDays | PeriodHalfYear → T::Ident` (single shared
+  arm at `sdbl_token_converter.rs:168`) — the parser
+  disambiguates both narrow period-type keywords by text in the
+  TOTALS BY ПЕРИОДАМИ list.
+- `LitUndefined → T::KwUndefined` (single arm at
+  `sdbl_token_converter.rs:196`) — the only Slice 3a variant
+  with a dedicated downstream `TokenKind`. The companion NULL
+  literal is owned by Slice 2's `LitNull` and maps the other
+  way (`LitNull → T::Ident` at
+  `sdbl_token_converter.rs:57`); see the LitUndefined per-
+  variant rustdoc at C2 for the full asymmetry note.
+
+All seven mappings are pre-existing converter properties —
+Slice 3a does not modify any of them. The byte-identity golden
+corpus + the C3-born `sdbl_slice3a_types.rs` LitUndefined /
+LitNull predicate-position asymmetry test pin both the
+PRESERVE-shape behaviour and the asymmetry contract.
 
 The lexer-level disambiguation between `Period*` tokens and `Fn*`
 tokens that "double as period types in TOTALS BY ... PERIODS(...)"
