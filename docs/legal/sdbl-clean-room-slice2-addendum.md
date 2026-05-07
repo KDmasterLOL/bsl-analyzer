@@ -598,29 +598,32 @@ baseline measured at C0a (2026-05-07) on `develop` branch tip
   with the 3 KwPeriods regression-gate tests (canonical /
   English / legacy-misspelling-now-Ident). Codex C2 review pass
   per pair-mode protocol.
-- `<C3_COMMIT>` (TBD) — C3: this attestation finalised
-  (placeholders replaced with actual SHAs), the
-  `sdbl_slice2_addendum_clause_keywords.rs` test file expanded
-  from the 3 C2-born regression gates into the full spec-driven
-  acceptance suite covering all 17 variants in both EN and RU
-  spellings (final test count pinned at C3 authoring time), the
-  Slice 2-addendum status block addition in
+- `3a95a3b3` (2026-05-07) — C3: this attestation finalised
+  (C0a / C0b / C1 / C2 placeholders replaced with actual SHAs),
+  the `sdbl_slice2_addendum_clause_keywords.rs` test file
+  expanded from the 3 C2-born regression gates to 30
+  spec-driven acceptance tests (3 KwPeriods regression gates +
+  16 bilingual EN+RU variant pairs + 1 case-insensitivity
+  sweep + 9 structural integration tests + 1 keyword-prefix
+  Ident longest-match guard), the Slice 2-addendum status
+  block added to
   [`sdbl-clean-room-slices.md`](sdbl-clean-room-slices.md)
-  (placement: after Slice 8-addendum in chronological
-  addendum order per codex C0-plan-review NIT), the file-level
-  `## Provenance` docstring fourth-bullet flip from "C0a draft"
-  to "complete (landed with C3 2026-05-XX)" with attestation
-  citation, the Slice 2 attestation §Scope flip acknowledging
-  the addendum at
-  `docs/legal/sdbl-clean-room-slice2.md:41-48`. Codex C3 review
-  pass per pair-mode protocol.
-- `<HILBERT_COMMIT>` (TBD) — Anti-Hilbert close-out:
-  replace any `<C3_COMMIT>` self-reference in this §Commit
-  trail entry with the actual C3 SHA. This amendment commit is
-  itself self-referential by design (it is the only commit
-  whose own SHA does not appear in the attestation §Commit
-  trail) — mirrors the Slice 7-addendum and Slice 8-addendum
-  Anti-Hilbert close-outs.
+  (placement: after Slice 8-addendum in chronological addendum
+  order per codex C0-plan-review NIT), the file-level
+  `## Provenance` docstring fourth-bullet flipped from
+  "(in progress)" to "(complete)" with attestation citation,
+  the Slice 2 attestation § Scope flipped at
+  `docs/legal/sdbl-clean-room-slice2.md:41-48` to acknowledge
+  the addendum claim of the 17 clause-keyword variants. Codex
+  C3 review pass per pair-mode protocol.
+- `<HILBERT_COMMIT>` (2026-05-07) — Anti-Hilbert close-out:
+  replaced the `<C3_COMMIT>` placeholder in the C3 §Commit
+  trail entry above with the actual C3 SHA `3a95a3b3`; fixed
+  test-file header drift (29 → 30 acceptance test count). This
+  amendment commit is itself self-referential by design — it
+  is the only commit whose own SHA does not appear in the
+  attestation §Commit trail — mirroring the Slice 7-addendum
+  (`cb383521`) and Slice 8-addendum Anti-Hilbert close-outs.
 
 ## Pre-C0b corpus coverage audit
 

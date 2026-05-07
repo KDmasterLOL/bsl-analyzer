@@ -4,7 +4,7 @@
 //! Status: file born at C2 with 3 KwPeriods regression-gate tests
 //! landing alongside the regex defect fix per
 //! `docs/legal/sdbl-clean-room-slice2-addendum.md` § Behaviour
-//! change Option A. C3 expanded the file to 29 spec-driven
+//! change Option A. C3 expanded the file to 30 spec-driven
 //! acceptance tests: 3 KwPeriods regression gates, 16 bilingual
 //! EN+RU variant pairs (KwPeriods covered by the regression
 //! gates), 1 case-insensitivity sweep, 9 structural integration
