@@ -596,6 +596,21 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     if let Some((ref name, range)) = target_name {
         let key = name.as_str().to_lowercase();
 
+        // Capture the pre-existing binding kind BEFORE the implicit
+        // `register_local_var` below — once we've registered, the
+        // local table always reports `Local`, masking the genuine
+        // "no shadowing" case where this assignment is the
+        // first introduction of the name. The downstream
+        // `CommonModuleAssign` handler uses this payload to fast-
+        // path-skip on shadowing without rebuilding a `Resolver`.
+        let existing_binding_kind = if ctx.local_vars.contains_key(&key) {
+            Some(crate::body::ExistingBindingKind::Local)
+        } else if ctx.param_names.contains(&key) {
+            Some(crate::body::ExistingBindingKind::Param)
+        } else {
+            None
+        };
+
         // Register as local variable for implicit variable declaration (BSL allows this).
         // This is important for UsingExternalCodeTools to distinguish local vars from globals.
         if !ctx.local_vars.contains_key(&key) && !ctx.param_names.contains(&key) {
@@ -608,6 +623,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         ctx.emit(BodyDiagnostic::CommonModuleAssign {
             variable_name: name.as_str().to_string(),
             range,
+            existing_binding_kind,
         });
 
         // Check for ThisObjectAssign diagnostic.
