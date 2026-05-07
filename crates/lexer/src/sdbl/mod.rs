@@ -3,8 +3,8 @@
 //!
 //! ## Provenance
 //!
-//! The `SdblTokenKind` enum below is split by banner comments into two
-//! clearly demarcated provenance sections:
+//! The `SdblTokenKind` enum below is split by banner comments into
+//! several clearly demarcated provenance sections:
 //!
 //! - **Slice 1 — clean-room.** Whitespace, line terminators, line
 //!   comments, separators, punctuation, comparison and arithmetic
@@ -31,9 +31,9 @@
 //!   OVERALL / PERIODS / ESCAPE / REFS / CAST / TYPE / VALUE.
 //!   Re-derived from v8327doc Глава 8 «Работа с запросами» (the
 //!   canonical SDBL grammar specification) with pubqlang
-//!   corroborating examples. Status: C1 banner relocate landed; C2
-//!   clean-room regex rewrite + per-variant provenance + KwPeriods
-//!   canonical spelling fix pending; C3 attestation finalisation
+//!   corroborating examples. Status: C1 banner relocate + C2
+//!   clean-room regex rewrite with per-variant provenance + KwPeriods
+//!   canonical-spelling fix landed; C3 attestation finalisation
 //!   pending.
 //!
 //! - **Slices 3–5 — pending.** Built-in functions, metadata-object
@@ -477,86 +477,204 @@ pub enum SdblTokenKind {
     LitNull,
 
     // ============================================================================
-    // CLEAN-ROOM Slice 2-addendum — clause keyword leftovers (banner only at C1)
+    // CLEAN-ROOM Slice 2-addendum — clause keyword leftovers
     // ============================================================================
     //
-    // The 17 long-tail clause-keyword variants below are claimed as
-    // clean-room authorship under the Slice 2-addendum scope:
-    // DROP / AUTOORDER / ASC / DESC / HIERARCHY / ALLOWED / FOR /
-    // UPDATE / INDEX / ONLY / OVERALL / PERIODS / ESCAPE / REFS /
-    // CAST / TYPE / VALUE. C1 (this commit) relocates the regex
-    // declarations out of the residual LEGACY banner under this
-    // banner without changing any regex bytes; C2 will re-author
-    // the regex bodies and per-variant docstrings from v8327doc
-    // Глава 8 and corroborating pubqlang chapters; C3 will land
-    // the attestation citation. Per-variant `// C1 placeholder —
-    // clean-room rewrite in C2` markers below are stripped at C2.
+    // Every variant in this section carries an inline provenance
+    // comment citing the v8327doc Глава 8 page section (and
+    // corroborating pubqlang chapters where applicable) it was
+    // re-derived from. Nothing in this block was copied from the
+    // pre-clean-room regex text of these variants or from any
+    // third-party SDBL lexer; the canonical SDBL grammar source is
+    // the v8.3.27 Developer's Reference Глава 8 «Работа с запросами»
+    // at <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>,
+    // with pubqlang chapters at
+    // <https://its.1c.ru/db/pubqlang/content/N/hdoc> providing
+    // corroborating examples. Full per-variant tier classification
+    // and source map lives in
+    // `docs/legal/sdbl-clean-room-slice2-addendum.md` § Per-variant
+    // tier source map.
+    //
+    // Convenience index (RUS / ENG → Variant — primary citation).
+    // The `#[regex]` attributes below are the single source of
+    // truth; this table is a scanning aid only.
+    //
+    //   DROP query:
+    //     УНИЧТОЖИТЬ / DROP              -> KwDrop       (v8327doc Гл. 8)
+    //
+    //   Order-by direction & modifiers:
+    //     ВОЗР / ASC                     -> KwAsc        (pubqlang/16)
+    //     УБЫВ / DESC                    -> KwDesc       (pubqlang/16)
+    //     ИЕРАРХИЯ / HIERARCHY           -> KwHierarchy  (v8327doc Гл. 8 / pubqlang/27)
+    //     АВТОУПОРЯДОЧИВАНИЕ / AUTOORDER -> KwAutoOrder  (pubqlang/17)
+    //
+    //   SELECT prefix qualifier:
+    //     РАЗРЕШЕННЫЕ / ALLOWED          -> KwAllowed    (v8327doc Гл. 8 — Slice 7-addendum)
+    //
+    //   FOR UPDATE / INDEX BY:
+    //     ДЛЯ / FOR                      -> KwFor        (v8327doc Гл. 8)
+    //     ИЗМЕНЕНИЯ / UPDATE             -> KwUpdate     (v8327doc Гл. 8)
+    //     ИНДЕКСИРОВАТЬ / INDEX          -> KwIndex      (v8327doc Гл. 8)
+    //
+    //   TOTALS modifiers:
+    //     ТОЛЬКО / ONLY                  -> KwOnly       (v8327doc Гл. 8)
+    //     ОБЩИЕ / OVERALL                -> KwOverall    (pubqlang/39)
+    //     ПЕРИОДАМИ / PERIODS            -> KwPeriods    (v8327doc Гл. 8 — instrumental case)
+    //
+    //   LIKE / REFS modifiers:
+    //     СПЕЦСИМВОЛ / ESCAPE            -> KwEscape     (v8327doc Гл. 8)
+    //     ССЫЛКА / REFS                  -> KwRefs       (v8327doc Гл. 8 / pubqlang/40)
+    //
+    //   CAST / TYPE / VALUE expressions:
+    //     ВЫРАЗИТЬ / CAST                -> KwCast       (v8327doc Гл. 8 / pubqlang/40)
+    //     ТИП / TYPE                     -> KwType       (v8327doc Гл. 8)
+    //     ЗНАЧЕНИЕ / VALUE               -> KwValue      (pubqlang/31)
 
-    // C1 placeholder — clean-room rewrite in C2
+    // --- DROP query ---
+
+    // v8327doc Глава 8 — DROP query: `УНИЧТОЖИТЬ <ident>` destroys a
+    // temporary table at end-of-batch (canonical syntax + Term word-
+    // list slot УНИЧТОЖИТЬ ↔ DROP). Corroborating pubqlang/51, /73
+    // describe temp-table lifecycle.
     #[regex(r"(?i)уничтожить|(?i)drop")]
     KwDrop,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // --- Order-by direction & modifiers ---
+
+    // pubqlang/17 — AUTOORDER: bare-keyword tail clause requesting
+    // automatic ordering by the table's reference field
+    // (`chapter_017.html:17, 32, 52` canonical bare-keyword form).
+    // Bilingual АВТОУПОРЯДОЧИВАНИЕ ↔ AUTOORDER.
     #[regex(r"(?i)автоупорядочивание|(?i)autoorder")]
     KwAutoOrder,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // pubqlang/16 — ORDER BY direction marker: ascending. Bilingual
+    // ВОЗР ↔ ASC.
     #[regex(r"(?i)возр|(?i)asc")]
     KwAsc,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // pubqlang/16 — ORDER BY direction marker: descending. Bilingual
+    // УБЫВ ↔ DESC.
     #[regex(r"(?i)убыв|(?i)desc")]
     KwDesc,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // v8327doc Глава 8 — ORDER BY / TOTALS BY group spec: HIERARCHY
+    // modifier (canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]`). Corroborating
+    // pubqlang/27 (`chapter_027.html:39, 51, 71`)
+    // `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`.
     #[regex(r"(?i)иерархия|(?i)hierarchy")]
     KwHierarchy,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // --- SELECT prefix qualifier ---
+
+    // v8327doc Глава 8 — SELECT prefix qualifier: РАЗРЕШЕННЫЕ filters
+    // the result set by row-level security (canonical EBNF first-
+    // prefix slot in `<Описание запроса>` + bilingual word-list
+    // РАЗРЕШЕННЫЕ ↔ ALLOWED + RLS-scope prose). Already attested
+    // Tier-A1 by Slice 7-addendum at
+    // `docs/legal/sdbl-clean-room-slice7-addendum.md`.
     #[regex(r"(?i)разрешенные|(?i)allowed")]
     KwAllowed,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // --- FOR UPDATE / INDEX BY ---
+
+    // v8327doc Глава 8 — FOR UPDATE clause: `[ДЛЯ ИЗМЕНЕНИЯ
+    // [<Список таблиц верхнего уровня>]]` enables row-locking for
+    // the named source tables (canonical EBNF + bilingual word-list
+    // ДЛЯ ↔ FOR + canonical example).
     #[regex(r"(?i)для|(?i)for")]
     KwFor,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // v8327doc Глава 8 — FOR UPDATE clause companion to KwFor: Term
+    // word-list ИЗМЕНЕНИЯ ↔ UPDATE + combined-Term entry
+    // `ДЛЯ ИЗМЕНЕНИЯ` + canonical EBNF.
     #[regex(r"(?i)изменения|(?i)update")]
     KwUpdate,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // v8327doc Глава 8 — INDEX BY clause: `[ИНДЕКСИРОВАТЬ ПО
+    // [НАБОРАМ] <Список полей>]` adds an index on temporary-table
+    // fields for downstream join performance (canonical EBNF +
+    // Term word-list ИНДЕКСИРОВАТЬ ↔ INDEX + canonical examples).
     #[regex(r"(?i)индексировать|(?i)index")]
     KwIndex,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // --- TOTALS modifiers ---
+
+    // v8327doc Глава 8 — TOTALS BY group modifier: `[[ТОЛЬКО]
+    // ИЕРАРХИЯ]` excludes detail rows so only hierarchy aggregates
+    // appear (Term word-list ТОЛЬКО ↔ ONLY + canonical EBNF +
+    // canonical example `Номенклатура ТОЛЬКО ИЕРАРХИЯ`).
     #[regex(r"(?i)только|(?i)only")]
     KwOnly,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // pubqlang/39 — TOTALS BY group: ОБЩИЕ marks the grand-total
+    // group (`chapter_039.html:13, 25, 29, 48, 49, 51` canonical
+    // `ИТОГИ ... ПО ОБЩИЕ`). Bilingual ОБЩИЕ ↔ OVERALL via the
+    // v8327doc Глава 8 word-list slot.
     #[regex(r"(?i)общие|(?i)overall")]
     KwOverall,
 
-    // C1 placeholder — clean-room rewrite in C2
-    #[regex(r"(?i)периоды|(?i)periods")]
+    // v8327doc Глава 8 — TOTALS BY period spec: `[ПЕРИОДАМИ
+    // (<period-types>, <begin>, <end>)]` enables time-bucketed
+    // totals (bilingual word-list ПЕРИОДАМИ ↔ PERIODS + canonical
+    // EBNF in TOTALS group spec + prose «при помощи ключевого слова
+    // ПЕРИОДАМИ» + canonical example
+    // `Период ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(...), ДАТАВРЕМЯ(...))`).
+    // The Russian spelling is **instrumental case** `ПЕРИОДАМИ` per
+    // the canonical source — the pre-Slice-2-addendum regex matched
+    // the wrong form `ПЕРИОДЫ` (nominative); the C2 fix flips the
+    // Russian alternation to canonical per
+    // `docs/legal/sdbl-clean-room-slice2-addendum.md` § Behaviour
+    // change Option A. Parser-tree invariant — the converter at
+    // `crates/parser/src/sdbl_token_converter.rs` maps
+    // `KwPeriods → TokenKind::Ident` and Slice 11 explicitly defers
+    // structured PERIODS handling to Slice 12, so the regex flip
+    // changes no observable parse-tree shape today.
+    #[regex(r"(?i)периодами|(?i)periods")]
     KwPeriods,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // --- LIKE / REFS modifiers ---
+
+    // v8327doc Глава 8 — LIKE escape clause: `[СПЕЦСИМВОЛ <Литерал
+    // типа СТРОКА>]` overrides the default LIKE escape character
+    // (bilingual word-list СПЕЦСИМВОЛ ↔ ESCAPE + canonical EBNF in
+    // LIKE slot + prose).
     #[regex(r"(?i)спецсимвол|(?i)escape")]
     KwEscape,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // v8327doc Глава 8 — REFS predicate: `<Выражение> ССЫЛКА <Имя
+    // таблицы>` tests whether a composite-typed expression is a
+    // reference to the named metadata object (Term word-list
+    // ССЫЛКА + canonical EBNF + canonical example). Corroborating
+    // pubqlang/40 (`chapter_040.html:83, 98`) canonical example
+    // `(ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная)`.
     #[regex(r"(?i)ссылка|(?i)refs")]
     KwRefs,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // --- CAST / TYPE / VALUE expressions ---
+
+    // v8327doc Глава 8 — CAST expression: `ВЫРАЗИТЬ ( <Выражение>
+    // КАК <Тип значения> )` performs composite-type narrowing
+    // (Term word-list ВЫРАЗИТЬ + canonical EBNF). Corroborating
+    // pubqlang/40 (`chapter_040.html:24, 66, 84-86, 99, 102`)
+    // canonical examples and aggregate-result-shape prose.
     #[regex(r"(?i)выразить|(?i)cast")]
     KwCast,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // v8327doc Глава 8 — TYPE expression: `ТИП(<Имя типа>)`
+    // produces a type-instance value usable as the right-hand side
+    // of a comparison with `ТИПЗНАЧЕНИЯ()` or as the КАК-target of
+    // a ВЫРАЗИТЬ() call (canonical EBNF).
     #[regex(r"(?i)тип|(?i)type")]
     KwType,
 
-    // C1 placeholder — clean-room rewrite in C2
+    // pubqlang/31 — VALUE expression: `ЗНАЧЕНИЕ(<полный путь>)`
+    // evaluates to a system-enum value or a predefined-data
+    // reference (`chapter_031.html:25` canonical example
+    // `Товары.Родитель = ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)`;
+    // `:28` prose «литерал функционального типа ЗНАЧЕНИЕ()»).
+    // Corroborating pubqlang/96 (`chapter_096.html:26`)
+    // `ЗНАЧЕНИЕ(Перечисление.ВидыОпераций.ПоступлениеОтПроизводителей)`.
     #[regex(r"(?i)значение|(?i)value")]
     KwValue,
 

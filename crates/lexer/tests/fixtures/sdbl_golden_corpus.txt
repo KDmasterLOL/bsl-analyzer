@@ -77,7 +77,7 @@ SELECT 1 ПОМЕСТИТЬ #T; УНИЧТОЖИТЬ #T
 ---- 039 FOR UPDATE INDEX BY ONLY ALLOWED OVERALL
 FOR UPDATE INDEX BY T.F ONLY ALLOWED OVERALL
 ---- 040 TOTALS AUTOORDER PERIODS russian
-ИТОГИ СУММА(X) ПО ОБЩИЕ АВТОУПОРЯДОЧИВАНИЕ ПЕРИОДЫ(ДЕНЬ, ДАТАВРЕМЯ(2024, 1, 1), &End)
+ИТОГИ СУММА(X) ПО ОБЩИЕ АВТОУПОРЯДОЧИВАНИЕ ПЕРИОДАМИ(ДЕНЬ, ДАТАВРЕМЯ(2024, 1, 1), &End)
 ---- 041 aggregate functions
 SUM(A) AVG(B) MIN(C) MAX(D) COUNT(*)
 ---- 042 date functions
