@@ -312,6 +312,60 @@ impl Resolver {
         metadata.form.as_ref().is_some_and(|f| f.is_managed())
     }
 
+    /// Resolve a bare name as an assignment-statement target.
+    ///
+    /// Narrower than [`Self::resolve_name`] in two ways:
+    ///
+    /// - **Builtins are not classified here.** A platform global like
+    ///   `Сообщить` returns [`AssignmentResolution::Unknown`] rather
+    ///   than a `Builtin` arm. Diagnostics consuming this API
+    ///   (`CommonModuleAssign`, future `ThisObjectAssign` /
+    ///   `ReadOnlyPropertyAssignment`) only care whether the LHS is a
+    ///   visible CommonModule, a module variable, or a local; the
+    ///   runtime semantics of "may a user assign over a platform
+    ///   global?" is out of scope and intentionally not encoded.
+    /// - **Methods are not classified either.** A two-segment
+    ///   `CommonModule.Method = ...` is field-on-receiver syntax that
+    ///   BSL rejects via separate paths, and a bare-name `Method = ...`
+    ///   is implicit-local declaration in BSL — handled by lowering,
+    ///   not by an assignment-target diagnostic. The bare-name resolver
+    ///   therefore drops methods from the resolution cone.
+    ///
+    /// Resolution order (first match wins):
+    /// 1. `Local` — local `Перем` introduced inside the body.
+    /// 2. `Param` — procedure / function parameter.
+    /// 3. `ModuleVariable` — module-level `Перем`.
+    /// 4. `CommonModule` — name resolves to a CommonModule visible
+    ///    across the main configuration + every registered extension.
+    /// 5. `Unknown` — anything else.
+    ///
+    /// `Local` and `Param` are surfaced separately so consumers that
+    /// care about the exact provenance (rename refactor, hover) can
+    /// keep that information; consumers that only need "is this name
+    /// shadowed?" can collapse both into a single arm.
+    pub fn resolve_assignment_target(
+        &self,
+        db: &dyn ConfigsDatabase,
+        name: &Name,
+    ) -> AssignmentResolution {
+        if let Some(local) = self.resolve_local(name) {
+            return match local.def {
+                crate::scope::ScopeDef::LocalVariable => AssignmentResolution::Local,
+                crate::scope::ScopeDef::Parameter => AssignmentResolution::Param,
+            };
+        }
+        if let Some(var_id) = self.resolve_module_variable(db, name) {
+            return AssignmentResolution::ModuleVariable(var_id);
+        }
+        if let Some(module_id) = self.module_id() {
+            let configs = db.configurations(module_id.file_id);
+            if Self::module_visible_in_configs(&configs, name) {
+                return AssignmentResolution::CommonModule(name.clone());
+            }
+        }
+        AssignmentResolution::Unknown
+    }
+
     /// Resolve a name at any level (builtin, local, module, workspace).
     ///
     /// Resolution order (first match wins):
@@ -1043,6 +1097,36 @@ pub enum Resolution {
 
     /// Module-level variable.
     Variable(VariableId),
+}
+
+/// Result of [`Resolver::resolve_assignment_target`].
+///
+/// Captures the binding an identifier resolves to **when used on the
+/// left-hand side of an assignment**, restricted to the kinds that
+/// assignment-target diagnostics in this codebase actually classify
+/// — local / param / module variable / visible CommonModule.
+/// Builtins and methods deliberately fall through to [`Self::Unknown`];
+/// see [`Resolver::resolve_assignment_target`] for the rationale.
+///
+/// Priority — first match wins:
+/// `Local` > `Param` > `ModuleVariable` > `CommonModule` > `Unknown`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentResolution {
+    /// Local `Перем` declared inside the current body — shadows any
+    /// module / configuration binding.
+    Local,
+    /// Procedure / function parameter — same shadowing priority as
+    /// [`Self::Local`], surfaced separately so consumers can render the
+    /// right hover / rename UI.
+    Param,
+    /// Module-level `Перем` declared at the module scope.
+    ModuleVariable(VariableId),
+    /// CommonModule visible across main + every registered extension.
+    /// Carries the matched name (consumers usually have it already, but
+    /// the field keeps the API symmetric with the other variants).
+    CommonModule(Name),
+    /// Identifier does not resolve to any shadowable assignment target.
+    Unknown,
 }
 
 /// Successful outcome of [`Resolver::resolve_qualified_method`].
