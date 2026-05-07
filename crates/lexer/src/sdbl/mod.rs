@@ -33,14 +33,14 @@
 //!   grammar specification) with pubqlang corroborating examples.
 //!   Attested in `docs/legal/sdbl-clean-room-slice2-addendum.md`.
 //!
-//! - **Slice 3a — clean-room (in progress).** Primitive type
-//!   literals (Boolean / Number / String / Date), the UNDEFINED
-//!   literal, and the narrow period-type keywords carried as
-//!   dedicated lexer tokens (TENDAYS / HALFYEAR). Re-derived from
-//!   v8327doc Глава 8 «Работа с запросами» with pubqlang
-//!   corroborating examples; the C0a discrepancy audit found zero
-//!   regex defects so the slice is a PRESERVE-shape arc. Attested
-//!   in `docs/legal/sdbl-clean-room-slice3a.md`.
+//! - **Slice 3a — clean-room (complete, 2026-05-07).** Primitive
+//!   type literals (Boolean / Number / String / Date), the
+//!   UNDEFINED literal, and the narrow period-type keywords
+//!   carried as dedicated lexer tokens (TENDAYS / HALFYEAR).
+//!   Re-derived from v8327doc Глава 8 «Работа с запросами» with
+//!   pubqlang corroborating examples; the C0a discrepancy audit
+//!   found zero regex defects so the slice is a PRESERVE-shape
+//!   arc. Attested in `docs/legal/sdbl-clean-room-slice3a.md`.
 //!
 //! - **Slices 3b, 4, 5 — pending.** Metadata-object tokens
 //!   (Slice 3b — `Mdo*` minus `MdoExternalDataSource`), built-in
@@ -688,7 +688,7 @@ pub enum SdblTokenKind {
     KwValue,
 
     // ============================================================================
-    // CLEAN-ROOM Slice 3a — primitive types, undefined literal, narrow period vocabulary (in progress)
+    // CLEAN-ROOM Slice 3a — primitive types, undefined literal, narrow period vocabulary (complete, 2026-05-07)
     // ============================================================================
     //
     // Every variant in this section carries an inline provenance

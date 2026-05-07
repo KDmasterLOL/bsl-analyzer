@@ -1,6 +1,6 @@
 # SDBL Slice 3a — Clean-Room Attestation (primitive types, undefined literal, narrow period vocabulary)
 
-**Status:** in progress (2026-05-07).
+**Status:** complete (2026-05-07).
 
 This document attests the clean-room authorship of the Slice 3a
 material of the SDBL lexer, per the staged migration plan in
@@ -62,15 +62,20 @@ The paths claimed as clean-room Slice 3a authorship are:
 - `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` — three
   thematic Slice 3a corpus entries (071–073) closing the six
   bilingual blind spots surfaced by the Pre-C0b corpus coverage
-  audit, with three reserved slots (074–076) held until C0b
-  finalization (see § Pre-C0b corpus coverage audit below).
+  audit. The C0a-reserved slots 074–076 collapsed at C0b — the
+  three landed entries close all six audit-confirmed blind spots
+  and codex pair-mode C0b review approved the batch unchanged.
 - `crates/lexer/tests/sdbl_golden_corpus.rs` — the snapshot
-  regenerated against the extended corpus.
+  regenerated against the extended corpus at C0b.
 - `crates/lexer/tests/sdbl_slice3a_types.rs` — new spec-driven
-  acceptance test file (born at C2 if any regression gates are
-  required; expanded at C3). Per the C0a discrepancy audit below,
-  no regression gates are required because no regex defects were
-  found, so the file is born at C3.
+  acceptance test file born at C3 with 25 tests: 14 bilingual
+  EN+RU canonical-form pins (7 variants × 2 spellings), 1 case-
+  insensitivity sweep, 9 structural integration tests (4 CAST
+  type-slot, 2 TYPE() expression, 1 LitUndefined / LitNull
+  predicate-position asymmetry, 2 TOTALS BY PERIODS period-type
+  slot), 1 keyword-prefix Ident longest-match guard. No C2
+  regression-gate file was born — the C0a audit found zero
+  defects.
 
 The deferred 14 `Mdo*` variants (`MdoCatalog`, `MdoDocument`,
 `MdoInformationRegister`, `MdoAccumulationRegister`,
@@ -375,13 +380,12 @@ silent test regressions:
    post-Slice-3a after the C0b snapshot regeneration captures the six
    new corpus entries.
 5. `cargo test -p lexer --test sdbl_slice3a_types` — file does
-   **not exist** pre-Slice-3a; count to be pinned at C3 (the new
-   spec-driven acceptance suite born at C3). **Pinning placeholder:
-   to be filled at C3 with the exact count as written into the
-   acceptance suite.**
+   **not exist** pre-Slice-3a; **25 passed** post-Slice-3a (the
+   spec-driven acceptance suite born at C3 — 14 bilingual EN+RU
+   canonical-form pins, 1 case-insensitivity sweep, 9 structural
+   integration tests, 1 keyword-prefix Ident longest-match guard).
 6. `cargo test -p lexer --tests` — **173 passed** pre-Slice-3a;
-   expected `173 + <slice3a_count>` post-Slice-3a where
-   `<slice3a_count>` matches item 5.
+   **198 passed** post-Slice-3a (173 + 25, matching item 5).
 7. `cargo test -p parser --test sdbl_parser_tests` — pre-Slice-3a
    baseline unchanged because Slice 3a does not edit the converter
    or any parser-side files; the parser-side test count is
@@ -392,39 +396,52 @@ silent test regressions:
 
 ## Commit trail
 
-- C0a (2026-05-07): this attestation document. Single anchor
-  commit; the SHA is recorded by the post-commit fixup that names
-  it explicitly in this trail (Anti-Hilbert disclosure pattern).
-- C0b: extend `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt`
-  with six thematic corpus entries (071–076) closing the bilingual
+- `51f17fff` (2026-05-07) — C0a: this attestation document
+  authored. Sole change: addition of `docs/legal/sdbl-clean-room-slice3a.md`.
+- `f6fcdc2e` (2026-05-07) — C0b: extend
+  `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` with three
+  thematic corpus entries (071–073) closing all six bilingual
   blind spots surfaced by the Pre-C0b corpus coverage audit;
   regenerate `crates/lexer/tests/sdbl_golden_corpus.rs` snapshot
-  via `UPDATE_EXPECT=1`. Commit SHA placeholder `<C0B_COMMIT>`.
-- C1: relocate the seven `#[regex]` declarations out of the LEGACY
-  block in `crates/lexer/src/sdbl/mod.rs` into the new
+  via `UPDATE_EXPECT=1`. The C0a-reserved slots 074–076 collapsed
+  unused after codex C0b review approval. The byte-identity
+  golden corpus gate confirms the audit's PRESERVE-shape
+  conclusion: each newly-covered form tokenises to its expected
+  `SdblTokenKind` without `Error` fallback or `Ident` shadow.
+- `297b529f` (2026-05-07) — C1: relocate the seven `#[regex]`
+  declarations out of the LEGACY block in
+  `crates/lexer/src/sdbl/mod.rs` into the new
   `CLEAN-ROOM Slice 3a — primitive types, undefined literal,
-  narrow period vocabulary` banner. Pure refactor — function
-  bodies and regex bodies move byte-for-byte, only banner header /
-  placeholder provenance markers / file-level docstring change.
-  Commit SHA placeholder `<C1_COMMIT>`.
-- C2: replace the C1 placeholder markers with full per-variant
-  v8327doc Глава 8 provenance docstrings (one rustdoc block per
-  variant citing word-list line numbers + contextual EBNF
-  citations); add the thematic convenience index (Type / Lit /
-  Period sub-sections) at the top of the banner; cross-reference
-  `KwType` for `Type*` variants per the codex STRONG #5 finding
-  on the C0a plan critique. No regex body changes — the C0a audit
-  found zero defects. Commit SHA placeholder `<C2_COMMIT>`.
-- C3: this attestation flips from "in progress" to "complete
-  (2026-05-07)" with absolute date stamp; the §Commit trail
-  pins all five real SHAs (C0a / C0b / C1 / C2 / C3); the new
+  narrow period vocabulary` banner. Pure refactor — regex bodies
+  move byte-for-byte, only banner header / placeholder provenance
+  markers / file-level docstring change. LEGACY banner header
+  tightened to `LEGACY (Slices 3b, 4, 5 pending —
+  Mdo*/function/virtual-table vocabularies + ExternalDataSource)`.
+- `077ae770` (2026-05-07) — C2: replace the C1 placeholder
+  markers with full per-variant v8327doc Глава 8 provenance
+  docstrings (one rustdoc block per variant citing word-list pair
+  and contextual EBNF / prose anchor); add the thematic
+  convenience index (Type / Lit / Period sub-sections) at the top
+  of the banner; cross-reference `KwType` for `Type*` variants
+  per the codex STRONG #5 finding on the C0a plan critique. No
+  regex body changes — the C0a audit found zero defects. Codex
+  pair-mode C2 review caught one BLOCKER (LitUndefined converter
+  mapping claim) addressed inline before commit: the
+  `LitNull → Ident` / `LitUndefined → KwUndefined` asymmetry per
+  `crates/parser/src/sdbl_token_converter.rs:57,196` is now
+  recorded explicitly in the LitUndefined docstring.
+- C3 (2026-05-07): this attestation flips from "in progress" to
+  "complete (2026-05-07)"; the new
   `crates/lexer/tests/sdbl_slice3a_types.rs` acceptance suite
-  is born; the master-doc `sdbl-clean-room-slices.md` Slice 3
-  section is updated to record the Slice 3a sub-slice landing
-  with status, files, and commit trail; the `sdbl.rs` file-level
-  docstring 5th-bullet status flips from "(in progress)" to
-  "(complete)" with attestation citation. Commit SHA placeholder
-  `<C3_COMMIT>`.
+  (25 tests) is born; the master-doc `sdbl-clean-room-slices.md`
+  carries a new `## Slice 3a` section recording the Slice 3a
+  sub-slice landing; `crates/lexer/src/sdbl/mod.rs` file-level
+  docstring 4th bullet flips from "(in progress)" to "(complete,
+  2026-05-07)" with attestation citation; the in-enum banner
+  header `CLEAN-ROOM Slice 3a — ... (in progress)` flips to
+  `(complete, 2026-05-07)`. Commit SHA recorded by the
+  Anti-Hilbert close-out fixup that pins it explicitly in this
+  trail.
 - Anti-Hilbert close-out: a single trailing fixup commit replaces
   the `<C3_COMMIT>` placeholder above with the actual C3 SHA;
   fixes any drift in subsidiary doc/test header counts; mirrors
@@ -451,12 +468,9 @@ Slice 3a variants' coverage in the pre-Slice-3a corpus
 | `PeriodTenDays` | `ДЕКАДА`        | ✓ entry 050 (`ДЕКАДА`)                          | `TENDAYS`    | ❌ MISSING                                   |
 | `PeriodHalfYear`| `ПОЛУГОДИЕ`     | ✓ entry 050 (`ПОЛУГОДИЕ`)                       | `HALFYEAR`   | ❌ MISSING                                   |
 
-Six bilingual blind spots (one per row marked ❌) require corpus
-gap-fill at C0b. The C0b commit adds three thematic entries
-(071–073) closing all six blind spots, with three reserved slots
-(074–076) held until C0b finalization in case the codex C0b review
-pass surfaces additional bilingual edge cases (e.g., `БУЛЕВО` in
-`<Значение>` predicate position vs CAST type-slot context):
+Six bilingual blind spots (one per row marked ❌) required corpus
+gap-fill at C0b. The C0b commit (`f6fcdc2e`) added three thematic
+entries (071–073) closing all six blind spots:
 
 - **071** Slice-3a primitive types russian — covers `БУЛЕВО`,
   `СТРОКА`, `ДАТА` in CAST type-slot context (`ВЫРАЗИТЬ(... КАК
@@ -466,13 +480,10 @@ pass surfaces additional bilingual edge cases (e.g., `БУЛЕВО` in
 - **073** Slice-3a period types english — covers `TENDAYS`,
   `HALFYEAR` in TOTALS BY period-list context.
 
-The minimum gap-fill volume is three entries (071–073), which closes
-all six audit-confirmed blind spots. Reserved slots 074–076 are
-optional headroom; if the codex C0b review pass approves the
-071–073 batch unchanged, slots 074–076 collapse and the final
-attestation §Scope entry-range tightens from `071–076 (claimed
-upper bound)` to `071–073 (final landed range)` at the C0b
-post-commit pinning.
+The C0a-reserved slots 074–076 collapsed unused — the codex C0b
+review approved the 071–073 batch unchanged and the three landed
+entries close all six audit-confirmed blind spots. The final
+landed range is **071–073**.
 
 ## Licensing note
 

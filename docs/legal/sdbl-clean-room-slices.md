@@ -172,11 +172,27 @@ FROM) where converter edits are in scope.
 
 ## Slice 3: metadata object and type vocabulary
 
+The original Slice 3 scope (metadata object names + type literals +
+period names — 22 lexer variants total) was split into two
+sub-slices by the codex pair-mode plan-review (2026-05-07):
+
+- **Slice 3a** owns the seven variants whose canonical SDBL
+  grammar attestation in v8327doc Глава 8 «Работа с запросами» is
+  unambiguous and direct (4 primitive type literals,
+  `LitUndefined`, 2 narrow `Period*` keywords). Status: complete
+  (2026-05-07) — see §Slice 3a below.
+- **Slice 3b** owns the 14 metadata-object variants (`Mdo*`
+  excluding `MdoExternalDataSource`) which require a per-variant
+  discrepancy audit to determine the right tier classification per
+  variant. Status: pending.
+- The platform-late `MdoExternalDataSource` variant is deferred to
+  master-doc Slice 5, which already owns external-source handling.
+
 ### Goal
 
 Separate the most provenance-sensitive catalogs into their own owned tables.
 
-### Scope
+### Scope (original)
 
 - metadata object names
 - type literals
@@ -1003,6 +1019,105 @@ KwPeriods regex flip parser-tree-invariant.
 Codex pair-mode review pass: 2 plan-review rounds + 1 C0a
 document review + 1 post-edit consistency verification + 1 C2
 review; 0 BLOCKER, 4 STRONG (all addressed inline), 6+ VERIFIED.
+
+## Slice 3a: primitive types, undefined literal, narrow period vocabulary (lexer)
+
+**Status: complete (2026-05-07).** See
+[`sdbl-clean-room-slice3a.md`](sdbl-clean-room-slice3a.md) for the
+attestation. Commit trail: C0a `51f17fff`, C0b `f6fcdc2e`, C1
+`297b529f`, C2 `077ae770`, C3 landed with the attestation.
+
+Slice 3a is the first sub-slice carved out of master-doc Slice 3
+per the codex pair-mode plan-review (2026-05-07). It claims the
+seven lexer variants whose canonical SDBL grammar attestation in
+v8327doc Глава 8 «Работа с запросами» is unambiguous and direct:
+the four primitive type literals (`Булево / Boolean`,
+`Число / Number`, `Строка / String`, `Дата / Date`), the
+`Неопределено / UNDEFINED` literal, and the two narrow period-type
+keywords carried as dedicated lexer tokens (`Декада / TENDAYS`,
+`Полугодие / HALFYEAR`). The remaining 14 `Mdo*` variants are
+claimed by Slice 3b (separate clean-room arc, pending); the
+platform-late `MdoExternalDataSource` is deferred to master-doc
+Slice 5 (which already owns external-source handling).
+
+The slice carries **no behaviour change**: the C0a discrepancy
+audit (named explicitly per codex pair-mode plan-review STRONG
+finding to forestall a KwPeriods-style regex defect from
+recurring) found zero defects in the seven `#[regex]` bodies. The
+seven attribute texts are byte-identical to pre-Slice-3a; only
+banner placement, per-variant provenance docstrings, the thematic
+convenience index, and the cross-references to Slice 2-addendum's
+`KwType` and `KwPeriods` are new. The byte-identity golden corpus
+(`crates/lexer/tests/sdbl_golden_corpus.rs`) gates the PRESERVE-
+shape conclusion.
+
+### Scope
+
+- 7 lexer token variants in `crates/lexer/src/sdbl/mod.rs`:
+  `TypeBoolean`, `TypeNumber`, `TypeString`, `TypeDate`,
+  `LitUndefined`, `PeriodTenDays`, `PeriodHalfYear`. All 7
+  classified Tier A1 with v8327doc Глава 8 as the primary
+  canonical SDBL grammar source per the attestation § Per-variant
+  tier source map.
+
+### Files
+
+- `crates/lexer/src/sdbl/mod.rs` — the new
+  `CLEAN-ROOM Slice 3a — primitive types, undefined literal,
+  narrow period vocabulary` banner (7 `#[regex]` declarations
+  with per-variant v8327doc Глава 8 provenance docstrings + the
+  thematic convenience index + cross-reference paragraph for
+  `KwType` / `KwPeriods`). The file-level `## Provenance`
+  docstring carries a fourth bullet for the Slice 3a scope. The
+  residual `LEGACY` banner header text shrinks from
+  `LEGACY (Slices 3, 4, 5 pending — metadata / function /
+  virtual-table vocabularies)` to
+  `LEGACY (Slices 3b, 4, 5 pending — Mdo*/function/virtual-table
+  vocabularies + ExternalDataSource)`.
+- `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` — three
+  thematic Slice 3a corpus entries (071–073) closing the six
+  bilingual blind spots surfaced by the attestation's Pre-C0b
+  corpus coverage audit (RU spellings of `БУЛЕВО`, `СТРОКА`,
+  `ДАТА`; EN spellings of `UNDEFINED`, `TENDAYS`, `HALFYEAR`).
+- `crates/lexer/tests/sdbl_golden_corpus.rs` — snapshot
+  regenerated at C0b.
+- `crates/lexer/tests/sdbl_slice3a_types.rs` — new acceptance
+  test file born at C3 with 25 spec-driven tests: 14 bilingual
+  EN+RU canonical-form pins (7 variants × 2 spellings), 1 case-
+  insensitivity sweep, 9 structural integration tests (4 CAST
+  type-slot, 2 TYPE() expression, 1 LitUndefined / LitNull
+  predicate-position asymmetry, 2 TOTALS BY PERIODS period-type
+  slot), 1 keyword-prefix Ident longest-match guard.
+- `docs/legal/sdbl-clean-room-slice3a.md` — Slice 3a clean-room
+  attestation (this slice's anchor document).
+
+### Notes
+
+The slice is a **lexer-only** clean-room — parser-side files
+(`crates/parser/src/grammar/sdbl/**`, `crates/sdbl-hir/**`) are
+not modified. The converter at
+`crates/parser/src/sdbl_token_converter.rs` already maps the seven
+Slice 3a variants onto their downstream parser kinds (`Type*`,
+`LitUndefined`, `Period*` get individual `KwBoolean / KwNumber /
+KwString / KwDate / KwUndefined / KwTenDays / KwHalfYear` mappings
+or fall through to `Ident`); none of those mappings change. The
+LitUndefined / LitNull asymmetry recorded in the C2 LitUndefined
+docstring (`LitNull → Ident` with `at_keyword("NULL")` text probe;
+`LitUndefined → KwUndefined` dedicated kind) is a pre-existing
+converter property — Slice 3a documents it but does not modify it.
+
+The Pre-existing parser-side stale-classification follow-up
+documented in the Slice 2-addendum attestation
+([`sdbl-clean-room-slice2-addendum.md`](sdbl-clean-room-slice2-addendum.md)
+§ Pre-existing parser-side stale-classification follow-up) is
+explicitly out of scope for Slice 3a — the same out-of-scope
+boundary applies as the Slice 2-addendum precedent. The follow-up
+remains a separate parser-only commit candidate.
+
+Codex pair-mode review pass: 2 plan-review rounds + 1 C0a
+document review + 1 C2 source review; 1 BLOCKER (LitUndefined
+converter mapping claim — addressed inline before C2 commit), 4
+STRONG (all addressed inline), multiple VERIFIED.
 
 ## Slice 12: recovery and IDE allowances
 
