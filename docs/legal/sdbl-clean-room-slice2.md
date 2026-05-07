@@ -38,14 +38,17 @@ The paths claimed as clean-room Slice 2 authorship are:
 - `crates/lexer/tests/sdbl_slice2_keywords.rs` — the new
   spec-driven acceptance test file.
 
-The `LEGACY (Slices 3–5 pending)` section of `SdblTokenKind`
-(`KwDrop`, `KwAutoOrder`, `KwAsc`, `KwDesc`, `KwHierarchy`,
-`KwAllowed`, `KwFor`, `KwUpdate`, `KwIndex`, `KwOnly`, `KwOverall`,
-`KwPeriods`, `KwEscape`, `KwRefs`, `KwCast`, `KwType`, `KwValue`,
-`Fn*`, `Mdo*`, `Vt*`, `Type*`, `LitUndefined`, `Period*`, and the
-`Error` fallback) remains explicitly **not** covered by this
-attestation; those variants stay Tier B and will be re-derived by
-Slices 3, 4, and 5.
+The original `LEGACY (Slices 3–5 pending)` section of `SdblTokenKind`
+remained explicitly **not** covered by this Slice 2 attestation. The
+17 clause-keyword variants from that legacy block (`KwDrop`,
+`KwAutoOrder`, `KwAsc`, `KwDesc`, `KwHierarchy`, `KwAllowed`,
+`KwFor`, `KwUpdate`, `KwIndex`, `KwOnly`, `KwOverall`, `KwPeriods`,
+`KwEscape`, `KwRefs`, `KwCast`, `KwType`, `KwValue`) were claimed
+clean-room by the **Slice 2-addendum** (landed 2026-05-07; see
+[`sdbl-clean-room-slice2-addendum.md`](sdbl-clean-room-slice2-addendum.md)).
+The remaining LEGACY-block variants (`Fn*`, `Mdo*`, `Vt*`, `Type*`,
+`LitUndefined`, `Period*`, and the `Error` fallback) stay Tier B and
+will be re-derived by Slices 3, 4, and 5.
 
 Downstream files that consume SDBL tokens
 (`crates/parser/src/lib.rs`, `crates/parser/src/sdbl_token_converter.rs`,

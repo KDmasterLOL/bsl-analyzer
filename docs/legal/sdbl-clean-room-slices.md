@@ -900,6 +900,110 @@ policy; prior slices retain their pre-policy citation form.
 - `crates/parser/tests/sdbl_slice8_addendum_virtual_table_args.rs`
   — 16 spec-driven acceptance tests added in C3.
 
+## Slice 2-addendum: clause keyword leftovers (lexer)
+
+**Status: complete (2026-05-07).** See
+[`sdbl-clean-room-slice2-addendum.md`](sdbl-clean-room-slice2-addendum.md)
+for the attestation. Commit trail: C0a `7a6baf09`, C0b `768704a6`,
+C1 `9f535e0d`, C2 `4e615e95`, C3 landed with the attestation.
+
+The Slice 2-addendum is a deferred follow-up to the Slice 2 lexer
+clean-room (which landed 2026-04-24 and explicitly excluded the
+long-tail clause keywords from its `CLEAN-ROOM Slice 2 — structural
+keyword vocabulary` banner). The addendum re-authors 17 clause-level
+keyword variants under a new `CLEAN-ROOM Slice 2-addendum — clause
+keyword leftovers` banner in `crates/lexer/src/sdbl/mod.rs`,
+attaches per-variant ITS provenance comments citing v8327doc Глава 8
+plus pubqlang corroborating chapters (16, 17, 27, 31, 39, 40, 51,
+73, 96), and shrinks the residual `LEGACY` banner header from
+`LEGACY (Slices 3–5 pending)` to
+`LEGACY (Slices 3, 4, 5 pending — metadata / function /
+virtual-table vocabularies)`. The remaining LEGACY surface after
+this addendum is the `Mdo*` (Slice 3) + `Type*` (Slice 3) +
+`LitUndefined` (Slice 3) + `Period*` (Slice 3) + `Fn*` (Slice 4) +
+`Vt*` (Slice 5) + `Error` fallback families — no clause-shaped
+keywords remain.
+
+The addendum landed one MANDATORY behaviour-change fix: KwPeriods'
+Russian regex alternation was corrected from the pre-addendum
+nominative-case `ПЕРИОДЫ` to the canonical instrumental-case
+`ПЕРИОДАМИ` per v8327doc Глава 8 bilingual word-list +
+canonical EBNF + canonical example. Parser-tree-invariant: the
+token converter at
+`crates/parser/src/sdbl_token_converter.rs` already maps
+`KwPeriods → TokenKind::Ident` and Slice 11 explicitly defers
+structured PERIODS handling to Slice 12, so no observable
+parse-tree shape changes today. See attestation § Behaviour
+change for the full Option A decision rationale.
+
+The addendum does NOT touch parser-side rustdoc Tier-D
+classifications for FOR UPDATE / INDEX BY at
+`crates/parser/src/grammar/sdbl/select.rs:1292-1297, 1349-1352`
+or in `docs/legal/sdbl-select-mini-spec.md:759-789`; those
+classifications are stale (they predate v8327doc landing in
+Slice 7-addendum 2026-04-26, which now Tier-A1-attests both
+clauses) and should be flipped in a separate parser-only
+follow-up commit. See attestation § Pre-existing parser-side
+stale-classification follow-up.
+
+### Scope
+
+- 17 lexer token variants in `crates/lexer/src/sdbl/mod.rs`:
+  `KwDrop`, `KwAutoOrder`, `KwAsc`, `KwDesc`, `KwHierarchy`,
+  `KwAllowed`, `KwFor`, `KwUpdate`, `KwIndex`, `KwOnly`,
+  `KwOverall`, `KwPeriods`, `KwEscape`, `KwRefs`, `KwCast`,
+  `KwType`, `KwValue`. All 17 classified Tier A1 with v8327doc
+  Глава 8 as the primary canonical SDBL grammar source per the
+  attestation § Per-variant tier source map.
+
+### Files
+
+- `crates/lexer/src/sdbl/mod.rs` — the new
+  `CLEAN-ROOM Slice 2-addendum — clause keyword leftovers`
+  banner (17 `#[regex]` declarations with per-variant ITS
+  provenance docstrings + thematic convenience index). The
+  file-level `## Provenance` docstring carries a fourth bullet
+  for the Slice 2-addendum scope. The residual `LEGACY` banner
+  header text is shrunk to enumerate the per-slice ownership of
+  remaining tokens.
+- `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` — 13
+  thematic Slice 2-addendum corpus entries (058–070) covering
+  the 13 Russian spelling blind spots + 3 English gap-fillers;
+  entry 040 byte-string updated from `ПЕРИОДЫ` to canonical
+  `ПЕРИОДАМИ` at C2.
+- `crates/lexer/tests/sdbl_golden_corpus.rs` — snapshot
+  regenerated at C0b (16-variant gap-fill) and C2 (KwPeriods
+  byte-string flip).
+- `crates/lexer/tests/sdbl_slice2_keywords.rs` — 13 RU
+  Bucket-A regression-gate tests added at C0b (count 30 → 43).
+- `crates/lexer/tests/sdbl_slice2_addendum_clause_keywords.rs`
+  — new acceptance test file born at C2 with 3 KwPeriods
+  regression gates (canonical / English / legacy-misspelling-
+  now-Ident); expanded at C3 to 30 spec-driven acceptance
+  tests covering bilingual EN+RU pairing for 16 variants
+  (KwPeriods covered by the regression gates), a case-
+  insensitivity sweep, 9 structural integration tests
+  exercising addendum keywords in realistic SDBL clause
+  fragments, and 1 keyword-prefix Ident longest-match guard.
+- `docs/legal/sdbl-clean-room-slice2-addendum.md` — Slice
+  2-addendum clean-room attestation (this addendum's anchor
+  document).
+- `docs/legal/sdbl-clean-room-slice2.md` — Slice 2 attestation
+  § Scope flipped at C3 to acknowledge the addendum claim of
+  the 17 clause-keyword variants.
+
+### Notes
+
+The addendum is a **lexer-only** clean-room. Parser-side files
+(`crates/parser/src/grammar/sdbl/**`, `crates/sdbl-hir/**`) and
+their existing rustdoc Tier classifications are not modified;
+the converter mapping `KwPeriods → TokenKind::Ident` keeps the
+KwPeriods regex flip parser-tree-invariant.
+
+Codex pair-mode review pass: 2 plan-review rounds + 1 C0a
+document review + 1 post-edit consistency verification + 1 C2
+review; 0 BLOCKER, 4 STRONG (all addressed inline), 6+ VERIFIED.
+
 ## Slice 12: recovery and IDE allowances
 
 ### Goal

@@ -2,7 +2,7 @@
 
 ## Status
 
-C0a draft (2026-05-07). Not yet landed.
+Complete (landed 2026-05-07).
 
 The Slice 2-addendum is a deferred follow-up to the Slice 2 lexer
 clean-room (which landed 2026-04-24 and explicitly excluded the
@@ -458,35 +458,37 @@ baseline measured at C0a (2026-05-07) on `develop` branch tip
 4. `cargo test -p lexer --test sdbl_slice2_addendum_clause_keywords`
    — new test file. Per Slice 7-addendum / Slice 8-addendum
    precedent (gap-tests in EXISTING test file at C0b, new
-   acceptance file at C3) the file is **born at C2** with the 3
+   acceptance file at C3) the file was **born at C2** with the 3
    KwPeriods regression-gate tests landing alongside the regex
    fix (canonical / English / legacy-misspelling-now-Ident). C3
-   expands the file into the spec-driven acceptance suite
-   covering all 17 variants in both EN and RU spellings.
-   Per-phase counts:
+   expanded the file into the spec-driven acceptance suite
+   covering all 17 variants. Per-phase counts:
    - C0a: file does not exist (count 0).
    - C0b: file does not exist (count 0).
    - C1: file does not exist (count 0).
    - C2: 3 tests (KwPeriods regression gates).
-   - C3: final count to be pinned at C3 authoring time;
-     planning estimate is 17–37 tests depending on whether
-     acceptance coverage is one-test-per-variant or
-     per-variant-per-spelling.
+   - C3: 30 tests — 3 KwPeriods regression gates + 16
+     bilingual EN+RU variant pairs (KwPeriods covered by the
+     regression gates) + 1 case-insensitivity sweep + 9
+     structural integration tests (DROP-in-batch,
+     ORDER-BY-with-modifiers, TOTALS-PERIODS-canonical,
+     FOR-UPDATE, INDEX-BY, LIKE-ESCAPE, REFS, CAST, VALUE) + 1
+     keyword-prefix Ident longest-match guard.
 5. `cargo test -p lexer` — full lexer suite, pre-addendum
    baseline 132 tests (65 lib unit tests in `src/` + 1
    `sdbl_golden_corpus` + 34 `sdbl_slice1_core` + 30
    `sdbl_slice2_keywords` + 2 doc-tests). Per-phase deltas:
-   - C0b adds Bucket-A gap tests to `sdbl_slice2_keywords.rs`
-     covering the 13 RU spelling blind spots (variants currently
-     EN-only in the corpus per §Pre-C0b corpus coverage audit).
-     Lexer suite: 132 → 145 (final count to be pinned at C0b).
-   - C2 creates `sdbl_slice2_addendum_clause_keywords.rs` with
-     3 regression gates (lexer suite 145 → 148) and updates the
-     line 80 corpus entry plus the line 484 expectation
-     in-place (golden_corpus test count stays at 1).
-   - C3 expands `sdbl_slice2_addendum_clause_keywords.rs` to
-     the full acceptance suite. Final lexer suite count to be
-     pinned at C3.
+   - C0b: Bucket-A RU gap tests added to
+     `sdbl_slice2_keywords.rs` (`sdbl_slice2_keywords` count
+     30 → 43). Lexer suite: 132 → 145.
+   - C2: `sdbl_slice2_addendum_clause_keywords.rs` created with
+     3 regression gates; line 80 corpus entry + line 484
+     expectation updated in-place (golden_corpus test count
+     stays at 1). Lexer suite: 145 → 148.
+   - C3: `sdbl_slice2_addendum_clause_keywords.rs` expanded
+     from 3 → 30 tests. Lexer suite: 148 → 175 (65 lib + 1
+     golden_corpus + 34 slice1 + 30 slice2_addendum + 43
+     slice2_keywords + 2 doc-tests).
 6. `cargo test -p parser` — full parser suite (regression gate;
    no parser changes expected). Per-file pre-addendum baseline:
    `sdbl_parser_tests` 204, `sdbl_slice6_package` 26,
@@ -547,7 +549,7 @@ baseline measured at C0a (2026-05-07) on `develop` branch tip
 
 ## Commit trail
 
-- `<C0a_COMMIT>` (2026-05-07) — C0a: this attestation document
+- `7a6baf09` (2026-05-07) — C0a: this attestation document
   created with full §Scope, §Per-variant tier source map,
   §Behaviour change (KwPeriods regex defect — Option A
   decision), §C2 priority assertion, §Pre-existing parser-side
@@ -557,7 +559,7 @@ baseline measured at C0a (2026-05-07) on `develop` branch tip
   Option-A verdict for KwPeriods regex fix recorded in
   §Behaviour change. No production-code changes; no test
   changes (those land in C0b).
-- `<C0b_COMMIT>` (TBD) — C0b: 13 RU Bucket-A gap-test functions
+- `768704a6` (2026-05-07) — C0b: 13 RU Bucket-A gap-test functions
   added to `crates/lexer/tests/sdbl_slice2_keywords.rs` covering
   the RU spelling blind spots (`sdbl_slice2_keywords` count 30 →
   43). 13 thematic corpus entries added to
@@ -570,7 +572,7 @@ baseline measured at C0a (2026-05-07) on `develop` branch tip
   canonical-spelling flip to `ПЕРИОДАМИ` lands at C2 alongside
   the regex fix. No production-code changes; no new test files
   (per Slice 7/8-addendum precedent).
-- `<C1_COMMIT>` (TBD) — C1: pure-refactor relocation of the 17
+- `9f535e0d` (2026-05-07) — C1: pure-refactor relocation of the 17
   `#[regex(...)]` declarations out of the
   `LEGACY (Slices 3–5 pending)` block into a new
   `CLEAN-ROOM Slice 2-addendum — clause keyword leftovers`
@@ -582,7 +584,7 @@ baseline measured at C0a (2026-05-07) on `develop` branch tip
   bullet (no attestation citation per forward-reference
   prohibition; flipped to "complete" in C3). This commit is the
   safe revert boundary for the clean-room rewrite.
-- `<C2_COMMIT>` (TBD) — C2: re-author the 17 Slice 2-addendum
+- `4e615e95` (2026-05-07) — C2: re-author the 17 Slice 2-addendum
   variant regex bodies and per-variant docstrings from
   v8327doc Глава 8 + corroborating pubqlang chapters + the
   C0a-extended attestation; attach one per-variant provenance

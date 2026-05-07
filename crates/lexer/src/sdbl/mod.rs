@@ -25,16 +25,13 @@
 //!   (TRUE / FALSE / NULL). Attested in
 //!   `docs/legal/sdbl-clean-room-slice2.md`.
 //!
-//! - **Slice 2-addendum — clean-room (in progress).** Long-tail
-//!   clause keywords excluded from Slice 2's scope: DROP / AUTOORDER /
-//!   ASC / DESC / HIERARCHY / ALLOWED / FOR / UPDATE / INDEX / ONLY /
-//!   OVERALL / PERIODS / ESCAPE / REFS / CAST / TYPE / VALUE.
-//!   Re-derived from v8327doc Глава 8 «Работа с запросами» (the
-//!   canonical SDBL grammar specification) with pubqlang
-//!   corroborating examples. Status: C1 banner relocate + C2
-//!   clean-room regex rewrite with per-variant provenance + KwPeriods
-//!   canonical-spelling fix landed; C3 attestation finalisation
-//!   pending.
+//! - **Slice 2-addendum — clean-room.** Long-tail clause keywords
+//!   excluded from Slice 2's scope: DROP / AUTOORDER / ASC / DESC /
+//!   HIERARCHY / ALLOWED / FOR / UPDATE / INDEX / ONLY / OVERALL /
+//!   PERIODS / ESCAPE / REFS / CAST / TYPE / VALUE. Re-derived from
+//!   v8327doc Глава 8 «Работа с запросами» (the canonical SDBL
+//!   grammar specification) with pubqlang corroborating examples.
+//!   Attested in `docs/legal/sdbl-clean-room-slice2-addendum.md`.
 //!
 //! - **Slices 3–5 — pending.** Built-in functions, metadata-object
 //!   tokens, virtual-table tokens, type literals, the UNDEFINED
