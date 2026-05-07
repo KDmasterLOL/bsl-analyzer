@@ -47,6 +47,8 @@ use bsl_platform::{PlatformData, PlatformMethod};
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 
+use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
+
 /// Result of a successful method lookup.
 ///
 /// `params` holds the typed parameter list — empty `Vec` means "method
@@ -298,7 +300,7 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
 /// - `return_type = Some("РезультатЗапроса, Неопределено")` — comma-joined
 ///   union strings emitted by the HBK scraper when a method returns one of
 ///   several types (happy-path + null sentinel). Split on `,`, map each
-///   segment via `resolve_platform_type_name`, and feed the list to
+///   segment via `lower_platform_type_name`, and feed the list to
 ///   `Ty::union` so chained calls see `Ty::Union([QueryResult, Undefined])`
 ///   instead of a poisoned `Ty::PlatformObject("... ,Неопределено")`.
 /// - `return_type = None` → procedure; `Ty::Undefined`.
@@ -309,13 +311,13 @@ pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     let return_ty = method
         .return_type
         .as_ref()
-        .map(|ret| resolve_platform_type_union(ret))
+        .map(|ret| lower_return_type_string(ret))
         .unwrap_or(Ty::Undefined);
 
     let params: Vec<Ty> = method
         .parameters
         .iter()
-        .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
+        .map(|p| p.param_type.as_ref().map(|t| lower_param_type_string(t)).unwrap_or(Ty::Unknown))
         .collect();
 
     // Per-overload param lists for multi-overload methods
@@ -326,41 +328,6 @@ pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     MethodInfo { return_ty, params, overloads }
 }
 
-/// Lower a platform-method `param_type` string to a [`Ty`].
-///
-/// **Asymmetric with return-type lowering, on purpose.** Returns route
-/// through [`resolve_platform_type_union`] so chained receivers carry
-/// every possible shape (e.g. `Запрос.Выполнить()` →
-/// `Ty::Union([QueryResult, Undefined])`). Params live on the **left**
-/// of `is_assignable` checks at the call site, where structural
-/// equality on `Ty::PlatformObject` would false-fire on legitimate
-/// looser actuals — so we keep gradual-typing (`Ty::Unknown`)
-/// reachable.
-///
-/// Three cases, matching what BSL's loose param semantics expect:
-///
-/// 1. **Single recognised primitive / collection** (`"Строка"`,
-///    `"ТаблицаЗначений"`, …): `Ty::from_type_name` lowers to the
-///    canonical variant (`Ty::String`, `Ty::ValueTable`, …).
-/// 2. **Single unrecognised name** (`"Строка табличной части"`,
-///    `"Произвольный"`): stays `Ty::Unknown`. Gradual typing
-///    (`Unknown ≤ A`) accepts any actual — mirrors the pre-fix
-///    `Ty::from_type_name` behaviour and keeps cross-section transfers
-///    (`ТЧ1.Индекс(ТЧ2.Получить(0))`) and `Undefined`-tolerant unions
-///    (`ТЧ.Индекс(ТЧ.Найти(…))`) quiet.
-/// 3. **Comma-joined string with EVERY segment a recognised type** —
-///    the headline fix. `"Число, Строка, КолонкаТаблицыЗначений"` lowers
-///    to `Ty::union([Number, String, PlatformObject("…")])` so
-///    `ТаблицаЗначений.ВыгрузитьКолонку(<Колонка>)` accepts every
-///    legitimate variant. `is_assignable` distributes correctly over a
-///    right-side `Ty::Union`.
-///
-/// Comma-joined strings where any segment fails validation
-/// (`"Ссылка на объект, либо"`, `"Метаданные,"`) collapse to
-/// `Ty::Unknown` — they are prose-with-commas or scraper garbage, not
-/// a real type list, and routing them through `resolve_platform_type_union`
-/// would lift the whole raw string to a strict `Ty::PlatformObject` and
-/// false-fire `TypeMismatch`.
 /// Lower per-variant parameter lists for multi-overload methods.
 ///
 /// Mirrors [`to_method_info`]'s overload computation but exposed as a
@@ -381,30 +348,12 @@ pub(crate) fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
         .map(|v| {
             v.parameters
                 .iter()
-                .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
+                .map(|p| {
+                    p.param_type.as_ref().map(|t| lower_param_type_string(t)).unwrap_or(Ty::Unknown)
+                })
                 .collect()
         })
         .collect()
-}
-
-pub(crate) fn lower_param_type(raw: &str) -> Ty {
-    if !raw.contains(',') {
-        return Ty::from_type_name(raw);
-    }
-
-    // Multi-segment: only treat as a union when EVERY segment is a
-    // recognised type. `is_arbitrary_type_name` collapses BSL's
-    // "any value" placeholder anywhere in the list back to
-    // `Ty::Unknown` (delegated to `resolve_platform_type_union`).
-    let segments: Vec<&str> = raw.split(',').map(str::trim).collect();
-    let all_valid = !segments.is_empty()
-        && segments.iter().all(|seg| !seg.is_empty() && segment_is_valid_type(seg));
-
-    if all_valid {
-        resolve_platform_type_union(raw)
-    } else {
-        Ty::Unknown
-    }
 }
 
 /// Build a `MethodInfo` from a `PlatformData["Tabular section"]` entry,
@@ -439,8 +388,7 @@ pub(crate) fn build_tabular_section_method_info(
         .return_type
         .as_ref()
         .map(|ret| {
-            let lowered =
-                rewrite_row_generic(resolve_platform_type_union(ret), parent, section_name);
+            let lowered = rewrite_row_generic(lower_return_type_string(ret), parent, section_name);
             // Methods like `НайтиСтроки` / `FindRows` carry a HBK return
             // string of `"Массив"` with no element-type schema — the
             // platform JSON has no slot for typed-array witnesses. The
@@ -455,14 +403,19 @@ pub(crate) fn build_tabular_section_method_info(
         .unwrap_or(Ty::Undefined);
 
     // Same conservative param lowering as `to_method_info` — see
-    // [`lower_param_type`] for the multi-type-vs-single-type
+    // [`lower_param_type_string`] for the multi-type-vs-single-type
     // asymmetry rationale. We deliberately do NOT pipe through
     // `rewrite_row_generic` for params (function-doc on
     // `build_tabular_section_method_info` above explains why).
     let params: Vec<Ty> = method
         .parameters
         .iter()
-        .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t.as_str())).unwrap_or(Ty::Unknown))
+        .map(|p| {
+            p.param_type
+                .as_ref()
+                .map(|t| lower_param_type_string(t.as_str()))
+                .unwrap_or(Ty::Unknown)
+        })
         .collect();
 
     // Tabular-section methods can also be multi-overload
@@ -477,7 +430,7 @@ pub(crate) fn build_tabular_section_method_info(
                 .map(|p| {
                     p.param_type
                         .as_ref()
-                        .map(|t| lower_param_type(t.as_str()))
+                        .map(|t| lower_param_type_string(t.as_str()))
                         .unwrap_or(Ty::Unknown)
                 })
                 .collect()
@@ -553,74 +506,6 @@ fn is_row_array_method(name: &str) -> bool {
 fn is_tabular_row_type_name(name: &str) -> bool {
     let lc = name.to_lowercase();
     lc == "строка табличной части" || lc == "line of a tabular section"
-}
-
-/// Split a comma-joined platform type string into a `Ty::union(...)`.
-///
-/// Only comma-joined strings whose every segment resolves to a known structured
-/// type or sentinel are treated as a union. Free-prose commas fall back to a
-/// single raw platform object type.
-///
-/// If any segment is the BSL "any value" placeholder
-/// (`Произвольный` / `Arbitrary`), the whole result collapses to
-/// [`Ty::Unknown`]: the union "any value ∪ X" is degenerate, and routing
-/// it through `Ty::union([Unknown, X])` would not help — `is_assignable`
-/// distributes over a left-side union (see [`crate::subtype`]), so a
-/// concrete sibling like `Ty::Undefined` would still false-fire
-/// `TypeMismatch` against typed sinks. Mirrors the single-token early
-/// exit in [`resolve_platform_type_name`].
-fn resolve_platform_type_union(raw: &str) -> Ty {
-    let segments: Vec<&str> = raw.split(',').map(str::trim).collect();
-    if segments.iter().any(|segment| is_arbitrary_type_name(segment)) {
-        return Ty::Unknown;
-    }
-    if segments.iter().any(|segment| !segment_is_valid_type(segment)) {
-        resolve_platform_type_name(raw)
-    } else {
-        Ty::union(segments.into_iter().map(resolve_platform_type_name).collect())
-    }
-}
-
-fn segment_is_valid_type(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-
-    let ty = Ty::from_type_name(s);
-    !ty.is_unknown() || PlatformData::instance().get_type(s).is_some()
-}
-
-/// Map a platform type-name string to a `Ty`. Primitives / collections
-/// take their canonical variant; anything else becomes
-/// `Ty::PlatformObject` so fluent chains like
-/// `Запрос.Выполнить().Выбрать()` can continue resolving.
-///
-/// `"Произвольный"` / `"Arbitrary"` is the BSL spec's "any value"
-/// placeholder (`Константы.X.Получить()` returns it; `Найти(...)`
-/// accepts it) and must lower to [`Ty::Unknown`] so the gradual-typing
-/// rule in [`crate::subtype::is_assignable`] accepts the value in any
-/// typed slot. Without this early exit the catch-all below would lift
-/// it to `Ty::PlatformObject("Произвольный")` and structural equality
-/// against `String` / `Number` / etc. would false-fire `TypeMismatch`.
-pub(crate) fn resolve_platform_type_name(name: &str) -> Ty {
-    if is_arbitrary_type_name(name) {
-        return Ty::Unknown;
-    }
-    let ty = Ty::from_type_name(name);
-    if ty.is_unknown() {
-        Ty::PlatformObject(Name::new(name))
-    } else {
-        ty
-    }
-}
-
-/// Whether `name` is the BSL "any value" placeholder. Lowercase
-/// comparison so future scraper-emitted casing variants
-/// (`произвольный`) also match — `eq_ignore_ascii_case` would not
-/// fold Cyrillic.
-fn is_arbitrary_type_name(name: &str) -> bool {
-    let trimmed = name.trim();
-    trimmed.eq_ignore_ascii_case("Arbitrary") || trimmed.to_lowercase() == "произвольный"
 }
 
 #[cfg(test)]
@@ -763,46 +648,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_platform_type_union_collapses_arbitrary_segment_to_unknown() {
-        // BSL's "any value" placeholder anywhere in a comma-joined return
-        // string makes the whole union degenerate. Collapsing to
-        // `Ty::Unknown` keeps the gradual rule firing on typed sinks; a
-        // `Ty::union([Unknown, Undefined])` would *not* — `is_assignable`
-        // distributes on the left, and for any non-String typed sink
-        // (e.g. `НачалоДня(Дата - Дата)`) `Undefined ≤ Дата` is false,
-        // so `НачалоДня(LoadDefaultSetting())` would still false-fire
-        // `TypeMismatch`. (The bare `to == Ty::String` short-circuit in
-        // `subtype::is_coercible_to` masks this for String sinks
-        // specifically, but the collapse must hold for every typed sink,
-        // not just String.) Pinned platform entries: `LoadDefaultSetting`
-        // and the second `Произвольный, Неопределено` site in
-        // platform_data.json.
-        assert_eq!(resolve_platform_type_union("Произвольный, Неопределено"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_union("Неопределено, Произвольный"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_union("Arbitrary, Undefined"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_union("Undefined, Arbitrary"), Ty::Unknown);
-        // Whitespace folding around the placeholder.
-        assert_eq!(resolve_platform_type_union("  Произвольный  ,  Неопределено"), Ty::Unknown);
-    }
-
-    #[test]
-    fn resolve_platform_type_union_falls_back_for_prose_commas() {
-        assert_eq!(
-            resolve_platform_type_union("ТабличныйДокумент, ТекстовыйДокумент; другой объект"),
-            Ty::PlatformObject(Name::new("ТабличныйДокумент, ТекстовыйДокумент; другой объект",)),
-        );
-        assert_eq!(
-            resolve_platform_type_union("Ссылка на объект, либо"),
-            Ty::PlatformObject(Name::new("Ссылка на объект, либо")),
-        );
-        assert_eq!(
-            resolve_platform_type_union("Метаданные,"),
-            Ty::PlatformObject(Name::new("Метаданные,")),
-        );
-        assert_eq!(resolve_platform_type_union(", ,"), Ty::PlatformObject(Name::new(", ,")));
-    }
-
-    #[test]
     fn to_method_info_lowers_param_type_asymmetrically() {
         // Returns and params lower differently on purpose — see
         // [`lower_param_type`]. For garbage / scraper-prose with a
@@ -840,7 +685,7 @@ mod tests {
         // typing for SINGLE-name params whose name `Ty::from_type_name`
         // doesn't recognise — `Ty::Unknown` accepts any actual at the
         // call-site argument check. Routing this through
-        // `resolve_platform_type_union` would lift to a structural
+        // `lower_return_type_string` would lift to a structural
         // `PlatformObject`, falsely rejecting valid args.
         let info = to_method_info(&test_method(None, Some("Строка табличной части")));
         assert_eq!(info.params, vec![Ty::Unknown]);
@@ -865,24 +710,6 @@ mod tests {
             }
             other => panic!("expected single Ty::Union param, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn resolve_platform_type_name_arbitrary_collapses_to_unknown() {
-        // BSL's "any value" placeholder must lower to `Ty::Unknown` so the
-        // gradual-typing rule (`Unknown ≤ A`) accepts the value in any
-        // typed slot. Without this, `Константы.X.Получить()` (declared
-        // `return_type: "Произвольный"` in platform_data.json) would lift
-        // to `Ty::PlatformObject("Произвольный")` and false-fire
-        // `TypeMismatch` on every `ПустаяСтрока(...)` / `СтрДлина(...)` /
-        // assignment-to-typed-var sink.
-        assert_eq!(resolve_platform_type_name("Произвольный"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_name("произвольный"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_name("ПРОИЗВОЛЬНЫЙ"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_name("Arbitrary"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_name("arbitrary"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_name("ARBITRARY"), Ty::Unknown);
-        assert_eq!(resolve_platform_type_name("  Произвольный  "), Ty::Unknown);
     }
 
     #[test]

@@ -40,7 +40,8 @@ use bsl_platform::{PlatformData, PlatformProperty};
 use hir_def::ty::Ty;
 use hir_def::Name;
 
-use crate::method_lookup::{platform_type_key, resolve_platform_type_name};
+use crate::lower::type_string::lower_platform_type_name;
+use crate::method_lookup::platform_type_key;
 
 /// Result of a successful platform-property lookup.
 ///
@@ -114,7 +115,7 @@ pub(crate) fn lookup_platform_property_by_type(
 /// Convert a `PlatformProperty` into the semantic [`PlatformPropertyResolution`].
 ///
 /// Mirrors `method_lookup::to_method_info` in shape — same path through
-/// `resolve_platform_type_name` for each declared value type, then
+/// `lower_platform_type_name` for each declared value type, then
 /// `Ty::union` when the HBK page declared more than one (e.g.
 /// `МенеджерВременныхТаблиц, Неопределено`).
 pub(crate) fn to_resolution(prop: &PlatformProperty) -> PlatformPropertyResolution {
@@ -129,7 +130,7 @@ pub(crate) fn to_resolution(prop: &PlatformProperty) -> PlatformPropertyResoluti
 /// - **0 entries** — the HBK page didn't carry a `Тип:` marker. Return
 ///   `Ty::Unknown` so downstream inference doesn't claim a type we don't
 ///   actually know.
-/// - **1 entry** — direct `resolve_platform_type_name` call (the same
+/// - **1 entry** — direct `lower_platform_type_name` call (the same
 ///   mapper method returns use).
 /// - **2+ entries** — `Ty::union(...)` of each mapped type. Ensures the
 ///   TempTablesManager-style `"…, Неопределено"` declarations become
@@ -138,10 +139,10 @@ pub(crate) fn to_resolution(prop: &PlatformProperty) -> PlatformPropertyResoluti
 fn map_property_type_list(types: &[smol_str::SmolStr]) -> Ty {
     match types.len() {
         0 => Ty::Unknown,
-        1 => resolve_platform_type_name(types[0].as_str()),
+        1 => lower_platform_type_name(types[0].as_str()),
         _ => {
             let mapped: Vec<Ty> =
-                types.iter().map(|s| resolve_platform_type_name(s.as_str())).collect();
+                types.iter().map(|s| lower_platform_type_name(s.as_str())).collect();
             Ty::union(mapped)
         }
     }

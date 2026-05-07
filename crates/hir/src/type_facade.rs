@@ -27,6 +27,7 @@ use bsl_platform::{PlatformData, PlatformMethod};
 use hir_def::configs::ConfigsDatabase;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
+use hir_ty::lower::type_string::{lower_param_type_string, lower_return_type_string};
 use hir_ty::{
     enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldOrigin,
 };
@@ -387,33 +388,26 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
 }
 
 /// Convert a `PlatformMethod` into the facade's `Method` DTO.
+///
+/// Param / return types lower through the unified
+/// [`hir_ty::lower::type_string`] pipeline so the DTO stays consistent
+/// with what `lookup_method` produces (param-asymmetric gradual typing,
+/// `;`-separator-aware unions, `Произвольный` collapse).
 fn method_dto_from_platform(method: &PlatformMethod) -> Method {
     let params = method
         .parameters
         .iter()
         .map(|param| MethodParam {
             name: Name::new(param.name.as_str()),
-            ty: param.param_type.as_ref().map(|ty| resolve_platform_type_name(ty)),
+            ty: param.param_type.as_ref().map(|ty| lower_param_type_string(ty)),
             optional: param.is_optional,
         })
         .collect();
     Method {
         name: Name::new(method.name.as_str()),
         english_name: fallback_name(method.english_name.as_str(), method.name.as_str()),
-        return_ty: method.return_type.as_ref().map(|ret| resolve_platform_type_name(ret)),
+        return_ty: method.return_type.as_ref().map(|ret| lower_return_type_string(ret)),
         params,
-    }
-}
-
-/// Same fallback logic `method_lookup::resolve_platform_type_name` uses
-/// — primitives / collections via `Ty::from_type_name`, everything else
-/// becomes `Ty::PlatformObject(name)` so fluent chains survive.
-fn resolve_platform_type_name(name: &str) -> Ty {
-    let ty = Ty::from_type_name(name);
-    if ty.is_unknown() {
-        Ty::PlatformObject(Name::new(name))
-    } else {
-        ty
     }
 }
 
