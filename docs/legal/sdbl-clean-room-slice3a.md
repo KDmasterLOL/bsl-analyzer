@@ -430,8 +430,8 @@ silent test regressions:
   `LitNull → Ident` / `LitUndefined → KwUndefined` asymmetry per
   `crates/parser/src/sdbl_token_converter.rs:57,196` is now
   recorded explicitly in the LitUndefined docstring.
-- C3 (2026-05-07): this attestation flips from "in progress" to
-  "complete (2026-05-07)"; the new
+- `cd31ce71` (2026-05-07) — C3: this attestation flips from
+  "in progress" to "complete (2026-05-07)"; the new
   `crates/lexer/tests/sdbl_slice3a_types.rs` acceptance suite
   (25 tests) is born; the master-doc `sdbl-clean-room-slices.md`
   carries a new `## Slice 3a` section recording the Slice 3a
@@ -439,18 +439,16 @@ silent test regressions:
   docstring 4th bullet flips from "(in progress)" to "(complete,
   2026-05-07)" with attestation citation; the in-enum banner
   header `CLEAN-ROOM Slice 3a — ... (in progress)` flips to
-  `(complete, 2026-05-07)`. Commit SHA recorded by the
-  Anti-Hilbert close-out fixup that pins it explicitly in this
-  trail.
-- Anti-Hilbert close-out: a single trailing fixup commit replaces
-  the `<C3_COMMIT>` placeholder above with the actual C3 SHA;
-  fixes any drift in subsidiary doc/test header counts; mirrors
-  the Slice 2-addendum `c54aa4a7` close-out shape. The Anti-
-  Hilbert disclosure: this trailing commit's own SHA is NOT named
-  in this enumeration — it cannot be, by construction. The
-  Slice 1, 2, 6, 7, 8, 9, 10a, 10b, 11, Slice 7-addendum, Slice
-  8-addendum, and Slice 2-addendum attestations all share this
-  pattern.
+  `(complete, 2026-05-07)`.
+- Anti-Hilbert close-out: a single trailing fixup commit pins the
+  C3 SHA `cd31ce71` explicitly in the trail above and fixes any
+  drift in subsidiary doc/test header counts surfaced after C3
+  lands; mirrors the Slice 2-addendum `c54aa4a7` close-out shape.
+  The Anti-Hilbert disclosure: this trailing commit's own SHA is
+  NOT named in this enumeration — it cannot be, by construction.
+  The Slice 1, 2, 6, 7, 8, 9, 10a, 10b, 11, Slice 7-addendum,
+  Slice 8-addendum, and Slice 2-addendum attestations all share
+  this pattern.
 
 ## Pre-C0b corpus coverage audit
 
