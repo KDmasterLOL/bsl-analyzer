@@ -691,36 +691,125 @@ pub enum SdblTokenKind {
     // CLEAN-ROOM Slice 3a — primitive types, undefined literal, narrow period vocabulary (in progress)
     // ============================================================================
     //
-    // Per-variant provenance docstrings citing the v8327doc Глава 8
-    // bilingual word-list rows and the contextual EBNF / prose
-    // anchors land at C2, alongside the thematic convenience index
-    // (Type / Lit / Period sub-sections) and the cross-reference
-    // to `KwType` for the `Type*` variants. At C1 the seven Slice
-    // 3a variants are relocated out of the LEGACY block
-    // byte-for-byte; the C0a discrepancy audit
-    // (`docs/legal/sdbl-clean-room-slice3a.md` § C0a discrepancy
-    // audit) found zero regex defects, so no regex bodies are
-    // flipped here or at C2. Full per-variant tier source map and
-    // attestation live in
-    // `docs/legal/sdbl-clean-room-slice3a.md`.
+    // Every variant in this section carries an inline provenance
+    // comment citing the v8327doc Глава 8 «Работа с запросами»
+    // bilingual word-list row and a contextual EBNF / prose anchor
+    // for the variant's grammar role. Nothing in this block was
+    // copied from the pre-clean-room regex text or from any third-
+    // party SDBL lexer; the canonical SDBL grammar source is the
+    // v8.3.27 Developer's Reference Глава 8 «Работа с запросами»
+    // at <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>,
+    // with pubqlang chapters at
+    // <https://its.1c.ru/db/pubqlang/content/N/hdoc> providing
+    // corroborating prose. Full per-variant tier source map, the
+    // C0a discrepancy audit, and the verification recipe live in
+    // `docs/legal/sdbl-clean-room-slice3a.md`. The C0a audit found
+    // zero regex defects, so the seven `#[regex]` bodies below
+    // were not modified at C2 — only the per-variant docstrings,
+    // the thematic separators, and this convenience index are new
+    // in C2 relative to the C1 banner relocation.
+    //
+    // Convenience index (RUS / ENG → Variant — primary citation).
+    // The `#[regex]` attributes below are the single source of
+    // truth; this table is a scanning aid only.
+    //
+    //   Primitive type literals (4):
+    //     БУЛЕВО / BOOLEAN         → TypeBoolean    (CAST type slot 1; <Значение> typed-literal slot)
+    //     ЧИСЛО / NUMBER           → TypeNumber     (CAST type slot 2 with optional length+precision; <Литерал типа Число> EBNF)
+    //     СТРОКА / STRING          → TypeString     (CAST type slot 3 with optional length; <Литерал типа Строка> EBNF)
+    //     ДАТА / DATE              → TypeDate       (CAST type slot 4; <Литерал типа Дата> EBNF via ДАТАВРЕМЯ(...))
+    //
+    //   Undefined literal (1):
+    //     НЕОПРЕДЕЛЕНО / UNDEFINED → LitUndefined   (<Значение> grammar slot, companion to LitNull)
+    //
+    //   Narrow period-type keywords (2):
+    //     ДЕКАДА / TENDAYS         → PeriodTenDays  (ПЕРИОДАМИ(...) period-type slot 9 of 10)
+    //     ПОЛУГОДИЕ / HALFYEAR     → PeriodHalfYear (ПЕРИОДАМИ(...) period-type slot 10 of 10)
+    //
+    // Cross-references: the four `Type*` variants gate the
+    // `<Имя типа>` argument position of the `ТИП(<Имя типа>)`
+    // expression introduced by Slice 2-addendum's `KwType`. Both
+    // `Period*` variants gate the period-type-list argument of the
+    // `ПЕРИОДАМИ(...)` call introduced by Slice 2-addendum's
+    // `KwPeriods`.
+
+    // --- Primitive type literals ---
+
+    // v8327doc Глава 8 — primitive type literal: bilingual word-
+    // list БУЛЕВО ↔ BOOLEAN. Used as the first slot of the
+    // `<Тип значения>` production for the CAST operator
+    // (`ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`) and as a
+    // typed-literal type-tag in the `<Значение>` grammar via
+    // `типа Булево` prose. Cross-ref: `KwType` (Slice 2-addendum)
+    // for the `ТИП(Булево)` form.
     #[regex(r"(?i)булево|(?i)boolean")]
     TypeBoolean,
 
+    // v8327doc Глава 8 — primitive type literal: bilingual word-
+    // list ЧИСЛО ↔ NUMBER. CAST type slot
+    // `Число [(Длина[, Точность])]` accepts optional length and
+    // precision modifiers in parens; the standalone `<Литерал типа
+    // Число>` EBNF is `<Целое число>[.<Целое число>]`. Cross-ref:
+    // `KwType` for `ТИП(Число)`.
     #[regex(r"(?i)число|(?i)number")]
     TypeNumber,
 
+    // v8327doc Глава 8 — primitive type literal: bilingual word-
+    // list СТРОКА ↔ STRING. CAST type slot `Строка [(Длина)]`
+    // accepts an optional length modifier in parens; the
+    // standalone `<Литерал типа Строка>` EBNF is
+    // `"<Последовательность символов>"`. Cross-ref: `KwType` for
+    // `ТИП(Строка)`.
     #[regex(r"(?i)строка|(?i)string")]
     TypeString,
 
+    // v8327doc Глава 8 — primitive type literal: bilingual word-
+    // list ДАТА ↔ DATE. CAST type slot `Дата` (no length /
+    // precision modifiers); the standalone `<Литерал типа Дата>`
+    // EBNF uses the `ДАТАВРЕМЯ(<int>, <int>, <int>[, <int>, <int>,
+    // <int>])` constructor with year/month/day plus optional
+    // hour/minute/second. Cross-ref: `KwType` for `ТИП(Дата)`.
     #[regex(r"(?i)дата|(?i)date")]
     TypeDate,
 
+    // --- Undefined literal ---
+
+    // v8327doc Глава 8 — typed-undefined literal: bilingual
+    // word-list НЕОПРЕДЕЛЕНО ↔ UNDEFINED. Sits in the `<Значение>`
+    // EBNF production alongside ИСТИНА, ЛОЖЬ, the typed numeric /
+    // string / date literals, parameter literals, and NULL. The
+    // companion NULL literal is owned by Slice 2's `LitNull`. The
+    // converter at `crates/parser/src/sdbl_token_converter.rs`
+    // treats the two literals asymmetrically: `LitNull` maps to
+    // `TokenKind::Ident` (parser disambiguates by text via
+    // `at_keyword("NULL")`), while `LitUndefined` maps to a
+    // dedicated `TokenKind::KwUndefined` so the parser can match
+    // it directly without a text probe.
     #[regex(r"(?i)неопределено|(?i)undefined")]
     LitUndefined,
 
+    // --- Narrow period-type keywords ---
+
+    // v8327doc Глава 8 — TOTALS BY period-type literal: bilingual
+    // word-list ДЕКАДА ↔ TENDAYS. Slot 9 of the 10-element
+    // canonical period-type list inside `ПЕРИОДАМИ(<period-types>,
+    // <begin>, <end>)`. The full canonical list (per the TOTALS
+    // group EBNF and matching prose enumeration) is `Секунда |
+    // Минута | Час | День | Неделя | Месяц | Квартал | Год |
+    // Декада | Полугодие`; slots 1-8 are owned by `Fn*` tokens in
+    // the LEGACY block (function-side priority = 2 — they double
+    // as date/time function names). Cross-ref: `KwPeriods`
+    // (Slice 2-addendum) introduces the `ПЕРИОДАМИ` keyword.
     #[regex(r"(?i)декада|(?i)tendays")]
     PeriodTenDays,
 
+    // v8327doc Глава 8 — TOTALS BY period-type literal: bilingual
+    // word-list ПОЛУГОДИЕ ↔ HALFYEAR. Slot 10 (last) of the
+    // 10-element canonical period-type list inside
+    // `ПЕРИОДАМИ(<period-types>, <begin>, <end>)`. See
+    // `PeriodTenDays` above for the full canonical list and the
+    // `Fn*`-shadowing of slots 1-8. Cross-ref: `KwPeriods`
+    // (Slice 2-addendum) introduces the `ПЕРИОДАМИ` keyword.
     #[regex(r"(?i)полугодие|(?i)halfyear")]
     PeriodHalfYear,
 
