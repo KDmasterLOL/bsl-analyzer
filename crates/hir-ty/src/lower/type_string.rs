@@ -268,4 +268,59 @@ mod tests {
     fn lower_platform_type_name_primitive_returns_canonical() {
         assert_eq!(lower_platform_type_name("Число"), Ty::Number);
     }
+
+    /// Audit: walk every `;`-bearing `param_type` / `return_type` in the
+    /// loaded platform data and confirm a non-zero fraction now lowers
+    /// to a non-`Unknown` `Ty`. Plan §2.1 finalisation: the headline
+    /// `;`-activation fix turns previously-`Ty::Unknown` collapses into
+    /// real `Ty::Union`s for entries whose every segment is a registered
+    /// platform type.
+    ///
+    /// The test is intentionally robust against minor platform-data
+    /// drift: it asserts that **at least 1 entry** lowers to non-Unknown
+    /// rather than pinning an exact count. Pre-fix this number was
+    /// zero (every `;`-entry collapsed); post-fix it is positive.
+    #[test]
+    fn semicolon_separator_activation_audit() {
+        let data = PlatformData::instance();
+        if data.all_types().is_empty() {
+            // Some build environments ship without platform data; the
+            // unit-level tests above already pin the contract.
+            return;
+        }
+
+        let mut total = 0_usize;
+        let mut non_unknown = 0_usize;
+        for ty in data.all_types() {
+            for method in data.get_type_methods(&ty.name) {
+                for param in &method.parameters {
+                    if let Some(pt) = &param.param_type {
+                        if pt.contains(';') {
+                            total += 1;
+                            if !matches!(lower_param_type_string(pt), Ty::Unknown) {
+                                non_unknown += 1;
+                            }
+                        }
+                    }
+                }
+                if let Some(ret) = &method.return_type {
+                    if ret.contains(';') {
+                        total += 1;
+                        if !matches!(lower_return_type_string(ret), Ty::Unknown) {
+                            non_unknown += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            total > 0,
+            "Expected platform data to contain at least one `;`-bearing type string",
+        );
+        assert!(
+            non_unknown > 0,
+            "Expected `;`-activation to lower at least one entry to non-Unknown — got {non_unknown}/{total}",
+        );
+    }
 }
