@@ -25,12 +25,22 @@
 //!   (TRUE / FALSE / NULL). Attested in
 //!   `docs/legal/sdbl-clean-room-slice2.md`.
 //!
-//! - **Slices 3–5 — pending.** Remaining long-tail keywords,
-//!   built-in functions, metadata-object tokens, virtual-table tokens,
-//!   type literals, the UNDEFINED literal, period-type tokens, and
-//!   the logos error fallback. These remain as carried over from the
-//!   pre-clean-room implementation and will be re-derived by
-//!   subsequent slices.
+//! - **Slice 2-addendum — clean-room (in progress).** Long-tail
+//!   clause keywords excluded from Slice 2's scope: DROP / AUTOORDER /
+//!   ASC / DESC / HIERARCHY / ALLOWED / FOR / UPDATE / INDEX / ONLY /
+//!   OVERALL / PERIODS / ESCAPE / REFS / CAST / TYPE / VALUE.
+//!   Re-derived from v8327doc Глава 8 «Работа с запросами» (the
+//!   canonical SDBL grammar specification) with pubqlang
+//!   corroborating examples. Status: C1 banner relocate landed; C2
+//!   clean-room regex rewrite + per-variant provenance + KwPeriods
+//!   canonical spelling fix pending; C3 attestation finalisation
+//!   pending.
+//!
+//! - **Slices 3–5 — pending.** Built-in functions, metadata-object
+//!   tokens, virtual-table tokens, type literals, the UNDEFINED
+//!   literal, period-type tokens, and the logos error fallback.
+//!   These remain as carried over from the pre-clean-room
+//!   implementation and will be re-derived by subsequent slices.
 //!
 //! All variants share a single longest-match precedence space — the
 //! physical reordering below does not change matching semantics. A
@@ -467,66 +477,101 @@ pub enum SdblTokenKind {
     LitNull,
 
     // ============================================================================
-    // LEGACY (Slices 3–5 pending — not part of the clean-room claim)
+    // CLEAN-ROOM Slice 2-addendum — clause keyword leftovers (banner only at C1)
     // ============================================================================
     //
-    // The variants below are carried over unchanged from the
-    // pre-clean-room implementation. They remain Tier B material for
-    // the duration of the staged migration; the next slices will
-    // re-derive remaining long-tail keywords, built-in functions,
-    // metadata-object tokens, virtual tables, type literals, and
-    // period-type tokens from ITS documentation.
+    // The 17 long-tail clause-keyword variants below are claimed as
+    // clean-room authorship under the Slice 2-addendum scope:
+    // DROP / AUTOORDER / ASC / DESC / HIERARCHY / ALLOWED / FOR /
+    // UPDATE / INDEX / ONLY / OVERALL / PERIODS / ESCAPE / REFS /
+    // CAST / TYPE / VALUE. C1 (this commit) relocates the regex
+    // declarations out of the residual LEGACY banner under this
+    // banner without changing any regex bytes; C2 will re-author
+    // the regex bodies and per-variant docstrings from v8327doc
+    // Глава 8 and corroborating pubqlang chapters; C3 will land
+    // the attestation citation. Per-variant `// C1 placeholder —
+    // clean-room rewrite in C2` markers below are stripped at C2.
+
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)уничтожить|(?i)drop")]
     KwDrop,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)автоупорядочивание|(?i)autoorder")]
     KwAutoOrder,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)возр|(?i)asc")]
     KwAsc,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)убыв|(?i)desc")]
     KwDesc,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)иерархия|(?i)hierarchy")]
     KwHierarchy,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)разрешенные|(?i)allowed")]
     KwAllowed,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)для|(?i)for")]
     KwFor,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)изменения|(?i)update")]
     KwUpdate,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)индексировать|(?i)index")]
     KwIndex,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)только|(?i)only")]
     KwOnly,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)общие|(?i)overall")]
     KwOverall,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)периоды|(?i)periods")]
     KwPeriods,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)спецсимвол|(?i)escape")]
     KwEscape,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)ссылка|(?i)refs")]
     KwRefs,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)выразить|(?i)cast")]
     KwCast,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)тип|(?i)type")]
     KwType,
 
+    // C1 placeholder — clean-room rewrite in C2
     #[regex(r"(?i)значение|(?i)value")]
     KwValue,
 
+    // ============================================================================
+    // LEGACY (Slices 3, 4, 5 pending — metadata / function / virtual-table vocabularies)
+    // ============================================================================
+    //
+    // The variants below are carried over unchanged from the
+    // pre-clean-room implementation. They remain Tier B material
+    // for the duration of the staged migration; the next slices
+    // will re-derive built-in functions (Slice 4), metadata-object
+    // tokens (Slice 3), virtual-table tokens (Slice 5), type
+    // literals (Slice 3), the UNDEFINED literal (Slice 3), and
+    // period-type tokens (Slice 3) from ITS documentation. The
+    // `Error` fallback is the final clean-up step.
     #[regex(r"(?i)сумма|(?i)sum")]
     FnSum,
 
