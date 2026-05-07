@@ -138,3 +138,9 @@ SELECT 1 INTO #T; DROP #T
 SELECT 1 ORDER BY F AUTOORDER
 ---- 070 slice2-addendum periods english
 TOTALS SUM(X) BY OVERALL PERIODS(DAY, DATETIME(2024, 1, 1), &End)
+---- 071 slice3a primitive types russian
+ВЫРАЗИТЬ(X КАК БУЛЕВО) ВЫРАЗИТЬ(Y КАК СТРОКА(50)) ВЫРАЗИТЬ(Z КАК ДАТА)
+---- 072 slice3a undefined literal english
+SELECT * FROM T WHERE X = UNDEFINED OR Y <> UNDEFINED
+---- 073 slice3a period types english
+TOTALS SUM(X) BY PERIODS(TENDAYS, &S, &E), PERIODS(HALFYEAR, &T, &U)
