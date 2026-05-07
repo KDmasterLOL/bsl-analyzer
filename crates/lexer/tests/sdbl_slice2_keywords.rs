@@ -566,3 +566,126 @@ fn like_string_pattern() {
     assert!(toks.contains(&SdblTokenKind::KwLike));
     assert!(matches!(toks[0], SdblTokenKind::Ident));
 }
+
+// ---------------------------------------------------------------------------
+// Slice 2-addendum Bucket-A — RU spelling pins for clause keyword leftovers
+// ---------------------------------------------------------------------------
+//
+// Bucket-A regression-gates pinning the current Russian-spelling lexer
+// behaviour for the 13 Slice 2-addendum variants whose RU spelling has
+// no other test or corpus coverage today (per
+// `docs/legal/sdbl-clean-room-slice2-addendum.md` § Pre-C0b corpus
+// coverage audit). The Slice 2-addendum C2 commit moves these regex
+// declarations under a clean-room banner; these tests ensure the
+// rewrite preserves byte-identical matching for the canonical RU
+// spelling. Per-variant Tier A1 sources are listed in the addendum
+// attestation § Per-variant tier source map.
+//
+// Note on KwPeriods: the canonical RU spelling per v8327doc Глава 8 is
+// `ПЕРИОДАМИ` (instrumental case), not `ПЕРИОДЫ` (nominative). The
+// pre-C2 regex matches `ПЕРИОДЫ`; the C2 fix flips it to `ПЕРИОДАМИ`.
+// No Bucket-A pin is added here for KwPeriods — the regression gates
+// for the canonical / English / legacy-misspelling-now-Ident behaviour
+// land at C2 in the new acceptance file
+// `sdbl_slice2_addendum_clause_keywords.rs`.
+
+/// Slice 2-addendum Bucket-A — `ВОЗР` lexes as `KwAsc`. Source: ITS
+/// pubqlang/16 § Сортировка результата запроса.
+#[test]
+fn slice2_addendum_kw_asc_russian() {
+    assert_eq!(single_kind("ВОЗР"), SdblTokenKind::KwAsc);
+}
+
+/// Slice 2-addendum Bucket-A — `УБЫВ` lexes as `KwDesc`. Source: ITS
+/// pubqlang/16 § Сортировка результата запроса.
+#[test]
+fn slice2_addendum_kw_desc_russian() {
+    assert_eq!(single_kind("УБЫВ"), SdblTokenKind::KwDesc);
+}
+
+/// Slice 2-addendum Bucket-A — `ИЕРАРХИЯ` lexes as `KwHierarchy`.
+/// Source: ITS pubqlang/27 § Иерархическая упорядоченная выборка
+/// (ORDER BY HIERARCHY).
+#[test]
+fn slice2_addendum_kw_hierarchy_russian() {
+    assert_eq!(single_kind("ИЕРАРХИЯ"), SdblTokenKind::KwHierarchy);
+}
+
+/// Slice 2-addendum Bucket-A — `РАЗРЕШЕННЫЕ` lexes as `KwAllowed`.
+/// Source: v8327doc Глава 8 § <Описание запроса> first SELECT-prefix
+/// slot.
+#[test]
+fn slice2_addendum_kw_allowed_russian() {
+    assert_eq!(single_kind("РАЗРЕШЕННЫЕ"), SdblTokenKind::KwAllowed);
+}
+
+/// Slice 2-addendum Bucket-A — `ДЛЯ` lexes as `KwFor`. Source:
+/// v8327doc Глава 8 canonical EBNF `[ДЛЯ ИЗМЕНЕНИЯ ...]`.
+#[test]
+fn slice2_addendum_kw_for_russian() {
+    assert_eq!(single_kind("ДЛЯ"), SdblTokenKind::KwFor);
+}
+
+/// Slice 2-addendum Bucket-A — `ИЗМЕНЕНИЯ` lexes as `KwUpdate`.
+/// Source: v8327doc Глава 8 canonical EBNF `[ДЛЯ ИЗМЕНЕНИЯ ...]`.
+#[test]
+fn slice2_addendum_kw_update_russian() {
+    assert_eq!(single_kind("ИЗМЕНЕНИЯ"), SdblTokenKind::KwUpdate);
+}
+
+/// Slice 2-addendum Bucket-A — `ИНДЕКСИРОВАТЬ` lexes as `KwIndex`.
+/// Source: v8327doc Глава 8 canonical EBNF
+/// `[ИНДЕКСИРОВАТЬ ПО [НАБОРАМ] <Список полей>]`.
+#[test]
+fn slice2_addendum_kw_index_russian() {
+    assert_eq!(single_kind("ИНДЕКСИРОВАТЬ"), SdblTokenKind::KwIndex);
+}
+
+/// Slice 2-addendum Bucket-A — `ТОЛЬКО` lexes as `KwOnly`. Source:
+/// v8327doc Глава 8 canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]` in TOTALS BY
+/// group spec.
+#[test]
+fn slice2_addendum_kw_only_russian() {
+    assert_eq!(single_kind("ТОЛЬКО"), SdblTokenKind::KwOnly);
+}
+
+/// Slice 2-addendum Bucket-A — `СПЕЦСИМВОЛ` lexes as `KwEscape`.
+/// Source: v8327doc Глава 8 canonical EBNF
+/// `[СПЕЦСИМВОЛ <Литерал типа СТРОКА>]` in LIKE slot.
+#[test]
+fn slice2_addendum_kw_escape_russian() {
+    assert_eq!(single_kind("СПЕЦСИМВОЛ"), SdblTokenKind::KwEscape);
+}
+
+/// Slice 2-addendum Bucket-A — `ВЫРАЗИТЬ` lexes as `KwCast`. Source:
+/// v8327doc Глава 8 canonical EBNF
+/// `ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`.
+#[test]
+fn slice2_addendum_kw_cast_russian() {
+    assert_eq!(single_kind("ВЫРАЗИТЬ"), SdblTokenKind::KwCast);
+}
+
+/// Slice 2-addendum Bucket-A — `ССЫЛКА` lexes as `KwRefs`. Source:
+/// v8327doc Глава 8 canonical EBNF
+/// `<Выражение> ССЫЛКА <Имя таблицы>` plus pubqlang/40 canonical
+/// example.
+#[test]
+fn slice2_addendum_kw_refs_russian() {
+    assert_eq!(single_kind("ССЫЛКА"), SdblTokenKind::KwRefs);
+}
+
+/// Slice 2-addendum Bucket-A — `ТИП` lexes as `KwType`. Source:
+/// v8327doc Глава 8 canonical EBNF `ТИП(<Имя типа>)`.
+#[test]
+fn slice2_addendum_kw_type_russian() {
+    assert_eq!(single_kind("ТИП"), SdblTokenKind::KwType);
+}
+
+/// Slice 2-addendum Bucket-A — `ЗНАЧЕНИЕ` lexes as `KwValue`. Source:
+/// pubqlang/31 canonical example
+/// `ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)` plus prose «литерал
+/// функционального типа ЗНАЧЕНИЕ()».
+#[test]
+fn slice2_addendum_kw_value_russian() {
+    assert_eq!(single_kind("ЗНАЧЕНИЕ"), SdblTokenKind::KwValue);
+}

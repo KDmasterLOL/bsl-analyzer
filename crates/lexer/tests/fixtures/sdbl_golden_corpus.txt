@@ -112,3 +112,29 @@ TOTALS SUM(X)
 ВНУТРЕННЕЕ ПРАВОЕ ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ
 ---- 057 english left join
 SELECT 1 FROM T LEFT JOIN U ON T.id = U.id
+---- 058 slice2-addendum order-by direction russian
+УПОРЯДОЧИТЬ ПО Имя ВОЗР, Цена УБЫВ ИЕРАРХИЯ
+---- 059 slice2-addendum select-prefix qualifier russian
+ВЫБРАТЬ РАЗРЕШЕННЫЕ Имя ИЗ Справочник.Товары
+---- 060 slice2-addendum for update russian
+ВЫБРАТЬ 1 ИЗ T ДЛЯ ИЗМЕНЕНИЯ
+---- 061 slice2-addendum index by russian
+ВЫБРАТЬ 1 ИНДЕКСИРОВАТЬ ПО T.F
+---- 062 slice2-addendum totals only-hierarchy russian
+ИТОГИ СУММА(X) ПО Номенклатура ТОЛЬКО ИЕРАРХИЯ
+---- 063 slice2-addendum like escape russian
+ГДЕ Н ПОДОБНО "%X%" СПЕЦСИМВОЛ "!"
+---- 064 slice2-addendum refs russian
+ГДЕ Р ССЫЛКА Документ.ПриходнаяНакладная
+---- 065 slice2-addendum cast russian
+ВЫРАЗИТЬ(П КАК ЧИСЛО(15, 2))
+---- 066 slice2-addendum type russian
+ТИП(Число)
+---- 067 slice2-addendum value russian
+ЗНАЧЕНИЕ(Перечисление.Статус.Готов)
+---- 068 slice2-addendum drop english
+SELECT 1 INTO #T; DROP #T
+---- 069 slice2-addendum autoorder english
+SELECT 1 ORDER BY F AUTOORDER
+---- 070 slice2-addendum periods english
+TOTALS SUM(X) BY OVERALL PERIODS(DAY, DATETIME(2024, 1, 1), &End)

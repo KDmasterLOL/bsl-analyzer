@@ -526,7 +526,8 @@ baseline measured at C0a (2026-05-07) on `develop` branch tip
       regex rewrite + per-variant provenance comments + file-
       level docstring extension).
     - `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` (C0b
-      16-entry RU/EN gap-fill addition + C2 line 80 ПЕРИОДЫ →
+      13 thematic entries (058–070, covering 13 RU blind-spot
+      variants + 3 EN gap-fillers) + C2 line 80 ПЕРИОДЫ →
       ПЕРИОДАМИ canonical-spelling update).
     - `crates/lexer/tests/sdbl_golden_corpus.rs` (C2 expectation
       update for the corpus byte-string change at line 484).
@@ -559,10 +560,12 @@ baseline measured at C0a (2026-05-07) on `develop` branch tip
 - `<C0b_COMMIT>` (TBD) — C0b: 13 RU Bucket-A gap-test functions
   added to `crates/lexer/tests/sdbl_slice2_keywords.rs` covering
   the RU spelling blind spots (`sdbl_slice2_keywords` count 30 →
-  43). 16 corpus entries added to
-  `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` covering
-  13 RU blind spots + 3 EN gap-fillers (KwDrop / KwAutoOrder /
-  KwPeriods). The KwPeriods corpus entry preserves the legacy
+  43). 13 thematic corpus entries added to
+  `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` (entries
+  058–070, covering all 13 RU spelling blind spots + 3 EN
+  gap-fillers for KwDrop / KwAutoOrder / KwPeriods — actual
+  entry count 13 with thematic merging per the §Pre-C0b corpus
+  coverage audit allowance). The KwPeriods corpus entry preserves the legacy
   `ПЕРИОДЫ` spelling at C0b as the Bucket-A baseline pin; the
   canonical-spelling flip to `ПЕРИОДАМИ` lands at C2 alongside
   the regex fix. No production-code changes; no new test files
