@@ -121,6 +121,40 @@ impl<'a> DiagnosticsContext<'a> {
         out
     }
 
+    /// Find a CommonModule by name across every visible configuration
+    /// (main + extensions).
+    ///
+    /// Returns `(VisibleConfig, CommonModule)` for the **first** matching
+    /// configuration in `visible_configurations()` order. Order matches
+    /// `find_common_module_files_anywhere`: main first, then extensions
+    /// in registration order. Diagnostics that need exists-in-any
+    /// semantics (CommonModuleAssign, ProtectedModule,
+    /// PrivilegedModuleMethodCall, …) should consume this helper rather
+    /// than reaching into [`Self::main_configuration`] / [`Self::load_configuration`],
+    /// which only see the main config and miss CFE-defined modules.
+    pub fn find_common_module_anywhere(
+        &self,
+        name: &str,
+    ) -> Option<(ide_db::provider::VisibleConfig, bsl_metadata::CommonModule)> {
+        for visible in self.visible_configurations() {
+            if let Some(common_module) = visible.configuration.find_common_module(name) {
+                let module = common_module.clone();
+                return Some((visible, module));
+            }
+        }
+        None
+    }
+
+    /// `true` when a CommonModule with this name is visible from the current
+    /// file under main + extensions, regardless of which configuration
+    /// declared it. Cheap predicate for handlers whose only question is
+    /// "does this name resolve to a CommonModule somewhere?".
+    pub fn is_common_module_anywhere(&self, name: &str) -> bool {
+        self.visible_configurations()
+            .iter()
+            .any(|visible| visible.configuration.find_common_module(name).is_some())
+    }
+
     /// Get the file path for the current file via provider.
     ///
     /// Returns `None` if file path cannot be resolved.
