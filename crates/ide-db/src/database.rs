@@ -404,6 +404,13 @@ impl hir::HirDatabase for RootDatabaseImpl {
     fn type_narrowing_enabled(&self) -> bool {
         RootDatabaseImpl::type_narrowing_enabled(self)
     }
+
+    fn proc_signature(
+        &self,
+        method_input: hir::MethodIdInput<'_>,
+    ) -> Arc<hir::proc_signature::ProcSignature> {
+        hir::proc_signature::proc_signature_query(self, method_input)
+    }
 }
 
 #[salsa::db]
