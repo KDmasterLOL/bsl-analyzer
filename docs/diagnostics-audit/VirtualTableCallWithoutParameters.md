@@ -1,0 +1,39 @@
+# VirtualTableCallWithoutParameters
+
+Статус: `done`, `needs-code-work`
+Дата разбора: 2026-05-07
+
+## Суть правила
+
+Находит обращения к виртуальным таблицам запросов без фильтрующих параметров.
+
+## Проверенные источники
+
+- `crates/ide-diagnostics/src/handlers/virtual_table_call_without_parameters.rs`
+- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/VirtualTableCallWithoutParameters.md`
+- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/657.md`
+- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/733.md`
+
+## Как реализовано
+
+SDBL HIR эмитит `SdblDiagnostic::VirtualTableCallWithoutParameters`; handler мапит range из запроса в BSL и создает diagnostic на обращение к виртуальной таблице.
+
+## Что покрыто
+
+Покрыты виртуальные таблицы без скобок, с пустыми скобками, с пустым набором параметров и с пустым вторым параметром. Корректно допускаются period-only параметры для `СрезПоследних` и пустой период при наличии условия.
+
+## Пробелы и ограничения
+
+Правило зависит от SDBL-классификации виртуальных таблиц и не учитывает дополнительные фильтры в `ГДЕ`, которые иногда ограничивают результат, но хуже оптимизируются.
+
+## Может ли инфраструктура улучшить качество
+
+Да. Нужна query semantic layer: знать тип виртуальной таблицы, обязательные параметры и связь параметров таблицы с фильтрами запроса.
+
+## Возможное объединение
+
+Близко к `UsingLikeInQuery` как query-quality/performance rule. Инфраструктуру SDBL diagnostics стоит объединять, пользовательские diagnostics лучше оставить отдельными.
+
+## Вывод
+
+Покрытие основных опасных форм хорошее; следующий уровень качества требует семантики запроса и метаданных регистров.

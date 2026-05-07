@@ -11,12 +11,14 @@
 - Настройка MCP и AI-инструментов: `mcp/README.md`
 - Инструменты MCP и интеграция с 1С: `mcp/TOOLS_AND_EXTENSION.md`
 - Конфигурация диагностик: `configuration/DIAGNOSTICS.md`
+- Аудит диагностик: `diagnostics-audit/README.md`
 
 ## Для пользователей
 
 - `../README.md` — установка и базовые сценарии CLI
 - `configuration/PROJECT_CONFIGURATION.md` — структура `bsl-analyzer.toml`
 - `configuration/DIAGNOSTICS.md` — параметры диагностик и правила включения / отключения
+- `diagnostics-audit/README.md` — последовательный разбор диагностик по алфавиту
 - `METADATA_COMPATIBILITY.md` — ограничения и совместимость загрузки метаданных
 
 ## MCP и AI-интеграции

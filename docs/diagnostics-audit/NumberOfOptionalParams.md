@@ -1,0 +1,38 @@
+# NumberOfOptionalParams
+
+Статус: `done`, `needs-code-work`
+Дата разбора: 2026-05-07
+
+## Суть правила
+
+Ограничивает количество необязательных параметров метода. Дефолт `maxOptionalParamsCount` равен 3.
+
+## Проверенные источники
+
+- `crates/ide-diagnostics/src/handlers/number_of_optional_params.rs`
+- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/NumberOfOptionalParams.md`
+- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/640.md`
+
+## Как реализовано
+
+Количество считает HIR, handler получает count и диапазон имени метода, сравнивает с конфигом.
+
+## Что покрыто
+
+Покрыты функции/процедуры, настройка порога, случаи на пороге и методы без optional parameters.
+
+## Пробелы и ограничения
+
+Нет учета API-стабильности: иногда optional параметры нужны для совместимости. Нет рекомендации заменить параметры структурой опций.
+
+## Может ли инфраструктура улучшить качество
+
+Да. Можно связывать с exported/public API и давать разные severity или рекомендации для публичных и внутренних методов.
+
+## Возможное объединение
+
+Близко к `NumberOfParams`, `OrderOfParams`, `MissedRequiredParameter`, `MismatchedArgCount`. Нужен общий method-signature policy layer.
+
+## Вывод
+
+Базовый счетчик работает, но правило остается грубой метрикой без анализа назначения метода.
