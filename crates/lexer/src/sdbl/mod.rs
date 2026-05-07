@@ -33,11 +33,23 @@
 //!   grammar specification) with pubqlang corroborating examples.
 //!   Attested in `docs/legal/sdbl-clean-room-slice2-addendum.md`.
 //!
-//! - **Slices 3–5 — pending.** Built-in functions, metadata-object
-//!   tokens, virtual-table tokens, type literals, the UNDEFINED
-//!   literal, period-type tokens, and the logos error fallback.
-//!   These remain as carried over from the pre-clean-room
-//!   implementation and will be re-derived by subsequent slices.
+//! - **Slice 3a — clean-room (in progress).** Primitive type
+//!   literals (Boolean / Number / String / Date), the UNDEFINED
+//!   literal, and the narrow period-type keywords carried as
+//!   dedicated lexer tokens (TENDAYS / HALFYEAR). Re-derived from
+//!   v8327doc Глава 8 «Работа с запросами» with pubqlang
+//!   corroborating examples; the C0a discrepancy audit found zero
+//!   regex defects so the slice is a PRESERVE-shape arc. Attested
+//!   in `docs/legal/sdbl-clean-room-slice3a.md`.
+//!
+//! - **Slices 3b, 4, 5 — pending.** Metadata-object tokens
+//!   (Slice 3b — `Mdo*` minus `MdoExternalDataSource`), built-in
+//!   functions (Slice 4 — `Fn*`), virtual-table tokens and the
+//!   platform-late `MdoExternalDataSource` metadata prefix
+//!   (Slice 5 — `Vt*` plus `MdoExternalDataSource`), and the
+//!   logos error fallback. These remain as carried over from the
+//!   pre-clean-room implementation and will be re-derived by
+//!   subsequent slices.
 //!
 //! All variants share a single longest-match precedence space — the
 //! physical reordering below does not change matching semantics. A
@@ -676,17 +688,56 @@ pub enum SdblTokenKind {
     KwValue,
 
     // ============================================================================
-    // LEGACY (Slices 3, 4, 5 pending — metadata / function / virtual-table vocabularies)
+    // CLEAN-ROOM Slice 3a — primitive types, undefined literal, narrow period vocabulary (in progress)
+    // ============================================================================
+    //
+    // Per-variant provenance docstrings citing the v8327doc Глава 8
+    // bilingual word-list rows and the contextual EBNF / prose
+    // anchors land at C2, alongside the thematic convenience index
+    // (Type / Lit / Period sub-sections) and the cross-reference
+    // to `KwType` for the `Type*` variants. At C1 the seven Slice
+    // 3a variants are relocated out of the LEGACY block
+    // byte-for-byte; the C0a discrepancy audit
+    // (`docs/legal/sdbl-clean-room-slice3a.md` § C0a discrepancy
+    // audit) found zero regex defects, so no regex bodies are
+    // flipped here or at C2. Full per-variant tier source map and
+    // attestation live in
+    // `docs/legal/sdbl-clean-room-slice3a.md`.
+    #[regex(r"(?i)булево|(?i)boolean")]
+    TypeBoolean,
+
+    #[regex(r"(?i)число|(?i)number")]
+    TypeNumber,
+
+    #[regex(r"(?i)строка|(?i)string")]
+    TypeString,
+
+    #[regex(r"(?i)дата|(?i)date")]
+    TypeDate,
+
+    #[regex(r"(?i)неопределено|(?i)undefined")]
+    LitUndefined,
+
+    #[regex(r"(?i)декада|(?i)tendays")]
+    PeriodTenDays,
+
+    #[regex(r"(?i)полугодие|(?i)halfyear")]
+    PeriodHalfYear,
+
+    // ============================================================================
+    // LEGACY (Slices 3b, 4, 5 pending — Mdo*/function/virtual-table vocabularies + ExternalDataSource)
     // ============================================================================
     //
     // The variants below are carried over unchanged from the
     // pre-clean-room implementation. They remain Tier B material
     // for the duration of the staged migration; the next slices
-    // will re-derive built-in functions (Slice 4), metadata-object
-    // tokens (Slice 3), virtual-table tokens (Slice 5), type
-    // literals (Slice 3), the UNDEFINED literal (Slice 3), and
-    // period-type tokens (Slice 3) from ITS documentation. The
-    // `Error` fallback is the final clean-up step.
+    // will re-derive built-in functions (Slice 4 — `Fn*`),
+    // metadata-object tokens (Slice 3b — the 14 `Mdo*` variants
+    // excluding `MdoExternalDataSource`), virtual-table tokens
+    // and the platform-late `MdoExternalDataSource` metadata
+    // prefix (Slice 5 — `Vt*` + `MdoExternalDataSource`) from ITS
+    // documentation. The `Error` fallback is the final clean-up
+    // step.
     #[regex(r"(?i)сумма|(?i)sum")]
     FnSum,
 
@@ -877,29 +928,6 @@ pub enum SdblTokenKind {
 
     #[regex(r"(?i)оборотыдткт|(?i)drcrturnovers")]
     VtDrCrTurnovers,
-
-    #[regex(r"(?i)булево|(?i)boolean")]
-    TypeBoolean,
-
-    #[regex(r"(?i)число|(?i)number")]
-    TypeNumber,
-
-    #[regex(r"(?i)строка|(?i)string")]
-    TypeString,
-
-    #[regex(r"(?i)дата|(?i)date")]
-    TypeDate,
-
-    #[regex(r"(?i)неопределено|(?i)undefined")]
-    LitUndefined,
-
-    // Note: Most period types are the same as date functions above.
-    // Only unique period types are listed here.
-    #[regex(r"(?i)декада|(?i)tendays")]
-    PeriodTenDays,
-
-    #[regex(r"(?i)полугодие|(?i)halfyear")]
-    PeriodHalfYear,
 
     /// Logos error fallback for any byte sequence that does not match
     /// a declared token. Retained unchanged pending the full Slice 1
