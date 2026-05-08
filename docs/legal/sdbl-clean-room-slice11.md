@@ -110,12 +110,12 @@ D = local IDE-recovery allowance):
 | 4 | `is_clause_keyword` | C (mini-spec §SELECT query — union of clauses-after-FROM starters) + B (every keyword pair Slice 2-attested or Slice 2 LEGACY-attested) |
 | 5 | `group_by_clause` | A1 (ITS pubqlang/34 §Группировка результата запроса + /35 §Расчет агрегатов) + B (KwGroup/СГРУППИРОВАТЬ + KwOnOrBy/BY/ПО) + C (mini-spec §GROUP BY) |
 | 6 | `order_by_clause` | A1 (ITS pubqlang/16 §Сортировка результата запроса + /17 §Сортировка по реквизитам) + B (KwOrder/УПОРЯДОЧИТЬ Slice 2-attested) + C (mini-spec §ORDER BY) |
-| 7 | `order_by_item` | A1 (ITS pubqlang/16 §Сортировка — ASC/DESC modifier per `chapter_016.html:37, 49, 63, 64`) + **A2 (ITS pubqlang/27 §Иерархическая упорядоченная выборка — HIERARCHY/ИЕРАРХИЯ modifier per `chapter_027.html:39, 51` — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`; C2 MANDATORY FIX)** + B (KwAsc/ВОЗР, KwDesc/УБЫВ, KwHierarchy/ИЕРАРХИЯ Slice 2 LEGACY-attested) |
-| 8 | `having_clause` | A1 (ITS pubqlang/35 §Условие на агрегаты — `chapter_035.html:49`) + B (KwHaving/ИМЕЮЩИЕ Slice 2-attested) + C (mini-spec §HAVING) |
+| 7 | `order_by_item` | A1 (ITS pubqlang/16 §Сортировка — ASC/DESC modifier per `chapter 16`) + **A2 (ITS pubqlang/27 §Иерархическая упорядоченная выборка — HIERARCHY/ИЕРАРХИЯ modifier per `chapter 27` — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`; C2 MANDATORY FIX)** + B (KwAsc/ВОЗР, KwDesc/УБЫВ, KwHierarchy/ИЕРАРХИЯ Slice 2 LEGACY-attested) |
+| 8 | `having_clause` | A1 (ITS pubqlang/35 §Условие на агрегаты — `chapter 35`) + B (KwHaving/ИМЕЮЩИЕ Slice 2-attested) + C (mini-spec §HAVING) |
 | 9 | `for_update_clause` | D (local IDE-recovery allowance — verified-no in dumped ITS chapters 16–39 by direct `rg`; lexer Slice 2 LEGACY KwFor + KwUpdate provide bilingual support) + C (mini-spec §FOR UPDATE) |
 | 10 | `index_by_clause` | D (local IDE-recovery allowance — verified-no in dumped ITS chapters 16–39 by direct `rg`; lexer Slice 2 LEGACY KwIndex + KwOnOrBy provide bilingual support) + C (mini-spec §INDEX BY) |
-| 11 | `autoorder_clause` | A1 (ITS pubqlang/17 §АВТОУПОРЯДОЧИВАНИЕ canonical example at `chapter_017.html:17, 32, 52`) + B (KwAutoOrder Slice 2 LEGACY-attested) + C (mini-spec §AUTOORDER) |
-| 12 | `totals_by_clause` | A1 (ITS pubqlang/39 §Расчет общих итогов canonical `ИТОГИ ПО ОБЩИЕ` at `chapter_039.html:13, 25, 29, 48, 49, 51`) + B (KwTotals/ИТОГИ Slice 2-attested + KwOverall/ОБЩИЕ Slice 2 LEGACY-attested) + C (mini-spec §TOTALS BY) + D (parser-side flat-list shape; structured-modifier promotion deferred to Slice 12) |
+| 11 | `autoorder_clause` | A1 (ITS pubqlang/17 §АВТОУПОРЯДОЧИВАНИЕ canonical example at `chapter 17`) + B (KwAutoOrder Slice 2 LEGACY-attested) + C (mini-spec §AUTOORDER) |
+| 12 | `totals_by_clause` | A1 (ITS pubqlang/39 §Расчет общих итогов canonical `ИТОГИ ПО ОБЩИЕ` at `chapter 39`) + B (KwTotals/ИТОГИ Slice 2-attested + KwOverall/ОБЩИЕ Slice 2 LEGACY-attested) + C (mini-spec §TOTALS BY) + D (parser-side flat-list shape; structured-modifier promotion deferred to Slice 12) |
 
 **Child-attachment invariants** carried by Slice 11 that
 downstream consumers depend on:
@@ -243,32 +243,23 @@ mini-spec sections, and the C3 acceptance suite was based on
 direct readings of:
 
 - ITS pubqlang chapter regions, accessed via the local dump at
-  `/home/itrous/src/tools_migration/its/dump/html/`:
-  - chapter 16 (`chapter_016.html:19, 31, 33, 37, 49, 63, 64,
-    75-76`) — `УПОРЯДОЧИТЬ ПО ... ВОЗР` canonical sort form,
+  `<ITS pubqlang dump>/html/`:
+  - chapter 16 — `УПОРЯДОЧИТЬ ПО ... ВОЗР` canonical sort form,
     multi-field `УПОРЯДОЧИТЬ ПО Период УБЫВ, ...`, prose
-    reference to HIERARCHY at line 63;
-  - chapter 17 (`chapter_017.html:17, 29, 32, 49, 52`) —
-    AUTOORDER / АВТОУПОРЯДОЧИВАНИЕ canonical example, sort by
-    ссылочное-поле variant;
-  - chapter 22 (`chapter_022.html:15, 26, 35`) — `ГДЕ` primary
-    `Условие отбора данных из таблицы`;
-  - chapter 23 (`chapter_023.html:13, 25-27, 45-46`) — `ГДЕ ...
-    ПОДОБНО "%Иван%"` LIKE+WHERE integration, `НЕ ... ПОДОБНО`
-    form;
-  - chapter 24 (`chapter_024.html:15, 16`) — `&Клиент` parameter
-    substitution in WHERE conditions;
-  - chapter 27 (`chapter_027.html:39, 51`) — `УПОРЯДОЧИТЬ ПО
-    Наименование ИЕРАРХИЯ` canonical hierarchical-ordering
-    syntax (Slice 11 C2 MANDATORY FIX source);
-  - chapter 34 (`chapter_034.html:14, 33, 44, 46, 51, 52`) —
-    `СГРУППИРОВАТЬ ПО` canonical with агрегатные функции
+    reference to HIERARCHY;
+  - chapter 17 — AUTOORDER / АВТОУПОРЯДОЧИВАНИЕ canonical example,
+    sort by ссылочное-поле variant;
+  - chapter 22 — `ГДЕ` primary `Условие отбора данных из таблицы`;
+  - chapter 23 — `ГДЕ ... ПОДОБНО "%Иван%"` LIKE+WHERE integration,
+    `НЕ ... ПОДОБНО` form;
+  - chapter 24 — `&Клиент` parameter substitution in WHERE conditions;
+  - chapter 27 — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ` canonical
+    hierarchical-ordering syntax (Slice 11 C2 MANDATORY FIX source);
+  - chapter 34 — `СГРУППИРОВАТЬ ПО` canonical with агрегатные функции
     СУММА/МИНИМУМ/МАКСИМУМ/СРЕДНЕЕ/КОЛИЧЕСТВО;
-  - chapter 35 (`chapter_035.html:23, 29, 41, 44, 45, 49`) —
-    multi-field `СГРУППИРОВАТЬ ПО` example, `ИМЕЮЩИЕ` HAVING
-    primary explanation;
-  - chapter 39 (`chapter_039.html:13, 25, 29, 48, 49, 51`) —
-    canonical `ИТОГИ ... ПО ОБЩИЕ` example.
+  - chapter 35 — multi-field `СГРУППИРОВАТЬ ПО` example, `ИМЕЮЩИЕ`
+    HAVING primary explanation;
+  - chapter 39 — canonical `ИТОГИ ... ПО ОБЩИЕ` example.
 
 - The C0a-extended SELECT mini-spec at
   `docs/legal/sdbl-select-mini-spec.md`, specifically the
@@ -319,7 +310,7 @@ The author of the Slice 11 clean-room work asserts:
   upstream Slice 1/2/6/7/8/9/10a/10b attestations) and from
   the HIR consumer code at `clauses.rs` for child-attachment
   contracts. The Slice 11 plan itself, at
-  `/home/itrous/.claude/plans/serialized-moseying-orbit.md`,
+  `<engineering scratch plans>/serialized-moseying-orbit.md`,
   served as the high-level routing document for which
   function emits which NodeKind and which Tier classification
   applies to each provenance comment.
@@ -410,7 +401,7 @@ HIERARCHY / ИЕРАРХИЯ in the token stream. Input
 ### Root cause
 
 The Slice 11 plan codex Round-1 finding 2 audit identified
-that ITS chapter 27 (`chapter_027.html:39, 51`) explicitly
+that ITS chapter 27 explicitly
 documents `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ` as
 canonical hierarchical-ordering syntax — placing HIERARCHY on
 ORDER BY items at **ITS Tier A2** (ITS prose-attested), NOT a
@@ -683,7 +674,7 @@ clean-room discipline documented in
 C0a / C0b / C1 / C2 / C3 authoring rounds and the codex pair-
 review feedback that shaped each commit are recorded above
 under §Commit trail. The Slice 11 plan at
-`/home/itrous/.claude/plans/serialized-moseying-orbit.md`
+`<engineering scratch plans>/serialized-moseying-orbit.md`
 served as the high-level routing document for this work; that
 plan was itself codex pair-reviewed across 14 findings over 6
 review rounds before approval.

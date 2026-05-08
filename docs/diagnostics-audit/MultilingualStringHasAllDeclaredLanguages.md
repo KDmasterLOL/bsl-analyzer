@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/multilingual_string_has_all_declared_languages.rs`
 - `crates/ide-diagnostics/src/utils/nstr.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/MultilingualStringHasAllDeclaredLanguages.md`
+- `<v8std mirror>/docs/diagnostics/bslls/MultilingualStringHasAllDeclaredLanguages.md`
 
 ## Как реализовано
 

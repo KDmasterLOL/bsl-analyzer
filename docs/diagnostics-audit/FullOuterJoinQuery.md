@@ -15,7 +15,7 @@ PostgreSQL. Основание - `#std435`.
 - `crates/sdbl-hir`
 - `crates/ide-diagnostics/docs/ru/FullOuterJoinQuery.md`
 - `docs/legal/diagnostics/FullOuterJoinQuery.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/435.md`
+- `<v8std mirror>/docs/std/435.md`
 
 ## Как реализовано
 

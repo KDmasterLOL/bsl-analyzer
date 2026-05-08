@@ -35,8 +35,8 @@
 - Provenance:
   `docs/legal/diagnostics/CachedPublic.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CachedPublic.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/644.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CachedPublic.md`,
+  `<v8std mirror>/docs/std/644.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std#content:644:hdoc:3.6`,
   `https://v8std.ru/std/644/`,

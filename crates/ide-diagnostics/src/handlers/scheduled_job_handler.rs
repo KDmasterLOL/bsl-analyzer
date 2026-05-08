@@ -46,8 +46,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // 3. Load configuration metadata
-    let configuration = match ctx.load_configuration() {
+    // 3. Load main configuration — `scheduled_jobs()` is a main-only
+    // collection (CFEs cannot declare new scheduled jobs); the per-handler
+    // CommonModule lookup goes through `find_common_module_anywhere` so
+    // handlers can resolve to a CommonModule defined in a CFE.
+    let configuration = match ctx.main_configuration() {
         Some(config) => config,
         None => return Vec::new(),
     };
@@ -57,7 +60,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut handler_usage: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
     for job in configuration.scheduled_jobs() {
-        check_scheduled_job(ctx, job, &configuration, code, &mut diagnostics, &mut handler_usage);
+        check_scheduled_job(ctx, job, code, &mut diagnostics, &mut handler_usage);
     }
 
     // 5. Check for duplicate handlers
@@ -82,7 +85,6 @@ fn is_session_module(ctx: &DiagnosticsContext) -> bool {
 fn check_scheduled_job(
     ctx: &DiagnosticsContext,
     job: &ScheduledJob,
-    configuration: &bsl_metadata::Configuration,
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
     handler_usage: &mut FxHashMap<String, Vec<String>>,
@@ -121,9 +123,9 @@ fn check_scheduled_job(
     // Track handler usage for duplicate detection
     handler_usage.entry(full_handler_name.clone()).or_default().push(job.name().to_string());
 
-    // CHECK 3: CommonModule exists
-    let common_module = match configuration.find_common_module(&handler.module_name) {
-        Some(cm) => cm,
+    // CHECK 3: CommonModule exists somewhere (main or CFE).
+    let (_visible, common_module) = match ctx.find_common_module_anywhere(&handler.module_name) {
+        Some(found) => found,
         None => {
             diagnostics.push(create_diagnostic(
                 ctx,
@@ -149,78 +151,109 @@ fn check_scheduled_job(
     }
 
     // CHECK 5, 6, 7: Method exists, exported, and valid for predefined
-    check_method(ctx, job, &handler, &full_handler_name, common_module, code, diagnostics);
+    check_method(ctx, job, &handler, &full_handler_name, code, diagnostics);
 }
 
-/// Validate method exists, is exported, and has valid parameters
+/// Validate method exists, is exported, and has valid parameters across
+/// CFE-unioned defining files.
+///
+/// 1C extension semantics treat same-name CommonModules across main + CFE
+/// as one logical module whose methods are unioned across all defining
+/// files. We iterate every defining file via
+/// `find_common_module_files_anywhere`; the first exported match becomes
+/// authoritative for the predefined-parameters and empty-body checks.
+/// When no file has the method as export, fall back to "any file at all"
+/// for the non-export diagnostic; only when no defining file has the
+/// method at all do we emit MissingMethod.
 fn check_method(
     ctx: &DiagnosticsContext,
     job: &ScheduledJob,
     handler: &ScheduledJobHandler,
     full_handler_name: &str,
-    common_module: &bsl_metadata::CommonModule,
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Resolve CommonModule file via VFS
-    let module_file_id = match ctx.find_common_module_file(common_module) {
-        Some(id) => id,
-        None => return, // Module has no source code, skip method check
+    let module_files = ctx.find_common_module_files_anywhere(&handler.module_name);
+    if module_files.is_empty() {
+        return;
+    }
+
+    let method_name_obj = Name::new(&handler.method_name);
+
+    // Resolved view of the method we settle on. We extract scalar fields up
+    // front so the symbol_tree borrow doesn't outlive the loop.
+    struct Resolved {
+        module_id: ModuleId,
+        local_id: u32,
+        is_export: bool,
+        params_empty: bool,
+    }
+    let mut resolved: Option<Resolved> = None;
+
+    for module_file_id in module_files {
+        let module_id = ModuleId::new(module_file_id);
+        let symbol_tree = ctx.symbol_tree_for(module_id);
+        let Some(method) = symbol_tree.find_method(&method_name_obj) else {
+            continue;
+        };
+        let candidate = Resolved {
+            module_id,
+            local_id: method.id.local_id,
+            is_export: method.is_export,
+            params_empty: method.params.is_empty(),
+        };
+        if candidate.is_export {
+            resolved = Some(candidate);
+            break;
+        }
+        if resolved.is_none() {
+            resolved = Some(candidate);
+        }
+    }
+
+    let Some(resolved) = resolved else {
+        // CHECK 5: Method does not exist in any defining file.
+        diagnostics.push(create_diagnostic(
+            ctx,
+            DiagnosticType::MissingMethod,
+            job.name(),
+            full_handler_name,
+            code,
+        ));
+        return;
     };
 
-    // Build SymbolTree for CommonModule
-    let module_id = ModuleId::new(module_file_id);
-    let symbol_tree = ctx.symbol_tree_for(module_id);
+    if !resolved.is_export {
+        // CHECK 6: Method exists but never as export.
+        diagnostics.push(create_diagnostic(
+            ctx,
+            DiagnosticType::NonExportMethod,
+            job.name(),
+            full_handler_name,
+            code,
+        ));
+    }
 
-    // Lookup method
-    let method_name_obj = Name::new(&handler.method_name);
-    let method = symbol_tree.find_method(&method_name_obj);
+    // CHECK 7: Predefined job with parameters
+    if job.is_predefined() && !resolved.params_empty {
+        diagnostics.push(create_diagnostic(
+            ctx,
+            DiagnosticType::MethodWithParameters,
+            job.name(),
+            full_handler_name,
+            code,
+        ));
+    }
 
-    match method {
-        None => {
-            // CHECK 5: Method does not exist
-            diagnostics.push(create_diagnostic(
-                ctx,
-                DiagnosticType::MissingMethod,
-                job.name(),
-                full_handler_name,
-                code,
-            ));
-        }
-        Some(m) => {
-            // CHECK 6: Method not exported
-            if !m.is_export {
-                diagnostics.push(create_diagnostic(
-                    ctx,
-                    DiagnosticType::NonExportMethod,
-                    job.name(),
-                    full_handler_name,
-                    code,
-                ));
-            }
-
-            // CHECK 7: Predefined job with parameters
-            if job.is_predefined() && !m.params.is_empty() {
-                diagnostics.push(create_diagnostic(
-                    ctx,
-                    DiagnosticType::MethodWithParameters,
-                    job.name(),
-                    full_handler_name,
-                    code,
-                ));
-            }
-
-            // CHECK 8: Empty method body
-            if is_empty_method(ctx, module_id, m.id.local_id) {
-                diagnostics.push(create_diagnostic(
-                    ctx,
-                    DiagnosticType::EmptyMethod,
-                    job.name(),
-                    full_handler_name,
-                    code,
-                ));
-            }
-        }
+    // CHECK 8: Empty method body — checked against the file we settled on.
+    if is_empty_method(ctx, resolved.module_id, resolved.local_id) {
+        diagnostics.push(create_diagnostic(
+            ctx,
+            DiagnosticType::EmptyMethod,
+            job.name(),
+            full_handler_name,
+            code,
+        ));
     }
 }
 

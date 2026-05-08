@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/multilingual_string_using_with_template.rs`
 - `crates/ide-diagnostics/src/utils/nstr.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/MultilingualStringUsingWithTemplate.md`
+- `<v8std mirror>/docs/diagnostics/bslls/MultilingualStringUsingWithTemplate.md`
 
 ## Как реализовано
 

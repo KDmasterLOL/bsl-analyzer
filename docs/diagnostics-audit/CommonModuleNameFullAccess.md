@@ -17,8 +17,8 @@
 - `crates/ide-diagnostics/docs/ru/CommonModuleNameFullAccess.md`,
   `crates/ide-diagnostics/docs/en/CommonModuleNameFullAccess.md`
 - `docs/legal/diagnostics/CommonModuleNameFullAccess.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/469.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommonModuleNameFullAccess.md`
+- `<v8std mirror>/docs/std/469.md`,
+  `<v8std mirror>/docs/diagnostics/bslls/CommonModuleNameFullAccess.md`
 
 ## Как реализовано
 

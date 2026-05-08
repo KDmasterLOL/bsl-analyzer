@@ -532,8 +532,9 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 
 /// Collect diagnostics that require Configuration XML metadata.
 ///
-/// These diagnostics use `ctx.load_configuration()` which loads the full
-/// Configuration.xml metadata. They only run for SessionModule files.
+/// These diagnostics use `ctx.main_configuration()` (and CFE-aware
+/// helpers like `find_common_module_anywhere` / `is_common_module_anywhere`)
+/// to resolve metadata. They only run for SessionModule files.
 ///
 /// Data source: Configuration XML (ScheduledJobs, EventSubscriptions, CommonModules)
 pub fn collect_configuration_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {

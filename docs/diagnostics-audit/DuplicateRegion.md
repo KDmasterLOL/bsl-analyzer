@@ -14,7 +14,7 @@
 - `crates/ide-diagnostics/src/handlers/duplicate_region.rs`
 - `crates/ide-diagnostics/docs/ru/DuplicateRegion.md`
 - `docs/legal/diagnostics/DuplicateRegion.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/455.md`
+- `<v8std mirror>/docs/std/455.md`
 
 ## Как реализовано
 

@@ -39,11 +39,11 @@
 - Provenance:
   `docs/legal/diagnostics/CommandModuleExportMethods.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommandModuleExportMethods.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/544.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/export-method-in-command-form-module.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/630.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/404.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CommandModuleExportMethods.md`,
+  `<v8std mirror>/docs/std/544.md`,
+  `<v8std mirror>/docs/diagnostics/v8-code-style/export-method-in-command-form-module.md`,
+  `<v8std mirror>/docs/std/630.md`,
+  `<v8std mirror>/docs/std/404.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std/content/544/hdoc`,
   `https://v8std.ru/std/544/`,

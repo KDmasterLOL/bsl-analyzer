@@ -1,0 +1,59 @@
+//! Workspace-method signature adapter.
+//!
+//! Bridges [`crate::proc_signature::proc_signature_query`] to the
+//! [`crate::method_lookup::MethodInfo`] shape that platform-method
+//! adapters already produce. Consumers (manager-method dispatch, form
+//! self-receiver lookup, future receiver-based workspace method
+//! lookup) call [`resolve_workspace_method`] with a resolved
+//! [`MethodId`] — they own the receiver→`MethodId` resolution; this
+//! module owns only the conversion to `MethodInfo`.
+//!
+//! ## Cycle status
+//!
+//! `proc_signature_query` already reads `db.infer(file_id)` for the
+//! return-from-body fallback. The cycle
+//! `infer → lookup_method → proc_signature_query` is closed the moment
+//! a `lookup_method` site starts calling [`resolve_workspace_method`]
+//! during inference. The first such consumer MUST add a
+//! `salsa::cycle_fn` to `proc_signature_query` returning the
+//! doc-derived recovery shape — see plan §2.4 / risk 9 and the cycle
+//! note in `crates/hir-ty/src/proc_signature.rs`. Today no consumer
+//! has wired this path through `infer`, so the cycle is structurally
+//! unreachable; this adapter does not attempt to install the handler
+//! without a reachable cycle to test against.
+
+use hir_def::{MethodId, MethodIdInput};
+
+use crate::db::HirDatabase;
+use crate::method_lookup::MethodInfo;
+use crate::proc_signature::proc_signature_query;
+use crate::Ty;
+
+/// Lower a workspace-defined method's signature into a [`MethodInfo`]
+/// in the same shape the platform-method path produces.
+///
+/// `overloads` is always empty — BSL does not let workspace methods
+/// declare multiple `Вариант синтаксиса:` overloads, so the
+/// `params` slot is the only signature consumers need.
+///
+/// Procedures get `return_ty = Ty::Undefined` (matching `to_method_info`'s
+/// `return_type: None` shape); functions get the docstring-derived or
+/// body-walk-inferred return type from
+/// [`crate::proc_signature::proc_signature_query`].
+pub fn resolve_workspace_method(db: &dyn HirDatabase, method_id: MethodId) -> MethodInfo {
+    let method_input = MethodIdInput::new(db, method_id);
+    let signature = proc_signature_query(db, method_input);
+    MethodInfo {
+        return_ty: signature.return_ty.clone(),
+        params: signature.params.clone(),
+        overloads: Vec::new(),
+    }
+}
+
+/// Like [`resolve_workspace_method`] but yields `Ty::Unknown` slots when
+/// the workspace method has no docstring entries — handy when callers
+/// only need the return type and want to skip the per-parameter `clone`.
+pub fn resolve_workspace_return_ty(db: &dyn HirDatabase, method_id: MethodId) -> Ty {
+    let method_input = MethodIdInput::new(db, method_id);
+    proc_signature_query(db, method_input).return_ty.clone()
+}

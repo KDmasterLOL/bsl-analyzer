@@ -252,18 +252,25 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     file_id: FileId,
     locale: ide_db::base_db::Locale,
 ) -> Option<Vec<CompletionItem>> {
-    // Fast path: ObjectManager / ManagerCollection have no MDO fields.
-    if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::ManagerCollection(_)) {
-        return collect_platform_items_or_none(db, receiver_ty, locale);
-    }
-
     // Coerce `ЭтотОбъект` so a catalog/document object module surfaces
-    // attributes + tabular sections on `ЭтотОбъект.|`. Both `Type::fields`
-    // and `enumerate_fields` would coerce internally, but the dispatch
-    // gate below also needs the effective ty for Union recognition, so
-    // we coerce once here.
+    // attributes + tabular sections on `ЭтотОбъект.|`, and a manager
+    // module surfaces platform manager methods (`СоздатьЭлемент()`,
+    // `НайтиПоКоду()`, …). Both `Type::fields` and `enumerate_fields`
+    // would coerce internally, but the dispatch gates below also need
+    // the effective ty for fast-path / Union recognition, so we coerce
+    // once here. `ThisObject` lands as `MetadataRef { *Object, .. }`,
+    // `ThisManager` as `ObjectManager { kind, name }` — both then route
+    // through their existing branches with no extra special-casing.
     let coerced = hir::coerce_this_object_to_metadata_ref(receiver_ty);
     let effective_ty = coerced.as_ref().unwrap_or(receiver_ty);
+
+    // Fast path: ObjectManager / ManagerCollection have no MDO fields.
+    // After coercion this also catches `Ty::ThisManager` → `ObjectManager`,
+    // which is what makes `ЭтотОбъект.|` in a ManagerModule offer the
+    // same platform manager-method set as `Справочники.<X>.|`.
+    if matches!(effective_ty, Ty::ObjectManager { .. } | Ty::ManagerCollection(_)) {
+        return collect_platform_items_or_none(db, effective_ty, locale);
+    }
 
     // MDO-field branch fires for direct `MetadataRef` receivers and for
     // unions containing at least one `MetadataRef` arm (typical shape:

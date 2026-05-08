@@ -15,7 +15,7 @@
 - `crates/ide-diagnostics/src/handlers/excessive_auto_test_check.rs`
 - `crates/ide-diagnostics/docs/ru/ExcessiveAutoTestCheck.md`
 - `docs/legal/diagnostics/ExcessiveAutoTestCheck.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/456.md`
+- `<v8std mirror>/docs/std/456.md`
 
 ## Как реализовано
 

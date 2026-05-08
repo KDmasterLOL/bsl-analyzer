@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/missing_common_module_method.rs`
 - `crates/ide-diagnostics/src/hir_dispatch.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/MissingCommonModuleMethod.md`
+- `<v8std mirror>/docs/diagnostics/bslls/MissingCommonModuleMethod.md`
 
 ## Как реализовано
 

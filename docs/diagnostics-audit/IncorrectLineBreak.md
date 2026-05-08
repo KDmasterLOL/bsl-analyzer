@@ -13,7 +13,7 @@
 - `crates/ide-diagnostics/src/handlers/incorrect_line_break.rs`
 - `crates/ide-diagnostics/docs/ru/IncorrectLineBreak.md`
 - `docs/legal/diagnostics/IncorrectLineBreak.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/444.md`
+- `<v8std mirror>/docs/std/444.md`
 
 ## Как реализовано
 

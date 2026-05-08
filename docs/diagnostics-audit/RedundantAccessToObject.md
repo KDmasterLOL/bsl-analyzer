@@ -1,6 +1,7 @@
 # RedundantAccessToObject
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: G1 `27fb95ec`, G2 `1e5230fd` — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 Дата разбора: 2026-05-07
 
 ## Суть правила
@@ -12,7 +13,7 @@
 - `crates/ide-diagnostics/src/handlers/redundant_access_to_object.rs`
 - `crates/hir-def/src/body/lower/expr.rs` (lowering эмитит `ThisObject` и `ThreeLevel`)
 - `crates/hir-ty/src/infer.rs` (inference эмитит `RedundantAccessToObjectTwoLevel`, конвертируется в `TwoLevel` в `hir_inference_dispatch.rs`)
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/RedundantAccessToObject.md`
+- `<v8std mirror>/docs/diagnostics/bslls/RedundantAccessToObject.md`
 
 ## Как реализовано
 

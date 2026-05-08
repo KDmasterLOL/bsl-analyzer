@@ -1,6 +1,7 @@
 # MissedRequiredParameter
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: G1 `27fb95ec`, G2 `1e5230fd` — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 Дата разбора: 2026-05-07
 
 ## Суть правила
@@ -12,8 +13,8 @@
 - `crates/ide-diagnostics/src/handlers/missed_required_parameter.rs`
 - `crates/ide-diagnostics/src/hir_dispatch.rs`
 - `crates/ide-diagnostics/src/hir_inference_dispatch.rs` (CommonModule вариант через `MissedRequiredParameterCommonModule`)
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/MissedRequiredParameter.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/640.md`
+- `<v8std mirror>/docs/diagnostics/bslls/MissedRequiredParameter.md`
+- `<v8std mirror>/docs/std/640.md`
 
 ## Как реализовано
 

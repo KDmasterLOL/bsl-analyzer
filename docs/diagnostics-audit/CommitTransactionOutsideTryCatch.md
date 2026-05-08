@@ -1,6 +1,7 @@
 # CommitTransactionOutsideTryCatch
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: scope-included, no code change (kept syntactic in `hir-def/body/lower` per plan §1.8) — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 
 Дата разбора: 2026-05-07
 
@@ -38,10 +39,10 @@
 - Provenance:
   `docs/legal/diagnostics/CommitTransactionOutsideTryCatch.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommitTransactionOutsideTryCatch.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/commit-transaction.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/783.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/499.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CommitTransactionOutsideTryCatch.md`,
+  `<v8std mirror>/docs/diagnostics/v8-code-style/commit-transaction.md`,
+  `<v8std mirror>/docs/std/783.md`,
+  `<v8std mirror>/docs/std/499.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std/content/783/hdoc/_top/`,
   `https://v8std.ru/diagnostics/bslls/CommitTransactionOutsideTryCatch/`.

@@ -25,9 +25,9 @@
 - `crates/ide-diagnostics/docs/ru/*.md` и `crates/ide-diagnostics/docs/en/*.md`
   — пользовательская документация правила;
 - `docs/legal/diagnostics/*.md` — provenance и clean-room статус;
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/*.md` —
+- `<v8std mirror>/docs/diagnostics/bslls/*.md` —
   карточки BSLLS в локальном репозитории `v8std`;
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/*.md` — тексты
+- `<v8std mirror>/docs/std/*.md` — тексты
   стандартов, если карточка BSLLS на них ссылается;
 - смежные слои `hir`, `cfg`, `dataflow`, `bsl-metadata`, если диагностика на них
   опирается.

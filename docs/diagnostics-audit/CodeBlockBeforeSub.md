@@ -30,12 +30,12 @@
 - Provenance:
   `docs/legal/diagnostics/CodeBlockBeforeSub.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CodeBlockBeforeSub.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/455.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/acc/426.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/acc/428.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/module-structure-init-code-in-region.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/module-structure-top-region.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CodeBlockBeforeSub.md`,
+  `<v8std mirror>/docs/std/455.md`,
+  `<v8std mirror>/docs/diagnostics/acc/426.md`,
+  `<v8std mirror>/docs/diagnostics/acc/428.md`,
+  `<v8std mirror>/docs/diagnostics/v8-code-style/module-structure-init-code-in-region.md`,
+  `<v8std mirror>/docs/diagnostics/v8-code-style/module-structure-top-region.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std/content/455/hdoc`,
   `https://v8std.ru/std/455/`,

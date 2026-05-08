@@ -15,7 +15,7 @@
 - `crates/hir-def/src/body/lower/mod.rs`
 - `crates/ide-diagnostics/docs/ru/FunctionNameStartsWithGet.md`
 - `docs/legal/diagnostics/FunctionNameStartsWithGet.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/647.md`
+- `<v8std mirror>/docs/std/647.md`
 
 ## Как реализовано
 

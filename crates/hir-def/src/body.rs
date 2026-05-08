@@ -102,6 +102,32 @@ impl Body {
         }
     }
 
+    /// Allocate an expression and return its opaque [`ExprId`].
+    ///
+    /// **Test / programmatic-construction helper, not part of the
+    /// regular lowering surface.** Lowering populates a `Body` via
+    /// direct crate-internal arena access (and also records source-map
+    /// entries, top-level body stmts, etc.); this method only forwards
+    /// to the arena and does NOT update `body_stmts`, the source map,
+    /// or any other side-table. It is intended for downstream crates
+    /// that need to hand-roll a tiny `Body` for a unit test (e.g. the
+    /// `dataflow::path_terminates` tests build minimal `Stmt::Return` /
+    /// `Stmt::Raise` bodies wired into a hand-built CFG to exercise the
+    /// lattice transfer in isolation from the parser+lowering stack).
+    /// Production callers should not use this — go through lowering.
+    #[doc(hidden)]
+    pub fn alloc_expr(&mut self, expr: Expr) -> ExprId {
+        ExprId::from_idx(self.exprs.alloc(expr))
+    }
+
+    /// Allocate a statement and return its opaque [`StmtId`]. See
+    /// [`Body::alloc_expr`] for the rationale and the same caveats —
+    /// this does NOT update `body_stmts` or the source map.
+    #[doc(hidden)]
+    pub fn alloc_stmt(&mut self, stmt: Stmt) -> StmtId {
+        StmtId::from_idx(self.stmts.alloc(stmt))
+    }
+
     /// Get an expression by ID (opaque → typed conversion).
     pub fn expr(&self, id: ExprId) -> &Expr {
         let typed_id: ExprIdx = id.to_idx();
@@ -364,6 +390,28 @@ pub struct LowerResult {
     pub external_refs: Vec<ExternalRef>,
 }
 
+/// Pre-existing binding kind captured by lowering for an assignment
+/// target whose name shadows a configuration-scope binding (e.g. a
+/// CommonModule).
+///
+/// Recorded **before** the implicit `register_local_var` runs so the
+/// downstream diagnostic handler (`CommonModuleAssign`,
+/// `ThisObjectAssign` future work) can fast-path-skip when a real
+/// local / param shadows the configuration name without rebuilding a
+/// `Resolver`. The enum stays intentionally narrow — extending it
+/// later (`ModuleVariable`, `ImportedAlias`) is non-breaking; the
+/// `Option<ExistingBindingKind>` payload uses `None` for "no
+/// shadowing tracked" rather than a placeholder variant, so absence
+/// has a single, unambiguous meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingBindingKind {
+    /// Identifier is already a local `Перем` declared earlier in the
+    /// body.
+    Local,
+    /// Identifier is a procedure / function parameter name.
+    Param,
+}
+
 /// Diagnostic collected during body lowering.
 ///
 /// These diagnostics are emitted as a byproduct of lowering AST to HIR.
@@ -462,7 +510,21 @@ pub enum BodyDiagnostic {
     /// Assignment to a potential CommonModule name.
     /// Emitted during lowering for simple identifier assignments.
     /// Validation against metadata happens in from_hir().
-    CommonModuleAssign { variable_name: String, range: TextRange },
+    ///
+    /// `existing_binding_kind` records whether the assignment target
+    /// already had a local / param binding **before** the implicit
+    /// `register_local_var` ran, so the diagnostic handler can fast-
+    /// path-skip on shadowing without rebuilding a `Resolver`. `None`
+    /// means "no shadowing — the name introduces a fresh implicit
+    /// binding (or is a re-assignment without an existing binding
+    /// kind we tracked)". The enum is intentionally not exhaustive
+    /// over all possible bindings (no `ModuleVariable`, no
+    /// `Builtin`); those land in the handler's resolver path.
+    CommonModuleAssign {
+        variable_name: String,
+        range: TextRange,
+        existing_binding_kind: Option<ExistingBindingKind>,
+    },
 
     /// Missing or non-export method call in CommonModule.
     ///
@@ -1296,7 +1358,11 @@ mod tests {
             BodyDiagnostic::FunctionShouldHaveReturn { range },
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range },
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range },
-            BodyDiagnostic::CommonModuleAssign { variable_name: "Test".to_string(), range },
+            BodyDiagnostic::CommonModuleAssign {
+                variable_name: "Test".to_string(),
+                range,
+                existing_binding_kind: None,
+            },
         ];
 
         for diag in diagnostics {

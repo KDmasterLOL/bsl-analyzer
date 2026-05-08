@@ -11,8 +11,8 @@ use std::sync::Arc;
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
 use hir::{
-    DefWithBodyId, InferenceDiagnostic, InferenceResult, ItemTree, MethodDocs, MethodId,
-    ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
+    AssignmentResolution, DefWithBodyId, InferenceDiagnostic, InferenceResult, ItemTree,
+    MethodDocs, MethodId, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
@@ -83,6 +83,27 @@ pub trait AnalysisProvider {
 
     /// Get module index (name -> FileId mapping).
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;
+
+    /// Classify an assignment target name at module scope.
+    ///
+    /// Used by [`CommonModuleAssign`] (Track 1 §4.6) to suppress the
+    /// diagnostic when the LHS of `Name = …` is shadowed by a
+    /// module-level `Перем`, or doesn't refer to anything visible
+    /// (resolution priority: `Local` > `Param` > `ModuleVariable` >
+    /// `CommonModule` > `Unknown`). Local/Param shadowing is caught
+    /// upstream by `BodyDiagnostic::CommonModuleAssign::existing_binding_kind`
+    /// (Step L), so the resolver-pass here only needs to disambiguate
+    /// `ModuleVariable` from `CommonModule` from `Unknown` —
+    /// `Resolver::for_module(...)` (no expression scopes) is sufficient.
+    ///
+    /// Default impl returns [`AssignmentResolution::Unknown`] so streaming
+    /// providers (which don't have access to the resolver) opt-out
+    /// without breaking consumers — the diagnostic conservatively
+    /// suppresses on `Unknown`, which under streaming mode is correct
+    /// because we can't prove the name refers to a CommonModule.
+    fn assignment_target_kind(&self, _file_id: FileId, _name: &str) -> AssignmentResolution {
+        AssignmentResolution::Unknown
+    }
 
     // ========================================================================
     // Per-file Data
@@ -207,6 +228,12 @@ pub trait AnalysisProvider {
         &self,
         file_id: FileId,
     ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>;
+
+    /// Get path-terminates analysis for all methods (batch).
+    fn module_path_terminates(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates>;
 
     // ========================================================================
     // Per-Method Dataflow (for specific diagnostics)

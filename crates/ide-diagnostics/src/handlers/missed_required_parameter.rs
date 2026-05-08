@@ -430,9 +430,10 @@ mod tests {
         // Qualified calls on a CommonModule (`ПервыйОбщийМодуль.*`) and a metadata
         // manager (`Документы.ПКО.*`, `Справочники.Справочник1.*`) do produce HIR
         // `BodyDiagnostic::MissedRequiredParameter`, but `from_hir()` needs
-        // `ctx.load_configuration()` to resolve them — `check_hir_diagnostic` runs
-        // without metadata so those handlers return `None` (see the dedicated
-        // qualified-call test below that uses a fake configuration).
+        // CFE-aware metadata (visible configurations + module file resolution)
+        // to resolve them — `check_hir_diagnostic` runs without metadata so
+        // those handlers return `None` (see the dedicated qualified-call
+        // test below that uses a fake configuration).
         assert_eq!(
             diags.len(),
             6,

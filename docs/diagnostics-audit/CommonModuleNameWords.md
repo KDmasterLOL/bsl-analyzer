@@ -16,8 +16,8 @@
 - `crates/ide-diagnostics/docs/ru/CommonModuleNameWords.md`,
   `crates/ide-diagnostics/docs/en/CommonModuleNameWords.md`
 - `docs/legal/diagnostics/CommonModuleNameWords.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/469.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommonModuleNameWords.md`
+- `<v8std mirror>/docs/std/469.md`,
+  `<v8std mirror>/docs/diagnostics/bslls/CommonModuleNameWords.md`
 
 ## Как реализовано
 

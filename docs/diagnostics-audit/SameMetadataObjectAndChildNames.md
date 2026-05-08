@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/same_metadata_object_and_child_names.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/SameMetadataObjectAndChildNames.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/474.md`
+- `<v8std mirror>/docs/diagnostics/bslls/SameMetadataObjectAndChildNames.md`
+- `<v8std mirror>/docs/std/474.md`
 
 ## Как реализовано
 

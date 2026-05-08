@@ -254,6 +254,70 @@ impl Resolver {
         Some((mdo.mdo_type, Name::new(&mdo.name)))
     }
 
+    /// Resolve `ЭтотОбъект` / `ThisObject` inside a `ManagerModule.bsl`.
+    ///
+    /// Sibling of [`Self::resolve_this_object`] for the manager axis.
+    /// Returns `Some((MdoType, Name))` only when the resolver's enclosing
+    /// module is a `ModuleType::ManagerModule` whose MDO has a manager
+    /// surface — gated on
+    /// [`bsl_metadata::MdoType::manager_type_prefix`] returning `Some(_)`,
+    /// the same table that `Ty::ManagerCollection` factory uses, so a
+    /// flavour without a manager (constants, common modules, forms,
+    /// HTTP-services, web-services, event subscriptions, scheduled jobs
+    /// …) returns `None` rather than dangle a `Ty::ThisManager` no
+    /// adapter can dispatch.
+    ///
+    /// In a manager module `ЭтотОбъект` denotes the manager itself
+    /// (`Справочники.Номенклатура` for a Catalog manager — same surface
+    /// the user reaches via the `Справочники.<Имя>` qualified path).
+    /// Inference produces [`crate::ty::Ty::ThisManager`]; field / method
+    /// lookup adapters then coerce it to [`crate::ty::Ty::ObjectManager`]
+    /// via `hir-ty::this_object::coerce_to_metadata_ref`. Both halves of
+    /// the pipeline share this gate so a new `MdoType` flavour with a
+    /// manager grows `ЭтотОбъект` support automatically.
+    pub fn resolve_this_manager(
+        &self,
+        db: &dyn DefDatabase,
+    ) -> Option<(bsl_metadata::MdoType, Name)> {
+        let module_id = self.module_id()?;
+        let metadata = db.module_metadata(module_id);
+
+        if metadata.module_type != bsl_metadata::ModuleType::ManagerModule {
+            return None;
+        }
+
+        // Two storage slots per `build_module_metadata`
+        // (`crates/ide-db/src/metadata.rs::build_module_metadata`):
+        //
+        // - `metadata.mdo` for non-register flavours (Catalog,
+        //   Document, ChartOfAccounts, …) — populated from
+        //   `Configuration::find_metadata_object`.
+        // - `metadata.register` for the four register flavours
+        //   (Information / Accumulation / Accounting / Calculation) —
+        //   populated from `Configuration::find_register_by_type_and_name`,
+        //   `metadata.mdo` stays `None`.
+        //
+        // Both carry the `(MdoType, name)` pair this gate needs. The
+        // earlier "read `metadata.mdo` only" shape would silently
+        // refuse every register's `ManagerModule.bsl` even though
+        // `manager_type_prefix` is `Some(...)` for all four flavours
+        // (covered end-to-end by
+        // `crates/ide/tests/infer_this_manager.rs::infer_this_manager_resolves_in_information_register_module`).
+        let (mdo_type, name) = match (metadata.mdo.as_ref(), metadata.register.as_ref()) {
+            (Some(mdo), _) => (mdo.mdo_type, Name::new(&mdo.name)),
+            (None, Some(reg)) => (reg.mdo_type(), Name::new(reg.name())),
+            (None, None) => return None,
+        };
+
+        // Only MDO flavours with a manager surface are allowed to surface
+        // `Ty::ThisManager`. The `Ty::ObjectManager` factory uses the same
+        // gate, so a manager that exists at the inference layer always
+        // has a corresponding dispatch target downstream.
+        mdo_type.manager_type_prefix()?;
+
+        Some((mdo_type, name))
+    }
+
     /// Visibility-aware probe for "is `module_name` a user CommonModule?".
     ///
     /// Mirrors the two-stage gate inside [`Self::resolve_qualified_method`]:
@@ -310,6 +374,60 @@ impl Resolver {
         }
 
         metadata.form.as_ref().is_some_and(|f| f.is_managed())
+    }
+
+    /// Resolve a bare name as an assignment-statement target.
+    ///
+    /// Narrower than [`Self::resolve_name`] in two ways:
+    ///
+    /// - **Builtins are not classified here.** A platform global like
+    ///   `Сообщить` returns [`AssignmentResolution::Unknown`] rather
+    ///   than a `Builtin` arm. Diagnostics consuming this API
+    ///   (`CommonModuleAssign`, future `ThisObjectAssign` /
+    ///   `ReadOnlyPropertyAssignment`) only care whether the LHS is a
+    ///   visible CommonModule, a module variable, or a local; the
+    ///   runtime semantics of "may a user assign over a platform
+    ///   global?" is out of scope and intentionally not encoded.
+    /// - **Methods are not classified either.** A two-segment
+    ///   `CommonModule.Method = ...` is field-on-receiver syntax that
+    ///   BSL rejects via separate paths, and a bare-name `Method = ...`
+    ///   is implicit-local declaration in BSL — handled by lowering,
+    ///   not by an assignment-target diagnostic. The bare-name resolver
+    ///   therefore drops methods from the resolution cone.
+    ///
+    /// Resolution order (first match wins):
+    /// 1. `Local` — local `Перем` introduced inside the body.
+    /// 2. `Param` — procedure / function parameter.
+    /// 3. `ModuleVariable` — module-level `Перем`.
+    /// 4. `CommonModule` — name resolves to a CommonModule visible
+    ///    across the main configuration + every registered extension.
+    /// 5. `Unknown` — anything else.
+    ///
+    /// `Local` and `Param` are surfaced separately so consumers that
+    /// care about the exact provenance (rename refactor, hover) can
+    /// keep that information; consumers that only need "is this name
+    /// shadowed?" can collapse both into a single arm.
+    pub fn resolve_assignment_target(
+        &self,
+        db: &dyn ConfigsDatabase,
+        name: &Name,
+    ) -> AssignmentResolution {
+        if let Some(local) = self.resolve_local(name) {
+            return match local.def {
+                crate::scope::ScopeDef::LocalVariable => AssignmentResolution::Local,
+                crate::scope::ScopeDef::Parameter => AssignmentResolution::Param,
+            };
+        }
+        if let Some(var_id) = self.resolve_module_variable(db, name) {
+            return AssignmentResolution::ModuleVariable(var_id);
+        }
+        if let Some(module_id) = self.module_id() {
+            let configs = db.configurations(module_id.file_id);
+            if Self::module_visible_in_configs(&configs, name) {
+                return AssignmentResolution::CommonModule(name.clone());
+            }
+        }
+        AssignmentResolution::Unknown
     }
 
     /// Resolve a name at any level (builtin, local, module, workspace).
@@ -1043,6 +1161,36 @@ pub enum Resolution {
 
     /// Module-level variable.
     Variable(VariableId),
+}
+
+/// Result of [`Resolver::resolve_assignment_target`].
+///
+/// Captures the binding an identifier resolves to **when used on the
+/// left-hand side of an assignment**, restricted to the kinds that
+/// assignment-target diagnostics in this codebase actually classify
+/// — local / param / module variable / visible CommonModule.
+/// Builtins and methods deliberately fall through to [`Self::Unknown`];
+/// see [`Resolver::resolve_assignment_target`] for the rationale.
+///
+/// Priority — first match wins:
+/// `Local` > `Param` > `ModuleVariable` > `CommonModule` > `Unknown`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentResolution {
+    /// Local `Перем` declared inside the current body — shadows any
+    /// module / configuration binding.
+    Local,
+    /// Procedure / function parameter — same shadowing priority as
+    /// [`Self::Local`], surfaced separately so consumers can render the
+    /// right hover / rename UI.
+    Param,
+    /// Module-level `Перем` declared at the module scope.
+    ModuleVariable(VariableId),
+    /// CommonModule visible across main + every registered extension.
+    /// Carries the matched name (consumers usually have it already, but
+    /// the field keeps the API symmetric with the other variants).
+    CommonModule(Name),
+    /// Identifier does not resolve to any shadowable assignment target.
+    Unknown,
 }
 
 /// Successful outcome of [`Resolver::resolve_qualified_method`].

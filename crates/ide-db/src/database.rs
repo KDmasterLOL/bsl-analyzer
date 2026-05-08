@@ -404,6 +404,13 @@ impl hir::HirDatabase for RootDatabaseImpl {
     fn type_narrowing_enabled(&self) -> bool {
         RootDatabaseImpl::type_narrowing_enabled(self)
     }
+
+    fn proc_signature(
+        &self,
+        method_input: hir::MethodIdInput<'_>,
+    ) -> Arc<hir::proc_signature::ProcSignature> {
+        hir::proc_signature::proc_signature_query(self, method_input)
+    }
 }
 
 #[salsa::db]
@@ -467,6 +474,13 @@ impl RootDatabase for RootDatabaseImpl {
         file_id_input: FileIdInput,
     ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         queries::module_reaching_definitions_query(self, file_id_input)
+    }
+
+    fn module_path_terminates(
+        &self,
+        file_id_input: FileIdInput,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        queries::module_path_terminates_query(self, file_id_input)
     }
 
     fn module_liveness_analysis(

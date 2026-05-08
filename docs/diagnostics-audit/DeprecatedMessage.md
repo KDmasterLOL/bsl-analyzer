@@ -15,7 +15,7 @@
 - `crates/hir-def/src/body/lower/expr.rs`
 - `crates/ide-diagnostics/docs/ru/DeprecatedMessage.md`
 - `docs/legal/diagnostics/DeprecatedMessage.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/418.md`
+- `<v8std mirror>/docs/std/418.md`
 
 ## Как реализовано
 

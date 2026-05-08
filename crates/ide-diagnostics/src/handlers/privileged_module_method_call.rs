@@ -39,14 +39,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_bool(DiagnosticCode::PrivilegedModuleMethodCall, "validateNestedCalls")
         .unwrap_or(DEFAULT_VALIDATE_NESTED_CALLS);
 
-    let configuration = match ctx.load_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
-
-    let privileged_modules: FxHashSet<String> = configuration
-        .common_modules()
+    // Union privileged CommonModule names across main + CFE so a
+    // privileged module declared by an extension is still flagged from
+    // call sites in other (or the same) configuration.
+    let privileged_modules: FxHashSet<String> = ctx
+        .visible_configurations()
         .iter()
+        .flat_map(|vc| vc.configuration.common_modules().to_vec())
         .filter(|m| m.is_privileged())
         .map(|m| m.name().to_lowercase())
         .collect();
@@ -55,9 +54,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let current_module_name =
-        common_module_helpers::find_common_module_for_file(ctx, &configuration)
-            .map(|m| m.name().to_string());
+    let current_module_name = common_module_helpers::find_common_module_for_file_anywhere(ctx)
+        .map(|m| m.name().to_string());
 
     let is_current_privileged = current_module_name
         .as_ref()

@@ -22,7 +22,9 @@ pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
 
 // Re-export HIR body types for diagnostics
-pub use hir_def::body::{DeprecatedKind8312, ExternalRef, MagicNumberContext, ManagerType};
+pub use hir_def::body::{
+    DeprecatedKind8312, ExistingBindingKind, ExternalRef, MagicNumberContext, ManagerType,
+};
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
 
 // Re-export HIR expression/statement types
@@ -38,7 +40,7 @@ pub use hir_def::symbol_tree::MethodSymbol;
 pub use hir_def::{ConditionalTree, ItemTree, ModuleIndex, SymbolTree, WorkspaceSymbols};
 
 // Re-export database and resolution
-pub use hir_def::resolver::Resolver;
+pub use hir_def::resolver::{AssignmentResolution, Resolver};
 pub use hir_def::scope::{ExprScopes, ScopeDef};
 pub use hir_def::DefDatabase;
 
@@ -70,10 +72,24 @@ pub mod dataflow {
         };
     }
 
+    pub mod path_terminates {
+        pub use ::dataflow::path_terminates::{
+            analyze_path_terminates, analyze_path_terminates_default, MayFallthrough,
+            ModulePathTerminates, PathTerminatesConfig, PathTerminatesResult,
+            PathTerminatesTransfer,
+        };
+    }
+
     pub mod reaching_defs {
         pub use ::dataflow::reaching_defs::{
             DefSite, Definition, DefinitionIndex, ModuleReachingDefs, ReachingDefs,
             ReachingDefsResult, ReachingDefsTransfer,
+        };
+    }
+
+    pub mod temp_resource {
+        pub use ::dataflow::temp_resource::{
+            analyze_open_resources, OpenResourcesResult, OpenSet, ResourceEvent, ResourceProvider,
         };
     }
 }
@@ -99,6 +115,7 @@ pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
 pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowState};
+pub use hir_ty::proc_signature;
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
     form_element_kind_sort_band, CallArgBinding, FormDataBinding, FormDataTarget, FormElementKind,

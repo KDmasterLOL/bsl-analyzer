@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/query_to_missing_metadata.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/QueryToMissingMetadata.md`
+- `<v8std mirror>/docs/diagnostics/bslls/QueryToMissingMetadata.md`
 
 ## Как реализовано
 

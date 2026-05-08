@@ -29,7 +29,7 @@ classify FOR UPDATE / INDEX BY as Tier D / Local IDE-recovery
 allowance based on a pubqlang-only scan; those classifications are
 **stale** — they predate the v8327doc Глава 8 source landing
 (Slice 7-addendum, 2026-04-26) which attests both clauses with
-canonical EBNF (`page.html:1324, 1328`). Tier-classification flip on
+canonical EBNF for both clauses. Tier-classification flip on
 the parser-side rustdoc is documented in §Pre-existing parser-side
 stale-classification follow-up below as a known follow-up; it is
 out of Slice 2-addendum scope (parser-only edit).
@@ -116,23 +116,23 @@ word-list.
 
 | # | Variant | Tier | Primary source (v8327doc Глава 8, public URL above) | Pubqlang corroborating |
 |---|---|---|---|---|
-| 1 | `KwDrop` | A1 | `:1200` Term word-list УНИЧТОЖИТЬ; `:2512` prose; `:2516` canonical syntax `УНИЧТОЖИТЬ ВременнаяТаблица` | pubqlang/51 (:111) + pubqlang/73 (:108) — temp-table lifecycle prose |
-| 2 | `KwAutoOrder` | A1 | bilingual word-list slot (АВТОУПОРЯДОЧИВАНИЕ ↔ AUTOORDER) | pubqlang/17 (:17, 32, 52) — canonical bare-keyword form |
+| 1 | `KwDrop` | A1 | Term word-list УНИЧТОЖИТЬ; prose; canonical syntax `УНИЧТОЖИТЬ ВременнаяТаблица` | pubqlang/51 + pubqlang/73 — temp-table lifecycle prose |
+| 2 | `KwAutoOrder` | A1 | bilingual word-list slot (АВТОУПОРЯДОЧИВАНИЕ ↔ AUTOORDER) | pubqlang/17 — canonical bare-keyword form |
 | 3 | `KwAsc` | A1 | bilingual word-list slot (ВОЗР ↔ ASC) | pubqlang/16 — ORDER BY direction marker |
 | 4 | `KwDesc` | A1 | bilingual word-list slot (УБЫВ ↔ DESC) | pubqlang/16 — ORDER BY direction marker |
-| 5 | `KwHierarchy` | A1 | `:3174` canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]` in TOTALS slot; co-located with KwOnly | pubqlang/27 (:39, 51, 71) — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ` (ORDER BY HIERARCHY canonical) |
-| 6 | `KwAllowed` | A1 | `:1320` canonical EBNF first-prefix slot; `:1040-1044` bilingual word-list (РАЗРЕШЕННЫЕ ↔ ALLOWED); `:1331-1344` prose semantics. Already Tier-A1-attested by Slice 7-addendum at `docs/legal/sdbl-clean-room-slice7-addendum.md:107-132` | pubqlang/57 (:50) — UI-checkbox prose (secondary) |
-| 7 | `KwFor` | A1 | `:1328` canonical EBNF `[ДЛЯ ИЗМЕНЕНИЯ [<Список таблиц верхнего уровня>]]`; `:2230` canonical example | — (verified absent in pubqlang dump 16-39) |
-| 8 | `KwUpdate` | A1 | `:650` Term word-list ИЗМЕНЕНИЯ; `:1391` Term ДЛЯ ИЗМЕНЕНИЯ; `:2212` prose; co-located with KwFor canonical EBNF at `:1328` | — |
-| 9 | `KwIndex` | A1 | `:1324` canonical EBNF `[ИНДЕКСИРОВАТЬ ПО [НАБОРАМ] <Список полей>]`; `:690` Term word-list ИНДЕКСИРОВАТЬ; `:2354, 2403` canonical examples | — (verified absent in pubqlang dump 16-39) |
-| 10 | `KwOnly` | A1 | `:1170` Term word-list ТОЛЬКО; `:3174` canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]`; `:3257, 3387` canonical examples `Номенклатура ТОЛЬКО ИЕРАРХИЯ` | — |
-| 11 | `KwOverall` | A1 | bilingual word-list slot (ОБЩИЕ ↔ OVERALL) | pubqlang/39 (:13, 25, 29, 48, 49, 51) — canonical `ИТОГИ ... ПО ОБЩИЕ` |
-| 12 | `KwPeriods` | A1 (with regex defect — see §Behaviour change) | `:930, 934` bilingual word-list (**ПЕРИОДАМИ** ↔ **PERIODS**, instrumental case for Russian); `:3174` canonical EBNF `... \| [ПЕРИОДАМИ(<period-type-list>)]`; `:3269` prose; `:3296` canonical example `Период ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(...), ДАТАВРЕМЯ(...))` | — |
-| 13 | `KwEscape` | A1 | `:1090, 1094` bilingual word-list (СПЕЦСИМВОЛ ↔ ESCAPE); `:4971` canonical EBNF `[СПЕЦСИМВОЛ <Литерал типа СТРОКА>]` in LIKE slot; `:5381, 5385` prose | — (verified absent in pubqlang/23, /60) |
-| 14 | `KwRefs` | A1 | `:1110` Term word-list ССЫЛКА; `:4969` canonical EBNF `<Выражение> ССЫЛКА <Имя таблицы>`; `:5329, 5343` prose + canonical example | pubqlang/40 (:83, 98) — `(ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная)` |
-| 15 | `KwCast` | A1 | `:460` Term word-list ВЫРАЗИТЬ; `:4730` canonical EBNF `ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )` | pubqlang/40 (:24, 66, 84-86, 99, 102) — canonical `ВЫРАЗИТЬ(...)` examples + prose |
-| 16 | `KwType` | A1 | `:4831` canonical EBNF `ТИП(<Имя типа>)` | — (no pubqlang canonical example located in dumped chapters) |
-| 17 | `KwValue` | A1 | bilingual word-list slot (ЗНАЧЕНИЕ ↔ VALUE) | pubqlang/31 (:25, 28) canonical example `Товары.Родитель = ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)` + prose «литерал функционального типа ЗНАЧЕНИЕ()»; pubqlang/96 (:26) corroborating |
+| 5 | `KwHierarchy` | A1 | canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]` in TOTALS slot; co-located with KwOnly | pubqlang/27 — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ` (ORDER BY HIERARCHY canonical) |
+| 6 | `KwAllowed` | A1 | canonical EBNF first-prefix slot; bilingual word-list (РАЗРЕШЕННЫЕ ↔ ALLOWED); prose semantics. Already Tier-A1-attested by Slice 7-addendum at `docs/legal/sdbl-clean-room-slice7-addendum.md` | pubqlang/57 — UI-checkbox prose (secondary) |
+| 7 | `KwFor` | A1 | canonical EBNF `[ДЛЯ ИЗМЕНЕНИЯ [<Список таблиц верхнего уровня>]]`; canonical example | — (verified absent in pubqlang dump 16-39) |
+| 8 | `KwUpdate` | A1 | Term word-list ИЗМЕНЕНИЯ; Term ДЛЯ ИЗМЕНЕНИЯ; prose; co-located with KwFor canonical EBNF | — |
+| 9 | `KwIndex` | A1 | canonical EBNF `[ИНДЕКСИРОВАТЬ ПО [НАБОРАМ] <Список полей>]`; Term word-list ИНДЕКСИРОВАТЬ; canonical examples | — (verified absent in pubqlang dump 16-39) |
+| 10 | `KwOnly` | A1 | Term word-list ТОЛЬКО; canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]`; canonical examples `Номенклатура ТОЛЬКО ИЕРАРХИЯ` | — |
+| 11 | `KwOverall` | A1 | bilingual word-list slot (ОБЩИЕ ↔ OVERALL) | pubqlang/39 — canonical `ИТОГИ ... ПО ОБЩИЕ` |
+| 12 | `KwPeriods` | A1 (with regex defect — see §Behaviour change) | bilingual word-list (**ПЕРИОДАМИ** ↔ **PERIODS**, instrumental case for Russian); canonical EBNF `... \| [ПЕРИОДАМИ(<period-type-list>)]`; prose; canonical example `Период ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(...), ДАТАВРЕМЯ(...))` | — |
+| 13 | `KwEscape` | A1 | bilingual word-list (СПЕЦСИМВОЛ ↔ ESCAPE); canonical EBNF `[СПЕЦСИМВОЛ <Литерал типа СТРОКА>]` in LIKE slot; prose | — (verified absent in pubqlang/23, /60) |
+| 14 | `KwRefs` | A1 | Term word-list ССЫЛКА; canonical EBNF `<Выражение> ССЫЛКА <Имя таблицы>`; prose + canonical example | pubqlang/40 — `(ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная)` |
+| 15 | `KwCast` | A1 | Term word-list ВЫРАЗИТЬ; canonical EBNF `ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )` | pubqlang/40 — canonical `ВЫРАЗИТЬ(...)` examples + prose |
+| 16 | `KwType` | A1 | canonical EBNF `ТИП(<Имя типа>)` | — (no pubqlang canonical example located in dumped chapters) |
+| 17 | `KwValue` | A1 | bilingual word-list slot (ЗНАЧЕНИЕ ↔ VALUE) | pubqlang/31 canonical example `Товары.Родитель = ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)` + prose «литерал функционального типа ЗНАЧЕНИЕ()»; pubqlang/96 corroborating |
 
 **Tier-classification overrides vs codex C0-plan-review** (recorded
 for audit trail):
@@ -146,17 +146,17 @@ authoritative SDBL grammar specification; pubqlang is a textbook
 companion). All eight candidates promoted to A1 once v8327doc
 verification was performed at C0a:
 
-- KwFor / KwUpdate: v8327doc `:1328` canonical EBNF.
-- KwIndex: v8327doc `:1324` canonical EBNF.
-- KwEscape: v8327doc `:4971` canonical EBNF.
-- KwPeriods: v8327doc `:3174` canonical EBNF (with §Behaviour
+- KwFor / KwUpdate: v8327doc Глава 8 canonical EBNF.
+- KwIndex: v8327doc Глава 8 canonical EBNF.
+- KwEscape: v8327doc Глава 8 canonical EBNF.
+- KwPeriods: v8327doc Глава 8 canonical EBNF (with §Behaviour
   change for the regex defect).
-- KwDrop: v8327doc `:2516` canonical syntax + Slice 6 attestation
-  `:168-178` already noted that "a tightened rewrite with a
-  specific ITS sub-page citation is expected when Slice 3 promotes
-  the KwDrop lexer variant out of the LEGACY banner" — this is
-  exactly that promotion.
-- KwType: v8327doc `:4831` canonical EBNF.
+- KwDrop: v8327doc Глава 8 canonical syntax + Slice 6 attestation
+  already noted that "a tightened rewrite with a specific ITS
+  sub-page citation is expected when Slice 3 promotes the KwDrop
+  lexer variant out of the LEGACY banner" — this is exactly that
+  promotion.
+- KwType: v8327doc Глава 8 canonical EBNF.
 - KwValue: pubqlang/31 canonical example + prose.
 
 The codex C0-plan-review verdict `STRONG: KwRefs is documented
@@ -179,15 +179,15 @@ The pre-addendum regex at `mod.rs:512` is
 SDBL grammar in v8327doc Глава 8 specifies the keyword in
 **instrumental case** — `ПЕРИОДАМИ`:
 
-- `page.html:930` `<span class="Term">ПЕРИОДАМИ</span>` (Russian
+- v8327doc bilingual word-list `<span class="Term">ПЕРИОДАМИ</span>` (Russian
   bilingual word-list slot).
-- `page.html:934` `<span class="Term">PERIODS</span>` (English
+- v8327doc bilingual word-list `<span class="Term">PERIODS</span>` (English
   bilingual word-list slot — matches current regex).
-- `page.html:3174` canonical EBNF in TOTALS clause:
+- v8327doc canonical EBNF in TOTALS clause:
   `... | [ПЕРИОДАМИ(Секунда | Минута | ... | Декада | Полугодие
   ...)]`.
-- `page.html:3269` prose: «при помощи ключевого слова ПЕРИОДАМИ».
-- `page.html:3296` canonical example:
+- v8327doc prose: «при помощи ключевого слова ПЕРИОДАМИ».
+- v8327doc canonical example:
   `Период ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(2006,6,28),
   ДАТАВРЕМЯ(2006,6,28))`.
 
@@ -306,13 +306,11 @@ The parser-side rustdoc comments at:
   (`index_by_clause` Provenance bullet — Tier D / "verified absent
   in dumped ITS chapters 16–39")
 
-and the SELECT mini-spec sections at
-`docs/legal/sdbl-select-mini-spec.md:759-766` (FOR UPDATE §ITS
-coverage) and `:785-789` (INDEX BY §ITS coverage) classify FOR
-UPDATE / INDEX BY as Tier D based on a pubqlang-only scan. With
-the v8327doc Глава 8 source landed (Slice 7-addendum, 2026-04-26),
-both clauses are now Tier A1 — v8327doc `:1324` and `:1328` carry
-canonical EBNF for both.
+and the SELECT mini-spec §FOR UPDATE §ITS coverage and §INDEX BY
+§ITS coverage sections classify FOR UPDATE / INDEX BY as Tier D
+based on a pubqlang-only scan. With the v8327doc Глава 8 source
+landed (Slice 7-addendum, 2026-04-26), both clauses are now Tier
+A1 — v8327doc Глава 8 carries canonical EBNF for both.
 
 This follow-up is **out of Slice 2-addendum scope** (lexer-only
 edit). The parser-side rustdoc tier-classification flip should
@@ -322,9 +320,9 @@ a documentation-only commit.
 
 The same is true for the §IDE-recovery allowance language around
 `KwPeriods` — once the regex defect is fixed at C2 the
-"Tier D / NOT verified" prose at
-`docs/legal/sdbl-select-mini-spec.md:882-884` may merit revisiting
-when Slice 12 promotes structured PERIODS handling.
+"Tier D / NOT verified" prose in the SELECT mini-spec §PERIODS
+section may merit revisiting when Slice 12 promotes structured
+PERIODS handling.
 
 ## Sources consulted
 
@@ -335,74 +333,64 @@ The Slice 2-addendum material was authored from:
    <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>.
    Per the project's citation policy
    (`docs/legal/sdbl-clean-room-slice8-addendum.md` precedent)
-   only the public URL above is cited as the canonical source;
-   line numbers are reviewer-convenience references against a
-   local snapshot. Specifically:
-   - `:460` — Term ВЫРАЗИТЬ.
-   - `:650` — Term ИЗМЕНЕНИЯ.
-   - `:690` — Term ИНДЕКСИРОВАТЬ.
-   - `:920-924` — bilingual ПЕРВЫЕ ↔ TOP (cross-reference, Slice
+   only the public URL above is cited as the canonical source.
+   Specifically consulted regions:
+   - bilingual word-list Term ВЫРАЗИТЬ.
+   - bilingual word-list Term ИЗМЕНЕНИЯ.
+   - bilingual word-list Term ИНДЕКСИРОВАТЬ.
+   - bilingual word-list ПЕРВЫЕ ↔ TOP (cross-reference, Slice
      7-addendum already attested).
-   - `:930-934` — bilingual ПЕРИОДАМИ ↔ PERIODS.
-   - `:1030-1034` — bilingual РАЗЛИЧНЫЕ ↔ DISTINCT (cross-
-     reference, Slice 2 already attested).
-   - `:1040-1044` — bilingual РАЗРЕШЕННЫЕ ↔ ALLOWED
-     (cross-reference, Slice 7-addendum already attested).
-   - `:1090-1094` — bilingual СПЕЦСИМВОЛ ↔ ESCAPE.
-   - `:1110` — Term ССЫЛКА.
-   - `:1170` — Term ТОЛЬКО.
-   - `:1200` — Term УНИЧТОЖИТЬ.
-   - `:1320` — canonical EBNF skeleton for `<Описание запроса>`
-     placing РАЗРЕШЕННЫЕ / РАЗЛИЧНЫЕ / ПЕРВЫЕ in the first three
+   - bilingual word-list ПЕРИОДАМИ ↔ PERIODS.
+   - bilingual word-list РАЗЛИЧНЫЕ ↔ DISTINCT (cross-reference,
+     Slice 2 already attested).
+   - bilingual word-list РАЗРЕШЕННЫЕ ↔ ALLOWED (cross-reference,
+     Slice 7-addendum already attested).
+   - bilingual word-list СПЕЦСИМВОЛ ↔ ESCAPE.
+   - bilingual word-list Term ССЫЛКА.
+   - bilingual word-list Term ТОЛЬКО.
+   - bilingual word-list Term УНИЧТОЖИТЬ.
+   - canonical EBNF skeleton for `<Описание запроса>` placing
+     РАЗРЕШЕННЫЕ / РАЗЛИЧНЫЕ / ПЕРВЫЕ in the first three
      SELECT-prefix slots.
-   - `:1324` — canonical EBNF
-     `[ИНДЕКСИРОВАТЬ ПО [НАБОРАМ] <Список полей>]`.
-   - `:1328` — canonical EBNF
-     `[ДЛЯ ИЗМЕНЕНИЯ [<Список таблиц верхнего уровня>]]`.
-   - `:1391` — Term ДЛЯ ИЗМЕНЕНИЯ (combined-term entry).
-   - `:2212-2230` — FOR UPDATE prose + canonical example block.
-   - `:2341-2428` — INDEX BY prose + canonical examples
-     `ИНДЕКСИРОВАТЬ ПО Поле` + `ИНДЕКСИРОВАТЬ ПО НАБОРАМ ( ... )`.
-   - `:2512-2516` — DROP prose + canonical syntax
-     `УНИЧТОЖИТЬ ВременнаяТаблица`.
-   - `:3174` — canonical EBNF for TOTALS BY group spec
+   - canonical EBNF `[ИНДЕКСИРОВАТЬ ПО [НАБОРАМ] <Список полей>]`.
+   - canonical EBNF `[ДЛЯ ИЗМЕНЕНИЯ [<Список таблиц верхнего
+     уровня>]]`.
+   - Term ДЛЯ ИЗМЕНЕНИЯ (combined-term entry).
+   - FOR UPDATE prose + canonical example block.
+   - INDEX BY prose + canonical examples `ИНДЕКСИРОВАТЬ ПО Поле`
+     + `ИНДЕКСИРОВАТЬ ПО НАБОРАМ ( ... )`.
+   - DROP prose + canonical syntax `УНИЧТОЖИТЬ ВременнаяТаблица`.
+   - canonical EBNF for TOTALS BY group spec
      `<Выражение> [[ТОЛЬКО] ИЕРАРХИЯ] | [ПЕРИОДАМИ(...)]`.
-   - `:3240` — ТОЛЬКО prose.
-   - `:3257` — canonical example `Номенклатура ТОЛЬКО ИЕРАРХИЯ`.
-   - `:3269` — ПЕРИОДАМИ prose.
-   - `:3296` — canonical PERIODS example.
-   - `:3387` — canonical TOTALS-with-alias example.
-   - `:4730` — canonical EBNF
-     `ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`.
-   - `:4831` — canonical EBNF `ТИП(<Имя типа>)`.
-   - `:4969` — canonical EBNF `<Выражение> ССЫЛКА <Имя таблицы>`.
-   - `:4971` — canonical EBNF `[СПЕЦСИМВОЛ <Литерал типа СТРОКА>]`
-     in LIKE slot.
-   - `:5329-5343` — ССЫЛКА prose + canonical example.
-   - `:5381-5385` — СПЕЦСИМВОЛ prose.
+   - ТОЛЬКО prose.
+   - canonical example `Номенклатура ТОЛЬКО ИЕРАРХИЯ`.
+   - ПЕРИОДАМИ prose.
+   - canonical PERIODS example.
+   - canonical TOTALS-with-alias example.
+   - canonical EBNF `ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`.
+   - canonical EBNF `ТИП(<Имя типа>)`.
+   - canonical EBNF `<Выражение> ССЫЛКА <Имя таблицы>`.
+   - canonical EBNF `[СПЕЦСИМВОЛ <Литерал типа СТРОКА>]` in LIKE
+     slot.
+   - ССЫЛКА prose + canonical example.
+   - СПЕЦСИМВОЛ prose.
 
 2. **Secondary corroborating** ITS pubqlang dump (textbook
    companion):
    - pubqlang/16 — ORDER BY direction modifiers (ASC/DESC).
-   - pubqlang/17 (`chapter_017.html:17, 32, 52`) — canonical bare
-     `АВТОУПОРЯДОЧИВАНИЕ`.
-   - pubqlang/27 (`chapter_027.html:39, 51, 71`) — canonical
-     `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ` (ORDER BY HIERARCHY).
-   - pubqlang/31 (`chapter_031.html:25, 28`) — canonical
-     `ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)` + prose
-     «литерал функционального типа ЗНАЧЕНИЕ()».
-   - pubqlang/39 (`chapter_039.html:13, 25, 29, 48, 49, 51`) —
-     canonical `ИТОГИ ... ПО ОБЩИЕ`.
-   - pubqlang/40 (`chapter_040.html:24, 66, 83-86, 98, 99, 102`)
-     — canonical ВЫРАЗИТЬ() + ССЫЛКА examples and prose.
-   - pubqlang/51 (`chapter_051.html:111`) — DROP / УНИЧТОЖИТЬ
-     temp-table lifecycle prose (cross-reference, Slice 6
-     already noted).
-   - pubqlang/57 (`chapter_057.html:50`) — UI-checkbox prose for
-     "Разрешенные" (cross-reference, Slice 7-addendum).
-   - pubqlang/73 (`chapter_073.html:108`) — DROP /
-     УНИЧТОЖИТЬ via temp-table-manager prose.
-   - pubqlang/96 (`chapter_096.html:26`) — corroborating
+   - pubqlang/17 — canonical bare `АВТОУПОРЯДОЧИВАНИЕ`.
+   - pubqlang/27 — canonical `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`
+     (ORDER BY HIERARCHY).
+   - pubqlang/31 — canonical `ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)`
+     + prose «литерал функционального типа ЗНАЧЕНИЕ()».
+   - pubqlang/39 — canonical `ИТОГИ ... ПО ОБЩИЕ`.
+   - pubqlang/40 — canonical ВЫРАЗИТЬ() + ССЫЛКА examples and prose.
+   - pubqlang/51 — DROP / УНИЧТОЖИТЬ temp-table lifecycle prose
+     (cross-reference, Slice 6 already noted).
+   - pubqlang/57 — UI-checkbox prose for "Разрешенные"
+     (cross-reference, Slice 7-addendum).
+   - pubqlang/73 — DROP / УНИЧТОЖИТЬ via temp-table-manager prose.
+   - pubqlang/96 — corroborating
      `ЗНАЧЕНИЕ(Перечисление.ВидыОпераций.ПоступлениеОтПроизводителей)`.
 
 3. The Slice 1, 2, 6, 7, 8, 9, 10a, 10b, 11, 7-addendum, and

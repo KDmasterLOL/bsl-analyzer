@@ -34,28 +34,36 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let configuration = match ctx.load_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
+    let visible = ctx.visible_configurations();
+    if visible.is_empty() {
+        return Vec::new();
+    }
 
     let diagnostic_range = get_diagnostic_range(ctx);
     let mut diagnostics = Vec::new();
 
-    for common_module in configuration.common_modules() {
-        if common_module.is_protected() {
-            let mdo_ref = format!("ОбщийМодуль.{}", common_module.name());
-            diagnostics.push(Diagnostic {
-                code,
-                message: format!(
-                    "Исходный код модуля отсутствует из-за защиты паролем. {}",
-                    mdo_ref
-                ),
-                severity: ctx.severity(code),
-                range: diagnostic_range,
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
+    // Union protected modules across main + CFE: an extension may add a
+    // password-protected CommonModule, and the SessionModule still needs to
+    // surface that the source is unavailable. Within a single VisibleConfig
+    // we keep the legacy iteration order; configurations are emitted main-
+    // first by `visible_configurations()`, so duplicates between main and
+    // CFE (rare under 1C extension semantics) report main first.
+    for vc in &visible {
+        for common_module in vc.configuration.common_modules() {
+            if common_module.is_protected() {
+                let mdo_ref = format!("ОбщийМодуль.{}", common_module.name());
+                diagnostics.push(Diagnostic {
+                    code,
+                    message: format!(
+                        "Исходный код модуля отсутствует из-за защиты паролем. {}",
+                        mdo_ref
+                    ),
+                    severity: ctx.severity(code),
+                    range: diagnostic_range,
+                    tags: ctx.tags(code),
+                    fixes: vec![],
+                });
+            }
         }
     }
 

@@ -235,29 +235,23 @@ sources only.
 **Authoritative ITS pubqlang chapters** (1C:Enterprise query-
 language documentation, `https://its.1c.ru/db/pubqlang/...`,
 accessed via the local dump at
-`/home/itrous/src/tools_migration/its/dump/`):
+`<ITS pubqlang dump>/`):
 
-- chapter 21 (`/db/pubqlang/content/21/hdoc`,
-  `chapter_021.html`) — DISTINCT / РАЗЛИЧНЫЕ aggregate prefix,
+- chapter 21 (`/db/pubqlang/content/21/hdoc`) — DISTINCT / РАЗЛИЧНЫЕ aggregate prefix,
   canonical example «КОЛИЧЕСТВО(РАЗЛИЧНЫЕ ЗаказТовара.Клиент) КАК
   РазныеКлиенты» (листинг 1.29).
-- chapter 22 (`/db/pubqlang/content/22/hdoc`,
-  `chapter_022.html`) — WHERE conditions, BETWEEN canonical
+- chapter 22 (`/db/pubqlang/content/22/hdoc`) — WHERE conditions, BETWEEN canonical
   example «Дата МЕЖДУ ДАТАВРЕМЯ(2012, 10, 01) И ДАТАВРЕМЯ(2012,
   10, 31)» (листинг 1.33), logical operators И/ИЛИ/НЕ.
-- chapter 23 (`/db/pubqlang/content/23/hdoc`,
-  `chapter_023.html`) — LIKE / ПОДОБНО pattern primitive,
+- chapter 23 (`/db/pubqlang/content/23/hdoc`) — LIKE / ПОДОБНО pattern primitive,
   canonical example «Наименование ПОДОБНО "%Иван%"» (листинг
   1.34).
-- chapter 27 (`/db/pubqlang/content/27/hdoc`,
-  `chapter_027.html`) — IS NULL / ЕСТЬ NULL canonical example
+- chapter 27 (`/db/pubqlang/content/27/hdoc`) — IS NULL / ЕСТЬ NULL canonical example
   «КОГДА (Товары.Производитель) ЕСТЬ NULL ТОГДА "NULL"».
-- chapter 32 (`/db/pubqlang/content/32/hdoc`,
-  `chapter_032.html`) — IN HIERARCHY / В ИЕРАРХИИ canonical
+- chapter 32 (`/db/pubqlang/content/32/hdoc`) — IN HIERARCHY / В ИЕРАРХИИ canonical
   example «Товары.Ссылка В ИЕРАРХИИ (&ГруппаТоваров)» (листинг
   1.51).
-- chapter 40 (`/db/pubqlang/content/40/hdoc`,
-  `chapter_040.html`) — CASE / ВЫБОР canonical example «ВЫБОР
+- chapter 40 (`/db/pubqlang/content/40/hdoc`) — CASE / ВЫБОР canonical example «ВЫБОР
   КОГДА Товары.ЭтоГруппа = ИСТИНА ТОГДА "Это группа" ИНАЧЕ "Это
   элемент" КОНЕЦ КАК ПризнакГруппы»; CAST / ВЫРАЗИТЬ canonical
   examples for primitive-parameterised («ВЫРАЗИТЬ(СУММА(...) /

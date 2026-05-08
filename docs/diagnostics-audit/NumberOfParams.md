@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/number_of_params.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/NumberOfParams.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/640.md`
+- `<v8std mirror>/docs/diagnostics/bslls/NumberOfParams.md`
+- `<v8std mirror>/docs/std/640.md`
 
 ## Как реализовано
 

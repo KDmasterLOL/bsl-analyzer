@@ -256,7 +256,7 @@ invariants preserved.
 The Slice 10a material was authored from:
 
 1. **1C ITS query-language documentation** — accessed via the
-   local dump at `/home/itrous/src/tools_migration/its/dump/`
+   local dump at `<ITS pubqlang dump>/`
    (`index.json` maps each `https://its.1c.ru/db/pubqlang/...`
    URL to a `chapter_NNN.html` snapshot of the published page;
    the public ITS URLs are paywalled and serve JS-rendered

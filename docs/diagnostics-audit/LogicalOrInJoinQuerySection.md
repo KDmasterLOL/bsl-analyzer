@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/logical_or_in_join_query_section.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/LogicalOrInJoinQuerySection.md`
+- `<v8std mirror>/docs/diagnostics/bslls/LogicalOrInJoinQuerySection.md`
 
 ## Как реализовано
 

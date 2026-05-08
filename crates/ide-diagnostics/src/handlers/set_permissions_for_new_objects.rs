@@ -47,8 +47,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // 3. Load configuration metadata
-    let configuration = match ctx.load_configuration() {
+    // 3. Load main configuration metadata (roles live only in the main config —
+    // CFE roles do not participate in the main role table).
+    let configuration = match ctx.main_configuration() {
         Some(config) => config,
         None => return Vec::new(),
     };

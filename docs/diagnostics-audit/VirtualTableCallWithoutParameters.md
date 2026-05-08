@@ -10,9 +10,9 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/virtual_table_call_without_parameters.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/VirtualTableCallWithoutParameters.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/657.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/733.md`
+- `<v8std mirror>/docs/diagnostics/bslls/VirtualTableCallWithoutParameters.md`
+- `<v8std mirror>/docs/std/657.md`
+- `<v8std mirror>/docs/std/733.md`
 
 ## Как реализовано
 

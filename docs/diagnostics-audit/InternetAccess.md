@@ -14,8 +14,8 @@
 - `crates/ide-diagnostics/src/handlers/internet_access.rs`
 - `crates/ide-diagnostics/docs/ru/InternetAccess.md`
 - `docs/legal/diagnostics/InternetAccess.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/794.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/678.md`
+- `<v8std mirror>/docs/std/794.md`
+- `<v8std mirror>/docs/std/678.md`
 
 ## Как реализовано
 

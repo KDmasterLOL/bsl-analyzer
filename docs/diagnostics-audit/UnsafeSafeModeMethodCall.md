@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/unsafe_safe_mode_method_call.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UnsafeSafeModeMethodCall.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UnsafeSafeModeMethodCall.md`
 
 ## Как реализовано
 

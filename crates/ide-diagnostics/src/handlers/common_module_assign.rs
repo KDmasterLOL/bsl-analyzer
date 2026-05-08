@@ -7,6 +7,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
+use hir::{AssignmentResolution, ExistingBindingKind};
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -25,15 +26,33 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
-/// Called from lib.rs dispatch when `BodyDiagnostic::CommonModuleAssign` is encountered.
+/// Called from `hir_dispatch::dispatch_body_diagnostic` when
+/// `BodyDiagnostic::CommonModuleAssign` fires.
 ///
-/// This function validates the assignment target against metadata:
-/// 1. Loads Configuration metadata
-/// 2. Checks if variable_name matches a CommonModule name (case-insensitive)
-/// 3. Returns diagnostic if it's an attempt to assign to a CommonModule
+/// ## Resolution sequence (Track 1 §4.6)
+///
+/// 1. Disabled? — return.
+/// 2. Local/Param shadowing fast-path: if Step L's
+///    `existing_binding_kind` payload reports `Some(_)`, the LHS is a
+///    real local or parameter that shadows any CommonModule of the
+///    same name — suppress without rebuilding a `Resolver`.
+/// 3. Resolver pass: build `Resolver::for_module(...)` (no expression
+///    scopes — locals are covered by the fast-path) and classify the
+///    name. We only emit when it resolves to `CommonModule`. The
+///    `ModuleVariable` arm catches a module-level `Перем` that
+///    shadows a same-named CommonModule — a case Step L's payload
+///    cannot see (lowering's `local_vars` / `param_names` tables
+///    don't track module-level vars). The `Unknown` arm catches names
+///    that simply don't refer to anything visible.
+///
+/// Streaming providers default the resolver pass to `Unknown` and
+/// therefore suppress the diagnostic — that's intentional, since
+/// without configuration access we cannot prove the name is a
+/// CommonModule.
 pub fn from_hir(
     variable_name: &str,
     range: TextRange,
+    existing_binding_kind: Option<ExistingBindingKind>,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     let code = DiagnosticCode::CommonModuleAssign;
@@ -42,19 +61,45 @@ pub fn from_hir(
         return None;
     }
 
-    // Load metadata via ctx.load_configuration() for Salsa caching
-    let configuration = ctx.load_configuration()?;
+    if existing_binding_kind.is_some() {
+        return None;
+    }
 
-    // Check if variable_name matches a CommonModule name (case-insensitive)
-    let common_module = configuration.find_common_module(variable_name)?;
+    match ctx.assignment_target_kind(variable_name) {
+        AssignmentResolution::CommonModule(_) => {}
+        AssignmentResolution::Local
+        | AssignmentResolution::Param
+        | AssignmentResolution::ModuleVariable(_) => return None,
+        AssignmentResolution::Unknown => {
+            // Streaming providers default `assignment_target_kind` to
+            // `Unknown` (no resolver available). Without a resolver
+            // pass, "Unknown" is ambiguous — the name could be either
+            // unrelated to anything visible (genuine suppress) **or** a
+            // real CommonModule we just couldn't classify. Falling
+            // back to `is_common_module_anywhere` recovers the Step M
+            // (CFE-aware metadata-only) behaviour for streaming mode
+            // so it keeps emitting on real CommonModule assignments;
+            // for Salsa-backed providers the resolver returns
+            // `CommonModule(_)` directly and this arm is unreachable
+            // for valid CommonModule names.
+            if !ctx.is_common_module_anywhere(variable_name) {
+                return None;
+            }
+        }
+    }
 
-    // Found matching CommonModule - this is an error
+    // Fetch the canonical-cased CommonModule name from metadata so the
+    // diagnostic message renders with the configuration's spelling
+    // (`СвойМодуль`) rather than echoing whatever case the user typed
+    // (`свОйМОдуль`).
+    let display_name = ctx
+        .find_common_module_anywhere(variable_name)
+        .map(|(_visible, common_module)| common_module.name().to_string())
+        .unwrap_or_else(|| variable_name.to_string());
+
     Some(Diagnostic {
         code,
-        message: format!(
-            "Недопустимо присваивание значения общему модулю '{}'",
-            common_module.name()
-        ),
+        message: format!("Недопустимо присваивание значения общему модулю '{}'", display_name),
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),

@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/ref_overuse.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/RefOveruse.md`
+- `<v8std mirror>/docs/diagnostics/bslls/RefOveruse.md`
 
 ## Как реализовано
 

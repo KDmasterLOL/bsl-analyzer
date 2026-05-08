@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/server_side_export_form_method.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/ServerSideExportFormMethod.md`
+- `<v8std mirror>/docs/diagnostics/bslls/ServerSideExportFormMethod.md`
 
 ## Как реализовано
 

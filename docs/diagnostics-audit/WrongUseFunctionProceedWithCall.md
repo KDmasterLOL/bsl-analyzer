@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/wrong_use_function_proceed_with_call.rs`
 - `crates/hir-def/src/body/lower/expr.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/WrongUseFunctionProceedWithCall.md`
+- `<v8std mirror>/docs/diagnostics/bslls/WrongUseFunctionProceedWithCall.md`
 
 ## Как реализовано
 

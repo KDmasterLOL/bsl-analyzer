@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/wrong_data_path_for_form_elements.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/WrongDataPathForFormElements.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/467.md`
+- `<v8std mirror>/docs/diagnostics/bslls/WrongDataPathForFormElements.md`
+- `<v8std mirror>/docs/std/467.md`
 
 ## Как реализовано
 

@@ -80,8 +80,22 @@ pub fn lookup_field(
     let projected_form_data = project_form_data_for_fields(receiver_ty);
     let projected_ty = projected_form_data.as_ref().unwrap_or(receiver_ty);
 
-    // `Ty::ThisObject` coercion and dispatch split: MetadataRef → enumerator,
-    // Union → intersection over live arms, everything else → platform-property adapter.
+    // `Ty::ThisObject` / `Ty::ThisManager` coercion and dispatch split:
+    //   - `MetadataRef { *Object, .. }` (from `ThisObject`) → enumerator below;
+    //   - `ObjectManager { kind, name }` (from `ThisManager`) → no
+    //     attribute table here, falls through to the platform-property
+    //     adapter (which itself returns `None` for `ObjectManager` —
+    //     `Ty::platform_type_name` is `None` for managers). This matches
+    //     the pre-Step-J behaviour of `Документы.ПКО.SomeField`: managers
+    //     don't expose attributes through the field-lookup channel. The
+    //     manager-flavoured "field" surface (predefined items reached as
+    //     `Справочники.Mgr.PredefinedName`) lives on `ManagerCollection`
+    //     indexing, not here. Adding predefined-item resolution under
+    //     `ObjectManager` is a separate enhancement (out of Step J's
+    //     scope — Step J only wires `ЭтотОбъект` provenance through to
+    //     the same dispatch shape qualified manager access already had).
+    //   - Union → intersection over live arms (handled below);
+    //   - everything else → platform-property adapter.
     let coerced = crate::this_object::coerce_to_metadata_ref(projected_ty);
     let effective_ty = coerced.as_ref().unwrap_or(projected_ty);
 

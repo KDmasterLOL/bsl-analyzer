@@ -11,8 +11,8 @@
 
 - `crates/ide-diagnostics/src/handlers/nested_function_in_parameters.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/NestedFunctionInParameters.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/640.md`
+- `<v8std mirror>/docs/diagnostics/bslls/NestedFunctionInParameters.md`
+- `<v8std mirror>/docs/std/640.md`
 
 ## Как реализовано
 

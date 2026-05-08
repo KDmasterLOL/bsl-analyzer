@@ -32,9 +32,9 @@
 - Provenance:
   `docs/legal/diagnostics/BeginTransactionBeforeTryCatch.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/BeginTransactionBeforeTryCatch.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/begin-transaction.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/783.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/BeginTransactionBeforeTryCatch.md`,
+  `<v8std mirror>/docs/diagnostics/v8-code-style/begin-transaction.md`,
+  `<v8std mirror>/docs/std/783.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std/content/783/hdoc/_top/`,
   `https://v8std.ru/std/783/`,

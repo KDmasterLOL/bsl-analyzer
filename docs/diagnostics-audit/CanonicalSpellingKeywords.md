@@ -35,9 +35,9 @@
 - Provenance:
   `docs/legal/diagnostics/CanonicalSpellingKeywords.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CanonicalSpellingKeywords.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/bsl-canonical-pragma.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/441.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CanonicalSpellingKeywords.md`,
+  `<v8std mirror>/docs/diagnostics/v8-code-style/bsl-canonical-pragma.md`,
+  `<v8std mirror>/docs/std/441.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std#content:441:hdoc`,
   `https://v8std.ru/std/441/`,

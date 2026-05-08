@@ -17,8 +17,8 @@
 - `crates/ide-diagnostics/docs/ru/CommonModuleNameCached.md`,
   `crates/ide-diagnostics/docs/en/CommonModuleNameCached.md`
 - `docs/legal/diagnostics/CommonModuleNameCached.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/469.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommonModuleNameCached.md`
+- `<v8std mirror>/docs/std/469.md`,
+  `<v8std mirror>/docs/diagnostics/bslls/CommonModuleNameCached.md`
 
 ## Как реализовано
 

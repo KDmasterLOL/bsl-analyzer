@@ -16,8 +16,8 @@ v8-code-style про form-module pragma.
 - `crates/ide-diagnostics/docs/ru/CompilationDirectiveLost.md`,
   `crates/ide-diagnostics/docs/en/CompilationDirectiveLost.md`
 - `docs/legal/diagnostics/CompilationDirectiveLost.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/439.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CompilationDirectiveLost.md`
+- `<v8std mirror>/docs/std/439.md`,
+  `<v8std mirror>/docs/diagnostics/bslls/CompilationDirectiveLost.md`
 
 ## Как реализовано
 

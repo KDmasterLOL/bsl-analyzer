@@ -16,7 +16,7 @@
 - `crates/hir-def/src/body/lower/expr.rs`
 - `crates/ide-diagnostics/docs/ru/CreateQueryInCycle.md`
 - `docs/legal/diagnostics/CreateQueryInCycle.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/436.md`
+- `<v8std mirror>/docs/std/436.md`
 
 ## Как реализовано
 

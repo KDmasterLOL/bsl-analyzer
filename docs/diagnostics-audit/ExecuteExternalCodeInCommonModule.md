@@ -1,6 +1,7 @@
 # ExecuteExternalCodeInCommonModule
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: D `637a6279`, M `691a751c` — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 
 Дата разбора: 2026-05-07
 
@@ -15,7 +16,7 @@
 - `crates/ide-diagnostics/src/common_module_helpers.rs`
 - `crates/ide-diagnostics/docs/ru/ExecuteExternalCodeInCommonModule.md`
 - `docs/legal/diagnostics/ExecuteExternalCodeInCommonModule.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/770.md`
+- `<v8std mirror>/docs/std/770.md`
 
 ## Как реализовано
 

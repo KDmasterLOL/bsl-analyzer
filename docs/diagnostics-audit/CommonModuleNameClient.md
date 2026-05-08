@@ -17,8 +17,8 @@
 - `crates/ide-diagnostics/docs/ru/CommonModuleNameClient.md`,
   `crates/ide-diagnostics/docs/en/CommonModuleNameClient.md`
 - `docs/legal/diagnostics/CommonModuleNameClient.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/469.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommonModuleNameClient.md`
+- `<v8std mirror>/docs/std/469.md`,
+  `<v8std mirror>/docs/diagnostics/bslls/CommonModuleNameClient.md`
 
 ## Как реализовано
 

@@ -138,6 +138,39 @@ pub enum Ty {
         owner: (MdoType, crate::Name),
     },
 
+    /// Implicit receiver bound to `ЭтотОбъект` / `ThisObject` **inside a
+    /// ManagerModule** (`<Folder>/<Name>/Ext/ManagerModule.bsl`).
+    ///
+    /// Sibling of [`Self::ThisObject`] for the manager axis. Inside an
+    /// ObjectModule `ЭтотОбъект` denotes the per-record object and
+    /// coerces to `Ty::MetadataRef { *Object, name }`; inside a
+    /// ManagerModule the same identifier denotes the *manager* itself
+    /// (`Справочники.Номенклатура`) and must coerce to
+    /// [`Self::ObjectManager`] so subsequent method dispatch lands on
+    /// the workspace `ManagerModule.bsl` exports / `CatalogManager`
+    /// platform table — **not** the per-record `*Object` table.
+    ///
+    /// A separate variant rather than a discriminator on
+    /// [`Self::ThisObject`] is the safe choice: existing pattern matches
+    /// like `Ty::ThisObject { .. } | Ty::MetadataRef { .. }` (the
+    /// authoritative-receiver predicate in `unresolved_field`,
+    /// `unresolved_method_call`, …) keep meaning exactly "ObjectModule
+    /// receiver" and don't silently widen to also accept ManagerModule
+    /// receivers — the compiler now flags every site that needs an
+    /// explicit decision about manager handling.
+    ///
+    /// Coercion target is [`Self::ObjectManager { kind, name }`]
+    /// (`Ty::MetadataRef { CatalogManager, … }` is *not* a thing in
+    /// this codebase — manager dispatch goes through `ObjectManager`
+    /// keyed on `MdoType` directly, see
+    /// [`hir_ty::this_object::coerce_to_metadata_ref`]). The plan
+    /// (`linear-tumbling-noodle.md` §2.5) had drift here.
+    ThisManager {
+        /// `(kind, name)` of the MDO whose `ManagerModule.bsl` encloses
+        /// the inferred `ЭтотОбъект`.
+        owner: (MdoType, crate::Name),
+    },
+
     /// Managed-form attribute receiver — the platform wrapper that exposes
     /// a form attribute (`Объект`, `Замечание`, `ТаблицаРасходов`) to
     /// FormModule code.
@@ -1083,6 +1116,11 @@ impl Ty {
             (Ty::ObjectManager { .. }, Locale::En) => "ObjectManager",
             (Ty::ThisObject { .. }, Locale::Ru) => "ЭтотОбъект",
             (Ty::ThisObject { .. }, Locale::En) => "ThisObject",
+            // `ThisManager` renders identically to `ThisObject` from the
+            // user's perspective — both surface as `ЭтотОбъект` in source.
+            // The variants are distinct only for inference-side dispatch.
+            (Ty::ThisManager { .. }, Locale::Ru) => "ЭтотОбъект",
+            (Ty::ThisManager { .. }, Locale::En) => "ThisObject",
             // FormData wrapper names live in `bsl-platform` (already locale-
             // agnostic; both `ДанныеФормыСтруктура` and the EN-named
             // `FormDataStructure` are valid platform identifiers, but
@@ -1156,7 +1194,14 @@ impl Ty {
             // matching `Ty::MetadataRef { *Object, name }`. Returning
             // `None` here keeps the platform fallback from surfacing
             // bogus methods before the coercion step runs.
-            Ty::ThisObject { .. } => None,
+            //
+            // Same story for `ThisManager`: it coerces to
+            // [`Ty::ObjectManager { kind, name }`] which is itself
+            // platform-method-less (`Ty::ObjectManager` arm above already
+            // returns `None`); the dispatch goes through
+            // `bsl_platform::get_manager_methods` keyed on `MdoType`, not
+            // through the platform-type table.
+            Ty::ThisObject { .. } | Ty::ThisManager { .. } => None,
             // Form data wraps the platform `ДанныеФормыСтруктура` /
             // `ДанныеФормыКоллекция` / `ДанныеФормыСтруктураСКоллекцией`
             // method tables. Method lookup goes through these names; field

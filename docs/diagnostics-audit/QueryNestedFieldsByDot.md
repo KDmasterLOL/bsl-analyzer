@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/query_nested_fields_by_dot.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/QueryNestedFieldsByDot.md`
+- `<v8std mirror>/docs/diagnostics/bslls/QueryNestedFieldsByDot.md`
 
 ## Как реализовано
 

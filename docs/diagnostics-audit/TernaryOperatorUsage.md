@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/ternary_operator_usage.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/TernaryOperatorUsage.md`
+- `<v8std mirror>/docs/diagnostics/bslls/TernaryOperatorUsage.md`
 
 ## Как реализовано
 

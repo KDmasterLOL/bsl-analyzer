@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/transferring_parameters_between_client_and_server.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/TransferringParametersBetweenClientAndServer.md`
+- `<v8std mirror>/docs/diagnostics/bslls/TransferringParametersBetweenClientAndServer.md`
 
 ## Как реализовано
 

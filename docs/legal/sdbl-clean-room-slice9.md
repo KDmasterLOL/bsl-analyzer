@@ -128,18 +128,18 @@ grammar surface, not as a textual source for transcription.
 ### ITS pubqlang chapters (via the local dump)
 
 Local dump path:
-`/home/itrous/src/tools_migration/its/dump/html/`. The web URLs
+`<ITS pubqlang dump>/html/`. The web URLs
 under `https://its.1c.ru/db/pubqlang/` are paywalled and
 WebFetch returns navigation stubs only; the dump is the
 authoritative on-disk reference.
 
 | Chapter | Evidence | Tier |
 |---|---|---|
-| `chapter_044.html` | `ВНУТРЕННЕЕ СОЕДИНЕНИЕ` listing + standalone `СОЕДИНЕНИЕ` reference. | A1 |
-| `chapter_045.html` | `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing. | A1 |
-| `chapter_046.html` | `ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing (also one secondary `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` example). | A1 |
-| `chapter_047.html` | `ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing. | A1 |
-| `chapter_048.html` | Chained / nested example listings (`ВНУТРЕННЕЕ СОЕДИНЕНИЕ` + `ЛЕВОЕ` chains). | A1 |
+| `chapter 44` | `ВНУТРЕННЕЕ СОЕДИНЕНИЕ` listing + standalone `СОЕДИНЕНИЕ` reference. | A1 |
+| `chapter 45` | `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing. | A1 |
+| `chapter 46` | `ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing (also one secondary `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` example). | A1 |
+| `chapter 47` | `ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing. | A1 |
+| `chapter 48` | Chained / nested example listings (`ВНУТРЕННЕЕ СОЕДИНЕНИЕ` + `ЛЕВОЕ` chains). | A1 |
 
 §ITS coverage verification — outcomes recorded at C2 author time:
 

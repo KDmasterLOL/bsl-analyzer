@@ -208,10 +208,9 @@ any canonical permutation.
 
 ### Deferred semantic constraint (codex Round-4 finding 4)
 
-v8327doc Глава 8 at `page.html:1336` constrains РАЗРЕШЕННЫЕ to the
+v8327doc Глава 8 constrains РАЗРЕШЕННЫЕ to the
 top-level `ВЫБРАТЬ` only and propagates the qualifier into nested
-subqueries (paraphrased; see line 1336 for the original prose). The
-current parser's
+subqueries. The current parser's
 `query()` at `crates/parser/src/grammar/sdbl/select.rs:279-307` calls
 `limitations()` for every query body it parses, INCLUDING nested
 subqueries — it does NOT enforce the top-level-only constraint at
@@ -261,12 +260,8 @@ explicitly so future slices know which behaviours are intentional.
 
 The **primary** SDBL grammar specification is the v8.3.27 Developer's
 Reference Глава 8 «Работа с запросами» —
-`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`. Locally
-saved snapshot at
-`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html` for
-line-numbered reviewer convenience; the canonical citation target
-is the public URL above.
-Line 1320 of `page.html` carries the canonical EBNF skeleton
+`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`.
+The canonical EBNF skeleton in §<Описание запроса> is:
 
 ```text
 ВЫБРАТЬ [РАЗРЕШЕННЫЕ] [РАЗЛИЧНЫЕ] [ПЕРВЫЕ <Количество>]
@@ -281,26 +276,25 @@ Line 1320 of `page.html` carries the canonical EBNF skeleton
 ```
 
 with all three SELECT-prefix qualifiers (РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ,
-ПЕРВЫЕ) in their canonical first-qualifier slot. Lines 1331-1356
-contain prose semantics for each qualifier.
+ПЕРВЫЕ) in their canonical first-qualifier slot. The prose semantics
+for each qualifier are in the same chapter.
 
-The pubqlang dump (`its/dump/html/chapter_*.html`) is the
-**secondary** textbook companion — its chapter-19/20/57 examples are
-demonstrative, not specificational. The Slice 7-addendum cites both
-sources, with v8327doc Глава 8 as the primary grammar source.
+The pubqlang chapters 19/20/57 are the **secondary** textbook
+companion — their examples are demonstrative, not specificational.
+The Slice 7-addendum cites both sources, with v8327doc Глава 8 as
+the primary grammar source.
 
 | Keyword | Tier | Source |
 |---|---|---|
-| `DISTINCT` / `РАЗЛИЧНЫЕ` | **A1** | v8327doc Глава 8 §<Описание запроса> at `page.html:1320, 1346-1348` (canonical EBNF + prose). Pubqlang chapter 20 at `chapter_020.html:18, 29, 42` provides the demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ` examples; DISTINCT × ORDER BY interaction at `chapter_020.html:38`. Bilingual word-list at `page.html:1030-1034` (РАЗЛИЧНЫЕ ↔ DISTINCT). |
-| `TOP <decimal>` / `ПЕРВЫЕ <decimal>` | **A1** | v8327doc Глава 8 at `page.html:1320, 1350-1356` (canonical EBNF `ПЕРВЫЕ <Количество>` + prose covering ordering interaction and nested-query support). Pubqlang chapter 19 at `chapter_019.html:19, 28` provides the demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3` example. |
-| `ALLOWED` / `РАЗРЕШЕННЫЕ` | **A1** | v8327doc Глава 8 at `page.html:1320, 1331-1344` — canonical EBNF places РАЗРЕШЕННЫЕ in the first SELECT-prefix slot; prose at lines 1331-1344 covers RLS scope (records visible to current user only), top-level-only constraint, propagation into subqueries, and interaction with ЧТЕНИЕ rights. Bilingual word-list at `page.html:1040-1044` (РАЗРЕШЕННЫЕ ↔ ALLOWED). The pubqlang dump's `chapter_057.html:50` UI-checkbox prose is a corroborating secondary reference only. |
+| `DISTINCT` / `РАЗЛИЧНЫЕ` | **A1** | v8327doc Глава 8 §<Описание запроса> canonical EBNF + prose. Pubqlang `chapter 20` provides the demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ` examples and DISTINCT × ORDER BY interaction. Bilingual word-list (РАЗЛИЧНЫЕ ↔ DISTINCT). |
+| `TOP <decimal>` / `ПЕРВЫЕ <decimal>` | **A1** | v8327doc Глава 8 canonical EBNF `ПЕРВЫЕ <Количество>` + prose covering ordering interaction and nested-query support. Pubqlang `chapter 19` provides the demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3` example. |
+| `ALLOWED` / `РАЗРЕШЕННЫЕ` | **A1** | v8327doc Глава 8 canonical EBNF places РАЗРЕШЕННЫЕ in the first SELECT-prefix slot; prose covers RLS scope (records visible to current user only), top-level-only constraint, propagation into subqueries, and interaction with ЧТЕНИЕ rights. Bilingual word-list (РАЗРЕШЕННЫЕ ↔ ALLOWED). Pubqlang `chapter 57` UI-checkbox prose is a corroborating secondary reference only. |
 | `is_identifier_token` predicate | **C/B local parser contract** | Body `p.at(TokenKind::Ident)` is trivially derivable. Load-bearing cross-slice semantics inherited from Slice 7 alias-scan (`selected_field_alias` at `crates/parser/src/grammar/sdbl/select.rs:357, 370`) and Slice 8 source-alias guard (`source_alias` at `crates/parser/src/grammar/sdbl/select.rs:582, 600`); see `docs/legal/sdbl-clean-room-slice8.md:264-269`. |
 
 ### ITS coverage
 
 All three SELECT-prefix qualifiers (DISTINCT, TOP, ALLOWED) are Tier
-A1 with canonical EBNF + prose in v8327doc Глава 8 at
-`page.html:1320, 1331-1356`.
+A1 with canonical EBNF + prose in v8327doc Глава 8.
 The pubqlang chapters 19 / 20 / 57 are demonstrative (textbook
 companion) and provide additional canonical examples (chapters 19 / 20)
 or UI-prose (chapter 57). The Slice 7-addendum C0 codex review pass
@@ -702,7 +696,7 @@ expression or modifier token is found.
 
 ITS chapter 27 (`https://its.1c.ru/db/pubqlang/content/27/hdoc`) explicitly
 documents `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ` as canonical hierarchical-
-ordering syntax (verified at `chapter_027.html:39,51`). The Slice 11 C2
+ordering syntax. The Slice 11 C2
 clean-room rewrite extends `order_by_item` to consume the optional
 HIERARCHY/ИЕРАРХИЯ modifier as a third position after the optional ASC/DESC
 modifier, preserving the flat-sibling layout (the IDENT token sits next to
@@ -818,9 +812,8 @@ acceptance is preserved per §Behavioral contract from current parser.
 ### ITS coverage
 
 ITS chapter 17 (`https://its.1c.ru/db/pubqlang/content/17/hdoc`) attests
-`АВТОУПОРЯДОЧИВАНИЕ` as canonical syntax — verified at `chapter_017.html:17,
-32, 52`. Bilingual AUTOORDER/АВТОУПОРЯДОЧИВАНИЕ via the lexer Slice 2 LEGACY
-block (KwAutoOrder).
+`АВТОУПОРЯДОЧИВАНИЕ` as canonical syntax. Bilingual AUTOORDER/АВТОУПОРЯДОЧИВАНИЕ
+via the lexer Slice 2 LEGACY block (KwAutoOrder).
 
 ## TOTALS BY
 
@@ -875,8 +868,7 @@ structured modifiers under Slice 11.
 ### ITS coverage
 
 ITS chapter 39 (`https://its.1c.ru/db/pubqlang/content/39/hdoc`) attests the
-canonical `ИТОГИ ... ПО ОБЩИЕ, ...` example (verified at `chapter_039.html:13,
-25, 29, 48, 49, 51`). Bilingual TOTALS/ИТОГИ via Slice 2 attestation;
+canonical `ИТОГИ ... ПО ОБЩИЕ, ...` example. Bilingual TOTALS/ИТОГИ via Slice 2 attestation;
 OVERALL/ОБЩИЕ via Slice 2 LEGACY block (KwOverall).
 
 PERIODS structured-modifier coverage was **NOT** verified in chapter 39 by
@@ -965,22 +957,22 @@ is deferred to Slice 12.
 
 | Clause / form | ITS chapter | Verification status |
 |---|---|---|
-| WHERE / ГДЕ — primary | 22 §Условие отбора | verified yes (C2 — `chapter_022.html:15, 26, 35` — `Условие отбора данных из таблицы задается после ключевого слова ГДЕ`) |
-| WHERE — pattern matching integration | 23 §LIKE+WHERE | verified yes (C2 — `chapter_023.html:13, 15, 25-27, 45-46` — `ГДЕ Наименование ПОДОБНО "%Иван%"` + `НЕ … ПОДОБНО` form) |
-| WHERE — additional examples | 24 §WHERE+parameters | verified yes (C2 — `chapter_024.html:15, 16` — параметры запроса `&Клиент` в условии отбора `ГДЕ`) |
-| ORDER BY — primary | 16 §Сортировка результата запроса | verified yes (C2 — `chapter_016.html:19, 31, 33, 37, 49` — `УПОРЯДОЧИТЬ ПО ... ВОЗР` canonical sort form) |
-| ORDER BY — multi-level / variants | 16 §Многоуровневая сортировка + 17 §Сортировка по реквизитам | verified yes (C2 — `chapter_016.html:63, 64, 75-76` — `УПОРЯДОЧИТЬ ПО Период УБЫВ, ...` multi-field; `chapter_017.html:29, 49` — sort by ссылочное поле; chapter 16 also references HIERARCHY at `chapter_016.html:63` "Можно также упорядочивать иерархические данные по иерархии") |
-| ORDER BY HIERARCHY / ИЕРАРХИЯ | 27 §Иерархическая упорядоченная выборка | verified yes (C0a — `chapter_027.html:39, 51` — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`); ITS Tier A2 / Slice 11 C2 MANDATORY FIX |
-| AUTOORDER / АВТОУПОРЯДОЧИВАНИЕ | 17 §АВТОУПОРЯДОЧИВАНИЕ | verified yes (C0a — `chapter_017.html:17, 32, 52`) |
-| GROUP BY — primary | 34 §Группировка результата запроса | verified yes (C2 — `chapter_034.html:14, 33, 44, 46, 51, 52` — `СГРУППИРОВАТЬ ПО` canonical with агрегатные функции СУММА/МИНИМУМ/МАКСИМУМ/СРЕДНЕЕ/КОЛИЧЕСТВО) |
-| GROUP BY — variants / multi-field | 35 §Расчет агрегатов | verified yes (C2 — `chapter_035.html:23, 29, 41, 44, 45` — multi-field `СГРУППИРОВАТЬ ПО` example) |
-| HAVING — primary | 35 §Условие на агрегаты | verified yes (C2 — `chapter_035.html:49` — `с помощью ключевого слова ИМЕЮЩИЕ ... условие отбора аналогично условию в предложении ГДЕ, но только оно накладывается ... на записи, получившиеся в результате группировки`) |
-| TOTALS BY — primary (incl. OVERALL / ОБЩИЕ) | 39 §Расчет общих итогов | verified yes (C0a — `chapter_039.html:13, 25, 29, 48, 49, 51` — canonical `ИТОГИ ПО ОБЩИЕ`); structured PERIODS form NOT verified |
+| WHERE / ГДЕ — primary | 22 §Условие отбора | verified yes (C2 — `chapter 22` — `Условие отбора данных из таблицы задается после ключевого слова ГДЕ`) |
+| WHERE — pattern matching integration | 23 §LIKE+WHERE | verified yes (C2 — `chapter 23` — `ГДЕ Наименование ПОДОБНО "%Иван%"` + `НЕ … ПОДОБНО` form) |
+| WHERE — additional examples | 24 §WHERE+parameters | verified yes (C2 — `chapter 24` — параметры запроса `&Клиент` в условии отбора `ГДЕ`) |
+| ORDER BY — primary | 16 §Сортировка результата запроса | verified yes (C2 — `chapter 16` — `УПОРЯДОЧИТЬ ПО ... ВОЗР` canonical sort form) |
+| ORDER BY — multi-level / variants | 16 §Многоуровневая сортировка + 17 §Сортировка по реквизитам | verified yes (C2 — `chapter 16` — `УПОРЯДОЧИТЬ ПО Период УБЫВ, ...` multi-field; `chapter 17` — sort by ссылочное поле; chapter 16 also references HIERARCHY "Можно также упорядочивать иерархические данные по иерархии") |
+| ORDER BY HIERARCHY / ИЕРАРХИЯ | 27 §Иерархическая упорядоченная выборка | verified yes (C0a — `chapter 27` — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`); ITS Tier A2 / Slice 11 C2 MANDATORY FIX |
+| AUTOORDER / АВТОУПОРЯДОЧИВАНИЕ | 17 §АВТОУПОРЯДОЧИВАНИЕ | verified yes (C0a — `chapter 17`) |
+| GROUP BY — primary | 34 §Группировка результата запроса | verified yes (C2 — `chapter 34` — `СГРУППИРОВАТЬ ПО` canonical with агрегатные функции СУММА/МИНИМУМ/МАКСИМУМ/СРЕДНЕЕ/КОЛИЧЕСТВО) |
+| GROUP BY — variants / multi-field | 35 §Расчет агрегатов | verified yes (C2 — `chapter 35` — multi-field `СГРУППИРОВАТЬ ПО` example) |
+| HAVING — primary | 35 §Условие на агрегаты | verified yes (C2 — `chapter 35` — `с помощью ключевого слова ИМЕЮЩИЕ ... условие отбора аналогично условию в предложении ГДЕ, но только оно накладывается ... на записи, получившиеся в результате группировки`) |
+| TOTALS BY — primary (incl. OVERALL / ОБЩИЕ) | 39 §Расчет общих итогов | verified yes (C0a — `chapter 39` — canonical `ИТОГИ ПО ОБЩИЕ`); structured PERIODS form NOT verified |
 | FOR UPDATE / ДЛЯ ИЗМЕНЕНИЯ | (not in ITS chapters 16–39) | verified-no (C2 — direct `rg` of dumped chapters 16–39 found no `ДЛЯ ИЗМЕНЕНИЯ` / `FOR UPDATE` form) — local IDE-recovery allowance (Tier D) |
 | INDEX BY / ИНДЕКСИРОВАТЬ ПО | (not in ITS chapters 16–39) | verified-no (C2 — direct `rg` of dumped chapters 16–39 found no `ИНДЕКСИРОВАТЬ` form) — local IDE-recovery allowance (Tier D) |
-| DISTINCT / РАЗЛИЧНЫЕ — primary | v8327doc Глава 8 §<Описание запроса> + pubqlang 20 §ВЫБРАТЬ РАЗЛИЧНЫЕ | verified yes (C0 of Slice 7-addendum — `page.html:1320` canonical EBNF skeleton, `:1346-1348` prose explanation; `its/dump/html/chapter_020.html:18, 29, 42` — demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ`; `chapter_020.html:38` — DISTINCT × ORDER BY validity rule); ITS Tier A1 |
-| TOP / ПЕРВЫЕ — primary | v8327doc Глава 8 §<Описание запроса> + pubqlang 19 §ВЫБРАТЬ ПЕРВЫЕ | verified yes (C0 of Slice 7-addendum — `page.html:1320` canonical EBNF skeleton with `[ПЕРВЫЕ <Количество>]`, `:1350-1356` prose covering ordering interaction and nested-query support; `chapter_019.html:19, 28` — demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3`); ITS Tier A1 |
-| ALLOWED / РАЗРЕШЕННЫЕ — primary | v8327doc Глава 8 §<Описание запроса> | verified yes (C0 of Slice 7-addendum — `page.html:1320` canonical EBNF places `[РАЗРЕШЕННЫЕ]` in first SELECT-prefix slot; `:1331-1344` prose paraphrased: РАЗРЕШЕННЫЕ scopes the result to records the current user has rights to; constrained to the top-level ВЫБРАТЬ; propagates into subqueries; interaction with ЧТЕНИЕ-table rights documented; bilingual word-list at `:1038-1046` РАЗРЕШЕННЫЕ ↔ ALLOWED). The pubqlang dump's `chapter_057.html:50` UI-checkbox prose is a secondary corroborating reference. ITS Tier A1. |
+| DISTINCT / РАЗЛИЧНЫЕ — primary | v8327doc Глава 8 §<Описание запроса> + pubqlang 20 §ВЫБРАТЬ РАЗЛИЧНЫЕ | verified yes (C0 of Slice 7-addendum — canonical EBNF skeleton; `chapter 20` — demonstrative `ВЫБРАТЬ РАЗЛИЧНЫЕ` and DISTINCT × ORDER BY validity rule); ITS Tier A1 |
+| TOP / ПЕРВЫЕ — primary | v8327doc Глава 8 §<Описание запроса> + pubqlang 19 §ВЫБРАТЬ ПЕРВЫЕ | verified yes (C0 of Slice 7-addendum — canonical EBNF skeleton with `[ПЕРВЫЕ <Количество>]` and prose covering ordering interaction; `chapter 19` — demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3`); ITS Tier A1 |
+| ALLOWED / РАЗРЕШЕННЫЕ — primary | v8327doc Глава 8 §<Описание запроса> | verified yes (C0 of Slice 7-addendum — canonical EBNF places `[РАЗРЕШЕННЫЕ]` in first SELECT-prefix slot; prose covers RLS scope, top-level-only constraint, propagation into subqueries, ЧТЕНИЕ rights interaction; bilingual word-list РАЗРЕШЕННЫЕ ↔ ALLOWED). Pubqlang `chapter 57` UI-checkbox prose is a secondary corroborating reference. ITS Tier A1. |
 | Virtual table arguments — primary | v8327doc Глава 8.2 «Виртуальные таблицы» — `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` | verified yes (C2 of Slice 8-addendum — Глава 8.2 §Виртуальные таблицы intro defines the VT concept; Глава 8.3 «Виртуальные и обычные поля» follows directly with §Виртуальные и обычные поля); ITS Tier A1 |
 | Virtual table arguments — canonical example with empty-arg + named-pos slots | v8327doc Глава 8.3 «Виртуальные и обычные поля» — `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` | verified yes (C2 of Slice 8-addendum — canonical 5-arg listing `РегистрНакопления.УчетНоменклатуры.ОстаткиИОбороты(, , Авто, , ) КАК УчетНоменклатурыОстаткиИОбороты` confirmed verbatim in Глава 8.3; siblings include `РегистрНакопления.УчетНоменклатуры.Остатки КАК ...` plain-VT-no-args forms in the same section); ITS Tier A1 |
 | Virtual table arguments — `СрезПоследних` intro (peripheral) | pubqlang chapter 9 lines 13, 20 | verified yes (C2 of Slice 8-addendum — `Виртуальные таблицы формируются в момент выполнения запроса на основе реальных таблиц базы данных. Например, виртуальная таблица РегистрСведений.Цены.СрезПоследних формируется ...` intro prose); peripheral / corroborating only (Tier A1 corroborator) |
@@ -990,7 +982,7 @@ is deferred to Slice 12.
 | Virtual table arguments — IN-subquery as VT param (structural) | pubqlang chapter 156 lines 50–56 | verified yes (C2 of Slice 8-addendum — multi-line `РегистрНакопления.ТоварыНаСкладах.Остатки( , Номенклатура В ( ВЫБРАТЬ СоставДокумента.Номенклатура ИЗ СоставДокумента ) ) КАК ТоварыНаСкладахОстатки` confirms IN-subquery is a canonical VT-arg form; the subquery's `)` is consumed inside `predicate_expr` → `super::select::subquery(p)` per Slice 10b, NOT by `recover_to_delimiter_vt`); ITS Tier A1 (structural) |
 
 C2 fills in the remaining "TODO at C2" rows after directly reading the dump
-pages at `/home/itrous/src/tools_migration/its/dump/html/`, mirroring the
+pages at `<ITS pubqlang dump>/html/`, mirroring the
 Slice 10b C0a → C2 verification handoff.
 
 **Line-number stability check (per D8a, applies to Slice 8-addendum
@@ -1012,7 +1004,7 @@ the Slice 11 clean-room slice were authored from:
 - the previously-existing mini-spec sketches (which were authored under the
   same clean-room discipline);
 - ITS pubqlang chapter regions read directly via the local dump path
-  `/home/itrous/src/tools_migration/its/dump/html/`. C0a authoring read
+  `<ITS pubqlang dump>/html/`. C0a authoring read
   three targeted regions only — chapter 17 lines 17/32/52 (AUTOORDER
   provenance), chapter 27 lines 39/51 (ORDER BY HIERARCHY provenance),
   chapter 39 lines 13/25/29/48/49/51 (TOTALS BY canonical OVERALL form
@@ -1046,35 +1038,25 @@ landed in commit C0 of the Slice 7-addendum and were authored from:
   (which was authored under the same clean-room discipline);
 - the **primary** SDBL grammar specification: v8.3.27 Developer's
   Reference Глава 8 «Работа с запросами» —
-  `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`. Locally
-  saved snapshot at
-  `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html` for
-  line-numbered reviewer convenience; the canonical citation target
-  is the public URL above. Per codex Round-4 finding 5 (LOW),
-  citations are line-based and excerpts kept minimal:
-  - `page.html:1320` — canonical EBNF skeleton for `<Описание
-    запроса>` placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, and ПЕРВЫЕ
-    `<Количество>` in the first three optional SELECT-prefix
-    slots (see line for the full skeleton including ПОМЕСТИТЬ |
+  `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`.
+  Specifically:
+  - canonical EBNF skeleton for `<Описание запроса>` placing
+    РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, and ПЕРВЫЕ `<Количество>` in the first
+    three optional SELECT-prefix slots (also including ПОМЕСТИТЬ |
     ДОБАВИТЬ, ИЗ, ИНДЕКСИРОВАТЬ ПО НАБОРАМ, ГДЕ, СГРУППИРОВАТЬ ПО,
     ИМЕЮЩИЕ, ДЛЯ ИЗМЕНЕНИЯ);
-  - `page.html:1331-1344` — RLS-scope prose for РАЗРЕШЕННЫЕ
-    (top-level-only constraint; propagation into subqueries;
-    interaction with ЧТЕНИЕ rights);
-  - `page.html:1346-1348` — duplicate-elimination prose for
-    РАЗЛИЧНЫЕ;
-  - `page.html:1350-1356` — limit / ordering / nested-query prose
-    for ПЕРВЫЕ;
-  - `page.html:1030-1034` — bilingual pair РАЗЛИЧНЫЕ ↔ DISTINCT;
-    `page.html:1040-1044` — bilingual pair РАЗРЕШЕННЫЕ ↔ ALLOWED;
-    `page.html:920-924` — bilingual pair ПЕРВЫЕ ↔ TOP;
-- the **secondary** ITS pubqlang dump (textbook companion) at
-  `/home/itrous/src/tools_migration/its/dump/html/` — chapter 19
-  lines 19/28 (TOP / ПЕРВЫЕ canonical demonstrative example),
-  chapter 20 lines 18/29/38/42 (DISTINCT / РАЗЛИЧНЫЕ canonical
-  demonstrative example + DISTINCT × ORDER BY interaction), chapter
-  57 line 50 (UI-checkbox prose listing "Разрешенные" as a query
-  designer GUI flag — corroborating only);
+  - RLS-scope prose for РАЗРЕШЕННЫЕ (top-level-only constraint;
+    propagation into subqueries; interaction with ЧТЕНИЕ rights);
+  - duplicate-elimination prose for РАЗЛИЧНЫЕ;
+  - limit / ordering / nested-query prose for ПЕРВЫЕ;
+  - bilingual pairs РАЗЛИЧНЫЕ ↔ DISTINCT, РАЗРЕШЕННЫЕ ↔ ALLOWED,
+    ПЕРВЫЕ ↔ TOP;
+- the **secondary** ITS pubqlang dump (textbook companion) —
+  `chapter 19` (TOP / ПЕРВЫЕ canonical demonstrative example),
+  `chapter 20` (DISTINCT / РАЗЛИЧНЫЕ canonical demonstrative example
+  + DISTINCT × ORDER BY interaction), `chapter 57` (UI-checkbox
+  prose listing "Разрешенные" as a query designer GUI flag —
+  corroborating only);
 - the lexer Slice 2 attestation (`docs/legal/sdbl-clean-room-slice2.md`)
   for bilingual keyword pairs (Slice-2-LEGACY KwAllowed at
   `crates/lexer/src/sdbl/mod.rs:470, 494`);
@@ -1098,15 +1080,13 @@ transcription of the 4 Slice-7-addendum parser function bodies
 
 The first-pass codex adversarial review (Rounds 1-3) classified
 ALLOWED as Tier D / B-contested on the strength of the pubqlang dump
-alone (chapter 57:50 UI prose). After the v8327doc Глава 8 download
-landed at `v8327doc snapshot directory`,
-ALLOWED was reclassified to **Tier A1** because the developer's
-reference is the primary SDBL grammar specification and lists
-РАЗРЕШЕННЫЕ in the canonical first-SELECT-prefix-slot at
-`page.html:1320` with full prose at lines 1331-1344. The Round-3
-"Plan is IMPLEMENTATION-READY" verdict was issued before this
-discovery; a Round-4 codex pass verifies the reclassification before
-C0 is committed.
+alone (chapter 57 UI prose). After the v8327doc Глава 8 download
+landed, ALLOWED was reclassified to **Tier A1** because the
+developer's reference is the primary SDBL grammar specification and
+lists РАЗРЕШЕННЫЕ in the canonical first-SELECT-prefix-slot with
+full prose semantics. The Round-3 "Plan is IMPLEMENTATION-READY"
+verdict was issued before this discovery; a Round-4 codex pass
+verifies the reclassification before C0 is committed.
 
 ## Non-consultation statement (Slice 8-addendum reaffirmation)
 

@@ -15,7 +15,7 @@
 - `crates/hir-def/src/body/lower/expr.rs`
 - `crates/ide-diagnostics/docs/ru/GetFormMethod.md`
 - `docs/legal/diagnostics/GetFormMethod.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/404.md`
+- `<v8std mirror>/docs/std/404.md`
 
 ## Как реализовано
 

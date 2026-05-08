@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/using_like_in_query.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UsingLikeInQuery.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/726.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UsingLikeInQuery.md`
+- `<v8std mirror>/docs/std/726.md`
 
 ## Как реализовано
 

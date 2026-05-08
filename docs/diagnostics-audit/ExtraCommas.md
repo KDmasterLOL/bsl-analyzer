@@ -15,7 +15,7 @@
 - `crates/hir-def/src/body/lower/expr.rs`
 - `crates/ide-diagnostics/docs/ru/ExtraCommas.md`
 - `docs/legal/diagnostics/ExtraCommas.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/640.md`
+- `<v8std mirror>/docs/std/640.md`
 
 ## Как реализовано
 

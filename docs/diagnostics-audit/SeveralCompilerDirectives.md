@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/several_compiler_directives.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/SeveralCompilerDirectives.md`
+- `<v8std mirror>/docs/diagnostics/bslls/SeveralCompilerDirectives.md`
 
 ## Как реализовано
 

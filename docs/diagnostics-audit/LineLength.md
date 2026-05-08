@@ -11,8 +11,8 @@
 
 - `crates/ide-diagnostics/src/handlers/line_length.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/LineLength.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/456.md`
+- `<v8std mirror>/docs/diagnostics/bslls/LineLength.md`
+- `<v8std mirror>/docs/std/456.md`
 
 ## Как реализовано
 

@@ -14,7 +14,7 @@
 - `crates/ide-diagnostics/src/handlers/consecutive_empty_lines.rs`
 - `crates/ide-diagnostics/docs/ru/ConsecutiveEmptyLines.md`
 - `docs/legal/diagnostics/ConsecutiveEmptyLines.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/module-consecutive-blank-lines.md`
+- `<v8std mirror>/docs/diagnostics/v8-code-style/module-consecutive-blank-lines.md`
 
 ## Как реализовано
 

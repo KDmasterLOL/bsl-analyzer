@@ -14,7 +14,7 @@
 - `crates/ide-diagnostics/src/handlers/compilation_directive_need_less.rs`
 - `crates/ide-diagnostics/docs/ru/CompilationDirectiveNeedLess.md`
 - `docs/legal/diagnostics/CompilationDirectiveNeedLess.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/439.md`
+- `<v8std mirror>/docs/std/439.md`
 
 ## Как реализовано
 
