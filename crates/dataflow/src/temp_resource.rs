@@ -108,19 +108,44 @@ where
 ///
 /// ## Contract
 ///
-/// - `classify` is called on every sub-expression of every statement
-///   in every basic block, plus every sub-expression of every
-///   vertex-condition expression. Implementations must be
-///   deterministic and side-effect-free; the same `expr_idx` may be
-///   re-classified many times during fixed-point iteration.
+/// - `classify` (or [`classify_many`](Self::classify_many)) is called
+///   on every sub-expression of every statement in every basic block,
+///   plus every sub-expression of every vertex-condition expression.
+///   Implementations must be deterministic and side-effect-free; the
+///   same `expr_idx` may be re-classified many times during
+///   fixed-point iteration.
 /// - The closure-style walk preserves source order, so a provider
 ///   that opens-then-closes within the same expression (rare) gets
 ///   the open recorded before the close.
+/// - The framework only consumes [`classify_many`](Self::classify_many);
+///   the single-event [`classify`](Self::classify) hook exists as a
+///   convenience for providers whose every expression maps to at most
+///   one event. Multi-event providers (e.g. a deletion call that
+///   closes several resources at once, like `УдалитьФайлы(a, b)`)
+///   override `classify_many` directly.
 pub trait ResourceProvider<R>
 where
     R: Clone + Eq + Hash,
 {
+    /// Single-event classification. Return `None` for expressions
+    /// that neither open nor close a resource. Override
+    /// [`classify_many`](Self::classify_many) instead when one
+    /// expression must emit multiple events at once.
     fn classify(&self, body: &Body, expr_idx: ExprIdx) -> Option<ResourceEvent<R>>;
+
+    /// Multi-event classification.
+    ///
+    /// The default forwards to [`classify`](Self::classify), wrapping
+    /// the optional single event in a `Vec`, so single-event
+    /// providers do not need to override anything. Override this
+    /// method when one expression legitimately closes (or, rarely,
+    /// opens) more than one resource — the canonical example is BSL's
+    /// `УдалитьФайлы(a, b)` overload that deletes both files in a
+    /// single call. The order of returned events is the order they
+    /// are applied to the lattice.
+    fn classify_many(&self, body: &Body, expr_idx: ExprIdx) -> Vec<ResourceEvent<R>> {
+        self.classify(body, expr_idx).into_iter().collect()
+    }
 }
 
 /// Open-set lattice element.
@@ -210,10 +235,11 @@ where
     P: ResourceProvider<R>,
 {
     fn apply(&self, body: &Body, expr_idx: ExprIdx, state: &mut OpenSet<R>) {
-        match self.provider.classify(body, expr_idx) {
-            Some(ResourceEvent::Open(r)) => state.open_at(r, expr_idx),
-            Some(ResourceEvent::Close(r)) => state.close(&r),
-            None => {}
+        for event in self.provider.classify_many(body, expr_idx) {
+            match event {
+                ResourceEvent::Open(r) => state.open_at(r, expr_idx),
+                ResourceEvent::Close(r) => state.close(&r),
+            }
         }
     }
 }
