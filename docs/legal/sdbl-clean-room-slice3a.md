@@ -50,15 +50,14 @@ The paths claimed as clean-room Slice 3a authorship are:
       `TypeString`, `TypeDate`. Bilingual canonical spellings per
       v8327doc bilingual word-list table:
       `БУЛЕВО / BOOLEAN`, `ЧИСЛО / NUMBER`, `СТРОКА / STRING`,
-      `ДАТА / DATE` (`page.html:380, 384, 1230, 1234, 1120, 1124,
-      500, 504`).
+      `ДАТА / DATE`.
     - **Undefined literal (1):** `LitUndefined`. Bilingual canonical
       spelling per v8327doc bilingual word-list table:
-      `НЕОПРЕДЕЛЕНО / UNDEFINED` (`page.html:890, 894`).
+      `НЕОПРЕДЕЛЕНО / UNDEFINED`.
     - **Narrow period-type keywords (2):** `PeriodTenDays`,
       `PeriodHalfYear`. Bilingual canonical spellings per v8327doc
       bilingual word-list table: `ДЕКАДА / TENDAYS`,
-      `ПОЛУГОДИЕ / HALFYEAR` (`page.html:520, 524, 980, 984`).
+      `ПОЛУГОДИЕ / HALFYEAR`.
 - `crates/lexer/tests/fixtures/sdbl_golden_corpus.txt` — three
   thematic Slice 3a corpus entries (071–073) closing the six
   bilingual blind spots surfaced by the Pre-C0b corpus coverage
@@ -95,42 +94,38 @@ families remain in LEGACY.
 All seven Slice 3a variants are classified **Tier A1** with v8327doc
 Глава 8 «Работа с запросами» as the primary canonical SDBL grammar
 source. The bilingual word-list tables (chapters 8.4.0–8.4.x of the
-single document at v8327doc#bookmark:dev:TI000000453, locally
-mirrored at `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`)
-attest each Russian / English token spelling at the line numbers
-given below. Secondary contextual attestations are included for
-robustness; the bilingual word-list rows alone are sufficient for the
-Tier A1 claim.
+single document at v8327doc#bookmark:dev:TI000000453)
+attest each Russian / English token spelling. Secondary contextual
+attestations are included for robustness; the bilingual word-list
+rows alone are sufficient for the Tier A1 claim.
 
-| Variant         | RU canonical    | EN canonical | Word-list `page.html` lines     | Contextual lines              |
+| Variant         | RU canonical    | EN canonical | Word-list region                | Contextual region             |
 |-----------------|-----------------|--------------|---------------------------------|-------------------------------|
-| `TypeBoolean`   | `БУЛЕВО`        | `BOOLEAN`    | `:380, :384`                    | `:4736, :4770`                |
-| `TypeNumber`    | `ЧИСЛО`         | `NUMBER`     | `:1230, :1234`                  | `:4737, :4770, :4780`         |
-| `TypeString`    | `СТРОКА`        | `STRING`     | `:1120, :1124`                  | `:4738, :4771, :4792-4796`    |
-| `TypeDate`      | `ДАТА`          | `DATE`       | `:500, :504`                    | `:4739, :4771, :4798-4802`    |
-| `LitUndefined`  | `НЕОПРЕДЕЛЕНО`  | `UNDEFINED`  | `:890, :894`                    | `:4785`                       |
-| `PeriodTenDays` | `ДЕКАДА`        | `TENDAYS`    | `:520, :524`                    | `:3174, :3274`                |
-| `PeriodHalfYear`| `ПОЛУГОДИЕ`     | `HALFYEAR`   | `:980, :984`                    | `:3174, :3275`                |
+| `TypeBoolean`   | `БУЛЕВО`        | `BOOLEAN`    | bilingual word-list             | CAST type grammar; constants prose |
+| `TypeNumber`    | `ЧИСЛО`         | `NUMBER`     | bilingual word-list             | CAST type grammar; constants prose; literal EBNF |
+| `TypeString`    | `СТРОКА`        | `STRING`     | bilingual word-list             | CAST type grammar; constants prose; literal EBNF |
+| `TypeDate`      | `ДАТА`          | `DATE`       | bilingual word-list             | CAST type grammar; constants prose; literal EBNF |
+| `LitUndefined`  | `НЕОПРЕДЕЛЕНО`  | `UNDEFINED`  | bilingual word-list             | `<Значение>` EBNF slot        |
+| `PeriodTenDays` | `ДЕКАДА`        | `TENDAYS`    | bilingual word-list             | TOTALS BY period list; prose enumeration |
+| `PeriodHalfYear`| `ПОЛУГОДИЕ`     | `HALFYEAR`   | bilingual word-list             | TOTALS BY period list; prose enumeration |
 
 The contextual lines anchor each variant to a canonical EBNF
 production or canonical prose enumeration:
 
-- `Type*` contextual lines `:4730-4740` carry the canonical CAST type
+- `Type*` contextual region carries the canonical CAST type
   grammar `Булево | Число [(Длина[, Точность])] | Строка [(Длина)] |
   Дата | <Имя таблицы>` for the `<Тип значения>` non-terminal of
-  `ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`. Lines `:4767-4806`
-  carry the §«Константы и параметры в языке запросов» prose
-  attesting that values of `Булево / Число / Строка / Дата` types
-  may be used directly in query expressions, and the `<Значение>`
-  EBNF production at `:4774-4787` lists `НЕОПРЕДЕЛЕНО` and `NULL`
-  alongside the typed literals.
-- `LitUndefined` contextual line `:4785` is the `НЕОПРЕДЕЛЕНО` slot
-  in the `<Значение>` EBNF production cited above.
-- `Period*` contextual line `:3174` is the canonical TOTALS BY period
+  `ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`. The §«Константы
+  и параметры в языке запросов» prose attests that values of
+  `Булево / Число / Строка / Дата` types may be used directly in
+  query expressions, and the `<Значение>` EBNF production lists
+  `НЕОПРЕДЕЛЕНО` and `NULL` alongside the typed literals.
+- `LitUndefined` contextual region is the `НЕОПРЕДЕЛЕНО` slot in
+  the `<Значение>` EBNF production cited above.
+- `Period*` contextual region is the canonical TOTALS BY period
   list inside `[ПЕРИОДАМИ(Секунда | Минута | Час | День | Неделя |
-  Месяц | Квартал | Год | Декада | Полугодие [...])]`. Lines
-  `:3270-3275` carry the matching prose enumeration listing the same
-  ten period types verbatim. The `ПЕРИОДАМИ` keyword that introduces
+  Месяц | Квартал | Год | Декада | Полугодие [...])]`. The matching
+  prose enumeration lists the same ten period types verbatim. The `ПЕРИОДАМИ` keyword that introduces
   this period list is owned by `KwPeriods` (Slice 2-addendum scope,
   landed 2026-05-07); see
   [`sdbl-clean-room-slice2-addendum.md`](sdbl-clean-room-slice2-addendum.md)
@@ -140,8 +135,8 @@ The `KwType` token (the `ТИП(<Имя типа>)` keyword that introduces
 the type-name function call producing values of type `Тип`) is
 owned by Slice 2-addendum and gates the user-facing call sites
 where `Type*` literals appear as `<Имя типа>` arguments. The
-canonical EBNF for the `ТИП(<Имя типа>)` production lives at
-`page.html:4831` and the cross-reference is preserved verbatim in
+canonical EBNF for the `ТИП(<Имя типа>)` production is in
+v8327doc Глава 8 and the cross-reference is preserved verbatim in
 the Slice 3a `Type*` per-variant docstrings authored at C2.
 
 The `LitNull` token (the `NULL` literal) is **not** in Slice 3a
@@ -259,31 +254,29 @@ spelling exactly under `(?i)` case folding, and the contextual EBNF
 / prose lines confirm the variant role. The audit log:
 
 - `TypeBoolean` — regex `булево|boolean`; word-list `БУЛЕВО / BOOLEAN`
-  (`:380, :384`); contextual CAST type slot `Булево` (`:4736`) and
-  constants prose `типа Булево` (`:4770`). **MATCH.**
+  in v8327doc bilingual table; contextual CAST type slot `Булево` and
+  constants prose `типа Булево`. **MATCH.**
 - `TypeNumber` — regex `число|number`; word-list `ЧИСЛО / NUMBER`
-  (`:1230, :1234`); contextual CAST type slot `Число [(Длина[,
-  Точность])]` (`:4737`), constants prose `типа Число` (`:4770`),
-  `<Литерал типа Число>` EBNF anchor (`:4780`). **MATCH.**
+  in v8327doc bilingual table; contextual CAST type slot `Число [(Длина[,
+  Точность])]`, constants prose `типа Число`,
+  `<Литерал типа Число>` EBNF anchor. **MATCH.**
 - `TypeString` — regex `строка|string`; word-list `СТРОКА / STRING`
-  (`:1120, :1124`); contextual CAST type slot `Строка [(Длина)]`
-  (`:4738`), constants prose `типа Строка` (`:4771`),
-  `<Литерал типа Строка>` EBNF (`:4792-4796`). **MATCH.**
+  in v8327doc bilingual table; contextual CAST type slot `Строка [(Длина)]`,
+  constants prose `типа Строка`,
+  `<Литерал типа Строка>` EBNF. **MATCH.**
 - `TypeDate` — regex `дата|date`; word-list `ДАТА / DATE`
-  (`:500, :504`); contextual CAST type slot `Дата` (`:4739`),
-  constants prose `типа Дата` (`:4771`), `<Литерал типа Дата>` EBNF
-  using `ДАТАВРЕМЯ(...)` constructor (`:4798-4802`). **MATCH.**
+  in v8327doc bilingual table; contextual CAST type slot `Дата`,
+  constants prose `типа Дата`, `<Литерал типа Дата>` EBNF
+  using `ДАТАВРЕМЯ(...)` constructor. **MATCH.**
 - `LitUndefined` — regex `неопределено|undefined`; word-list
-  `НЕОПРЕДЕЛЕНО / UNDEFINED` (`:890, :894`); contextual `<Значение>`
-  EBNF slot (`:4785`). **MATCH.**
+  `НЕОПРЕДЕЛЕНО / UNDEFINED` in v8327doc bilingual table; contextual
+  `<Значение>` EBNF slot. **MATCH.**
 - `PeriodTenDays` — regex `декада|tendays`; word-list
-  `ДЕКАДА / TENDAYS` (`:520, :524`); contextual TOTALS BY period
-  list `Декада` (`:3174`), prose enumeration `Декада` (`:3274`).
-  **MATCH.**
+  `ДЕКАДА / TENDAYS` in v8327doc bilingual table; contextual TOTALS BY
+  period list `Декада`, prose enumeration `Декада`. **MATCH.**
 - `PeriodHalfYear` — regex `полугодие|halfyear`; word-list
-  `ПОЛУГОДИЕ / HALFYEAR` (`:980, :984`); contextual TOTALS BY
-  period list `Полугодие` (`:3174`), prose enumeration `Полугодие`
-  (`:3275`). **MATCH.**
+  `ПОЛУГОДИЕ / HALFYEAR` in v8327doc bilingual table; contextual TOTALS
+  BY period list `Полугодие`, prose enumeration `Полугодие`. **MATCH.**
 
 ### Audit conclusion
 
@@ -318,25 +311,19 @@ The Slice 3a material was re-derived from:
 1. v8.3.27 Developer's Reference Глава 8 «Работа с запросами»:
    - <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453> —
      the single-document URL covering the full chapter; locally
-     mirrored at
-     `its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
-     for line-numbered reviewer convenience.
    - Specific cited regions:
      - Bilingual word-list table rows for the seven variants
-       (`page.html:380, 384, 500, 504, 520, 524, 890, 894, 980, 984,
-       1120, 1124, 1230, 1234`).
-     - §«Приведение типа» (CAST type grammar, `:4720-4765`) — the
-       `<Тип значения>` non-terminal listing the four primitive
-       types and `<Имя таблицы>`.
-     - §«Константы и параметры в языке запросов» (`:4767-4825`) —
-       the `<Значение>` EBNF production listing all literal forms
-       including `НЕОПРЕДЕЛЕНО` and the `<Литерал типа Тип>` cross-
-       reference.
-     - §«Расчет общих итогов» / §«Дополнение дат»
-       (`:3170-3290`) — the `[ПЕРИОДАМИ(Секунда | Минута | Час |
-       День | Неделя | Месяц | Квартал | Год | Декада | Полугодие
-       [...])]` canonical period-list grammar plus matching prose
-       enumeration.
+       (БУЛЕВО/BOOLEAN, ЧИСЛО/NUMBER, СТРОКА/STRING, ДАТА/DATE,
+       НЕОПРЕДЕЛЕНО/UNDEFINED, ДЕКАДА/TENDAYS, ПОЛУГОДИЕ/HALFYEAR).
+     - §«Приведение типа» (CAST type grammar) — the `<Тип значения>`
+       non-terminal listing the four primitive types and `<Имя таблицы>`.
+     - §«Константы и параметры в языке запросов» — the `<Значение>`
+       EBNF production listing all literal forms including `НЕОПРЕДЕЛЕНО`
+       and the `<Литерал типа Тип>` cross-reference.
+     - §«Расчет общих итогов» / §«Дополнение дат» — the
+       `[ПЕРИОДАМИ(Секунда | Минута | Час | День | Неделя | Месяц |
+       Квартал | Год | Декада | Полугодие [...])]` canonical
+       period-list grammar plus matching prose enumeration.
 2. 1C ITS pubqlang documentation (secondary, corroborating):
    - <https://its.1c.ru/db/pubqlang/content/12/hdoc> — lexical
      elements, identifier longest-match rule, and literal vocabulary
@@ -356,15 +343,11 @@ in Slice 2-addendum (cite the public ITS URL plus pubqlang chapter
 identifier in committed artefacts; local mirror paths are working
 convenience only), Slice 3a source-code provenance comments at C2
 and Slice 3a commit messages cite ONLY the public ITS URL plus
-pubqlang chapter identifiers — no local mirror paths. The
-local-mirror line-number references inside **this attestation
-document** (`page.html:NNN`) are an explicit exemption: legal
-attestation documents are reviewer-facing working artefacts, not
-source-code rustdoc text, and the line numbers here let a reviewer
-verify the audit trail without re-deriving citations themselves.
-The exemption applies to attestation documents only; source-code
-rustdoc text authored at C2 propagates the public-URL form of each
-citation, never the `page.html:NNN` form.
+pubqlang chapter identifiers — no local mirror paths. This
+attestation document likewise follows the citation policy: local-mirror
+line-number references have been removed and citations use only the
+public URL and section descriptions. Source-code rustdoc text
+authored at C2 propagates the public-URL form of each citation.
 
 ## Non-consultation statement
 

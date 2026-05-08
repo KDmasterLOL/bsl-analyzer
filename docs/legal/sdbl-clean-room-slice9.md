@@ -135,11 +135,11 @@ authoritative on-disk reference.
 
 | Chapter | Evidence | Tier |
 |---|---|---|
-| `chapter_044.html` | `ВНУТРЕННЕЕ СОЕДИНЕНИЕ` listing + standalone `СОЕДИНЕНИЕ` reference. | A1 |
-| `chapter_045.html` | `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing. | A1 |
-| `chapter_046.html` | `ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing (also one secondary `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` example). | A1 |
-| `chapter_047.html` | `ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing. | A1 |
-| `chapter_048.html` | Chained / nested example listings (`ВНУТРЕННЕЕ СОЕДИНЕНИЕ` + `ЛЕВОЕ` chains). | A1 |
+| `chapter 44` | `ВНУТРЕННЕЕ СОЕДИНЕНИЕ` listing + standalone `СОЕДИНЕНИЕ` reference. | A1 |
+| `chapter 45` | `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing. | A1 |
+| `chapter 46` | `ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing (also one secondary `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` example). | A1 |
+| `chapter 47` | `ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing. | A1 |
+| `chapter 48` | Chained / nested example listings (`ВНУТРЕННЕЕ СОЕДИНЕНИЕ` + `ЛЕВОЕ` chains). | A1 |
 
 §ITS coverage verification — outcomes recorded at C2 author time:
 

@@ -100,9 +100,9 @@ D = local IDE-recovery allowance.
 | Function | Tier source map |
 |---|---|
 | `is_identifier_token` | **C/B local parser contract** — body `p.at(TokenKind::Ident)` is trivially derivable from the project's event-parser conventions; load-bearing semantics inherited from Slice 7 alias-scan + Slice 8 source-alias guard contracts cross-referenced at `docs/legal/sdbl-clean-room-slice8.md:264-269`. |
-| `is_limitation_keyword` | **A1** + B (lexer Slice 2 / Slice 2 LEGACY-attested keyword pairs DISTINCT / РАЗЛИЧНЫЕ, TOP / ПЕРВЫЕ, ALLOWED / РАЗРЕШЕННЫЕ). Primary Tier A1 source: v8327doc Глава 8 §<Описание запроса> at `page.html:1320` canonical EBNF skeleton placing all three qualifiers in their canonical first three SELECT-prefix slots; bilingual word-list at `:1030-1034` (РАЗЛИЧНЫЕ ↔ DISTINCT), `:1040-1044` (РАЗРЕШЕННЫЕ ↔ ALLOWED), `:920-924` (ПЕРВЫЕ ↔ TOP). |
-| `limitations` | **A1** + B + C. Primary Tier A1 source: v8327doc Глава 8 at `page.html:1320` canonical EBNF + `:1331-1356` prose semantics for РАЗРЕШЕННЫЕ / РАЗЛИЧНЫЕ / ПЕРВЫЕ. Secondary corroborating sources: pubqlang chapters 19/20/57 (textbook companion). C = mini-spec §Limitations any-order acceptance + duplicate-qualifier loop tolerance contract. |
-| `top_clause` | **A1** + B + C + D. Primary Tier A1 source: v8327doc Глава 8 at `page.html:1320` canonical EBNF `[ПЕРВЫЕ <Количество>]` slot + `:1350-1356` prose covering limit, ordering interaction with subsequent ORDER BY, and nested-query support. Secondary: pubqlang `chapter_019.html:19, 28`. D = §IDE-recovery allowance Q3 (missing-decimal recovery shape; Slice 12 owns the recovery-quality fix). |
+| `is_limitation_keyword` | **A1** + B (lexer Slice 2 / Slice 2 LEGACY-attested keyword pairs DISTINCT / РАЗЛИЧНЫЕ, TOP / ПЕРВЫЕ, ALLOWED / РАЗРЕШЕННЫЕ). Primary Tier A1 source: v8327doc Глава 8 §<Описание запроса> canonical EBNF skeleton placing all three qualifiers in their canonical first three SELECT-prefix slots; bilingual word-list for РАЗЛИЧНЫЕ ↔ DISTINCT, РАЗРЕШЕННЫЕ ↔ ALLOWED, ПЕРВЫЕ ↔ TOP. |
+| `limitations` | **A1** + B + C. Primary Tier A1 source: v8327doc Глава 8 canonical EBNF and prose semantics for РАЗРЕШЕННЫЕ / РАЗЛИЧНЫЕ / ПЕРВЫЕ. Secondary corroborating sources: pubqlang chapters 19/20/57 (textbook companion). C = mini-spec §Limitations any-order acceptance + duplicate-qualifier loop tolerance contract. |
+| `top_clause` | **A1** + B + C + D. Primary Tier A1 source: v8327doc Глава 8 canonical EBNF `[ПЕРВЫЕ <Количество>]` slot and prose covering limit, ordering interaction with subsequent ORDER BY, and nested-query support. Secondary: pubqlang `chapter 19`. D = §IDE-recovery allowance Q3 (missing-decimal recovery shape; Slice 12 owns the recovery-quality fix). |
 
 **ALLOWED / РАЗРЕШЕННЫЕ Tier classification — verbatim
 disclosure** (per codex Round-2 finding 2 + post-Round-3
@@ -115,9 +115,9 @@ document carries the canonical EBNF skeleton placing
 1331-1344 give full prose semantics covering RLS scope,
 top-level-only constraint (see §Deferred semantic constraint
 below), propagation into subqueries, and interaction with
-ЧТЕНИЕ rights; the bilingual word-list at `:1040-1044` maps
+ЧТЕНИЕ rights; the bilingual word-list maps
 РАЗРЕШЕННЫЕ ↔ ALLOWED. The pubqlang dump's
-`chapter_057.html:50` UI-checkbox prose is a secondary
+`chapter 57` UI-checkbox prose is a secondary
 corroborating reference only.
 
 The first-pass codex adversarial review (Rounds 1–3) had
@@ -131,7 +131,7 @@ grammar specification and lists РАЗРЕШЕННЫЕ in the canonical
 first-SELECT-prefix slot with full prose semantics.
 
 **Deferred semantic constraint** (codex Round-4 finding 4):
-v8327doc Глава 8 at `page.html:1336` constrains РАЗРЕШЕННЫЕ to
+v8327doc Глава 8 constrains РАЗРЕШЕННЫЕ to
 the top-level `ВЫБРАТЬ` only (the keyword may appear only in
 the top-level SELECT and propagates to nested subqueries).
 The current parser's `query()` at
@@ -150,36 +150,26 @@ The Slice 7-addendum material was authored from:
 1. **Primary** SDBL grammar specification: v8.3.27 Developer's
    Reference Глава 8 «Работа с запросами» —
    `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`.
-   Line-numbered references below (`page.html:NNNN`) are
-   relative to the canonical document fetched from the public
-   URL above; reviewers may resolve them against their own
-   archived snapshot. Specifically:
-   - `page.html:1320` — canonical EBNF skeleton for `<Описание
-     запроса>` placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ
-     `<Количество>` in the first three optional SELECT-prefix
-     slots.
-   - `page.html:1331-1344` — RLS-scope prose for РАЗРЕШЕННЫЕ
-     (top-level-only constraint; propagation into subqueries;
-     interaction with ЧТЕНИЕ rights).
-   - `page.html:1346-1348` — duplicate-elimination prose for
-     РАЗЛИЧНЫЕ.
-   - `page.html:1350-1356` — limit / ordering / nested-query
-     prose for ПЕРВЫЕ.
-   - `page.html:1030-1034` — bilingual pair РАЗЛИЧНЫЕ ↔
-     DISTINCT.
-   - `page.html:1040-1044` — bilingual pair РАЗРЕШЕННЫЕ ↔
-     ALLOWED.
-   - `page.html:920-924` — bilingual pair ПЕРВЫЕ ↔ TOP.
+   Specifically:
+   - canonical EBNF skeleton for `<Описание запроса>` placing
+     РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ `<Количество>` in the first
+     three optional SELECT-prefix slots.
+   - RLS-scope prose for РАЗРЕШЕННЫЕ (top-level-only constraint;
+     propagation into subqueries; interaction with ЧТЕНИЕ rights).
+   - duplicate-elimination prose for РАЗЛИЧНЫЕ.
+   - limit / ordering / nested-query prose for ПЕРВЫЕ.
+   - bilingual pair РАЗЛИЧНЫЕ ↔ DISTINCT.
+   - bilingual pair РАЗРЕШЕННЫЕ ↔ ALLOWED.
+   - bilingual pair ПЕРВЫЕ ↔ TOP.
 
 2. **Secondary corroborating** ITS pubqlang dump (textbook
    companion; chapter-numbered HTML extracts of the public
    ITS pubqlang reference):
-   - `chapter_019.html:19, 28` — TOP / ПЕРВЫЕ canonical
-     demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3` example.
-   - `chapter_020.html:18, 29, 38, 42` — DISTINCT / РАЗЛИЧНЫЕ
-     canonical demonstrative example + DISTINCT × ORDER BY
-     interaction.
-   - `chapter_057.html:50` — UI-checkbox prose for "Разрешенные"
+   - `chapter 19` — TOP / ПЕРВЫЕ canonical demonstrative
+     `ВЫБРАТЬ ПЕРВЫЕ 3` example.
+   - `chapter 20` — DISTINCT / РАЗЛИЧНЫЕ canonical demonstrative
+     example + DISTINCT × ORDER BY interaction.
+   - `chapter 57` — UI-checkbox prose for "Разрешенные"
      in the query-designer GUI (corroborating only).
 
 3. The C0-extended SDBL select mini-spec at
@@ -282,9 +272,8 @@ plan):
 **None.** The Slice 7-addendum carries no behavioural fixes
 beyond the three preserved-quirk documentation items above.
 
-The Tier-A1 source v8327doc Глава 8 prose at
-`page.html:1336` carries an additional semantic constraint
-(top-level-only `РАЗРЕШЕННЫЕ`), but the parser does NOT
+The Tier-A1 source v8327doc Глава 8 prose carries an additional
+semantic constraint (top-level-only `РАЗРЕШЕННЫЕ`), but the parser does NOT
 enforce this constraint and the Slice 7-addendum preserves
 that — see §Tier classification §Deferred semantic constraint
 above. Enforcement is deferred to a future slice (Slice 13
@@ -385,8 +374,8 @@ C0a/C0b-shaped flow):
   mini-spec + the Slice 8 attestation cross-reference for
   `is_identifier_token`; attach one per-function provenance
   comment each; address the codex C2-review Minor finding
-  (bilingual word-list line citations corrected from
-  `:1024-1046` to `:1030-1034` / `:1040-1044` / `:920-924`);
+  (bilingual word-list line citations corrected to the accurate
+  word-list rows for РАЗЛИЧНЫЕ, РАЗРЕШЕННЫЕ, and ПЕРВЫЕ);
   drop the empty `if !p.expect(...) { }` no-op block in
   `top_clause` (within clean-room latitude per codex C2-review
   confirmation).

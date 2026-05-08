@@ -665,19 +665,11 @@ ORDER readers, `LogicalOrInWhere` recursive-walk reachability at
 `clauses.rs:170-192`) read.
 
 Authored from ITS pubqlang chapters 12 (§Структура запроса), 16
-(§Сортировка результата запроса — `chapter_016.html:19, 31, 33,
-37, 49, 63, 64, 75-76`), 17 (§АВТОУПОРЯДОЧИВАНИЕ —
-`chapter_017.html:17, 32, 52` plus sort-by-ссылочное-поле lines
-29, 49), 22 (§Условие отбора — `chapter_022.html:15, 26, 35`), 23
-(§LIKE+WHERE — `chapter_023.html:13, 25-27, 45-46`), 24
-(§WHERE+parameters — `chapter_024.html:15, 16`), 27
-(§Иерархическая упорядоченная выборка —
-`chapter_027.html:39, 51`), 34 (§Группировка результата запроса —
-`chapter_034.html:14, 33, 44, 46, 51, 52`), 35 (§Расчет агрегатов
-+ §Условие на агрегаты — `chapter_035.html:23, 29, 41, 44, 45,
-49`), 39 (§Расчет общих итогов — `chapter_039.html:13, 25, 29,
-48, 49, 51`) via the local dump at
-`<ITS pubqlang dump>/`; the C0a-extended
+(§Сортировка результата запроса), 17 (§АВТОУПОРЯДОЧИВАНИЕ plus
+sort-by-ссылочное-поле), 22 (§Условие отбора), 23 (§LIKE+WHERE),
+24 (§WHERE+parameters), 27 (§Иерархическая упорядоченная выборка),
+34 (§Группировка результата запроса), 35 (§Расчет агрегатов +
+§Условие на агрегаты), 39 (§Расчет общих итогов); the C0a-extended
 SELECT mini-spec §WHERE / §GROUP BY / §HAVING / §ORDER BY /
 §AUTOORDER / §TOTALS BY / §FOR UPDATE / §INDEX BY clause-body
 sections, §IDE-recovery allowances block (4 entries), §ITS
@@ -692,8 +684,8 @@ ASC/ВОЗР, DESC/УБЫВ, HIERARCHY/ИЕРАРХИЯ).
 The C2 commit landed one MANDATORY behaviour-change fix:
 `order_by_item` now consumes the optional HIERARCHY/ИЕРАРХИЯ
 modifier as a flat sibling IDENT token of `SdblOrderClause` (per
-ITS chapter 27 attestation — `chapter_027.html:39, 51` —
-`УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`), atomic with unignoring
+ITS chapter 27 attestation — `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`),
+atomic with unignoring
 the C0b regression-gate test
 `test_slice11_order_by_hierarchy_consumed`. Parser-only
 acceptance: HIR semantic interpretation (adding hierarchy field
@@ -772,13 +764,10 @@ LEGACY banner in `select.rs` from
 A primary SDBL grammar source — v8.3.27 Developer's Reference
 Глава 8 «Работа с запросами» —
 <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>
-landed during the C0 review window (locally saved at
-`its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
-for line-numbered reviewer convenience). Line 1320 of
-`page.html` carries the canonical EBNF skeleton for `<Описание
-запроса>` placing all three SELECT-prefix qualifiers
+landed during the C0 review window. The §<Описание запроса>
+EBNF skeleton places all three SELECT-prefix qualifiers
 (РАЗРЕШЕННЫЕ / РАЗЛИЧНЫЕ / ПЕРВЫЕ) in their canonical first
-three slots; lines 1331-1356 give full prose semantics for
+three slots; the accompanying prose gives full semantics for
 each qualifier. This source is **primary**; the pubqlang dump
 (chapters 19/20/57) remains a **secondary** corroborating
 textbook companion. After the addendum lands, ALL three
@@ -787,9 +776,9 @@ the cited primary source.
 
 The addendum carries a §Deferred semantic constraint note
 (codex Round-4 finding 4): the v8327doc-attested top-level-only
-constraint on РАЗРЕШЕННЫЕ (`page.html:1336`) is NOT enforced at
-parser level; HIR-level / IDE-diagnostic-level enforcement is
-deferred to Slice 13 or a dedicated diagnostic.
+constraint on РАЗРЕШЕННЫЕ is NOT enforced at parser level;
+HIR-level / IDE-diagnostic-level enforcement is deferred to Slice 13
+or a dedicated diagnostic.
 
 ### Scope
 
