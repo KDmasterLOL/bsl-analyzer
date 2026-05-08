@@ -9,7 +9,9 @@ use bsl_platform::{
     manager_methods_query, type_methods_query, type_properties_query, PlatformDataInner,
     PlatformMethod, PlatformProperty, TypeNameInput,
 };
-use hir::{Field, HirFieldOrigin, MethodSymbol, Name, Semantics, Ty, Type as HirType};
+use hir::{
+    Field, HirFieldOrigin, MethodSymbol, Name, Semantics, Ty, TyLoweringContext, Type as HirType,
+};
 use ide_db::RootDatabase;
 use symbol_info::{
     build_signature, from_platform_method, render_completion_detail, CalleeKind, CompletionDetail,
@@ -75,11 +77,12 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 
     // Fallback: a bare identifier that HIR couldn't resolve — typically
     // a literal type name (`Строка.`) or a platform constructor name
-    // (`Запрос.`) without a variable binding. `Ty::from_type_name`
-    // catches primitives / collections; anything else becomes a
-    // `PlatformObject(name)` so `platform_type_name()` below can ask
-    // `type_methods_query` for matching methods (empty result is safe
-    // — completion just shows nothing).
+    // (`Запрос.`) without a variable binding. The shared
+    // `TyLoweringContext::lower_bare_name` cascade catches primitives /
+    // collections / metadata-prefix guards and falls back to
+    // `Ty::PlatformObject(name)` so `platform_type_name()` below can
+    // ask `type_methods_query` for matching methods (empty result is
+    // safe — completion just shows nothing).
     if receiver_ty.is_unknown() {
         if let Some(name) = extract_receiver_ident(&receiver_expr) {
             // If the receiver is a real workspace CommonModule, the fast
@@ -137,10 +140,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
                 }
             }
             if receiver_ty.is_unknown() {
-                receiver_ty = Ty::from_type_name(&name);
-            }
-            if receiver_ty.is_unknown() {
-                receiver_ty = Ty::PlatformObject(Name::new(&name));
+                receiver_ty = TyLoweringContext::new().lower_bare_name(&Name::new(&name));
             }
         }
     }

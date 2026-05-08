@@ -57,6 +57,8 @@ use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt};
 use hir_def::ty::Ty;
 use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId, Name};
+
+use crate::lower::builtin_names::ty_from_bare_name;
 use la_arena::{Idx, RawIdx};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -83,7 +85,7 @@ pub enum Guard {
     /// union, else `Unknown`.
     ///
     /// `type_name` is kept as the raw string literal — the caller maps
-    /// it through [`hir_def::ty::Ty::from_type_name`].
+    /// it through [`hir_def::ty::ty_from_bare_name`].
     TypeCheck { var: Name, type_name: String },
 
     /// `X = Неопределено` (or `Неопределено = X`).
@@ -414,7 +416,7 @@ impl NarrowingTransfer {
     /// Apply a recognized guard to the overlay on the given branch.
     ///
     /// True-branch narrowing is always precise:
-    /// - `Guard::TypeCheck { var, type_name }` → `Ty::from_type_name`.
+    /// - `Guard::TypeCheck { var, type_name }` → `ty_from_bare_name`.
     /// - `Guard::IsUndefined { var }` → `Ty::Undefined`.
     /// - `Guard::IsNotUndefined { var }` → `base \ Undefined`.
     ///
@@ -445,13 +447,13 @@ impl NarrowingTransfer {
     fn apply_guard(&self, state: &mut NarrowState, guard: &Guard, on_true: bool) {
         match guard {
             Guard::TypeCheck { var, type_name } => {
-                let matched = Ty::from_type_name(type_name);
+                let matched = ty_from_bare_name(type_name);
                 let narrowed = if on_true {
                     // True branch: take the matched type, but refine it
                     // with the base when the base is strictly more
                     // precise. Today the only such pair is
                     // `matched = Ty::Array` ↔ `base = Ty::TypedArray(_)`:
-                    // `Ty::from_type_name("Массив")` cannot reconstruct
+                    // `ty_from_bare_name("Массив")` cannot reconstruct
                     // an element witness from the surface name, so a
                     // direct write would clobber `TypedArray(String)`
                     // back to bare `Array`. Promoting the base preserves
@@ -503,7 +505,7 @@ impl NarrowingTransfer {
     /// Refine the matched guard type with the variable's recorded base
     /// when the base is strictly more precise.
     ///
-    /// `Ty::from_type_name` resolves surface names like `"Массив"` /
+    /// `ty_from_bare_name` resolves surface names like `"Массив"` /
     /// `"Array"` to bare [`Ty::Array`] — it has no element witness to
     /// reconstruct. If the base for `var` is a [`Ty::TypedArray`], the
     /// guard `Если ТипЗнч(М) = Тип("Массив") Тогда …` should narrow to
@@ -1773,7 +1775,7 @@ mod tests {
     #[test]
     fn apply_guard_type_check_true_maps_to_named_ty() {
         // `ТипЗнч(Х) = Тип("Строка")` on the true branch maps Х to
-        // Ty::String (lowered via `Ty::from_type_name`). This is the
+        // Ty::String (lowered via `ty_from_bare_name`). This is the
         // path users will actually observe in hover.
         let tr = transfer_no_bases();
         let mut s = NarrowState::new();
@@ -1789,7 +1791,7 @@ mod tests {
     fn apply_guard_type_check_true_promotes_array_to_typed_array_base() {
         // Phase 0 regression guard: `Если ТипЗнч(М) = Тип("Массив")`
         // must NOT downgrade a `TypedArray(String)` base to bare
-        // `Ty::Array`. The matched type from `Ty::from_type_name`
+        // `Ty::Array`. The matched type from `ty_from_bare_name`
         // ("Массив") is `Ty::Array` (no element witness), so without
         // the refinement the overlay would clobber the element type
         // and iteration inside the branch would lose `String`.

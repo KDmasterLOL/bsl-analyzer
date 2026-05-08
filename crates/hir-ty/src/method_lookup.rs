@@ -295,7 +295,7 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
 /// Convert a `PlatformMethod` entry into the semantic `MethodInfo`.
 ///
 /// - `return_type = Some("Число")` → `Ty::Number` (via
-///   `Ty::from_type_name`); unrecognised names fall back to
+///   `ty_from_bare_name`); unrecognised names fall back to
 ///   `Ty::PlatformObject(name)` so hover / chained calls still carry a
 ///   meaningful type.
 /// - `return_type = Some("РезультатЗапроса, Неопределено")` — comma-joined
@@ -370,7 +370,7 @@ pub(crate) fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
 /// `Ty::Undefined`) pass through untouched.
 ///
 /// **Parameters are deliberately *not* rebound.** Mirrors the
-/// `to_method_info` baseline (`Ty::from_type_name`) so unrecognised
+/// `to_method_info` baseline (`ty_from_bare_name`) so unrecognised
 /// platform names like `"Произвольный"` (Найти's first arg, "any
 /// value") and `"Строка табличной части"` (Индекс's arg) lower to
 /// `Ty::Unknown`. Rebinding params would narrow them to
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn to_method_info_single_unknown_param_stays_unknown() {
         // The asymmetry in [`lower_param_type`] preserves gradual
-        // typing for SINGLE-name params whose name `Ty::from_type_name`
+        // typing for SINGLE-name params whose name `ty_from_bare_name`
         // doesn't recognise — `Ty::Unknown` accepts any actual at the
         // call-site argument check. Routing this through
         // `lower_return_type_string` would lift to a structural
@@ -1028,7 +1028,7 @@ mod tests {
         // `Индекс(СтрокаТЧ: Строка табличной части)` — parameter
         // intentionally lowers to `Ty::Unknown` (mirrors how every
         // other unrecognised platform-name param behaves through
-        // `Ty::from_type_name`). Rebinding the row generic here
+        // `ty_from_bare_name`). Rebinding the row generic here
         // would narrow it to a section-specific row receiver, but
         // `is_assignable` uses structural equality on `MetadataRef`,
         // so legitimate cross-section transfers

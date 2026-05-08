@@ -8,6 +8,7 @@ pub mod type_facade;
 
 pub use definition::Definition;
 pub use hir_ty::coerce_this_object_to_metadata_ref;
+pub use hir_ty::TyLoweringContext;
 pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
 pub use name_classify::{classify_token, NameClass};

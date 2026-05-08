@@ -27,12 +27,14 @@ use bsl_platform::{split_type_alternatives, PlatformData};
 use hir_def::ty::Ty;
 use hir_def::Name;
 
+use super::builtin_names::ty_from_bare_name;
+
 /// Lower a raw HBK parameter-type string to a [`Ty`].
 ///
 /// 1. Empty / whitespace-only string → `Ty::Unknown` (no claim).
 /// 2. Any segment is the `Произвольный` placeholder → `Ty::Unknown`
 ///    (any-value collapses every union).
-/// 3. Single segment → [`Ty::from_type_name`]: primitives become their
+/// 3. Single segment → [`ty_from_bare_name`]: primitives become their
 ///    canonical variant, anything else stays `Ty::Unknown` so gradual
 ///    typing accepts any actual at the call site (the asymmetry).
 /// 4. Multi-segment with every segment validated → `Ty::union(...)` of
@@ -48,7 +50,7 @@ pub fn lower_param_type_string(raw: &str) -> Ty {
         return Ty::Unknown;
     }
     if segments.len() == 1 {
-        return Ty::from_type_name(segments[0]);
+        return ty_from_bare_name(segments[0]);
     }
     if segments.iter().all(|s| segment_is_valid_type(s)) {
         Ty::union(segments.iter().copied().map(lower_platform_type_name).collect())
@@ -89,7 +91,7 @@ pub fn lower_return_type_string(raw: &str) -> Ty {
 /// Lower a single bare type-name token to a [`Ty`].
 ///
 /// Primitives / collections (`"Число"`, `"Массив"`) take their canonical
-/// variant via [`Ty::from_type_name`]; anything else lifts to
+/// variant via [`ty_from_bare_name`]; anything else lifts to
 /// `Ty::PlatformObject(name)` so chained dispatch on platform objects
 /// (`Запрос.Выполнить().Выбрать()`) keeps resolving.
 ///
@@ -102,7 +104,7 @@ pub fn lower_platform_type_name(name: &str) -> Ty {
     if is_arbitrary_type_name(name) {
         return Ty::Unknown;
     }
-    let ty = Ty::from_type_name(name);
+    let ty = ty_from_bare_name(name);
     if ty.is_unknown() {
         Ty::PlatformObject(Name::new(name))
     } else {
@@ -111,7 +113,7 @@ pub fn lower_platform_type_name(name: &str) -> Ty {
 }
 
 /// `true` when the trimmed segment is a primitive / collection / sentinel
-/// recognised by [`Ty::from_type_name`], or a registered platform type.
+/// recognised by [`ty_from_bare_name`], or a registered platform type.
 ///
 /// Used by both lowering entry points to gate union-versus-fallback —
 /// a multi-segment string with even one invalid segment is
@@ -120,7 +122,7 @@ pub fn segment_is_valid_type(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    let ty = Ty::from_type_name(s);
+    let ty = ty_from_bare_name(s);
     !ty.is_unknown() || PlatformData::instance().get_type(s).is_some()
 }
 

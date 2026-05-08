@@ -36,7 +36,7 @@ use crate::{path::QualifiedName, Name};
 pub enum TypeRef {
     /// Primitive builtin (Число, Строка, …).
     ///
-    /// Consolidates the case-insensitive Ru/En table that `Ty::from_type_name`
+    /// Consolidates the case-insensitive Ru/En table that `ty_from_bare_name`
     /// and `ty::doc_types::parse_type_name` historically duplicated.
     Builtin(BuiltinTypeRef),
 
@@ -76,7 +76,7 @@ pub enum TypeRef {
 }
 
 /// Primitive builtin, consolidated from the Ru/En lookup tables previously
-/// duplicated in `Ty::from_type_name` and `doc_types::parse_type_name`.
+/// duplicated in `ty_from_bare_name` and `doc_types::parse_type_name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinTypeRef {
     Number,
