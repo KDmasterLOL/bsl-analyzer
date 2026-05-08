@@ -30,6 +30,13 @@ fn designer_fixture_path() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer"))
 }
 
+fn extension_common_module_path() -> PathBuf {
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/extension_common_module"
+    ))
+}
+
 /// Common module file path inside the designer fixture. Using a real
 /// CommonModule path means `find_configuration_root` locates the
 /// designer fixture's root and the visible-configurations registry
@@ -40,7 +47,10 @@ fn common_module_path() -> PathBuf {
     designer_fixture_path().join("CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl")
 }
 
-fn setup_diagnostics(text: &str) -> Vec<ide_diagnostics::Diagnostic> {
+fn build_db_with_configs(
+    text: &str,
+    config_paths: Vec<(Option<String>, PathBuf)>,
+) -> (RootDatabaseImpl, FileId) {
     let file_id = FileId::from_raw(1);
     let mut db = RootDatabaseImpl::new();
 
@@ -49,8 +59,16 @@ fn setup_diagnostics(text: &str) -> Vec<ide_diagnostics::Diagnostic> {
     db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
     db.set_file_source_root(file_id, SourceRootId(0));
     db.set_file_text(file_id, text);
-    db.set_all_config_paths(vec![(None, designer_fixture_path())]);
+    db.set_all_config_paths(config_paths);
 
+    (db, file_id)
+}
+
+fn setup_diagnostics_with_configs(
+    text: &str,
+    config_paths: Vec<(Option<String>, PathBuf)>,
+) -> Vec<ide_diagnostics::Diagnostic> {
+    let (db, file_id) = build_db_with_configs(text, config_paths);
     let config = DiagnosticsConfig::all_enabled();
     let provider = SalsaProvider::new(&db, None);
     let ctx = DiagnosticsContext::new(&config, file_id, &provider);
@@ -59,6 +77,10 @@ fn setup_diagnostics(text: &str) -> Vec<ide_diagnostics::Diagnostic> {
         .into_iter()
         .filter(|d| d.code == DiagnosticCode::CommonModuleAssign)
         .collect()
+}
+
+fn setup_diagnostics(text: &str) -> Vec<ide_diagnostics::Diagnostic> {
+    setup_diagnostics_with_configs(text, vec![(None, designer_fixture_path())])
 }
 
 /// Pure positive case: a method assigns to the unqualified name of a
@@ -149,6 +171,68 @@ fn common_module_assign_suppressed_by_module_variable_shadow() {
          resolver pass, got {} diagnostic(s): {:?}",
         diags.len(),
         diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+}
+
+/// Plan §4.7 CFE coverage (Step R): a CommonModule declared
+/// **only in a CFE** — never in the main configuration — must
+/// still trip the diagnostic when its name appears as an
+/// assignment target. Step M's `is_common_module_anywhere` and
+/// Step N's resolver hook both iterate `db.configurations(file_id)`
+/// (main + every registered extension), so visibility extends to
+/// extension-only declarations symmetrically.
+///
+/// The test pins **two independent contracts** to keep the CFE
+/// path honest end-to-end:
+///
+/// 1. The resolver — `ctx.assignment_target_kind` — must classify
+///    the CFE-only name as `AssignmentResolution::CommonModule(_)`
+///    directly. Without this we cannot tell whether the diagnostic
+///    fires through the resolver path or through the streaming
+///    fallback in `common_module_assign::from_hir` (which would
+///    mask a regression that drops CFE entries from the resolver's
+///    visible-configurations view).
+/// 2. The end-to-end emission — diagnostic count and canonical
+///    message — confirms the resolver classification flows through
+///    the diagnostic dispatch correctly.
+#[test]
+fn common_module_assign_emits_for_cfe_only_module() {
+    let text = r#"
+Процедура Тест()
+    РасширениеТолькоМодуль = 1;
+КонецПроцедуры
+"#;
+    let config_paths = vec![
+        (None, designer_fixture_path()),
+        (Some("РасширениеОбщегоМодуля".to_string()), extension_common_module_path()),
+    ];
+    let (db, file_id) = build_db_with_configs(text, config_paths);
+    let config = DiagnosticsConfig::all_enabled();
+    let provider = SalsaProvider::new(&db, None);
+    let ctx = DiagnosticsContext::new(&config, file_id, &provider);
+
+    let resolution = ctx.assignment_target_kind("РасширениеТолькоМодуль");
+    assert!(
+        matches!(resolution, hir::AssignmentResolution::CommonModule(_)),
+        "resolver must classify CFE-only name as CommonModule (independently of \
+         the `is_common_module_anywhere` fallback), got {:?}",
+        resolution
+    );
+
+    let diags: Vec<_> = ide_diagnostics::diagnostics(&ctx)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::CommonModuleAssign)
+        .collect();
+    assert_eq!(
+        diags.len(),
+        1,
+        "expected one CommonModuleAssign diagnostic for CFE-only name, got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+    assert!(
+        diags[0].message.contains("РасширениеТолькоМодуль"),
+        "diagnostic must reference canonical CFE-declared CommonModule name, got: {}",
+        diags[0].message
     );
 }
 
