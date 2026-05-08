@@ -50,9 +50,23 @@
 //! - **Tags:** DESIGN, CONFUSING
 //!
 //! ## Implementation
-//! This diagnostic is collected during HIR lowering as a byproduct of
-//! CFG analysis. The `from_hir` function converts the BodyDiagnostic
-//! to a Diagnostic for display.
+//!
+//! Lowering emits a [`BodyDiagnostic::MissingReturn`] candidate per
+//! function whose body could conceivably miss a `Return` (procedures
+//! are excluded at the lowering layer because they cannot return a
+//! value). The handler here re-validates the candidate against the
+//! `module_path_terminates` Salsa query (Track 1 Step E): if the
+//! analyser proves every path from the entry block reaches `Return`
+//! / `Raise` (i.e. `IN[entry] = MayFallthrough(false)`), the candidate
+//! is suppressed; otherwise it is materialised into a user-visible
+//! diagnostic.
+//!
+//! This replaces the previous local CFG walker that inspected every
+//! incoming edge of the exit vertex case-by-case (`BasicBlock` ending
+//! in `Return`, `WhileLoop` false-branch, `Conditional` false-branch,
+//! …). The dataflow framework gives the same answer with a single
+//! lattice transfer rule, and centralises the loop / dead-code edge
+//! semantics in one place (`crates/dataflow/src/path_terminates.rs`).
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -74,10 +88,17 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch).
+/// Validate a `MissingReturn` candidate emitted by lowering.
 ///
-/// This performs CFG-based validation to check if ALL paths truly miss a return.
-/// The lowering emits a candidate diagnostic, and this handler validates it using CFG.
+/// Suppresses the diagnostic when the path-terminates dataflow proves
+/// every execution path from the function's entry reaches a `Return`
+/// or `Raise` (i.e. `IN[entry] = MayFallthrough(false)`); otherwise
+/// emits the candidate as a user-visible diagnostic.
+///
+/// If either the CFG or the path-terminates result is missing for
+/// this method (e.g. malformed lowering, no entry vertex), the
+/// handler conservatively trusts the lowering candidate and emits —
+/// the same posture the legacy walker took for unreachable cases.
 pub fn from_hir(
     range: TextRange,
     method_id: &MethodId,
@@ -90,22 +111,25 @@ pub fn from_hir(
         return None;
     }
 
-    // Get module bodies and method body using the provided MethodId
-    let module_bodies = ctx.module_bodies();
     let local_id = method_id.local_id;
-    let body = module_bodies.body(local_id)?;
 
-    // Get CFG for this method from module-level query (batch processing)
-    let module_cfgs = ctx.module_cfgs();
-    let cfg = module_cfgs.get(local_id)?;
+    // If the analyser proves every path from entry reaches Return/Raise,
+    // suppress the candidate. Any missing piece (CFG, entry vertex,
+    // path-terminates result) leaves `every_path_returns = false` so the
+    // candidate is materialised — the conservative direction.
+    let every_path_returns = ctx
+        .module_cfgs()
+        .get(local_id)
+        .and_then(|cfg| cfg.entry_point())
+        .and_then(|entry| {
+            ctx.module_path_terminates().get(local_id).map(|pt| !pt.may_fallthrough_at_block(entry))
+        })
+        .unwrap_or(false);
 
-    // Perform CFG-based validation
-    if !check_missing_return_in_cfg(body, cfg) {
-        // All paths have returns - false positive, suppress diagnostic
+    if every_path_returns {
         return None;
     }
 
-    // Confirmed: some paths missing return
     Some(Diagnostic {
         code,
         message: message_ru(),
@@ -114,117 +138,6 @@ pub fn from_hir(
         tags: ctx.tags(code),
         fixes: vec![],
     })
-}
-
-/// Check if function has missing return paths using CFG analysis.
-///
-/// Returns true if some execution paths don't have explicit return statements.
-fn check_missing_return_in_cfg(body: &hir::Body, cfg: &hir::cfg::ControlFlowGraph) -> bool {
-    use hir::cfg::{CfgEdgeType, CfgVertex};
-
-    let exit_point = cfg.exit_point();
-
-    // Check all incoming edges to exit point
-    let incoming: Vec<_> = cfg.incoming_edges(exit_point).collect();
-
-    for (source_idx, edge_type) in incoming.iter() {
-        // Skip dead code edges — unreachable paths don't need returns
-        if edge_type.is_dead_code_edge() {
-            continue;
-        }
-        if let Some(vertex) = cfg.vertex(*source_idx) {
-            // Check if this path has missing return
-            let has_missing = match vertex {
-                CfgVertex::BasicBlock(block) => {
-                    // Check if block ends with Return/Raise
-                    check_basic_block_missing_return(*source_idx, block, cfg, body)
-                }
-                CfgVertex::WhileLoop(_) => {
-                    // Loop false branch (didn't execute) is OK if loops_executed_at_least_once
-                    **edge_type != CfgEdgeType::FalseBranch
-                }
-                CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_) => {
-                    // Loop false branch (didn't execute) is OK
-                    **edge_type != CfgEdgeType::FalseBranch
-                }
-                CfgVertex::Conditional(_) => {
-                    // Missing else clause - check if this is false branch
-                    **edge_type == CfgEdgeType::FalseBranch
-                }
-                _ => false,
-            };
-
-            if has_missing {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Check if a basic block has missing return.
-fn check_basic_block_missing_return(
-    vertex_idx: hir::cfg::NodeIndex,
-    block: &hir::cfg::BasicBlockVertex,
-    cfg: &hir::cfg::ControlFlowGraph,
-    body: &hir::Body,
-) -> bool {
-    use hir::cfg::{CfgEdgeType, CfgVertex};
-    use hir::Stmt;
-
-    if block.is_empty() {
-        // Check incoming edges
-        let incoming_edges: Vec<_> = cfg.incoming_edges(vertex_idx).collect();
-
-        // Loop false branch is OK
-        let from_loop_false = incoming_edges.iter().any(|(source_idx, edge)| {
-            matches!(edge, CfgEdgeType::FalseBranch)
-                && matches!(
-                    cfg.vertex(*source_idx),
-                    Some(
-                        CfgVertex::WhileLoop(_) | CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_)
-                    )
-                )
-        });
-
-        if from_loop_false {
-            return false;
-        }
-
-        // Missing else clause
-        let from_conditional_false = incoming_edges.iter().any(|(source_idx, edge)| {
-            matches!(edge, CfgEdgeType::FalseBranch)
-                && matches!(cfg.vertex(*source_idx), Some(CfgVertex::Conditional(_)))
-        });
-
-        if from_conditional_false {
-            return true;
-        }
-
-        // Check if all incoming edges have returns
-        let all_have_returns = incoming_edges.iter().all(|(source_idx, _)| {
-            if let Some(CfgVertex::BasicBlock(src_block)) = cfg.vertex(*source_idx) {
-                // Check if source block ends with Return/Raise
-                src_block.statements().last().is_some_and(|&stmt_id| {
-                    let stmt = body.stmt(stmt_id);
-                    matches!(stmt, Stmt::Return { .. } | Stmt::Raise { .. })
-                })
-            } else {
-                false
-            }
-        });
-
-        return !all_have_returns;
-    }
-
-    // Non-empty block: check last statement
-    let has_explicit_return = block.statements().last().is_some_and(|&stmt_id| {
-        let stmt = body.stmt(stmt_id);
-        matches!(stmt, Stmt::Return { .. } | Stmt::Raise { .. })
-    });
-
-    !has_explicit_return
 }
 
 fn message_ru() -> String {
@@ -305,9 +218,19 @@ mod tests {
         assert_eq!(count, 1, "Expected 1 diagnostic: ElseIf branch missing return");
     }
 
-    /// ForEach loop - false branch (loop body never executes) should not trigger diagnostic.
+    /// ForEach loop with `Возврат` only inside the body and no return after
+    /// the loop emits a diagnostic: the empty-collection path through the
+    /// `Для Каждого … КонецЦикла` reaches the function's end without
+    /// hitting any `Возврат`. Per plan §1.6 + §7 risk #3 the dataflow runs
+    /// with `loops_executed_at_least_once = false` and treats every loop as
+    /// potentially-skippable, so the user is expected to add an explicit
+    /// fallback return after the loop (see
+    /// [`test_while_with_break_and_return_after_loop`] for the fixed shape).
+    /// This was a known edge case for the legacy walker that "accept[ed]
+    /// whatever the current behavior is"; Step E + I lock in the principled
+    /// answer.
     #[test]
-    fn test_foreach_loop_false_branch_no_diagnostic() {
+    fn test_foreach_loop_no_return_after_loop_emits_diagnostic() {
         let code = r#"Функция ЦиклДляПроверки(Коллекция, Поиск)
     Для Каждого Элемент Из Коллекция Цикл
         Если Элемент = Поиск Тогда
@@ -316,20 +239,25 @@ mod tests {
     КонецЦикла;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        // Loop false branch (collection empty) is OK - no diagnostic expected
-        let count = diagnostics
+        let count = check_hir_diagnostic(code)
             .iter()
             .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
             .count();
-        // This is a known edge case: when loop doesn't execute, no return path exists.
-        // The diagnostic count here reflects current CFG behavior.
-        let _ = count; // Accept whatever the current behavior is
+        assert_eq!(
+            count, 1,
+            "empty-collection path through ForEach reaches function end without Возврат"
+        );
     }
 
-    /// While Истина loop - should not trigger diagnostic (infinite loop exits via Возврат inside).
+    /// `Пока Истина` with `Возврат` only inside the body emits a
+    /// diagnostic: without constant-propagation the analyser cannot
+    /// prove the loop is provably-infinite, so the loop's
+    /// "didn't execute" / "exited normally" path is treated as a real
+    /// runtime path that reaches the function's end without `Возврат`.
+    /// Plan §7 risk #3 makes this an explicit known-limitation; the fix
+    /// for the user is the same fallback-return idiom.
     #[test]
-    fn test_while_true_loop_no_diagnostic() {
+    fn test_while_true_no_fallback_return_emits_diagnostic() {
         let code = r#"Функция НайтиСледующееСовпадение(ТекущиеДанные)
     Пока Истина Цикл
         Если ТекущиеДанные = Неопределено Тогда
@@ -339,9 +267,14 @@ mod tests {
     КонецЦикла;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        // While Истина loops are complex; current behavior is accepted
-        let _ = diagnostics;
+        let count = check_hir_diagnostic(code)
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+            .count();
+        assert_eq!(
+            count, 1,
+            "without constant propagation, `Пока Истина` is treated as potentially-skippable"
+        );
     }
 
     /// Function with while loop containing Прервать and explicit return after loop.

@@ -264,6 +264,17 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_reaching_definitions(self.file_id))
     }
 
+    /// Get module path-terminates analysis (batch).
+    ///
+    /// Backward dataflow that answers "may execution from this block reach
+    /// the function's exit without crossing `Возврат` / `ВызватьИсключение`?".
+    /// Consumed by `AllFunctionPathMustHaveReturn` (Track 1 §1.6).
+    pub fn module_path_terminates(
+        &self,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        self.query(|p| p.module_path_terminates(self.file_id))
+    }
+
     /// Get region tree for current file.
     pub fn region_tree(&self) -> Arc<hir::RegionTree> {
         self.query(|p| p.region_tree(self.file_id))
