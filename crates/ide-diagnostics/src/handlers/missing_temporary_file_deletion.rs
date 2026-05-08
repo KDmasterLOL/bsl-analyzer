@@ -318,10 +318,25 @@ fn extract_call_path(body: &Body, callee: ExprIdx) -> String {
 }
 
 /// Walk `expr` depth-first, inserting (lower-cased) names of every
-/// `Path` whose lowered form is in `known_vars`. Preserves the
-/// pre-Step-Q `expr_contains_var` contract — a deletion call
-/// `f(g(file))` counts as deleting `file` even if the reference is
-/// nested inside another call.
+/// `Path` whose lowered form is in `known_vars`. The set of
+/// recursed-into expression shapes mirrors the pre-Step-Q
+/// `expr_contains_var` walker exactly:
+///
+/// **Recursed:** `Path`, `Call`, `MethodCall`, `Field`, `Index`,
+/// `BinaryOp`, `UnaryOp`, `New`.
+///
+/// **Not recursed (returns no closed vars):** `Ternary`, `Array`,
+/// `Await`, `QualifiedPath`, `Literal`, `Missing`. Each of these is
+/// a *non-direct wrapper* — its value is conditional, computed, or
+/// disjunctive, so a textual occurrence of a tracked variable
+/// inside one of them does not statically prove the deletion call
+/// closes that variable. Treating
+/// `УдалитьФайлы(?(Условие, Файл1, Файл2))` as closing both
+/// branches would be a false negative under MAY semantics — at
+/// runtime exactly one branch evaluates, leaving the other temp
+/// file leaked. The legacy walker fell into its catch-all
+/// `_ => false` arm for these shapes; the migration preserves
+/// that conservative parity.
 fn collect_referenced_vars(
     body: &Body,
     expr_idx: ExprIdx,
@@ -357,23 +372,17 @@ fn collect_referenced_vars(
             collect_referenced_vars(body, *rhs, known_vars, out);
         }
         Expr::UnaryOp { expr, .. } => collect_referenced_vars(body, *expr, known_vars, out),
-        Expr::Ternary { condition, then_expr, else_expr } => {
-            collect_referenced_vars(body, *condition, known_vars, out);
-            collect_referenced_vars(body, *then_expr, known_vars, out);
-            collect_referenced_vars(body, *else_expr, known_vars, out);
-        }
         Expr::New { args, .. } => {
             for &a in args.iter() {
                 collect_referenced_vars(body, a, known_vars, out);
             }
         }
-        Expr::Array(items) => {
-            for &item in items.iter() {
-                collect_referenced_vars(body, item, known_vars, out);
-            }
-        }
-        Expr::Await { expr } => collect_referenced_vars(body, *expr, known_vars, out),
-        Expr::Literal(_) | Expr::QualifiedPath(_) | Expr::Missing => {}
+        Expr::Ternary { .. }
+        | Expr::Array(_)
+        | Expr::Await { .. }
+        | Expr::Literal(_)
+        | Expr::QualifiedPath(_)
+        | Expr::Missing => {}
     }
 }
 
@@ -745,6 +754,28 @@ mod tests {
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "First Get of a re-assigned name leaks");
+    }
+
+    #[test]
+    fn test_ternary_deletion_arg_does_not_close_either_branch() {
+        // Codex stop-time finding: a deletion call whose arg is a
+        // Ternary (`?(cond, A, B)`) cannot statically be resolved
+        // to a single closed resource — at runtime exactly one
+        // branch evaluates, so under MAY semantics neither branch
+        // is guaranteed to close. The pre-Step-Q `expr_contains_var`
+        // walker did not recurse into Ternary at all (it fell into
+        // its catch-all `_ => false` arm), so the body-wide BFS
+        // already conservatively flagged both temps as leaks. This
+        // test pins that legacy parity post-migration.
+        let code = r#"
+            Процедура Тест(Условие)
+                Файл1 = ПолучитьИмяВременногоФайла("xml");
+                Файл2 = ПолучитьИмяВременногоФайла("txt");
+                УдалитьФайлы(?(Условие, Файл1, Файл2));
+            КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 2, "Ternary delete arg leaves both temps open under MAY");
     }
 
     #[test]
