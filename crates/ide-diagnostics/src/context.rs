@@ -190,6 +190,26 @@ impl<'a> DiagnosticsContext<'a> {
             .any(|visible| visible.configuration.find_common_module(name).is_some())
     }
 
+    /// Classify the assignment target `Name = …` for the current file.
+    ///
+    /// Companion to [`Self::is_common_module_anywhere`] for diagnostics
+    /// that need to suppress on shadowing rather than just check
+    /// CommonModule visibility (Track 1 §4.6 — `CommonModuleAssign`).
+    /// Resolution priority follows `Resolver::resolve_assignment_target`:
+    /// `Local` > `Param` > `ModuleVariable` > `CommonModule` >
+    /// `Unknown`.
+    ///
+    /// Local/Param shadowing should be caught upstream by Step L's
+    /// `BodyDiagnostic::CommonModuleAssign::existing_binding_kind`
+    /// fast-path; this accessor exists for the cases that payload
+    /// doesn't cover (module-level `Перем` shadow, name not visible
+    /// anywhere). Streaming providers that don't have a resolver
+    /// available return [`hir::AssignmentResolution::Unknown`] by
+    /// default, conservatively suppressing the diagnostic.
+    pub fn assignment_target_kind(&self, name: &str) -> hir::AssignmentResolution {
+        self.provider.assignment_target_kind(self.file_id, name)
+    }
+
     /// Get the file path for the current file via provider.
     ///
     /// Returns `None` if file path cannot be resolved.

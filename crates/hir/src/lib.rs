@@ -22,7 +22,9 @@ pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
 
 // Re-export HIR body types for diagnostics
-pub use hir_def::body::{DeprecatedKind8312, ExternalRef, MagicNumberContext, ManagerType};
+pub use hir_def::body::{
+    DeprecatedKind8312, ExistingBindingKind, ExternalRef, MagicNumberContext, ManagerType,
+};
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
 
 // Re-export HIR expression/statement types
@@ -38,7 +40,7 @@ pub use hir_def::symbol_tree::MethodSymbol;
 pub use hir_def::{ConditionalTree, ItemTree, ModuleIndex, SymbolTree, WorkspaceSymbols};
 
 // Re-export database and resolution
-pub use hir_def::resolver::Resolver;
+pub use hir_def::resolver::{AssignmentResolution, Resolver};
 pub use hir_def::scope::{ExprScopes, ScopeDef};
 pub use hir_def::DefDatabase;
 

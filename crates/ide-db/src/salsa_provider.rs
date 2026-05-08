@@ -8,8 +8,8 @@ use std::sync::Arc;
 use base_db::{FileIdInput, SourceRootId};
 use bsl_metadata::Configuration;
 use hir::{
-    DefWithBodyId, HirDatabase, InferenceDiagnostic, InferenceResult, ItemTree, ModuleBodies,
-    ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
+    AssignmentResolution, DefWithBodyId, HirDatabase, InferenceDiagnostic, InferenceResult,
+    ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, Name, Resolver, SymbolTree,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
@@ -94,6 +94,17 @@ impl AnalysisProvider for SalsaProvider<'_> {
 
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex> {
         self.db.module_index(source_root_id)
+    }
+
+    fn assignment_target_kind(&self, file_id: FileId, name: &str) -> AssignmentResolution {
+        // No expression scopes are pushed: by contract (see provider trait
+        // doc) Local/Param shadowing is caught upstream by Step L's
+        // `existing_binding_kind` payload, so the resolver only needs to
+        // distinguish ModuleVariable / CommonModule / Unknown — all of
+        // which `Resolver::for_module` handles without a body.
+        let module_id = ModuleId::new(file_id);
+        let resolver = Resolver::for_module(module_id);
+        resolver.resolve_assignment_target(self.db, &Name::new(name))
     }
 
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {

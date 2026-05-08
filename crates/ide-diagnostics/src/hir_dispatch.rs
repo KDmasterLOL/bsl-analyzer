@@ -184,11 +184,13 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => {
             handlers::commit_transaction_outside_try_catch::from_hir(*range, ctx)
         }
-        BodyDiagnostic::CommonModuleAssign { variable_name, range, .. } => {
-            // Step N (plan §4.6) plumbs `existing_binding_kind` here for
-            // resolver-aware shadowing suppression. Until then the
-            // handler stays signature-stable.
-            handlers::common_module_assign::from_hir(variable_name, *range, ctx)
+        BodyDiagnostic::CommonModuleAssign { variable_name, range, existing_binding_kind } => {
+            handlers::common_module_assign::from_hir(
+                variable_name,
+                *range,
+                *existing_binding_kind,
+                ctx,
+            )
         }
         BodyDiagnostic::RewriteMethodParameter { param_id, stmt_id, stmt_range, ident_range } => {
             handlers::rewrite_method_parameter::from_hir(
