@@ -369,7 +369,7 @@ Authored from ITS pubqlang chapters 44 (`ВНУТРЕННЕЕ
 45 (`ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing), 46 (`ПРАВОЕ ВНЕШНЕЕ
 СОЕДИНЕНИЕ` listing), 47 (`ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ` listing),
 48 (chained / nested examples) via the local dump at
-`/home/itrous/src/tools_migration/its/dump/`; SELECT mini-spec
+`<ITS pubqlang dump>/`; SELECT mini-spec
 §JOIN clauses (lines 297–319) and §Recovery requirements item
 #6 (line 410); the lexer's Slice 2 attestation for bilingual
 EN/RU keyword pairs (LEFT/ЛЕВОЕ, RIGHT/ПРАВОЕ, FULL/ПОЛНОЕ,
@@ -457,7 +457,7 @@ preservation gate" without any test edits.
 
 The expression surface (1108 LOC, 26 functions, 26 NodeKinds) is split
 into two sub-slices for review-surface manageability. See the planning
-doc at `~/.claude/plans/serialized-moseying-orbit.md` (Slice 10a) and
+doc at `<engineering scratch plans>/serialized-moseying-orbit.md` (Slice 10a) and
 the §Slice 10a + 10b sub-slices below.
 
 ### Slice 10a: expression backbone
@@ -677,7 +677,7 @@ Authored from ITS pubqlang chapters 12 (§Структура запроса), 16
 + §Условие на агрегаты — `chapter_035.html:23, 29, 41, 44, 45,
 49`), 39 (§Расчет общих итогов — `chapter_039.html:13, 25, 29,
 48, 49, 51`) via the local dump at
-`/home/itrous/src/tools_migration/its/dump/`; the C0a-extended
+`<ITS pubqlang dump>/`; the C0a-extended
 SELECT mini-spec §WHERE / §GROUP BY / §HAVING / §ORDER BY /
 §AUTOORDER / §TOTALS BY / §FOR UPDATE / §INDEX BY clause-body
 sections, §IDE-recovery allowances block (4 entries), §ITS

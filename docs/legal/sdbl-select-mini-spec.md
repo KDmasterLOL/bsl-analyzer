@@ -990,7 +990,7 @@ is deferred to Slice 12.
 | Virtual table arguments — IN-subquery as VT param (structural) | pubqlang chapter 156 lines 50–56 | verified yes (C2 of Slice 8-addendum — multi-line `РегистрНакопления.ТоварыНаСкладах.Остатки( , Номенклатура В ( ВЫБРАТЬ СоставДокумента.Номенклатура ИЗ СоставДокумента ) ) КАК ТоварыНаСкладахОстатки` confirms IN-subquery is a canonical VT-arg form; the subquery's `)` is consumed inside `predicate_expr` → `super::select::subquery(p)` per Slice 10b, NOT by `recover_to_delimiter_vt`); ITS Tier A1 (structural) |
 
 C2 fills in the remaining "TODO at C2" rows after directly reading the dump
-pages at `/home/itrous/src/tools_migration/its/dump/html/`, mirroring the
+pages at `<ITS pubqlang dump>/html/`, mirroring the
 Slice 10b C0a → C2 verification handoff.
 
 **Line-number stability check (per D8a, applies to Slice 8-addendum
@@ -1012,7 +1012,7 @@ the Slice 11 clean-room slice were authored from:
 - the previously-existing mini-spec sketches (which were authored under the
   same clean-room discipline);
 - ITS pubqlang chapter regions read directly via the local dump path
-  `/home/itrous/src/tools_migration/its/dump/html/`. C0a authoring read
+  `<ITS pubqlang dump>/html/`. C0a authoring read
   three targeted regions only — chapter 17 lines 17/32/52 (AUTOORDER
   provenance), chapter 27 lines 39/51 (ORDER BY HIERARCHY provenance),
   chapter 39 lines 13/25/29/48/49/51 (TOTALS BY canonical OVERALL form
@@ -1069,7 +1069,7 @@ landed in commit C0 of the Slice 7-addendum and were authored from:
     `page.html:1040-1044` — bilingual pair РАЗРЕШЕННЫЕ ↔ ALLOWED;
     `page.html:920-924` — bilingual pair ПЕРВЫЕ ↔ TOP;
 - the **secondary** ITS pubqlang dump (textbook companion) at
-  `/home/itrous/src/tools_migration/its/dump/html/` — chapter 19
+  `<ITS pubqlang dump>/html/` — chapter 19
   lines 19/28 (TOP / ПЕРВЫЕ canonical demonstrative example),
   chapter 20 lines 18/29/38/42 (DISTINCT / РАЗЛИЧНЫЕ canonical
   demonstrative example + DISTINCT × ORDER BY interaction), chapter

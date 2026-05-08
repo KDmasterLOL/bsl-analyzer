@@ -243,7 +243,7 @@ mini-spec sections, and the C3 acceptance suite was based on
 direct readings of:
 
 - ITS pubqlang chapter regions, accessed via the local dump at
-  `/home/itrous/src/tools_migration/its/dump/html/`:
+  `<ITS pubqlang dump>/html/`:
   - chapter 16 (`chapter_016.html:19, 31, 33, 37, 49, 63, 64,
     75-76`) — `УПОРЯДОЧИТЬ ПО ... ВОЗР` canonical sort form,
     multi-field `УПОРЯДОЧИТЬ ПО Период УБЫВ, ...`, prose
@@ -319,7 +319,7 @@ The author of the Slice 11 clean-room work asserts:
   upstream Slice 1/2/6/7/8/9/10a/10b attestations) and from
   the HIR consumer code at `clauses.rs` for child-attachment
   contracts. The Slice 11 plan itself, at
-  `/home/itrous/.claude/plans/serialized-moseying-orbit.md`,
+  `<engineering scratch plans>/serialized-moseying-orbit.md`,
   served as the high-level routing document for which
   function emits which NodeKind and which Tier classification
   applies to each provenance comment.
@@ -683,7 +683,7 @@ clean-room discipline documented in
 C0a / C0b / C1 / C2 / C3 authoring rounds and the codex pair-
 review feedback that shaped each commit are recorded above
 under §Commit trail. The Slice 11 plan at
-`/home/itrous/.claude/plans/serialized-moseying-orbit.md`
+`<engineering scratch plans>/serialized-moseying-orbit.md`
 served as the high-level routing document for this work; that
 plan was itself codex pair-reviewed across 14 findings over 6
 review rounds before approval.

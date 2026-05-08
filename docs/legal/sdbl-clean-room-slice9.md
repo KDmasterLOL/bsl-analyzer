@@ -128,7 +128,7 @@ grammar surface, not as a textual source for transcription.
 ### ITS pubqlang chapters (via the local dump)
 
 Local dump path:
-`/home/itrous/src/tools_migration/its/dump/html/`. The web URLs
+`<ITS pubqlang dump>/html/`. The web URLs
 under `https://its.1c.ru/db/pubqlang/` are paywalled and
 WebFetch returns navigation stubs only; the dump is the
 authoritative on-disk reference.

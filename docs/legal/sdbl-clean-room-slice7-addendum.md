@@ -106,20 +106,19 @@ D = local IDE-recovery allowance.
 
 **ALLOWED / РАЗРЕШЕННЫЕ Tier classification — verbatim
 disclosure** (per codex Round-2 finding 2 + post-Round-3
-reclassification): The user downloaded the v8.3.27 Developer's
-Reference Глава 8 «Работа с запросами» from
-`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453` and
-saved a local snapshot at
-`/home/itrous/src/tools_migration/its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
-during the C0 review window. Line 1320 of that page carries
-the canonical EBNF skeleton placing `[РАЗРЕШЕННЫЕ]` in the
-first SELECT-prefix slot; lines 1331-1344 give full prose
-semantics covering RLS scope, top-level-only constraint
-(see §Deferred semantic constraint below), propagation into
-subqueries, and interaction with ЧТЕНИЕ rights; the bilingual
-word-list at `:1040-1044` maps РАЗРЕШЕННЫЕ ↔ ALLOWED. The
-pubqlang dump's `chapter_057.html:50` UI-checkbox prose is a
-secondary corroborating reference only.
+reclassification): The canonical source is v8.3.27 Developer's
+Reference Глава 8 «Работа с запросами» at
+`https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`
+(consulted during the C0 review window). Line 1320 of that
+document carries the canonical EBNF skeleton placing
+`[РАЗРЕШЕННЫЕ]` in the first SELECT-prefix slot; lines
+1331-1344 give full prose semantics covering RLS scope,
+top-level-only constraint (see §Deferred semantic constraint
+below), propagation into subqueries, and interaction with
+ЧТЕНИЕ rights; the bilingual word-list at `:1040-1044` maps
+РАЗРЕШЕННЫЕ ↔ ALLOWED. The pubqlang dump's
+`chapter_057.html:50` UI-checkbox prose is a secondary
+corroborating reference only.
 
 The first-pass codex adversarial review (Rounds 1–3) had
 classified ALLOWED as Tier D / B-contested under the
@@ -151,10 +150,10 @@ The Slice 7-addendum material was authored from:
 1. **Primary** SDBL grammar specification: v8.3.27 Developer's
    Reference Глава 8 «Работа с запросами» —
    `https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453`.
-   Locally saved snapshot at
-   `/home/itrous/src/tools_migration/its/dump/its_db_v8327doc_bookmark_dev_TI000000453/page.html`
-   for line-numbered reviewer convenience; the canonical
-   citation target is the public URL above. Specifically:
+   Line-numbered references below (`page.html:NNNN`) are
+   relative to the canonical document fetched from the public
+   URL above; reviewers may resolve them against their own
+   archived snapshot. Specifically:
    - `page.html:1320` — canonical EBNF skeleton for `<Описание
      запроса>` placing РАЗРЕШЕННЫЕ, РАЗЛИЧНЫЕ, ПЕРВЫЕ
      `<Количество>` in the first three optional SELECT-prefix
@@ -173,8 +172,8 @@ The Slice 7-addendum material was authored from:
    - `page.html:920-924` — bilingual pair ПЕРВЫЕ ↔ TOP.
 
 2. **Secondary corroborating** ITS pubqlang dump (textbook
-   companion) at
-   `/home/itrous/src/tools_migration/its/dump/html/`:
+   companion; chapter-numbered HTML extracts of the public
+   ITS pubqlang reference):
    - `chapter_019.html:19, 28` — TOP / ПЕРВЫЕ canonical
      demonstrative `ВЫБРАТЬ ПЕРВЫЕ 3` example.
    - `chapter_020.html:18, 29, 38, 42` — DISTINCT / РАЗЛИЧНЫЕ

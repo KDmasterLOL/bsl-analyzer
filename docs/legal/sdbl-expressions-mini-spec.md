@@ -20,7 +20,7 @@ Authoritative sources for this mini-spec — 1C ITS pubqlang chapters
 (in canonical English / Russian title order). The publicly reachable
 URLs at `its.1c.ru/db/pubqlang/...` are paywalled and serve
 JS-rendered navigation only; the working copy used for verification
-is the local dump at `/home/itrous/src/tools_migration/its/dump/`
+is the local dump at `<ITS pubqlang dump>/`
 (file `index.json` maps each URL to a `chapter_NNN.html` snapshot).
 
 - `Язык запросов «1С:Предприятия»` — short overview chapter:
@@ -1159,7 +1159,7 @@ compatibility reasons that are **not** ITS-mandated:
 ## ITS coverage verification
 
 Filled at Slice 10a C2 against the local ITS pubqlang dump at
-`/home/itrous/src/tools_migration/its/dump/` (the publicly reachable
+`<ITS pubqlang dump>/` (the publicly reachable
 ITS URLs at `its.1c.ru/db/pubqlang/...` are paywalled and serve
 JS-rendered navigation only; the local dump is the authoritative
 copy of the published ITS pages).

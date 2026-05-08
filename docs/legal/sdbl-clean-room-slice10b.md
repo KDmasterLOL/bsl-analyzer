@@ -235,7 +235,7 @@ sources only.
 **Authoritative ITS pubqlang chapters** (1C:Enterprise query-
 language documentation, `https://its.1c.ru/db/pubqlang/...`,
 accessed via the local dump at
-`/home/itrous/src/tools_migration/its/dump/`):
+`<ITS pubqlang dump>/`):
 
 - chapter 21 (`/db/pubqlang/content/21/hdoc`,
   `chapter_021.html`) — DISTINCT / РАЗЛИЧНЫЕ aggregate prefix,

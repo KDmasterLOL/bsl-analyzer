@@ -1,7 +1,7 @@
 # Track 1 — Performance & Memory Baseline
 
 Снято до начала имплементации Track 1 (см. план
-`/home/itrous/.claude/plans/linear-tumbling-noodle.md`, §10 Performance &
+`<engineering scratch plans>/linear-tumbling-noodle.md`, §10 Performance &
 memory budget). Все будущие правки сравниваются с этими числами.
 
 ## Configuration
