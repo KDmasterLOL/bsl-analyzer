@@ -29,11 +29,15 @@
 //! (one merge per loop is sufficient; avoiding the extra vertex
 //! kind keeps the dataflow framework simpler).
 //!
-//! [`CfgEdgeType::AdjacentCode`] is reserved for the **dead**
-//! fallthrough successor of an unconditional jump (`Возврат`,
+//! [`CfgEdgeType::AdjacentCode`] marks the **dead** fallthrough
+//! successor of an unconditional jump (`Возврат`,
 //! `ВызватьИсключение`, `Прервать`, `Продолжить`, `Перейти`).
-//! Forward dataflow transfers (`path_terminates`,
-//! `temp_resource`) drop this edge to bottom in
+//! It's the edge-type convention used by the builder to encode
+//! "the textually next statement that no execution path can
+//! actually reach"; analyses pick it out via
+//! [`CfgEdgeType::is_dead_code_edge`]. Track 1's dataflow
+//! framework — both `path_terminates` (backward) and
+//! `temp_resource` (forward) — drops this edge to bottom in
 //! `transfer_edge`, so paths that never actually reach the next
 //! block do not seed exit state with phantom values. The
 //! `LoopBreak` (live) vs. `AdjacentCode` (dead) distinction is
