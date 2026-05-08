@@ -1,6 +1,7 @@
 # MissingEventSubscriptionHandler
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: D `637a6279`, M `691a751c` — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 Дата разбора: 2026-05-07
 
 ## Суть правила

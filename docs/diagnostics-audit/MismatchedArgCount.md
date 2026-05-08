@@ -1,6 +1,7 @@
 # MismatchedArgCount
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: G1 `27fb95ec`, G2 `1e5230fd` — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 Дата разбора: 2026-05-07
 
 ## Суть правила

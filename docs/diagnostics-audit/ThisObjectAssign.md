@@ -1,6 +1,7 @@
 # ThisObjectAssign
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: scope-included, no code change (non-shadowable contract preserved per plan §4.4) — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 Дата разбора: 2026-05-07
 
 ## Суть правила

@@ -1,6 +1,7 @@
 # UnreachableCode
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: foundation `819945b7`, O `47133aeb` — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 Дата разбора: 2026-05-07
 
 ## Суть правила

@@ -1,6 +1,7 @@
 # RewriteMethodParameter
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: scope-included, no code change (already uses `ctx.by_value_params` per plan §4.5) — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 Дата разбора: 2026-05-07
 
 ## Суть правила

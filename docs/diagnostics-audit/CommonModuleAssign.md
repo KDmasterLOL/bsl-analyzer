@@ -1,6 +1,7 @@
 # CommonModuleAssign
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: D `637a6279`, F `2f1606a8`, L `b3f3c82c`, M `691a751c`, N `54a494e8`, R `8aa69ca4` — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 
 Дата разбора: 2026-05-07
 

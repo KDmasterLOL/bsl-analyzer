@@ -1,6 +1,7 @@
 # AllFunctionPathMustHaveReturn
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: E `49498d7d`, I `00da9fc8`, foundation `819945b7` — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 
 Дата разбора: 2026-05-07
 

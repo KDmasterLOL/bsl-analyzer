@@ -1,6 +1,7 @@
 # CommitTransactionOutsideTryCatch
 
 Статус: `done`, `needs-code-work`
+Track 1 closure: scope-included, no code change (kept syntactic in `hir-def/body/lower` per plan §1.8) — см. `docs/diagnostics-audit/TRACK_1_CLOSURE.md`.
 
 Дата разбора: 2026-05-07
 
