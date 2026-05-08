@@ -87,18 +87,21 @@ Status: closed.
 
 ## Acceptance gate (§6 плана)
 
-| Условие | Статус |
-|---------|--------|
-| 1. `cargo test --workspace` — без `#[ignore]` без обоснования | ✅ Все `#[ignore]`'d тесты имеют письменное обоснование (constant-folding deferred-track + legacy-parity bug pins для move-method dst и variable-generation). |
-| 2. `cargo clippy --all-targets --all-features -- -D warnings` чистый | ✅ Каждый Track 1 коммит проходит pre-commit hook'ом. |
-| 3. 25 карточек имеют пометку Track 1 closure | ✅ Этот документ + per-card аннотация. |
-| 4. Lowering без `db` | ✅ `hir-def/body/lower/` не вызывает `db.`; единственная адаптерная связь — `BodyDiagnostic::CommonModuleAssign::existing_binding_kind` payload, без db. |
-| 5. Один path lowering | ✅ `lower_param_type_string` единственный консумер `bsl_platform::split_type_alternatives` среди non-test кода в hir-ty (Steps G/H). |
-| 6. Адаптеры `ide-diagnostics` не вызывают `ctx.load_configuration()` | ✅ Step M миграция; единственные main-only консумеры — `ordinary_app_support`, `set_permissions_for_new_objects` (CFE-irrelevant флаги). |
-| 7. CFE fixture + integration tests | ✅ `extension_common_module/` + `configurations_cfe_visibility.rs` + `common_module_assign_emits_for_cfe_only_module` (Step R, `8aa69ca4`). |
-| 8. Performance budget | ROADMAP carried over; benchmark deltas задокументированы в `93a4e6c1`. |
-| 9. Документация | `cfg/src/lib.rs` module-doc обновлён; `dataflow/temp_resource.rs` имеет module-level rationale; этот closure-doc — point-of-truth. |
-| 10. `// TODO(Phase 6.2)` метки удалены | ✅ Step `819945b7` удалил их из `cfg/builder.rs:217/231/245`. |
+Условные обозначения: ▣ — verified at закрытии Step S; 🔄 — in flight;
+⚠ — done с письменным нюансом.
+
+| Условие | Статус | Доказательство |
+|---------|--------|----------------|
+| 1. `cargo test --workspace` — без `#[ignore]` без обоснования | ▣ | exit 0 после Step S; все `#[ignore]`'d тесты имеют письменное обоснование (constant-folding deferred-track + legacy-parity bug pins для move-method dst и variable-generation). |
+| 2. `cargo clippy --all-targets --all-features -- -D warnings` чистый | ▣ | Каждый Track 1 коммит проходит pre-commit hook'ом (fmt+clippy+tests). |
+| 3. 25 карточек имеют пометку Track 1 closure | ▣ | Этот документ + per-card аннотация (Step S `56a48242`). |
+| 4. Lowering без `db` | ▣ | `grep '\bdb\.' crates/hir-def/src/body/lower/` показывает только `tests.rs` (test harness). Production lowering без `db`. |
+| 5. Один path lowering | ⚠ | План §2.3 unify'нул `lower_param_type` / `resolve_platform_type_union` / `map_type_string` через `lower_param_type_string` (Steps G/H) — это единственный platform-type-union path. `Ty::from_type_name` в `hir-def/src/ty.rs:967` остаётся как basic built-in-type-name → `Ty` маппинг — другая лестница абстракции (синтаксический lowering без platform-метаданных), вне scope §2.3. Литеральный grep gate срабатывает на этом API; контракт «один платформенный path lowering» выполнен. |
+| 6. Адаптеры `ide-diagnostics` не вызывают `ctx.load_configuration()` | ▣ | `grep 'load_configuration' crates/ide-diagnostics/src/` (исключая `main_configuration`) — пусто. Main-only консумеры: `ordinary_app_support`, `set_permissions_for_new_objects`, `scheduled_job_handler`, `missing_event_subscription_handler` — у каждого main-only metadata (флаги, EventSubscriptions, ScheduledJobs); CFE-aware lookup для имён модулей идёт через `find_common_module_anywhere`. |
+| 7. CFE fixture + integration tests | ▣ | `extension_common_module/` + `configurations_cfe_visibility.rs` + `common_module_assign_emits_for_cfe_only_module` (Step R, `8aa69ca4`). |
+| 8. Performance budget (cold +15% / hot +20% / RSS +50 MB на real corpus) | 🔄 | Замер ведётся на корпусе `~/src/niagara_ut` (~13.4k BSL), сравнение `e18f3a60` (parent of foundation) ↔ HEAD. Без секции «Performance measurements» ниже этот гейт **не закрыт**. |
+| 9. Документация | ⚠ | `dataflow/temp_resource.rs` несёт module-level rationale (lattice/transfer/диагностики). Этот closure-doc — point-of-truth для commit map и per-card mapping. Module-doc для `cfg` (loop-context semantics break/continue/goto + after-loop reuse) поднимется отдельным docs-commit'ом если grep `cargo doc` укажет на пробел; зафиксировать в follow-up. |
+| 10. `// TODO(Phase 6.2)` метки удалены | ▣ | `grep 'TODO(Phase 6.2)' crates/` — пусто. Foundation коммит `819945b7` снял их из `cfg/builder.rs:217/231/245`. |
 
 ## Known limitations (deferred tracks)
 
