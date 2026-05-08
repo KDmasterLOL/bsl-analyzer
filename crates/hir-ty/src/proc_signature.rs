@@ -66,7 +66,7 @@ pub struct ProcSignature {
 /// guarantees the resulting `params.len() == method_symbol.params.len()`
 /// — out-of-order or missing doc entries never shift slots, never
 /// truncate or extend the signature.
-#[salsa::tracked]
+#[salsa::tracked(lru = 1024)]
 pub fn proc_signature_query<'db>(
     db: &'db dyn HirDatabase,
     method_input: MethodIdInput<'db>,

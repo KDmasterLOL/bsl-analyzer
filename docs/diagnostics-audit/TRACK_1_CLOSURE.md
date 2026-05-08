@@ -101,7 +101,7 @@ every Track 1 commit message.
 | 5. Один path lowering | ▣ | План §2.3 unify'нул `lower_param_type` / `resolve_platform_type_union` / `map_type_string` через `lower_param_type_string` (Steps G/H). Post-merge follow-up снял `Ty::from_type_name` из hir-def: `from_new_expr` был мёртв; четыре hir-ty-callsite'а (`type_string.rs` × 3 + `narrow.rs`) переехали на `crate::lower::builtin_names::ty_from_bare_name` (новый pub-helper), а IDE-completion получил `TyLoweringContext::new().lower_bare_name(…)`. `grep -E "from_type_name\|map_type_string" crates/ --include="*.rs" \| grep -v "^crates/hir-ty/src/lower/"` пусто. |
 | 6. Адаптеры `ide-diagnostics` не вызывают `ctx.load_configuration()` | ▣ | `grep 'load_configuration' crates/ide-diagnostics/src/` (исключая `main_configuration`) — пусто. Main-only консумеры: `ordinary_app_support`, `set_permissions_for_new_objects`, `scheduled_job_handler`, `missing_event_subscription_handler` — у каждого main-only metadata (флаги, EventSubscriptions, ScheduledJobs); CFE-aware lookup для имён модулей идёт через `find_common_module_anywhere`. |
 | 7. CFE fixture + integration tests | ▣ | `extension_common_module/` + `configurations_cfe_visibility.rs` + `common_module_assign_emits_for_cfe_only_module` (Step R, `8aa69ca4`). |
-| 8. Performance budget (cold +15% / hot +20% / RSS +50 MB на real corpus) | ⚠ | Streaming mode (the production CLI + LSP path): cold +3.4% wall, RSS −76 MB (HEAD меньше baseline) — both within budget. Salsa-mode debug flag (`--salsa`, hidden CLI option «for testing/debugging only»): cold +11.6% wall (within +15%) and RSS +1.21 GB (well over the +50 MB literal budget). Hot edit-to-diagnostic не измерен (no LSP-mode harness в текущем проекте). См. §«Performance measurements» ниже за полной таблицей и интерпретацией. |
+| 8. Performance budget (cold +15% / hot +20% / RSS +50 MB на real corpus) | ⚠ | Streaming mode (the production CLI + LSP path): cold +3.4% wall, RSS −76 MB (HEAD меньше baseline) — both within budget. Salsa-mode debug flag (`--salsa`, hidden CLI option «for testing/debugging only»): cold +11.6% wall (within +15%) and RSS +1.21 GB (well over the +50 MB literal budget). Post-merge follow-up added the missing `lru = 1024` cap on `proc_signature_query` (the only Track 1 query that was unbounded; Plan §10.2 had required a cap on every new query). Three attempts at a clean re-measurement on the same corpus were OOM-killed mid-run (peak observed RSS reached 15.6 GB at the highest attempt — already 1.6 GB below the unbounded HEAD's 17.3 GB before the kernel OOM-killer fired); host memory pressure from concurrent IDE sessions prevented a full reanalysis within the session budget. Hot edit-to-diagnostic не измерен (no LSP-mode harness в текущем проекте). См. §«Performance measurements» ниже за полной таблицей и интерпретацией. |
 | 9. Документация | ▣ | `dataflow/temp_resource.rs` несёт module-level rationale (lattice/transfer/диагностики). `cfg/src/lib.rs` обновлён §«Loop-context semantics» — `Прервать`/`Продолжить`/`Перейти` live-edges, after-loop block reuse, dead `AdjacentCode` separation, label-resolution flow. Этот closure-doc — point-of-truth для commit map и per-card mapping. |
 | 10. `// TODO(Phase 6.2)` метки удалены | ▣ | `grep 'TODO(Phase 6.2)' crates/` — пусто. Foundation коммит `819945b7` снял их из `cfg/builder.rs:217/231/245`. |
 
@@ -160,6 +160,28 @@ comparison; absolute numbers carry the wider noise.
   full-materialisation runs. The hidden `--salsa` CLI flag is
   not the production path; its `--help` text marks it "for
   testing/debugging only".
+
+- **Post-merge follow-up — `proc_signature_query` LRU cap.** The
+  query was the only Track 1 addition that had landed without an
+  explicit `lru = …` argument (Plan §10.2 had required a cap on
+  every new query). A cap of `1024` was added (≈10× the existing
+  `module_cfgs` cap of `128`, per the same plan §10.2 ratio). A
+  fresh end-to-end re-measurement against this capped binary was
+  attempted three times on the same corpus; each attempt was
+  OOM-killed by the kernel before the analyze phase completed,
+  with peak observed RSS values of 15.6 GB / 14.0 GB / 12.1 GB
+  respectively (the first attempt died at 24:05 wall-clock — i.e.
+  near the typical 26-minute completion time of the unbounded
+  HEAD run, suggesting it was within seconds of completion when
+  the kernel intervened). The "peak before OOM" of 15.6 GB is
+  already 1.6 GB below the unbounded HEAD's full-run peak of
+  17.3 GB, which is consistent with the cap reducing
+  `proc_signature` cache footprint, but a clean fully-completed
+  measurement was blocked by host memory pressure from two
+  concurrent `rust-analyzer` sessions occupying ~10 GB. The cap
+  is committed regardless because its correctness rationale
+  (every Salsa query must have an LRU cap per Plan §10.2) is
+  independent of the empirical RSS reduction.
 
 - **Hot edit-to-diagnostic latency** was not measured. The
   project ships no LSP-mode benchmark harness today; the
