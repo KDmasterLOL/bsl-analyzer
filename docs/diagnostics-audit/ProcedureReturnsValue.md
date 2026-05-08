@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/procedure_returns_value.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/ProcedureReturnsValue.md`
+- `<v8std mirror>/docs/diagnostics/bslls/ProcedureReturnsValue.md`
 
 ## Как реализовано
 

@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/query_parse_error.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/QueryParseError.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/437.md`
+- `<v8std mirror>/docs/diagnostics/bslls/QueryParseError.md`
+- `<v8std mirror>/docs/std/437.md`
 
 ## Как реализовано
 

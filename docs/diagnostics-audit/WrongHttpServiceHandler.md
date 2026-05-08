@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/wrong_http_service_handler.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/WrongHttpServiceHandler.md`
+- `<v8std mirror>/docs/diagnostics/bslls/WrongHttpServiceHandler.md`
 
 ## Как реализовано
 

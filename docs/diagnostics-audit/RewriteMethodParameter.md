@@ -11,7 +11,7 @@ Track 1 closure: scope-included, no code change (already uses `ctx.by_value_para
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/rewrite_method_parameter.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/RewriteMethodParameter.md`
+- `<v8std mirror>/docs/diagnostics/bslls/RewriteMethodParameter.md`
 
 ## Как реализовано
 

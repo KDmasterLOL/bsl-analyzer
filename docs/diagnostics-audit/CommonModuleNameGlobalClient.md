@@ -18,8 +18,8 @@
 - `crates/ide-diagnostics/docs/ru/CommonModuleNameGlobalClient.md`,
   `crates/ide-diagnostics/docs/en/CommonModuleNameGlobalClient.md`
 - `docs/legal/diagnostics/CommonModuleNameGlobalClient.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/469.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommonModuleNameGlobalClient.md`
+- `<v8std mirror>/docs/std/469.md`,
+  `<v8std mirror>/docs/diagnostics/bslls/CommonModuleNameGlobalClient.md`
 
 ## Как реализовано
 

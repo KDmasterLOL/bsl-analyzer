@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/multiline_string_in_query.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/MultilineStringInQuery.md`
+- `<v8std mirror>/docs/diagnostics/bslls/MultilineStringInQuery.md`
 
 ## Как реализовано
 

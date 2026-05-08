@@ -12,9 +12,9 @@ Track 1 closure: Q-α `c1330185`, Q-β-1 `2366e1fb` — см. `docs/diagnostics-
 
 - `crates/ide-diagnostics/src/handlers/missing_temp_storage_deletion.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/MissingTempStorageDeletion.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/487.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/642.md`
+- `<v8std mirror>/docs/diagnostics/bslls/MissingTempStorageDeletion.md`
+- `<v8std mirror>/docs/std/487.md`
+- `<v8std mirror>/docs/std/642.md`
 
 ## Как реализовано
 

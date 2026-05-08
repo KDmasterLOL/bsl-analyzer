@@ -15,7 +15,7 @@
 - `crates/hir-def/src/body/lower/preproc.rs`
 - `crates/ide-diagnostics/docs/ru/EmptyRegion.md`
 - `docs/legal/diagnostics/EmptyRegion.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/455.md`
+- `<v8std mirror>/docs/std/455.md`
 
 ## Как реализовано
 

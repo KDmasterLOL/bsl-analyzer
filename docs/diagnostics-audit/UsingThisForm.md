@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/using_this_form.rs`
 - `crates/hir-def/src/body/lower/expr.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UsingThisForm.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UsingThisForm.md`
 
 ## Как реализовано
 

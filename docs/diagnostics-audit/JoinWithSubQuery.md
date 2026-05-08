@@ -12,8 +12,8 @@
 - `crates/ide-diagnostics/src/handlers/join_with_sub_query.rs`
 - `crates/ide-diagnostics/src/runner.rs`
 - `crates/sdbl-hir/src/lower/from_clause.rs`, `crates/sdbl-hir/src/lower/join_clause.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/JoinWithSubQuery.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/655.md`
+- `<v8std mirror>/docs/diagnostics/bslls/JoinWithSubQuery.md`
+- `<v8std mirror>/docs/std/655.md`
 
 ## Как реализовано
 

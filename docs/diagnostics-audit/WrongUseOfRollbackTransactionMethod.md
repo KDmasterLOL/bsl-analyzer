@@ -13,8 +13,8 @@ Track 1 closure: scope-included, no code change (kept syntactic in `hir-def/body
 - `crates/ide-diagnostics/src/handlers/wrong_use_of_rollback_transaction_method.rs`
 - `crates/hir-def/src/body/lower/stmt.rs`
 - `crates/hir-def/src/body/lower/diagnostics.rs` (`is_global_rollback_transaction_call`, `check_rollback_transaction_in_try`)
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/WrongUseOfRollbackTransactionMethod.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/783.md`
+- `<v8std mirror>/docs/diagnostics/bslls/WrongUseOfRollbackTransactionMethod.md`
+- `<v8std mirror>/docs/std/783.md`
 
 ## Как реализовано
 

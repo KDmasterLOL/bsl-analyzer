@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/using_hardcode_network_address.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UsingHardcodeNetworkAddress.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UsingHardcodeNetworkAddress.md`
 
 ## Как реализовано
 

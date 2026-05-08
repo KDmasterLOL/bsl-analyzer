@@ -36,8 +36,8 @@
 - Provenance:
   `docs/legal/diagnostics/AssignAliasFieldsInQuery.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/AssignAliasFieldsInQuery.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/437.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/AssignAliasFieldsInQuery.md`,
+  `<v8std mirror>/docs/std/437.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std#content:437:hdoc`,
   `https://v8std.ru/std/437/`,

@@ -32,10 +32,10 @@
 - Provenance:
   `docs/legal/diagnostics/CodeOutOfRegion.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CodeOutOfRegion.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/455.md`,
+  `<v8std mirror>/docs/diagnostics/bslls/CodeOutOfRegion.md`,
+  `<v8std mirror>/docs/std/455.md`,
   `module-structure-*` карточки в
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/`.
+  `<v8std mirror>/docs/diagnostics/v8-code-style/`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std#content:455:hdoc`,
   `https://v8std.ru/std/455/`,

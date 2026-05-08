@@ -16,7 +16,7 @@
 - `crates/hir-def/src/body/lower/expr.rs`
 - `crates/ide-diagnostics/docs/ru/ExecuteExternalCode.md`
 - `docs/legal/diagnostics/ExecuteExternalCode.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/770.md`
+- `<v8std mirror>/docs/std/770.md`
 
 ## Как реализовано
 

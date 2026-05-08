@@ -11,8 +11,8 @@ Track 1 closure: foundation `819945b7`, P `5b656687` — см. `docs/diagnostics
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/pairing_broken_transaction.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/PairingBrokenTransaction.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/783.md`
+- `<v8std mirror>/docs/diagnostics/bslls/PairingBrokenTransaction.md`
+- `<v8std mirror>/docs/std/783.md`
 
 ## Как реализовано
 

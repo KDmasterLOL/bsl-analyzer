@@ -11,8 +11,8 @@
 
 - `crates/ide-diagnostics/src/handlers/missing_returned_value_description.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/MissingReturnedValueDescription.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/453.md`
+- `<v8std mirror>/docs/diagnostics/bslls/MissingReturnedValueDescription.md`
+- `<v8std mirror>/docs/std/453.md`
 
 ## Как реализовано
 

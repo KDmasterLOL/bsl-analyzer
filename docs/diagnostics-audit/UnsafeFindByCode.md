@@ -11,8 +11,8 @@ Track 1 closure: D `637a6279`, M `691a751c` — см. `docs/diagnostics-audit/TR
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/unsafe_find_by_code.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UnsafeFindByCode.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/456.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UnsafeFindByCode.md`
+- `<v8std mirror>/docs/std/456.md`
 
 ## Как реализовано
 

@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/using_find_element_by_string.rs`
 - `crates/hir-def/src/body/lower/expr.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UsingFindElementByString.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UsingFindElementByString.md`
 
 ## Как реализовано
 

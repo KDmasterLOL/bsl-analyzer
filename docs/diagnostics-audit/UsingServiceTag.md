@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/using_service_tag.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UsingServiceTag.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UsingServiceTag.md`
 
 ## Как реализовано
 

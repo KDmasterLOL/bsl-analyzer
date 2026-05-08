@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/server_calls_in_form_events.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/ServerCallsInFormEvents.md`
+- `<v8std mirror>/docs/diagnostics/bslls/ServerCallsInFormEvents.md`
 
 ## Как реализовано
 

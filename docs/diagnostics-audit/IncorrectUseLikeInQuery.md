@@ -16,7 +16,7 @@
 - `crates/sdbl-hir`
 - `crates/ide-diagnostics/docs/ru/IncorrectUseLikeInQuery.md`
 - `docs/legal/diagnostics/IncorrectUseLikeInQuery.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/726.md`
+- `<v8std mirror>/docs/std/726.md`
 
 ## Как реализовано
 

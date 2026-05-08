@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/self_insertion.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/SelfInsertion.md`
+- `<v8std mirror>/docs/diagnostics/bslls/SelfInsertion.md`
 
 ## Как реализовано
 

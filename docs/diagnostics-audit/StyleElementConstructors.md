@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/style_element_constructors.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/StyleElementConstructors.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/667.md`
+- `<v8std mirror>/docs/diagnostics/bslls/StyleElementConstructors.md`
+- `<v8std mirror>/docs/std/667.md`
 
 ## Как реализовано
 

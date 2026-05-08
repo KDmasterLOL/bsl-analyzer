@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/unknown_preprocessor_symbol.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UnknownPreprocessorSymbol.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UnknownPreprocessorSymbol.md`
 
 ## Как реализовано
 

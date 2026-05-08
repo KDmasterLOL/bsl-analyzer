@@ -11,7 +11,7 @@ Track 1 closure: scope-included, no code change (non-shadowable contract preserv
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/this_object_assign.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/ThisObjectAssign.md`
+- `<v8std mirror>/docs/diagnostics/bslls/ThisObjectAssign.md`
 
 ## Как реализовано
 

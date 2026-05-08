@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/order_of_params.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/OrderOfParams.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/640.md`
+- `<v8std mirror>/docs/diagnostics/bslls/OrderOfParams.md`
+- `<v8std mirror>/docs/std/640.md`
 
 ## Как реализовано
 

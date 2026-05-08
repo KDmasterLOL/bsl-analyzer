@@ -16,7 +16,7 @@
 - `crates/hir-def/src/body/lower/diagnostics.rs`
 - `crates/ide-diagnostics/docs/ru/FileSystemAccess.md`
 - `docs/legal/diagnostics/FileSystemAccess.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/542.md`
+- `<v8std mirror>/docs/std/542.md`
 
 ## Как реализовано
 

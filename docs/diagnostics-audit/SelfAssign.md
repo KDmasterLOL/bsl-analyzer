@@ -11,7 +11,7 @@ Track 1 closure: scope-included, no code change (structural equality, no resolve
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/self_assign.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/SelfAssign.md`
+- `<v8std mirror>/docs/diagnostics/bslls/SelfAssign.md`
 
 ## Как реализовано
 

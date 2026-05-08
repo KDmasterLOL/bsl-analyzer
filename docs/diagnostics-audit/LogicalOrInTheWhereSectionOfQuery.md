@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/logical_or_in_the_where_section_of_query.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/index.md`
+- `<v8std mirror>/docs/diagnostics/bslls/index.md`
 
 ## Как реализовано
 

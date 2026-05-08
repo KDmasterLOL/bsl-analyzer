@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/use_system_information.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UseSystemInformation.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UseSystemInformation.md`
 
 ## Как реализовано
 

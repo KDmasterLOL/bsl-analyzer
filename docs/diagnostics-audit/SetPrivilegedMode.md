@@ -12,8 +12,8 @@
 - `crates/ide-diagnostics/src/handlers/set_privileged_mode.rs`
 - `crates/hir-def/src/body/lower/expr.rs` (логика «Ложь — safe» в `SetPrivilegedModeCall`)
 - `crates/hir-def/src/body/lower/diagnostics.rs::is_set_privileged_mode`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/SetPrivilegedMode.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/678.md`
+- `<v8std mirror>/docs/diagnostics/bslls/SetPrivilegedMode.md`
+- `<v8std mirror>/docs/std/678.md`
 
 ## Как реализовано
 

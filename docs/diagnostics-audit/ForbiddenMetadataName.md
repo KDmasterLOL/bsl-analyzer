@@ -15,7 +15,7 @@ Metadata objects не должны называться зарезервиров
 - `crates/ide-diagnostics/src/handlers/forbidden_metadata_name.rs`
 - `crates/ide-diagnostics/docs/ru/ForbiddenMetadataName.md`
 - `docs/legal/diagnostics/ForbiddenMetadataName.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/474.md`
+- `<v8std mirror>/docs/std/474.md`
 
 ## Как реализовано
 

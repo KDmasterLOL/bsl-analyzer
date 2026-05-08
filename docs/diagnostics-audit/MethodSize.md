@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/method_size.rs`
 - `crates/ide-diagnostics/src/hir_dispatch.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/index.md`
+- `<v8std mirror>/docs/diagnostics/bslls/index.md`
 
 ## Как реализовано
 

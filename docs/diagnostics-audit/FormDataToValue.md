@@ -15,7 +15,7 @@
 - `crates/hir-def/src/body/lower/expr.rs`
 - `crates/ide-diagnostics/docs/ru/FormDataToValue.md`
 - `docs/legal/diagnostics/FormDataToValue.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/409.md`
+- `<v8std mirror>/docs/std/409.md`
 
 ## Как реализовано
 

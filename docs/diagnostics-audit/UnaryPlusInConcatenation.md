@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/unary_plus_in_concatenation.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UnaryPlusInConcatenation.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UnaryPlusInConcatenation.md`
 
 ## Как реализовано
 

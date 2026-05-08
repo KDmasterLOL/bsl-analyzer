@@ -36,7 +36,7 @@ SonarSource Cognitive Complexity.
 - Provenance:
   `docs/legal/diagnostics/CognitiveComplexity.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CognitiveComplexity.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CognitiveComplexity.md`.
 - Внешние источники:
   `https://www.sonarsource.com/docs/CognitiveComplexity.pdf`,
   `https://www.sonarsource.com/blog/cognitive-complexity-because-testability-understandability/`,

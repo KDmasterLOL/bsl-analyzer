@@ -15,7 +15,7 @@
 - `crates/hir-def/src/body/lower/diagnostics.rs`
 - `crates/ide-diagnostics/docs/ru/IfElseDuplicatedCodeBlock.md`
 - `docs/legal/diagnostics/IfElseDuplicatedCodeBlock.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/440.md`
+- `<v8std mirror>/docs/std/440.md`
 
 ## Как реализовано
 

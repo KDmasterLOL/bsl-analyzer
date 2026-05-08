@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/unused_local_variable.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UnusedLocalVariable.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UnusedLocalVariable.md`
 
 ## Как реализовано
 

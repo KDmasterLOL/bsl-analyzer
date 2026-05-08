@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/parse_error.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/ParseError.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/439.md`
+- `<v8std mirror>/docs/diagnostics/bslls/ParseError.md`
+- `<v8std mirror>/docs/std/439.md`
 
 ## Как реализовано
 

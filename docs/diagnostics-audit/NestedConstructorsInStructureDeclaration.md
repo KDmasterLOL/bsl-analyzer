@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/nested_constructors_in_structure_declaration.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/NestedConstructorsInStructureDeclaration.md`
+- `<v8std mirror>/docs/diagnostics/bslls/NestedConstructorsInStructureDeclaration.md`
 
 ## Как реализовано
 

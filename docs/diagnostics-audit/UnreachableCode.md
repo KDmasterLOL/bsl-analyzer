@@ -11,7 +11,7 @@ Track 1 closure: foundation `819945b7`, O `47133aeb` — см. `docs/diagnostics
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/unreachable_code.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UnreachableCode.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UnreachableCode.md`
 
 ## Как реализовано
 

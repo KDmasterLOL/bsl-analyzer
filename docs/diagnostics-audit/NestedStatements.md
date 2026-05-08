@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/nested_statements.rs`
 - `crates/ide-diagnostics/src/hir_dispatch.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/NestedStatements.md`
+- `<v8std mirror>/docs/diagnostics/bslls/NestedStatements.md`
 
 ## Как реализовано
 

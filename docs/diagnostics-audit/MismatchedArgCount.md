@@ -12,7 +12,7 @@ Track 1 closure: G1 `27fb95ec`, G2 `1e5230fd` — см. `docs/diagnostics-audit/
 
 - `crates/ide-diagnostics/src/handlers/mismatched_arg_count.rs`
 - `crates/ide-diagnostics/src/hir_inference_dispatch.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/index.md`
+- `<v8std mirror>/docs/diagnostics/bslls/index.md`
 
 ## Как реализовано
 

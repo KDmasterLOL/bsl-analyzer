@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/temp_files_dir.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/TempFilesDir.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/542.md`
+- `<v8std mirror>/docs/diagnostics/bslls/TempFilesDir.md`
+- `<v8std mirror>/docs/std/542.md`
 
 ## Как реализовано
 

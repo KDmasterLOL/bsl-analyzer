@@ -16,7 +16,7 @@
 - `crates/hir-def/src/body/lower/diagnostics.rs`
 - `crates/ide-diagnostics/docs/ru/ExternalAppStarting.md`
 - `docs/legal/diagnostics/ExternalAppStarting.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/774.md`
+- `<v8std mirror>/docs/std/774.md`
 
 ## Как реализовано
 

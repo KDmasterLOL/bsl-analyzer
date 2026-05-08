@@ -30,7 +30,7 @@
 - Provenance:
   `docs/legal/diagnostics/BadWords.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/BadWords.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/BadWords.md`.
 - Внешняя ссылка из rule-доков:
   `https://v8std.ru/diagnostics/bslls/BadWords/`.
 

@@ -15,7 +15,7 @@
 - `crates/hir-def/src/body/lower/stmt.rs`
 - `crates/ide-diagnostics/docs/ru/ExportVariables.md`
 - `docs/legal/diagnostics/ExportVariables.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/639.md`
+- `<v8std mirror>/docs/std/639.md`
 
 ## Как реализовано
 

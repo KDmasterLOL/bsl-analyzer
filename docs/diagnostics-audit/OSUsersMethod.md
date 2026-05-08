@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/os_users_method.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/OSUsersMethod.md`
+- `<v8std mirror>/docs/diagnostics/bslls/OSUsersMethod.md`
 
 ## Как реализовано
 

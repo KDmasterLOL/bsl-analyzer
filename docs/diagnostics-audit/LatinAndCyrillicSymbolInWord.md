@@ -11,7 +11,7 @@
 
 - `crates/ide-diagnostics/src/handlers/latin_and_cyrillic_symbol_in_word.rs`
 - `crates/ide-diagnostics/src/runner.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/LatinAndCyrillicSymbolInWord.md`
+- `<v8std mirror>/docs/diagnostics/bslls/LatinAndCyrillicSymbolInWord.md`
 
 ## Как реализовано
 

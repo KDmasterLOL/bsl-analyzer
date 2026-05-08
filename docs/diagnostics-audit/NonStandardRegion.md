@@ -11,8 +11,8 @@
 
 - `crates/ide-diagnostics/src/handlers/non_standard_region.rs`
 - `crates/ide-diagnostics/src/utils/standard_regions.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/NonStandardRegion.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/455.md`
+- `<v8std mirror>/docs/diagnostics/bslls/NonStandardRegion.md`
+- `<v8std mirror>/docs/std/455.md`
 
 ## Как реализовано
 

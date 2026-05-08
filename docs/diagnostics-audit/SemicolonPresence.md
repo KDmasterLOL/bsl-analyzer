@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/semicolon_presence.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/SemicolonPresence.md`
+- `<v8std mirror>/docs/diagnostics/bslls/SemicolonPresence.md`
 
 ## Как реализовано
 

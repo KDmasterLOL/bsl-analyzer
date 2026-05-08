@@ -37,8 +37,8 @@
 - Provenance:
   `docs/legal/diagnostics/CommentedCode.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommentedCode.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/std/456.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CommentedCode.md`,
+  `<v8std mirror>/docs/std/456.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8std/content/456/hdoc`,
   `https://v8std.ru/std/456/`,

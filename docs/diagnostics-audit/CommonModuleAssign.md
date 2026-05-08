@@ -42,7 +42,7 @@ Track 1 closure: D `637a6279`, F `2f1606a8`, L `b3f3c82c`, M `691a751c`, N `54a4
 - Provenance:
   `docs/legal/diagnostics/CommonModuleAssign.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CommonModuleAssign.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CommonModuleAssign.md`.
 - Внешняя ссылка из rule-доков:
   `https://1c-syntax.github.io/bsl-language-server/diagnostics/CommonModuleAssign/`.
 

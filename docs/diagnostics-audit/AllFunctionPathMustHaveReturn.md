@@ -31,8 +31,8 @@ Track 1 closure: E `49498d7d`, I `00da9fc8`, foundation `819945b7` — см. `do
 - Provenance:
   `docs/legal/diagnostics/AllFunctionPathMustHaveReturn.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/AllFunctionPathMustHaveReturn.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/index.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/AllFunctionPathMustHaveReturn.md`,
+  `<v8std mirror>/docs/diagnostics/bslls/index.md`.
 - Внешние ссылки из rule-доков:
   `https://v8std.ru/lang/` открывается как общий раздел про встроенный язык;
 - карточка `v8std` для BSLLS указывает, что прямой привязки к стандарту нет, и

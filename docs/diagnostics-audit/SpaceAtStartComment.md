@@ -10,8 +10,8 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/space_at_start_comment.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/SpaceAtStartComment.md`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/std/456.md`
+- `<v8std mirror>/docs/diagnostics/bslls/SpaceAtStartComment.md`
+- `<v8std mirror>/docs/std/456.md`
 
 ## Как реализовано
 

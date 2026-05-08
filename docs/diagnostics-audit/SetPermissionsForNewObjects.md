@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/set_permissions_for_new_objects.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/SetPermissionsForNewObjects.md`
+- `<v8std mirror>/docs/diagnostics/bslls/SetPermissionsForNewObjects.md`
 
 ## Как реализовано
 

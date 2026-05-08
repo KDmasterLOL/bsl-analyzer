@@ -10,7 +10,7 @@
 ## Проверенные источники
 
 - `crates/ide-diagnostics/src/handlers/unused_parameters.rs`
-- `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/UnusedParameters.md`
+- `<v8std mirror>/docs/diagnostics/bslls/UnusedParameters.md`
 
 ## Как реализовано
 

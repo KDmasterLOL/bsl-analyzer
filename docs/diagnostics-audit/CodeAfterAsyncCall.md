@@ -37,9 +37,9 @@
 - Provenance:
   `docs/legal/diagnostics/CodeAfterAsyncCall.md`.
 - Локальный `v8std`:
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/bslls/CodeAfterAsyncCall.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/diagnostics/v8-code-style/code-after-async-call.md`,
-  `/home/itrous/src/tools_migration/lsp/v8std/docs/lang/index.md`.
+  `<v8std mirror>/docs/diagnostics/bslls/CodeAfterAsyncCall.md`,
+  `<v8std mirror>/docs/diagnostics/v8-code-style/code-after-async-call.md`,
+  `<v8std mirror>/docs/lang/index.md`.
 - Внешние ссылки из rule-доков:
   `https://its.1c.ru/db/v8319doc#bookmark:dev:TI000001505`,
   `https://1c-syntax.github.io/bsl-language-server/diagnostics/CodeAfterAsyncCall/`,
