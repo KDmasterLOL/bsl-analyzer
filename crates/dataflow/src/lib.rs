@@ -40,6 +40,7 @@
 pub mod liveness;
 pub mod path_terminates;
 pub mod reaching_defs;
+pub mod temp_resource;
 
 use cfg::{CfgEdgeType, ControlFlowGraph};
 use hir_def::body::Body;
