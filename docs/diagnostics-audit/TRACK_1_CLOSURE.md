@@ -2,8 +2,10 @@
 
 Status: closed.
 
-План: `~/.claude/plans/linear-tumbling-noodle.md` (§Context перечисляет 25
-затронутых карточек диагностического аудита).
+Track 1's implementation plan (codename `linear-tumbling-noodle`, kept
+out-of-tree as engineering scratch) lists 25 audit cards in its §Context
+section as the motivation surface; the plan codename is referenced in
+every Track 1 commit message.
 
 Этот документ — единая точка истины по тому, какие коммиты Track 1 закрыли
 работу для каждой карточки. Каждая из 25 затронутых карточек в этом каталоге
@@ -99,7 +101,7 @@ Status: closed.
 | 5. Один path lowering | ⚠ | План §2.3 unify'нул `lower_param_type` / `resolve_platform_type_union` / `map_type_string` через `lower_param_type_string` (Steps G/H) — это единственный platform-type-union path. `Ty::from_type_name` в `hir-def/src/ty.rs:967` остаётся как basic built-in-type-name → `Ty` маппинг — другая лестница абстракции (синтаксический lowering без platform-метаданных), вне scope §2.3. Литеральный grep gate срабатывает на этом API; контракт «один платформенный path lowering» выполнен. |
 | 6. Адаптеры `ide-diagnostics` не вызывают `ctx.load_configuration()` | ▣ | `grep 'load_configuration' crates/ide-diagnostics/src/` (исключая `main_configuration`) — пусто. Main-only консумеры: `ordinary_app_support`, `set_permissions_for_new_objects`, `scheduled_job_handler`, `missing_event_subscription_handler` — у каждого main-only metadata (флаги, EventSubscriptions, ScheduledJobs); CFE-aware lookup для имён модулей идёт через `find_common_module_anywhere`. |
 | 7. CFE fixture + integration tests | ▣ | `extension_common_module/` + `configurations_cfe_visibility.rs` + `common_module_assign_emits_for_cfe_only_module` (Step R, `8aa69ca4`). |
-| 8. Performance budget (cold +15% / hot +20% / RSS +50 MB на real corpus) | 🔄 | Замер ведётся на корпусе `~/src/niagara_ut` (~13.4k BSL), сравнение `e18f3a60` (parent of foundation) ↔ HEAD. Без секции «Performance measurements» ниже этот гейт **не закрыт**. |
+| 8. Performance budget (cold +15% / hot +20% / RSS +50 MB на real corpus) | 🔄 | Замер ведётся на real-world BSL workspace (~13.4k файлов, рабочее окружение разработчика), сравнение `e18f3a60` (parent of foundation) ↔ HEAD. Без секции «Performance measurements» ниже этот гейт **не закрыт**. |
 | 9. Документация | ⚠ | `dataflow/temp_resource.rs` несёт module-level rationale (lattice/transfer/диагностики). Этот closure-doc — point-of-truth для commit map и per-card mapping. Module-doc для `cfg` (loop-context semantics break/continue/goto + after-loop reuse) поднимется отдельным docs-commit'ом если grep `cargo doc` укажет на пробел; зафиксировать в follow-up. |
 | 10. `// TODO(Phase 6.2)` метки удалены | ▣ | `grep 'TODO(Phase 6.2)' crates/` — пусто. Foundation коммит `819945b7` снял их из `cfg/builder.rs:217/231/245`. |
 
