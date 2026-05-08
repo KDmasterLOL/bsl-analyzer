@@ -147,6 +147,14 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.module_cfgs(input)
     }
 
+    fn module_path_terminates(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        let input = FileIdInput::new(self.db, file_id);
+        self.db.module_path_terminates(input)
+    }
+
     fn module_liveness_analysis(
         &self,
         file_id: FileId,

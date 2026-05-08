@@ -102,6 +102,32 @@ impl Body {
         }
     }
 
+    /// Allocate an expression and return its opaque [`ExprId`].
+    ///
+    /// **Test / programmatic-construction helper, not part of the
+    /// regular lowering surface.** Lowering populates a `Body` via
+    /// direct crate-internal arena access (and also records source-map
+    /// entries, top-level body stmts, etc.); this method only forwards
+    /// to the arena and does NOT update `body_stmts`, the source map,
+    /// or any other side-table. It is intended for downstream crates
+    /// that need to hand-roll a tiny `Body` for a unit test (e.g. the
+    /// `dataflow::path_terminates` tests build minimal `Stmt::Return` /
+    /// `Stmt::Raise` bodies wired into a hand-built CFG to exercise the
+    /// lattice transfer in isolation from the parser+lowering stack).
+    /// Production callers should not use this — go through lowering.
+    #[doc(hidden)]
+    pub fn alloc_expr(&mut self, expr: Expr) -> ExprId {
+        ExprId::from_idx(self.exprs.alloc(expr))
+    }
+
+    /// Allocate a statement and return its opaque [`StmtId`]. See
+    /// [`Body::alloc_expr`] for the rationale and the same caveats —
+    /// this does NOT update `body_stmts` or the source map.
+    #[doc(hidden)]
+    pub fn alloc_stmt(&mut self, stmt: Stmt) -> StmtId {
+        StmtId::from_idx(self.stmts.alloc(stmt))
+    }
+
     /// Get an expression by ID (opaque → typed conversion).
     pub fn expr(&self, id: ExprId) -> &Expr {
         let typed_id: ExprIdx = id.to_idx();

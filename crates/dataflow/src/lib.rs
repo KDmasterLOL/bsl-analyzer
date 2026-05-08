@@ -38,6 +38,7 @@
 //! ```
 
 pub mod liveness;
+pub mod path_terminates;
 pub mod reaching_defs;
 
 use cfg::{CfgEdgeType, ControlFlowGraph};
@@ -341,6 +342,51 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         if let Some(entry) = self.cfg.entry_point() {
             self.block_in.insert(entry, initial);
         }
+    }
+
+    /// Seed the exit block's OUT state.
+    ///
+    /// Symmetric counterpart of [`set_initial_state`] for backward analyses.
+    /// The backward solver iterates from the exit point: when the exit has
+    /// no successors it preserves whatever lives in `block_out[exit]`
+    /// (see `solve_backward`'s `is_exit && !has_successors` branch). The
+    /// default initialisation from [`set_bottom_factory`] makes this `⊥`,
+    /// which is correct for analyses whose boundary fact is bottom
+    /// (liveness — nothing is live after a function returns) but wrong for
+    /// analyses whose boundary fact is non-bottom.
+    ///
+    /// Example: PathTerminates seeds `OUT[exit] = MayFallthrough(true)` so
+    /// "execution can reach the end without `Return`" propagates backwards
+    /// through every block until a `Return` / `Raise` transfer kills it.
+    /// Without this seed every block sees `false`, the join is a fixed
+    /// point, and the analysis returns the trivial answer.
+    ///
+    /// Call **after** [`set_bottom_factory`] (the factory wipes
+    /// `block_out` for every vertex including the exit).
+    ///
+    /// For forward analyses this is effectively a no-op on the result —
+    /// the forward solver consults `block_out[exit]` only as initial state
+    /// when computing OUT for the exit, which has no out-edges, so seeding
+    /// it does not influence any other block.
+    ///
+    /// Panics in debug builds if called before
+    /// [`set_bottom_factory`] (or any other initialiser that populates
+    /// `block_out` for every vertex). Without that prior call the
+    /// solver's pre-loop assertion would fire later anyway, but the
+    /// failure mode there is opaque ("All blocks must be initialized");
+    /// the assert here makes the ordering bug immediately legible.
+    pub fn set_initial_state_at_exit(&mut self, initial: L) {
+        let exit = self.cfg.exit_point();
+        debug_assert!(
+            self.cfg
+                .vertices()
+                .all(|(idx, _)| self.block_in.contains_key(&idx)
+                    && self.block_out.contains_key(&idx)),
+            "set_initial_state_at_exit must be called *after* set_bottom_factory \
+             (or another initialiser that seeds block_in/block_out for every vertex) — \
+             otherwise the factory called later will overwrite the seeded exit OUT state",
+        );
+        self.block_out.insert(exit, initial);
     }
 
     /// Initialize all blocks with a custom bottom element factory.

@@ -398,6 +398,61 @@ pub fn module_reaching_definitions_query<'db>(
     Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
 }
 
+/// Compute path-terminates analysis for all methods in a module (batch processing).
+///
+/// Per Track 1 §1.5: backward dataflow on a 2-element `MayFallthrough`
+/// lattice that answers "may execution starting at this block reach the
+/// function's exit without an intervening `Return` / `Raise`?". Intended
+/// consumer: the `AllFunctionPathMustHaveReturn` diagnostic
+/// (Track 1 §1.6 — migrated in Step I, this query is the foundation).
+///
+/// # Salsa caching
+/// - LRU: 128 (mirrors `module_cfgs` / `module_reaching_definitions` so
+///   the cache cascade has matching granularity).
+/// - Invalidation: cascades automatically via `module_bodies` →
+///   `module_cfgs` → `module_path_terminates`.
+///
+/// # Performance
+/// - Reuses CFGs from `module_cfgs` (zero rebuild overhead).
+/// - The lattice has 2 elements → worklist converges in one full RPO pass
+///   for any DAG and in O(loop-nest depth) on graphs with cycles, so the
+///   per-method work is dominated by the basic-block sweep.
+#[salsa::tracked(lru = 128)]
+pub fn module_path_terminates_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+    let file_id = file_id_input.file_id(db);
+    let module_id = hir::ModuleId::new(file_id);
+    let _span = tracing::info_span!("module_path_terminates", ?module_id).entered();
+
+    let module_cfgs = db.module_cfgs(file_id_input);
+    let module_bodies = db.module_bodies(module_id);
+
+    let mut results = rustc_hash::FxHashMap::default();
+
+    for (local_id, body) in module_bodies.iter_bodies() {
+        db.unwind_if_revision_cancelled();
+
+        let cfg = match module_cfgs.get(local_id) {
+            Some(cfg) => cfg,
+            None => continue,
+        };
+
+        if let Some(result) = hir::dataflow::path_terminates::analyze_path_terminates(
+            body,
+            cfg,
+            hir::dataflow::path_terminates::PathTerminatesConfig::default(),
+            hir::dataflow::DEFAULT_MAX_ITERATIONS,
+        ) {
+            results.insert(local_id, Arc::new(result));
+        }
+    }
+
+    tracing::debug!(count = results.len(), "Analyzed module path-terminates");
+    Arc::new(hir::dataflow::path_terminates::ModulePathTerminates::new(results))
+}
+
 /// Get reaching definitions for a single method (backward compatible accessor).
 ///
 /// **Note:** This is now a thin wrapper around module_reaching_definitions_query.

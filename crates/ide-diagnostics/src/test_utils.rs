@@ -514,6 +514,16 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.module_cfgs(input)
     }
 
+    fn module_path_terminates(
+        &self,
+        file_id: vfs::FileId,
+    ) -> std::sync::Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        use ide_db::base_db::FileIdInput;
+        use ide_db::RootDatabase;
+        let input = FileIdInput::new(&self.db, file_id);
+        self.db.module_path_terminates(input)
+    }
+
     fn file_external_refs(
         &self,
         module_id: hir::ModuleId,

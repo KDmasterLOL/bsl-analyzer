@@ -351,6 +351,34 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
     }
 
+    fn module_path_terminates(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        let module_id = ModuleId::new(file_id);
+        let module_cfgs = self.module_cfgs(file_id);
+        let module_bodies = self.module_bodies(module_id);
+
+        let mut results = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            let cfg = match module_cfgs.get(local_id) {
+                Some(cfg) => cfg,
+                None => continue,
+            };
+
+            if let Some(result) = hir::dataflow::path_terminates::analyze_path_terminates(
+                body,
+                cfg,
+                hir::dataflow::path_terminates::PathTerminatesConfig::default(),
+                hir::dataflow::DEFAULT_MAX_ITERATIONS,
+            ) {
+                results.insert(local_id, Arc::new(result));
+            }
+        }
+
+        Arc::new(hir::dataflow::path_terminates::ModulePathTerminates::new(results))
+    }
+
     fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {
         let parse = self.parse(file_id);
         Arc::new(hir::lower_regions(&parse.syntax_node()))

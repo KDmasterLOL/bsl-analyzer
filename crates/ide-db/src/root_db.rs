@@ -115,6 +115,22 @@ pub trait RootDatabase:
         file_id_input: FileIdInput,
     ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>;
 
+    /// Compute path-terminates analysis for all methods in a module (batch).
+    ///
+    /// Backward dataflow that answers "may execution from this block reach
+    /// the function's exit without crossing a `Return` / `Raise`?". The
+    /// boundary fact `OUT[exit] = true` propagates back, killed at every
+    /// `Return` / `Raise` statement and at every dead `AdjacentCode` edge.
+    ///
+    /// Intended consumer: the `AllFunctionPathMustHaveReturn` diagnostic
+    /// (Track 1 §1.6 — migrated in Step I; this query is the
+    /// foundation it will replace the legacy "inspect incoming edges of
+    /// exit" walk with). Cached per-module (LRU=128).
+    fn module_path_terminates(
+        &self,
+        file_id_input: FileIdInput,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates>;
+
     /// Compute liveness analysis for all methods in a module (batch processing).
     ///
     /// Runs liveness analysis for ALL methods in the module,

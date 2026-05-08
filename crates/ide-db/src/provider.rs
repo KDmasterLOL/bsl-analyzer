@@ -208,6 +208,12 @@ pub trait AnalysisProvider {
         file_id: FileId,
     ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>;
 
+    /// Get path-terminates analysis for all methods (batch).
+    fn module_path_terminates(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates>;
+
     // ========================================================================
     // Per-Method Dataflow (for specific diagnostics)
     // ========================================================================

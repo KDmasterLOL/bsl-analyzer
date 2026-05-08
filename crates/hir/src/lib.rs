@@ -70,6 +70,14 @@ pub mod dataflow {
         };
     }
 
+    pub mod path_terminates {
+        pub use ::dataflow::path_terminates::{
+            analyze_path_terminates, analyze_path_terminates_default, MayFallthrough,
+            ModulePathTerminates, PathTerminatesConfig, PathTerminatesResult,
+            PathTerminatesTransfer,
+        };
+    }
+
     pub mod reaching_defs {
         pub use ::dataflow::reaching_defs::{
             DefSite, Definition, DefinitionIndex, ModuleReachingDefs, ReachingDefs,

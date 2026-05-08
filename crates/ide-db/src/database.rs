@@ -476,6 +476,13 @@ impl RootDatabase for RootDatabaseImpl {
         queries::module_reaching_definitions_query(self, file_id_input)
     }
 
+    fn module_path_terminates(
+        &self,
+        file_id_input: FileIdInput,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        queries::module_path_terminates_query(self, file_id_input)
+    }
+
     fn module_liveness_analysis(
         &self,
         file_id_input: FileIdInput,
