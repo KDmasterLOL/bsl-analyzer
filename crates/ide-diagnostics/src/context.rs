@@ -48,11 +48,46 @@ impl<'a> DiagnosticsContext<'a> {
         self.config.locale
     }
 
-    /// Load configuration metadata via provider.
+    /// Load **main** configuration metadata.
     ///
-    /// Returns `None` if no configuration is available.
-    pub fn load_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
-        self.provider.configuration()
+    /// Returns the main configuration only — extension (CFE) configurations
+    /// are NOT included. Use this for diagnostics whose contract is
+    /// expressed against the main configuration's own metadata: project-level
+    /// flags (`use_managed_form_in_ordinary_application`,
+    /// `use_ordinary_form_in_managed_application`), `roles()` (CFE roles do
+    /// not participate in the main role table), and any other property that
+    /// has no extension counterpart.
+    ///
+    /// For "does this name resolve to a CommonModule somewhere visible from
+    /// this file?" — use [`Self::is_common_module_anywhere`] /
+    /// [`Self::find_common_module_anywhere`] instead, which honour CFE
+    /// union semantics (Track 1 §3, plan `linear-tumbling-noodle.md`).
+    ///
+    /// ## How "main" is identified
+    ///
+    /// The main configuration is sourced from
+    /// [`Self::visible_configurations`] — the **first entry whose
+    /// `VisibleConfig.name` is `None`**. This matches the invariant set up
+    /// in `bsl-analyzer/src/workspace.rs::set_workspace_root`, which always
+    /// pushes the main config as `(None, path)` ahead of any extensions.
+    /// We do not blindly trust the provider's own configured path: that
+    /// field is opaque (`configuration_path_input` may be set to any single
+    /// configuration in test setups), so falling back to the
+    /// `visible_configurations` registry — which carries an explicit main
+    /// marker — keeps the "main" semantic load-bearing rather than
+    /// implementation-defined.
+    ///
+    /// When no configuration carries the `name: None` marker (single-config
+    /// providers that fall through `visible_configurations`'s
+    /// `all_config_paths`-empty branch synthesise such an entry from
+    /// `configuration_path_input`), the result is the synthesised entry,
+    /// preserving single-config behaviour. If neither path is registered,
+    /// returns `None`.
+    pub fn main_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
+        self.visible_configurations()
+            .into_iter()
+            .find(|vc| vc.name.is_none())
+            .map(|vc| vc.configuration)
     }
 
     /// Get all visible configurations for the current file: main + extensions.
@@ -62,7 +97,7 @@ impl<'a> DiagnosticsContext<'a> {
     /// unioned across all defining files. Callers that need to resolve
     /// cross-configuration references (e.g. a file in an extension calling a
     /// CommonModule defined in the main configuration) should iterate the
-    /// returned list rather than relying on [`load_configuration`].
+    /// returned list rather than relying on [`Self::main_configuration`].
     pub fn visible_configurations(&self) -> Vec<ide_db::provider::VisibleConfig> {
         self.provider.visible_configurations(self.file_id)
     }
@@ -130,8 +165,8 @@ impl<'a> DiagnosticsContext<'a> {
     /// in registration order. Diagnostics that need exists-in-any
     /// semantics (CommonModuleAssign, ProtectedModule,
     /// PrivilegedModuleMethodCall, …) should consume this helper rather
-    /// than reaching into [`Self::main_configuration`] / [`Self::load_configuration`],
-    /// which only see the main config and miss CFE-defined modules.
+    /// than reaching into [`Self::main_configuration`], which only sees the
+    /// main config and misses CFE-defined modules.
     pub fn find_common_module_anywhere(
         &self,
         name: &str,

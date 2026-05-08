@@ -40,12 +40,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let configuration = match ctx.load_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
-
-    let module = match common_module_helpers::find_common_module_for_file(ctx, &configuration) {
+    // CFE-aware "is *this file* a CommonModule with executable scope?":
+    // we don't care which configuration declares it, only that the file is
+    // a CommonModule whose flags match `should_check_module`.
+    let module = match common_module_helpers::find_common_module_for_file_anywhere(ctx) {
         Some(m) => m,
         None => return Vec::new(),
     };

@@ -31,8 +31,6 @@ pub fn from_hir(
         return None;
     }
 
-    let config = ctx.load_configuration()?;
-
     let manager_lower = manager_name.to_lowercase();
     let mdo_type = if matches!(manager_lower.as_str(), "справочники" | "catalogs") {
         MdoType::Catalog
@@ -47,7 +45,21 @@ pub fn from_hir(
         return None;
     };
 
-    let mdo = config.find_metadata_object(mdo_type, object_name)?;
+    // CFE-aware lookup with extension-wins semantics. Metadata-object
+    // resolution follows the same convention as `hir-ty`'s
+    // `ConfigsResolver` (see `metadata_resolver.rs:4-26`): walk
+    // `visible_configurations()` reversed so a Catalog/Document/etc.
+    // redeclared by an extension shadows the same-name MDO from the
+    // main configuration. Under runtime semantics the extension's
+    // `check_unique` / `code_series` flags govern execution, so
+    // diagnosing safety against main-only flags would yield false
+    // negatives (and false positives) for projects that use CFE
+    // overrides.
+    let mdo = ctx
+        .visible_configurations()
+        .iter()
+        .rev()
+        .find_map(|vc| vc.configuration.find_metadata_object(mdo_type, object_name).cloned())?;
 
     if mdo.is_find_by_code_safe() {
         return None;

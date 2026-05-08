@@ -25,12 +25,17 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
-/// Called from lib.rs dispatch when `BodyDiagnostic::CommonModuleAssign` is encountered.
+/// Called from lib.rs dispatch when `BodyDiagnostic::CommonModuleAssign` is
+/// encountered.
 ///
 /// This function validates the assignment target against metadata:
-/// 1. Loads Configuration metadata
-/// 2. Checks if variable_name matches a CommonModule name (case-insensitive)
-/// 3. Returns diagnostic if it's an attempt to assign to a CommonModule
+/// 1. Looks up `variable_name` against CommonModules visible in any
+///    configuration (main + extensions) via `find_common_module_anywhere`.
+/// 2. Returns a diagnostic if the name resolves to a CommonModule.
+///
+/// Resolver-based shadowing (skip when a local/param shadows the module)
+/// lands in Track 1 Step N (§4.6); this slice only switches the metadata
+/// source from main-only to CFE-aware.
 pub fn from_hir(
     variable_name: &str,
     range: TextRange,
@@ -42,13 +47,10 @@ pub fn from_hir(
         return None;
     }
 
-    // Load metadata via ctx.load_configuration() for Salsa caching
-    let configuration = ctx.load_configuration()?;
+    // CFE-aware: a CommonModule declared in any visible configuration
+    // makes the name an illegal assignment target.
+    let (_visible, common_module) = ctx.find_common_module_anywhere(variable_name)?;
 
-    // Check if variable_name matches a CommonModule name (case-insensitive)
-    let common_module = configuration.find_common_module(variable_name)?;
-
-    // Found matching CommonModule - this is an error
     Some(Diagnostic {
         code,
         message: format!(

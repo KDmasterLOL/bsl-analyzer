@@ -36,7 +36,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let configuration = match ctx.load_configuration() {
+    let configuration = match ctx.main_configuration() {
         Some(config) => config,
         None => return Vec::new(),
     };
