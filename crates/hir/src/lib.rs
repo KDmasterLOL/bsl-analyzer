@@ -86,6 +86,12 @@ pub mod dataflow {
             ReachingDefsResult, ReachingDefsTransfer,
         };
     }
+
+    pub mod temp_resource {
+        pub use ::dataflow::temp_resource::{
+            analyze_open_resources, OpenResourcesResult, OpenSet, ResourceEvent, ResourceProvider,
+        };
+    }
 }
 
 // Re-export additional types needed by ide-db
