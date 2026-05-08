@@ -277,8 +277,14 @@ fn dfs_check_paths(
             }
         }
     } else {
-        // Skip AdjacentCode edges: they represent dead code after Continue/Return/Raise
-        // and carry stale transaction levels that cause false positives.
+        // Skip *only* AdjacentCode edges: they represent dead code after
+        // Return/Raise and carry stale transaction levels that cause false
+        // positives. `LoopBreak` / `LoopContinue` are live edges (Track 1
+        // Step C, plan §1.3) and must be walked — `Прервать` propagates the
+        // current transaction state to the loop-exit block (where an
+        // orphan-Begin will surface at procedure exit), and `Продолжить`
+        // returns to the loop header carrying the closed-transaction state
+        // for the next iteration.
         let successors: Vec<_> = ctx
             .cfg
             .outgoing_edges(node)
@@ -910,6 +916,76 @@ mod tests {
             0,
             "Begin inside try with nested raise should have NO diagnostics, got: {:?}",
             pairing_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// Pins Track 1 Step P (plan §1.8a, risk #6) — `Прервать` after a
+    /// closed transaction inside a loop must not produce a pairing
+    /// diagnostic. After Step C `walk_break_statement_hir` emits a
+    /// `LoopBreak` *live* edge to the loop-exit block (not the old
+    /// `AdjacentCode` dead edge), and the DFS skip-list still
+    /// excludes only `AdjacentCode`, so the post-break exit block
+    /// inherits `state.level == 0` from the closed transaction.
+    /// Without Step C this case lowered through `AdjacentCode` and
+    /// the after-loop block was never visited, masking real
+    /// orphan-begin bugs.
+    #[test]
+    fn test_break_after_commit_in_loop_valid() {
+        let code = r#"
+Процедура Тест()
+    Пока Истина Цикл
+        НачатьТранзакцию();
+        Действие();
+        ЗафиксироватьТранзакцию();
+        Прервать;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Begin/Commit/Прервать inside loop should leave the transaction closed, \
+             got {} diagnostic(s): {:?}",
+            pairing_diags.len(),
+            pairing_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+        );
+    }
+
+    /// Step P companion to `test_break_after_commit_in_loop_valid`:
+    /// `Прервать` while the transaction is still open must surface
+    /// the orphaned `НачатьТранзакцию`. The `LoopBreak` edge carries
+    /// `state.level == 1` to the loop-exit block, which then reaches
+    /// the procedure exit with `begin_stack` non-empty — exactly the
+    /// path the orphan-detector flags. Without Step C this path was
+    /// invisible (dead `AdjacentCode` edge) and the diagnostic
+    /// silently passed.
+    #[test]
+    fn test_break_with_open_transaction_invalid() {
+        let code = r#"
+Процедура Тест()
+    Пока Истина Цикл
+        НачатьТранзакцию();
+        Действие();
+        Прервать;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+        assert_eq!(
+            pairing_diags.len(),
+            1,
+            "Begin/Прервать inside loop without close must produce one orphan-Begin \
+             diagnostic, got {}",
+            pairing_diags.len(),
         );
     }
 
