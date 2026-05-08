@@ -254,6 +254,48 @@ impl Resolver {
         Some((mdo.mdo_type, Name::new(&mdo.name)))
     }
 
+    /// Resolve `ЭтотОбъект` / `ThisObject` inside a `ManagerModule.bsl`.
+    ///
+    /// Sibling of [`Self::resolve_this_object`] for the manager axis.
+    /// Returns `Some((MdoType, Name))` only when the resolver's enclosing
+    /// module is a `ModuleType::ManagerModule` whose MDO has a manager
+    /// surface — gated on
+    /// [`bsl_metadata::MdoType::manager_type_prefix`] returning `Some(_)`,
+    /// the same table that `Ty::ManagerCollection` factory uses, so a
+    /// flavour without a manager (constants, common modules, forms,
+    /// HTTP-services, web-services, event subscriptions, scheduled jobs
+    /// …) returns `None` rather than dangle a `Ty::ThisManager` no
+    /// adapter can dispatch.
+    ///
+    /// In a manager module `ЭтотОбъект` denotes the manager itself
+    /// (`Справочники.Номенклатура` for a Catalog manager — same surface
+    /// the user reaches via the `Справочники.<Имя>` qualified path).
+    /// Inference produces [`crate::ty::Ty::ThisManager`]; field / method
+    /// lookup adapters then coerce it to [`crate::ty::Ty::ObjectManager`]
+    /// via `hir-ty::this_object::coerce_to_metadata_ref`. Both halves of
+    /// the pipeline share this gate so a new `MdoType` flavour with a
+    /// manager grows `ЭтотОбъект` support automatically.
+    pub fn resolve_this_manager(
+        &self,
+        db: &dyn DefDatabase,
+    ) -> Option<(bsl_metadata::MdoType, Name)> {
+        let module_id = self.module_id()?;
+        let metadata = db.module_metadata(module_id);
+        let mdo = metadata.mdo.as_ref()?;
+
+        if metadata.module_type != bsl_metadata::ModuleType::ManagerModule {
+            return None;
+        }
+
+        // Only MDO flavours with a manager surface are allowed to surface
+        // `Ty::ThisManager`. The `Ty::ObjectManager` factory uses the same
+        // gate, so a manager that exists at the inference layer always
+        // has a corresponding dispatch target downstream.
+        mdo.mdo_type.manager_type_prefix()?;
+
+        Some((mdo.mdo_type, Name::new(&mdo.name)))
+    }
+
     /// Visibility-aware probe for "is `module_name` a user CommonModule?".
     ///
     /// Mirrors the two-stage gate inside [`Self::resolve_qualified_method`]:

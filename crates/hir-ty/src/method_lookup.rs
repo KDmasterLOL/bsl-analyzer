@@ -270,8 +270,9 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
         // `MetadataRef` branch above then routes through
         // `platform_manager_lookup`. A receiver that still lands here
         // did not match a coercible MDO kind — `None` is the safe
-        // fallback.
-        Ty::ThisObject { .. } => None,
+        // fallback. Same posture for `ThisManager`, whose coercion
+        // target is `Ty::ObjectManager`.
+        Ty::ThisObject { .. } | Ty::ThisManager { .. } => None,
         // Managed-form attribute receivers route methods through the
         // platform form-data wrappers (`ДанныеФормыСтруктура` /
         // `ДанныеФормыКоллекция` / `ДанныеФормыСтруктураСКоллекцией`),
