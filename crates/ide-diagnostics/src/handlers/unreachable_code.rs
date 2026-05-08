@@ -814,6 +814,46 @@ mod tests {
         assert_eq!(unreachable_diags.len(), 1, "Expected unreachable foreach after return");
     }
 
+    /// Pins Track 1 Step C — `walk_goto_statement_hir` (plan §1.3)
+    /// makes `Перейти ~Метка` a `Direct` edge to the resolved
+    /// `Label` vertex, leaving the block immediately after the
+    /// `Перейти` without a fall-through edge. Statements between
+    /// the `Перейти` and the matching label sit in their own
+    /// basic block whose only potential predecessor is the
+    /// dangling block — none reaches them, so they are unreachable.
+    /// The label and everything beyond it stay reachable through
+    /// the goto edge itself, so no false positive there.
+    ///
+    /// Without Step C this case lowered into an `AdjacentCode`
+    /// (dead) edge and the after-`Перейти` block was treated as
+    /// "reachable but dead" — UnreachableCode never fired. Step O
+    /// pins the post-Step-C live-edge contract: existing
+    /// `compute_reachable_vertices` / `compute_locally_unreachable`
+    /// recognise the new shape automatically.
+    #[test]
+    fn test_unreachable_after_goto() {
+        let code = r#"
+Процедура Тест()
+    Перейти ~Конец;
+    Сообщить("Недостижимо");
+    ~Конец:
+    Сообщить("Достижимо");
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
+        let unreachable_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
+
+        assert_eq!(
+            unreachable_diags.len(),
+            1,
+            "expected one UnreachableCode for `Сообщить(\"Недостижимо\")` between \
+             `Перейти ~Конец` and `~Конец:`, got {} diagnostics",
+            unreachable_diags.len(),
+        );
+        assert_diagnostic_range(code, unreachable_diags[0], 3, 4, 27);
+    }
+
     #[test]
     fn test_unreachable_in_preproc_else_module_level() {
         let code = r#"
