@@ -281,19 +281,41 @@ impl Resolver {
     ) -> Option<(bsl_metadata::MdoType, Name)> {
         let module_id = self.module_id()?;
         let metadata = db.module_metadata(module_id);
-        let mdo = metadata.mdo.as_ref()?;
 
         if metadata.module_type != bsl_metadata::ModuleType::ManagerModule {
             return None;
         }
 
+        // Two storage slots per `build_module_metadata`
+        // (`crates/ide-db/src/metadata.rs::build_module_metadata`):
+        //
+        // - `metadata.mdo` for non-register flavours (Catalog,
+        //   Document, ChartOfAccounts, …) — populated from
+        //   `Configuration::find_metadata_object`.
+        // - `metadata.register` for the four register flavours
+        //   (Information / Accumulation / Accounting / Calculation) —
+        //   populated from `Configuration::find_register_by_type_and_name`,
+        //   `metadata.mdo` stays `None`.
+        //
+        // Both carry the `(MdoType, name)` pair this gate needs. The
+        // earlier "read `metadata.mdo` only" shape would silently
+        // refuse every register's `ManagerModule.bsl` even though
+        // `manager_type_prefix` is `Some(...)` for all four flavours
+        // (covered end-to-end by
+        // `crates/ide/tests/infer_this_manager.rs::infer_this_manager_resolves_in_information_register_module`).
+        let (mdo_type, name) = match (metadata.mdo.as_ref(), metadata.register.as_ref()) {
+            (Some(mdo), _) => (mdo.mdo_type, Name::new(&mdo.name)),
+            (None, Some(reg)) => (reg.mdo_type(), Name::new(reg.name())),
+            (None, None) => return None,
+        };
+
         // Only MDO flavours with a manager surface are allowed to surface
         // `Ty::ThisManager`. The `Ty::ObjectManager` factory uses the same
         // gate, so a manager that exists at the inference layer always
         // has a corresponding dispatch target downstream.
-        mdo.mdo_type.manager_type_prefix()?;
+        mdo_type.manager_type_prefix()?;
 
-        Some((mdo.mdo_type, Name::new(&mdo.name)))
+        Some((mdo_type, name))
     }
 
     /// Visibility-aware probe for "is `module_name` a user CommonModule?".
