@@ -157,10 +157,24 @@ impl GuardRegistry {
 /// Whether [`condition_matches_guard`] can soundly approve a call
 /// whose registry entry carries this semantic class. Updates here
 /// MUST come with the matching recogniser change in
-/// [`condition_matches_guard`].
+/// [`condition_matches_guard`] AND in
+/// [`PrivilegedModuleMethodCall`]'s suppression intent (see
+/// [`default_registry`] doc).
+///
+/// Today only `RoleCheck` is sound under bare-call recognition.
+/// Both `PrivilegedQuery` (`ПривилегированныйРежим()` —
+/// tautological in privileged modules; Codex round-2 BLOCKER) and
+/// `UserCheck` (`ТекущийПользователь() = "X"` — needs equality-aware
+/// recogniser) are filtered out so a custom-built `GuardRegistry`
+/// cannot re-introduce the failure modes that the
+/// [`default_registry`] omissions were designed to prevent.
 fn is_supported(semantics: GuardSemantics) -> bool {
     match semantics {
-        GuardSemantics::RoleCheck | GuardSemantics::PrivilegedQuery => true,
+        GuardSemantics::RoleCheck => true,
+        // Tautological under bare-call recognition; see
+        // `default_registry` doc for the privileged-module ambient
+        // state argument.
+        GuardSemantics::PrivilegedQuery => false,
         // Equality-aware recogniser not implemented; see the
         // `GuardSemantics` type doc for the soundness rationale.
         GuardSemantics::UserCheck => false,
@@ -700,6 +714,28 @@ mod tests {
         let registry = default_registry();
         assert!(!registry.matches(&name("ТекущийПользователь")));
         assert!(!registry.matches(&name("CurrentUser")));
+    }
+
+    #[test]
+    fn custom_registry_drops_privileged_query_entries() {
+        // Codex §1.6 Group D round-3 BLOCKER fix: `is_supported`
+        // must reject `PrivilegedQuery` so a custom-built registry
+        // cannot reintroduce the tautological-guard failure mode
+        // (the §1.6 round-2 BLOCKER) — `default_registry` omission
+        // alone is not enough; the public `GuardRegistry::new`
+        // accepts arbitrary entries.
+        let registry = GuardRegistry::new(vec![GuardPredicate {
+            ru: "ПривилегированныйРежим",
+            en: "PrivilegedMode",
+            semantics: GuardSemantics::PrivilegedQuery,
+        }]);
+        assert_eq!(
+            registry.alias_count(),
+            0,
+            "PrivilegedQuery entries must be dropped at construction"
+        );
+        assert!(!registry.matches(&name("ПривилегированныйРежим")));
+        assert!(!registry.matches(&name("PrivilegedMode")));
     }
 
     #[test]
