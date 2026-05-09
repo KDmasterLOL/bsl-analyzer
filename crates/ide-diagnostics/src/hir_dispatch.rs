@@ -42,11 +42,8 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::IfElseIfEndsWithElse,
     DiagnosticCode::IncorrectUseOfStrTemplate,
     DiagnosticCode::MagicNumber,
-    DiagnosticCode::MethodSize,
     DiagnosticCode::MissedRequiredParameter,
     DiagnosticCode::MissingCommonModuleMethod,
-    DiagnosticCode::NumberOfOptionalParams,
-    DiagnosticCode::NumberOfParams,
     DiagnosticCode::OneStatementPerLine,
     DiagnosticCode::OSUsersMethod,
     DiagnosticCode::ProcedureReturnsValue,
@@ -316,22 +313,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::ThisObjectAssign { range } => {
             handlers::this_object_assign::from_hir(*range, ctx)
-        }
-        // Phase 4: Method-scoped diagnostics
-        BodyDiagnostic::MethodSize { method_name, size, is_function, range } => {
-            handlers::method_size::from_hir(method_name, *size, *is_function, *range, ctx)
-        }
-        BodyDiagnostic::NumberOfParams { method_name, count, is_function, range } => {
-            handlers::number_of_params::from_hir(method_name, *count, *is_function, *range, ctx)
-        }
-        BodyDiagnostic::NumberOfOptionalParams { method_name, count, is_function, range } => {
-            handlers::number_of_optional_params::from_hir(
-                method_name,
-                *count,
-                *is_function,
-                *range,
-                ctx,
-            )
         }
         BodyDiagnostic::TryNumber { range } => handlers::try_number::from_hir(*range, ctx),
         BodyDiagnostic::UsingObjectNotAvailableUnix { type_name, range } => {

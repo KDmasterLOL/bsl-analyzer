@@ -411,7 +411,11 @@ impl AnalysisProvider for StreamingProvider {
         let module_bodies = self.module_bodies(module_id);
         let mut methods: FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>> = FxHashMap::default();
         for (local_id, body) in module_bodies.iter_bodies() {
-            methods.insert(local_id, Arc::new(hir::metrics::compute_hir_metrics(body)));
+            let mut metrics = hir::metrics::compute_hir_metrics(body);
+            if let Some(lower_result) = module_bodies.lower_result(local_id) {
+                metrics.size_lines = lower_result.size_lines;
+            }
+            methods.insert(local_id, Arc::new(metrics));
         }
         let module_code = module_bodies
             .module_code()

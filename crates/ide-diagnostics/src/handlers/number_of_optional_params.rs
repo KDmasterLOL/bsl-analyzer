@@ -1,10 +1,17 @@
 //! NumberOfOptionalParams diagnostic.
 //!
 //! Reports methods with too many optional parameters.
+//!
+//! ## Track 2 Phase B §6.4 migration
+//! Pre-migration this consumed `BodyDiagnostic::NumberOfOptionalParams`
+//! from `lower::mod::emit_method_scoped_diagnostics`; the migrated
+//! handler reads `HirMethodMetrics::optional_params_count` (set by the
+//! visitor from `body.params` filtered on `default_value.is_some()`).
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::ModItem;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -22,38 +29,55 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_OPTIONAL_PARAMS: i64 = 3;
 
-/// Creates a diagnostic from HIR when the number of optional parameters exceeds
-/// the configured limit.
-pub fn from_hir(
-    _method_name: &str,
-    count: u32,
-    _is_function: bool,
-    range: ide_db::TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
+/// `HirMethodMetrics::optional_params_count` via
+/// `ctx.module_hir_metrics()`.
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::NumberOfOptionalParams;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
-    let max_optional_params =
-        ctx.config_int(code, "maxOptionalParamsCount", DEFAULT_MAX_OPTIONAL_PARAMS) as usize;
-    if (count as usize) <= max_optional_params {
-        return None;
-    }
+    let max_optional =
+        ctx.config_int(code, "maxOptionalParamsCount", DEFAULT_MAX_OPTIONAL_PARAMS) as u32;
 
-    Some(Diagnostic {
-        code,
-        message: format!(
-            "Уменьшите количество необязательных параметров c {} до допустимого {}",
-            count, max_optional_params
-        ),
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+    let module_metrics = ctx.module_hir_metrics();
+    if module_metrics.is_empty() {
+        return Vec::new();
+    }
+    let module_bodies = ctx.module_bodies();
+    let item_tree = ctx.item_tree();
+
+    // Sort by `local_id` for deterministic output ordering — see the
+    // matching note in `method_size::check`.
+    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
+    local_ids.sort_unstable();
+
+    let mut out = Vec::new();
+    for local_id in local_ids {
+        let Some(metrics) = module_metrics.get(local_id) else { continue };
+        if metrics.optional_params_count <= max_optional {
+            continue;
+        }
+        let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
+        let name_range = match item {
+            ModItem::Procedure(idx) => item_tree.procedure(*idx).name_range,
+            ModItem::Function(idx) => item_tree.function(*idx).name_range,
+            ModItem::Variable(_) => continue,
+        };
+        out.push(Diagnostic {
+            code,
+            message: format!(
+                "Уменьшите количество необязательных параметров c {} до допустимого {}",
+                metrics.optional_params_count, max_optional
+            ),
+            severity: ctx.severity(code),
+            range: name_range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+    out
 }
 
 #[cfg(test)]

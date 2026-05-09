@@ -388,6 +388,15 @@ pub struct LowerResult {
     /// External module references collected during lowering.
     /// Used to build module dependency graph for lazy loading.
     pub external_refs: Vec<ExternalRef>,
+    /// Method body line span as the legacy
+    /// `emit_method_scoped_diagnostics::MethodSize` calculation
+    /// produced it: `(end_line - start_line) - 4`. `0` when no
+    /// `LineIndex` was supplied to lowering (e.g. module-level body
+    /// without line info, streaming-mode tests). The §6.4 `MethodSize`
+    /// migration consumes this through `HirMethodMetrics::size_lines`,
+    /// populated by the Salsa wrapper that has access to both the
+    /// `LowerResult` (this field) and `module_bodies`.
+    pub size_lines: u32,
 }
 
 /// Pre-existing binding kind captured by lowering for an assignment
@@ -800,48 +809,6 @@ pub enum BodyDiagnostic {
     /// Validated in from_hir() to check if module type is CommonModule or FormModule.
     ThisObjectAssign { range: TextRange },
 
-    // ==========================================================================
-    // Phase 4: Method-scoped diagnostics (emitted at end of method lowering)
-    // ==========================================================================
-    /// Method size (number of statements) exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by maxSize in from_hir().
-    MethodSize {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Calculated method size (number of statements).
-        size: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
-
-    /// Number of parameters exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by maxParamsCount in from_hir().
-    NumberOfParams {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Number of parameters.
-        count: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
-
-    /// Number of optional parameters exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by maxOptionalParamsCount in from_hir().
-    NumberOfOptionalParams {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Number of optional parameters.
-        count: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
-
     /// Число()/Number() call inside try block body.
     /// Using exceptions for type casting is incorrect - use TypeDescription instead.
     TryNumber { range: TextRange },
@@ -1154,10 +1121,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => *range,
             BodyDiagnostic::DeprecatedMethodCall { range, .. } => *range,
             BodyDiagnostic::ThisObjectAssign { range } => *range,
-            // Phase 4: Method-scoped diagnostics
-            BodyDiagnostic::MethodSize { range, .. } => *range,
-            BodyDiagnostic::NumberOfParams { range, .. } => *range,
-            BodyDiagnostic::NumberOfOptionalParams { range, .. } => *range,
             BodyDiagnostic::TryNumber { range } => *range,
             BodyDiagnostic::UsingObjectNotAvailableUnix { range, .. } => *range,
             BodyDiagnostic::UnsafeSafeModeMethodCall { range } => *range,
@@ -1177,8 +1140,10 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
 
 /// Lower a method AST node to HIR Body with line index for additional diagnostics.
 ///
-/// When `line_index` is provided, additional diagnostics are emitted:
-/// OneStatementPerLine, TooManyReturns, MethodSize, and method-scoped metrics.
+/// When `line_index` is provided, the `OneStatementPerLine` and
+/// `TooManyReturns` diagnostics are emitted, and `LowerResult::size_lines`
+/// is populated (consumed by the §6.4 `MethodSize` handler through
+/// `HirMethodMetrics::size_lines`).
 pub fn lower_method_with_externals(
     method_node: &SyntaxNode,
     is_function: bool,

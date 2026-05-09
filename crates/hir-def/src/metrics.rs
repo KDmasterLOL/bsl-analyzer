@@ -85,6 +85,26 @@ pub struct HirMethodMetrics {
     /// parse tree at handler time. Source order matches HIR allocation
     /// order (i.e. lexical order of the leaf statements).
     pub nesting_leaves: Vec<NestingLeafMetrics>,
+    /// Total number of declared parameters (matches `body.params.len()`).
+    /// Consumed by the §6.4 `NumberOfParams` migration.
+    pub params_count: u32,
+    /// Number of parameters declared with a default value
+    /// (`Параметр = ...`). Consumed by the §6.4 `NumberOfOptionalParams`
+    /// migration.
+    pub optional_params_count: u32,
+    /// Method body line span as the legacy
+    /// `lower::mod::emit_method_scoped_diagnostics::MethodSize`
+    /// computed it: `(end_line - start_line) - 4`, where `4` accounts
+    /// for the `Процедура...КонецПроцедуры` declaration header that the
+    /// Rowan `PROCEDURE_DEF` / `FUNCTION_DEF` range includes. Always
+    /// `0` for `Body` instances produced without a `LineIndex`
+    /// (streaming-mode tests, module_code) — the §6.4 `MethodSize`
+    /// handler treats `0` as "metric unavailable" and silently skips
+    /// emitting in that case (legacy behaviour). Source: populated by
+    /// the Salsa wrapper from `LowerResult::size_lines`, not the
+    /// visitor (the visitor walks the HIR `Body` and has no access to
+    /// the file-level `LineIndex`).
+    pub size_lines: u32,
 }
 
 /// One leaf nesting statement recorded by [`MetricsVisitor`]. A leaf is
@@ -114,7 +134,14 @@ pub fn compute_hir_metrics(body: &Body) -> HirMethodMetrics {
     for &stmt_id in body.body_stmts.iter() {
         visitor.visit_stmt(body, stmt_id, 0);
     }
-    visitor.finish()
+    let mut metrics = visitor.finish();
+    // Param counts come straight off the `Body` arena — no statement
+    // walk needed. `default_value.is_some()` mirrors the legacy
+    // `emit_method_scoped_diagnostics` predicate.
+    metrics.params_count = body.params.len() as u32;
+    metrics.optional_params_count =
+        body.params.iter().filter(|&&p| body.bindings[p].default_value.is_some()).count() as u32;
+    metrics
 }
 
 #[derive(Debug, Default)]
@@ -145,6 +172,14 @@ impl MetricsVisitor {
             if_conditions: self.if_conditions,
             if_condition_max,
             nesting_leaves: self.nesting_leaves,
+            // Populated by `compute_hir_metrics` after `finish()` —
+            // the visitor itself doesn't read `Body::params` /
+            // `Body::bindings`, that lookup is post-walk.
+            params_count: 0,
+            optional_params_count: 0,
+            // Populated by the Salsa wrapper from
+            // `LowerResult::size_lines` (the visitor has no `LineIndex`).
+            size_lines: 0,
         }
     }
 

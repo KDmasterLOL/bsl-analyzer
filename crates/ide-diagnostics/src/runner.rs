@@ -172,6 +172,9 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CyclomaticComplexity,
     DiagnosticCode::NestedStatements,
     DiagnosticCode::IfConditionComplexity,
+    DiagnosticCode::MethodSize,
+    DiagnosticCode::NumberOfParams,
+    DiagnosticCode::NumberOfOptionalParams,
 ];
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
@@ -726,6 +729,13 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         "IfConditionComplexity",
         ctx,
         handlers::if_condition_complexity::check,
+    ));
+    diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
+    diagnostics.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
+    diagnostics.extend(run_diagnostic(
+        "NumberOfOptionalParams",
+        ctx,
+        handlers::number_of_optional_params::check,
     ));
 
     diagnostics

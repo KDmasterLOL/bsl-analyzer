@@ -577,70 +577,6 @@ fn check_function_returns_same_primitive(ctx: &mut LoweringCtx, method_node: &Sy
     }
 }
 
-/// Emit method-scoped diagnostics at end of lowering.
-///
-/// Phase 4: Method metrics (complexity, size, nesting, params) are calculated
-/// after body is lowered and emitted as diagnostics.
-/// Threshold filtering happens in from_hir() handlers.
-fn emit_method_scoped_diagnostics(
-    ctx: &mut LoweringCtx,
-    method_name: &str,
-    name_range: TextRange,
-    method_range: TextRange,
-    is_function: bool,
-) {
-    use crate::body::BodyDiagnostic;
-
-    // Track 2 Phase B §6.4: cognitive AND cyclomatic complexity moved
-    // to handlers (`ide-diagnostics::handlers::{cognitive,cyclomatic}_
-    // complexity::check`), consuming the cached
-    // `module_hir_metrics_query` and `module_cyclomatic_query`
-    // respectively.
-
-    // Emit MethodSize candidate using line-based calculation
-    // Algorithm: subCodeBlock.getStop().getLine() - subCodeBlock.getStart().getLine()
-    // Rowan PROCEDURE_DEF spans from declaration to end keyword, so subtract 4 to match the subCodeBlock span
-    if let Some(ref line_index) = ctx.line_index {
-        let start_line = line_index.line_col(method_range.start()).line as usize;
-        let end_line = line_index.line_col(method_range.end()).line as usize;
-        let total_span = end_line.saturating_sub(start_line);
-        let method_size = total_span.saturating_sub(4) as u32;
-
-        if method_size > 0 {
-            ctx.emit(BodyDiagnostic::MethodSize {
-                method_name: method_name.to_string(),
-                size: method_size,
-                is_function,
-                range: name_range,
-            });
-        }
-    }
-
-    // Emit NumberOfParams and NumberOfOptionalParams candidates
-    let params_count = ctx.body.params.len() as u32;
-    let optional_count =
-        ctx.body.params.iter().filter(|&p| ctx.body.bindings[*p].default_value.is_some()).count()
-            as u32;
-
-    if params_count > 0 {
-        ctx.emit(BodyDiagnostic::NumberOfParams {
-            method_name: method_name.to_string(),
-            count: params_count,
-            is_function,
-            range: name_range,
-        });
-    }
-
-    if optional_count > 0 {
-        ctx.emit(BodyDiagnostic::NumberOfOptionalParams {
-            method_name: method_name.to_string(),
-            count: optional_count,
-            is_function,
-            range: name_range,
-        });
-    }
-}
-
 /// Compare two literals for equality (case-insensitive for strings by default).
 ///
 /// Strings are compared case-insensitively unless configured otherwise.
@@ -664,8 +600,10 @@ fn literals_equal(a: &crate::hir::Literal, b: &crate::hir::Literal) -> bool {
 
 /// Lower a method AST node to HIR.
 ///
-/// When `line_index` is provided, additional diagnostics are emitted:
-/// OneStatementPerLine, TooManyReturns, MethodSize, and method-scoped metrics.
+/// When `line_index` is provided, the additional `OneStatementPerLine`
+/// and `TooManyReturns` diagnostics are emitted, and `LowerResult::size_lines`
+/// is populated for the §6.4 `MethodSize` handler (which now reads
+/// `HirMethodMetrics::size_lines`, not a `BodyDiagnostic`).
 pub fn lower_method_with_externals(
     method_node: &SyntaxNode,
     is_function: bool,
@@ -786,19 +724,13 @@ pub fn lower_method_with_externals(
         ctx.emit_too_many_returns_diagnostic(token.text().to_string(), token.text_range());
     }
 
-    // Emit method-scoped diagnostics (complexity, size, params)
-    if let Some(ref token) = name_token {
-        emit_method_scoped_diagnostics(
-            &mut ctx,
-            token.text(),
-            token.text_range(),
-            method_node.text_range(),
-            is_function,
-        );
-    }
-
     // Collect referenced externals (variables used but not declared locally)
     let referenced_externals = collect_referenced_externals(&ctx.body);
+
+    // Track 2 Phase B §6.4: method body line span (subCodeBlock.stop -
+    // subCodeBlock.start). Computed only when a `LineIndex` is
+    // available — module-level code passes `None` and gets `0`.
+    let size_lines = compute_method_size_lines(method_node, ctx.line_index.as_deref());
 
     LowerResult {
         body: ctx.body,
@@ -806,7 +738,22 @@ pub fn lower_method_with_externals(
         diagnostics: ctx.diagnostics,
         referenced_externals,
         external_refs: ctx.external_refs,
+        size_lines,
     }
+}
+
+/// Track 2 Phase B §6.4 — compute method body line span the same way
+/// the legacy `emit_method_scoped_diagnostics::MethodSize` block did:
+/// `(end_line - start_line) - 4`. The `4` accounts for the
+/// `Процедура...КонецПроцедуры` declaration header that the Rowan
+/// `PROCEDURE_DEF` / `FUNCTION_DEF` range includes.
+fn compute_method_size_lines(method_node: &SyntaxNode, line_index: Option<&LineIndex>) -> u32 {
+    let Some(line_index) = line_index else { return 0 };
+    let method_range = method_node.text_range();
+    let start_line = line_index.line_col(method_range.start()).line as usize;
+    let end_line = line_index.line_col(method_range.end()).line as usize;
+    let total_span = end_line.saturating_sub(start_line);
+    total_span.saturating_sub(4) as u32
 }
 
 /// Lower module-level code (statements outside procedures/functions).
@@ -874,6 +821,10 @@ pub fn lower_module_code(root: &SyntaxNode, line_index: Option<Arc<LineIndex>>) 
         diagnostics: ctx.diagnostics,
         referenced_externals,
         external_refs: ctx.external_refs,
+        // Module-level code has no method declaration header — its
+        // line span is meaningless to `MethodSize`, which only fires
+        // for procedures and functions.
+        size_lines: 0,
     }
 }
 

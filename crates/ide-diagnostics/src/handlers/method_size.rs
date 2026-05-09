@@ -1,10 +1,21 @@
 //! MethodSize diagnostic.
 //!
 //! Detects functions and procedures with excessive line count.
+//!
+//! ## Track 2 Phase B §6.4 migration
+//! Pre-migration the legacy `from_hir` adapter consumed
+//! `BodyDiagnostic::MethodSize`, which was emitted from
+//! `lower::mod::emit_method_scoped_diagnostics` after computing
+//! `(end_line - start_line) - 4` from the method's syntax range and
+//! the file `LineIndex`. The migrated handler now reads the cached
+//! `HirMethodMetrics::size_lines` populated by the Salsa wrapper from
+//! `LowerResult::size_lines` (the only entry point that has
+//! `LineIndex` access).
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::ModItem;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -21,39 +32,69 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::MethodSize` is encountered.
-/// Applies configuration filtering (maxMethodSize).
-pub fn from_hir(
-    method_name: &str,
-    size: u32,
-    _is_function: bool,
-    range: ide_db::TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+const DEFAULT_MAX_METHOD_SIZE: i64 = 200;
+
+/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
+/// `HirMethodMetrics::size_lines` via `ctx.module_hir_metrics()`.
+/// Mirrors the legacy emit-from-`emit_method_scoped_diagnostics`
+/// behaviour: skip methods with `size_lines == 0` (unmeasurable —
+/// `LineIndex` was unavailable during lowering, e.g. streaming-mode
+/// tests), skip when size <= configured threshold.
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MethodSize;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
-    let max_method_size = ctx.config_int(code, "maxMethodSize", 200) as usize;
-    if (size as usize) <= max_method_size {
-        return None;
-    }
+    let max_method_size = ctx.config_int(code, "maxMethodSize", DEFAULT_MAX_METHOD_SIZE) as u32;
 
-    Some(Diagnostic {
-        code,
-        message: format!(
-            "Длина метода \"{}\" равна {}, что больше установленного лимита в {} строк",
-            method_name, size, max_method_size
-        ),
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+    let module_metrics = ctx.module_hir_metrics();
+    if module_metrics.is_empty() {
+        return Vec::new();
+    }
+    let module_bodies = ctx.module_bodies();
+    let item_tree = ctx.item_tree();
+
+    // `iter_bodies()` walks an `FxHashMap` (non-deterministic order);
+    // sort by `local_id` so handler output stays in source order — the
+    // legacy lowering-time emit produced lexical order, and consumer
+    // tests assert the resulting diagnostic ordering.
+    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
+    local_ids.sort_unstable();
+
+    let mut out = Vec::new();
+    for local_id in local_ids {
+        let Some(metrics) = module_metrics.get(local_id) else { continue };
+        // Legacy guard: `if method_size > 0` — without `LineIndex` the
+        // size is meaningless (`size_lines == 0`), so skip.
+        if metrics.size_lines == 0 || metrics.size_lines <= max_method_size {
+            continue;
+        }
+        let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
+        let (name, name_range) = match item {
+            ModItem::Procedure(idx) => {
+                let p = item_tree.procedure(*idx);
+                (p.name.as_str().to_string(), p.name_range)
+            }
+            ModItem::Function(idx) => {
+                let f = item_tree.function(*idx);
+                (f.name.as_str().to_string(), f.name_range)
+            }
+            ModItem::Variable(_) => continue,
+        };
+        out.push(Diagnostic {
+            code,
+            message: format!(
+                "Длина метода \"{}\" равна {}, что больше установленного лимита в {} строк",
+                name, metrics.size_lines, max_method_size
+            ),
+            severity: ctx.severity(code),
+            range: name_range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+    out
 }
 
 #[cfg(test)]

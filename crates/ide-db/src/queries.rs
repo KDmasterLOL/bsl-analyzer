@@ -836,7 +836,14 @@ pub fn module_hir_metrics_query<'db>(
     let module_bodies = db.module_bodies(module_id);
     let mut methods = rustc_hash::FxHashMap::default();
     for (local_id, body) in module_bodies.iter_bodies() {
-        let metrics = hir::metrics::compute_hir_metrics(body);
+        let mut metrics = hir::metrics::compute_hir_metrics(body);
+        // `size_lines` is a syntax-level metric (depends on
+        // `LineIndex`, not the HIR `Body`), so it lives in the
+        // `LowerResult` next to the body. Stamp it onto the metrics
+        // here — the visitor cannot compute it.
+        if let Some(lower_result) = module_bodies.lower_result(local_id) {
+            metrics.size_lines = lower_result.size_lines;
+        }
         methods.insert(local_id, Arc::new(metrics));
     }
     // Codex round-A fix: `ModuleBodies::module_code()` is always `Some`
