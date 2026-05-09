@@ -31,12 +31,18 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let module_data = ctx.module_data();
 
+    // Strict mode rejects "Параметр - Тип" docs that omit the trailing
+    // "— описание" prose. Default `true` keeps existing fixtures (and
+    // BSL-style "Тип alone" parameters) compatible; opt-in via config to
+    // mirror MissingReturnedValueDescription's `allowShortDescriptionReturnValues`.
+    let allow_short = ctx.config.get_bool(code, "allowShortDescriptionParameters").unwrap_or(true);
+
     for method_id in &module_data.procedures {
-        diagnostics.extend(check_method(ctx, *method_id, code, false));
+        diagnostics.extend(check_method(ctx, *method_id, code, false, allow_short));
     }
 
     for method_id in &module_data.functions {
-        diagnostics.extend(check_method(ctx, *method_id, code, true));
+        diagnostics.extend(check_method(ctx, *method_id, code, true, allow_short));
     }
 
     diagnostics
@@ -47,6 +53,7 @@ fn check_method(
     method_id: hir::MethodId,
     code: DiagnosticCode,
     is_function: bool,
+    allow_short: bool,
 ) -> Vec<Diagnostic> {
     let tree = ctx.item_tree();
 
@@ -106,7 +113,15 @@ fn check_method(
         return diagnostics;
     }
 
-    check_parameter_descriptions(ctx, params, param_docs, name_range, code, &mut diagnostics);
+    check_parameter_descriptions(
+        ctx,
+        params,
+        param_docs,
+        name_range,
+        code,
+        allow_short,
+        &mut diagnostics,
+    );
 
     diagnostics
 }
@@ -117,6 +132,7 @@ fn check_parameter_descriptions(
     param_docs: &[hir::ParameterDoc],
     name_range: TextRange,
     code: DiagnosticCode,
+    allow_short: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if is_single_parameter_legacy_type_only_doc(params, param_docs) {
@@ -145,6 +161,18 @@ fn check_parameter_descriptions(
         let lower_name = param_name.to_lowercase();
 
         if doc_map.contains_key(&lower_name) {
+            if !allow_short {
+                let doc = doc_map[&lower_name];
+                if !param_doc_has_description(doc) {
+                    let message =
+                        format!("Необходимо добавить пояснение к параметру \"{}\"", param_name);
+                    diagnostics.push(create_diagnostic(param.name_range, &message, code, ctx));
+                    // Intentionally NOT setting `has_missing_description`:
+                    // content-quality issues are orthogonal to structural
+                    // (missing/extra/order) issues and should not suppress
+                    // the order-correctness check below.
+                }
+            }
             matched_docs.push(lower_name);
         } else {
             let message = format!("Необходимо добавить описание параметра \"{}\"", param_name);
@@ -189,6 +217,20 @@ fn check_parameter_descriptions(
     }
 }
 
+/// True iff the parameter doc carries any prose description (a `- описание`
+/// tail on at least one type, or a structured `Структура:` block with sub-fields).
+/// "Type alone" docs (`Параметр - Строка`) and bare-name docs (`Параметр`)
+/// return false — these are what strict mode wants to flag.
+fn param_doc_has_description(doc: &hir::ParameterDoc) -> bool {
+    if doc.types.is_empty() {
+        return false;
+    }
+    doc.types.iter().any(|type_doc| {
+        type_doc.description.as_ref().is_some_and(|d| !d.trim().is_empty())
+            || !type_doc.parameters.is_empty()
+    })
+}
+
 fn is_single_parameter_legacy_type_only_doc(
     params: &[hir::Param],
     param_docs: &[hir::ParameterDoc],
@@ -222,8 +264,10 @@ fn create_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_message_at_line, check_ast_diagnostic};
-    use crate::DiagnosticCode;
+    use crate::test_utils::{
+        assert_diagnostic_message_at_line, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
     const FIXTURE: &str = "Функция БезПараметровИОписания()\nКонецФункции\n\nФункция БезОписания(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть, но нет параметров\nФункция Пример1(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример2()\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример3(Параметр1)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример4(Параметр2, Параметр3)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр2 - Строка - Описание параметра 2\n// Параметр1 - Строка - Описание параметра 1\nФункция Пример5(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка\n// Параметр2\nФункция Пример6(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример7(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр3 - Строка - Описание параметра 3\n// Параметр4 - Строка - Описание параметра 4\n// Параметр5\nФункция Пример8(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\n// Параметр3 - Строка - Описание параметра 3\n// Параметр4 - Строка - Описание параметра 4\n// Параметр5 - тип\nФункция Пример9(Параметр1, Знач Параметр4)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример10(параметр1, ПаРамЕтр2)\nКонецФункции\n\n// См. Пример10()\nФункция Пример11(параметр1, ПаРамЕтр2)\nКонецФункции\n\n// Загружает настройку из хранилища общих настроек, как метод платформы Загрузить,\n// объектов СтандартноеХранилищеНастроекМенеджер или ХранилищеНастроекМенеджер.<Имя хранилища>,\n// но с поддержкой длины ключа настроек более 128 символов путем хеширования части,\n// которая превышает 96 символов.\n// Кроме того, возвращает указанное значение по умолчанию, если настройки не существуют.\n// Если нет права СохранениеДанныхПользователя, возвращается значение по умолчанию без ошибки.\n//\n// В возвращаемом значении очищаются ссылки на несуществующий объект в базе данных, а именно\n// - возвращаемая ссылка заменяется на указанное значение по умолчанию;\n// - из данных типа Массив ссылки удаляются;\n// - у данных типа Структура и Соответствие ключ не меняется, а значение устанавливается Неопределено;\n// - анализ значений в данных типа Массив, Структура, Соответствие выполняется рекурсивно.\n//\n// Параметры:\n//   КлючОбъекта          - Строка           - см. синтакс-помощник платформы.\n//   КлючНастроек         - Строка           - см. синтакс-помощник платформы.\n//   ЗначениеПоУмолчанию  - Произвольный     - значение, которое возвращается, если настройки не существуют.\n//                                             Если не указано, возвращается значение Неопределено.\n//   ОписаниеНастроек     - ОписаниеНастроек - см. синтакс-помощник платформы.\n//   ИмяПользователя      - Строка           - см. синтакс-помощник платформы.\n//\n// Возвращаемое значение:\n//   Произвольный - см. синтакс-помощник платформы.\n//\nФункция BUG_1490(КлючОбъекта, КлючНастроек, ЗначениеПоУмолчанию = Неопределено,\n\t\t\tОписаниеНастроек = Неопределено, ИмяПользователя = Неопределено) Экспорт\nКонецФункции\n\n// Делает некоторые вещи с массивом строк\n//\n// Параметры:\n//  МассивСтрок - Массив из Строка - Массив строк\nФункция BUG_1620(МассивСтрок)\nКонецФункции";
 
     #[test]
@@ -428,6 +472,116 @@ mod tests {
 // Параметры:
 //   Параметр1 - Строка - описание
 Функция Пример(параметр1)
+КонецФункции"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_strict_mode_flags_type_only_param_doc() {
+        // `Параметр1 - Строка` matches the signature but has no description
+        // tail. Default mode accepts this (BSL idiom). Strict mode
+        // (`allowShortDescription=false`) should emit.
+        let code = r#"// Описание
+// Параметры:
+//   Параметр1 - Строка
+Функция Пример(Параметр1)
+КонецФункции"#;
+
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::MissingParameterDescription,
+            serde_json::json!({"allowShortDescriptionParameters": false}),
+        );
+
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingParameterDescription);
+        assert!(diagnostics[0].message.contains("Необходимо добавить пояснение к параметру"));
+        assert!(diagnostics[0].message.contains("Параметр1"));
+    }
+
+    #[test]
+    fn test_strict_mode_passes_param_with_description() {
+        // Param with full prose (`- описание`) is acceptable even in strict mode.
+        let code = r#"// Описание
+// Параметры:
+//   Параметр1 - Строка - первое слагаемое
+Функция Пример(Параметр1)
+КонецФункции"#;
+
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::MissingParameterDescription,
+            serde_json::json!({"allowShortDescriptionParameters": false}),
+        );
+
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_strict_mode_passes_structured_param_doc() {
+        // Structured Структура: docs carry semantic content via sub-fields.
+        // Strict mode treats this as adequate.
+        let code = r#"// Описание
+// Параметры:
+//   Параметр1 - Структура:
+//     * Поле1 - Строка - первое поле
+//     * Поле2 - Число - второе поле
+Функция Пример(Параметр1)
+КонецФункции"#;
+
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::MissingParameterDescription,
+            serde_json::json!({"allowShortDescriptionParameters": false}),
+        );
+
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_strict_mode_content_does_not_suppress_order_check() {
+        // Codex pair-mode regression guard: a content-quality emission
+        // (param doc lacking prose description) must not mask the
+        // structural order-mismatch emission for the same method.
+        let code = r#"// Описание
+// Параметры:
+//   Параметр2 - Строка - second
+//   Параметр1 - Строка
+Функция Пример(Параметр1, Параметр2)
+КонецФункции"#;
+
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::MissingParameterDescription,
+            serde_json::json!({"allowShortDescriptionParameters": false}),
+        );
+
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 2);
+        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("Необходимо добавить пояснение к параметру")
+                && m.contains("Параметр1")),
+            "missing strict-mode content emission for Параметр1: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("Необходимо исправить порядок описаний параметров")),
+            "missing order-mismatch emission: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn test_default_mode_accepts_type_only_param_doc() {
+        // Regression guard: default mode (`allowShortDescription=true`)
+        // must keep accepting `Параметр - Тип` shorthand.
+        let code = r#"// Описание
+// Параметры:
+//   Параметр1 - Строка
+Функция Пример(Параметр1)
 КонецФункции"#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
