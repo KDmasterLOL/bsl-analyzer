@@ -38,6 +38,7 @@
 //! ```
 
 pub mod effect_summary;
+pub mod guard_predicates;
 pub mod liveness;
 pub mod path_terminates;
 pub mod reaching_defs;
