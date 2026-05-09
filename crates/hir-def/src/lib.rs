@@ -33,6 +33,7 @@ pub mod cyclomatic_complexity;
 pub mod docs;
 pub mod hir;
 pub mod item_tree;
+pub mod metrics;
 pub mod module_index;
 pub mod name;
 pub mod path;

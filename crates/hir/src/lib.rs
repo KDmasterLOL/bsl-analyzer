@@ -53,6 +53,7 @@ pub use hir_def::docs::{is_dotted_type_reference, MethodDocs, ParameterDoc};
 // Re-export analysis modules
 pub use hir_def::cognitive_complexity;
 pub use hir_def::cyclomatic_complexity;
+pub use hir_def::metrics;
 
 /// CFG analysis — stable public API
 pub mod cfg {
