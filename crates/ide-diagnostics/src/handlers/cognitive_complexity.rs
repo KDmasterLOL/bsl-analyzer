@@ -86,6 +86,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::ModItem;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -101,53 +102,58 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::CognitiveComplexity` is encountered.
-/// Applies configuration filtering (complexityThreshold).
-pub fn from_hir(
-    method_name: &str,
-    complexity: u32,
-    is_function: bool,
-    range: ide_db::TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
+/// [`hir::metrics::HirMethodMetrics::cognitive`] field via
+/// `ctx.module_hir_metrics()`. Replaces the legacy `from_hir` adapter
+/// (BodyDiagnostic-fed) and the per-method HIR walk in
+/// `hir-def/cognitive_complexity.rs`.
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CognitiveComplexity;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
-    let complexity_threshold = ctx.config_int(code, "complexityThreshold", 15) as u32;
-    if complexity <= complexity_threshold {
-        return None;
+    let threshold = ctx.config_int(code, "complexityThreshold", 15) as u32;
+    let module_metrics = ctx.module_hir_metrics();
+    if module_metrics.is_empty() {
+        return Vec::new();
     }
+    let module_bodies = ctx.module_bodies();
+    let item_tree = ctx.item_tree();
 
-    let method_type = if is_function { "Функция" } else { "Процедура" };
-    Some(Diagnostic {
-        code,
-        message: format!(
-            "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
-             Упростите логику или уменьшите вложенность",
-            method_type, method_name, complexity, complexity_threshold
-        ),
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
-}
-
-/// Calculate cognitive complexity for a method body (HIR-based).
-///
-/// This is a PUBLIC function that can be reused for:
-/// - Code lenses (showing complexity in editor)
-/// - Metrics collection
-/// - Other diagnostics
-///
-/// Uses the HIR-based implementation from `hir_def::cognitive_complexity`.
-pub fn calculate_complexity(body: &hir::Body) -> u32 {
-    hir::cognitive_complexity::calculate_complexity(body)
+    let mut out = Vec::new();
+    for (local_id, _body) in module_bodies.iter_bodies() {
+        let Some(metrics) = module_metrics.get(local_id) else { continue };
+        if metrics.cognitive <= threshold {
+            continue;
+        }
+        let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
+        let (name, name_range, is_function) = match item {
+            ModItem::Procedure(idx) => {
+                let p = item_tree.procedure(*idx);
+                (p.name.as_str().to_string(), p.name_range, false)
+            }
+            ModItem::Function(idx) => {
+                let f = item_tree.function(*idx);
+                (f.name.as_str().to_string(), f.name_range, true)
+            }
+            ModItem::Variable(_) => continue,
+        };
+        let method_type = if is_function { "Функция" } else { "Процедура" };
+        out.push(Diagnostic {
+            code,
+            message: format!(
+                "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
+                 Упростите логику или уменьшите вложенность",
+                method_type, name, metrics.cognitive, threshold
+            ),
+            severity: ctx.severity(code),
+            range: name_range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -331,8 +337,13 @@ mod tests {
         );
     }
 
+    /// Track 2 Phase B §6.4 — pin the cognitive value the §6.1 visitor
+    /// produces against the same fixture the legacy
+    /// `calculate_complexity` test asserted on. The migration path runs
+    /// through `hir::metrics::compute_hir_metrics` instead of the
+    /// retired wrapper; the expected number is unchanged.
     #[test]
-    fn test_calculate_complexity_directly() {
+    fn test_compute_hir_metrics_cognitive_value() {
         let code = COMPLEX_FUNCTION;
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
@@ -356,8 +367,8 @@ mod tests {
         let module_bodies = db.module_bodies(module_id);
 
         let body = module_bodies.body(0).expect("Should have first method body");
-        let complexity = calculate_complexity(body);
+        let metrics = hir::metrics::compute_hir_metrics(body);
 
-        assert_eq!(complexity, 25, "ОбработатьКоллекцию should have complexity 25");
+        assert_eq!(metrics.cognitive, 25, "ОбработатьКоллекцию should have cognitive 25");
     }
 }

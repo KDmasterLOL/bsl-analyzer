@@ -600,23 +600,13 @@ fn emit_method_scoped_diagnostics(
     is_function: bool,
 ) {
     use crate::body::BodyDiagnostic;
-    use crate::cognitive_complexity;
     use crate::cyclomatic_complexity;
 
-    // Calculate complexity metrics using existing implementations
-    let cognitive = cognitive_complexity::calculate_complexity(&ctx.body);
+    // Track 2 Phase B §6.4: cognitive complexity moved to handler
+    // (`ide-diagnostics::handlers::cognitive_complexity::check`),
+    // consuming the cached `module_hir_metrics_query`. Cyclomatic
+    // emission stays here until its own §6.4 migration slice.
     let cyclomatic = cyclomatic_complexity::calculate_complexity(&ctx.body);
-
-    // Emit CognitiveComplexity candidate (always emit, filter in from_hir)
-    // Only emit if complexity > 0 to reduce noise
-    if cognitive > 0 {
-        ctx.emit(BodyDiagnostic::CognitiveComplexity {
-            method_name: method_name.to_string(),
-            complexity: cognitive,
-            is_function,
-            range: name_range,
-        });
-    }
 
     // Emit CyclomaticComplexity candidate
     // Base complexity is 1, so only emit if > 1

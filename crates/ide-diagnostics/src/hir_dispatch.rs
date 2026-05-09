@@ -11,7 +11,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::AllFunctionPathMustHaveReturn,
     DiagnosticCode::BeginTransactionBeforeTryCatch,
     DiagnosticCode::CodeAfterAsyncCall,
-    DiagnosticCode::CognitiveComplexity,
     DiagnosticCode::CommitTransactionOutsideTryCatch,
     DiagnosticCode::CommonModuleAssign,
     DiagnosticCode::CreateQueryInCycle,
@@ -325,15 +324,6 @@ pub fn dispatch_hir_diagnostic(
             handlers::this_object_assign::from_hir(*range, ctx)
         }
         // Phase 4: Method-scoped diagnostics
-        BodyDiagnostic::CognitiveComplexity { method_name, complexity, is_function, range } => {
-            handlers::cognitive_complexity::from_hir(
-                method_name,
-                *complexity,
-                *is_function,
-                *range,
-                ctx,
-            )
-        }
         BodyDiagnostic::CyclomaticComplexity { method_name, complexity, is_function, range } => {
             handlers::cyclomatic_complexity::from_hir(
                 method_name,

@@ -167,6 +167,8 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     // Track 2 §1.6 Group C: lattice-driven (security_state).
     DiagnosticCode::SetPrivilegedMode,
     DiagnosticCode::DisableSafeMode,
+    // Track 2 Phase B §6.4: HirMethodMetrics-driven.
+    DiagnosticCode::CognitiveComplexity,
 ];
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
@@ -704,6 +706,13 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         handlers::set_privileged_mode::check,
     ));
     diagnostics.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
+    // Track 2 Phase B §6.4 — handler-side reads cached
+    // `module_hir_metrics_query`.
+    diagnostics.extend(run_diagnostic(
+        "CognitiveComplexity",
+        ctx,
+        handlers::cognitive_complexity::check,
+    ));
 
     diagnostics
 }
