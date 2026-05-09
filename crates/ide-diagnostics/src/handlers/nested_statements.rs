@@ -58,8 +58,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
+    // Sort by `local_id` for deterministic outer-method ordering —
+    // matches the §6.4 cohort follow-up. Inner per-leaf ordering
+    // already comes from HIR allocation order via
+    // `metrics.nesting_leaves`.
+    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
+    local_ids.sort_unstable();
+
     let mut out = Vec::new();
-    for (local_id, _body) in module_bodies.iter_bodies() {
+    for local_id in local_ids {
         let Some(metrics) = module_metrics.get(local_id) else { continue };
         if metrics.nesting_leaves.is_empty() {
             continue;

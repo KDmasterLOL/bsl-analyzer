@@ -104,8 +104,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let item_tree = ctx.item_tree();
 
+    // Sort by `local_id` for deterministic output ordering — matches
+    // the §6.4 cohort follow-up applied to method_size etc. (the
+    // underlying `FxHashMap` walk in `iter_bodies()` is non-deterministic).
+    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
+    local_ids.sort_unstable();
+
     let mut out = Vec::new();
-    for (local_id, _body) in module_bodies.iter_bodies() {
+    for local_id in local_ids {
         let complexity = module_cyclomatic.get(local_id);
         if complexity <= threshold {
             continue;
