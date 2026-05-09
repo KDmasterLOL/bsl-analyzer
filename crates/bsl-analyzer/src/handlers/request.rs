@@ -4,15 +4,20 @@
 //! textDocument/definition, textDocument/references, etc.
 
 use anyhow::Result;
-use ide::{DocumentHighlightKind as IdeDocumentHighlightKind, Location as IdeLocation};
-use line_index::LineIndex;
+use ide::{
+    DocumentHighlightKind as IdeDocumentHighlightKind, FoldingRangeKind as IdeFoldingRangeKind,
+    Location as IdeLocation,
+};
+use line_index::{LineIndex, TextSize};
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem, CompletionItemKind,
     CompletionParams, CompletionResponse, DocumentHighlight as LspDocumentHighlight,
     DocumentHighlightKind as LspDocumentHighlightKind, DocumentHighlightParams,
-    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverParams, Location, MarkupContent, MarkupKind, ReferenceParams,
-    SemanticTokens, SemanticTokensParams, SemanticTokensResult, SignatureHelpParams,
+    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange as LspFoldingRange,
+    FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupContent, MarkupKind,
+    ReferenceParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
+    SignatureHelpParams,
 };
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -181,6 +186,51 @@ pub fn handle_document_highlight(
         Ok(None)
     } else {
         Ok(Some(lsp_highlights))
+    }
+}
+
+/// Handles textDocument/foldingRange request.
+///
+/// Returns all foldable ranges in the document.
+pub fn handle_folding_range(
+    ctx: LatencyRequestContext,
+    params: FoldingRangeParams,
+) -> Result<Option<Vec<LspFoldingRange>>> {
+    let _p = tracing::info_span!("handle_folding_range", uri = %params.text_document.uri).entered();
+
+    let uri = params.text_document.uri;
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let line_index = doc.line_index();
+
+    let ranges = ctx.analysis.folding_ranges(file_id);
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+
+    let lsp_ranges: Vec<LspFoldingRange> = ranges
+        .into_iter()
+        .filter_map(|folding_range| {
+            let (start_line, end_line) = folding_range_lines(line_index, folding_range.range)?;
+            Some(LspFoldingRange {
+                start_line,
+                start_character: None,
+                end_line,
+                end_character: None,
+                kind: folding_range.kind.map(convert_folding_range_kind),
+                collapsed_text: None,
+            })
+        })
+        .collect();
+
+    if lsp_ranges.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(lsp_ranges))
     }
 }
 
@@ -623,6 +673,23 @@ fn convert_document_highlight_kind(kind: IdeDocumentHighlightKind) -> LspDocumen
     }
 }
 
+fn convert_folding_range_kind(kind: IdeFoldingRangeKind) -> LspFoldingRangeKind {
+    match kind {
+        IdeFoldingRangeKind::Region => LspFoldingRangeKind::Region,
+    }
+}
+
+fn folding_range_lines(line_index: &LineIndex, range: ide::TextRange) -> Option<(u32, u32)> {
+    if range.is_empty() {
+        return None;
+    }
+
+    let start_line = line_index.try_line_col(range.start())?.line;
+    let end_offset = range.end() - TextSize::from(1);
+    let end_line = line_index.try_line_col(end_offset)?.line;
+    (end_line > start_line).then_some((start_line, end_line))
+}
+
 /// Convert IDE CompletionItem to LSP CompletionItem.
 fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
     let has_snippet = item.insert_text.contains('$');
@@ -1046,6 +1113,46 @@ mod tests {
         assert_eq!(result[1].range.start, Position { line: 4, character: 4 });
         assert_eq!(result[2].kind, Some(LspDocumentHighlightKind::READ));
         assert_eq!(result[2].range.start, Position { line: 5, character: 13 });
+    }
+
+    #[test]
+    fn folding_range_returns_lines_and_region_kind() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///folding.bsl").unwrap();
+        let source = "#Область Public\nПроцедура Тест()\n    Если Истина Тогда\n        Сообщить(1);\n    КонецЕсли;\nКонецПроцедуры\n#КонецОбласти";
+
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        state.vfs_file_for_url(&uri).unwrap();
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+
+        let ctx = latency_ctx(&state);
+        let params = FoldingRangeParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = handle_folding_range(ctx, params).unwrap().unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].start_line, 0);
+        assert_eq!(result[0].end_line, 6);
+        assert_eq!(result[0].kind, Some(LspFoldingRangeKind::Region));
+        assert_eq!(result[1].start_line, 1);
+        assert_eq!(result[1].end_line, 5);
+        assert_eq!(result[1].kind, None);
+        assert_eq!(result[2].start_line, 2);
+        assert_eq!(result[2].end_line, 4);
+        assert_eq!(result[2].kind, None);
     }
 
     #[test]

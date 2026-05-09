@@ -1812,6 +1812,7 @@ dependencies = [
  "ide-db",
  "ide-diagnostics",
  "lexer",
+ "line-index",
  "parser",
  "project-model",
  "rayon",
