@@ -75,6 +75,7 @@
 
 pub mod builder;
 pub mod collection;
+pub mod cyclomatic;
 pub mod edge;
 pub mod graph;
 pub mod vertex;
@@ -82,6 +83,7 @@ pub mod vertex;
 // Re-export main types for convenience
 pub use builder::CfgBuilder;
 pub use collection::ModuleCfgs;
+pub use cyclomatic::cyclomatic_complexity;
 pub use edge::CfgEdgeType;
 pub use graph::ControlFlowGraph;
 pub use vertex::{
