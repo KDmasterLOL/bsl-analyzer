@@ -113,14 +113,27 @@ pub struct GuardRegistry {
 impl GuardRegistry {
     /// Build a registry from a list of entries; case-fold once.
     ///
-    /// Entries whose [`GuardSemantics`] class is not currently
-    /// supported by [`condition_matches_guard`] are silently dropped
-    /// here — the call-shape recogniser cannot soundly approve them
-    /// (see [`GuardSemantics::UserCheck`] doc). Codex round-A round-3
-    /// BLOCKER: without this filter, a public caller could construct
-    /// `GuardRegistry::new(vec![GuardPredicate { ..., semantics: UserCheck }])`
-    /// and reintroduce the false-positive that the
-    /// [`default_registry`] omission was intended to prevent.
+    /// Two filters reject unsafe entries:
+    ///
+    /// 1. [`is_supported`] gates by [`GuardSemantics`]: only
+    ///    `RoleCheck` is sound under bare-call recognition today.
+    /// 2. [`is_blocklisted_name`] gates by name, regardless of the
+    ///    semantics the caller declares. A miscategorised entry like
+    ///    `GuardPredicate { ru: "ПривилегированныйРежим", semantics:
+    ///    RoleCheck }` would pass filter (1) — name-level blocklist
+    ///    closes the door (Codex round-4 BLOCKER fix).
+    ///
+    /// Both filters log a `tracing::warn!` so silent drops are
+    /// observable in production. Codex rounds 1-4 walked these
+    /// failure modes:
+    /// - round-3 (UserCheck): public caller could re-add
+    ///   `ТекущийПользователь` via `UserCheck` entry → filter (1).
+    /// - round-2 / round-3 (PrivilegedQuery): public caller could
+    ///   re-add `ПривилегированныйРежим` via `PrivilegedQuery` entry
+    ///   → filter (1).
+    /// - round-4 (this commit): public caller could re-add
+    ///   `ПривилегированныйРежим` via miscategorised `RoleCheck`
+    ///   entry → filter (2).
     pub fn new(entries: Vec<GuardPredicate>) -> Self {
         let mut lower_aliases = Vec::with_capacity(entries.len() * 2);
         for p in &entries {
@@ -133,9 +146,21 @@ impl GuardRegistry {
                 );
                 continue;
             }
-            lower_aliases.push(p.ru.to_lowercase());
-            if !p.en.is_empty() {
-                lower_aliases.push(p.en.to_lowercase());
+            let ru_lower = p.ru.to_lowercase();
+            let en_lower = if p.en.is_empty() { String::new() } else { p.en.to_lowercase() };
+            if is_blocklisted_name(&ru_lower) || is_blocklisted_name(&en_lower) {
+                tracing::warn!(
+                    name = %p.ru,
+                    en = %p.en,
+                    "GuardRegistry::new dropped a guard predicate whose name is blocklisted \
+                     (tautological / multi-state under bare-call recognition); \
+                     see default_registry doc."
+                );
+                continue;
+            }
+            lower_aliases.push(ru_lower);
+            if !en_lower.is_empty() {
+                lower_aliases.push(en_lower);
             }
         }
         Self { lower_aliases }
@@ -152,6 +177,37 @@ impl GuardRegistry {
         let n = name.as_str().to_lowercase();
         self.lower_aliases.iter().any(|alias| alias == &n)
     }
+}
+
+/// Names that must NOT pass through to the registry regardless of
+/// the [`GuardSemantics`] the caller declares (Codex round-4 BLOCKER
+/// fix on §1.6 Group D). A miscategorised entry like
+/// `GuardPredicate { ru: "ПривилегированныйРежим", semantics:
+/// RoleCheck }` would clear [`is_supported`] but reintroduce the
+/// tautological-guard failure mode the round-2 BLOCKER fix
+/// removed. The blocklist is a hard floor — name-level safety net
+/// that closes the door even on willful miscategorisation.
+///
+/// Lower-cased entries; the caller-side check lower-cases its input
+/// before consulting this list.
+const BLOCKLISTED_GUARD_NAMES: &[&str] = &[
+    // Tautological in privileged modules — round-2 BLOCKER.
+    "привилегированныйрежим",
+    "privilegedmode",
+    // Multi-state, conflicts with `UnsafeSafeModeMethodCall` — round-1 MAJOR.
+    "безопасныйрежим",
+    "safemode",
+    // Needs equality-aware recogniser; bare call returns a UserRef
+    // that boolean-coerces in BSL but is meaningless as authorisation —
+    // round-3 BLOCKER (the GuardSemantics::UserCheck doc).
+    "текущийпользователь",
+    "currentuser",
+];
+
+/// `true` when `lower_name` is in the [`BLOCKLISTED_GUARD_NAMES`]
+/// hard-floor list. Empty input returns `false`.
+fn is_blocklisted_name(lower_name: &str) -> bool {
+    !lower_name.is_empty() && BLOCKLISTED_GUARD_NAMES.contains(&lower_name)
 }
 
 /// Whether [`condition_matches_guard`] can soundly approve a call
@@ -714,6 +770,41 @@ mod tests {
         let registry = default_registry();
         assert!(!registry.matches(&name("ТекущийПользователь")));
         assert!(!registry.matches(&name("CurrentUser")));
+    }
+
+    #[test]
+    fn name_blocklist_rejects_miscategorised_privileged_mode() {
+        // Codex round-4 BLOCKER fix: a caller could re-add the
+        // PrivilegedMode tautology by miscategorising it as
+        // RoleCheck — the semantics filter `is_supported` would let
+        // it through. The name-level blocklist closes that door.
+        let registry = GuardRegistry::new(vec![GuardPredicate {
+            ru: "ПривилегированныйРежим",
+            en: "PrivilegedMode",
+            semantics: GuardSemantics::RoleCheck,
+        }]);
+        assert_eq!(
+            registry.alias_count(),
+            0,
+            "miscategorised PrivilegedMode entry must be dropped by name blocklist"
+        );
+    }
+
+    #[test]
+    fn name_blocklist_rejects_miscategorised_safe_mode_and_current_user() {
+        // Symmetric coverage: both other blocklisted names also drop.
+        let safe_mode = GuardRegistry::new(vec![GuardPredicate {
+            ru: "БезопасныйРежим",
+            en: "SafeMode",
+            semantics: GuardSemantics::RoleCheck,
+        }]);
+        assert_eq!(safe_mode.alias_count(), 0);
+        let current_user = GuardRegistry::new(vec![GuardPredicate {
+            ru: "ТекущийПользователь",
+            en: "CurrentUser",
+            semantics: GuardSemantics::RoleCheck,
+        }]);
+        assert_eq!(current_user.alias_count(), 0);
     }
 
     #[test]
