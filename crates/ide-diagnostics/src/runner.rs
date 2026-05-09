@@ -169,6 +169,7 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::DisableSafeMode,
     // Track 2 Phase B §6.4: HirMethodMetrics-driven.
     DiagnosticCode::CognitiveComplexity,
+    DiagnosticCode::CyclomaticComplexity,
 ];
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
@@ -707,11 +708,16 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
     ));
     diagnostics.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
     // Track 2 Phase B §6.4 — handler-side reads cached
-    // `module_hir_metrics_query`.
+    // `module_hir_metrics_query` / `module_cyclomatic_query`.
     diagnostics.extend(run_diagnostic(
         "CognitiveComplexity",
         ctx,
         handlers::cognitive_complexity::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "CyclomaticComplexity",
+        ctx,
+        handlers::cyclomatic_complexity::check,
     ));
 
     diagnostics

@@ -600,24 +600,12 @@ fn emit_method_scoped_diagnostics(
     is_function: bool,
 ) {
     use crate::body::BodyDiagnostic;
-    use crate::cyclomatic_complexity;
 
-    // Track 2 Phase B §6.4: cognitive complexity moved to handler
-    // (`ide-diagnostics::handlers::cognitive_complexity::check`),
-    // consuming the cached `module_hir_metrics_query`. Cyclomatic
-    // emission stays here until its own §6.4 migration slice.
-    let cyclomatic = cyclomatic_complexity::calculate_complexity(&ctx.body);
-
-    // Emit CyclomaticComplexity candidate
-    // Base complexity is 1, so only emit if > 1
-    if cyclomatic > 1 {
-        ctx.emit(BodyDiagnostic::CyclomaticComplexity {
-            method_name: method_name.to_string(),
-            complexity: cyclomatic,
-            is_function,
-            range: name_range,
-        });
-    }
+    // Track 2 Phase B §6.4: cognitive AND cyclomatic complexity moved
+    // to handlers (`ide-diagnostics::handlers::{cognitive,cyclomatic}_
+    // complexity::check`), consuming the cached
+    // `module_hir_metrics_query` and `module_cyclomatic_query`
+    // respectively.
 
     // Emit MethodSize candidate using line-based calculation
     // Algorithm: subCodeBlock.getStop().getLine() - subCodeBlock.getStart().getLine()

@@ -808,19 +808,6 @@ pub enum BodyDiagnostic {
     // ==========================================================================
     // Phase 4: Method-scoped diagnostics (emitted at end of method lowering)
     // ==========================================================================
-    /// Cyclomatic complexity exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by complexityThreshold in from_hir().
-    CyclomaticComplexity {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Calculated cyclomatic complexity.
-        complexity: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
-
     /// Method size (number of statements) exceeds threshold.
     /// Emitted at end of method lowering. Filtered by maxSize in from_hir().
     MethodSize {
@@ -1187,7 +1174,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::DeprecatedMethodCall { range, .. } => *range,
             BodyDiagnostic::ThisObjectAssign { range } => *range,
             // Phase 4: Method-scoped diagnostics
-            BodyDiagnostic::CyclomaticComplexity { range, .. } => *range,
             BodyDiagnostic::MethodSize { range, .. } => *range,
             BodyDiagnostic::NestedStatements { range, .. } => *range,
             BodyDiagnostic::NumberOfParams { range, .. } => *range,

@@ -14,7 +14,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CommitTransactionOutsideTryCatch,
     DiagnosticCode::CommonModuleAssign,
     DiagnosticCode::CreateQueryInCycle,
-    DiagnosticCode::CyclomaticComplexity,
     DiagnosticCode::DeletingCollectionItem,
     DiagnosticCode::DeprecatedAttributes8312,
     DiagnosticCode::DeprecatedCurrentDate,
@@ -324,15 +323,6 @@ pub fn dispatch_hir_diagnostic(
             handlers::this_object_assign::from_hir(*range, ctx)
         }
         // Phase 4: Method-scoped diagnostics
-        BodyDiagnostic::CyclomaticComplexity { method_name, complexity, is_function, range } => {
-            handlers::cyclomatic_complexity::from_hir(
-                method_name,
-                *complexity,
-                *is_function,
-                *range,
-                ctx,
-            )
-        }
         BodyDiagnostic::MethodSize { method_name, size, is_function, range } => {
             handlers::method_size::from_hir(method_name, *size, *is_function, *range, ctx)
         }
