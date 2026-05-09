@@ -79,6 +79,7 @@ const SYNTAX_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CodeOutOfRegion,
     DiagnosticCode::DuplicateRegion,
     DiagnosticCode::DuplicateStringLiteral,
+    DiagnosticCode::EmptyRegion,
     DiagnosticCode::ExcessiveAutoTestCheck,
     DiagnosticCode::MultilingualStringHasAllDeclaredLanguages,
     DiagnosticCode::MultilingualStringUsingWithTemplate,
@@ -266,6 +267,7 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::duplicate_string_literal::check,
     ));
+    diagnostics.extend(run_diagnostic("EmptyRegion", ctx, handlers::empty_region::check));
     diagnostics.extend(run_diagnostic(
         "ExcessiveAutoTestCheck",
         ctx,

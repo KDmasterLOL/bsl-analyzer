@@ -24,7 +24,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::DeprecatedMethodCall,
     DiagnosticCode::DeprecatedTypeManagedForm,
     DiagnosticCode::EmptyCodeBlock,
-    DiagnosticCode::EmptyRegion,
     DiagnosticCode::EmptyStatement,
     DiagnosticCode::ExecuteExternalCode,
     DiagnosticCode::ExternalAppStarting,
@@ -226,9 +225,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::FunctionReturnsSamePrimitive { range } => {
             handlers::function_returns_same_primitive::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::EmptyRegion { name, range } => {
-            handlers::empty_region::from_hir(name, *range, ctx)
         }
         BodyDiagnostic::EmptyStatement { range } => {
             handlers::empty_statement::from_hir(*range, ctx)

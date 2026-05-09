@@ -32,15 +32,16 @@
 //! - Reports only inner if outer has code
 //!
 //! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! Preprocessor regions ARE processed by HIR lowering for control flow analysis.
-//! The diagnostic is emitted in `hir-def/body/lower/preproc.rs` during region processing.
+//! Track 2 Phase C §3.4 — handler reads the cached
+//! `RegionTree::is_region_empty` bit (computed at AST→`RegionTree`
+//! lowering time). The legacy `BodyDiagnostic::EmptyRegion` emit in
+//! `body/lower/preproc.rs` was retired in this slice; the
+//! single-source classification lives next to the rest of the region
+//! data on `RegionData`.
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -56,30 +57,60 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::EmptyRegion` is encountered.
-pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+/// Track 2 Phase C §3.4 — handler-side detection consuming the
+/// cached `RegionTree::is_region_empty` bit via `ctx.region_tree()`.
+/// Replaces the legacy `from_hir` adapter (BodyDiagnostic-fed) and
+/// the AST walks in `body/lower/preproc::is_empty_region`.
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::EmptyRegion;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
-    Some(Diagnostic {
-        code,
-        message: format!("Область '{}' пуста", name),
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+    let region_tree = ctx.region_tree();
+    let mut out = Vec::new();
+    for (idx, region) in region_tree.regions() {
+        if !region_tree.is_region_empty(idx) {
+            continue;
+        }
+        out.push(Diagnostic {
+            code,
+            message: format!("Область '{}' пуста", region.name.as_str()),
+            severity: ctx.severity(code),
+            range: region.range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+    // Sort by source position for deterministic output (the
+    // `Arena::iter` order isn't position-sorted by construction).
+    out.sort_by_key(|d| d.range.start());
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    /// Codex round-A regression guard for the §3.4 migration: the
+    /// retired `lower_region_stmts` emit ran inside method lowering
+    /// for method-local regions. Without recursing into method
+    /// bodies in `RegionTreeBuilder::collect_regions`, the migrated
+    /// handler would silently miss them.
+    #[test]
+    fn test_method_local_empty_region_is_detected() {
+        let code = r#"Процедура Тест()
+    #Область ВнутриМетода
+    // комментарий
+    #КонецОбласти
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        assert_eq!(diags.len(), 1, "method-local empty region must still be detected after §3.4");
+        assert!(diags[0].message.contains("ВнутриМетода"));
+    }
+
     #[test]
     fn test_comment_only_region_is_empty() {
         let code = r#"#Область Тест

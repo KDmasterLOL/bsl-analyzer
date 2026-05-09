@@ -50,6 +50,16 @@ pub struct RegionData {
 
     /// Depth in the region hierarchy (0 for top-level).
     pub depth: u32,
+
+    /// Track 2 Phase C §3.4: `true` when the region contains only
+    /// comments / whitespace / nested empty regions — i.e. nothing
+    /// meaningful. Computed at AST→`RegionTree` lowering time using
+    /// the same logic the retired
+    /// `body/lower/preproc::is_empty_region` helper used. The §3.4
+    /// `EmptyRegion` migration consumes this through
+    /// [`RegionTree::is_region_empty`] — handler reads the bit
+    /// instead of re-walking the AST.
+    pub is_empty: bool,
 }
 
 /// Hierarchical tree of regions in a module.
@@ -98,6 +108,15 @@ impl RegionTree {
     /// Get top-level regions.
     pub fn root_regions(&self) -> &[RegionIdx] {
         &self.root_regions
+    }
+
+    /// Track 2 Phase C §3.4: `true` when the region at `idx` is
+    /// "empty" — contains only comments / whitespace / nested empty
+    /// regions. Used by the §3.4 `EmptyRegion` handler to replace the
+    /// retired `body/lower/preproc::is_empty_region` AST walk with a
+    /// pre-computed RegionTree bit.
+    pub fn is_region_empty(&self, idx: RegionIdx) -> bool {
+        self.regions[idx].is_empty
     }
 
     /// Get a region by its index.
@@ -243,10 +262,20 @@ impl RegionTreeBuilder {
                 SyntaxKind::PRE_REGION_DIR => {
                     self.process_region(&child);
                 }
-                // Recurse into preprocessor conditionals
+                // Recurse into preprocessor conditionals.
                 SyntaxKind::PRE_IF_DIR
                 | SyntaxKind::PRE_ELSE_CLAUSE
                 | SyntaxKind::PRE_ELSIF_CLAUSE => {
+                    self.collect_regions(&child);
+                }
+                // Track 2 Phase C §3.4 fix: descend into method bodies
+                // and statement lists so the RegionTree captures
+                // method-local regions too. The legacy
+                // `lower_region_stmts` emit ran inside method
+                // lowering for these; without recursing here the §3.4
+                // `EmptyRegion` migration would silently drop
+                // method-local empty regions.
+                SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF | SyntaxKind::STMT_LIST => {
                     self.collect_regions(&child);
                 }
                 _ => {}
@@ -276,6 +305,11 @@ impl RegionTreeBuilder {
         let parent = self.parent_stack.last().copied();
         let depth = self.parent_stack.len() as u32;
 
+        // Track 2 Phase C §3.4: classify region emptiness at
+        // construction time using the same AST predicate the retired
+        // `body/lower/preproc::is_empty_region` used.
+        let is_empty = is_region_node_empty(node);
+
         // Allocate region
         let region_idx = self.tree.regions.alloc(RegionData {
             name,
@@ -284,6 +318,7 @@ impl RegionTreeBuilder {
             parent,
             children: Vec::new(),
             depth,
+            is_empty,
         });
 
         // Add to position map
@@ -342,6 +377,53 @@ impl RegionTreeBuilder {
             node.text_range().start() + text_size::TextSize::from(first_line_len as u32),
         )
     }
+}
+
+/// Track 2 Phase C §3.4: classify whether a `PRE_REGION_DIR` node
+/// holds only comments / whitespace / nested empty regions. Mirrors
+/// the retired `body/lower/preproc::is_empty_region` predicate; lifted
+/// into `region_tree` so the `RegionTree` consumers (the §3.4
+/// `EmptyRegion` handler in particular) can read the result through
+/// `RegionData::is_empty` instead of re-walking the AST.
+fn is_region_node_empty(region_node: &SyntaxNode) -> bool {
+    for child in region_node.children() {
+        if is_meaningful_region_content(&child) {
+            return false;
+        }
+        if child.kind() == SyntaxKind::PRE_REGION_DIR && !is_region_node_empty(&child) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Statement kinds that count as "meaningful" content for the purpose
+/// of the §3.4 `EmptyRegion` classification — anything that lowers
+/// to a HIR statement or declaration the user expects to find inside
+/// a region.
+fn is_meaningful_region_content(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::PROCEDURE_DEF
+            | SyntaxKind::FUNCTION_DEF
+            | SyntaxKind::VAR_DEF
+            | SyntaxKind::ASSIGN_STMT
+            | SyntaxKind::CALL_STMT
+            | SyntaxKind::RETURN_STMT
+            | SyntaxKind::IF_STMT
+            | SyntaxKind::WHILE_STMT
+            | SyntaxKind::FOR_STMT
+            | SyntaxKind::FOR_EACH_STMT
+            | SyntaxKind::TRY_STMT
+            | SyntaxKind::RAISE_STMT
+            | SyntaxKind::BREAK_STMT
+            | SyntaxKind::CONTINUE_STMT
+            | SyntaxKind::EXECUTE_STMT
+            | SyntaxKind::GOTO_STMT
+            | SyntaxKind::LABEL_STMT
+            | SyntaxKind::ADD_HANDLER_STMT
+            | SyntaxKind::REMOVE_HANDLER_STMT
+    )
 }
 
 /// Lower AST to RegionTree.

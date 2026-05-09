@@ -644,10 +644,6 @@ pub enum BodyDiagnostic {
     /// User-defined methods with these names will conflict with platform methods.
     GlobalContextMethodCollision8312 { method_name: String, range: TextRange },
 
-    /// Empty preprocessor region (#Область/#КонецОбласти).
-    /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
-    EmptyRegion { name: String, range: TextRange },
-
     /// Empty statement (standalone semicolon).
     /// Detected when EMPTY_STMT AST node is encountered without parser errors nearby.
     EmptyStatement { range: TextRange },
@@ -1093,7 +1089,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::FunctionReturnsSamePrimitive { range } => *range,
             BodyDiagnostic::GetFormMethod { range, .. } => *range,
             BodyDiagnostic::GlobalContextMethodCollision8312 { range, .. } => *range,
-            BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
             BodyDiagnostic::MissingSemicolon { range } => *range,
             BodyDiagnostic::IfElseDuplicatedCondition { range, .. } => *range,
