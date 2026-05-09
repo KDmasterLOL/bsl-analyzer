@@ -598,6 +598,12 @@ impl AnalysisProvider for StreamingProvider {
         method.docs.clone()
     }
 
+    fn variable_docs(&self, variable_id: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
+        let symbol_tree = self.symbol_tree(variable_id.module);
+        let variable = symbol_tree.find_variable_by_id(variable_id)?;
+        variable.docs.clone()
+    }
+
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,

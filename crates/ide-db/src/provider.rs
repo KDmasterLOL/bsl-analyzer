@@ -13,7 +13,7 @@ use bsl_metadata::Configuration;
 use hir::{
     dataflow::effect_summary::EffectSummary, AssignmentResolution, DefWithBodyId,
     InferenceDiagnostic, InferenceResult, ItemTree, MethodDocs, MethodId, ModuleBodies, ModuleId,
-    ModuleIndex, ModuleMetadata, SymbolTree,
+    ModuleIndex, ModuleMetadata, SymbolTree, VariableDocs, VariableId,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
@@ -214,6 +214,14 @@ pub trait AnalysisProvider {
     /// Extracts and parses leading comments (lines starting with //)
     /// before a procedure or function definition.
     fn method_docs(&self, method_id: MethodId) -> Option<Arc<MethodDocs>>;
+
+    /// Get parsed documentation for a module-level variable.
+    ///
+    /// Mirrors `method_docs` for variables: combines leading,
+    /// inter-annotation, and trailing-on-`;` comment regions into a
+    /// `VariableDocs`. Returns `None` when the variable has no
+    /// description anywhere.
+    fn variable_docs(&self, variable_id: VariableId) -> Option<Arc<VariableDocs>>;
 
     // ========================================================================
     // Dataflow Analysis (for complex diagnostics)

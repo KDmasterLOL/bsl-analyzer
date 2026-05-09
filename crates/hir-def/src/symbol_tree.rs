@@ -19,7 +19,7 @@
 //! - **Documentation**: Method docs are parsed once during SymbolTree construction
 //!
 
-use crate::docs::MethodDocs;
+use crate::docs::{compute_variable_docs_with_node, MethodDocs, VariableDocs};
 use crate::item_tree::{Annotation, ItemTree, ModItem, Param};
 use crate::ty::doc_types::{parse_method_doc_types, MethodTypeHints};
 use crate::type_ref::TypeRef;
@@ -118,6 +118,12 @@ pub struct VariableSymbol {
 
     /// Source location of the variable name (for diagnostics).
     pub name_range: TextRange,
+
+    /// Parsed documentation for this variable (leading, inter-annotation,
+    /// and trailing comments). Pre-computed during [`SymbolTreeBuilder`]
+    /// construction; mirrors how `MethodSymbol.docs` is populated. `None`
+    /// when the variable carries no description anywhere.
+    pub docs: Option<Arc<VariableDocs>>,
 }
 
 /// Parameter symbol.
@@ -245,9 +251,6 @@ impl SymbolTree {
                 ModItem::Variable(var_idx) => {
                     let var = item_tree.variable(*var_idx);
                     let key: SmolStr = var.name.as_str().to_lowercase().into();
-                    if variables_by_name.contains_key(&key) {
-                        continue;
-                    }
                     let variable_id = VariableId { module: module_id, local_id };
                     let symbol = VariableSymbol {
                         id: variable_id,
@@ -256,9 +259,16 @@ impl SymbolTree {
                         annotations: var.annotations.to_vec(),
                         source_range: var.source_range,
                         name_range: var.name_range,
+                        // No parse tree available in the no-docs test path,
+                        // so docs are intentionally None — symmetric to how
+                        // `MethodSymbol.docs` is set on this branch.
+                        docs: None,
                     };
                     let idx = variables.alloc(symbol);
-                    variables_by_name.entry(key).or_default().push(idx);
+                    let entry = variables_by_name.entry(key).or_default();
+                    if entry.is_empty() {
+                        entry.push(idx);
+                    }
                 }
             }
         }
@@ -319,6 +329,13 @@ impl SymbolTree {
     pub fn find_method_by_id(&self, method_id: MethodId) -> Option<&MethodSymbol> {
         self.methods().find(|m| m.id == method_id)
     }
+
+    /// Find variable by VariableId.
+    ///
+    /// Returns the variable with the given ID, or None if not found.
+    pub fn find_variable_by_id(&self, variable_id: VariableId) -> Option<&VariableSymbol> {
+        self.variables().find(|v| v.id == variable_id)
+    }
 }
 
 /// Builder for constructing SymbolTree.
@@ -331,6 +348,10 @@ struct SymbolTreeBuilder<'a> {
     variables: Arena<VariableSymbol>,
     methods_by_name: FxHashMap<SmolStr, Vec<Idx<MethodSymbol>>>,
     variables_by_name: FxHashMap<SmolStr, Vec<Idx<VariableSymbol>>>,
+    /// Pre-collected `VAR_DEF` nodes keyed by `text_range()` so the
+    /// per-variable docs lookup stays O(1) instead of O(file × variables).
+    /// Codex round-11 MAJOR-3.
+    var_def_nodes: FxHashMap<TextRange, syntax::SyntaxNode>,
 }
 
 impl<'a> SymbolTreeBuilder<'a> {
@@ -340,6 +361,13 @@ impl<'a> SymbolTreeBuilder<'a> {
         source_text: &'a str,
         item_tree: &'a ItemTree,
     ) -> Self {
+        let var_def_nodes: FxHashMap<TextRange, syntax::SyntaxNode> = parse
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == syntax::SyntaxKind::VAR_DEF)
+            .map(|n| (n.text_range(), n))
+            .collect();
+
         Self {
             module_id,
             parse,
@@ -349,6 +377,7 @@ impl<'a> SymbolTreeBuilder<'a> {
             variables: Arena::new(),
             methods_by_name: FxHashMap::default(),
             variables_by_name: FxHashMap::default(),
+            var_def_nodes,
         }
     }
 
@@ -438,13 +467,30 @@ impl<'a> SymbolTreeBuilder<'a> {
 
     fn add_variable(&mut self, local_id: u32, var: &crate::item_tree::Variable) {
         let key: SmolStr = var.name.as_str().to_lowercase().into();
-
-        // Skip duplicate module variable declarations
-        if self.variables_by_name.contains_key(&key) {
-            return;
-        }
-
         let variable_id = VariableId { module: self.module_id, local_id };
+
+        // ItemTree is derived from the same parse tree, so every
+        // `Variable::source_range` must round-trip through the
+        // pre-collected VAR_DEF map. A miss signals ItemTree↔parse
+        // drift; surface it in debug builds and recompute via the
+        // slow scanning path in release so a documented variable
+        // never gets silently flagged as "missing description".
+        let var_node = self.var_def_nodes.get(&var.source_range);
+        debug_assert!(
+            var_node.is_some(),
+            "VAR_DEF for variable {:?} not found in parse tree (range = {:?})",
+            var.name,
+            var.source_range,
+        );
+        let docs = match var_node {
+            Some(node) => compute_variable_docs_with_node(node, var, self.source_text),
+            None => crate::docs::compute_variable_docs(
+                self.parse,
+                self.item_tree,
+                variable_id,
+                self.source_text,
+            ),
+        };
 
         let symbol = VariableSymbol {
             id: variable_id,
@@ -453,10 +499,18 @@ impl<'a> SymbolTreeBuilder<'a> {
             annotations: var.annotations.to_vec(),
             source_range: var.source_range,
             name_range: var.name_range,
+            docs,
         };
 
         let idx = self.variables.alloc(symbol);
-        self.variables_by_name.entry(key).or_default().push(idx);
+        // Dedup only the name index — `find_variable(name)` still resolves
+        // to the first declaration (same semantics as before). Every
+        // VariableSymbol stays accessible by `find_variable_by_id`,
+        // which is what per-variable docs/diagnostic lookups need.
+        let entry = self.variables_by_name.entry(key).or_default();
+        if entry.is_empty() {
+            entry.push(idx);
+        }
     }
 
     fn build(self) -> SymbolTree {

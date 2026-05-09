@@ -209,6 +209,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.method_docs(method_id)
     }
 
+    fn variable_docs(&self, variable_id: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
+        self.db.variable_docs(variable_id)
+    }
+
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,

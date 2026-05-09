@@ -414,6 +414,32 @@ pub fn compute_variable_docs(
         .descendants()
         .find(|n| n.kind() == SyntaxKind::VAR_DEF && n.text_range() == variable.source_range)?;
 
+    compute_variable_docs_with_node(&var_node, variable, file_text)
+}
+
+/// Compute docs for a variable when the matching `VAR_DEF` node has
+/// already been resolved (batched callers pre-collect a
+/// `FxHashMap<TextRange, SyntaxNode>` to avoid O(file × variables)
+/// rescans — see Codex round-11 MAJOR-3).
+///
+/// The node lookup responsibility moves to the caller; this function is
+/// pure-text from the offsets it derives off `var_node`.
+pub fn compute_variable_docs_with_node(
+    var_node: &SyntaxNode,
+    variable: &crate::item_tree::Variable,
+    file_text: &str,
+) -> Option<Arc<VariableDocs>> {
+    debug_assert_eq!(
+        var_node.kind(),
+        SyntaxKind::VAR_DEF,
+        "compute_variable_docs_with_node expects a VAR_DEF node",
+    );
+    debug_assert_eq!(
+        var_node.text_range(),
+        variable.source_range,
+        "var_node range must match Variable::source_range",
+    );
+
     let var_keyword_offset: usize = var_node
         .children_with_tokens()
         .filter_map(|el| el.into_token())

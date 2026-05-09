@@ -545,6 +545,13 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.method_docs(method_id)
     }
 
+    fn variable_docs(
+        &self,
+        variable_id: hir::VariableId,
+    ) -> Option<std::sync::Arc<hir::VariableDocs>> {
+        self.db.variable_docs(variable_id)
+    }
+
     fn module_cfgs(&self, file_id: vfs::FileId) -> std::sync::Arc<hir::cfg::ModuleCfgs> {
         use ide_db::base_db::FileIdInput;
         use ide_db::RootDatabase;

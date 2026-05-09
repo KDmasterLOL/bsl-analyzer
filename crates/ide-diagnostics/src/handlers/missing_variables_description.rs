@@ -3,8 +3,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::ModItem;
-use syntax::{has_variable_description, SyntaxKind, TextRange};
+use hir::{ModItem, VariableId};
+use syntax::{SyntaxKind, TextRange};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -21,6 +21,13 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 /// Checks top-level module variables for a trailing or header description comment.
+///
+/// Track 2 §5.2: consumes the structured `VariableDocs` from the
+/// SymbolTree-cached `ctx.variable_docs(var_id)` and applies a
+/// hyperlink-first / presence / emptiness emission sequence. Hyperlink
+/// docs are treated as delegated (parity with `MissingParameterDescription`
+/// and `MissingReturnedValueDescription`); whitespace-only doc strings
+/// no longer pass as a description.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingVariablesDescription;
 
@@ -32,59 +39,49 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let tree = ctx.item_tree();
     let parse = ctx.parse();
     let root = parse.syntax_node();
-    let source_text = ctx.file_text();
+    let module_id = hir::ModuleId::new(ctx.file_id);
 
-    for item in tree.top_level_items() {
+    for (idx, item) in tree.top_level_items().iter().enumerate() {
         let ModItem::Variable(var_idx) = item else {
             continue;
         };
 
         let var = tree.variable(*var_idx);
+        let variable_id = VariableId { module: module_id, local_id: idx as u32 };
 
-        let var_node = root
+        let docs = ctx.variable_docs(variable_id);
+
+        // Hyperlink docs are intentionally delegated (`См. Метод()`),
+        // never treated as missing.
+        if docs.as_ref().is_some_and(|d| d.is_hyperlink()) {
+            continue;
+        }
+
+        // Both "no docs at all" and "docs with empty/whitespace purpose"
+        // collapse to the same diagnostic — no description.
+        let has_meaningful_purpose =
+            docs.as_ref().and_then(|d| d.purpose.as_deref()).is_some_and(|p| !p.trim().is_empty());
+
+        if has_meaningful_purpose {
+            continue;
+        }
+
+        // Find the VAR_DEF node only when we actually need to emit, to
+        // compute the diagnostic range. The handler's data is otherwise
+        // SymbolTree-cached.
+        let Some(var_node) = root
             .descendants()
-            .find(|n| n.kind() == SyntaxKind::VAR_DEF && n.text_range() == var.source_range);
-
-        let Some(var_node) = var_node else {
+            .find(|n| n.kind() == SyntaxKind::VAR_DEF && n.text_range() == var.source_range)
+        else {
             continue;
         };
 
-        let var_keyword_offset: usize = find_var_keyword_offset(&var_node).unwrap_or(0);
-        let first_annotation_offset = find_first_annotation_offset(&var_node);
-
-        if !has_variable_description(
-            &var_node,
-            var_keyword_offset,
-            &source_text,
-            first_annotation_offset,
-        ) {
-            let diag_range =
-                compute_variable_diagnostic_range(&var_node, var.name_range, var.is_export);
-            diagnostics.push(create_diagnostic(diag_range, code, ctx));
-        }
+        let diag_range =
+            compute_variable_diagnostic_range(&var_node, var.name_range, var.is_export);
+        diagnostics.push(create_diagnostic(diag_range, code, ctx));
     }
 
     diagnostics
-}
-
-fn find_var_keyword_offset(node: &syntax::SyntaxNode) -> Option<usize> {
-    for child in node.children_with_tokens() {
-        if let Some(token) = child.as_token() {
-            if token.kind() == SyntaxKind::KW_VAR {
-                return Some(token.text_range().start().into());
-            }
-        }
-    }
-    None
-}
-
-fn find_first_annotation_offset(node: &syntax::SyntaxNode) -> Option<usize> {
-    for child in node.children() {
-        if child.kind() == SyntaxKind::ANNOTATION {
-            return Some(child.text_range().start().into());
-        }
-    }
-    None
 }
 
 fn compute_variable_diagnostic_range(
@@ -288,5 +285,52 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingVariablesDescription);
+    }
+
+    #[test]
+    fn test_whitespace_only_comment_emits() {
+        // Track 2 §5.2 audit gap: an isolated `//` with no text was
+        // accepted by the legacy binary helper. The structured parser
+        // returns `purpose: None`, so the handler now emits.
+        let code = "//\nПерем Переменная;";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingVariablesDescription);
+    }
+
+    #[test]
+    fn test_hyperlink_only_doc_is_accepted() {
+        // `См.` delegated docs are intentionally not flagged — parity
+        // with `MissingParameterDescription` and
+        // `MissingReturnedValueDescription` hyperlink handling.
+        let code = "// См. ОбщегоНазначения.СомеVariable\nПерем Переменная;";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_empty_marker_then_hyperlink_is_accepted() {
+        // Codex round-B Q5 NIT: an isolated `//` ahead of the hyperlink
+        // is filtered by the extractor, so the parser still sees just
+        // the hyperlink and the handler skips. Documents the boundary
+        // between whitespace-only filtering and hyperlink delegation.
+        let code = "//\n// См. ОбщегоНазначения.Имя\nПерем Переменная;";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_duplicate_name_variables_each_get_own_diagnostic() {
+        // Codex round-B Q1 NIT: SymbolTree now stores every variable
+        // declaration in the arena (legacy code skipped duplicate-name
+        // entries entirely). Each duplicate carries its own
+        // `VariableId`, so `ctx.variable_docs(id)` resolves correctly
+        // per declaration and every undocumented duplicate emits.
+        let code = "Перем Дубликат;\nПерем Дубликат;";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 2);
+        for d in &diagnostics {
+            assert_eq!(d.code, DiagnosticCode::MissingVariablesDescription);
+        }
     }
 }

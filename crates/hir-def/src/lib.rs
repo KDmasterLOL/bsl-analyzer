@@ -279,6 +279,14 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// ```
     fn method_docs(&self, method: MethodId) -> Option<Arc<crate::docs::MethodDocs>>;
 
+    /// Get parsed documentation for a module-level variable.
+    ///
+    /// Pre-computed during `SymbolTree` construction and read from
+    /// `VariableSymbol.docs` (cached via `symbol_tree_query` LRU=512).
+    /// Returns `None` when the variable carries no description anywhere
+    /// (no leading, inter-annotation, or trailing comment).
+    fn variable_docs(&self, variable: VariableId) -> Option<Arc<crate::docs::VariableDocs>>;
+
     /// Get workspace-wide symbol index for CommonModules.
     ///
     /// Builds a global index of all CommonModules in the provided files, enabling

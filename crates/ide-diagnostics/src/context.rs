@@ -406,6 +406,11 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.method_docs(method_id))
     }
 
+    /// Get parsed documentation for a module-level variable.
+    pub fn variable_docs(&self, variable_id: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
+        self.query(|p| p.variable_docs(variable_id))
+    }
+
     /// Get external references (qualified calls) from current module.
     pub fn file_external_refs(&self) -> std::sync::Arc<Vec<hir::ExternalRef>> {
         let module_id = hir::ModuleId::new(self.file_id);

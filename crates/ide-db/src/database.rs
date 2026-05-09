@@ -331,6 +331,12 @@ impl DefDatabase for RootDatabaseImpl {
         method_symbol.docs.clone()
     }
 
+    fn variable_docs(&self, variable: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
+        let symbol_tree = self.symbol_tree(variable.module);
+        let variable_symbol = symbol_tree.find_variable_by_id(variable)?;
+        variable_symbol.docs.clone()
+    }
+
     fn workspace_symbols(
         &self,
         source_root_id: base_db::SourceRootId,

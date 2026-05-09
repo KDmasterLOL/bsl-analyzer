@@ -48,7 +48,9 @@ pub use hir_def::DefDatabase;
 // Re-export documentation types
 pub use hir_def::call_graph;
 pub use hir_def::call_graph::ModuleCallSummary;
-pub use hir_def::docs::{is_dotted_type_reference, MethodDocs, ParameterDoc};
+pub use hir_def::docs::{
+    is_dotted_type_reference, MethodDocs, ParameterDoc, TypeDoc, VariableDocs,
+};
 
 // Re-export analysis modules
 pub use hir_def::catch_class;
