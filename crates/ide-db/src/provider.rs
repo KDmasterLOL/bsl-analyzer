@@ -11,13 +11,14 @@ use std::sync::Arc;
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
 use hir::{
-    AssignmentResolution, DefWithBodyId, InferenceDiagnostic, InferenceResult, ItemTree,
-    MethodDocs, MethodId, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
+    dataflow::effect_summary::EffectSummary, AssignmentResolution, DefWithBodyId,
+    InferenceDiagnostic, InferenceResult, ItemTree, MethodDocs, MethodId, ModuleBodies, ModuleId,
+    ModuleIndex, ModuleMetadata, SymbolTree,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
 
-use crate::SdblHirEntries;
+use crate::{effects::ModuleSecurityState, SdblHirEntries};
 
 /// Visible configuration for a file: main config or extension.
 ///
@@ -282,6 +283,35 @@ pub trait AnalysisProvider {
     ///
     /// Returns `None` if workspace root is not available or file not found.
     fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId>;
+
+    // ========================================================================
+    // Track 2 §1.4c — Security/effect analyses
+    // ========================================================================
+
+    /// Per-method security-effect summary (§1.4 — bitwise OR over the 6
+    /// security-relevant effect bits + transitive recursion flag).
+    ///
+    /// Default impl returns [`EffectSummary::EMPTY`] so providers that
+    /// don't run the analysis (most non-Salsa modes) opt out without
+    /// breaking consumers — §6.5's cognitive recursion penalty and
+    /// §1.6's `PrivilegedModuleMethodCall` handler interpret an EMPTY
+    /// summary as "no known transitive effects", which is a safe
+    /// degraded reading when caching is unavailable.
+    fn method_effect_summary(&self, _method: MethodId) -> Arc<EffectSummary> {
+        Arc::new(EffectSummary::EMPTY)
+    }
+
+    /// Per-module privileged/safe-mode lifetime state (§1.2 saturating
+    /// counter lattice batched per method).
+    ///
+    /// Default impl returns an empty [`ModuleSecurityState`] (no
+    /// methods analysed) so providers that don't run the analysis opt
+    /// out cleanly. The §1.6 `SetPrivilegedMode` / `DisableSafeMode`
+    /// handlers degrade to their pre-Track-2 behaviour when this
+    /// returns empty.
+    fn module_security_state(&self, _file_id: FileId) -> Arc<ModuleSecurityState> {
+        Arc::new(ModuleSecurityState::default())
+    }
 }
 
 #[cfg(test)]

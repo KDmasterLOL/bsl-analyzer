@@ -260,4 +260,21 @@ impl AnalysisProvider for SalsaProvider<'_> {
         }
         crate::vfs_helpers::get_file_path(self.db, file_id).map(|p| p.to_string_lossy().to_string())
     }
+
+    // ========================================================================
+    // Track 2 §1.4c — Security/effect Salsa accessors
+    // ========================================================================
+
+    fn method_effect_summary(
+        &self,
+        method: hir::MethodId,
+    ) -> Arc<hir::dataflow::effect_summary::EffectSummary> {
+        let method_input = hir::MethodIdInput::new(self.db, method);
+        crate::effects::method_effect_summary_query(self.db, method_input)
+    }
+
+    fn module_security_state(&self, file_id: FileId) -> Arc<crate::effects::ModuleSecurityState> {
+        let input = FileIdInput::new(self.db, file_id);
+        crate::effects::module_security_state_query(self.db, input)
+    }
 }

@@ -351,6 +351,38 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
     }
 
+    fn module_security_state(&self, file_id: FileId) -> Arc<crate::effects::ModuleSecurityState> {
+        // §1.4c override for streaming: the security-state lattice is
+        // per-method (no cross-method dependency edges), so the same
+        // on-the-fly compute pattern as `module_path_terminates` works
+        // here. Run `dataflow::security_state::analyze` against each
+        // method body and assemble the batch.
+        let module_id = ModuleId::new(file_id);
+        let module_cfgs = self.module_cfgs(file_id);
+        let module_bodies = self.module_bodies(module_id);
+
+        let mut methods = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            let cfg = match module_cfgs.get(local_id) {
+                Some(c) => c.clone(),
+                None => continue,
+            };
+            if let Some(result) = hir::dataflow::security_state::analyze(cfg, body.clone()) {
+                methods.insert(local_id, Arc::new(result));
+            }
+        }
+        // The `ModuleSecurityState::methods` field is private — use the
+        // crate-private constructor exposed below to keep the trait
+        // boundary clean.
+        Arc::new(crate::effects::ModuleSecurityState::from_methods(methods))
+    }
+
+    // Note: `method_effect_summary` deliberately uses the trait's
+    // default impl (returns `EffectSummary::EMPTY`). Cross-module
+    // recursion resolution requires Salsa cycle handling, which is
+    // unsafe to do on-the-fly without caching — see §1.4c default-impl
+    // rationale in `provider.rs`.
+
     fn module_path_terminates(
         &self,
         file_id: FileId,

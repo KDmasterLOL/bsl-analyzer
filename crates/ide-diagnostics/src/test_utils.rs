@@ -554,6 +554,27 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         // Not supported in test provider
         None
     }
+
+    // ========================================================================
+    // Track 2 §1.4c — Security/effect Salsa accessors
+    // ========================================================================
+
+    fn method_effect_summary(
+        &self,
+        method: hir::MethodId,
+    ) -> std::sync::Arc<hir::dataflow::effect_summary::EffectSummary> {
+        let method_input = hir::MethodIdInput::new(&self.db, method);
+        ide_db::effects::method_effect_summary_query(&self.db, method_input)
+    }
+
+    fn module_security_state(
+        &self,
+        file_id: vfs::FileId,
+    ) -> std::sync::Arc<ide_db::effects::ModuleSecurityState> {
+        use ide_db::base_db::FileIdInput;
+        let input = FileIdInput::new(&self.db, file_id);
+        ide_db::effects::module_security_state_query(&self.db, input)
+    }
 }
 
 /// Test helper for module-level metadata diagnostics.

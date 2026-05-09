@@ -93,6 +93,17 @@ pub mod dataflow {
             analyze_open_resources, OpenResourcesResult, OpenSet, ResourceEvent, ResourceProvider,
         };
     }
+
+    pub mod effect_summary {
+        pub use ::dataflow::effect_summary::{analyze_method_effects, CalleeKey, EffectSummary};
+    }
+
+    pub mod security_state {
+        pub use ::dataflow::security_state::{
+            analyze, PrivilegeCounter, SaturatingCount, SecurityCounters, SecurityModeState,
+            SecurityStateProvider, K_MAX,
+        };
+    }
 }
 
 // Re-export additional types needed by ide-db
