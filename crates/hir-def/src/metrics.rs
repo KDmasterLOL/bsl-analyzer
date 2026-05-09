@@ -123,7 +123,11 @@ impl MetricsVisitor {
 
             Stmt::While { condition, body: loop_body } => {
                 self.cognitive += 1 + nesting;
-                self.note_condition(body, *condition);
+                // `While` conditions are NOT recorded in `if_conditions`
+                // — that field is the per-condition feed for the
+                // `IfConditionComplexity` diagnostic, whose legacy scope
+                // is `If` / `Elsif` only. Cognitive complexity still
+                // gets the AND/OR contribution via `visit_expr`.
                 self.visit_expr(body, *condition);
                 for &child in loop_body.iter() {
                     self.visit_stmt(body, child, nesting + 1);
@@ -230,10 +234,11 @@ impl MetricsVisitor {
         match body.expr_idx(expr_id) {
             Expr::Ternary { condition, then_expr, else_expr } => {
                 self.cognitive += 1;
-                // The plan classifies ternary as a *condition* too — count
-                // its logical-operator burden against the same per-method
-                // ceiling as if/while.
-                self.note_condition(body, *condition);
+                // Ternary conditions are not in the
+                // `IfConditionComplexity` diagnostic scope, so they do
+                // NOT go into `if_conditions`. The AND/OR
+                // sub-expressions still contribute to cognitive via
+                // the recursive `visit_expr` calls below.
                 self.visit_expr(body, *condition);
                 self.visit_expr(body, *then_expr);
                 self.visit_expr(body, *else_expr);
@@ -410,7 +415,10 @@ mod tests {
     }
 
     /// Nested if-while: outer If +1, While inside +1+1 nesting; max
-    /// statement depth 2; one logical AND in the inner condition.
+    /// statement depth 2; one logical AND in the While condition.
+    /// `if_condition_max` is 0 because the While condition is NOT
+    /// recorded in `if_conditions` (the legacy `IfConditionComplexity`
+    /// diagnostic only fires for `If`/`Elsif`).
     #[test]
     fn nested_if_while_with_and_op() {
         let body = parse_and_lower(
@@ -429,8 +437,34 @@ mod tests {
         assert_eq!(m.cognitive, 4);
         // Body inside While inside If is at depth 2.
         assert_eq!(m.max_nesting, 2);
-        // The `Б И В` condition has one AND.
-        assert_eq!(m.if_condition_max, 1);
+        // Only the `Если А` condition is recorded; A has 0 logical ops.
+        assert_eq!(m.if_conditions.len(), 1);
+        assert_eq!(m.if_condition_max, 0);
+    }
+
+    /// Codex stop-hook regression guard: `if_conditions` records ONLY
+    /// `Если`/`ИначеЕсли` conditions. `Пока` and ternary conditions
+    /// must stay out of the list (their AND/OR ops still contribute
+    /// to `cognitive` via `visit_expr`, but the per-condition feed for
+    /// `IfConditionComplexity` filters them out).
+    #[test]
+    fn while_and_ternary_conditions_are_not_recorded() {
+        let body = parse_and_lower(
+            r#"
+Процедура Тест()
+    Пока А И Б Цикл
+        Х = ?(В ИЛИ Г, 1, 2);
+    КонецЦикла;
+КонецПроцедуры
+"#,
+        );
+        let m = compute_hir_metrics(&body);
+        assert!(
+            m.if_conditions.is_empty(),
+            "While/ternary conditions must not appear in if_conditions, got {:?}",
+            m.if_conditions
+        );
+        assert_eq!(m.if_condition_max, 0);
     }
 
     /// `Если А И Б ИЛИ В Тогда`: condition has 2 logical ops; cognitive
