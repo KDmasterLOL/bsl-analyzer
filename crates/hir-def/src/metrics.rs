@@ -20,7 +20,28 @@
 //! `ide-db::queries::method_hir_metrics_query` (§6.3).
 
 use crate::hir::{BinaryOp, Expr, ExprIdx, IfStmt, Stmt, StmtIdx};
-use crate::Body;
+use crate::{Body, ExprId, IdConversion};
+
+/// One condition expression visited by the metrics walker, paired with
+/// the number of logical `И`/`AND`/`Или`/`OR` operators it contains.
+///
+/// Tracked because the legacy `IfConditionComplexity` diagnostic emits
+/// once **per condition** that exceeds its threshold, not once per
+/// method. The §6.4 handler migration consumes this list to preserve
+/// the per-condition source-precision the user-visible diagnostic
+/// already gives — collapsing to a single per-method maximum
+/// (`if_condition_max`) would silently regress the diagnostic from N
+/// findings to 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConditionMetrics {
+    /// HIR id of the condition expression. Use
+    /// `BodySourceMap::expr_range(condition)` to recover the source
+    /// range the diagnostic should attach to.
+    pub condition: ExprId,
+    /// Count of logical `AND` / `OR` operators in the condition's
+    /// expression tree.
+    pub logical_op_count: u32,
+}
 
 /// Per-method HIR-structural metrics, produced by
 /// [`compute_hir_metrics`].
@@ -28,8 +49,9 @@ use crate::Body;
 /// Every field is independent — adding a new metric does not invalidate
 /// the existing ones, so future slices can extend the struct without
 /// re-running the walks the migrated handlers depend on. `Default::default`
-/// is the empty-method state (`cognitive = 0`, all counters at 0).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// is the empty-method state (every counter at zero, `if_conditions`
+/// empty).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HirMethodMetrics {
     /// SonarSource Cognitive Complexity v1.4 score. Same algorithm as
     /// the legacy `cognitive_complexity::calculate_complexity`, just
@@ -41,12 +63,16 @@ pub struct HirMethodMetrics {
     /// `ForEach`, `PreprocIf`) all increase the depth of their bodies
     /// by one.
     pub max_nesting: u32,
-    /// Maximum number of logical `И`/`AND`/`Или`/`OR` operators in any
-    /// **conditional** expression in the body — the value the
-    /// `IfConditionComplexity` diagnostic compares against its
-    /// threshold. The walker reports `max` across every `If`/`Elsif`
-    /// condition as well as the implicit conditions of `While` /
-    /// `Ternary`.
+    /// Per-condition logical-operator counts for every `If` / `Elsif`
+    /// / `While` / ternary condition in the body, in source order.
+    /// The §6.4 `IfConditionComplexity` migration filters this list
+    /// against the diagnostic threshold and emits one finding per
+    /// over-budget entry, preserving the legacy per-condition
+    /// source-precision.
+    pub if_conditions: Vec<ConditionMetrics>,
+    /// Convenience value: `if_conditions.iter().map(|c| c.logical_op_count).max().unwrap_or(0)`.
+    /// The `NestedStatements` and any future "max-of-conditions"
+    /// consumer can read this without iterating `if_conditions`.
     pub if_condition_max: u32,
 }
 
@@ -68,15 +94,18 @@ pub fn compute_hir_metrics(body: &Body) -> HirMethodMetrics {
 struct MetricsVisitor {
     cognitive: u32,
     max_nesting: u32,
-    if_condition_max: u32,
+    if_conditions: Vec<ConditionMetrics>,
 }
 
 impl MetricsVisitor {
     fn finish(self) -> HirMethodMetrics {
+        let if_condition_max =
+            self.if_conditions.iter().map(|c| c.logical_op_count).max().unwrap_or(0);
         HirMethodMetrics {
             cognitive: self.cognitive,
             max_nesting: self.max_nesting,
-            if_condition_max: self.if_condition_max,
+            if_conditions: self.if_conditions,
+            if_condition_max,
         }
     }
 
@@ -94,7 +123,7 @@ impl MetricsVisitor {
 
             Stmt::While { condition, body: loop_body } => {
                 self.cognitive += 1 + nesting;
-                self.note_logical_ops(body, *condition);
+                self.note_condition(body, *condition);
                 self.visit_expr(body, *condition);
                 for &child in loop_body.iter() {
                     self.visit_stmt(body, child, nesting + 1);
@@ -170,7 +199,7 @@ impl MetricsVisitor {
 
     fn visit_if(&mut self, body: &Body, if_stmt: &IfStmt, nesting: u32) {
         self.cognitive += 1 + nesting;
-        self.note_logical_ops(body, if_stmt.condition);
+        self.note_condition(body, if_stmt.condition);
         self.visit_expr(body, if_stmt.condition);
 
         for &child in if_stmt.then_branch.iter() {
@@ -179,7 +208,7 @@ impl MetricsVisitor {
 
         for (elsif_cond, elsif_body) in if_stmt.elsif_branches.iter() {
             self.cognitive += 1;
-            self.note_logical_ops(body, *elsif_cond);
+            self.note_condition(body, *elsif_cond);
             self.visit_expr(body, *elsif_cond);
             for &child in elsif_body.iter() {
                 self.visit_stmt(body, child, nesting + 2);
@@ -204,7 +233,7 @@ impl MetricsVisitor {
                 // The plan classifies ternary as a *condition* too — count
                 // its logical-operator burden against the same per-method
                 // ceiling as if/while.
-                self.note_logical_ops(body, *condition);
+                self.note_condition(body, *condition);
                 self.visit_expr(body, *condition);
                 self.visit_expr(body, *then_expr);
                 self.visit_expr(body, *else_expr);
@@ -249,14 +278,17 @@ impl MetricsVisitor {
         }
     }
 
-    /// Count `И`/`AND`/`Или`/`OR` operators in `expr` and update the
-    /// per-method maximum. Used for the `IfConditionComplexity`
-    /// diagnostic threshold.
-    fn note_logical_ops(&mut self, body: &Body, expr: ExprIdx) {
-        let count = count_logical_ops(body, expr);
-        if count > self.if_condition_max {
-            self.if_condition_max = count;
-        }
+    /// Count `И`/`AND`/`Или`/`OR` operators in `expr` and record one
+    /// `ConditionMetrics` entry. The §6.4 `IfConditionComplexity`
+    /// migration iterates `if_conditions` to emit per-condition
+    /// findings; the `if_condition_max` convenience field is derived
+    /// from this list in [`MetricsVisitor::finish`].
+    fn note_condition(&mut self, body: &Body, condition: ExprIdx) {
+        let count = count_logical_ops(body, condition);
+        self.if_conditions.push(ConditionMetrics {
+            condition: ExprId::from_idx(condition),
+            logical_op_count: count,
+        });
     }
 }
 
@@ -419,6 +451,34 @@ mod tests {
         );
         let m = compute_hir_metrics(&body);
         assert_eq!(m.cognitive, 1 + 2 + 1);
+        assert_eq!(m.if_condition_max, 2);
+    }
+
+    /// Codex stop-hook regression guard: the legacy
+    /// `IfConditionComplexity` diagnostic emits **per condition**, so
+    /// `if_conditions` must carry one entry per visited condition (not
+    /// only the max). Two `Если` blocks with different operator counts
+    /// must produce two entries.
+    #[test]
+    fn if_conditions_lists_each_condition_separately() {
+        let body = parse_and_lower(
+            r#"
+Процедура Тест()
+    Если А И Б ИЛИ В Тогда
+        Сообщить("");
+    КонецЕсли;
+    Если Г Тогда
+        Сообщить("");
+    КонецЕсли;
+КонецПроцедуры
+"#,
+        );
+        let m = compute_hir_metrics(&body);
+        assert_eq!(m.if_conditions.len(), 2);
+        // Source order: the `А И Б ИЛИ В` condition is first.
+        assert_eq!(m.if_conditions[0].logical_op_count, 2);
+        assert_eq!(m.if_conditions[1].logical_op_count, 0);
+        // The convenience `if_condition_max` matches the largest.
         assert_eq!(m.if_condition_max, 2);
     }
 
