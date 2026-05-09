@@ -442,11 +442,6 @@ pub enum BodyDiagnostic {
     /// Detected when Type() is called with deprecated type name string.
     DeprecatedTypeManagedForm { type_name: String, range: TextRange },
 
-    /// Unsafe call to УстановитьБезопасныйРежим / SetSafeMode or
-    /// УстановитьОтключениеБезопасногоРежима / SetSafeModeDisabled.
-    /// Detected when safe mode methods are called with unsafe arguments.
-    DisableSafeMode { method_name: String, range: TextRange },
-
     /// Magic number literal (hardcoded number that should be a constant).
     /// Value is stored as string to allow Eq derivation.
     /// Context is used for filtering by excludedConstructors and allowMagicIndexes config.
@@ -703,10 +698,6 @@ pub enum BodyDiagnostic {
     /// - `ЭтотОбъект["Поле"]` is NOT an error (INDEX_EXPR handled separately)
     /// - CommonModule with ReturnValueReuse != DontUse are NOT checked
     RedundantAccessToObject { kind: RedundantAccessKind, range: TextRange },
-
-    /// SetPrivilegedMode/УстановитьПривилегированныйРежим call that enables privileged mode.
-    /// Safe mode calls (with False argument) are not flagged.
-    SetPrivilegedModeCall { range: TextRange },
 
     /// Style element constructor (Цвет/Color, Шрифт/Font, Рамка/Border).
     /// Detected when New expression creates a style element type.
@@ -1154,7 +1145,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::DeprecatedFind { range, .. } => *range,
             BodyDiagnostic::DeprecatedMessage { range, .. } => *range,
             BodyDiagnostic::DeprecatedTypeManagedForm { range, .. } => *range,
-            BodyDiagnostic::DisableSafeMode { range, .. } => *range,
             BodyDiagnostic::MagicNumber { range, .. } => *range,
             BodyDiagnostic::SelfAssign { range } => *range,
             BodyDiagnostic::FunctionShouldHaveReturn { range } => *range,
@@ -1192,7 +1182,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::ProcedureReturnsValue { range } => *range,
             BodyDiagnostic::ReservedWordAsMethodName { range, .. } => *range,
             BodyDiagnostic::RedundantAccessToObject { range, .. } => *range,
-            BodyDiagnostic::SetPrivilegedModeCall { range } => *range,
             BodyDiagnostic::StyleElementConstructors { range, .. } => *range,
             BodyDiagnostic::TempFilesDir { range, .. } => *range,
             BodyDiagnostic::TernaryOperatorUsage { range } => *range,

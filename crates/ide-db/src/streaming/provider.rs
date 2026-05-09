@@ -371,10 +371,28 @@ impl AnalysisProvider for StreamingProvider {
                 methods.insert(local_id, Arc::new(result));
             }
         }
-        // The `ModuleSecurityState::methods` field is private — use the
+        // Codex round-1 MAJOR fix: cover module-level (top-level) code
+        // too. Streaming mode has no `module_level_cfg_query` Salsa
+        // cache, so build the CFG on-the-fly the same way
+        // `module_level_cfg_query` does.
+        let module_level = module_bodies
+            .module_code()
+            .filter(|body| !body.body_stmts_typed().is_empty())
+            .and_then(|body| {
+                let cfg = Arc::new(hir::cfg::CfgBuilder::new().build_graph_from_hir(
+                    body.body_stmts_typed(),
+                    body,
+                    None,
+                ));
+                hir::dataflow::security_state::analyze(cfg, body.clone()).map(Arc::new)
+            });
+        // The `ModuleSecurityState` fields are private — use the
         // crate-private constructor exposed below to keep the trait
         // boundary clean.
-        Arc::new(crate::effects::ModuleSecurityState::from_methods(methods))
+        Arc::new(crate::effects::ModuleSecurityState::from_methods_with_module_level(
+            methods,
+            module_level,
+        ))
     }
 
     // Note: `method_effect_summary` deliberately uses the trait's

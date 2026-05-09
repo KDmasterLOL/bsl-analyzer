@@ -344,6 +344,21 @@ where
     check_ast_diagnostic(code, check_fn)
 }
 
+/// Run a single dataflow-based handler on test code.
+///
+/// Track 2 §1.6 Group C: alias of [`check_ast_diagnostic`] used by the
+/// `set_privileged_mode` / `disable_safe_mode` handlers, which consume
+/// the §1.2 saturating-counter lattice through `module_security_state`.
+/// Because `SalsaProvider` already implements that accessor, the test
+/// setup is identical to the AST path — the alias documents the
+/// dataflow dependency at the call site.
+pub fn check_dataflow_diagnostic<F>(code: &str, check_fn: F) -> Vec<Diagnostic>
+where
+    F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
+{
+    check_ast_diagnostic(code, check_fn)
+}
+
 /// Run diagnostics on test code with custom configuration.
 pub fn check_hir_diagnostic_with_config<F>(
     code: &str,

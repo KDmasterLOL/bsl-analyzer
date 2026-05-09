@@ -367,12 +367,6 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         callee_node.clone()
     };
 
-    // Track safe mode method name for later diagnostic check
-    let mut safe_mode_name: Option<String> = None;
-
-    // Track privileged mode method name for later diagnostic check
-    let mut privileged_mode_name: Option<String> = None;
-
     // Track if this is a SafeMode() query call for UnsafeSafeModeMethodCall
     let mut is_safe_mode_query_call = false;
 
@@ -383,22 +377,15 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     if actual_callee.kind() == SyntaxKind::IDENT {
         let name = actual_callee.text().to_string();
 
-        // Check for safe mode methods FIRST (before name is moved)
-        use super::diagnostics::is_safe_mode_method;
-        if is_safe_mode_method(&name) {
-            safe_mode_name = Some(name.clone());
-        }
-
         // Check for SafeMode() query (the getter)
+        // Track 2 §1.6 Group C: SetPrivilegedMode and DisableSafeMode
+        // detection moved to ide-diagnostics handlers (lattice-driven
+        // through `module_security_state`). Only the SafeMode() query
+        // (the *getter*, used by `UnsafeSafeModeMethodCall`) stays here
+        // because it has no const-prop / counter dependency.
         use super::diagnostics::is_safe_mode_query;
         if is_safe_mode_query(&name) {
             is_safe_mode_query_call = true;
-        }
-
-        // Check for privileged mode methods
-        use super::diagnostics::is_set_privileged_mode;
-        if is_set_privileged_mode(&name) {
-            privileged_mode_name = Some(name.clone());
         }
 
         // Check for deprecated global methods (8.3.12)
@@ -690,65 +677,11 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     let args =
         arg_list_node.as_ref().map(|arg_list| lower_arg_list(ctx, arg_list)).unwrap_or_default();
 
-    // Check for DisableSafeMode diagnostic after args are lowered
-    if let Some(method_name) = safe_mode_name {
-        // Check if this is a safe call by examining first argument
-        let is_safe = if !args.is_empty() {
-            match &ctx.body.exprs[args[0]] {
-                Expr::Literal(Literal::Bool(true)) => {
-                    // SetSafeMode(True) is safe
-                    method_name.to_lowercase() == "установитьбезопасныйрежим"
-                        || method_name.to_lowercase() == "setsafemode"
-                }
-                Expr::Literal(Literal::Bool(false)) => {
-                    // SetSafeModeDisabled(False) is safe
-                    method_name.to_lowercase() == "установитьотключениебезопасногорежима"
-                        || method_name.to_lowercase() == "setsafemodedisabled"
-                }
-                _ => false, // Variable or other expression - unsafe
-            }
-        } else {
-            false // No argument - unsafe
-        };
-
-        if !is_safe {
-            // Find the method name token for the range
-            let method_token = callee_node
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind() == SyntaxKind::IDENT);
-
-            if let Some(token) = method_token {
-                ctx.diagnostics.push(BodyDiagnostic::DisableSafeMode {
-                    method_name,
-                    range: token.text_range(),
-                });
-            }
-        }
-    }
-
-    // Check for SetPrivilegedMode diagnostic after args are lowered
-    if privileged_mode_name.is_some() {
-        // Safe only if argument is literal False (disabling privileged mode)
-        let is_safe = if !args.is_empty() {
-            matches!(&ctx.body.exprs[args[0]], Expr::Literal(Literal::Bool(false)))
-        } else {
-            false // No argument - not safe
-        };
-
-        if !is_safe {
-            // Find the method name token for the range
-            let method_token = callee_node
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind() == SyntaxKind::IDENT);
-
-            if let Some(token) = method_token {
-                ctx.diagnostics
-                    .push(BodyDiagnostic::SetPrivilegedModeCall { range: token.text_range() });
-            }
-        }
-    }
+    // Track 2 §1.6 Group C: SetPrivilegedMode + DisableSafeMode
+    // detection lives in `ide-diagnostics` and consumes the §1.2
+    // saturating-counter lattice via `open_events`. The literal-arg
+    // check that used to live here is replaced by a const-prop overlay
+    // that handles `Перем = Истина; Установить(Перем)` correctly.
 
     // Check for UnsafeSafeModeMethodCall: SafeMode() used without explicit comparison
     if is_safe_mode_query_call && is_unsafe_safe_mode_context(node) {

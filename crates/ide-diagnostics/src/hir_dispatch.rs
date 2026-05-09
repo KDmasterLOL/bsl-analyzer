@@ -25,7 +25,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::DeprecatedMethods8317,
     DiagnosticCode::DeprecatedMethodCall,
     DiagnosticCode::DeprecatedTypeManagedForm,
-    DiagnosticCode::DisableSafeMode,
     DiagnosticCode::EmptyCodeBlock,
     DiagnosticCode::EmptyRegion,
     DiagnosticCode::EmptyStatement,
@@ -61,7 +60,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::SelfAssign,
     DiagnosticCode::SelfInsertion,
     DiagnosticCode::SemicolonPresence,
-    DiagnosticCode::SetPrivilegedMode,
     DiagnosticCode::StyleElementConstructors,
     DiagnosticCode::TempFilesDir,
     DiagnosticCode::TernaryOperatorUsage,
@@ -152,9 +150,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::DeprecatedTypeManagedForm { type_name, range } => {
             handlers::deprecated_type_managed_form::from_hir(type_name, *range, ctx)
-        }
-        BodyDiagnostic::DisableSafeMode { method_name, range } => {
-            handlers::disable_safe_mode::from_hir(method_name, *range, ctx)
         }
         BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
             handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
@@ -275,9 +270,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::RedundantAccessToObject { kind, range } => {
             handlers::redundant_access_to_object::from_hir(kind, *range, ctx)
-        }
-        BodyDiagnostic::SetPrivilegedModeCall { range } => {
-            handlers::set_privileged_mode::from_hir(*range, ctx)
         }
         BodyDiagnostic::StyleElementConstructors { type_name, range } => {
             handlers::style_element_constructors::from_hir(type_name, *range, ctx)

@@ -164,6 +164,9 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnusedParameters,
     DiagnosticCode::MissingTemporaryFileDeletion,
     DiagnosticCode::MissingTempStorageDeletion,
+    // Track 2 §1.6 Group C: lattice-driven (security_state).
+    DiagnosticCode::SetPrivilegedMode,
+    DiagnosticCode::DisableSafeMode,
 ];
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
@@ -693,6 +696,14 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::missing_temp_storage_deletion::check,
     ));
+    // Track 2 §1.6 Group C — lattice-driven security-mode handlers
+    // (read `module_security_state` through `open_events`).
+    diagnostics.extend(run_diagnostic(
+        "SetPrivilegedMode",
+        ctx,
+        handlers::set_privileged_mode::check,
+    ));
+    diagnostics.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
 
     diagnostics
 }

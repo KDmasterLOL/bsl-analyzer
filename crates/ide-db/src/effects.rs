@@ -184,24 +184,33 @@ impl ModuleEffectSummaries {
 /// Returned by [`module_security_state_query`]. Each method's
 /// [`DataflowResult<SecurityModeState>`] carries the lattice value at
 /// every CFG block, ready for handler consumption (§1.6).
+///
+/// Module-level top-level code (statements outside any
+/// procedure/function) is analysed separately and exposed via
+/// [`ModuleSecurityState::module_level`] — without it the §1.6 Group C
+/// handlers would silently skip module-scope `SetPrivilegedMode` /
+/// `DisableSafeMode` calls (Codex round-1 MAJOR fix).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleSecurityState {
     methods: FxHashMap<u32, Arc<DataflowResult<SecurityModeState>>>,
+    module_level: Option<Arc<DataflowResult<SecurityModeState>>>,
 }
 
 impl ModuleSecurityState {
-    /// Construct from a pre-built methods map. Used by the streaming
-    /// provider (`StreamingProvider::module_security_state`) to expose
-    /// an on-the-fly batch without round-tripping through Salsa. The
+    /// Construct from a pre-built methods map plus an optional
+    /// module-level result. Used by the streaming provider
+    /// (`StreamingProvider::module_security_state`) to expose an
+    /// on-the-fly batch without round-tripping through Salsa. The
     /// Salsa-tracked path goes through the query function directly and
     /// constructs this type internally.
     ///
-    /// `pub(crate)` to keep the private `methods` field shape out of
-    /// the public ide-db surface — only the streaming module needs it.
-    pub(crate) fn from_methods(
+    /// `pub(crate)` to keep the private fields out of the public
+    /// ide-db surface — only the streaming module needs them.
+    pub(crate) fn from_methods_with_module_level(
         methods: FxHashMap<u32, Arc<DataflowResult<SecurityModeState>>>,
+        module_level: Option<Arc<DataflowResult<SecurityModeState>>>,
     ) -> Self {
-        Self { methods }
+        Self { methods, module_level }
     }
 
     /// Look up a method's dataflow result. Returns `None` for methods
@@ -211,14 +220,26 @@ impl ModuleSecurityState {
         self.methods.get(&local_id).cloned()
     }
 
-    /// Number of methods with a computed result.
+    /// Module-level (top-level) dataflow result, if the module has any
+    /// top-level code outside procedures. Returns `None` for modules
+    /// without module-level code or when the analysis failed to
+    /// converge.
+    pub fn module_level(&self) -> Option<Arc<DataflowResult<SecurityModeState>>> {
+        self.module_level.clone()
+    }
+
+    /// Number of methods with a computed result. Excludes the
+    /// module-level entry — query [`Self::module_level`] separately.
     pub fn len(&self) -> usize {
         self.methods.len()
     }
 
-    /// `true` when no method has a computed result.
+    /// `true` when no method has a computed result AND no module-level
+    /// result is present. The §1.6 Group C handlers use this as the
+    /// fast-path early exit; with the module-level addition the check
+    /// must consider both batches.
     pub fn is_empty(&self) -> bool {
-        self.methods.is_empty()
+        self.methods.is_empty() && self.module_level.is_none()
     }
 }
 
@@ -434,8 +455,32 @@ pub fn module_security_state_query<'db>(
             methods.insert(local_id, Arc::new(result));
         }
     }
-    tracing::debug!(count = methods.len(), "Module security-state batch built");
-    Arc::new(ModuleSecurityState { methods })
+
+    // Track 2 §1.6 Group C — Codex round-1 MAJOR fix: also analyse
+    // module-level top-level code so file-scope SetPrivilegedMode /
+    // DisableSafeMode calls outside any procedure are surfaced. The
+    // legacy HIR-side detector ran on every CALL_EXPR; the lattice
+    // path keeps parity by reusing `module_level_cfg_query` (Track 1).
+    // Codex round-2 NIT: `module_code()` returns `Some` for *every*
+    // module post-lowering even when the file has zero top-level
+    // statements (the body is empty but the entry exists). Filter the
+    // empty case so `ModuleSecurityState::is_empty()` keeps its
+    // "nothing to scan" semantics for handler fast-paths.
+    let module_level = module_bodies
+        .module_code()
+        .filter(|body| !body.body_stmts_typed().is_empty())
+        .and_then(|body| {
+            db.unwind_if_revision_cancelled();
+            let cfg = db.module_level_cfg(module_id);
+            security_state::analyze(cfg, body.clone()).map(Arc::new)
+        });
+
+    tracing::debug!(
+        count = methods.len(),
+        module_level = module_level.is_some(),
+        "Module security-state batch built"
+    );
+    Arc::new(ModuleSecurityState { methods, module_level })
 }
 
 // ============================================================================

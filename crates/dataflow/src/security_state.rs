@@ -51,8 +51,10 @@
 
 use std::sync::Arc;
 
-use bsl_platform::security::{registry, Category, Role};
-use cfg::ControlFlowGraph;
+pub use bsl_platform::security::Category;
+
+use bsl_platform::security::{registry, Role};
+use cfg::{CfgVertex, ControlFlowGraph};
 use hir_def::{
     body::Body,
     hir::{Expr, Literal, Stmt},
@@ -302,15 +304,17 @@ impl Transfer<SecurityModeState> for SecurityStateProvider {
         };
         let typed_stmt = StmtId::from_raw(stmt_id);
 
-        // Update the embedded overlay for any `Стмт::Assign` —
-        // this delegates to value_state's `step`, so the two
-        // crates stay in sync without duplicated logic.
-        crate::value_state::step(overlay, body, typed_stmt);
-
-        // Inspect the statement's "main" expression for a security
-        // call. The legacy `lower_call_expr` recognizer fires on every
-        // call site regardless of statement context, so parity demands
-        // we cover at least these shapes:
+        // Codex round-1 MINOR fix: recognise the security call BEFORE
+        // stepping the overlay, matching `open_events`. Both consumers
+        // now read the call's arg with the entry overlay (the value
+        // visible at the start of the statement), then propagate the
+        // assignment effect of this stmt onward. The previous order
+        // (step-then-recognise) worked for straight-line code but
+        // diverged on `Перем = SetPriv(Перем)`-style self-assigns.
+        //
+        // The legacy `lower_call_expr` recognizer fires on every call
+        // site regardless of statement context, so parity demands we
+        // cover at least these shapes:
         //   - `Стмт::Expr(call)` — top-level call statement
         //   - `Стмт::Assign { value = Call(…), … }` — `x = SetPriv(…)`
         //   - `Стмт::Return(Call(…))` / `Стмт::Raise(Call(…))`
@@ -321,6 +325,12 @@ impl Transfer<SecurityModeState> for SecurityStateProvider {
                 apply_call_to_counters(counters, info);
             }
         }
+
+        // Update the embedded overlay for any `Стмт::Assign` — this
+        // delegates to value_state's `step`, so the two crates stay
+        // in sync without duplicated logic.
+        crate::value_state::step(overlay, body, typed_stmt);
+
         next
     }
 
@@ -434,6 +444,191 @@ pub fn analyze(
     solver.set_bottom_factory(SecurityModeState::unreachable);
     solver.set_initial_state(SecurityModeState::entry());
     solver.solve()
+}
+
+/// One recognised "frame-open" event in a method body.
+///
+/// Yielded by [`open_events`] for every call site whose
+/// `apply_call_to_counters` would `open()` or treat as `unknown()`
+/// the targeted frame counter — i.e. every site the §1.6 Group C
+/// handler should surface as a security diagnostic. Calls whose const-
+/// folded argument is the polarity that *closes* the frame are
+/// suppressed (no event yielded). Unknown-bool argument is conservatively
+/// treated as opening (matching the legacy "non-literal-False ⇒ emit"
+/// behaviour for `SetPrivilegedMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenEvent {
+    /// Which frame this call manipulates — `PrivilegedMode` ⇒ source for
+    /// `SetPrivilegedMode`, `SafeMode` ⇒ source for `DisableSafeMode`.
+    pub category: Category,
+    /// `Expr::Path` that names the called API. Use
+    /// `BodySourceMap::expr_range(callee)` to recover the IDENT range
+    /// the diagnostic should attach to.
+    pub callee: ExprId,
+    /// Statement carrying the call (the `Стмт::Expr` /
+    /// `Стмт::Assign { value = Call(…) }` etc. that
+    /// [`main_call_expr`] picked up).
+    pub stmt: StmtId,
+}
+
+/// Walk every basic block of `result.cfg()` and yield one [`OpenEvent`]
+/// for each recognised "frame-open" call site. Pure helper — no Salsa
+/// access, no allocation beyond the returned `Vec`. The returned events
+/// follow the CFG vertex iteration order; callers that need source-order
+/// stability should sort by `result.body().source_map().expr_range(callee)`
+/// (handler-side concern, not done here).
+///
+/// Replays the per-block value overlay statement-by-statement so that
+/// `Значение = Истина; SetPrivilegedMode(Значение)` is folded as
+/// `KnownTrue` rather than `Unknown` — exactly the §1.3 const-prop
+/// precision §1.6 Group C wants in the diagnostic.
+pub fn open_events(result: &DataflowResult<SecurityModeState>) -> Vec<OpenEvent> {
+    let body = result.body();
+    let mut events = Vec::new();
+    let mut calls_buf: Vec<ExprId> = Vec::new();
+    for (block_idx, vertex) in result.cfg().vertices() {
+        let CfgVertex::BasicBlock(bb) = vertex else { continue };
+        let Some(in_state) = result.block_in(block_idx) else { continue };
+        let Inner::Reachable { overlay: block_overlay, .. } = &in_state.0 else { continue };
+        let mut overlay = block_overlay.clone();
+        for &stmt_id in bb.statements() {
+            // Codex round-2 stop-hook fix: recognise security calls
+            // anywhere in the statement's expression tree, not just at
+            // the statement-root (legacy `lower_call_expr` fired on
+            // every CALL_EXPR regardless of nesting depth, so e.g.
+            // `Сообщить(УстановитьБезопасныйРежим(Ложь))` had to keep
+            // surfacing).
+            calls_buf.clear();
+            collect_call_exprs_in_stmt(body, stmt_id, &mut calls_buf);
+            for call_expr in calls_buf.drain(..) {
+                let Some(info) = recognize_security_call(body, call_expr, &overlay) else {
+                    continue;
+                };
+                if !call_opens_frame(&info) {
+                    continue;
+                }
+                if let Expr::Call { callee, .. } = body.expr(call_expr) {
+                    events.push(OpenEvent {
+                        category: info.category,
+                        callee: ExprId::from_idx(*callee),
+                        stmt: stmt_id,
+                    });
+                }
+            }
+            crate::value_state::step(&mut overlay, body, stmt_id);
+        }
+    }
+    events
+}
+
+/// Collect every call-like expression reachable from a leaf statement's
+/// expression tree. Returns the call expressions in post-order so nested
+/// calls in arguments are recognised before the outer call; this matches
+/// BSL's left-to-right evaluation of nested calls.
+///
+/// Compound statements (`Стмт::If`/`While`/loops) do NOT live in basic
+/// blocks: condition expressions in If/While/For vertices are
+/// `ConditionalVertex`/`WhileLoop`/`ForLoop` CFG nodes, not `BasicBlock`
+/// nodes. Security calls inside those conditions are not detected. This
+/// is intentional — such patterns are pathological, and adding
+/// ConditionalVertex traversal would require visiting condition ExprId
+/// outside the BasicBlock transfer loop.
+fn collect_call_exprs_in_stmt(body: &Body, stmt: StmtId, out: &mut Vec<ExprId>) {
+    let roots: &[hir_def::hir::ExprIdx] = match body.stmt(stmt) {
+        Stmt::Expr(e) => std::slice::from_ref(e),
+        Stmt::Assign { target, value } => {
+            walk_expr_for_calls(body, *target, out);
+            walk_expr_for_calls(body, *value, out);
+            return;
+        }
+        Stmt::Return { value: Some(v) } => std::slice::from_ref(v),
+        Stmt::Raise { value: Some(v) } => std::slice::from_ref(v),
+        Stmt::Execute { expr } => std::slice::from_ref(expr),
+        Stmt::AddHandler { event, handler } => {
+            walk_expr_for_calls(body, *event, out);
+            walk_expr_for_calls(body, *handler, out);
+            return;
+        }
+        Stmt::RemoveHandler { event, handler } => {
+            walk_expr_for_calls(body, *event, out);
+            walk_expr_for_calls(body, *handler, out);
+            return;
+        }
+        _ => return,
+    };
+    for &root in roots {
+        walk_expr_for_calls(body, root, out);
+    }
+}
+
+fn walk_expr_for_calls(body: &Body, expr_idx: hir_def::hir::ExprIdx, out: &mut Vec<ExprId>) {
+    let typed = ExprId::from_idx(expr_idx);
+    match body.expr(typed) {
+        Expr::Call { callee, args } => {
+            walk_expr_for_calls(body, *callee, out);
+            for &a in args.iter() {
+                walk_expr_for_calls(body, a, out);
+            }
+            out.push(typed);
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            // Qualified `obj.Method(...)` calls are not in the global-
+            // method registry, so they cannot match a security call —
+            // but their receiver / arguments may contain nested global
+            // calls that do.
+            walk_expr_for_calls(body, *receiver, out);
+            for &a in args.iter() {
+                walk_expr_for_calls(body, a, out);
+            }
+            out.push(typed);
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            walk_expr_for_calls(body, *lhs, out);
+            walk_expr_for_calls(body, *rhs, out);
+        }
+        Expr::UnaryOp { expr, .. } => walk_expr_for_calls(body, *expr, out),
+        Expr::Ternary { condition, then_expr, else_expr } => {
+            walk_expr_for_calls(body, *condition, out);
+            walk_expr_for_calls(body, *then_expr, out);
+            walk_expr_for_calls(body, *else_expr, out);
+        }
+        Expr::Index { base, index } => {
+            walk_expr_for_calls(body, *base, out);
+            walk_expr_for_calls(body, *index, out);
+        }
+        Expr::Field { base, .. } => walk_expr_for_calls(body, *base, out),
+        Expr::New { args, .. } => {
+            for &a in args.iter() {
+                walk_expr_for_calls(body, a, out);
+            }
+            out.push(typed);
+        }
+        Expr::Array(items) => {
+            for &i in items.iter() {
+                walk_expr_for_calls(body, i, out);
+            }
+        }
+        Expr::Await { expr } => walk_expr_for_calls(body, *expr, out),
+        Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => {}
+    }
+}
+
+/// Mirror of [`apply_call_to_counters`]'s open-vs-close decision, lifted
+/// out so [`open_events`] can decide whether to yield without mutating
+/// any counter. Kept private — the lattice's transfer is the
+/// authoritative consumer of [`SecurityCallInfo`].
+fn call_opens_frame(info: &SecurityCallInfo) -> bool {
+    match info.arg {
+        ArgValue::KnownTrue if info.opens_unsafe_when => true,
+        ArgValue::KnownFalse if !info.opens_unsafe_when => true,
+        ArgValue::KnownTrue | ArgValue::KnownFalse => false,
+        // Unknown ⇒ worst-of-both-paths: legacy `lower_call_expr`
+        // emitted on every non-literal-False arg, so to preserve test
+        // behaviour we yield here too. Const-prop has already collapsed
+        // every `Перем = literal; Установить(Перем)` chain that the
+        // legacy used to over-approximate.
+        ArgValue::Unknown => true,
+    }
 }
 
 fn apply_call_to_counters(counters: &mut SecurityCounters, info: SecurityCallInfo) {

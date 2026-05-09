@@ -314,6 +314,17 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_liveness_analysis(self.file_id))
     }
 
+    /// Get module privileged/safe-mode lifetime state (§1.2 saturating
+    /// counter lattice batched per method).
+    ///
+    /// Consumed by the §1.6 Group C `SetPrivilegedMode` / `DisableSafeMode`
+    /// handlers; the per-method `DataflowResult<SecurityModeState>` is fed
+    /// through [`hir::dataflow::security_state::open_events`] to surface
+    /// frame-open call sites.
+    pub fn module_security_state(&self) -> Arc<ide_db::effects::ModuleSecurityState> {
+        self.query(|p| p.module_security_state(self.file_id))
+    }
+
     /// Get module reaching definitions (batch).
     pub fn module_reaching_defs(&self) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         self.query(|p| p.module_reaching_definitions(self.file_id))

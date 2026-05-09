@@ -100,8 +100,8 @@ pub mod dataflow {
 
     pub mod security_state {
         pub use ::dataflow::security_state::{
-            analyze, PrivilegeCounter, SaturatingCount, SecurityCounters, SecurityModeState,
-            SecurityStateProvider, K_MAX,
+            analyze, open_events, Category, OpenEvent, PrivilegeCounter, SaturatingCount,
+            SecurityCounters, SecurityModeState, SecurityStateProvider, K_MAX,
         };
     }
 
