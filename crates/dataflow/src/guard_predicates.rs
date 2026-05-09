@@ -188,6 +188,32 @@ fn is_supported(semantics: GuardSemantics) -> bool {
 /// major privileged-call warning. Until the recogniser learns the
 /// explicit-comparison shapes that `UnsafeSafeModeMethodCall` blesses,
 /// SafeMode stays out of the default registry.
+///
+/// **`ПривилегированныйРежим` / `PrivilegedMode` is also intentionally
+/// absent** (Codex §1.6 Group D round-2 BLOCKER fix). The bare-call
+/// shape `Если ПривилегированныйРежим() Тогда …` is tautological —
+/// the getter observes ambient runtime state, not user authorisation.
+/// In a CommonModule that is itself declared `privileged=true` in
+/// metadata, the getter returns `Истина` permanently, and recognising
+/// it as a guard would silence the privileged-call diagnostic exactly
+/// when the diagnostic is most needed (cross-module calls from inside
+/// a privileged module). The `validateNestedCalls=true` default in
+/// `PrivilegedModuleMethodCall` is set up to flag those edges; a
+/// `PrivilegedMode()` guard would defeat that explicit review intent.
+/// Reserved for an equality-aware recogniser in a future slice.
+///
+/// # Suppression intent: review marker, not security gate
+///
+/// `РольДоступна(...)` recognises ANY role name as a guard — the
+/// argument is not inspected. The `PrivilegedModuleMethodCall`
+/// diagnostic is a review marker ("a human checked access at this
+/// call site"), not a security gate ("the role check authorises the
+/// specific operation"). A pattern like
+/// `Если РольДоступна("Чтение") Тогда ПривилегированныйМодуль.Удалить()`
+/// silences the diagnostic — the role-name vs operation match is out
+/// of scope for the call-shape recogniser. Future work that audits
+/// role-name × operation pairings would land as a stronger semantic
+/// class than `RoleCheck`.
 pub fn default_registry() -> GuardRegistry {
     GuardRegistry::new(vec![
         GuardPredicate {
@@ -201,11 +227,6 @@ pub fn default_registry() -> GuardRegistry {
             ru: "РольДоступнаПользователю",
             en: "IsInRoleByUser",
             semantics: GuardSemantics::RoleCheck,
-        },
-        GuardPredicate {
-            ru: "ПривилегированныйРежим",
-            en: "PrivilegedMode",
-            semantics: GuardSemantics::PrivilegedQuery,
         },
     ])
 }
@@ -655,6 +676,20 @@ mod tests {
         let registry = default_registry();
         assert!(!registry.matches(&name("БезопасныйРежим")));
         assert!(!registry.matches(&name("SafeMode")));
+    }
+
+    #[test]
+    fn privileged_mode_query_is_not_a_guard() {
+        // Codex §1.6 Group D round-2 BLOCKER fix: bare-call
+        // `Если ПривилегированныйРежим() Тогда …` is tautological.
+        // The getter observes ambient runtime state, not
+        // authorisation. In a privileged CommonModule, it is
+        // permanently `Истина`, so the suppression would silence the
+        // very diagnostic targeting cross-privileged-module calls.
+        // Pin the absence here.
+        let registry = default_registry();
+        assert!(!registry.matches(&name("ПривилегированныйРежим")));
+        assert!(!registry.matches(&name("PrivilegedMode")));
     }
 
     #[test]

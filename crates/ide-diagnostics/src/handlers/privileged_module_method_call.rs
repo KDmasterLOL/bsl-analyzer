@@ -5,12 +5,13 @@
 //! # Guard-predicate suppression (Track 2 §1.6 Group D)
 //!
 //! Calls that are dominated by a recognised guard predicate
-//! (`РольДоступна`, `РольДоступнаПользователю`, `ПривилегированныйРежим`
-//! — see [`hir::dataflow::guard_predicates::default_registry`])
-//! are suppressed. `БезопасныйРежим` is intentionally absent from the
-//! default registry (see the `default_registry` doc-comment for the
-//! `UnsafeSafeModeMethodCall` conflict rationale). The detector is
-//! `must-be-guarded`: every path
+//! (`РольДоступна`, `РольДоступнаПользователю` — see
+//! [`hir::dataflow::guard_predicates::default_registry`]) are
+//! suppressed. `БезопасныйРежим` and `ПривилегированныйРежим` are
+//! intentionally absent from the default registry (the former
+//! conflicts with `UnsafeSafeModeMethodCall`, the latter is
+//! tautological in privileged modules — see the `default_registry`
+//! doc-comment). The detector is `must-be-guarded`: every path
 //! from method entry to the call site must cross a guard's true
 //! branch. False negatives (a guarded call still flagged) are the
 //! conservative direction — security alerts win over noise — but
