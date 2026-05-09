@@ -482,9 +482,9 @@ fn handle_vfs_msg(
 /// Handles an LSP request.
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
-        CodeActionRequest, Completion, DocumentSymbolRequest, Formatting, GotoDefinition,
-        HoverRequest, OnTypeFormatting, RangeFormatting, References, SemanticTokensFullRequest,
-        SignatureHelpRequest,
+        CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting,
+        GotoDefinition, HoverRequest, OnTypeFormatting, RangeFormatting, References,
+        SemanticTokensFullRequest, SignatureHelpRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -498,6 +498,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         // main loop stays responsive to $/cancelRequest and subsequent edits.
         .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
         .on_latency::<References>(crate::handlers::handle_find_references)
+        .on_latency::<DocumentHighlightRequest>(crate::handlers::handle_document_highlight)
         .on_latency::<HoverRequest>(crate::handlers::handle_hover)
         .on_latency::<Completion>(crate::handlers::handle_completion)
         .on_latency::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
@@ -581,6 +582,9 @@ fn server_capabilities() -> ServerCapabilities {
         // Document symbols (outline, breadcrumbs)
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
 
+        // Document highlights (same-document occurrences)
+        document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
+
         // Code actions (quick fixes)
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
 
@@ -622,5 +626,7 @@ mod tests {
             }
             _ => panic!("Expected incremental text document sync"),
         }
+
+        assert_eq!(caps.document_highlight_provider, Some(lsp_types::OneOf::Left(true)));
     }
 }

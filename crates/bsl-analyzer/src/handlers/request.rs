@@ -4,14 +4,15 @@
 //! textDocument/definition, textDocument/references, etc.
 
 use anyhow::Result;
-use ide::Location as IdeLocation;
+use ide::{DocumentHighlightKind as IdeDocumentHighlightKind, Location as IdeLocation};
 use line_index::LineIndex;
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem, CompletionItemKind,
-    CompletionParams, CompletionResponse, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
-    MarkupContent, MarkupKind, ReferenceParams, SemanticTokens, SemanticTokensParams,
-    SemanticTokensResult, SignatureHelpParams,
+    CompletionParams, CompletionResponse, DocumentHighlight as LspDocumentHighlight,
+    DocumentHighlightKind as LspDocumentHighlightKind, DocumentHighlightParams,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverParams, Location, MarkupContent, MarkupKind, ReferenceParams,
+    SemanticTokens, SemanticTokensParams, SemanticTokensResult, SignatureHelpParams,
 };
 use rustc_hash::FxHashMap;
 use vfs::FileId;
@@ -130,6 +131,56 @@ pub fn handle_find_references(
         Ok(None)
     } else {
         Ok(Some(lsp_locations))
+    }
+}
+
+/// Handles textDocument/documentHighlight request.
+///
+/// Returns same-document highlights for the symbol at the cursor position.
+pub fn handle_document_highlight(
+    ctx: LatencyRequestContext,
+    params: DocumentHighlightParams,
+) -> Result<Option<Vec<LspDocumentHighlight>>> {
+    let _p = tracing::info_span!(
+        "handle_document_highlight",
+        uri = %params.text_document_position_params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let offset = crate::lsp::offset(line_index, text, position)?;
+
+    let highlights = ctx.analysis.document_highlights(file_id, offset.into());
+    if highlights.is_empty() {
+        return Ok(None);
+    }
+
+    let lsp_highlights: Vec<LspDocumentHighlight> = highlights
+        .into_iter()
+        .filter_map(|highlight| {
+            let range = crate::lsp::range(line_index, text, highlight.range)?;
+            Some(LspDocumentHighlight {
+                range,
+                kind: Some(convert_document_highlight_kind(highlight.kind)),
+            })
+        })
+        .collect();
+
+    if lsp_highlights.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(lsp_highlights))
     }
 }
 
@@ -564,6 +615,14 @@ impl<'ctx> ReferenceLocationConverter<'ctx> {
     }
 }
 
+fn convert_document_highlight_kind(kind: IdeDocumentHighlightKind) -> LspDocumentHighlightKind {
+    match kind {
+        IdeDocumentHighlightKind::Text => LspDocumentHighlightKind::TEXT,
+        IdeDocumentHighlightKind::Read => LspDocumentHighlightKind::READ,
+        IdeDocumentHighlightKind::Write => LspDocumentHighlightKind::WRITE,
+    }
+}
+
 /// Convert IDE CompletionItem to LSP CompletionItem.
 fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
     let has_snippet = item.insert_text.contains('$');
@@ -940,6 +999,53 @@ mod tests {
         let result = handle_find_references(ctx, params);
         // File not in VFS is expected to fail in tests
         assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    #[test]
+    fn document_highlight_returns_ranges_and_kinds() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///highlight.bsl").unwrap();
+        let source = r#"
+Процедура Тест()
+    Перем МояПеременная;
+
+    МояПеременная = 10;
+    Сообщить(МояПеременная);
+КонецПроцедуры
+"#;
+
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        state.vfs_file_for_url(&uri).unwrap();
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+
+        let ctx = latency_ctx(&state);
+        let params = DocumentHighlightParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line: 2, character: 10 },
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = handle_document_highlight(ctx, params).unwrap().unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].kind, Some(LspDocumentHighlightKind::TEXT));
+        assert_eq!(result[0].range.start, Position { line: 2, character: 10 });
+        assert_eq!(result[1].kind, Some(LspDocumentHighlightKind::WRITE));
+        assert_eq!(result[1].range.start, Position { line: 4, character: 4 });
+        assert_eq!(result[2].kind, Some(LspDocumentHighlightKind::READ));
+        assert_eq!(result[2].range.start, Position { line: 5, character: 13 });
     }
 
     #[test]
