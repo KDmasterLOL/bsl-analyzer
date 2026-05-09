@@ -40,14 +40,16 @@
 //! `EntryKind::Constructor` entries). The plan §1.6 confirms this is
 //! the same scope the legacy handler uses.
 //!
-//! Each statement's "executable" expression(s) — the value of
-//! `Стмт::Expr`, `Стмт::Assign`, `Стмт::Return`, `Стмт::Raise` — are
-//! checked once for a security call at their root. Calls nested inside
-//! arguments, ternary arms, or binary operands are deliberately NOT
-//! re-counted: the saturating counter is order-sensitive and double-
-//! counting would corrupt the lattice in shapes like
-//! `?(cond, SetPriv(Истина), 0)`. §1.7 will close this with an
-//! integration fixture if a real-world false-negative surfaces.
+//! Each statement's full expression tree is walked for security calls
+//! (basic-block leaves via [`Transfer::transfer_stmt`], compound-stmt
+//! conditions / loop bounds via [`Transfer::transfer_expr_in_place`]).
+//! Calls are visited in post-order, matching BSL's left-to-right
+//! evaluation of nested arguments — `Сообщить(SetPriv(Истина))` opens
+//! the privileged frame at runtime, and the lattice's counter reflects
+//! that after the inner call's effect is applied. The two consumers
+//! ([`open_events`] for diagnostics, the lattice transfers for
+//! downstream consumers) walk the same tree shape so their counter
+//! views can never diverge.
 
 use std::sync::Arc;
 
@@ -304,23 +306,25 @@ impl Transfer<SecurityModeState> for SecurityStateProvider {
         };
         let typed_stmt = StmtId::from_raw(stmt_id);
 
-        // Codex round-1 MINOR fix: recognise the security call BEFORE
-        // stepping the overlay, matching `open_events`. Both consumers
-        // now read the call's arg with the entry overlay (the value
-        // visible at the start of the statement), then propagate the
-        // assignment effect of this stmt onward. The previous order
-        // (step-then-recognise) worked for straight-line code but
-        // diverged on `Перем = SetPriv(Перем)`-style self-assigns.
+        // Codex round-3 stop-hook fix: recognise security calls anywhere
+        // in the statement's expression tree (not just the statement-
+        // root), and apply counter changes for each — matching the
+        // every-CALL_EXPR coverage `open_events` already gives. Without
+        // this, a diagnostic would surface for
+        // `Сообщить(УстановитьБезопасныйРежим(Ложь))` while the lattice
+        // counter stayed at zero, so downstream consumers (future leak
+        // detection, transitive effect_summary, …) would see an
+        // inconsistent picture.
         //
-        // The legacy `lower_call_expr` recognizer fires on every call
-        // site regardless of statement context, so parity demands we
-        // cover at least these shapes:
-        //   - `Стмт::Expr(call)` — top-level call statement
-        //   - `Стмт::Assign { value = Call(…), … }` — `x = SetPriv(…)`
-        //   - `Стмт::Return(Call(…))` / `Стмт::Raise(Call(…))`
-        // Calls nested in args / ternary / binary are deliberately
-        // skipped (see module-doc).
-        if let Some(call_expr) = main_call_expr(body, typed_stmt) {
+        // Order: recognise BEFORE stepping the overlay (Codex round-1
+        // MINOR fix kept) so the call's arg is folded with the entry
+        // overlay. Calls are visited in `walk_expr_for_calls`'s post-
+        // order, which matches BSL's left-to-right evaluation of nested
+        // arguments — the inner call's counter effect is applied before
+        // the outer's, exactly as the runtime would.
+        let mut calls = Vec::new();
+        collect_call_exprs_in_stmt(body, typed_stmt, &mut calls);
+        for call_expr in calls {
             if let Some(info) = recognize_security_call(body, call_expr, overlay) {
                 apply_call_to_counters(counters, info);
             }
@@ -332,6 +336,32 @@ impl Transfer<SecurityModeState> for SecurityStateProvider {
         crate::value_state::step(overlay, body, typed_stmt);
 
         next
+    }
+
+    fn transfer_expr_in_place(
+        &self,
+        expr_id: hir_def::ExprId,
+        state: &mut SecurityModeState,
+        body: &Body,
+    ) {
+        // Counter parity for compound-stmt condition expressions
+        // (`Если`/`Пока` headers, `Для … По …` bounds, foreach iter
+        // expressions). Codex round-3 stop-hook noted that adding
+        // condition-call diagnostics in `open_events` without updating
+        // the lattice would let the counter drift away from runtime
+        // semantics — `Если УстановитьБезопасныйРежим(Ложь) Тогда` opens
+        // the unsafe frame at runtime, so the counter must reflect that
+        // for any successor block to read.
+        let Inner::Reachable { counters, overlay } = &mut state.0 else {
+            return;
+        };
+        let mut calls = Vec::new();
+        walk_expr_for_calls(body, expr_id.to_idx(), &mut calls);
+        for call_expr in calls {
+            if let Some(info) = recognize_security_call(body, call_expr, overlay) {
+                apply_call_to_counters(counters, info);
+            }
+        }
     }
 
     fn transfer_loop_var_bind(
@@ -370,23 +400,6 @@ struct SecurityCallInfo {
     /// `false` ⇒ `Ложь`-arg opens.
     opens_unsafe_when: bool,
     arg: ArgValue,
-}
-
-/// Extract the "main" call expression from a statement: the value of
-/// `Стмт::Expr`, the `value` of `Стмт::Assign`, the `value` of a
-/// non-empty `Стмт::Return`/`Стмт::Raise`, or the inner expr of
-/// `Стмт::Execute`. Returns `None` if the statement has no executable
-/// expression to recognise (e.g. `Стмт::Break`, `Стмт::VarDecl`).
-fn main_call_expr(body: &Body, stmt_id: StmtId) -> Option<ExprId> {
-    let expr = match body.stmt(stmt_id) {
-        Stmt::Expr(e) => *e,
-        Stmt::Assign { value, .. } => *value,
-        Stmt::Return { value: Some(v) } => *v,
-        Stmt::Raise { value: Some(v) } => *v,
-        Stmt::Execute { expr } => *expr,
-        _ => return None,
-    };
-    Some(ExprId::from_idx(expr))
 }
 
 fn recognize_security_call(
