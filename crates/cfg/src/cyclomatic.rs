@@ -57,34 +57,45 @@ use petgraph::visit::EdgeRef;
 ///
 /// Empty CFGs (no entry point) return `1` as the conventional base.
 pub fn cyclomatic_complexity(cfg: &ControlFlowGraph) -> u32 {
-    if cfg.entry_point().is_none() {
+    let Some(entry) = cfg.entry_point() else {
         return 1;
-    }
+    };
 
-    // `reverse_postorder` walks the CFG forward from the entry, so the
-    // returned set is exactly the reachable nodes — the right `N` for
-    // the formula. Unreachable / dangling vertices are skipped, which
-    // matches every cyclomatic-complexity textbook treatment of
-    // dead code.
-    let reachable = cfg.reverse_postorder();
-    if reachable.is_empty() {
-        return 1;
-    }
-    let node_count = reachable.len() as i64;
-    let reachable_set: rustc_hash::FxHashSet<_> = reachable.iter().copied().collect();
-
+    // Live-edges-only BFS from the entry. The cfg's own
+    // `reverse_postorder` follows every edge including
+    // `AdjacentCode` placeholders, so a block reachable only via
+    // dead-code would land in `N` while its live outgoing edges
+    // would also land in `E` — desynchronising the formula. Walking
+    // through `is_dead_code_edge`-filtered successors keeps `N` and
+    // `E` coupled.
     let graph = cfg.graph();
-    let mut edge_count: i64 = 0;
-    for node in &reachable {
-        for edge in graph.edges(*node) {
+    let mut reachable: rustc_hash::FxHashSet<_> = rustc_hash::FxHashSet::default();
+    reachable.insert(entry);
+    let mut stack = vec![entry];
+    while let Some(node) = stack.pop() {
+        for edge in graph.edges(node) {
             if edge.weight().is_dead_code_edge() {
                 continue;
             }
-            // Only count edges whose target is also reachable. A live
-            // edge to an unreachable node would be a builder bug, but
-            // a defensive filter keeps the formula self-consistent
-            // (`E` and `N` stay coupled).
-            if !reachable_set.contains(&edge.target()) {
+            let target = edge.target();
+            if reachable.insert(target) {
+                stack.push(target);
+            }
+        }
+    }
+    let node_count = reachable.len() as i64;
+
+    // Count live edges among reachable nodes (the same filter the
+    // BFS used; reapplying it here is the cheapest way to keep the
+    // two counts in lockstep without threading mutable state through
+    // the walk above).
+    let mut edge_count: i64 = 0;
+    for &node in &reachable {
+        for edge in graph.edges(node) {
+            if edge.weight().is_dead_code_edge() {
+                continue;
+            }
+            if !reachable.contains(&edge.target()) {
                 continue;
             }
             edge_count += 1;
@@ -197,6 +208,36 @@ mod tests {
         cfg.add_edge(cond, exit, CfgEdgeType::FalseBranch).unwrap();
         cfg.set_entry_point(entry);
         assert_eq!(cyclomatic_complexity(&cfg), 2);
+    }
+
+    /// Codex stop-hook regression guard: a block reachable ONLY via a
+    /// dead-code (`AdjacentCode`) edge must NOT count toward `N`. The
+    /// previous implementation used `reverse_postorder`, which walks
+    /// every edge regardless of kind, so the orphan block + its live
+    /// outgoing edge both leaked into the formula. The live-edges-only
+    /// BFS implemented here filters them out:
+    ///
+    /// entry → live → exit (live `Direct` edges)
+    /// live → orphan (dead `AdjacentCode`)
+    /// orphan → exit (live `Direct`)
+    ///
+    /// `orphan` is unreachable along live edges, so `N=3` (entry,
+    /// live, exit) and `E=2` (entry→live, live→exit). `orphan→exit`
+    /// is dropped because `orphan` itself is excluded from the
+    /// reachable set. V(G) = 2 - 3 + 2 = 1.
+    #[test]
+    fn dead_edge_reachability_excludes_orphan() {
+        let mut cfg = build_cfg();
+        let entry = cfg.add_vertex(fresh_block());
+        let live = cfg.add_vertex(fresh_block());
+        let orphan = cfg.add_vertex(fresh_block());
+        let exit = cfg.exit_point();
+        cfg.add_edge(entry, live, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(live, exit, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(live, orphan, CfgEdgeType::AdjacentCode).unwrap();
+        cfg.add_edge(orphan, exit, CfgEdgeType::Direct).unwrap();
+        cfg.set_entry_point(entry);
+        assert_eq!(cyclomatic_complexity(&cfg), 1);
     }
 
     /// Nested if inside while: N=6, live E=7, V(G) = 7 - 6 + 2 = 3.
