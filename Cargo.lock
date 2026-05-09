@@ -982,6 +982,7 @@ name = "dataflow"
 version = "0.1.176"
 dependencies = [
  "base-db",
+ "bsl-platform",
  "cfg",
  "cfg-types",
  "expect-test",

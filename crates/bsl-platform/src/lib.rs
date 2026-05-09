@@ -29,6 +29,7 @@
 //! ```
 
 mod db;
+pub mod security;
 pub mod standard_mdo_attributes;
 mod types;
 
