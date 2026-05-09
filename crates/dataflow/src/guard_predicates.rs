@@ -177,6 +177,17 @@ fn is_supported(semantics: GuardSemantics) -> bool {
 /// implemented; until it lands, registering a `UserCheck` entry would
 /// let the algorithm match a bare call as a guard — see
 /// [`GuardSemantics`] doc.
+///
+/// **`БезопасныйРежим` / `SafeMode` is intentionally absent** (Codex
+/// §1.6 Group D MAJOR fix). The `UnsafeSafeModeMethodCall` diagnostic
+/// (Blocker severity) explicitly flags the bare-condition shape
+/// `Если БезопасныйРежим() Тогда …` as unsafe — `БезопасныйРежим` is
+/// multi-state, not a clean Boolean, and best practice is to compare
+/// explicitly with `<> Ложь` / `= Истина`. Recognising the bare call
+/// as a guard would let an unsafe-by-construction pattern silence a
+/// major privileged-call warning. Until the recogniser learns the
+/// explicit-comparison shapes that `UnsafeSafeModeMethodCall` blesses,
+/// SafeMode stays out of the default registry.
 pub fn default_registry() -> GuardRegistry {
     GuardRegistry::new(vec![
         GuardPredicate {
@@ -194,11 +205,6 @@ pub fn default_registry() -> GuardRegistry {
         GuardPredicate {
             ru: "ПривилегированныйРежим",
             en: "PrivilegedMode",
-            semantics: GuardSemantics::PrivilegedQuery,
-        },
-        GuardPredicate {
-            ru: "БезопасныйРежим",
-            en: "SafeMode",
             semantics: GuardSemantics::PrivilegedQuery,
         },
     ])
@@ -635,6 +641,20 @@ mod tests {
         assert!(registry.matches(&name("РОЛЬДОСТУПНА")));
         assert!(registry.matches(&name("isinrole")));
         assert!(!registry.matches(&name("NotARealGuard")));
+    }
+
+    #[test]
+    fn safe_mode_is_not_a_guard() {
+        // Codex §1.6 Group D MAJOR fix: `БезопасныйРежим` /
+        // `SafeMode` is the bare-condition shape that
+        // `UnsafeSafeModeMethodCall` flags as Blocker-severity
+        // unsafe. Recognising it as a guard would let an
+        // unsafe-by-construction pattern silence a major
+        // privileged-call warning. Pin the absence here so a future
+        // edit can't silently re-add it.
+        let registry = default_registry();
+        assert!(!registry.matches(&name("БезопасныйРежим")));
+        assert!(!registry.matches(&name("SafeMode")));
     }
 
     #[test]

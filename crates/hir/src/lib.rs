@@ -104,6 +104,12 @@ pub mod dataflow {
             SecurityStateProvider, K_MAX,
         };
     }
+
+    pub mod guard_predicates {
+        pub use ::dataflow::guard_predicates::{
+            default_registry, is_stmt_guarded, GuardPredicate, GuardRegistry, GuardSemantics,
+        };
+    }
 }
 
 // Re-export additional types needed by ide-db
