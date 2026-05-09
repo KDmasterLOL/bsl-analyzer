@@ -115,8 +115,15 @@ fn is_global_eval_call(node: &syntax::SyntaxNode) -> bool {
         }
     }
 
-    let name = first_token.text().to_lowercase();
-    name == "eval" || name == "вычислить"
+    // Track 2 §1.6: registry-driven recognition (`Category::ExecuteExternalCode`,
+    // `EntryKind::GlobalMethod`). The curated registry covers `Eval` /
+    // `Вычислить` and any future bilingual aliases as a single source of
+    // truth, replacing the hardcoded `name == "eval" || name == "вычислить"`
+    // pair. The `EXECUTE_STMT` (`Выполнить`) match in `detect_violations`
+    // stays a SyntaxKind branch — it's not a name-based match.
+    bsl_platform::security::registry().lookup_global(first_token.text()).is_some_and(|e| {
+        matches!(e.category, bsl_platform::security::Category::ExecuteExternalCode)
+    })
 }
 
 #[cfg(test)]

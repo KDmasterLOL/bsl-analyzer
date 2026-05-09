@@ -417,6 +417,29 @@ fn legacy_recognizer_category_parity() {
         // is_os_users_method — Category::OsUsers
         ("пользователиос", "is_os_users_method", Category::OsUsers),
         ("osusers", "is_os_users_method", Category::OsUsers),
+        // is_global_eval_call (`execute_external_code_in_common_module`) —
+        // Category::ExecuteExternalCode (Track 2 §1.6 Group B).
+        ("вычислить", "is_global_eval_call", Category::ExecuteExternalCode),
+        ("eval", "is_global_eval_call", Category::ExecuteExternalCode),
+        // is_safe_mode_method (DisableSafeMode handler — `hir-def/body/
+        // lower/diagnostics.rs`) — Category::SafeMode covers both
+        // setter flavours.
+        ("установитьбезопасныйрежим", "is_safe_mode_method", Category::SafeMode),
+        ("setsafemode", "is_safe_mode_method", Category::SafeMode),
+        ("установитьотключениебезопасногорежима", "is_safe_mode_method", Category::SafeMode),
+        ("setsafemodedisabled", "is_safe_mode_method", Category::SafeMode),
+        // is_safe_mode_query (UnsafeSafeModeMethodCall handler) —
+        // Category::SafeModeQuery distinguishes the getter from the
+        // setters above so the predicate stays strict.
+        ("безопасныйрежим", "is_safe_mode_query", Category::SafeModeQuery),
+        ("safemode", "is_safe_mode_query", Category::SafeModeQuery),
+        // is_set_privileged_mode (SetPrivilegedMode handler) —
+        // Category::PrivilegedMode is for the setter only; the
+        // getter `ПривилегированныйРежим` lives under
+        // `Category::PrivilegedModeQuery`, so the category filter
+        // alone preserves the legacy strictness.
+        ("установитьпривилегированныйрежим", "is_set_privileged_mode", Category::PrivilegedMode),
+        ("setprivilegedmode", "is_set_privileged_mode", Category::PrivilegedMode),
         // is_file_system_method — Category::FileSystem (canonical-only
         // superset). Full enumeration matches `legacy_recognizer_parity`
         // — Codex round-2 MAJOR: a representative sample lets a

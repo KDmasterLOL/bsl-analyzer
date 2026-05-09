@@ -188,14 +188,26 @@ pub(crate) fn is_deprecated_managed_form(type_name: &str) -> bool {
 /// Check if a method name is УстановитьБезопасныйРежим / SetSafeMode or
 /// УстановитьОтключениеБезопасногоРежима / SetSafeModeDisabled.
 /// Returns true if the method controls safe mode.
+///
+/// Track 2 §1.6: registry-driven (`Category::SafeMode`); previously
+/// consulted `PlatformDataInner` via `is_any_global_function`. The
+/// curated security registry is the single source of truth for
+/// security-relevant API classification, with category-parity tests
+/// in `bsl-platform/tests/security_registry.rs`.
 pub(crate) fn is_safe_mode_method(name: &str) -> bool {
-    is_any_global_function(name, &["SetSafeMode", "SetSafeModeDisabled"])
+    bsl_platform::security::registry()
+        .lookup_global(name)
+        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::SafeMode))
 }
 
 /// Check if a method name is БезопасныйРежим / SafeMode (the getter, not setter).
 /// Returns true if the method queries safe mode state.
+///
+/// Track 2 §1.6: registry-driven (`Category::SafeModeQuery`).
 pub(crate) fn is_safe_mode_query(name: &str) -> bool {
-    is_global_function(name, "SafeMode")
+    bsl_platform::security::registry()
+        .lookup_global(name)
+        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::SafeModeQuery))
 }
 
 /// Check if a method name is НайтиПоКоду / FindByCode.
@@ -206,8 +218,15 @@ pub(crate) fn is_find_by_code_method(name: &str) -> bool {
 
 /// Check if a method name is УстановитьПривилегированныйРежим / SetPrivilegedMode.
 /// Returns true if the method sets privileged mode.
+///
+/// Track 2 §1.6: registry-driven (`Category::PrivilegedMode`). The
+/// getter `ПривилегированныйРежим` lives under
+/// `Category::PrivilegedModeQuery` so the category filter alone keeps
+/// this predicate strict — only the SETTER matches.
 pub(crate) fn is_set_privileged_mode(name: &str) -> bool {
-    is_global_function(name, "SetPrivilegedMode")
+    bsl_platform::security::registry()
+        .lookup_global(name)
+        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::PrivilegedMode))
 }
 
 /// Check if a method name is КаталогВременныхФайлов / TempFilesDir.
