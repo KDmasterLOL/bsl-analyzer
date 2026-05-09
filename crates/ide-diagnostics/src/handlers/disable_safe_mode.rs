@@ -241,6 +241,27 @@ mod tests {
         assert_eq!(safe_mode_diags.len(), 2);
     }
 
+    /// Track 2 §1.6 Group C — Codex round-3 stop-hook regression
+    /// guard: security calls inside compound-statement condition
+    /// expressions (`If <cond> Then`, `While <cond>`) live in
+    /// dedicated CFG vertices, not BasicBlocks. `open_events` walks
+    /// those vertices too — without this, the diagnostic would
+    /// silently regress vs. the legacy HIR detector.
+    #[test]
+    fn test_call_in_if_condition_emits() {
+        let code = r#"
+Процедура Тест()
+    Если УстановитьБезопасныйРежим(Ложь) Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_dataflow_diagnostic(code, check);
+        let safe_mode_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
+        assert_eq!(safe_mode_diags.len(), 1, "SetSafeMode(Ложь) inside If condition must emit");
+    }
+
     /// Track 2 §1.6 Group C — Codex round-2 stop-hook regression
     /// guard: nested security calls (e.g. as a function argument)
     /// must still surface, matching legacy `lower_call_expr` behaviour

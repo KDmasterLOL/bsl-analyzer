@@ -465,60 +465,107 @@ pub struct OpenEvent {
     /// `BodySourceMap::expr_range(callee)` to recover the IDENT range
     /// the diagnostic should attach to.
     pub callee: ExprId,
-    /// Statement carrying the call (the `Стмт::Expr` /
-    /// `Стмт::Assign { value = Call(…) }` etc. that
-    /// [`main_call_expr`] picked up).
-    pub stmt: StmtId,
+    /// Statement carrying the call when known (basic-block leaf
+    /// statements). `None` for calls discovered inside compound-stmt
+    /// condition expressions (e.g. `If <cond> Then ...`), which live
+    /// in dedicated CFG vertices instead of any `BasicBlock`.
+    pub stmt: Option<StmtId>,
 }
 
-/// Walk every basic block of `result.cfg()` and yield one [`OpenEvent`]
+/// Walk every CFG vertex of `result.cfg()` and yield one [`OpenEvent`]
 /// for each recognised "frame-open" call site. Pure helper — no Salsa
 /// access, no allocation beyond the returned `Vec`. The returned events
 /// follow the CFG vertex iteration order; callers that need source-order
 /// stability should sort by `result.body().source_map().expr_range(callee)`
 /// (handler-side concern, not done here).
 ///
-/// Replays the per-block value overlay statement-by-statement so that
-/// `Значение = Истина; SetPrivilegedMode(Значение)` is folded as
-/// `KnownTrue` rather than `Unknown` — exactly the §1.3 const-prop
-/// precision §1.6 Group C wants in the diagnostic.
+/// **Coverage shape.** BasicBlock vertices replay the value overlay
+/// statement-by-statement so that `Значение = Истина;
+/// SetPrivilegedMode(Значение)` is folded as `KnownTrue` rather than
+/// `Unknown` — exactly the §1.3 const-prop precision §1.6 Group C
+/// needs. Conditional / WhileLoop / ForLoop / ForEachLoop vertices
+/// also have their condition / iter expressions walked for security
+/// calls, using the vertex IN-state's overlay (no per-stmt replay
+/// needed — these vertices carry exactly one expression each). Codex
+/// round-3 stop-hook fix: omitting condition vertices regressed the
+/// legacy `lower_call_expr` behaviour, which fired on every
+/// `CALL_EXPR` regardless of where it appeared.
 pub fn open_events(result: &DataflowResult<SecurityModeState>) -> Vec<OpenEvent> {
     let body = result.body();
     let mut events = Vec::new();
     let mut calls_buf: Vec<ExprId> = Vec::new();
-    for (block_idx, vertex) in result.cfg().vertices() {
-        let CfgVertex::BasicBlock(bb) = vertex else { continue };
-        let Some(in_state) = result.block_in(block_idx) else { continue };
-        let Inner::Reachable { overlay: block_overlay, .. } = &in_state.0 else { continue };
-        let mut overlay = block_overlay.clone();
-        for &stmt_id in bb.statements() {
-            // Codex round-2 stop-hook fix: recognise security calls
-            // anywhere in the statement's expression tree, not just at
-            // the statement-root (legacy `lower_call_expr` fired on
-            // every CALL_EXPR regardless of nesting depth, so e.g.
-            // `Сообщить(УстановитьБезопасныйРежим(Ложь))` had to keep
-            // surfacing).
-            calls_buf.clear();
-            collect_call_exprs_in_stmt(body, stmt_id, &mut calls_buf);
-            for call_expr in calls_buf.drain(..) {
-                let Some(info) = recognize_security_call(body, call_expr, &overlay) else {
-                    continue;
-                };
-                if !call_opens_frame(&info) {
-                    continue;
-                }
-                if let Expr::Call { callee, .. } = body.expr(call_expr) {
-                    events.push(OpenEvent {
-                        category: info.category,
-                        callee: ExprId::from_idx(*callee),
-                        stmt: stmt_id,
-                    });
+    for (vertex_idx, vertex) in result.cfg().vertices() {
+        let Some(in_state) = result.block_in(vertex_idx) else { continue };
+        let Inner::Reachable { overlay: vertex_overlay, .. } = &in_state.0 else { continue };
+        match vertex {
+            CfgVertex::BasicBlock(bb) => {
+                let mut overlay = vertex_overlay.clone();
+                for &stmt_id in bb.statements() {
+                    // Codex round-2 stop-hook fix: recognise security calls
+                    // anywhere in the statement's expression tree, not just
+                    // at the statement-root (legacy `lower_call_expr` fired
+                    // on every CALL_EXPR regardless of nesting depth, so
+                    // e.g. `Сообщить(УстановитьБезопасныйРежим(Ложь))` had
+                    // to keep surfacing).
+                    calls_buf.clear();
+                    collect_call_exprs_in_stmt(body, stmt_id, &mut calls_buf);
+                    emit_for_calls(body, &calls_buf, &overlay, Some(stmt_id), &mut events);
+                    crate::value_state::step(&mut overlay, body, stmt_id);
                 }
             }
-            crate::value_state::step(&mut overlay, body, stmt_id);
+            CfgVertex::Conditional(v) => {
+                calls_buf.clear();
+                walk_expr_for_calls(body, v.condition.to_idx(), &mut calls_buf);
+                emit_for_calls(body, &calls_buf, vertex_overlay, None, &mut events);
+            }
+            CfgVertex::WhileLoop(v) => {
+                calls_buf.clear();
+                walk_expr_for_calls(body, v.condition.to_idx(), &mut calls_buf);
+                emit_for_calls(body, &calls_buf, vertex_overlay, None, &mut events);
+            }
+            CfgVertex::ForLoop(v) => {
+                calls_buf.clear();
+                walk_expr_for_calls(body, v.from.to_idx(), &mut calls_buf);
+                walk_expr_for_calls(body, v.to.to_idx(), &mut calls_buf);
+                emit_for_calls(body, &calls_buf, vertex_overlay, v.stmt_id, &mut events);
+            }
+            CfgVertex::ForEachLoop(v) => {
+                calls_buf.clear();
+                walk_expr_for_calls(body, v.collection.to_idx(), &mut calls_buf);
+                emit_for_calls(body, &calls_buf, vertex_overlay, v.stmt_id, &mut events);
+            }
+            // TryExcept / Label / PreprocCondition / Exit carry no
+            // runtime-evaluated security-relevant expressions.
+            _ => {}
         }
     }
     events
+}
+
+/// Recognise each call in `calls`, yielding an `OpenEvent` for those
+/// whose const-folded argument transitions a frame counter to "open".
+fn emit_for_calls(
+    body: &Body,
+    calls: &[ExprId],
+    overlay: &ValueOverlay,
+    stmt: Option<StmtId>,
+    events: &mut Vec<OpenEvent>,
+) {
+    for &call_expr in calls {
+        let Some(info) = recognize_security_call(body, call_expr, overlay) else {
+            continue;
+        };
+        if !call_opens_frame(&info) {
+            continue;
+        }
+        if let Expr::Call { callee, .. } = body.expr(call_expr) {
+            events.push(OpenEvent {
+                category: info.category,
+                callee: ExprId::from_idx(*callee),
+                stmt,
+            });
+        }
+    }
 }
 
 /// Collect every call-like expression reachable from a leaf statement's
@@ -527,12 +574,10 @@ pub fn open_events(result: &DataflowResult<SecurityModeState>) -> Vec<OpenEvent>
 /// BSL's left-to-right evaluation of nested calls.
 ///
 /// Compound statements (`Стмт::If`/`While`/loops) do NOT live in basic
-/// blocks: condition expressions in If/While/For vertices are
-/// `ConditionalVertex`/`WhileLoop`/`ForLoop` CFG nodes, not `BasicBlock`
-/// nodes. Security calls inside those conditions are not detected. This
-/// is intentional — such patterns are pathological, and adding
-/// ConditionalVertex traversal would require visiting condition ExprId
-/// outside the BasicBlock transfer loop.
+/// blocks: their condition / iter expressions are visited separately
+/// in [`open_events`] via the corresponding `ConditionalVertex` /
+/// `WhileLoop` / `ForLoop` / `ForEachLoop` CFG nodes. This helper
+/// covers ONLY the leaf-statement expression tree.
 fn collect_call_exprs_in_stmt(body: &Body, stmt: StmtId, out: &mut Vec<ExprId>) {
     let roots: &[hir_def::hir::ExprIdx] = match body.stmt(stmt) {
         Stmt::Expr(e) => std::slice::from_ref(e),
