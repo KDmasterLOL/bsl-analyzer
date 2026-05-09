@@ -13,6 +13,8 @@ use lsp_types::{
     MarkupContent, MarkupKind, ReferenceParams, SemanticTokens, SemanticTokensParams,
     SemanticTokensResult, SignatureHelpParams,
 };
+use rustc_hash::FxHashMap;
+use vfs::FileId;
 
 use crate::frozen_context::LatencyRequestContext;
 use crate::global_state::GlobalStateSnapshot;
@@ -120,10 +122,9 @@ pub fn handle_find_references(
         return Ok(None);
     }
 
-    let lsp_locations: Vec<Location> = locations
-        .into_iter()
-        .filter_map(|loc| convert_location(line_index, text, &uri, loc))
-        .collect();
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let lsp_locations: Vec<Location> =
+        locations.into_iter().map(|loc| converter.convert(loc)).collect::<Result<Vec<_>>>()?;
 
     if lsp_locations.is_empty() {
         Ok(None)
@@ -512,18 +513,55 @@ fn convert_document_symbol(
     })
 }
 
-/// Convert IDE Location to LSP Location.
-///
-/// For now, assumes all locations are in the same file.
-/// TODO: Support cross-file references when we have FileId → URL mapping.
-fn convert_location(
-    line_index: &LineIndex,
-    text: &str,
-    uri: &lsp_types::Url,
-    ide_loc: IdeLocation,
-) -> Option<Location> {
-    let range = crate::lsp::range(line_index, text, ide_loc.range)?;
-    Some(Location { uri: uri.clone(), range })
+struct ReferenceLocationConverter<'ctx> {
+    ctx: &'ctx LatencyRequestContext,
+    source_file_id: FileId,
+    source_text: String,
+    target_files: FxHashMap<FileId, ReferenceTargetFile>,
+}
+
+struct ReferenceTargetFile {
+    uri: lsp_types::Url,
+    text: String,
+    line_index: LineIndex,
+}
+
+impl<'ctx> ReferenceLocationConverter<'ctx> {
+    fn new(ctx: &'ctx LatencyRequestContext, source_file_id: FileId, source_text: &str) -> Self {
+        Self {
+            ctx,
+            source_file_id,
+            source_text: source_text.to_string(),
+            target_files: FxHashMap::default(),
+        }
+    }
+
+    fn convert(&mut self, ide_loc: IdeLocation) -> Result<Location> {
+        let target = self.target_file(ide_loc.file_id)?;
+        let range = crate::lsp::range(&target.line_index, &target.text, ide_loc.range)
+            .ok_or_else(|| anyhow::anyhow!("Failed to convert reference range"))?;
+        Ok(Location { uri: target.uri.clone(), range })
+    }
+
+    fn target_file(&mut self, file_id: FileId) -> Result<&ReferenceTargetFile> {
+        if !self.target_files.contains_key(&file_id) {
+            let uri = self.ctx.url_for_file_id(file_id)?;
+            let text = if file_id == self.source_file_id {
+                self.source_text.clone()
+            } else if let Some(doc) = self.ctx.mem_docs.get(&uri) {
+                doc.text().to_string()
+            } else {
+                self.ctx.analysis.file_text(file_id)
+            };
+            let line_index = LineIndex::new(&text);
+            self.target_files.insert(file_id, ReferenceTargetFile { uri, text, line_index });
+        }
+
+        Ok(self
+            .target_files
+            .get(&file_id)
+            .expect("reference target file must be cached after insertion"))
+    }
 }
 
 /// Convert IDE CompletionItem to LSP CompletionItem.
@@ -795,6 +833,8 @@ mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
     use lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams};
+    use std::sync::Arc;
+    use vfs::VfsPath;
 
     use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
     use crate::global_state::GlobalState;
@@ -900,6 +940,50 @@ mod tests {
         let result = handle_find_references(ctx, params);
         // File not in VFS is expected to fail in tests
         assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    #[test]
+    fn reference_location_converter_uses_target_file_uri_and_text() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let source_uri = lsp_types::Url::parse("file:///source.bsl").unwrap();
+        let target_uri = lsp_types::Url::parse("file:///target.bsl").unwrap();
+        let source_text = "Процедура Источник()\nКонецПроцедуры";
+        let target_text = "ПерваяСтрока\n    Цель();\n";
+
+        let source_file_id = state.vfs_file_for_url(&source_uri).unwrap();
+        let target_file_id = state.vfs_file_for_url(&target_uri).unwrap();
+        state.mem_docs.insert(source_uri.clone(), source_text.to_string(), 1);
+
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(source_uri.to_file_path().unwrap()),
+                Some(Arc::from(source_text)),
+            );
+            vfs.set_file_contents(
+                VfsPath::new(target_uri.to_file_path().unwrap()),
+                Some(Arc::from(target_text)),
+            );
+        }
+
+        state.process_changes(false);
+        let ctx = latency_ctx(&state);
+
+        let start = target_text.find("Цель").unwrap() as u32;
+        let end = start + "Цель".len() as u32;
+        let ide_loc = IdeLocation {
+            file_id: target_file_id,
+            range: ide::TextRange::new(start.into(), end.into()),
+        };
+
+        let mut converter = ReferenceLocationConverter::new(&ctx, source_file_id, source_text);
+        let lsp_loc = converter.convert(ide_loc).unwrap();
+
+        assert_eq!(lsp_loc.uri, target_uri);
+        assert_eq!(lsp_loc.range.start, Position { line: 1, character: 4 });
+        assert_eq!(lsp_loc.range.end, Position { line: 1, character: 8 });
     }
 
     #[test]
