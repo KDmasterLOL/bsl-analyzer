@@ -26,10 +26,8 @@
 
 pub mod body;
 pub mod call_graph;
-pub mod cognitive_complexity;
 pub mod conditional_tree;
 pub mod configs;
-pub mod cyclomatic_complexity;
 pub mod docs;
 pub mod hir;
 pub mod item_tree;
