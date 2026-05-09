@@ -167,9 +167,10 @@ fn bits_for_category(category: Category) -> EffectSummary {
         Category::Internet => s.may_call_internet = true,
         Category::ExternalApp => s.may_call_external_app = true,
         Category::ExecuteExternalCode => s.may_execute_external_code = true,
-        Category::OsUsers | Category::Logging => {
-            // OsUsers has no dedicated bit yet; logging is benign and
-            // exists in the registry only for §2's catch-body classifier.
+        Category::OsUsers | Category::Logging | Category::Transaction => {
+            // OsUsers has no dedicated bit yet; logging and
+            // transaction-rollback are benign and exist in the
+            // registry only for §2's catch-body classifier.
         }
     }
     s

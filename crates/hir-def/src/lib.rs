@@ -26,6 +26,7 @@
 
 pub mod body;
 pub mod call_graph;
+pub mod catch_class;
 pub mod conditional_tree;
 pub mod configs;
 pub mod docs;

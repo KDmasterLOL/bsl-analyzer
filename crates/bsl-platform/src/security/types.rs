@@ -43,6 +43,13 @@ pub enum Category {
     /// Logging APIs. Used by `MissingCodeTryCatchEx` to recognize
     /// `LogsOnly` catch-bodies in §2.
     Logging,
+    /// Transaction-rollback APIs (`ОтменитьТранзакцию` /
+    /// `RollbackTransaction`). The §2 catch-body classifier treats
+    /// rollback as a legitimate recovery action — a catch body
+    /// containing only a rollback call is not silently swallowing the
+    /// exception, it's reverting state before propagating or
+    /// otherwise handling the failure.
+    Transaction,
 }
 
 /// Curated severity. Reflects the *intrinsic* risk of the API, not the

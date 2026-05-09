@@ -1,8 +1,20 @@
-//! Reports empty `Исключение` / `Except` blocks.
+//! Reports `Исключение` / `Except` blocks that swallow errors silently
+//! (no `Raise` / no logging API call) — including completely empty
+//! blocks and blocks with only non-recovery code.
+//!
+//! Track 2 Phase D §2.2 migration: replaces the previous
+//! "empty-only" heuristic with a [`hir::catch_class::CatchBodyClass`]
+//! classifier-driven dispatch. The classifier categorises the
+//! `Исключение` body into one of six classes; this handler emits
+//! for `Empty` / `Silent` (and respects `commentAsCode` for the
+//! `Empty` case via the existing AST fallback). `RaisesOnly` /
+//! `LogsOnly` / `Mixed` are recognised as proper recovery paths
+//! and skip emission.
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::catch_class::{classify_catch_body, CatchBodyClass};
 use hir::{IdConversion, Stmt, StmtId};
 use syntax::SyntaxKind;
 
@@ -76,76 +88,27 @@ fn check_stmt_recursive(
 
     // Check if this is a Try statement
     if let Stmt::Try { body: try_body, except } = stmt {
-        // Empty except block?
-        if except.is_empty() {
-            // If commentAsCode=true, check if except block has comments via AST fallback
-            if comment_as_code {
-                // Need to get the range of the except clause and check for comments
-                // For now, we'll use source_map to get the stmt range, then parse AST
-                if let Some(stmt_range) = source_map.stmt_range(stmt_id) {
-                    // Parse AST at this range to check for comments
-                    let parse = ctx.parse();
-                    let root = parse.syntax_node();
-
-                    // Find the TRY_STMT node at this range
-                    if let Some(try_node) = root
-                        .descendants()
-                        .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)
-                    {
-                        // Find EXCEPT_CLAUSE and check for comments
-                        if let Some(except_clause) =
-                            try_node.children().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)
-                        {
-                            if has_comments_in_node(&except_clause) {
-                                // Has comments, skip diagnostic
-                            } else {
-                                // No comments, report diagnostic
-                                report_diagnostic_at_except(&try_node, code, ctx, diagnostics);
-                            }
-                        } else {
-                            // No except clause found (shouldn't happen), skip
-                        }
-                    } else {
-                        // Couldn't find AST node, report diagnostic anyway
-                        if let Some(range) = source_map.stmt_range(stmt_id) {
-                            diagnostics.push(Diagnostic {
-                                code,
-                                message: "Отсутствует код в блоке исключения".to_string(),
-                                severity: ctx.severity(code),
-                                range,
-                                tags: ctx.tags(code),
-                                fixes: vec![],
-                            });
-                        }
-                    }
-                } else {
-                    // No source range, skip
-                }
-            } else {
-                // commentAsCode=false, report diagnostic directly
-                // Find the EXCEPT keyword position via AST fallback
-                if let Some(stmt_range) = source_map.stmt_range(stmt_id) {
-                    let parse = ctx.parse();
-                    let root = parse.syntax_node();
-
-                    if let Some(try_node) = root
-                        .descendants()
-                        .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)
-                    {
-                        report_diagnostic_at_except(&try_node, code, ctx, diagnostics);
-                    } else {
-                        // Fallback: use stmt range
-                        diagnostics.push(Diagnostic {
-                            code,
-                            message: "Отсутствует код в блоке исключения".to_string(),
-                            severity: ctx.severity(code),
-                            range: stmt_range,
-                            tags: ctx.tags(code),
-                            fixes: vec![],
-                        });
-                    }
-                }
+        let class = classify_catch_body(body, except);
+        let should_emit = match class {
+            // Empty body: emit unless commentAsCode is on AND the
+            // EXCEPT_CLAUSE has comments (HIR drops trivia, so the
+            // distinction lives at the AST layer).
+            CatchBodyClass::Empty => {
+                !(comment_as_code && except_clause_has_comments(stmt_id, source_map, ctx))
             }
+            // Silent swallow: has statements but none propagate or
+            // record the exception. Always emit.
+            CatchBodyClass::Silent => true,
+            // Rollback-only: reverts state but loses the failure.
+            // Emit with rollback-specific guidance (recommend adding
+            // log or `Raise` so the error is observable).
+            CatchBodyClass::RollbackOnly => true,
+            // Real recovery paths — proper raise / log / mixed.
+            CatchBodyClass::RaisesOnly | CatchBodyClass::LogsOnly | CatchBodyClass::Mixed => false,
+        };
+
+        if should_emit {
+            emit_at_except_keyword(stmt_id, source_map, code, ctx, diagnostics, class);
         }
 
         // Recursively check nested statements in try body
@@ -246,31 +209,78 @@ fn check_stmt_recursive(
     }
 }
 
-/// Check if a node contains any comments (AST fallback).
-fn has_comments_in_node(node: &syntax::SyntaxNode) -> bool {
-    node.descendants_with_tokens()
+/// AST-side query: does the `EXCEPT_CLAUSE` corresponding to the
+/// HIR `Stmt::Try` at `stmt_id` contain any comments? HIR strips
+/// trivia, so the `commentAsCode` config still has to peek at the
+/// parse tree.
+fn except_clause_has_comments(
+    stmt_id: StmtId,
+    source_map: &hir::BodySourceMap,
+    ctx: &DiagnosticsContext,
+) -> bool {
+    let Some(stmt_range) = source_map.stmt_range(stmt_id) else { return false };
+    let parse = ctx.parse();
+    let root = parse.syntax_node();
+    let Some(try_node) = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)
+    else {
+        return false;
+    };
+    let Some(except_clause) = try_node.children().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)
+    else {
+        return false;
+    };
+    except_clause
+        .descendants_with_tokens()
         .filter_map(|el| el.into_token())
         .any(|tok| tok.kind() == SyntaxKind::COMMENT)
 }
 
-/// Report diagnostic at EXCEPT keyword position (AST fallback for precise location).
-fn report_diagnostic_at_except(
-    try_node: &syntax::SyntaxNode,
+/// Push a diagnostic at the `Исключение` keyword. The message wording
+/// branches on the catch-body class — `Empty` and `Silent` are
+/// distinct quality issues even though they share the same diagnostic
+/// code.
+fn emit_at_except_keyword(
+    stmt_id: StmtId,
+    source_map: &hir::BodySourceMap,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
+    class: CatchBodyClass,
 ) {
-    // Find EXCEPT keyword
-    if let Some(except_token) = try_node
-        .children_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|tok| tok.kind() == SyntaxKind::KW_EXCEPT)
-    {
+    let message = match class {
+        CatchBodyClass::Silent => "Блок исключения молча подавляет ошибку: добавьте \
+             `ВызватьИсключение` или вызов журналирования"
+            .to_string(),
+        CatchBodyClass::RollbackOnly => "Блок исключения только откатывает транзакцию, \
+             но не фиксирует ошибку: добавьте логирование или `ВызватьИсключение`"
+            .to_string(),
+        _ => "Отсутствует код в блоке исключения".to_string(),
+    };
+
+    let range = source_map
+        .stmt_range(stmt_id)
+        .and_then(|stmt_range| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let try_node = root
+                .descendants()
+                .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)?;
+            try_node
+                .children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .find(|tok| tok.kind() == SyntaxKind::KW_EXCEPT)
+                .map(|tok| tok.text_range())
+        })
+        .or_else(|| source_map.stmt_range(stmt_id));
+
+    if let Some(range) = range {
         diagnostics.push(Diagnostic {
             code,
-            message: "Отсутствует код в блоке исключения".to_string(),
+            message,
             severity: ctx.severity(code),
-            range: except_token.text_range(),
+            range,
             tags: ctx.tags(code),
             fixes: vec![],
         });
@@ -284,6 +294,120 @@ mod tests {
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+
+    /// Track 2 Phase D §2.2 — `RaisesOnly` catch-body classification:
+    /// re-raising the exception via `ВызватьИсключение;` is proper
+    /// recovery, no diagnostic.
+    #[test]
+    fn raises_only_does_not_emit() {
+        let code = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Re-raise must not be flagged as silent swallow");
+    }
+
+    /// Track 2 Phase D §2.2 — `LogsOnly` catch-body classification:
+    /// `Сообщить` is in `Category::Logging` per the §1.1 registry, so
+    /// the catch handler is recognised as recording the error.
+    #[test]
+    fn logs_only_does_not_emit() {
+        let code = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Сообщить("error");
+    КонецПопытки;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Logging-API call must not be flagged");
+    }
+
+    /// Track 2 Phase D §2.2 — `Silent` catch-body classification: the
+    /// except has statements but none of them propagate or log the
+    /// exception (an unknown user-defined call cannot be statically
+    /// proven to re-raise/log without inter-procedural analysis, so
+    /// the classifier reports Silent and the handler emits).
+    #[test]
+    fn silent_swallow_emits() {
+        let code = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ОбработатьОшибку();
+    КонецПопытки;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Silent swallow must be flagged");
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingCodeTryCatchEx);
+        assert!(
+            diagnostics[0].message.contains("молча"),
+            "Silent message should mention the swallow, got: {}",
+            diagnostics[0].message
+        );
+    }
+
+    /// Track 2 Phase D §2.2 — `RollbackOnly` catch-body
+    /// classification: rolling back the transaction reverts state but
+    /// doesn't record or propagate the failure. The handler emits a
+    /// rollback-specific message recommending to add logging or
+    /// `ВызватьИсключение`.
+    #[test]
+    fn rollback_only_emits_with_rollback_message() {
+        let code = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Rollback-alone must emit");
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingCodeTryCatchEx);
+        assert!(
+            diagnostics[0].message.contains("откатывает"),
+            "Rollback message should mention rollback, got: {}",
+            diagnostics[0].message
+        );
+    }
+
+    /// Rollback + logging is proper recovery — the failure is
+    /// observable, no diagnostic.
+    #[test]
+    fn rollback_plus_log_does_not_emit() {
+        let code = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ОтменитьТранзакцию();
+        Сообщить("error");
+    КонецПопытки;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Rollback + log must not emit");
+    }
+
+    /// Track 2 Phase D §2.2 — `Mixed` catch-body classification:
+    /// raise + log together is a legitimate "log then re-raise"
+    /// pattern, no diagnostic.
+    #[test]
+    fn mixed_does_not_emit() {
+        let code = r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Сообщить("error");
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Log-then-reraise must not be flagged");
+    }
+
     #[test]
     fn test_missing_code_try_catch_ex() {
         // Inline version of MissingCodeTryCatchExDiagnostic.bsl.
@@ -292,7 +416,7 @@ mod tests {
     Попытка
         Действие();
     Исключение
-        ДействиеИсключения();
+        ВызватьИсключение;
     КонецПопытки;
 КонецПроцедуры
 
@@ -303,7 +427,7 @@ mod tests {
 
         // просто коментарий
 
-        ДействиеИсключения();
+        ВызватьИсключение;
     КонецПопытки;
 КонецПроцедуры
 
@@ -331,7 +455,11 @@ mod tests {
 КонецФункции
 
 Процедура Проц3()
-    // в исключении другая попытка, не ошибка
+    // §2.2: nested try without re-raise IS Silent — outer except
+    // has Stmt::Try as "other", and the classifier conservatively
+    // treats any stmt-kind that isn't Raise / log-call as Silent
+    // (cannot prove the nested try ultimately propagates without
+    // inter-procedural analysis).
     Попытка
         Действие();
     Исключение
@@ -346,17 +474,22 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Expected 3 diagnostics at specific positions
-        assert_eq!(diagnostics.len(), 3, "Should detect 3 empty exception handlers");
+        // Track 2 Phase D §2.2: 4 expected emits — the §2 classifier
+        // adds Silent detection for catch bodies whose contents are
+        // not Raise / log-call. The outer Проц3 except contains a
+        // nested Try (which the classifier treats as "other"), so it
+        // is now flagged as Silent in addition to the prior 3 Empty
+        // cases.
+        assert_eq!(diagnostics.len(), 4, "Should detect 3 Empty + 1 Silent");
 
-        // Line 23, columns 4-14 (Исключение keyword in Проц2)
+        // Line 23 (Проц2 Empty)
         assert_diagnostic_range(code, &diagnostics[0], 23, 4, 14);
-
-        // Line 32, columns 4-14 (Исключение with only comments in Функ1)
+        // Line 32 (Функ1 Empty — HIR drops comments)
         assert_diagnostic_range(code, &diagnostics[1], 32, 4, 14);
-
-        // Line 50, columns 8-18 (nested Исключение in Проц3)
-        assert_diagnostic_range(code, &diagnostics[2], 50, 8, 18);
+        // Line 50 (Проц3 outer Silent — new in §2.2)
+        assert_diagnostic_range(code, &diagnostics[2], 50, 4, 14);
+        // Line 54 (Проц3 inner Empty)
+        assert_diagnostic_range(code, &diagnostics[3], 54, 8, 18);
     }
 
     #[test]
@@ -366,7 +499,7 @@ mod tests {
     Попытка
         Действие();
     Исключение
-        ДействиеИсключения();
+        ВызватьИсключение;
     КонецПопытки;
 КонецПроцедуры
 
@@ -377,7 +510,7 @@ mod tests {
 
         // просто коментарий
 
-        ДействиеИсключения();
+        ВызватьИсключение;
     КонецПопытки;
 КонецПроцедуры
 
@@ -405,7 +538,11 @@ mod tests {
 КонецФункции
 
 Процедура Проц3()
-    // в исключении другая попытка, не ошибка
+    // §2.2: nested try without re-raise IS Silent — outer except
+    // has Stmt::Try as "other", and the classifier conservatively
+    // treats any stmt-kind that isn't Raise / log-call as Silent
+    // (cannot prove the nested try ultimately propagates without
+    // inter-procedural analysis).
     Попытка
         Действие();
     Исключение
@@ -428,24 +565,35 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expected 2 diagnostics (line 32 is now suppressed because it has comments)
-        assert_eq!(diagnostics.len(), 2, "Should detect only 2 when comments count as code");
+        // Track 2 Phase D §2.2 + commentAsCode=true: Функ1's
+        // Empty-with-comments is suppressed (line 32 gone). Проц2
+        // Empty stays (no comments in its except clause). Проц3 outer
+        // Silent (nested Try) stays — `commentAsCode` only affects
+        // the Empty branch. Проц3 inner Empty stays.
+        assert_eq!(diagnostics.len(), 3, "1 Empty suppressed + 2 Empty + 1 Silent remain");
 
-        // Line 23 still reported (no comments)
+        // Line 23 (Проц2 Empty — no comments to suppress)
         assert_diagnostic_range(code, &diagnostics[0], 23, 4, 14);
-
-        // Line 50 still reported (no comments)
-        assert_diagnostic_range(code, &diagnostics[1], 50, 8, 18);
+        // Line 50 (Проц3 outer Silent — commentAsCode irrelevant)
+        assert_diagnostic_range(code, &diagnostics[1], 50, 4, 14);
+        // Line 54 (Проц3 inner Empty)
+        assert_diagnostic_range(code, &diagnostics[2], 54, 8, 18);
     }
 
     #[test]
     fn test_valid_exception_handlers() {
+        // Track 2 Phase D §2.2: "valid exception handler" now means
+        // re-raise or log via the §1.1 registry. An unknown
+        // user-defined call is conservatively classified as Silent
+        // because we can't prove it propagates the exception. The
+        // fixture uses `ВызватьИсключение;` to exercise the
+        // RaisesOnly → no-emit path.
         let code = r#"
 Процедура Проц1()
     Попытка
         Действие();
     Исключение
-        ДействиеИсключения();
+        ВызватьИсключение;
     КонецПопытки;
 КонецПроцедуры
 "#;

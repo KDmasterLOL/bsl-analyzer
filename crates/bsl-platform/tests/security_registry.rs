@@ -92,6 +92,7 @@ fn each_handler_category_has_entries() {
         Category::SafeMode,
         Category::SafeModeQuery,
         Category::Logging,
+        Category::Transaction,
     ] {
         assert!(!reg.entries_by_category(category).is_empty(), "no entries for {category:?}",);
     }

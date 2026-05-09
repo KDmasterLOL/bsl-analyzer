@@ -238,6 +238,19 @@ pub const ENTRIES: &[SecurityEntry] = &[
         lifetime: None,
     },
     // -----------------------------------------------------------------
+    // Category::Transaction — used by §2 catch-body classifier as a
+    // recovery action (rollback before propagating / handling).
+    // -----------------------------------------------------------------
+    SecurityEntry {
+        ru: "ОтменитьТранзакцию",
+        en: "RollbackTransaction",
+        kind: EntryKind::GlobalMethod,
+        category: Category::Transaction,
+        severity: Severity::Minor,
+        params: NO_PARAMS,
+        lifetime: None,
+    },
+    // -----------------------------------------------------------------
     // Category::Logging — used by §2 catch-body classifier (`LogsOnly`).
     // -----------------------------------------------------------------
     SecurityEntry {
@@ -252,6 +265,21 @@ pub const ENTRIES: &[SecurityEntry] = &[
     SecurityEntry {
         ru: "Сообщить",
         en: "Message",
+        kind: EntryKind::GlobalMethod,
+        category: Category::Logging,
+        severity: Severity::Minor,
+        params: NO_PARAMS,
+        lifetime: None,
+    },
+    // BSL stdlib `ОбщегоНазначения.СообщитьПользователю(...)` —
+    // typically used inside `Исключение` to surface the error to the
+    // end user. Registered as a Logging entry so the §2 catch-body
+    // classifier doesn't false-positive on the very common qualified
+    // call shape (`Module.method(...)`, lowered as
+    // `Expr::Call { callee: Expr::Field }` — see `recovery_kind`).
+    SecurityEntry {
+        ru: "СообщитьПользователю",
+        en: "MessageToUser",
         kind: EntryKind::GlobalMethod,
         category: Category::Logging,
         severity: Severity::Minor,
