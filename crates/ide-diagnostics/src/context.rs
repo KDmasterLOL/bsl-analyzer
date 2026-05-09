@@ -325,6 +325,21 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_security_state(self.file_id))
     }
 
+    /// Per-method effect summary (Track 2 Phase A §1.4).
+    ///
+    /// Returned by [`AnalysisProvider::method_effect_summary`]. The
+    /// §6.5 cognitive recursion penalty consumes
+    /// [`dataflow::effect_summary::EffectSummary::is_recursive`] to
+    /// add a +1 increment for self/mutually-recursive methods,
+    /// matching the SonarSource Cognitive Complexity v1.4 spec
+    /// section "fundamental increment — recursion".
+    pub fn method_effect_summary(
+        &self,
+        method: hir::MethodId,
+    ) -> std::sync::Arc<hir::dataflow::effect_summary::EffectSummary> {
+        self.query(|p| p.method_effect_summary(method))
+    }
+
     /// Per-module HIR-structural metrics batch (Track 2 Phase B §6.3).
     ///
     /// Consumed by the §6.4-migrated `CognitiveComplexity` /

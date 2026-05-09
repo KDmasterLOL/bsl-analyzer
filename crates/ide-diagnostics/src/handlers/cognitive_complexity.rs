@@ -86,7 +86,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::ModItem;
+use hir::{MethodId, ModItem, ModuleId};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -120,11 +120,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
     let module_bodies = ctx.module_bodies();
     let item_tree = ctx.item_tree();
+    let module_id = ModuleId::new(ctx.file_id);
+
+    // Sort by `local_id` for deterministic output ordering — matches
+    // the §6.4 cohort follow-up applied to method_size etc.
+    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
+    local_ids.sort_unstable();
 
     let mut out = Vec::new();
-    for (local_id, _body) in module_bodies.iter_bodies() {
+    for local_id in local_ids {
         let Some(metrics) = module_metrics.get(local_id) else { continue };
-        if metrics.cognitive <= threshold {
+        // Track 2 Phase B §6.5: SonarSource Cognitive Complexity v1.4
+        // recursion penalty — `+1` when the method is self-recursive
+        // or part of a recursion cycle (intra-module SCC). Sourced
+        // from `EffectSummary::is_recursive` (§1.4) so the penalty
+        // tracks the same call-graph fixed-point the security-state
+        // handlers consume.
+        let method_id = MethodId { module: module_id, local_id };
+        let effect = ctx.method_effect_summary(method_id);
+        let recursion_bonus = if effect.is_recursive { 1 } else { 0 };
+        let total = metrics.cognitive + recursion_bonus;
+        if total <= threshold {
             continue;
         }
         let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
@@ -145,7 +161,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             message: format!(
                 "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
                  Упростите логику или уменьшите вложенность",
-                method_type, name, metrics.cognitive, threshold
+                method_type, name, total, threshold
             ),
             severity: ctx.severity(code),
             range: name_range,
@@ -333,6 +349,47 @@ mod tests {
         assert!(
             diagnostics[0].message.contains("15"),
             "Message should contain threshold 15, got: {}",
+            diagnostics[0].message
+        );
+    }
+
+    /// Track 2 Phase B §6.5 — recursion penalty regression guard.
+    /// SonarSource Cognitive Complexity v1.4 spec adds `+1` for any
+    /// recursive call (self or mutual). The §6.4 visitor's HIR-walk
+    /// can't see call edges, so the penalty is sourced from
+    /// `EffectSummary::is_recursive` (§1.4) and applied in the
+    /// handler. This test pins the +1 increment against a tight
+    /// fixture: a self-recursive function with cognitive=2 (one
+    /// `Если` increment) plus the recursion bonus = 3, fires when
+    /// `complexityThreshold = 2`.
+    #[test]
+    fn test_recursion_penalty_self_call() {
+        let code = r#"Функция Факториал(N)
+    Если N <= 1 Тогда
+        Возврат 1;
+    КонецЕсли;
+    Возврат N * Факториал(N - 1);
+КонецФункции"#;
+
+        let mut config = DiagnosticsConfig::default();
+        let mut params = serde_json::Map::new();
+        params.insert("complexityThreshold".to_string(), serde_json::Value::Number(1.into()));
+        config
+            .parameters
+            .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
+
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "raw cognitive=1, recursion bonus=+1 → total 2; with threshold 1 should fire after \
+             the §6.5 penalty"
+        );
+        assert!(
+            diagnostics[0].message.contains("сложность 2"),
+            "Message should contain total complexity 2 (1 + 1 recursion), got: {}",
             diagnostics[0].message
         );
     }
