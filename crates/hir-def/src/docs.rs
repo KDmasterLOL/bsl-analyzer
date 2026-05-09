@@ -15,9 +15,12 @@
 //! Documentation is a first-class HIR concept.
 
 use crate::item_tree::ModItem;
-use crate::{DefDatabase, MethodId};
+use crate::{DefDatabase, MethodId, VariableId};
 use std::sync::Arc;
-use syntax::{extract_leading_comments_at_offset, SyntaxNode};
+use syntax::{
+    extract_leading_comments_at_offset, extract_variable_comments_at_offset, Parse, SyntaxKind,
+    SyntaxNode,
+};
 
 /// Parsed documentation for a BSL method (procedure or function).
 ///
@@ -248,16 +251,18 @@ impl TypeDoc {
 
 /// Parse method documentation from comments.
 ///
-/// This is a Salsa query that:
 /// 1. Extracts leading comments before the method
 /// 2. Parses all documentation sections (purpose, parameters, returns, etc.)
 /// 3. Returns structured `MethodDocs` or `None` if no documentation exists
 ///
 /// ## Caching
 ///
-/// This query is cached by Salsa. It's only recomputed when:
-/// - The file containing the method changes
-/// - The parse tree changes (which implies comments changed)
+/// Not Salsa-tracked itself. Callers go through `SymbolTree`, which
+/// pre-computes each method's docs during construction and stores the
+/// `Arc<MethodDocs>` on `MethodSymbol.docs`; the LRU cap on
+/// `symbol_tree_query` (=512) bounds the cache. `RootDatabaseImpl::method_docs`,
+/// `StreamingProvider::method_docs`, and the test stub all read from
+/// the same SymbolTree-resident copy.
 ///
 /// ## Example
 ///
@@ -330,6 +335,174 @@ pub fn compute_method_docs(
     let docs = parse_method_docs(&comments)?;
 
     Some(Arc::new(docs))
+}
+
+/// Parsed documentation for a module-level BSL variable.
+///
+/// Variables don't carry parameters / return values / examples / call options,
+/// so the structure is a thinner cousin of `MethodDocs`. The `types` slot is
+/// kept (and currently always empty) so future LSP hover features can grow
+/// into typed variable docs (`// ИмяПеременной - Строка - комментарий`)
+/// without a breaking schema change. The `link` slot lets quality
+/// diagnostics suppress on `См. ДругойМодуль.МойОбъект` delegated docs,
+/// matching how `MethodDocs::is_hyperlink()` is honoured by the method
+/// handlers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableDocs {
+    /// Raw comment lines (after `//` strip + trim, blank lines filtered).
+    pub raw: Vec<String>,
+    /// Free-form prose before any structured section. `None` when only
+    /// hyperlink / deprecation content was present.
+    pub purpose: Option<String>,
+    /// Reserved: typed variable docs aren't parsed yet but the schema
+    /// keeps the slot so future consumers don't force a breaking change.
+    pub types: Vec<TypeDoc>,
+    /// Text of the `Устарела:` / `Deprecated:` section if any.
+    pub deprecation: Option<String>,
+    /// `См. <target>` / `See <target>` reference; when set, the docs are
+    /// considered delegated to the linked entity and quality diagnostics
+    /// must skip.
+    pub link: Option<String>,
+}
+
+impl VariableDocs {
+    /// Variable docs are a hyperlink reference (delegated documentation).
+    pub fn is_hyperlink(&self) -> bool {
+        self.link.is_some()
+    }
+
+    /// Variable is marked deprecated.
+    pub fn is_deprecated(&self) -> bool {
+        self.deprecation.is_some()
+    }
+}
+
+/// Compute documentation for a module-level variable.
+///
+/// Mirrors `compute_method_docs` but uses the three-region variable
+/// extractor (leading + inter-annotation + trailing). Walks the AST once
+/// to resolve the `Перем`/`Var` keyword offset — needed because
+/// `Variable::source_range.start()` covers the leading `&Annotation` block
+/// and a precise keyword anchor is required for the leading-comment scan.
+///
+/// Returns `None` when the variable lookup fails or no description is
+/// attached anywhere.
+///
+/// ## Performance constraint for batched callers
+///
+/// The `root.descendants().find(...)` lookup is O(file). When called in a
+/// per-variable loop (e.g. SymbolTree construction in Slice B), batched
+/// callers MUST pre-collect `VAR_DEF` nodes by `TextRange` into a
+/// `FxHashMap` before iterating, then resolve by `Variable::source_range`
+/// in O(1) — otherwise compute degrades to O(file × variables_per_file).
+pub fn compute_variable_docs(
+    parse: &Parse<SyntaxNode>,
+    tree: &crate::item_tree::ItemTree,
+    variable_id: VariableId,
+    file_text: &str,
+) -> Option<Arc<VariableDocs>> {
+    let items = tree.top_level_items();
+    let item = items.get(variable_id.local_id as usize)?;
+    let var_idx = match item {
+        ModItem::Variable(idx) => *idx,
+        _ => return None,
+    };
+    let variable = tree.variable(var_idx);
+
+    let root = parse.syntax_node();
+    let var_node = root
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::VAR_DEF && n.text_range() == variable.source_range)?;
+
+    let var_keyword_offset: usize = var_node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SyntaxKind::KW_VAR)
+        .map(|t| t.text_range().start().into())?;
+
+    let var_end_offset: usize = variable.source_range.end().into();
+    let first_annotation_offset: Option<usize> =
+        variable.annotations.first().map(|ann| ann.range.start().into());
+
+    let comments = extract_variable_comments_at_offset(
+        file_text,
+        var_keyword_offset,
+        var_end_offset,
+        first_annotation_offset,
+    )?;
+
+    parse_variable_docs(&comments).map(Arc::new)
+}
+
+/// Parse module-level variable documentation from already-extracted
+/// comment lines.
+///
+/// Recognises three section markers (in priority order):
+/// 1. `См. <target>` / `See <target>` at the start → hyperlink-only docs.
+/// 2. `Устарела:` / `Deprecated:` line → deprecation prose follows.
+/// 3. Everything before the first marker becomes `purpose`.
+///
+/// Returns `None` only when the input is empty.
+pub fn parse_variable_docs(comments: &[String]) -> Option<VariableDocs> {
+    if comments.is_empty() {
+        return None;
+    }
+
+    let raw: Vec<String> = comments.to_vec();
+
+    // 1. Hyperlink-only docs (matches the early-return in parse_method_docs).
+    //    Both first-line and last-line forms are honoured; the last-line
+    //    form is suppressed when a structural section (deprecation) is
+    //    present, mirroring `has_structural_section` in method docs.
+    if let Some(first_non_empty) = comments.iter().find(|c| !c.trim().is_empty()) {
+        let trimmed = first_non_empty.trim();
+        if is_hyperlink_line(trimmed) {
+            return Some(VariableDocs {
+                raw,
+                purpose: None,
+                types: Vec::new(),
+                deprecation: None,
+                link: Some(trimmed.to_string()),
+            });
+        }
+    }
+    let has_deprecation_marker =
+        comments.iter().any(|line| is_deprecated_keyword(&line.trim().to_lowercase()));
+    if !has_deprecation_marker {
+        if let Some(last_non_empty) = comments.iter().rev().find(|c| !c.trim().is_empty()) {
+            let trimmed = last_non_empty.trim();
+            if is_hyperlink_line(trimmed) {
+                return Some(VariableDocs {
+                    raw,
+                    purpose: None,
+                    types: Vec::new(),
+                    deprecation: None,
+                    link: Some(trimmed.to_string()),
+                });
+            }
+        }
+    }
+
+    // 2. Locate the deprecation section (if any).
+    let deprecated_idx =
+        comments.iter().position(|line| is_deprecated_keyword(&line.trim().to_lowercase()));
+
+    let (purpose_lines, deprecated_slice): (&[String], &[String]) = match deprecated_idx {
+        Some(idx) => (&comments[..idx], &comments[idx..]),
+        None => (comments, &[]),
+    };
+
+    let purpose_collected: Vec<&str> =
+        purpose_lines.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let purpose =
+        if purpose_collected.is_empty() { None } else { Some(purpose_collected.join("\n")) };
+
+    let deprecation = match deprecated_slice.first() {
+        Some(keyword_line) => parse_deprecated_section(keyword_line, &deprecated_slice[1..]),
+        None => None,
+    };
+
+    Some(VariableDocs { raw, purpose, types: Vec::new(), deprecation, link: None })
 }
 
 /// Parse method documentation from comment lines.
@@ -1686,5 +1859,124 @@ mod tests {
         assert_eq!(nested.len(), 2);
         assert_eq!(nested[0].name, "Сервер");
         assert_eq!(nested[1].name, "Порт");
+    }
+
+    // ---- parse_variable_docs ----
+
+    #[test]
+    fn variable_docs_empty_input_returns_none() {
+        assert_eq!(parse_variable_docs(&[]), None);
+    }
+
+    #[test]
+    fn variable_docs_plain_purpose() {
+        let comments = vec!["описание переменной".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert_eq!(docs.purpose.as_deref(), Some("описание переменной"));
+        assert!(docs.deprecation.is_none());
+        assert!(docs.link.is_none());
+        assert!(!docs.is_hyperlink());
+        assert!(!docs.is_deprecated());
+    }
+
+    #[test]
+    fn variable_docs_multiline_purpose_joined_by_newline() {
+        let comments = vec!["первая строка".to_string(), "вторая строка".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert_eq!(docs.purpose.as_deref(), Some("первая строка\nвторая строка"));
+    }
+
+    #[test]
+    fn variable_docs_hyperlink_only() {
+        let comments = vec!["См. ОбщегоНазначения.ИмяПеременной".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert!(docs.is_hyperlink());
+        assert_eq!(docs.link.as_deref(), Some("См. ОбщегоНазначения.ИмяПеременной"));
+        assert!(docs.purpose.is_none());
+        assert!(docs.deprecation.is_none());
+    }
+
+    #[test]
+    fn variable_docs_hyperlink_english() {
+        let comments = vec!["See Common.SomeVariable".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert!(docs.is_hyperlink());
+        assert_eq!(docs.link.as_deref(), Some("See Common.SomeVariable"));
+    }
+
+    #[test]
+    fn variable_docs_deprecation_section() {
+        let comments = vec![
+            "Старое описание.".to_string(),
+            "Устарела:".to_string(),
+            "используйте НовоеИмя.".to_string(),
+        ];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert_eq!(docs.purpose.as_deref(), Some("Старое описание."));
+        assert!(docs.is_deprecated());
+        // parse_deprecated_section trims `Устарела:` keyword and joins prose.
+        assert!(docs.deprecation.as_deref().unwrap_or("").contains("используйте НовоеИмя"));
+    }
+
+    #[test]
+    fn variable_docs_deprecation_inline() {
+        let comments = vec!["Устарела: используйте НовоеИмя.".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert!(docs.is_deprecated());
+        assert!(docs.purpose.is_none());
+    }
+
+    #[test]
+    fn variable_docs_keeps_raw_input() {
+        let comments = vec!["a".to_string(), "b".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert_eq!(docs.raw, comments);
+    }
+
+    #[test]
+    fn variable_docs_hyperlink_on_last_line() {
+        // Round-11 MINOR-5 parity with parse_method_docs: a See/См. on
+        // the last non-empty line is honoured as a hyperlink reference
+        // when no structural section breaks the form.
+        let comments = vec!["См. ОбщегоНазначения.СомеVariable".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert!(docs.is_hyperlink());
+    }
+
+    #[test]
+    fn variable_docs_hyperlink_after_purpose() {
+        let comments = vec!["Описание переменной.".to_string(), "См. ДругойМодуль.Имя".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert!(docs.is_hyperlink());
+        assert_eq!(docs.link.as_deref(), Some("См. ДругойМодуль.Имя"));
+        // When the link short-circuits, the purpose isn't materialised —
+        // delegated docs are owned by the linked entity.
+        assert!(docs.purpose.is_none());
+    }
+
+    #[test]
+    fn variable_docs_deprecation_suppresses_last_line_hyperlink() {
+        // Round-11 MINOR-5: deprecation marker prevents the last-line
+        // hyperlink shortcut so the deprecation itself stays visible.
+        let comments = vec![
+            "Старое описание.".to_string(),
+            "Устарела: используйте НовоеИмя.".to_string(),
+            "См. ДругойМодуль".to_string(),
+        ];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert!(!docs.is_hyperlink());
+        assert!(docs.is_deprecated());
+    }
+
+    #[test]
+    fn variable_docs_types_field_unused_for_now() {
+        // Round-11 MAJOR-2: keep the field even though the v1 parser
+        // doesn't populate it. Future LSP hover features can grow into
+        // typed variable docs without a breaking schema change.
+        let comments = vec!["ИмяПеременной - Строка - комментарий".to_string()];
+        let docs = parse_variable_docs(&comments).unwrap();
+        assert!(docs.types.is_empty());
+        // Whole line ends up in `purpose`; that's fine for v1.
+        assert_eq!(docs.purpose.as_deref(), Some("ИмяПеременной - Строка - комментарий"));
     }
 }

@@ -21,8 +21,8 @@ use rowan::GreenNode;
 
 pub use crate::{
     ast_utils::{
-        extract_leading_comments, extract_leading_comments_at_offset, has_trailing_comment,
-        has_variable_description,
+        extract_leading_comments, extract_leading_comments_at_offset,
+        extract_variable_comments_at_offset, has_trailing_comment, has_variable_description,
     },
     sdbl_query::{extract_sdbl_with_corrections, SdblQueryInfo},
     syntax_kind::SyntaxKind,
