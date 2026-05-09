@@ -21,55 +21,6 @@ use super::expr::{exprs_are_equal, lower_expr_node};
 use super::preproc::{lower_preproc_if, lower_region_stmts};
 use super::LoweringCtx;
 
-// ============================================================================
-// Nesting depth tracking for NestedStatements diagnostic
-// ============================================================================
-
-/// Enter a nesting statement (IF, WHILE, FOR, TRY).
-/// Increments nesting depth and resets child tracking for this level.
-fn enter_nesting_stmt(ctx: &mut LoweringCtx) {
-    ctx.nesting_depth += 1;
-    ctx.had_nested_child = false;
-}
-
-/// Exit a nesting statement.
-/// If this is a leaf statement (no nested children) and depth exceeds threshold, emits diagnostic.
-fn exit_nesting_stmt(
-    ctx: &mut LoweringCtx,
-    keyword_range: TextRange,
-    method_name: &str,
-    is_function: bool,
-) {
-    // If no nested child was found, this is a leaf - emit diagnostic
-    // The from_hir() handler will filter by maxAllowedLevel config
-    if !ctx.had_nested_child {
-        ctx.emit(BodyDiagnostic::NestedStatements {
-            method_name: method_name.to_string(),
-            depth: ctx.nesting_depth,
-            is_function,
-            range: keyword_range,
-        });
-    }
-
-    // Mark that parent has a nested child (this nesting statement)
-    ctx.had_nested_child = true;
-    ctx.nesting_depth -= 1;
-}
-
-/// Get the first keyword (IF/WHILE/FOR/TRY) range from a nesting statement node.
-fn get_nesting_keyword_range(node: &SyntaxNode) -> TextRange {
-    node.children_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|t| {
-            matches!(
-                t.kind(),
-                SyntaxKind::KW_IF | SyntaxKind::KW_WHILE | SyntaxKind::KW_FOR | SyntaxKind::KW_TRY
-            )
-        })
-        .map(|t| t.text_range())
-        .unwrap_or_else(|| node.text_range())
-}
-
 /// Find the range for IF/THEN header (from IF to THEN keyword).
 fn find_if_then_range(if_stmt: &SyntaxNode) -> TextRange {
     let mut start = None;
@@ -845,10 +796,6 @@ fn has_platform_type_check(condition_node: &SyntaxNode) -> bool {
 
 /// Lower if statement.
 fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     let mut children = node.children().peekable();
 
     // Condition (first EXPR or expression node)
@@ -962,10 +909,6 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Restore platform guard state
     ctx.in_platform_guard = saved_platform_guard;
 
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
-
     Some(Stmt::If(Box::new(crate::hir::IfStmt {
         condition,
         then_branch: then_branch.into_boxed_slice(),
@@ -976,10 +919,6 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
 /// Lower while statement.
 fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     let mut children = node.children();
 
     let condition_node = children.next()?;
@@ -1006,19 +945,11 @@ fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Leave loop scope
     ctx.leave_loop();
 
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
-
     Some(Stmt::While { condition, body })
 }
 
 /// Lower for statement.
 fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     // Find loop variable (IDENT token after FOR keyword)
     let var_token = node
         .children_with_tokens()
@@ -1071,19 +1002,11 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Leave loop scope
     ctx.leave_loop();
 
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
-
     Some(Stmt::For { var, from, to, body })
 }
 
 /// Lower for-each statement.
 fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     // Find loop variable (first IDENT token)
     let var_token = node
         .children_with_tokens()
@@ -1157,19 +1080,11 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
     // Leave loop scope
     ctx.leave_loop();
 
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
-
     Some(Stmt::ForEach { var, collection, body })
 }
 
 /// Lower try statement.
 fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     // Check CommitTransaction placement within this try-catch
     let violations = check_commit_transaction_in_try(node);
     for (commit_node, _violation) in violations {
@@ -1211,10 +1126,6 @@ fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             })
         })
         .unwrap_or_default();
-
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
 
     Some(Stmt::Try { body, except })
 }

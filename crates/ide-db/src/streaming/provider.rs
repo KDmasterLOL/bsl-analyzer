@@ -413,7 +413,10 @@ impl AnalysisProvider for StreamingProvider {
         for (local_id, body) in module_bodies.iter_bodies() {
             methods.insert(local_id, Arc::new(hir::metrics::compute_hir_metrics(body)));
         }
-        Arc::new(crate::queries::ModuleHirMetrics::from_methods(methods))
+        let module_code = module_bodies
+            .module_code()
+            .map(|body| Arc::new(hir::metrics::compute_hir_metrics(body)));
+        Arc::new(crate::queries::ModuleHirMetrics::from_methods(methods, module_code))
     }
 
     /// Per-method shim — Codex stop-hook fix: without this override

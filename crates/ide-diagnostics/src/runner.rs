@@ -170,6 +170,7 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     // Track 2 Phase B §6.4: HirMethodMetrics-driven.
     DiagnosticCode::CognitiveComplexity,
     DiagnosticCode::CyclomaticComplexity,
+    DiagnosticCode::NestedStatements,
 ];
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
@@ -719,6 +720,7 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::cyclomatic_complexity::check,
     ));
+    diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
 
     diagnostics
 }

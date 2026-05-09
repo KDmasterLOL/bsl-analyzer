@@ -20,7 +20,7 @@
 //! `ide-db::queries::method_hir_metrics_query` (§6.3).
 
 use crate::hir::{BinaryOp, Expr, ExprIdx, IfStmt, Stmt, StmtIdx};
-use crate::{Body, ExprId, IdConversion};
+use crate::{Body, ExprId, IdConversion, StmtId};
 
 /// One condition expression visited by the metrics walker, paired with
 /// the number of logical `И`/`AND`/`Или`/`OR` operators it contains.
@@ -74,6 +74,33 @@ pub struct HirMethodMetrics {
     /// The `NestedStatements` and any future "max-of-conditions"
     /// consumer can read this without iterating `if_conditions`.
     pub if_condition_max: u32,
+    /// Innermost (`If` / `While` / `For` / `ForEach` / `Try`) statements
+    /// — those whose body contains no further nesting statement of the
+    /// same kinds — paired with their **1-indexed** nesting-stmt depth
+    /// (1 for a top-level `If`, 2 for an `If` inside an outer `If`,
+    /// etc.). The §6.4 `NestedStatements` migration consumes this list:
+    /// emit one diagnostic per leaf whose `depth` exceeds
+    /// `maxAllowedLevel`, attaching to the statement's first keyword
+    /// (`Если` / `Пока` / `Для` / `Попытка`) recovered through the
+    /// parse tree at handler time. Source order matches HIR allocation
+    /// order (i.e. lexical order of the leaf statements).
+    pub nesting_leaves: Vec<NestingLeafMetrics>,
+}
+
+/// One leaf nesting statement recorded by [`MetricsVisitor`]. A leaf is
+/// the innermost `If` / `While` / `For` / `ForEach` / `Try` along a
+/// nesting chain — i.e. a statement that does not itself contain
+/// another nesting statement in any of its bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NestingLeafMetrics {
+    /// HIR id of the leaf statement. Use
+    /// `BodySourceMap::stmt_range(stmt)` to recover its source range.
+    pub stmt: StmtId,
+    /// 1-indexed nesting-stmt depth at the leaf. Matches the legacy
+    /// `BodyDiagnostic::NestedStatements::depth` value the retired
+    /// `lower::stmt::exit_nesting_stmt` produced — preserved so the
+    /// §6.4 handler keeps the existing `maxAllowedLevel` semantics.
+    pub depth: u32,
 }
 
 /// Single-pass HIR walk producing every metric in [`HirMethodMetrics`].
@@ -95,6 +122,17 @@ struct MetricsVisitor {
     cognitive: u32,
     max_nesting: u32,
     if_conditions: Vec<ConditionMetrics>,
+    nesting_leaves: Vec<NestingLeafMetrics>,
+    /// 1-indexed depth of the currently-active nesting statement chain.
+    /// Increments on entering an `If` / `While` / `For` / `ForEach` /
+    /// `Try`; decrements on exit. `0` means the visitor is outside any
+    /// such statement.
+    nesting_stmt_depth: u32,
+    /// Whether the active nesting scope has already seen a nested-child
+    /// nesting statement. Reset to `false` on each enter; flipped to
+    /// `true` at every exit so the parent observes "I had a nested
+    /// child". Used to identify leaf statements at exit time.
+    had_nested_child: bool,
 }
 
 impl MetricsVisitor {
@@ -106,6 +144,7 @@ impl MetricsVisitor {
             max_nesting: self.max_nesting,
             if_conditions: self.if_conditions,
             if_condition_max,
+            nesting_leaves: self.nesting_leaves,
         }
     }
 
@@ -116,46 +155,88 @@ impl MetricsVisitor {
         }
     }
 
+    /// Mirror of `lower::stmt::enter_nesting_stmt` / `exit_nesting_stmt`
+    /// (retired by §6.4). Wraps a body-walk over a nesting statement
+    /// (`If` / `While` / `For` / `ForEach` / `Try`) so leaf detection
+    /// works the same way as the legacy lowering-time emit:
+    /// - on entry, increment depth and reset the leaf flag for this
+    ///   scope (the parent's flag is restored implicitly because the
+    ///   exit always sets the flag back to `true`);
+    /// - run the body walk through `f`;
+    /// - on exit, if no nested child fired, this statement is a leaf —
+    ///   record `(stmt, depth)` so the handler can attach a diagnostic.
+    ///   Then set the flag to `true` for the parent's view.
+    fn with_nesting_stmt(&mut self, stmt_id: StmtIdx, f: impl FnOnce(&mut Self)) {
+        self.nesting_stmt_depth += 1;
+        self.had_nested_child = false;
+        f(self);
+        if !self.had_nested_child {
+            self.nesting_leaves.push(NestingLeafMetrics {
+                stmt: StmtId::from_idx(stmt_id),
+                depth: self.nesting_stmt_depth,
+            });
+        }
+        self.had_nested_child = true;
+        self.nesting_stmt_depth -= 1;
+    }
+
     fn visit_stmt(&mut self, body: &Body, stmt_id: StmtIdx, nesting: u32) {
         self.note_depth(nesting);
         match body.stmt_idx(stmt_id) {
-            Stmt::If(if_stmt) => self.visit_if(body, if_stmt, nesting),
+            Stmt::If(if_stmt) => {
+                let if_stmt = if_stmt.clone();
+                self.with_nesting_stmt(stmt_id, |this| this.visit_if(body, &if_stmt, nesting));
+            }
 
             Stmt::While { condition, body: loop_body } => {
-                self.cognitive += 1 + nesting;
-                // `While` conditions are NOT recorded in `if_conditions`
-                // — that field is the per-condition feed for the
-                // `IfConditionComplexity` diagnostic, whose legacy scope
-                // is `If` / `Elsif` only. Cognitive complexity still
-                // gets the AND/OR contribution via `visit_expr`.
-                self.visit_expr(body, *condition);
-                for &child in loop_body.iter() {
-                    self.visit_stmt(body, child, nesting + 1);
-                }
+                let condition = *condition;
+                let loop_body = loop_body.clone();
+                self.with_nesting_stmt(stmt_id, |this| {
+                    this.cognitive += 1 + nesting;
+                    // `While` conditions are NOT recorded in `if_conditions`
+                    // — that field is the per-condition feed for the
+                    // `IfConditionComplexity` diagnostic, whose legacy scope
+                    // is `If` / `Elsif` only. Cognitive complexity still
+                    // gets the AND/OR contribution via `visit_expr`.
+                    this.visit_expr(body, condition);
+                    for &child in loop_body.iter() {
+                        this.visit_stmt(body, child, nesting + 1);
+                    }
+                });
             }
 
             Stmt::For { body: loop_body, .. } => {
-                self.cognitive += 1 + nesting;
-                for &child in loop_body.iter() {
-                    self.visit_stmt(body, child, nesting + 1);
-                }
+                let loop_body = loop_body.clone();
+                self.with_nesting_stmt(stmt_id, |this| {
+                    this.cognitive += 1 + nesting;
+                    for &child in loop_body.iter() {
+                        this.visit_stmt(body, child, nesting + 1);
+                    }
+                });
             }
 
             Stmt::ForEach { body: loop_body, .. } => {
-                self.cognitive += 1 + nesting;
-                for &child in loop_body.iter() {
-                    self.visit_stmt(body, child, nesting + 1);
-                }
+                let loop_body = loop_body.clone();
+                self.with_nesting_stmt(stmt_id, |this| {
+                    this.cognitive += 1 + nesting;
+                    for &child in loop_body.iter() {
+                        this.visit_stmt(body, child, nesting + 1);
+                    }
+                });
             }
 
             Stmt::Try { body: try_body, except } => {
-                for &child in try_body.iter() {
-                    self.visit_stmt(body, child, nesting);
-                }
-                self.cognitive += 1 + nesting;
-                for &child in except.iter() {
-                    self.visit_stmt(body, child, nesting + 1);
-                }
+                let try_body = try_body.clone();
+                let except = except.clone();
+                self.with_nesting_stmt(stmt_id, |this| {
+                    for &child in try_body.iter() {
+                        this.visit_stmt(body, child, nesting);
+                    }
+                    this.cognitive += 1 + nesting;
+                    for &child in except.iter() {
+                        this.visit_stmt(body, child, nesting + 1);
+                    }
+                });
             }
 
             Stmt::Goto(_) => {
@@ -514,6 +595,79 @@ mod tests {
         assert_eq!(m.if_conditions[1].logical_op_count, 0);
         // The convenience `if_condition_max` matches the largest.
         assert_eq!(m.if_condition_max, 2);
+    }
+
+    /// Single nested-If chain: only the innermost is a leaf, depth
+    /// matches the legacy `BodyDiagnostic::NestedStatements` 1-indexed
+    /// counter.
+    #[test]
+    fn nesting_leaves_record_innermost_only() {
+        let body = parse_and_lower(
+            r#"
+Процедура Тест()
+    Если А Тогда
+        Если Б Тогда
+            Если В Тогда
+                Сообщить("");
+            КонецЕсли;
+        КонецЕсли;
+    КонецЕсли;
+КонецПроцедуры
+"#,
+        );
+        let m = compute_hir_metrics(&body);
+        assert_eq!(m.nesting_leaves.len(), 1, "only innermost If is a leaf");
+        assert_eq!(m.nesting_leaves[0].depth, 3, "leaf at depth=3 matches legacy");
+    }
+
+    /// Sibling nesting branches: each leaf gets its own entry. Mirrors
+    /// the legacy multi-emit semantics the §6.4 handler must preserve.
+    #[test]
+    fn nesting_leaves_emit_per_leaf_branch() {
+        let body = parse_and_lower(
+            r#"
+Процедура Тест()
+    Если А Тогда
+        Если Б Тогда
+            Сообщить("");
+        КонецЕсли;
+        Если В Тогда
+            Сообщить("");
+        КонецЕсли;
+    КонецЕсли;
+КонецПроцедуры
+"#,
+        );
+        let m = compute_hir_metrics(&body);
+        assert_eq!(m.nesting_leaves.len(), 2, "two sibling Ifs are both leaves");
+        assert!(
+            m.nesting_leaves.iter().all(|l| l.depth == 2),
+            "both leaves at depth=2 (under outer If)"
+        );
+    }
+
+    /// Mixed kinds: `For` inside `Try` inside `If`. Only the `For` is a
+    /// leaf because it has no nesting children. Depth reflects all
+    /// three frames.
+    #[test]
+    fn nesting_leaves_count_all_kinds() {
+        let body = parse_and_lower(
+            r#"
+Процедура Тест()
+    Если А Тогда
+        Попытка
+            Для Каждого Э Из К Цикл
+                Сообщить("");
+            КонецЦикла;
+        Исключение
+        КонецПопытки;
+    КонецЕсли;
+КонецПроцедуры
+"#,
+        );
+        let m = compute_hir_metrics(&body);
+        assert_eq!(m.nesting_leaves.len(), 1, "innermost For is the only leaf");
+        assert_eq!(m.nesting_leaves[0].depth, 3, "If→Try→For = depth 3");
     }
 
     /// `Default::default()` matches an empty-method walk.

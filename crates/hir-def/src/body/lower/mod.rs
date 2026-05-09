@@ -130,14 +130,6 @@ pub(crate) struct LoweringCtx {
     /// Used for UsingSynchronousCalls diagnostic - synchronous calls are skipped in server context.
     pub(crate) is_server_method: bool,
 
-    /// Current nesting depth for control flow statements (IF, WHILE, FOR, TRY).
-    /// Used for NestedStatements diagnostic.
-    pub(crate) nesting_depth: u32,
-
-    /// Flag indicating if any child was a nesting statement.
-    /// Used for NestedStatements diagnostic to identify leaf statements.
-    pub(crate) had_nested_child: bool,
-
     /// Whether we're inside an IF statement that has a platform type guard.
     /// Used for UsingObjectNotAvailableUnix diagnostic to skip COMObject/Mail checks.
     pub(crate) in_platform_guard: bool,
@@ -186,8 +178,6 @@ impl LoweringCtx {
             return_statements: Vec::new(),
             is_instead_method: false, // Will be set in lower_method_with_externals_and_line_index
             is_server_method: false,  // Will be set in lower_method_with_externals
-            nesting_depth: 0,
-            had_nested_child: false,
             in_platform_guard: false,
             in_except_block: false,
             except_has_raise: false,

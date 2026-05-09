@@ -46,7 +46,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::MethodSize,
     DiagnosticCode::MissedRequiredParameter,
     DiagnosticCode::MissingCommonModuleMethod,
-    DiagnosticCode::NestedStatements,
     DiagnosticCode::NumberOfOptionalParams,
     DiagnosticCode::NumberOfParams,
     DiagnosticCode::OneStatementPerLine,
@@ -325,9 +324,6 @@ pub fn dispatch_hir_diagnostic(
         // Phase 4: Method-scoped diagnostics
         BodyDiagnostic::MethodSize { method_name, size, is_function, range } => {
             handlers::method_size::from_hir(method_name, *size, *is_function, *range, ctx)
-        }
-        BodyDiagnostic::NestedStatements { method_name, depth, is_function, range } => {
-            handlers::nested_statements::from_hir(method_name, *depth, *is_function, *range, ctx)
         }
         BodyDiagnostic::NumberOfParams { method_name, count, is_function, range } => {
             handlers::number_of_params::from_hir(method_name, *count, *is_function, *range, ctx)

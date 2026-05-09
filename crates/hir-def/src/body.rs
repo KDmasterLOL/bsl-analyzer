@@ -821,19 +821,6 @@ pub enum BodyDiagnostic {
         range: TextRange,
     },
 
-    /// Nested statements depth exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by maxAllowedLevel in from_hir().
-    NestedStatements {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Maximum nesting depth found.
-        depth: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the deepest nested statement for the diagnostic.
-        range: TextRange,
-    },
-
     /// Number of parameters exceeds threshold.
     /// Emitted at end of method lowering. Filtered by maxParamsCount in from_hir().
     NumberOfParams {
@@ -1175,7 +1162,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::ThisObjectAssign { range } => *range,
             // Phase 4: Method-scoped diagnostics
             BodyDiagnostic::MethodSize { range, .. } => *range,
-            BodyDiagnostic::NestedStatements { range, .. } => *range,
             BodyDiagnostic::NumberOfParams { range, .. } => *range,
             BodyDiagnostic::NumberOfOptionalParams { range, .. } => *range,
             BodyDiagnostic::TryNumber { range } => *range,

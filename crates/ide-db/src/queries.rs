@@ -735,17 +735,24 @@ pub fn line_index_query<'db>(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleHirMetrics {
     methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
+    /// Metrics for the module-level code body (statements outside any
+    /// method). `None` when the module has no top-level code. Required
+    /// by §6.4 `NestedStatements` whose legacy lowering-time emit ran
+    /// for module-level Если/Пока/Для/Попытка the same way it ran for
+    /// method bodies.
+    module_code: Option<Arc<hir::metrics::HirMethodMetrics>>,
 }
 
 impl ModuleHirMetrics {
     /// Streaming-mode constructor (no Salsa). Mirrors
     /// [`crate::effects::ModuleSecurityState::from_methods_with_module_level`]
-    /// — `pub(crate)` so the private `methods` field stays opaque to
-    /// downstream consumers.
+    /// — `pub(crate)` so the private fields stay opaque to downstream
+    /// consumers.
     pub(crate) fn from_methods(
         methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
+        module_code: Option<Arc<hir::metrics::HirMethodMetrics>>,
     ) -> Self {
-        Self { methods }
+        Self { methods, module_code }
     }
 
     /// Look up a method's metrics. Returns `None` for methods absent
@@ -756,15 +763,23 @@ impl ModuleHirMetrics {
         self.methods.get(&local_id).cloned()
     }
 
+    /// Metrics for module-level code (top-level statements outside any
+    /// method). `None` when the module has no top-level code. Returned
+    /// as the same `HirMethodMetrics` shape so handlers can reuse the
+    /// per-method analysis path with a synthetic "module body" entry.
+    pub fn module_code(&self) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
+        self.module_code.clone()
+    }
+
     /// Number of methods with computed metrics.
     pub fn len(&self) -> usize {
         self.methods.len()
     }
 
-    /// `true` when no method produced metrics (typically: an empty
-    /// module).
+    /// `true` when no method or module-level code produced metrics
+    /// (typically: an empty module).
     pub fn is_empty(&self) -> bool {
-        self.methods.is_empty()
+        self.methods.is_empty() && self.module_code.is_none()
     }
 }
 
@@ -824,8 +839,22 @@ pub fn module_hir_metrics_query<'db>(
         let metrics = hir::metrics::compute_hir_metrics(body);
         methods.insert(local_id, Arc::new(metrics));
     }
-    tracing::debug!(count = methods.len(), "Built module HIR metrics");
-    Arc::new(ModuleHirMetrics { methods })
+    // Codex round-A fix: `ModuleBodies::module_code()` is always `Some`
+    // after lowering, even for modules with zero top-level statements.
+    // Drop the entry when its metrics are default (every counter at
+    // zero, every list empty) so `ModuleHirMetrics::is_empty()` stays a
+    // meaningful fast-path gate for handlers.
+    let module_code = module_bodies
+        .module_code()
+        .map(hir::metrics::compute_hir_metrics)
+        .filter(|m| *m != hir::metrics::HirMethodMetrics::default())
+        .map(Arc::new);
+    tracing::debug!(
+        count = methods.len(),
+        has_module_code = module_code.is_some(),
+        "Built module HIR metrics",
+    );
+    Arc::new(ModuleHirMetrics { methods, module_code })
 }
 
 /// Per-method shim over [`module_hir_metrics_query`]. LRU = 256 to

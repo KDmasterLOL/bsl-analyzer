@@ -1,11 +1,23 @@
 //! NestedStatements diagnostic.
 //!
 //! Reports control-flow statements nested deeper than the configured limit.
+//!
+//! ## Track 2 Phase B §6.4 migration
+//! Pre-migration the legacy `from_hir` adapter consumed
+//! `BodyDiagnostic::NestedStatements`, which was emitted from
+//! `lower::stmt::exit_nesting_stmt` once per **leaf** nesting statement.
+//! That leaf-emit pattern is preserved here: the `compute_hir_metrics`
+//! visitor records a `NestingLeafMetrics { stmt, depth }` entry for
+//! every innermost nesting statement, and this handler replays the
+//! threshold filter directly against the cached
+//! `module_hir_metrics_query` data — one diagnostic per over-budget
+//! leaf, attached to the leaf's first keyword (`Если` / `Пока` / `Для` /
+//! `Попытка`) recovered through the parse tree.
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
+use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -24,35 +36,117 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_ALLOWED_LEVEL: i64 = 4;
 
-/// Creates a diagnostic from HIR when nesting depth exceeds the configured
-/// limit.
-pub fn from_hir(
-    _method_name: &str,
-    depth: u32,
-    _is_function: bool,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
+/// `HirMethodMetrics::nesting_leaves` via `ctx.module_hir_metrics()`.
+/// Emits one diagnostic per leaf nesting statement whose 1-indexed
+/// depth exceeds the `maxAllowedLevel` config (mirrors the legacy
+/// behaviour the retired `lower::stmt::exit_nesting_stmt` produced).
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::NestedStatements;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
     let max_allowed_level =
-        ctx.config_int(code, "maxAllowedLevel", DEFAULT_MAX_ALLOWED_LEVEL) as usize;
-    if (depth as usize) <= max_allowed_level {
-        return None;
-    }
+        ctx.config_int(code, "maxAllowedLevel", DEFAULT_MAX_ALLOWED_LEVEL) as u32;
 
-    Some(Diagnostic {
-        code,
-        message: "Управляющие конструкции не должны быть вложены слишком глубоко".to_string(),
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+    let module_metrics = ctx.module_hir_metrics();
+    if module_metrics.is_empty() {
+        return Vec::new();
+    }
+    let module_bodies = ctx.module_bodies();
+    let parse = ctx.parse();
+    let root = parse.syntax_node();
+
+    let mut out = Vec::new();
+    for (local_id, _body) in module_bodies.iter_bodies() {
+        let Some(metrics) = module_metrics.get(local_id) else { continue };
+        if metrics.nesting_leaves.is_empty() {
+            continue;
+        }
+        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
+        emit_leaves(ctx, code, &metrics, source_map, &root, max_allowed_level, &mut out);
+    }
+    // Module-level code: top-level Если/Пока/Для/Попытка outside any
+    // method body. The legacy lowering-time emit ran for these the same
+    // way it ran for method bodies — preserve that coverage by walking
+    // the synthetic "module body" entry.
+    if let Some(metrics) = module_metrics.module_code() {
+        if !metrics.nesting_leaves.is_empty() {
+            if let Some(lower_result) = module_bodies.module_code_result() {
+                emit_leaves(
+                    ctx,
+                    code,
+                    &metrics,
+                    &lower_result.source_map,
+                    &root,
+                    max_allowed_level,
+                    &mut out,
+                );
+            }
+        }
+    }
+    out
+}
+
+fn emit_leaves(
+    ctx: &DiagnosticsContext,
+    code: DiagnosticCode,
+    metrics: &hir::metrics::HirMethodMetrics,
+    source_map: &hir::BodySourceMap,
+    root: &SyntaxNode,
+    max_allowed_level: u32,
+    out: &mut Vec<Diagnostic>,
+) {
+    for leaf in metrics.nesting_leaves.iter() {
+        if leaf.depth <= max_allowed_level {
+            continue;
+        }
+        let Some(stmt_range) = source_map.stmt_range(leaf.stmt) else { continue };
+        let keyword_range = first_nesting_keyword(root, stmt_range).unwrap_or(stmt_range);
+        out.push(Diagnostic {
+            code,
+            message: "Управляющие конструкции не должны быть вложены слишком глубоко".to_string(),
+            severity: ctx.severity(code),
+            range: keyword_range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+}
+
+/// Find the first `Если` / `Пока` / `Для` / `Попытка` keyword token
+/// within `stmt_range`. Mirrors the retired
+/// `lower::stmt::get_nesting_keyword_range` behaviour, recovering
+/// keyword precision so the migrated diagnostic preserves the same
+/// per-leaf range the legacy emit produced.
+///
+/// Codex round-A fix: scope the token walk to the covering syntax
+/// element instead of the whole file. Without scoping the cost was
+/// `O(file_tokens × violating_leaves)`, which on 50k-LOC modules with
+/// many deep violations becomes an LSP-latency risk; covering-element
+/// scoping caps each call at `O(stmt_size)`.
+fn first_nesting_keyword(
+    root: &SyntaxNode,
+    stmt_range: ide_db::TextRange,
+) -> Option<ide_db::TextRange> {
+    let node = match root.covering_element(stmt_range) {
+        NodeOrToken::Node(n) => n,
+        NodeOrToken::Token(t) => return Some(t.text_range()),
+    };
+    node.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| {
+            stmt_range.contains_range(t.text_range())
+                && matches!(
+                    t.kind(),
+                    SyntaxKind::KW_IF
+                        | SyntaxKind::KW_WHILE
+                        | SyntaxKind::KW_FOR
+                        | SyntaxKind::KW_TRY
+                )
+        })
+        .map(|t| t.text_range())
 }
 
 #[cfg(test)]
