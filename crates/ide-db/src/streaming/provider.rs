@@ -439,10 +439,19 @@ impl AnalysisProvider for StreamingProvider {
         let module_id = ModuleId::new(file_id);
         let module_cfgs = self.module_cfgs(file_id);
         let module_bodies = self.module_bodies(module_id);
+        // Track 2 Phase B §6.5: SonarQube-style cyclomatic = textbook
+        // V(G) + boolean_ops + ternary (see `module_cyclomatic_query`
+        // in `queries.rs` for the rationale).
+        let module_metrics = self.module_hir_metrics(file_id);
         let mut methods: FxHashMap<u32, u32> = FxHashMap::default();
         for (local_id, _body) in module_bodies.iter_bodies() {
             let Some(cfg) = module_cfgs.get(local_id) else { continue };
-            methods.insert(local_id, hir::cfg::cyclomatic_complexity(cfg.as_ref()));
+            let base = hir::cfg::cyclomatic_complexity(cfg.as_ref());
+            let extras = module_metrics
+                .get(local_id)
+                .map(|m| m.boolean_ops_count + m.ternary_count)
+                .unwrap_or(0);
+            methods.insert(local_id, base + extras);
         }
         Arc::new(crate::queries::ModuleCyclomatic::from_methods(methods))
     }

@@ -12,17 +12,19 @@
 //! - Hard to understand and maintain
 //!
 //! ## Algorithm
-//! Based on McCabe's Cyclomatic Complexity:
-//!
-//! **Base complexity:** 1 per method
+//! Track 2 Phase B §6.5 — SonarQube-style cyclomatic complexity:
+//! `V(G) + boolean_ops + ternary` where `V(G) = E - N + 2*P` is the
+//! textbook McCabe count from the cached CFG, and the boolean / ternary
+//! extras come from the §6.1 HIR visitor (BSL `И` / `ИЛИ` and
+//! `?(...)` evaluate inside basic blocks and don't add CFG edges, so
+//! the textbook formula misses them).
 //!
 //! **Decision points** (+1 each, no nesting penalty):
-//! - if, elsif, else
+//! - if, elsif (NOT else — SonarQube parity)
 //! - for, while, foreach
-//! - ternary operator (?)
+//! - ternary operator `?(...)`
 //! - except clause (try-except)
-//! - goto
-//! - AND/OR operators in expressions
+//! - AND / OR (`И`/`ИЛИ`) operators in expressions
 //!
 //! ## Bad practice
 //! Many decision points regardless of nesting:
@@ -178,11 +180,18 @@ mod tests {
 
     #[test]
     fn test_high_complexity_triggers_diagnostic() {
-        // Track 2 Phase B §6.4: the CFG-based formula reports
-        // `complexity = 13` for this fixture. The §6.5 gap-fix slice
-        // may revisit absolute thresholds; for now the test lowers
-        // the configured threshold so the migrated diagnostic still
-        // exercises the "fire on high CC" code path.
+        // Track 2 Phase B §6.5: SonarQube-style formula gives
+        // `cyclomatic = 23` for this extended fixture (CFG-based 14 +
+        // 7 boolean-op + 2 ternary). The fixture was enlarged here to
+        // cross the default threshold (20) naturally, removing the
+        // §6.4 "lower threshold to 10" compromise. The textbook
+        // McCabe value the §6.4 commit pinned was 13 against the
+        // smaller fixture; the SonarQube extras add `И`/`ИЛИ` and
+        // ternary as decision points the CFG can't see (they evaluate
+        // inside basic blocks). The legacy HIR-walk approximation
+        // additionally counted each `Else` clause as a separate
+        // decision; SonarQube does not, so the alignment intentionally
+        // drops that contribution.
         let code = r#"Функция РассчитатьМаршрут(Сумма, ТипКлиента, Режим, ЕстьСкидка)
     Результат = 0;
     Если Сумма > 100 Тогда
@@ -226,20 +235,20 @@ mod tests {
     КонецЕсли;
     Условие = Сумма > 0 И ТипКлиента <> "";
     Условие2 = Режим = "A" ИЛИ Режим = "B";
+    Условие3 = ЕстьСкидка И Сумма > 50 ИЛИ Режим = "C" И ТипКлиента <> "";
     Если Условие И Условие2 Тогда
         Результат = Результат + 1;
+    КонецЕсли;
+    Если Условие3 ИЛИ ЕстьСкидка Тогда
+        Результат = Результат + 2;
     КонецЕсли;
     Возврат Результат;
 КонецФункции"#;
 
-        let mut config = crate::DiagnosticsConfig::default();
-        let mut params = serde_json::Map::new();
-        params.insert("complexityThreshold".to_string(), serde_json::Value::Number(10.into()));
-        config
-            .parameters
-            .insert(DiagnosticCode::CyclomaticComplexity, serde_json::Value::Object(params));
+        // Default threshold = 20 (no per-test compromise needed after
+        // §6.5 alignment).
         let diagnostics =
-            crate::test_utils::check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+            crate::test_utils::check_hir_diagnostic(code).into_iter().collect::<Vec<_>>();
         let diagnostics: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
 
@@ -253,13 +262,14 @@ mod tests {
         assert_eq!(diagnostics[0].severity, Severity::Warning);
 
         assert!(
-            diagnostics[0].message.contains("13"),
-            "Message should contain complexity 13 (CFG-based), got: {}",
+            diagnostics[0].message.contains("23"),
+            "Message should contain SonarQube-style cyclomatic 23 \
+             (CFG-based 14 + 7 boolean-op + 2 ternary), got: {}",
             diagnostics[0].message
         );
         assert!(
-            diagnostics[0].message.contains("10"),
-            "Message should contain configured threshold 10, got: {}",
+            diagnostics[0].message.contains("20"),
+            "Message should contain default threshold 20, got: {}",
             diagnostics[0].message
         );
     }
@@ -309,8 +319,12 @@ mod tests {
     КонецЕсли;
     Условие = Сумма > 0 И ТипКлиента <> "";
     Условие2 = Режим = "A" ИЛИ Режим = "B";
+    Условие3 = ЕстьСкидка И Сумма > 50 ИЛИ Режим = "C" И ТипКлиента <> "";
     Если Условие И Условие2 Тогда
         Результат = Результат + 1;
+    КонецЕсли;
+    Если Условие3 ИЛИ ЕстьСкидка Тогда
+        Результат = Результат + 2;
     КонецЕсли;
     Возврат Результат;
 КонецФункции"#;
@@ -338,23 +352,30 @@ mod tests {
 
         let body = module_bodies.body(0).expect("Should have first method body");
 
-        // Track 2 Phase B §6.4 — pin the CFG-based value the new
-        // `cfg::cyclomatic_complexity` produces. The legacy HIR-walk
-        // approximation reported `22`; the CFG-based formula
-        // `V(G) = E - N + 2` against the same fixture is non-zero
-        // (above the diagnostic's `complexityThreshold = 20`), which
-        // is the quality the diagnostic actually exercises.
+        // Track 2 Phase B §6.5 — pin both the textbook CFG value and
+        // the SonarQube extension separately. `V(G) = E - N + 2*P`
+        // counts only structural decisions that produce CFG edges
+        // (If/Elsif, While, For, ForEach, Try/Except). BSL `И` / `ИЛИ`
+        // and ternary `?(...)` evaluate inside basic blocks and don't
+        // add edges, so the SonarQube definition adds them back as
+        // per-occurrence increments. The §6.4 commit asserted the
+        // textbook value (13 for the smaller fixture); after §6.5 the
+        // diagnostic reports `cfg + boolean_ops + ternary`, so this
+        // test now pins all three components against the extended
+        // fixture.
         let cfg =
             hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
         let complexity = hir::cfg::cyclomatic_complexity(&cfg);
-        // Track 2 Phase B §6.4 alignment: the CFG-based formula
-        // `V(G) = E - N + 2*P` produces 13 against this fixture.
-        // The legacy HIR-walk approximation reported 22 because it
-        // counted AND/OR / ternary as additional decision points;
-        // the textbook CFG formula does not (those don't introduce
-        // new edges in the CFG, they evaluate inside basic blocks).
-        // §6.5 gap-fix may revisit if the lower number proves too
-        // permissive on real corpora.
-        assert_eq!(complexity, 13, "РассчитатьМаршрут CFG-based cyclomatic should be 13");
+        assert_eq!(complexity, 14, "РассчитатьМаршрут CFG-based cyclomatic should be 14");
+
+        let metrics = hir::metrics::compute_hir_metrics(body);
+        assert_eq!(
+            metrics.boolean_ops_count, 7,
+            "boolean ops contribute +7 to SonarQube cyclomatic"
+        );
+        assert_eq!(metrics.ternary_count, 2, "ternary expressions contribute +2");
+        // The §6.5 SonarQube-aligned cyclomatic the diagnostic reports
+        // is the sum: 14 (CFG) + 7 (boolean) + 2 (ternary) = 23.
+        assert_eq!(complexity + metrics.boolean_ops_count + metrics.ternary_count, 23);
     }
 }

@@ -105,6 +105,22 @@ pub struct HirMethodMetrics {
     /// visitor (the visitor walks the HIR `Body` and has no access to
     /// the file-level `LineIndex`).
     pub size_lines: u32,
+    /// Total count of logical `И` (`AND`) / `ИЛИ` (`OR`) binary
+    /// operators anywhere in the body's expressions. Track 2 Phase B
+    /// §6.5 cyclomatic alignment consumes this as the SonarQube-style
+    /// extension to McCabe `V(G)`: BSL short-circuit operators don't
+    /// produce additional CFG edges (evaluation is inside basic
+    /// blocks), so the textbook graph formula misses them. Adding this
+    /// count back keeps the diagnostic in line with the SonarQube
+    /// Cyclomatic Complexity definition.
+    pub boolean_ops_count: u32,
+    /// Total count of ternary `?(condition, then, else)` expressions
+    /// anywhere in the body. Track 2 Phase B §6.5 cyclomatic alignment
+    /// consumes this for the same reason as `boolean_ops_count`:
+    /// ternary expressions evaluate within a basic block in BSL HIR
+    /// and don't add CFG edges, so SonarQube parity needs the explicit
+    /// per-occurrence increment.
+    pub ternary_count: u32,
 }
 
 /// One leaf nesting statement recorded by [`MetricsVisitor`]. A leaf is
@@ -150,6 +166,8 @@ struct MetricsVisitor {
     max_nesting: u32,
     if_conditions: Vec<ConditionMetrics>,
     nesting_leaves: Vec<NestingLeafMetrics>,
+    boolean_ops_count: u32,
+    ternary_count: u32,
     /// 1-indexed depth of the currently-active nesting statement chain.
     /// Increments on entering an `If` / `While` / `For` / `ForEach` /
     /// `Try`; decrements on exit. `0` means the visitor is outside any
@@ -180,6 +198,8 @@ impl MetricsVisitor {
             // Populated by the Salsa wrapper from
             // `LowerResult::size_lines` (the visitor has no `LineIndex`).
             size_lines: 0,
+            boolean_ops_count: self.boolean_ops_count,
+            ternary_count: self.ternary_count,
         }
     }
 
@@ -240,20 +260,36 @@ impl MetricsVisitor {
                 });
             }
 
-            Stmt::For { body: loop_body, .. } => {
+            Stmt::For { from, to, body: loop_body, .. } => {
+                let from = *from;
+                let to = *to;
                 let loop_body = loop_body.clone();
                 self.with_nesting_stmt(stmt_id, |this| {
                     this.cognitive += 1 + nesting;
+                    // Codex round-A fix: pick up `И`/`ИЛИ` and
+                    // ternaries inside bounds expressions —
+                    // `Для И = (а И б) По (в ИЛИ г) Цикл ...` is real
+                    // BSL. Use the extras-only walker to avoid
+                    // changing cognitive complexity contributions
+                    // (the §6.4 cognitive migration shipped without
+                    // walking For bounds, and we keep that exact
+                    // value).
+                    this.count_extras_only(body, from);
+                    this.count_extras_only(body, to);
                     for &child in loop_body.iter() {
                         this.visit_stmt(body, child, nesting + 1);
                     }
                 });
             }
 
-            Stmt::ForEach { body: loop_body, .. } => {
+            Stmt::ForEach { collection, body: loop_body, .. } => {
+                let collection = *collection;
                 let loop_body = loop_body.clone();
                 self.with_nesting_stmt(stmt_id, |this| {
                     this.cognitive += 1 + nesting;
+                    // Codex round-A fix: extras-only walker for the
+                    // collection — see the matching note in `For`.
+                    this.count_extras_only(body, collection);
                     for &child in loop_body.iter() {
                         this.visit_stmt(body, child, nesting + 1);
                     }
@@ -279,7 +315,18 @@ impl MetricsVisitor {
             }
 
             Stmt::Expr(expr) => self.visit_expr(body, *expr),
-            Stmt::Assign { value, .. } => self.visit_expr(body, *value),
+            Stmt::Assign { target, value } => {
+                // Codex round-A fix: assignment target IS an
+                // expression — `Массив[?(Условие, 1, 2)] = ...` is
+                // legal BSL, so the target's index expression can
+                // carry ternaries / `И` / `ИЛИ` that the §6.5
+                // cyclomatic extras must pick up. Use the
+                // extras-only walker to keep cognitive at the §6.4
+                // baseline (the migration shipped without walking
+                // assignment targets).
+                self.count_extras_only(body, *target);
+                self.visit_expr(body, *value);
+            }
             Stmt::Return { value: Some(v) } | Stmt::Raise { value: Some(v) } => {
                 self.visit_expr(body, *v);
             }
@@ -345,11 +392,27 @@ impl MetricsVisitor {
 
     /// Mirror of `cognitive_complexity::count_expr_complexity` — the
     /// only expression-level cognitive contributors are ternary (+1)
-    /// and logical AND/OR (+1 each).
+    /// and logical AND/OR (+1 each). Ternary occurrences and AND/OR
+    /// counts are also tracked in dedicated fields for the §6.5
+    /// cyclomatic alignment (SonarQube-style extended formula).
+    ///
+    /// Codex stop-time fix: the §6.5 cyclomatic extras
+    /// (`boolean_ops_count` and `ternary_count`) skip parser-recovered
+    /// expression subtrees — those are reconstructed from `ERROR`
+    /// nodes by HIR lowering and don't represent decisions the user
+    /// actually wrote. Counting them would re-introduce the false
+    /// positives the CFG-based formula already avoids (CFG never
+    /// includes recovered exprs). Cognitive complexity contributions
+    /// stay unchanged: matches the pre-§6.5 cognitive behaviour the
+    /// migrated handler already shipped.
     fn visit_expr(&mut self, body: &Body, expr_id: ExprIdx) {
+        let is_recovered = body.is_recovered(ExprId::from_idx(expr_id));
         match body.expr_idx(expr_id) {
             Expr::Ternary { condition, then_expr, else_expr } => {
                 self.cognitive += 1;
+                if !is_recovered {
+                    self.ternary_count += 1;
+                }
                 // Ternary conditions are not in the
                 // `IfConditionComplexity` diagnostic scope, so they do
                 // NOT go into `if_conditions`. The AND/OR
@@ -362,6 +425,9 @@ impl MetricsVisitor {
             Expr::BinaryOp { lhs, rhs, op } => {
                 if matches!(op, BinaryOp::And | BinaryOp::Or) {
                     self.cognitive += 1;
+                    if !is_recovered {
+                        self.boolean_ops_count += 1;
+                    }
                 }
                 self.visit_expr(body, *lhs);
                 self.visit_expr(body, *rhs);
@@ -395,6 +461,67 @@ impl MetricsVisitor {
                 }
             }
             Expr::Await { expr } => self.visit_expr(body, *expr),
+            Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => {}
+        }
+    }
+
+    /// Walk an expression tree counting **only** the §6.5 cyclomatic
+    /// extras (`boolean_ops_count`, `ternary_count`) without touching
+    /// `cognitive`. Used for expression slots the §6.4 cognitive
+    /// migration intentionally did not walk (`Stmt::For` bounds and
+    /// `Stmt::ForEach` collection): adding them to `visit_expr` would
+    /// silently inflate cognitive complexity for any loop with
+    /// `И`/`ИЛИ`/`?(...)` in its bounds, regressing the §6.4 cognitive
+    /// values consumers already pin in their tests.
+    ///
+    /// Recovered subtrees are filtered (matching `visit_expr`).
+    fn count_extras_only(&mut self, body: &Body, expr_id: ExprIdx) {
+        let is_recovered = body.is_recovered(ExprId::from_idx(expr_id));
+        match body.expr_idx(expr_id) {
+            Expr::Ternary { condition, then_expr, else_expr } => {
+                if !is_recovered {
+                    self.ternary_count += 1;
+                }
+                self.count_extras_only(body, *condition);
+                self.count_extras_only(body, *then_expr);
+                self.count_extras_only(body, *else_expr);
+            }
+            Expr::BinaryOp { lhs, rhs, op } => {
+                if matches!(op, BinaryOp::And | BinaryOp::Or) && !is_recovered {
+                    self.boolean_ops_count += 1;
+                }
+                self.count_extras_only(body, *lhs);
+                self.count_extras_only(body, *rhs);
+            }
+            Expr::UnaryOp { expr, .. } => self.count_extras_only(body, *expr),
+            Expr::Call { callee, args } => {
+                self.count_extras_only(body, *callee);
+                for &arg in args.iter() {
+                    self.count_extras_only(body, arg);
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                self.count_extras_only(body, *receiver);
+                for &arg in args.iter() {
+                    self.count_extras_only(body, arg);
+                }
+            }
+            Expr::Index { base, index } => {
+                self.count_extras_only(body, *base);
+                self.count_extras_only(body, *index);
+            }
+            Expr::Field { base, .. } => self.count_extras_only(body, *base),
+            Expr::New { args, .. } => {
+                for &arg in args.iter() {
+                    self.count_extras_only(body, arg);
+                }
+            }
+            Expr::Array(items) => {
+                for &item in items.iter() {
+                    self.count_extras_only(body, item);
+                }
+            }
+            Expr::Await { expr } => self.count_extras_only(body, *expr),
             Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => {}
         }
     }
@@ -703,6 +830,100 @@ mod tests {
         let m = compute_hir_metrics(&body);
         assert_eq!(m.nesting_leaves.len(), 1, "innermost For is the only leaf");
         assert_eq!(m.nesting_leaves[0].depth, 3, "If→Try→For = depth 3");
+    }
+
+    /// Codex round-A regression guard: For/ForEach bounds and
+    /// collection contribute to the §6.5 cyclomatic extras
+    /// (`boolean_ops_count`, `ternary_count`) but **not** to
+    /// `cognitive`. Walking `from`/`to`/`collection` through the full
+    /// `visit_expr` would silently inflate cognitive complexity vs.
+    /// the §6.4 baseline; the dedicated `count_extras_only` helper
+    /// keeps cognitive untouched.
+    #[test]
+    fn for_bounds_and_collection_extras_do_not_leak_into_cognitive() {
+        let body = parse_and_lower(
+            r#"
+Процедура Тест()
+    Для Каждого Э Из ?(Условие, Колл1, Колл2) Цикл
+        Сообщить("");
+    КонецЦикла;
+КонецПроцедуры
+"#,
+        );
+        let m = compute_hir_metrics(&body);
+        // Cognitive: the ForEach itself is +1+0 nesting; its body's
+        // Сообщить is at nesting=1 but not a decision. Crucially, the
+        // ternary inside the collection expression must NOT add to
+        // cognitive. So cognitive == 1.
+        assert_eq!(
+            m.cognitive, 1,
+            "cognitive must stay at the ForEach decision point — ternary in \
+             collection must not leak in, got {}",
+            m.cognitive
+        );
+        // Cyclomatic extras: the ternary contributes 1.
+        assert_eq!(
+            m.ternary_count, 1,
+            "ternary in ForEach collection must contribute to cyclomatic extras, got {}",
+            m.ternary_count
+        );
+    }
+
+    /// Codex round-A regression guard: assignment target expressions
+    /// (`Массив[?(...)] = X;`) contribute to the §6.5 cyclomatic
+    /// extras but **not** to cognitive — same isolation contract as
+    /// For/ForEach bounds.
+    #[test]
+    fn assign_target_extras_do_not_leak_into_cognitive() {
+        let body = parse_and_lower(
+            r#"
+Процедура Тест()
+    Массив[?(Условие, 0, 1)] = 5;
+КонецПроцедуры
+"#,
+        );
+        let m = compute_hir_metrics(&body);
+        assert_eq!(m.cognitive, 0, "ternary in assign target must not bump cognitive");
+        assert_eq!(m.ternary_count, 1, "ternary in assign target must contribute to extras");
+    }
+
+    /// Codex round-A regression guard: §6.5 boolean / ternary
+    /// counters MUST NOT include parser-recovered expressions. The
+    /// CFG never sees recovered subtrees, so adding them on top of
+    /// the textbook formula would reintroduce false positives the
+    /// CFG-based diagnostic already avoids. This fixture trips
+    /// parser ERROR recovery on bare `.` member access; lowering
+    /// marks the resulting expression subtree as recovered, and the
+    /// `boolean_ops_count` / `ternary_count` increments must skip it.
+    /// Cognitive contribution stays as before.
+    ///
+    /// The fixture is a smoke-test pinning the counters at their
+    /// lower-bound values — a hand-constructed `Body` with a real
+    /// `BinaryOp::And` inside a recovered subtree would directly pin
+    /// the recursive-filter behaviour, but that requires `pub(crate)`
+    /// arena APIs we don't expose for tests outside the lowering
+    /// module. Within the module, a parser-driven fixture exercises
+    /// the same code path indirectly.
+    #[test]
+    fn recovered_exprs_do_not_inflate_cyclomatic_extras() {
+        let body = parse_and_lower(
+            r#"
+Процедура Тест()
+    Х = ?(а., 1, 2);
+КонецПроцедуры
+"#,
+        );
+        let m = compute_hir_metrics(&body);
+        assert!(
+            m.boolean_ops_count == 0,
+            "boolean_ops must stay 0 for fixture without real AND/OR, got {}",
+            m.boolean_ops_count
+        );
+        assert!(
+            m.ternary_count <= 1,
+            "ternary_count must not be inflated by recovered subtrees, got {}",
+            m.ternary_count
+        );
     }
 
     /// `Default::default()` matches an empty-method walk.

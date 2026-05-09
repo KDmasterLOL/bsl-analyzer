@@ -887,6 +887,19 @@ pub fn method_hir_metrics_query<'db>(
 /// method's CFG is a single `Arc` clone, then a graph traversal via
 /// [`hir::cfg::cyclomatic_complexity`].
 ///
+/// Track 2 Phase B §6.5 alignment: the textbook McCabe formula
+/// `V(G) = E - N + 2*P` only counts decision points that introduce
+/// CFG edges. BSL short-circuit `И`/`ИЛИ` and ternary `?(...)` evaluate
+/// inside basic blocks (no extra edges), so the textbook formula
+/// under-counts compared to SonarQube cyclomatic. We add the
+/// per-occurrence boolean and ternary counts (sourced from the §6.1
+/// HIR visitor through `module_hir_metrics_query`) on top of the
+/// graph value to match the SonarQube definition. The legacy
+/// `hir-def::cyclomatic_complexity::calculate_complexity` (retired in
+/// 71c22eab) also counted `Else` clauses as separate decisions; we
+/// intentionally drop that — SonarQube doesn't, and `Else` doesn't
+/// add a new outgoing edge in McCabe's textbook formulation.
+///
 /// LRU = 128.
 #[salsa::tracked(lru = 128)]
 pub fn module_cyclomatic_query<'db>(
@@ -899,10 +912,16 @@ pub fn module_cyclomatic_query<'db>(
     let module_cfgs = db.module_cfgs(file_id_input);
     let module_id = ModuleId::new(file_id);
     let module_bodies = db.module_bodies(module_id);
+    let module_metrics = module_hir_metrics_query(db, file_id_input);
     let mut methods = rustc_hash::FxHashMap::default();
     for (local_id, _body) in module_bodies.iter_bodies() {
         let Some(cfg) = module_cfgs.get(local_id) else { continue };
-        methods.insert(local_id, hir::cfg::cyclomatic_complexity(cfg.as_ref()));
+        let base = hir::cfg::cyclomatic_complexity(cfg.as_ref());
+        let extras = module_metrics
+            .get(local_id)
+            .map(|m| m.boolean_ops_count + m.ternary_count)
+            .unwrap_or(0);
+        methods.insert(local_id, base + extras);
     }
     tracing::debug!(count = methods.len(), "Built module cyclomatic metrics");
     Arc::new(ModuleCyclomatic { methods })
