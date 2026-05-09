@@ -416,6 +416,18 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(crate::queries::ModuleHirMetrics::from_methods(methods))
     }
 
+    /// Per-method shim — Codex stop-hook fix: without this override
+    /// the trait default returned `HirMethodMetrics::default()` for
+    /// every method in streaming mode, silently zeroing every
+    /// migrated complexity diagnostic. Look up against the
+    /// streaming-computed module batch.
+    fn method_hir_metrics(&self, method: hir::MethodId) -> Arc<hir::metrics::HirMethodMetrics> {
+        let batch = self.module_hir_metrics(method.module.file_id);
+        batch
+            .get(method.local_id)
+            .unwrap_or_else(|| Arc::new(hir::metrics::HirMethodMetrics::default()))
+    }
+
     fn module_cyclomatic(&self, file_id: FileId) -> Arc<crate::queries::ModuleCyclomatic> {
         let module_id = ModuleId::new(file_id);
         let module_cfgs = self.module_cfgs(file_id);
@@ -426,6 +438,14 @@ impl AnalysisProvider for StreamingProvider {
             methods.insert(local_id, hir::cfg::cyclomatic_complexity(cfg.as_ref()));
         }
         Arc::new(crate::queries::ModuleCyclomatic::from_methods(methods))
+    }
+
+    /// Per-method shim. Codex stop-hook fix: without this override the
+    /// trait default returned `1` (the conventional base) for every
+    /// method, silently masking all `CyclomaticComplexity` diagnostics
+    /// in streaming mode.
+    fn method_cyclomatic(&self, method: hir::MethodId) -> u32 {
+        self.module_cyclomatic(method.module.file_id).get(method.local_id)
     }
 
     fn module_path_terminates(
