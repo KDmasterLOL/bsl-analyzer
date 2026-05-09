@@ -271,6 +271,65 @@ mod tests {
         assert!(diagnostics.is_empty(), "No metadata should return empty diagnostics");
     }
 
+    /// Track 2 §1.7-A — e2e: direct unguarded call to a privileged
+    /// CommonModule method emits the diagnostic. Validates the full
+    /// pipeline: Configuration → visible_configurations →
+    /// is_privileged filter → call_summary edge → resolve_qualified_path
+    /// → emit.
+    const PRIVILEGED_MODULE_BODY: &str = r#"
+Процедура Метод() Экспорт
+КонецПроцедуры
+"#;
+
+    #[test]
+    fn test_direct_unguarded_call_emits() {
+        let code = r#"
+Процедура Тест()
+    ПривилегМодуль.Метод();
+КонецПроцедуры
+"#;
+        let diagnostics = crate::test_utils::check_diagnostic_with_privileged_modules(
+            code,
+            &[("ПривилегМодуль", PRIVILEGED_MODULE_BODY)],
+            check,
+        );
+        let priv_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PrivilegedModuleMethodCall)
+            .collect();
+        assert_eq!(priv_diags.len(), 1, "direct call to privileged module must emit");
+    }
+
+    /// Track 2 §1.7-A — e2e: a privileged-module call dominated by a
+    /// `РольДоступна("Чтение")` guard is suppressed by the §1.6 Group D
+    /// guard-predicate detector. The full pipeline is exercised end-to-
+    /// end here (Configuration → visible_configurations → call_summary →
+    /// guard_predicates::is_stmt_guarded → suppression).
+    #[test]
+    fn test_role_guarded_call_suppressed() {
+        let code = r#"
+Процедура Тест()
+    Если РольДоступна("Чтение") Тогда
+        ПривилегМодуль.Метод();
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = crate::test_utils::check_diagnostic_with_privileged_modules(
+            code,
+            &[("ПривилегМодуль", PRIVILEGED_MODULE_BODY)],
+            check,
+        );
+        let priv_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PrivilegedModuleMethodCall)
+            .collect();
+        assert!(
+            priv_diags.is_empty(),
+            "RoleCheck-guarded privileged call must be suppressed; got {} diagnostic(s)",
+            priv_diags.len()
+        );
+    }
+
     #[test]
     fn test_disabled_config() {
         let mut db = RootDatabaseImpl::new();

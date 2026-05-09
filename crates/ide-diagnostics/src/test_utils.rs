@@ -324,7 +324,8 @@ where
     let test_file = *fixture.files.keys().last().expect("Fixture should have at least one file");
     let metadata_arc = Arc::new(metadata);
     let config_rc = Rc::new(crate::DiagnosticsConfig::all_enabled());
-    let provider_impl = MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc) };
+    let provider_impl =
+        MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc), configuration: None };
     let ctx = crate::DiagnosticsContext::new(
         &config_rc,
         test_file,
@@ -372,14 +373,36 @@ where
 }
 
 /// AnalysisProvider that returns custom metadata for testing metadata-based diagnostics.
+///
+/// Track 2 §1.7-A: optionally carries a [`bsl_metadata::Configuration`]
+/// so handlers that consult `visible_configurations()` (notably
+/// `PrivilegedModuleMethodCall`) can be exercised end-to-end. When
+/// `configuration` is `Some`, both `configuration()` and
+/// `visible_configurations()` surface it; otherwise both return the
+/// default empty values.
 struct MetadataTestProvider {
     db: ide_db::RootDatabaseImpl,
     metadata: std::sync::Arc<hir::ModuleMetadata>,
+    configuration: Option<std::sync::Arc<bsl_metadata::Configuration>>,
 }
 
 impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn configuration(&self) -> Option<std::sync::Arc<bsl_metadata::Configuration>> {
-        None
+        self.configuration.clone()
+    }
+
+    fn visible_configurations(
+        &self,
+        _file_id: vfs::FileId,
+    ) -> Vec<ide_db::provider::VisibleConfig> {
+        match &self.configuration {
+            Some(cfg) => vec![ide_db::provider::VisibleConfig {
+                name: None,
+                root: std::path::PathBuf::from("/test"),
+                configuration: std::sync::Arc::clone(cfg),
+            }],
+            None => Vec::new(),
+        }
     }
 
     fn workspace_symbols(
@@ -622,7 +645,8 @@ where
     let metadata_arc = Arc::new(metadata);
     let config_rc = Rc::new(config);
 
-    let provider_impl = MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc) };
+    let provider_impl =
+        MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc), configuration: None };
 
     let ctx = crate::DiagnosticsContext::new(
         &config_rc,
@@ -631,6 +655,82 @@ where
     );
 
     check_fn(&metadata_arc, &ctx)
+}
+
+/// Track 2 §1.7-A — run a multi-file diagnostic with a synthetic
+/// [`bsl_metadata::Configuration`] containing privileged `CommonModule`s.
+/// End-to-end harness for handlers that consult both
+/// `ctx.visible_configurations()` (the `is_privileged()` flag) AND
+/// `ctx.resolve_qualified_path(...)` (which needs the privileged
+/// module's body file in the VFS so workspace symbol resolution finds
+/// the called method).
+///
+/// `caller_code` is the file under test, mounted at
+/// `/CommonModules/Caller/Module.bsl`. Each `(name, body)` entry in
+/// `privileged_modules` is mounted at `/CommonModules/<name>/Module.bsl`
+/// AND added to the synthetic configuration with `privileged=true,
+/// server=true`. Diagnostics are returned for the caller file only.
+pub fn check_diagnostic_with_privileged_modules<F>(
+    caller_code: &str,
+    privileged_modules: &[(&str, &str)],
+    check_fn: F,
+) -> Vec<Diagnostic>
+where
+    F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
+{
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use vfs::{FileId, FileSet, VfsPath};
+
+    let mut configuration = bsl_metadata::Configuration::new("TestConfig");
+    for &(name, _) in privileged_modules {
+        let module =
+            bsl_metadata::CommonModule::builder().name(name).privileged(true).server(true).build();
+        configuration.add_common_module(module);
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::default();
+
+    // Mount caller file at id 0.
+    let caller_file_id = FileId(0);
+    file_set.insert(caller_file_id, VfsPath::new("/CommonModules/Caller/Module.bsl"));
+
+    // Mount each privileged module body at /CommonModules/<name>/Module.bsl.
+    let mut privileged_file_ids = Vec::with_capacity(privileged_modules.len());
+    for (idx, (name, _body)) in privileged_modules.iter().enumerate() {
+        let fid = FileId((idx + 1) as u32);
+        file_set.insert(fid, VfsPath::new(format!("/CommonModules/{}/Module.bsl", name)));
+        privileged_file_ids.push(fid);
+    }
+
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller_file_id, SourceRootId(0));
+    db.set_file_text(caller_file_id, caller_code);
+    for (fid, (_, body)) in privileged_file_ids.iter().zip(privileged_modules.iter()) {
+        db.set_file_source_root(*fid, SourceRootId(0));
+        db.set_file_text(*fid, body);
+    }
+
+    let metadata =
+        make_common_module_metadata(bsl_metadata::CommonModule::builder().name("Caller").build());
+    let metadata_arc = Arc::new(metadata);
+    let config_rc = Rc::new(crate::DiagnosticsConfig::all_enabled());
+    let provider_impl = MetadataTestProvider {
+        db,
+        metadata: Arc::clone(&metadata_arc),
+        configuration: Some(Arc::new(configuration)),
+    };
+    let ctx = crate::DiagnosticsContext::new(
+        &config_rc,
+        caller_file_id,
+        &provider_impl as &dyn ide_db::provider::AnalysisProvider,
+    );
+
+    check_fn(&ctx)
 }
 
 /// Create a `ModuleMetadata` for a CommonModule (without execution context).
