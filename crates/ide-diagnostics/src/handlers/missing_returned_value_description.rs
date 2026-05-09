@@ -76,9 +76,24 @@ fn check_function_hir(
         return None;
     }
 
-    // Get documentation via ctx (works in both LSP and streaming mode).
-    // Missing whole-method documentation is handled by PublicMethodsDescription.
-    let docs = ctx.method_docs(method_id)?;
+    // When the method has no docs at all we normally defer to
+    // PublicMethodsDescription to avoid double-reporting; if that rule is
+    // disabled, this handler steps in so missing-return docs still get
+    // caught instead of falling through both rules silently.
+    let docs = match ctx.method_docs(method_id) {
+        Some(docs) => docs,
+        None => {
+            if !ctx.is_disabled_with_metadata(DiagnosticCode::PublicMethodsDescription) {
+                return None;
+            }
+            return Some(create_diagnostic(
+                name_range,
+                "Добавьте описание возвращаемого значения функции",
+                code,
+                ctx,
+            ));
+        }
+    };
 
     // If it's a hyperlink reference, skip validation
     if docs.is_hyperlink() {
@@ -199,14 +214,35 @@ mod tests {
 
     #[test]
     fn test_export_function_without_comments() {
+        // The function lives outside any region so PublicMethodsDescription
+        // (default `checkAllRegion=false`) also stays silent — the residual
+        // silent case is the responsibility of PublicMethodsDescription's
+        // own audit-gap fix for export-outside-region, not this rule. When
+        // that lands, this assertion will need to follow.
         let code = "Функция Example() Экспорт\nКонецФункции";
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
             0,
-            "MissingReturnedValueDescription should not duplicate PublicMethodsDescription"
+            "MissingReturnedValueDescription stays silent here so it doesn't \
+             double-emit with PublicMethodsDescription, which is enabled by default"
         );
+    }
+
+    #[test]
+    fn test_export_function_without_comments_pmd_disabled() {
+        // When PublicMethodsDescription is disabled, the missing-return-doc check
+        // must still cover export functions that have no documentation at all —
+        // otherwise the case is silent in both rules.
+        let code = "Функция Example() Экспорт\nКонецФункции";
+        let mut config = DiagnosticsConfig::default();
+        config.disabled.push(DiagnosticCode::PublicMethodsDescription);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
+        assert!(diagnostics[0].message.contains("Добавьте описание"));
+        assert_diagnostic_range(code, &diagnostics[0], 0, 8, 15);
     }
 
     #[test]
