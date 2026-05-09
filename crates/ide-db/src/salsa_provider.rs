@@ -277,4 +277,26 @@ impl AnalysisProvider for SalsaProvider<'_> {
         let input = FileIdInput::new(self.db, file_id);
         crate::effects::module_security_state_query(self.db, input)
     }
+
+    // Track 2 Phase B §6.3 — complexity-metric overrides
+
+    fn method_hir_metrics(&self, method: hir::MethodId) -> Arc<hir::metrics::HirMethodMetrics> {
+        let input = hir::MethodIdInput::new(self.db, method);
+        crate::queries::method_hir_metrics_query(self.db, input)
+    }
+
+    fn module_hir_metrics(&self, file_id: FileId) -> Arc<crate::queries::ModuleHirMetrics> {
+        let input = FileIdInput::new(self.db, file_id);
+        crate::queries::module_hir_metrics_query(self.db, input)
+    }
+
+    fn method_cyclomatic(&self, method: hir::MethodId) -> u32 {
+        let input = hir::MethodIdInput::new(self.db, method);
+        crate::queries::method_cyclomatic_query(self.db, input)
+    }
+
+    fn module_cyclomatic(&self, file_id: FileId) -> Arc<crate::queries::ModuleCyclomatic> {
+        let input = FileIdInput::new(self.db, file_id);
+        crate::queries::module_cyclomatic_query(self.db, input)
+    }
 }

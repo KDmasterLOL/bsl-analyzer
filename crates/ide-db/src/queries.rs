@@ -721,3 +721,166 @@ pub fn line_index_query<'db>(
 
     Arc::new(line_index::LineIndex::new(file_text.as_ref()))
 }
+
+// ============================================================================
+// Track 2 Phase B §6.3 — complexity-metric Salsa wrappers
+// ============================================================================
+
+/// Per-method [`hir::metrics::HirMethodMetrics`] results for one module.
+///
+/// Returned by [`module_hir_metrics_query`]. The §6.4 cognitive /
+/// nested-statements / if-condition handlers iterate the per-method
+/// shim [`method_hir_metrics_query`] which reads from this batch via a
+/// cheap HashMap lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleHirMetrics {
+    methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
+}
+
+impl ModuleHirMetrics {
+    /// Streaming-mode constructor (no Salsa). Mirrors
+    /// [`crate::effects::ModuleSecurityState::from_methods_with_module_level`]
+    /// — `pub(crate)` so the private `methods` field stays opaque to
+    /// downstream consumers.
+    pub(crate) fn from_methods(
+        methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
+    ) -> Self {
+        Self { methods }
+    }
+
+    /// Look up a method's metrics. Returns `None` for methods absent
+    /// from the module's body collection (synthetic / orphan ItemTree
+    /// entries) — matches the contract of every other module-batch
+    /// query.
+    pub fn get(&self, local_id: u32) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
+        self.methods.get(&local_id).cloned()
+    }
+
+    /// Number of methods with computed metrics.
+    pub fn len(&self) -> usize {
+        self.methods.len()
+    }
+
+    /// `true` when no method produced metrics (typically: an empty
+    /// module).
+    pub fn is_empty(&self) -> bool {
+        self.methods.is_empty()
+    }
+}
+
+/// Per-method cyclomatic complexity values for one module.
+///
+/// Stored as `u32` directly (no `Arc` — values fit in a register).
+/// Returned by [`module_cyclomatic_query`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleCyclomatic {
+    methods: rustc_hash::FxHashMap<u32, u32>,
+}
+
+impl ModuleCyclomatic {
+    /// Streaming-mode constructor (no Salsa).
+    pub(crate) fn from_methods(methods: rustc_hash::FxHashMap<u32, u32>) -> Self {
+        Self { methods }
+    }
+
+    /// Look up a method's cyclomatic complexity. Returns `1` (the
+    /// conventional base) for methods absent from the module batch.
+    pub fn get(&self, local_id: u32) -> u32 {
+        self.methods.get(&local_id).copied().unwrap_or(1)
+    }
+
+    /// Number of methods with computed values.
+    pub fn len(&self) -> usize {
+        self.methods.len()
+    }
+
+    /// `true` when no method produced a value.
+    pub fn is_empty(&self) -> bool {
+        self.methods.is_empty()
+    }
+}
+
+/// Compute HIR-structural metrics for every method in a module.
+///
+/// Per master plan §6.3: module-level batch matches the actual
+/// invalidation granularity of `module_bodies` (any method change
+/// invalidates the whole module), so per-method queries would burn
+/// cache for no benefit. Each method's `HirMethodMetrics` is shared as
+/// `Arc` so the per-method shim is a cheap pointer copy.
+///
+/// LRU = 128 (matches `module_cfgs_query`).
+#[salsa::tracked(lru = 128)]
+pub fn module_hir_metrics_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<ModuleHirMetrics> {
+    let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
+    let _span = tracing::info_span!("module_hir_metrics", ?module_id).entered();
+
+    let module_bodies = db.module_bodies(module_id);
+    let mut methods = rustc_hash::FxHashMap::default();
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let metrics = hir::metrics::compute_hir_metrics(body);
+        methods.insert(local_id, Arc::new(metrics));
+    }
+    tracing::debug!(count = methods.len(), "Built module HIR metrics");
+    Arc::new(ModuleHirMetrics { methods })
+}
+
+/// Per-method shim over [`module_hir_metrics_query`]. LRU = 256 to
+/// match the `method_cfg_query` precedent — the hot path is a
+/// per-method `HashMap` lookup against the module batch.
+#[salsa::tracked(lru = 256)]
+pub fn method_hir_metrics_query<'db>(
+    db: &'db dyn RootDatabase,
+    method_id_input: hir::MethodIdInput<'db>,
+) -> Arc<hir::metrics::HirMethodMetrics> {
+    let _span = tracing::info_span!("method_hir_metrics", ?method_id_input).entered();
+    let method_id = method_id_input.method_id(db);
+    let file_id_input = FileIdInput::new(db, method_id.module.file_id);
+    let module_metrics = module_hir_metrics_query(db, file_id_input);
+    module_metrics
+        .get(method_id.local_id)
+        .unwrap_or_else(|| Arc::new(hir::metrics::HirMethodMetrics::default()))
+}
+
+/// Compute cyclomatic complexity for every method in a module.
+///
+/// Reuses the CFGs already cached by `module_cfgs_query` — each
+/// method's CFG is a single `Arc` clone, then a graph traversal via
+/// [`hir::cfg::cyclomatic_complexity`].
+///
+/// LRU = 128.
+#[salsa::tracked(lru = 128)]
+pub fn module_cyclomatic_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<ModuleCyclomatic> {
+    let file_id = file_id_input.file_id(db);
+    let _span = tracing::info_span!("module_cyclomatic", ?file_id).entered();
+
+    let module_cfgs = db.module_cfgs(file_id_input);
+    let module_id = ModuleId::new(file_id);
+    let module_bodies = db.module_bodies(module_id);
+    let mut methods = rustc_hash::FxHashMap::default();
+    for (local_id, _body) in module_bodies.iter_bodies() {
+        let Some(cfg) = module_cfgs.get(local_id) else { continue };
+        methods.insert(local_id, hir::cfg::cyclomatic_complexity(cfg.as_ref()));
+    }
+    tracing::debug!(count = methods.len(), "Built module cyclomatic metrics");
+    Arc::new(ModuleCyclomatic { methods })
+}
+
+/// Per-method shim over [`module_cyclomatic_query`]. LRU = 256.
+#[salsa::tracked(lru = 256)]
+pub fn method_cyclomatic_query<'db>(
+    db: &'db dyn RootDatabase,
+    method_id_input: hir::MethodIdInput<'db>,
+) -> u32 {
+    let _span = tracing::info_span!("method_cyclomatic", ?method_id_input).entered();
+    let method_id = method_id_input.method_id(db);
+    let file_id_input = FileIdInput::new(db, method_id.module.file_id);
+    let module_metrics = module_cyclomatic_query(db, file_id_input);
+    module_metrics.get(method_id.local_id)
+}

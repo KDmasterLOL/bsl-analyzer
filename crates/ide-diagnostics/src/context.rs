@@ -325,6 +325,25 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_security_state(self.file_id))
     }
 
+    /// Per-module HIR-structural metrics batch (Track 2 Phase B §6.3).
+    ///
+    /// Consumed by the §6.4-migrated `CognitiveComplexity` /
+    /// `NestedStatements` / `IfConditionComplexity` handlers; each
+    /// reads its specific field of [`hir::metrics::HirMethodMetrics`]
+    /// per method.
+    pub fn module_hir_metrics(&self) -> Arc<ide_db::queries::ModuleHirMetrics> {
+        self.query(|p| p.module_hir_metrics(self.file_id))
+    }
+
+    /// Per-module cyclomatic complexity batch (Track 2 Phase B §6.3).
+    ///
+    /// Consumed by the §6.4-migrated `CyclomaticComplexity` handler;
+    /// values come from [`hir::cfg::cyclomatic_complexity`] applied to
+    /// each method's CFG.
+    pub fn module_cyclomatic(&self) -> Arc<ide_db::queries::ModuleCyclomatic> {
+        self.query(|p| p.module_cyclomatic(self.file_id))
+    }
+
     /// Get module reaching definitions (batch).
     pub fn module_reaching_defs(&self) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         self.query(|p| p.module_reaching_definitions(self.file_id))

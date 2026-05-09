@@ -401,6 +401,33 @@ impl AnalysisProvider for StreamingProvider {
     // unsafe to do on-the-fly without caching — see §1.4c default-impl
     // rationale in `provider.rs`.
 
+    // Track 2 Phase B §6.3 — complexity-metric overrides. Both are
+    // pure HIR-/CFG-walks with no cross-module dependencies, so the
+    // on-the-fly compute pattern (matching `module_security_state`
+    // above) works in streaming mode without Salsa caching.
+
+    fn module_hir_metrics(&self, file_id: FileId) -> Arc<crate::queries::ModuleHirMetrics> {
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.module_bodies(module_id);
+        let mut methods: FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>> = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            methods.insert(local_id, Arc::new(hir::metrics::compute_hir_metrics(body)));
+        }
+        Arc::new(crate::queries::ModuleHirMetrics::from_methods(methods))
+    }
+
+    fn module_cyclomatic(&self, file_id: FileId) -> Arc<crate::queries::ModuleCyclomatic> {
+        let module_id = ModuleId::new(file_id);
+        let module_cfgs = self.module_cfgs(file_id);
+        let module_bodies = self.module_bodies(module_id);
+        let mut methods: FxHashMap<u32, u32> = FxHashMap::default();
+        for (local_id, _body) in module_bodies.iter_bodies() {
+            let Some(cfg) = module_cfgs.get(local_id) else { continue };
+            methods.insert(local_id, hir::cfg::cyclomatic_complexity(cfg.as_ref()));
+        }
+        Arc::new(crate::queries::ModuleCyclomatic::from_methods(methods))
+    }
+
     fn module_path_terminates(
         &self,
         file_id: FileId,

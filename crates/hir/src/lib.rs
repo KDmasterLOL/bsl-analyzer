@@ -58,9 +58,9 @@ pub use hir_def::metrics;
 /// CFG analysis — stable public API
 pub mod cfg {
     pub use ::cfg::{
-        BasicBlockVertex, CfgBuilder, CfgEdgeType, CfgVertex, ConditionalVertex, ControlFlowGraph,
-        ForEachLoopVertex, ForLoopVertex, LabelVertex, ModuleCfgs, NodeIndex,
-        PreprocConditionVertex, TryExceptVertex, WhileLoopVertex,
+        cyclomatic_complexity, BasicBlockVertex, CfgBuilder, CfgEdgeType, CfgVertex,
+        ConditionalVertex, ControlFlowGraph, ForEachLoopVertex, ForLoopVertex, LabelVertex,
+        ModuleCfgs, NodeIndex, PreprocConditionVertex, TryExceptVertex, WhileLoopVertex,
     };
 }
 

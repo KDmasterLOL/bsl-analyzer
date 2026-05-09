@@ -18,7 +18,11 @@ use hir::{
 use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
 
-use crate::{effects::ModuleSecurityState, SdblHirEntries};
+use crate::{
+    effects::ModuleSecurityState,
+    queries::{ModuleCyclomatic, ModuleHirMetrics},
+    SdblHirEntries,
+};
 
 /// Visible configuration for a file: main config or extension.
 ///
@@ -311,6 +315,40 @@ pub trait AnalysisProvider {
     /// returns empty.
     fn module_security_state(&self, _file_id: FileId) -> Arc<ModuleSecurityState> {
         Arc::new(ModuleSecurityState::default())
+    }
+
+    // ========================================================================
+    // Track 2 Phase B §6.3 — complexity metrics
+    // ========================================================================
+
+    /// Per-method HIR-structural metrics (cognitive, max_nesting,
+    /// per-condition logical-op counts). The §6.4-migrated handlers
+    /// (`CognitiveComplexity`, `NestedStatements`, `IfConditionComplexity`)
+    /// read this to replace their per-handler HIR walks.
+    ///
+    /// Default impl returns the empty-method state so providers that
+    /// don't run the analysis (degraded modes) opt out cleanly.
+    fn method_hir_metrics(&self, _method: MethodId) -> Arc<hir::metrics::HirMethodMetrics> {
+        Arc::new(hir::metrics::HirMethodMetrics::default())
+    }
+
+    /// Module batch over [`hir::metrics::HirMethodMetrics`]. Returned
+    /// by `module_hir_metrics_query`; the per-method shim
+    /// [`Self::method_hir_metrics`] reads from it.
+    fn module_hir_metrics(&self, _file_id: FileId) -> Arc<ModuleHirMetrics> {
+        Arc::new(ModuleHirMetrics::default())
+    }
+
+    /// Per-method McCabe cyclomatic complexity, computed from the
+    /// CFG by [`hir::cfg::cyclomatic_complexity`]. Default `1`
+    /// matches the conventional base value for trivial methods.
+    fn method_cyclomatic(&self, _method: MethodId) -> u32 {
+        1
+    }
+
+    /// Module batch over per-method cyclomatic values.
+    fn module_cyclomatic(&self, _file_id: FileId) -> Arc<ModuleCyclomatic> {
+        Arc::new(ModuleCyclomatic::default())
     }
 }
 
