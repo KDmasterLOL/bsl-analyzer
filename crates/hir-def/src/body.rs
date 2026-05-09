@@ -647,11 +647,6 @@ pub enum BodyDiagnostic {
     /// Detected when statement AST node has no SEMICOLON token.
     MissingSemicolon { range: TextRange },
 
-    /// Overly complex if condition with too many boolean operations.
-    /// Detected when if/elsif condition has more boolean operations (AND/OR) than maxComplexity.
-    /// Complexity = number of boolean operations + 1 (default max: 3).
-    IfConditionComplexity { complexity: usize, max_complexity: usize, range: TextRange },
-
     /// Duplicated condition in if/elsif chain.
     /// Detected when an elsif condition is identical to a previous if/elsif condition.
     /// First occurrence index is 0-based (0 = if, 1+ = elsif).
@@ -1134,7 +1129,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
             BodyDiagnostic::MissingSemicolon { range } => *range,
-            BodyDiagnostic::IfConditionComplexity { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCondition { range, .. } => *range,
             BodyDiagnostic::IfElseIfEndsWithElse { range } => *range,
             BodyDiagnostic::IncorrectUseOfStrTemplate { range } => *range,

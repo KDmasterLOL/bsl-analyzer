@@ -37,7 +37,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::FunctionShouldHaveReturn,
     DiagnosticCode::GetFormMethod,
     DiagnosticCode::GlobalContextMethodCollision8312,
-    DiagnosticCode::IfConditionComplexity,
     DiagnosticCode::IfElseDuplicatedCodeBlock,
     DiagnosticCode::IfElseDuplicatedCondition,
     DiagnosticCode::IfElseIfEndsWithElse,
@@ -239,9 +238,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::MissingSemicolon { range } => {
             handlers::semicolon_presence::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::IfConditionComplexity { complexity, max_complexity, range } => {
-            handlers::if_condition_complexity::from_hir(*complexity, *max_complexity, *range, ctx)
         }
         BodyDiagnostic::IfElseDuplicatedCondition { first_occurrence_index, range } => {
             handlers::if_else_duplicated_condition::from_hir(*first_occurrence_index, *range, ctx)

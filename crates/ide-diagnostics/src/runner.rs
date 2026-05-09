@@ -171,6 +171,7 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CognitiveComplexity,
     DiagnosticCode::CyclomaticComplexity,
     DiagnosticCode::NestedStatements,
+    DiagnosticCode::IfConditionComplexity,
 ];
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
@@ -721,6 +722,11 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         handlers::cyclomatic_complexity::check,
     ));
     diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
+    diagnostics.extend(run_diagnostic(
+        "IfConditionComplexity",
+        ctx,
+        handlers::if_condition_complexity::check,
+    ));
 
     diagnostics
 }
