@@ -377,6 +377,213 @@ fn legacy_recognizer_parity() {
     }
 }
 
+/// Track 2 §1.6 Group A category-parity guard.
+///
+/// The legacy recognizers in `hir-def/body/lower/expr.rs` filter on a
+/// fixed `Category` (e.g. `is_file_system_method` checks
+/// `Category::FileSystem` on `EntryKind::GlobalMethod`). After the §1.6
+/// swap, an entry whose name appears in the legacy list but whose
+/// registry `category` is the wrong one would silently stop being
+/// detected — `legacy_recognizer_parity` only asserts `is_some()`,
+/// missing this class of regression.
+///
+/// This test pins the contract: **every** name covered by a migrated
+/// predicate (full enumeration matching `legacy_recognizer_parity`,
+/// not a representative sample — Codex round-2 MAJOR fix) is reachable
+/// AND classified under the predicate's filter category. If a future
+/// PR reassigns any name's category in `registry.rs` (e.g. moves
+/// `КопироватьФайл` from `FileSystem` to `Internet`), the migrated
+/// `is_file_system_method` will silently lose detection — this test
+/// fails first and forces an explicit decision.
+#[test]
+fn legacy_recognizer_category_parity() {
+    let reg = registry();
+
+    let global_cases: &[(&str, &str, Category)] = &[
+        // is_external_app_method — Category::ExternalApp
+        ("командасистемы", "is_external_app_method", Category::ExternalApp),
+        ("system", "is_external_app_method", Category::ExternalApp),
+        ("запуститьсистему", "is_external_app_method", Category::ExternalApp),
+        ("runsystem", "is_external_app_method", Category::ExternalApp),
+        ("запуститьприложение", "is_external_app_method", Category::ExternalApp),
+        ("runapp", "is_external_app_method", Category::ExternalApp),
+        ("начатьзапускприложения", "is_external_app_method", Category::ExternalApp),
+        ("beginrunningapplication", "is_external_app_method", Category::ExternalApp),
+        ("запуститьприложениеасинх", "is_external_app_method", Category::ExternalApp),
+        ("runappasync", "is_external_app_method", Category::ExternalApp),
+        ("запуститьпрограмму", "is_external_app_method", Category::ExternalApp),
+        ("открытьпроводник", "is_external_app_method", Category::ExternalApp),
+        ("открытьфайл", "is_external_app_method", Category::ExternalApp),
+        // is_os_users_method — Category::OsUsers
+        ("пользователиос", "is_os_users_method", Category::OsUsers),
+        ("osusers", "is_os_users_method", Category::OsUsers),
+        // is_file_system_method — Category::FileSystem (canonical-only
+        // superset). Full enumeration matches `legacy_recognizer_parity`
+        // — Codex round-2 MAJOR: a representative sample lets a
+        // category reassignment outside the sample slip past silently.
+        ("значениевфайл", "is_file_system_method", Category::FileSystem),
+        ("valuetofile", "is_file_system_method", Category::FileSystem),
+        ("копироватьфайл", "is_file_system_method", Category::FileSystem),
+        ("filecopy", "is_file_system_method", Category::FileSystem),
+        ("объединитьфайлы", "is_file_system_method", Category::FileSystem),
+        ("mergefiles", "is_file_system_method", Category::FileSystem),
+        ("переместитьфайл", "is_file_system_method", Category::FileSystem),
+        ("movefile", "is_file_system_method", Category::FileSystem),
+        ("разделитьфайл", "is_file_system_method", Category::FileSystem),
+        ("splitfile", "is_file_system_method", Category::FileSystem),
+        ("создатькаталог", "is_file_system_method", Category::FileSystem),
+        ("createdirectory", "is_file_system_method", Category::FileSystem),
+        ("удалитьфайлы", "is_file_system_method", Category::FileSystem),
+        ("deletefiles", "is_file_system_method", Category::FileSystem),
+        ("каталогпрограммы", "is_file_system_method", Category::FileSystem),
+        ("bindir", "is_file_system_method", Category::FileSystem),
+        ("каталогвременныхфайлов", "is_file_system_method", Category::FileSystem),
+        ("tempfilesdir", "is_file_system_method", Category::FileSystem),
+        ("каталогдокументов", "is_file_system_method", Category::FileSystem),
+        ("documentsdir", "is_file_system_method", Category::FileSystem),
+        ("рабочийкаталогданныхпользователя", "is_file_system_method", Category::FileSystem),
+        ("userdataworkdir", "is_file_system_method", Category::FileSystem),
+        (
+            "начатьподключениерасширенияработысфайлами",
+            "is_file_system_method",
+            Category::FileSystem,
+        ),
+        ("beginattachingfilesystemextension", "is_file_system_method", Category::FileSystem),
+        ("начатьустановкурасширенияработысфайлами", "is_file_system_method", Category::FileSystem),
+        ("begininstallfilesystemextension", "is_file_system_method", Category::FileSystem),
+        ("установитьрасширениеработысфайлами", "is_file_system_method", Category::FileSystem),
+        ("installfilesystemextension", "is_file_system_method", Category::FileSystem),
+        ("установитьрасширениеработысфайламиасинх", "is_file_system_method", Category::FileSystem),
+        ("installfilesystemextensionasync", "is_file_system_method", Category::FileSystem),
+        ("подключитьрасширениеработысфайламиасинх", "is_file_system_method", Category::FileSystem),
+        ("attachfilesystemextensionasync", "is_file_system_method", Category::FileSystem),
+        ("каталогвременныхфайловасинх", "is_file_system_method", Category::FileSystem),
+        ("tempfilesdirasync", "is_file_system_method", Category::FileSystem),
+        ("каталогдокументовасинх", "is_file_system_method", Category::FileSystem),
+        ("documentsdirasync", "is_file_system_method", Category::FileSystem),
+        ("рабочийкаталогданныхпользователяасинх", "is_file_system_method", Category::FileSystem),
+        ("userdataworkdirasync", "is_file_system_method", Category::FileSystem),
+        ("копироватьфайласинх", "is_file_system_method", Category::FileSystem),
+        ("copyfileasync", "is_file_system_method", Category::FileSystem),
+        ("найтифайлыасинх", "is_file_system_method", Category::FileSystem),
+        ("findfilesasync", "is_file_system_method", Category::FileSystem),
+        ("начатькопированиефайла", "is_file_system_method", Category::FileSystem),
+        ("begincopyingfile", "is_file_system_method", Category::FileSystem),
+        ("начатьперемещениефайла", "is_file_system_method", Category::FileSystem),
+        ("beginmovingfile", "is_file_system_method", Category::FileSystem),
+        ("начатьпоискфайлов", "is_file_system_method", Category::FileSystem),
+        ("beginfindingfiles", "is_file_system_method", Category::FileSystem),
+        ("начатьсозданиедвоичныхданныхизфайла", "is_file_system_method", Category::FileSystem),
+        ("begincreatebinarydatafromfile", "is_file_system_method", Category::FileSystem),
+        ("начатьсозданиекаталога", "is_file_system_method", Category::FileSystem),
+        ("begincreatingdirectory", "is_file_system_method", Category::FileSystem),
+        ("начатьудалениефайлов", "is_file_system_method", Category::FileSystem),
+        ("begindeletingfiles", "is_file_system_method", Category::FileSystem),
+        ("переместитьфайласинх", "is_file_system_method", Category::FileSystem),
+        ("movefileasync", "is_file_system_method", Category::FileSystem),
+        ("создатьдвоичныеданныеизфайлаасинх", "is_file_system_method", Category::FileSystem),
+        ("createbinarydatafromfileasync", "is_file_system_method", Category::FileSystem),
+        ("создатькаталогасинх", "is_file_system_method", Category::FileSystem),
+        ("createdirectoryasync", "is_file_system_method", Category::FileSystem),
+        ("удалитьфайлыасинх", "is_file_system_method", Category::FileSystem),
+        ("deletefilesasync", "is_file_system_method", Category::FileSystem),
+        ("начатьполучениекаталогавременныхфайлов", "is_file_system_method", Category::FileSystem),
+        ("begingettingtempfilesdir", "is_file_system_method", Category::FileSystem),
+        ("начатьполучениекаталогадокументов", "is_file_system_method", Category::FileSystem),
+        ("begingettingdocumentsdir", "is_file_system_method", Category::FileSystem),
+        (
+            "начатьполучениерабочегокаталогаданныхпользователя",
+            "is_file_system_method",
+            Category::FileSystem,
+        ),
+        ("begingettinguserdataworkdir", "is_file_system_method", Category::FileSystem),
+    ];
+    for (name, recognizer, expected) in global_cases {
+        let entry = reg.lookup_global(name).unwrap_or_else(|| {
+            panic!(
+                "{recognizer}: registry has no global entry for {name:?} \
+                 (run `cargo test legacy_recognizer_parity` first to localise)"
+            )
+        });
+        assert!(
+            std::mem::discriminant(&entry.category) == std::mem::discriminant(expected),
+            "{recognizer}: name {name:?} has category {:?}, expected {expected:?} — \
+             a category reassignment would silently drop detection",
+            entry.category,
+        );
+    }
+
+    // Constructor cases — full enumeration matches the legacy lists
+    // covered by `legacy_recognizer_parity` (Codex round-2 MAJOR fix:
+    // representative samples leak silent regressions for any name the
+    // sample omits).
+    let constructor_cases: &[(&str, &str, Category)] = &[
+        // is_file_system_type — Category::FileSystem (32 names).
+        ("file", "is_file_system_type", Category::FileSystem),
+        ("файл", "is_file_system_type", Category::FileSystem),
+        ("xbase", "is_file_system_type", Category::FileSystem),
+        ("htmlwriter", "is_file_system_type", Category::FileSystem),
+        ("записьhtml", "is_file_system_type", Category::FileSystem),
+        ("htmlreader", "is_file_system_type", Category::FileSystem),
+        ("чтениеhtml", "is_file_system_type", Category::FileSystem),
+        ("fastinfosetreader", "is_file_system_type", Category::FileSystem),
+        ("чтениеfastinfoset", "is_file_system_type", Category::FileSystem),
+        ("fastinfosetwriter", "is_file_system_type", Category::FileSystem),
+        ("записьfastinfoset", "is_file_system_type", Category::FileSystem),
+        ("xsltransform", "is_file_system_type", Category::FileSystem),
+        ("преобразованиеxsl", "is_file_system_type", Category::FileSystem),
+        ("zipfilewriter", "is_file_system_type", Category::FileSystem),
+        ("записьzipфайла", "is_file_system_type", Category::FileSystem),
+        ("zipfilereader", "is_file_system_type", Category::FileSystem),
+        ("чтениеzipфайла", "is_file_system_type", Category::FileSystem),
+        ("textreader", "is_file_system_type", Category::FileSystem),
+        ("чтениетекста", "is_file_system_type", Category::FileSystem),
+        ("textwriter", "is_file_system_type", Category::FileSystem),
+        ("записьтекста", "is_file_system_type", Category::FileSystem),
+        ("textextraction", "is_file_system_type", Category::FileSystem),
+        ("извлечениетекста", "is_file_system_type", Category::FileSystem),
+        ("binarydata", "is_file_system_type", Category::FileSystem),
+        ("двоичныеданные", "is_file_system_type", Category::FileSystem),
+        ("filestream", "is_file_system_type", Category::FileSystem),
+        ("файловыйпоток", "is_file_system_type", Category::FileSystem),
+        ("filestreamsmanager", "is_file_system_type", Category::FileSystem),
+        ("менеджерфайловыхпотоков", "is_file_system_type", Category::FileSystem),
+        ("datawriter", "is_file_system_type", Category::FileSystem),
+        ("записьданных", "is_file_system_type", Category::FileSystem),
+        ("datareader", "is_file_system_type", Category::FileSystem),
+        ("чтениеданных", "is_file_system_type", Category::FileSystem),
+        // internet_access::is_internet_constructor — Category::Internet (18 names).
+        ("ftpсоединение", "is_internet_constructor", Category::Internet),
+        ("ftpconnection", "is_internet_constructor", Category::Internet),
+        ("httpсоединение", "is_internet_constructor", Category::Internet),
+        ("httpconnection", "is_internet_constructor", Category::Internet),
+        ("wsопределения", "is_internet_constructor", Category::Internet),
+        ("wsdefinitions", "is_internet_constructor", Category::Internet),
+        ("wsпрокси", "is_internet_constructor", Category::Internet),
+        ("wsproxy", "is_internet_constructor", Category::Internet),
+        ("интернетпочтовыйпрофиль", "is_internet_constructor", Category::Internet),
+        ("internetmailprofile", "is_internet_constructor", Category::Internet),
+        ("интернетпочта", "is_internet_constructor", Category::Internet),
+        ("internetmail", "is_internet_constructor", Category::Internet),
+        ("почта", "is_internet_constructor", Category::Internet),
+        ("mail", "is_internet_constructor", Category::Internet),
+        ("httpзапрос", "is_internet_constructor", Category::Internet),
+        ("httprequest", "is_internet_constructor", Category::Internet),
+        ("интернетпрокси", "is_internet_constructor", Category::Internet),
+        ("internetproxy", "is_internet_constructor", Category::Internet),
+    ];
+    for (name, recognizer, expected) in constructor_cases {
+        let entry = reg.lookup_constructor(name).unwrap_or_else(|| {
+            panic!("{recognizer}: registry has no constructor entry for {name:?}")
+        });
+        assert!(
+            std::mem::discriminant(&entry.category) == std::mem::discriminant(expected),
+            "{recognizer}: ctor {name:?} has category {:?}, expected {expected:?}",
+            entry.category,
+        );
+    }
+}
+
 fn lookup_by_kind(
     reg: &bsl_platform::security::SecurityRegistry,
     name: &str,

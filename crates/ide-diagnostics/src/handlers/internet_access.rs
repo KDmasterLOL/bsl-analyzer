@@ -53,6 +53,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::security::{registry, Category};
 use hir::{Expr, ExprId, IdConversion, Literal};
 use ide_db::TextRange;
 
@@ -70,30 +71,14 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Constructor types that indicate internet access.
-///
-/// Case-insensitive patterns (stored in lowercase).
-/// Supports both Russian and English keywords.
-const NEW_EXPRESSION_PATTERNS: &[&str] = &[
-    "ftpсоединение",
-    "ftpconnection",
-    "httpсоединение",
-    "httpconnection",
-    "wsопределения",
-    "wsdefinitions",
-    "wsпрокси",
-    "wsproxy",
-    "интернетпочтовыйпрофиль",
-    "internetmailprofile",
-    "интернетпочта",
-    "internetmail",
-    "почта",
-    "mail",
-    "httpзапрос",
-    "httprequest",
-    "интернетпрокси",
-    "internetproxy",
-];
+/// Track 2 §1.6: Constructor lookup against the security registry —
+/// `Category::Internet` covers FTP / HTTP / WS / mail / proxy types.
+/// The legacy hardcoded `NEW_EXPRESSION_PATTERNS` list is gone; the
+/// registry parity test in `bsl-platform/tests/security_registry.rs`
+/// asserts every legacy name is present, so behaviour is preserved.
+fn is_internet_constructor(name: &str) -> bool {
+    registry().lookup_constructor(name).is_some_and(|e| matches!(e.category, Category::Internet))
+}
 
 /// HIR-based check for internet access operations.
 ///
@@ -146,19 +131,14 @@ fn check_body_for_internet_access(
 
             // Pattern 1: Новый HTTPСоединение(...)
             if let Some(name) = type_name {
-                let type_text = name.as_str().to_lowercase();
-                if NEW_EXPRESSION_PATTERNS.contains(&type_text.as_str()) {
+                if is_internet_constructor(name.as_str()) {
                     detected = true;
                 }
-            } else {
+            } else if !args.is_empty() {
                 // Pattern 2: Новый("HTTPСоединение")
-                if !args.is_empty() {
-                    if let Expr::Literal(Literal::String(s)) = body.expr(ExprId::from_idx(args[0]))
-                    {
-                        let type_text = s.to_lowercase();
-                        if NEW_EXPRESSION_PATTERNS.contains(&type_text.as_str()) {
-                            detected = true;
-                        }
+                if let Expr::Literal(Literal::String(s)) = body.expr(ExprId::from_idx(args[0])) {
+                    if is_internet_constructor(s) {
+                        detected = true;
                     }
                 }
             }
