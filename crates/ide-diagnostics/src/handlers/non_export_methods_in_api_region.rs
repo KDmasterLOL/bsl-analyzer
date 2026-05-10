@@ -132,10 +132,11 @@ fn has_builtin_annotations(annotations: &[Annotation]) -> bool {
 mod tests {
     use super::check;
     use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+        check_ast_diagnostic_with_config, check_diagnostics_snapshot_for, format_diags,
         range_to_line_col,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_non_export_in_api_region() {
         let code = r#"
@@ -214,16 +215,29 @@ mod tests {
 КонецПроцедуры
 
 #КонецОбласти"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics, got {}", diagnostics.len());
-
-        assert_diagnostic_range(code, &diagnostics[0], 8, 10, 16); // Плохая()
-        assert_diagnostic_range(code, &diagnostics[1], 20, 10, 13); // Bad()
-        assert_diagnostic_range(code, &diagnostics[2], 25, 14, 27); // ShouldSayFuck()
-        assert_diagnostic_range(code, &diagnostics[3], 64, 10, 39); // СлужебныйПрограммныйИнтерфейс()
-        assert_diagnostic_range(code, &diagnostics[4], 68, 10, 29); // АннотированныйМетод()
-        assert_diagnostic_range(code, &diagnostics[5], 72, 10, 31); // МетодВместоРасширения()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NonExportMethodsInApiRegion,
+            expect![[r#"
+                NonExportMethodsInApiRegion @ 9:11..9:17
+                  message: Перенесите неэкспортный метод "Плохая" из области "ПрограммныйИнтерфейс"
+                  severity: Warning
+                NonExportMethodsInApiRegion @ 21:11..21:14
+                  message: Перенесите неэкспортный метод "Bad" из области "Public"
+                  severity: Warning
+                NonExportMethodsInApiRegion @ 26:15..26:28
+                  message: Перенесите неэкспортный метод "ShouldTrigger" из области "Public"
+                  severity: Warning
+                NonExportMethodsInApiRegion @ 65:11..65:40
+                  message: Перенесите неэкспортный метод "СлужебныйПрограммныйИнтерфейс" из области "СлужебныйПрограммныйИнтерфейс"
+                  severity: Warning
+                NonExportMethodsInApiRegion @ 69:11..69:30
+                  message: Перенесите неэкспортный метод "АннотированныйМетод" из области "СлужебныйПрограммныйИнтерфейс"
+                  severity: Warning
+                NonExportMethodsInApiRegion @ 73:11..73:32
+                  message: Перенесите неэкспортный метод "МетодВместоРасширения" из области "СлужебныйПрограммныйИнтерфейс"
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -313,12 +327,24 @@ mod tests {
             .insert(DiagnosticCode::NonExportMethodsInApiRegion, serde_json::Value::Object(params));
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        expect![[r#"
+            NonExportMethodsInApiRegion @ 9:11..9:17
+              message: Перенесите неэкспортный метод "Плохая" из области "ПрограммныйИнтерфейс"
+              severity: Warning
+            NonExportMethodsInApiRegion @ 21:11..21:14
+              message: Перенесите неэкспортный метод "Bad" из области "Public"
+              severity: Warning
+            NonExportMethodsInApiRegion @ 26:15..26:28
+              message: Перенесите неэкспортный метод "ShouldSayFuck" из области "Public"
+              severity: Warning
+            NonExportMethodsInApiRegion @ 65:11..65:40
+              message: Перенесите неэкспортный метод "СлужебныйПрограммныйИнтерфейс" из области "СлужебныйПрограммныйИнтерфейс"
+              severity: Warning
+            NonExportMethodsInApiRegion @ 69:11..69:30
+              message: Перенесите неэкспортный метод "АннотированныйМетод" из области "СлужебныйПрограммныйИнтерфейс"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
 
-        // Should skip line 72 (МетодВместоРасширения with &Вместо built-in annotation)
-        // But NOT skip line 68 (АннотированныйМетод with &Кастом custom annotation)
-        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics with skipAnnotatedMethods=true");
-
-        // Verify the skipped diagnostic is line 72
+        // snapshot-skip: specific range arithmetic for the skipped built-in annotation.
         for diag in &diagnostics {
             let (line, _, _, _) = range_to_line_col(code, diag.range);
             assert_ne!(line, 72, "Line 72 should be skipped with skipAnnotatedMethods=true");
@@ -336,8 +362,11 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NonExportMethodsInApiRegion,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -351,7 +380,10 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NonExportMethodsInApiRegion,
+            expect![[r#""#]],
+        );
     }
 }

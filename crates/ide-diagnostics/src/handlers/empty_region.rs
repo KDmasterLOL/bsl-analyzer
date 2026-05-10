@@ -90,8 +90,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_hir_diagnostic, format_diags};
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     /// Codex round-A regression guard for the §3.4 migration: the
     /// retired `lower_region_stmts` emit ran inside method lowering
     /// for method-local regions. Without recursing into method
@@ -106,8 +107,13 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(diags.len(), 1, "method-local empty region must still be detected after §3.4");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        expect![[r#"
+            EmptyRegion @ 2:5..4:18
+              message: Область 'ВнутриМетода' пуста
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diags));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags[0].message.contains("ВнутриМетода"));
     }
 
@@ -118,9 +124,13 @@ mod tests {
 #КонецОбласти"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range_multiline(code, diags[0], 0, 0, 2, 13);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        expect![[r#"
+            EmptyRegion @ 1:1..3:14
+              message: Область 'Тест' пуста
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diags));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags[0].message.contains("Тест"));
     }
 
@@ -135,9 +145,18 @@ mod tests {
 #КонецОбласти"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(diags.len(), 2);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        expect![[r#"
+            EmptyRegion @ 1:1..6:14
+              message: Область 'ВнешняяОбласть' пуста
+              severity: Hint
+            EmptyRegion @ 3:1..5:14
+              message: Область 'ВнутренняяОбласть' пуста
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diags));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags.iter().any(|d| d.message.contains("ВнешняяОбласть")));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags.iter().any(|d| d.message.contains("ВнутренняяОбласть")));
     }
 
@@ -148,10 +167,7 @@ mod tests {
 Перем А;
 #КонецОбласти
         "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 0, "Region with variable is not empty");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::EmptyRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -162,10 +178,7 @@ mod tests {
 КонецФункции
 #КонецОбласти
         "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 0, "Region with function is not empty");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::EmptyRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -176,10 +189,17 @@ mod tests {
     #КонецОбласти
 #КонецОбласти
         "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 2, "Both nested empty regions reported");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::EmptyRegion,
+            expect![[r#"
+                EmptyRegion @ 2:1..5:14
+                  message: Область 'Внешняя' пуста
+                  severity: Hint
+                EmptyRegion @ 3:5..4:18
+                  message: Область 'Внутренняя' пуста
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -193,8 +213,13 @@ mod tests {
         "#;
         let diagnostics = check_hir_diagnostic(code);
         let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 1, "Only inner empty region reported");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        expect![[r#"
+            EmptyRegion @ 4:5..5:18
+              message: Область 'Внутренняя' пуста
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &empty_region_diags));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(empty_region_diags[0].message.contains("Внутренняя"));
     }
 
@@ -209,9 +234,16 @@ mod tests {
 // comment only
 #КонецОбласти
         "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 2, "Both English and Russian empty regions reported");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::EmptyRegion,
+            expect![[r#"
+                EmptyRegion @ 2:1..4:11
+                  message: Область 'Test' пуста
+                  severity: Hint
+                EmptyRegion @ 6:1..8:14
+                  message: Область 'Тест' пуста
+                  severity: Hint"#]],
+        );
     }
 }

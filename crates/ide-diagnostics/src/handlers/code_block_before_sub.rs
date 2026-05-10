@@ -226,10 +226,7 @@ fn is_executable_statement(node: &SyntaxNode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range_multiline, check_ast_diagnostic, check_diagnostics_snapshot_for,
-    };
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;
     #[test]
@@ -249,10 +246,14 @@ mod tests {
 #Область Инициализация
 П = 12;
 #КонецОбласти"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostic for code in region before sub");
-        // The diagnostic spans the entire region (starts at first executable code inside)
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 3, 0, 5, 13);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeBlockBeforeSub,
+            expect![[r#"
+                CodeBlockBeforeSub @ 4:1..6:14
+                  message: Обнаружен блок кода перед объявлением процедур и функций
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -265,8 +266,7 @@ mod tests {
 
 Инициализация();
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Code after procedures should be valid");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expect![[r#""#]]);
     }
 
     #[test]
@@ -278,8 +278,14 @@ mod tests {
 Процедура Тест()
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Code before procedure should be flagged");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeBlockBeforeSub,
+            expect![[r#"
+                CodeBlockBeforeSub @ 3:1..3:19
+                  message: Обнаружен блок кода перед объявлением процедур и функций
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -290,8 +296,7 @@ mod tests {
 Процедура Тест()
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Only variables before procedure is valid");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expect![[r#""#]]);
     }
 
     #[test]
@@ -301,8 +306,7 @@ mod tests {
 МояПеременная = 10;
 Сообщить(МояПеременная);
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "No procedures means no error (nothing to be 'before')");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expect![[r#""#]]);
     }
 
     #[test]
@@ -317,8 +321,14 @@ mod tests {
     Счетчик = 1;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Multiple code blocks reported as ONE diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeBlockBeforeSub,
+            expect![[r#"
+                CodeBlockBeforeSub @ 3:1..5:19
+                  message: Обнаружен блок кода перед объявлением процедур и функций
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -343,12 +353,7 @@ mod tests {
 Процедура ВнеОбласти()
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Region with only procedures should not be flagged as code block"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expect![[r#""#]]);
     }
 
     #[test]
@@ -360,8 +365,14 @@ MyVariable = 10;
 Procedure Initialize()
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "English keywords should work");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeBlockBeforeSub,
+            expect![[r#"
+                CodeBlockBeforeSub @ 3:1..3:16
+                  message: Обнаружен блок кода перед объявлением процедур и функций
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]

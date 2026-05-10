@@ -140,7 +140,9 @@ fn report_duplicates(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
+    use crate::test_utils::{check_ast_diagnostic, check_diagnostics_snapshot_for, format_diags};
+    use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_duplicate_internal_regions() {
@@ -153,8 +155,12 @@ mod tests {
 // код
 #EndRegion"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 0, 38);
+        expect![[r#"
+            DuplicateRegion @ 1:1..1:39
+              message: Нужно удалить дубли раздела "СлужебныйПрограммныйИнтерфейс"
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diagnostics[0].message.contains("СлужебныйПрограммныйИнтерфейс"));
     }
 
@@ -169,8 +175,12 @@ mod tests {
 // код
 #EndRegion"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 0, 35);
+        expect![[r#"
+            DuplicateRegion @ 1:1..1:36
+              message: Нужно удалить дубли раздела "СлужебныеПроцедурыИФункции"
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diagnostics[0].message.contains("СлужебныеПроцедурыИФункции"));
     }
 
@@ -185,8 +195,12 @@ mod tests {
 // код
 #КонецОбласти"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 0, 21);
+        expect![[r#"
+            DuplicateRegion @ 1:1..1:22
+              message: Нужно удалить дубли раздела "EventHandlers"
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diagnostics[0].message.contains("EventHandlers"));
     }
 
@@ -203,8 +217,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "No duplicates - should be 0 diagnostics");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DuplicateRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -222,12 +235,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Nested regions inside procedures don't conflict with module-level"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DuplicateRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -242,14 +250,12 @@ mod tests {
         "#;
 
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Russian and English standard region names are duplicates"
-        );
-
-        // Should report first occurrence (line 2, 0-indexed: 1)
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 1, 0, 1, 38);
+        expect![[r#"
+            DuplicateRegion @ 2:1..2:39
+              message: Нужно удалить дубли раздела "СлужебныйПрограммныйИнтерфейс"
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diagnostics[0].message.contains("СлужебныйПрограммныйИнтерфейс"));
     }
 
@@ -264,11 +270,13 @@ mod tests {
 #EndRegion
         "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Case-insensitive canonical matching for standard regions"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DuplicateRegion,
+            expect![[r#"
+                DuplicateRegion @ 2:1..2:17
+                  message: Нужно удалить дубли раздела "Internal"
+                  severity: Hint"#]],
         );
     }
 
@@ -283,12 +291,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Non-standard regions with different case are not duplicates"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DuplicateRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -302,7 +305,13 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Non-standard regions with exact match are duplicates");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DuplicateRegion,
+            expect![[r#"
+                DuplicateRegion @ 2:1..2:26
+                  message: Нужно удалить дубли раздела "КастомнаяОбласть"
+                  severity: Hint"#]],
+        );
     }
 }
