@@ -78,6 +78,7 @@ pub mod collection;
 pub mod cyclomatic;
 pub mod edge;
 pub mod graph;
+pub mod test_utils;
 pub mod vertex;
 
 // Re-export main types for convenience
