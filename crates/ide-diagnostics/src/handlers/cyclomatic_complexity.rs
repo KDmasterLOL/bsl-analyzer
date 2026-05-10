@@ -148,8 +148,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
-    use crate::Severity;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     use hir::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};
@@ -162,10 +162,11 @@ mod tests {
     Возврат Параметр + 1;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
-        assert_eq!(diagnostics.len(), 0, "Complexity 1 should not trigger (threshold 20)");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CyclomaticComplexity,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -178,10 +179,11 @@ mod tests {
     КонецЕсли;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
-        assert_eq!(diagnostics.len(), 0, "Complexity 3 should not trigger (threshold 20)");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CyclomaticComplexity,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -251,32 +253,13 @@ mod tests {
     Возврат Результат;
 КонецФункции"#;
 
-        // Default threshold = 20 (no per-test compromise needed after
-        // §6.5 alignment).
-        let diagnostics =
-            crate::test_utils::check_hir_diagnostic(code).into_iter().collect::<Vec<_>>();
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
-
-        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostic for high-complexity function");
-
-        // Diagnostic points at function name "РассчитатьМаршрут" (col 8-25 on line 0)
-        assert_diagnostic_range(code, diagnostics[0], 0, 8, 25);
-
-        assert_eq!(diagnostics[0].code, DiagnosticCode::CyclomaticComplexity);
-        // CodeSmell + Critical → Warning (per metadata mapping)
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
-
-        assert!(
-            diagnostics[0].message.contains("23"),
-            "Message should contain SonarQube-style cyclomatic 23 \
-             (CFG-based 14 + 7 boolean-op + 2 ternary), got: {}",
-            diagnostics[0].message
-        );
-        assert!(
-            diagnostics[0].message.contains("20"),
-            "Message should contain default threshold 20, got: {}",
-            diagnostics[0].message
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CyclomaticComplexity,
+            expect![[r#"
+                CyclomaticComplexity @ 1:9..1:26
+                  message: Функция 'РассчитатьМаршрут' имеет цикломатическую сложность 23 (максимум: 20). Рассмотрите возможность упрощения или разбиения на более мелкие функции
+                  severity: Warning"#]],
         );
     }
 

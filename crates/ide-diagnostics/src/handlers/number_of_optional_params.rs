@@ -83,9 +83,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{
-        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
+        check_diagnostics_snapshot_for, check_hir_diagnostic_with_config, format_diags,
     };
-    use crate::{DiagnosticCode, DiagnosticsConfig, Severity};
+    use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"Процедура МимоРаз()
@@ -99,20 +100,14 @@ mod tests {
 Процедура СработкаПоКоличествуНеобязательных(Раз = 1, Два, Три, Четыре = 4, Пять = 5, Шесть = 6, Семь)
 
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::NumberOfOptionalParams)
-            .collect();
-
-        // "СработкаПоКоличествуНеобязательных" has 4 optional params
-        // HIR produces 1 diagnostic per method at method name range
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::NumberOfOptionalParams);
-        // CodeSmell + Minor → Information (per metadata mapping)
-        assert_eq!(diagnostics[0].severity, Severity::Information);
-        // Method name at line 8 (0-indexed), col 10-44
-        assert_diagnostic_range(code, diagnostics[0], 8, 10, 44);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NumberOfOptionalParams,
+            expect![[r#"
+                NumberOfOptionalParams @ 9:11..9:45
+                  message: Уменьшите количество необязательных параметров c 4 до допустимого 3
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -135,48 +130,50 @@ mod tests {
         );
         let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let diagnostics: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::NumberOfOptionalParams)
             .collect();
-        // HIR produces 1 diagnostic per method:
-        // МимоТри: 3 optional → exceeds 1 → 1 diagnostic
-        // СработкаПоКоличествуНеобязательных: 4 optional → exceeds 1 → 1 diagnostic
-        assert_eq!(diagnostics.len(), 2);
+        expect![[r#"
+            NumberOfOptionalParams @ 5:9..5:16
+              message: Уменьшите количество необязательных параметров c 3 до допустимого 1
+              severity: Information
+            NumberOfOptionalParams @ 9:11..9:45
+              message: Уменьшите количество необязательных параметров c 4 до допустимого 1
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_at_threshold() {
         let code = r#"Функция Тест(А = 1, Б = 2, В = 3) Возврат 0; КонецФункции"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::NumberOfOptionalParams)
-            .collect();
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NumberOfOptionalParams,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_no_optional_params() {
         let code = r#"Процедура Тест(А, Б, В) КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::NumberOfOptionalParams)
-            .collect();
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NumberOfOptionalParams,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_multiple_excess_optional() {
         let code = r#"Процедура Тест(А = 1, Б = 2, В = 3, Г = 4, Д = 5)
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::NumberOfOptionalParams)
-            .collect();
-        // HIR produces 1 diagnostic per method at method name range
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, diagnostics[0], 0, 10, 14); // Тест
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NumberOfOptionalParams,
+            expect![[r#"
+                NumberOfOptionalParams @ 1:11..1:15
+                  message: Уменьшите количество необязательных параметров c 5 до допустимого 3
+                  severity: Information"#]],
+        );
     }
 }

@@ -159,9 +159,10 @@ fn first_nesting_keyword(
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{
-        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
+        check_diagnostics_snapshot_for, check_hir_diagnostic_with_config, format_diags,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_no_nesting() {
         let code = r#"Процедура Тест()
@@ -170,10 +171,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::NestedStatements, expect![[r#""#]]);
     }
 
     #[test]
@@ -189,10 +187,7 @@ mod tests {
 КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
-        assert_eq!(diagnostics.len(), 0, "4 levels is the maximum allowed");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::NestedStatements, expect![[r#""#]]);
     }
 
     #[test]
@@ -210,10 +205,14 @@ mod tests {
 КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
-        assert_eq!(diagnostics.len(), 1, "5 levels exceeds limit of 4");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedStatements,
+            expect![[r#"
+            NestedStatements @ 6:17..6:21
+              message: Управляющие конструкции не должны быть вложены слишком глубоко
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -278,14 +277,17 @@ mod tests {
   КонецПопытки;
  КонецЕсли;
 КонецЦикла;"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
-
-        assert_eq!(diagnostics.len(), 2, "Should find 2 diagnostics");
-
-        assert_diagnostic_range(code, diagnostics[0], 35, 8, 12);
-        assert_diagnostic_range(code, diagnostics[1], 50, 6, 10);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedStatements,
+            expect![[r#"
+            NestedStatements @ 36:9..36:13
+              message: Управляющие конструкции не должны быть вложены слишком глубоко
+              severity: Warning
+            NestedStatements @ 51:7..51:11
+              message: Управляющие конструкции не должны быть вложены слишком глубоко
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -356,11 +358,15 @@ mod tests {
             .insert(DiagnosticCode::NestedStatements, serde_json::json!({ "maxAllowedLevel": 6 }));
 
         let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
-
-        assert_eq!(diagnostics.len(), 1, "With maxAllowedLevel=6, only 7-level nesting triggers");
-        assert_diagnostic_range(code, diagnostics[0], 50, 6, 10);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::NestedStatements)
+            .collect();
+        expect![[r#"
+            NestedStatements @ 51:7..51:11
+              message: Управляющие конструкции не должны быть вложены слишком глубоко
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -379,10 +385,13 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let nested: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
-
-        assert_eq!(nested.len(), 1, "HIR should detect 1 NestedStatements (depth 5)");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedStatements,
+            expect![[r#"
+            NestedStatements @ 7:21..7:25
+              message: Управляющие конструкции не должны быть вложены слишком глубоко
+              severity: Warning"#]],
+        );
     }
 }

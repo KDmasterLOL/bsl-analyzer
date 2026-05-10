@@ -99,8 +99,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{check_hir_diagnostic, check_hir_diagnostic_with_config};
-    use crate::{DiagnosticCode, DiagnosticsConfig, Severity};
+    use crate::test_utils::{
+        check_diagnostics_snapshot_for, check_hir_diagnostic_with_config, format_diags,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
 
     fn make_method_size_code() -> String {
         // Large inline regression fixture for method-size coverage.
@@ -163,25 +166,17 @@ mod tests {
     #[test]
     fn test_comprehensive() {
         let code = make_method_size_code();
-        let diagnostics = check_hir_diagnostic(&code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
-
-        assert_eq!(diagnostics.len(), 2, "Should find 2 diagnostics");
-
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MethodSize);
-        assert_eq!(diagnostics[0].severity, Severity::Warning); // CodeSmell + Major -> Warning
-        assert!(
-            diagnostics[0].message.contains("Процедура201Строка"),
-            "Message should contain method name, got: {}",
-            diagnostics[0].message
+        check_diagnostics_snapshot_for(
+            &code,
+            DiagnosticCode::MethodSize,
+            expect![[r#"
+            MethodSize @ 7:11..7:29
+              message: Длина метода "Процедура201Строка" равна 201, что больше установленного лимита в 200 строк
+              severity: Warning
+            MethodSize @ 420:9..420:25
+              message: Длина метода "Функция201Строка" равна 201, что больше установленного лимита в 200 строк
+              severity: Warning"#]],
         );
-        assert!(
-            diagnostics[0].message.contains("201"),
-            "Message should contain size 201, got: {}",
-            diagnostics[0].message
-        );
-        assert!(diagnostics[1].message.contains("Функция201Строка"));
     }
 
     #[test]
@@ -194,8 +189,20 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic_with_config(&code, config, crate::diagnostics);
         let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
-        assert_eq!(diagnostics.len(), 4, "Should find 4 diagnostics with threshold 20");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
+        expect![[r#"
+            MethodSize @ 7:11..7:29
+              message: Длина метода "Процедура201Строка" равна 201, что больше установленного лимита в 20 строк
+              severity: Warning
+            MethodSize @ 214:11..214:28
+              message: Длина метода "Процедура200Строк" равна 200, что больше установленного лимита в 20 строк
+              severity: Warning
+            MethodSize @ 420:9..420:25
+              message: Длина метода "Функция201Строка" равна 201, что больше установленного лимита в 20 строк
+              severity: Warning
+            MethodSize @ 627:9..627:24
+              message: Длина метода "Функция200Строк" равна 200, что больше установленного лимита в 20 строк
+              severity: Warning"#]].assert_eq(&format_diags(&code, &diagnostics));
     }
 
     #[test]
@@ -204,19 +211,13 @@ mod tests {
 
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
-        assert_eq!(diagnostics.len(), 0, "Empty method should not trigger");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::MethodSize, expect![[r#""#]]);
     }
 
     #[test]
     fn test_one_liner() {
         let code = r#"Функция Тест() КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
-        assert_eq!(diagnostics.len(), 0, "One-liner should not trigger");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::MethodSize, expect![[r#""#]]);
     }
 }

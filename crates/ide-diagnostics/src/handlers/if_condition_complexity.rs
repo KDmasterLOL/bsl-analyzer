@@ -173,7 +173,8 @@ fn trim_trailing_whitespace(file_text: &str, range: TextRange) -> TextRange {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::*;
-    use crate::{DiagnosticCode, DiagnosticsConfig, Severity};
+    use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     /// Test simple condition (should pass)
     #[test]
     fn test_simple_condition() {
@@ -183,14 +184,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let if_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
-
-        // Should NOT detect - complexity = 2 (1 AND + 1 = 2)
-        assert_eq!(if_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfConditionComplexity,
+            expect![[r#""#]],
+        );
     }
 
     /// Test at threshold (should pass)
@@ -202,14 +200,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let if_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
-
-        // Should NOT detect - complexity = 3 (2 ops: AND + OR = 2, complexity = 2+1 = 3)
-        assert_eq!(if_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfConditionComplexity,
+            expect![[r#""#]],
+        );
     }
 
     /// Test complex condition (should fail)
@@ -221,18 +216,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let if_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
-
-        // Should detect - complexity = 4 (3 ops: AND, OR, AND = 3, complexity = 3+1 = 4)
-        assert_eq!(if_diags.len(), 1);
-        assert_eq!(if_diags[0].code, DiagnosticCode::IfConditionComplexity);
-        assert_eq!(if_diags[0].severity, Severity::Information); // CodeSmell + Minor -> Information
-        assert!(if_diags[0].message.contains("сложность 4"));
-        assert!(if_diags[0].message.contains("максимум 3"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfConditionComplexity,
+            expect![[r#"
+                IfConditionComplexity @ 2:10..2:25
+                  message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
+                  severity: Information"#]],
+        );
     }
 
     /// Test elsif clause
@@ -246,15 +237,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let if_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
-
-        // Should detect in elseif - complexity = 4
-        assert_eq!(if_diags.len(), 1);
-        assert_eq!(if_diags[0].code, DiagnosticCode::IfConditionComplexity);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfConditionComplexity,
+            expect![[r#"
+                IfConditionComplexity @ 4:15..4:30
+                  message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
+                  severity: Information"#]],
+        );
     }
 
     /// Test English keywords
@@ -266,14 +256,14 @@ mod tests {
     EndIf;
 EndProcedure"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let if_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
-
-        // Should detect - complexity = 4
-        assert_eq!(if_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfConditionComplexity,
+            expect![[r#"
+                IfConditionComplexity @ 2:8..2:26
+                  message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
+                  severity: Information"#]],
+        );
     }
 
     /// Large multiline condition (9 OR ops) - should warn
@@ -293,13 +283,14 @@ EndProcedure"#;
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let if_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
-
-        assert_eq!(if_diags.len(), 1, "Should warn on 9-OR condition");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfConditionComplexity,
+            expect![[r#"
+                IfConditionComplexity @ 2:10..10:56
+                  message: Условие имеет сложность 9 (максимум 3). Упростите условие или вынесите части в переменные.
+                  severity: Information"#]],
+        );
     }
 
     /// Simple outer condition (2 OR ops) should pass; nested condition (3 OR ops) should warn
@@ -317,13 +308,14 @@ EndProcedure"#;
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let if_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
-
-        assert_eq!(if_diags.len(), 1, "Only inner nested condition should warn");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfConditionComplexity,
+            expect![[r#"
+                IfConditionComplexity @ 4:14..7:60
+                  message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
+                  severity: Information"#]],
+        );
     }
 
     /// Codex round-A regression guard: sub-default `maxIfConditionComplexity`.
@@ -347,14 +339,13 @@ EndProcedure"#;
 
         let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let if_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
             .collect();
-
-        // complexity = 1 AND + 1 = 2; with max=1, fires.
-        assert_eq!(if_diags.len(), 1, "complexity=2 must fire when maxIfConditionComplexity=1");
-        assert!(if_diags[0].message.contains("сложность 2"));
-        assert!(if_diags[0].message.contains("максимум 1"));
+        expect![[r#"
+            IfConditionComplexity @ 2:10..2:15
+              message: Условие имеет сложность 2 (максимум 1). Упростите условие или вынесите части в переменные.
+              severity: Information"#]].assert_eq(&format_diags(code, &if_diags));
     }
 
     /// If branch (4 OR) and ElseIf branch (6 OR) both exceed threshold
@@ -379,12 +370,16 @@ EndProcedure"#;
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let if_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
-
-        assert_eq!(if_diags.len(), 2, "Both If and ElseIf branches should warn");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfConditionComplexity,
+            expect![[r#"
+                IfConditionComplexity @ 2:10..5:41
+                  message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
+                  severity: Information
+                IfConditionComplexity @ 7:15..13:42
+                  message: Условие имеет сложность 7 (максимум 3). Упростите условие или вынесите части в переменные.
+                  severity: Information"#]],
+        );
     }
 }

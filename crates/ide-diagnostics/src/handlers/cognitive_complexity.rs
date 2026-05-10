@@ -176,9 +176,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 mod tests {
     use super::*;
     use crate::test_utils::{
-        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
+        check_diagnostics_snapshot_for, check_hir_diagnostic_with_config, format_diags,
     };
-    use crate::{DiagnosticsConfig, Severity};
+    use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use hir::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};
@@ -191,10 +192,7 @@ mod tests {
     Возврат Параметр + 1;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(diagnostics.len(), 0, "Simple function should have complexity 0");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
     }
 
     #[test]
@@ -208,10 +206,7 @@ mod tests {
     Возврат 0;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(diagnostics.len(), 0, "Complexity should be 1 + 2 = 3, below default threshold");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
     }
 
     #[test]
@@ -229,14 +224,7 @@ mod tests {
     Возврат 0;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Complexity should be 1 + 2 + 3 + 4 = 10, below default threshold of 15"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
     }
 
     #[test]
@@ -253,14 +241,7 @@ mod tests {
     КонецЕсли;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Complexity should be 4 (if + 3 elseif/else), below threshold"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
     }
 
     #[test]
@@ -281,9 +262,14 @@ mod tests {
             .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
 
         let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(diagnostics.len(), 1, "Complexity is 3 (1 + 2), should exceed threshold of 2");
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
+        expect![[r#"
+            CognitiveComplexity @ 1:9..1:13
+              message: Функция 'Тест' имеет когнитивную сложность 3 (максимум: 2). Упростите логику или уменьшите вложенность
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     const COMPLEX_FUNCTION: &str = r#"Функция ОбработатьКоллекцию(Данные, Флаг)
@@ -326,30 +312,13 @@ mod tests {
     #[test]
     fn test_comprehensive() {
         let code = COMPLEX_FUNCTION;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-
-        // Expected 1 diagnostic for function ОбработатьКоллекцию
-        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostic");
-
-        // Expected diagnostic on function name
-        assert_diagnostic_range(code, diagnostics[0], 0, 8, 27);
-
-        // Verify diagnostic details
-        assert_eq!(diagnostics[0].code, DiagnosticCode::CognitiveComplexity);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
-
-        // Verify the actual cognitive complexity value is mentioned in the message
-        assert!(
-            diagnostics[0].message.contains("25"),
-            "Message should contain complexity value 25, got: {}",
-            diagnostics[0].message
-        );
-        assert!(
-            diagnostics[0].message.contains("15"),
-            "Message should contain threshold 15, got: {}",
-            diagnostics[0].message
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CognitiveComplexity,
+            expect![[r#"
+            CognitiveComplexity @ 1:9..1:28
+              message: Функция 'ОбработатьКоллекцию' имеет когнитивную сложность 25 (максимум: 15). Упростите логику или уменьшите вложенность
+              severity: Warning"#]],
         );
     }
 
@@ -379,19 +348,14 @@ mod tests {
             .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
 
         let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "raw cognitive=1, recursion bonus=+1 → total 2; with threshold 1 should fire after \
-             the §6.5 penalty"
-        );
-        assert!(
-            diagnostics[0].message.contains("сложность 2"),
-            "Message should contain total complexity 2 (1 + 1 recursion), got: {}",
-            diagnostics[0].message
-        );
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
+        expect![[r#"
+            CognitiveComplexity @ 1:9..1:18
+              message: Функция 'Факториал' имеет когнитивную сложность 2 (максимум: 1). Упростите логику или уменьшите вложенность
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Track 2 Phase B §6.4 — pin the cognitive value the §6.1 visitor
