@@ -53,3 +53,10 @@ message.
 Правило корректно ловит типовой мусор, но должно использовать общий region
 слой и получить quick-fix удаления.
 
+
+## Закрыто Track 2
+
+**Phase C §3.4 migration (commit `00f52b2f`) + Slice 2 (`d32f55d9`),
+2026-05:** detection переехал на `RegionTree::is_region_empty(idx)` и
+enumeration через `module_level_regions` — без AST-обхода и без
+зависимости от lowering.

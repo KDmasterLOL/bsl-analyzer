@@ -53,3 +53,9 @@ security audit family. Внешний код оставить отдельным
 Хороший disabled-by-default audit rule, но для полноценной проверки внешних
 ресурсов нужен endpoint/method analysis.
 
+
+## Закрыто Track 2
+
+**Phase A §1.6 Group A (commit `4a9a9290`, 2026-05):** локальный whitelist
+internet-API заменён на `bsl_platform::security::registry` lookup
+(`Category::Internet`). Endpoint/method-analysis (см. «Вывод») — Track 6.

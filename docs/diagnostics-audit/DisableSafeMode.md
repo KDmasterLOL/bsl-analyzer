@@ -55,3 +55,10 @@ registry с polarity правилами.
 Покрытие хорошее. Улучшения - constant propagation и общий registry
 безопасностных API.
 
+
+## Закрыто Track 2
+
+**Phase A §1.6 Group C (commit `f0c617e1`, 2026-05):** lattice-driven
+detection (см. `SetPrivilegedMode` — общая инфраструктура
+`SecurityModeState` для privilege/safe-mode lifetime). Распознавание
+парных вызовов `Begin/End` через `Lifetime::Begin/End` в registry.

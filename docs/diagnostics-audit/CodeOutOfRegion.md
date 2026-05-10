@@ -164,3 +164,11 @@ severity, разные сообщения и разные способы исп�
 несогласованная классификация значимых module-level statements, особенно внутри
 препроцессора. Следующий практичный шаг — общий `ModuleStructure`/helper слой с
 единым списком элементов и тестами на пропущенные statement kinds.
+
+## Закрыто Track 2
+
+**Phase C §3 Slice 1 (commit `effab845`, 2026-05):** локальный
+significant-stmt list переехал в `hir_def::module_structure::significant`
+(`is_significant_module_level_stmt`); audit gap по
+`RAISE_STMT`/`LABEL_STMT` закрыт там же. Walk через `RegionTree` API
+(Slice 2, `d32f55d9`).

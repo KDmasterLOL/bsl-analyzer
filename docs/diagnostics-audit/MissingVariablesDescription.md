@@ -37,3 +37,13 @@
 ## Вывод
 
 Правило закрывает требование структуры модуля, но пока проверяет только факт комментария, не качество описания.
+
+## Закрыто Track 2
+
+**Phase B §5.1 Slice A (`55ce9dc0`) + §5.2 Slice B (`e289cec8`),
+2026-05:** detection переехал на `hir_def::docs::VariableDocs`
+(SymbolTree-owned, parallel `MethodDocs`); handler потребляет
+`ctx.variable_docs(var_id)` через `AnalysisProvider`. Hyperlink-only
+delegated-doc guard работает идентично `MissingParameterDescription`/
+`MissingReturnedValueDescription` (см. en/ru card-level docs «Strict
+semantic check»).

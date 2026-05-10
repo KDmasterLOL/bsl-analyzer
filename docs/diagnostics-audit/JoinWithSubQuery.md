@@ -38,3 +38,12 @@
 ## Вывод
 
 Правило реализовано как тонкая обертка над SDBL diagnostic. Для следующего качества нужны не изменения обработчика, а развитие SDBL-анализа и рекомендаций.
+
+## Закрыто Track 2
+
+**Phase C §4 Slice 3 (commit `c3cd1917`, 2026-05):** detection теперь
+исключает агрегирующие subqueries (`subquery_has_aggregation` —
+function-call-positioned scan для `СУММА`/`SUM`/`СРЕДНЕЕ`/`AVG`/
+`МИНИМУМ`/`MIN`/`МАКСИМУМ`/`MAX`/`КОЛИЧЕСТВО`/`COUNT`, а также
+`GROUP BY`-only subqueries). Card-level docs (en/ru) обновлены с
+секцией Aggregation Exemption.

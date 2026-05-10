@@ -182,3 +182,11 @@ transaction-набор уже разделен между несколькими
 проверяются, а вложенные ветки внутри `Попытка` могут выпасть. Следующий шаг —
 общий transaction-analysis слой и reason-specific diagnostics, не объединяя
 внешние коды правил.
+
+## Закрыто Track 2
+
+**Phase D §2 audit (2026-05):** out-of-scope для Track 2. Master plan §2
+включал только `BeginTransactionBeforeTryCatch` + `MissingCodeTryCatchEx`;
+остальной transaction-cluster (этот, `PairingBrokenTransaction`,
+`WrongUseOfRollbackTransactionMethod`, `TryNumber`) — отдельный
+будущий трек по transaction-shape анализу поверх CFG.

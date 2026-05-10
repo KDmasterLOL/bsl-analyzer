@@ -50,3 +50,10 @@ range utilities и fix planning.
 
 Реализация эффективная и покрытая, но region policy нужно централизовать.
 
+
+## Закрыто Track 2
+
+**Phase C §3 Slice 1 (`effab845`) + Slice 2 (`d32f55d9`), 2026-05:**
+hardcoded canonical-aliases переехали в
+`hir_def::module_structure::canonical_alias`; enumeration через
+`RegionTree::module_level_regions` (Slice 2).

@@ -161,3 +161,9 @@ v8-code-style проверки `module-structure-top-region`,
 `CodeBlockBeforeSub`, `CodeOutOfRegion` и region diagnostics. До этого стоит
 добавить тест на код инициализации перед областью методов, чтобы зафиксировать
 самый важный пробел.
+
+## Закрыто Track 2
+
+**Phase C §3.4 audit (2026-05):** правило truly orthogonal —
+SyntaxNode walk без зависимости от `RegionTree`/policy/significant
+helpers. Без изменений в Track 2.

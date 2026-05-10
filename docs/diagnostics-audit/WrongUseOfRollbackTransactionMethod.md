@@ -39,3 +39,10 @@ HIR lowering анализирует statement list и try/catch структур
 ## Вывод
 
 Локальная проверка позиции rollback работает, но полноценное качество требует единого анализа жизненного цикла транзакции.
+
+## Закрыто Track 2
+
+**Phase D §2 audit (2026-05):** out-of-scope для Track 2. Master plan §2
+ограничен `BeginTransactionBeforeTryCatch` + `MissingCodeTryCatchEx`;
+правила про `ОтменитьТранзакцию` положение и парность — отдельный
+будущий трек по transaction-shape анализу.

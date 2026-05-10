@@ -53,3 +53,9 @@ condition implication. Handler уже тонкий.
 Сильная диагностика, но качество полностью зависит от SDBL nullability
 анализа. Нужно осторожно с exemptions.
 
+
+## Закрыто Track 2
+
+**Phase C §4 delta-audit (2026-05):** `IS NULL` / LEFT/FULL OUTER JOIN
+семантика покрыта существующей классификацией в `sdbl-hir`; работ Track 2
+не требуется. Closed без implementation slice.

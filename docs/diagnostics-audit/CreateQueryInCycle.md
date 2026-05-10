@@ -53,3 +53,7 @@ query-performance layer, который сможет видеть текст з�
 Сейчас ловится частый и опасный паттерн, но coverage зависит от простого
 tracking переменных. Улучшение требует dataflow и query context.
 
+
+## Закрыто Track 2
+
+**Phase C §4 audit pass (task #84, 2026-05):** Track A — без изменений.

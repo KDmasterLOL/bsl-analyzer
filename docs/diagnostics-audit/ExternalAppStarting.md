@@ -56,3 +56,10 @@ Security API registry с категориями `process_start`, `filesystem`,
 Список покрывает много реальных API, но без type/arg analysis это скорее
 security hotspot, чем доказанная уязвимость.
 
+
+## Закрыто Track 2
+
+**Phase A §1.6 Group A (commit `4a9a9290`, 2026-05):** локальный whitelist
+external-app API заменён на `bsl_platform::security::registry` lookup
+(`Category::ExternalApp`). Argument/taint-analysis — Track 6 (registry
+уже несёт `Role::Cmd`/`Role::Path` для будущей taint-pipeline).

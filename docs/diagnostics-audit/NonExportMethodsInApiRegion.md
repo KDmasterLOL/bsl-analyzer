@@ -36,3 +36,9 @@
 ## Вывод
 
 Правило хорошо закрывает прямой structural smell, но пока не помогает привести модуль к стандартной структуре автоматически.
+
+## Закрыто Track 2
+
+**Phase C §3 Slice 1 (commit `effab845`, 2026-05):** hardcoded API
+region-names заменены на
+`hir_def::module_structure::policy::policy_for(module_type).api_region_names`.

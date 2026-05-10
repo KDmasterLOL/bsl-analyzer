@@ -37,3 +37,9 @@ Handler берет method docs, пропускает hyperlink docs и пров�
 ## Вывод
 
 Диагностика хорошо отделяет missing docs от no-comment случая, но дальнейшее качество требует связи с inferred return types.
+
+## Закрыто Track 2
+
+**Phase B §5.3 (commit `6d8a1eb2`, 2026-05):** закрыт audit gap «case
+без комментария вообще не покрывался, если PublicMethodsDescription
+disabled» — handler теперь fall-through'ит на MRVD при PMD-disabled.

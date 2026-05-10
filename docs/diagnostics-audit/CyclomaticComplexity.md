@@ -57,3 +57,12 @@ cognitive, nesting, condition complexity и code lens values.
 Правило полезное, но нужно доаудировать сам calculator и покрыть каждый
 decision point отдельным тестом.
 
+
+## Закрыто Track 2
+
+**Phase B §6.2 (`bfeabca8`) + §6.4 migration (`501203b8`) + §6.5
+SonarQube alignment (`f7472c9e`), 2026-05:** detection переехал из
+HIR-обхода на CFG-based формулу `V(G) = E - N + 2*P`
+(`crates/cfg/src/cyclomatic.rs`, pure). Preprocessor `#Если`
+учтён через существующие `PreprocConditionVertex`. Salsa-обёртка —
+§6.3.

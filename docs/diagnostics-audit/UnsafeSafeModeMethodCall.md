@@ -35,3 +35,10 @@ HIR находит вызовы `SafeMode` в булевых условиях б
 ## Вывод
 
 Паттерн покрыт хорошо, но UX просит локализацию и quick fix.
+
+## Закрыто Track 2
+
+**Phase A §1.6 Group B (commit `9588c13e`, 2026-05):** registry-driven
+distinction unsafe-mode method names (`bsl_platform::security::registry`,
+`Category::SafeModeMethodCall`) — hardcoded equality pattern сохранён
+структурно, но имя метода теперь приходит из реестра.

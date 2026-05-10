@@ -36,3 +36,7 @@
 ## Вывод
 
 Правило важное, но наличие workaround в handler показывает инфраструктурный долг в SDBL lexer/range model.
+
+## Закрыто Track 2
+
+**Phase C §4 audit pass (task #84, 2026-05):** Track A — без изменений.

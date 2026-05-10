@@ -37,3 +37,10 @@
 ## Вывод
 
 Правило простое и полезное, но ограничено определением типа модуля и отсутствием автоматического исправления.
+
+## Закрыто Track 2
+
+**Phase C §3 Slice 1 (`effab845`) + Slice 2 (`d32f55d9`), 2026-05:**
+hardcoded standard-list заменён на
+`hir_def::module_structure::policy::policy_for(module_type).allowed_regions`
++ `RegionTree::module_level_regions` (Slice 2).

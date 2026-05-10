@@ -37,3 +37,7 @@ SDBL HIR эмитит `SdblDiagnostic::VirtualTableCallWithoutParameters`; handl
 ## Вывод
 
 Покрытие основных опасных форм хорошее; следующий уровень качества требует семантики запроса и метаданных регистров.
+
+## Закрыто Track 2
+
+**Phase C §4 audit pass (task #84, 2026-05):** Track A — без изменений.

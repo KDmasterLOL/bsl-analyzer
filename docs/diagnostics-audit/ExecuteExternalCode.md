@@ -54,3 +54,11 @@ HIR lowering эмитит diagnostic для `EXECUTE_STMT` и global calls
 Основной риск ловится. Главный долг - синхронизация с common-module variant и
 единая модель контекста выполнения.
 
+
+## Закрыто Track 2
+
+**Phase A §1.6 Group B (commit `9588c13e`, 2026-05):** hardcoded имена
+`Выполнить`/`Execute`/`Вычислить`/`Eval` заменены на
+`bsl_platform::security::registry` lookup
+(`Category::ExecuteExternalCode`). Const-fold через `value_state`
+(Phase A §1.3) применяется там, где это релевантно.

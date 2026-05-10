@@ -36,3 +36,8 @@ HIR считает параметры метода и вызывает handler �
 ## Вывод
 
 Простая maintainability-метрика. Полезна как сигнал, но не объясняет оптимальный refactoring.
+
+## Закрыто Track 2
+
+**Phase B §6.4 (commit `68f65fcd`, 2026-05):** detection переехал на
+`HirMethodMetrics.params_count` (§6.1).

@@ -36,3 +36,10 @@
 ## Вывод
 
 Базовый поиск опасного `OR` покрыт, но правило остается эвристическим и требует более богатой query semantics для рекомендаций.
+
+## Закрыто Track 2
+
+**Phase C §4 delta-audit (2026-05):** subquery WHERE coverage
+проанализирован — текущая реализация `sdbl-hir` уже эмитит для
+вложенных WHERE; работ Track 2 не требуется. Closed без implementation
+slice.

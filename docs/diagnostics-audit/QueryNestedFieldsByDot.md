@@ -35,3 +35,10 @@
 ## Вывод
 
 Полезное SDBL performance правило, но actionable fix требует более глубокого query transformation.
+
+## Закрыто Track 2
+
+**Phase C §4 Slice 1 (commit `329802ad`, 2026-05):** добавлен
+`minPathDepth` config-knob (handler-side filter); SDBL-схема расширена
+полем `parts_count` для emit'а; hard floor parts.len() >= 2 закреплён;
+card-level docs (en/ru) описывают новую конфигурацию.

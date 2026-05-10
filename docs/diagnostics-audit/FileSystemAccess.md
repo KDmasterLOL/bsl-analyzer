@@ -55,3 +55,11 @@ temporary storage, client/server context, argument taint.
 Хороший audit detector, но не vulnerability proof. Нужны registry и
 arg/context analysis.
 
+
+## Закрыто Track 2
+
+**Phase A §1.6 Group A (commit `4a9a9290`, 2026-05):** локальный whitelist
+file-system API заменён на `bsl_platform::security::registry` lookup
+(`Category::FileSystem`). Phase A §1.1 (`b51c38b8`) ввёл сам реестр.
+Известное двойное обнаружение с `TempFilesDir` отнесено в Track 6
+cascade-suppression — здесь не правится.

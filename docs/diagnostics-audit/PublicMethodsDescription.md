@@ -36,3 +36,12 @@
 ## Вывод
 
 Правило правильно не дублирует соседние docs diagnostics, но из-за этого пользователю нужно смотреть семейство целиком.
+
+## Закрыто Track 2
+
+**Phase B §5.3 (косвенно, commit `6d8a1eb2`, 2026-05):** Track 2 не
+вносил прямых изменений в этот handler, но связанный gap «MRVD не
+покрывает no-doc export при PMD-disabled» закрыт в MRVD.
+Audit gap «export outside region — emit всё равно» из master plan §5.3
+**отложен в Track 4 quick-fixes** (требует решения по UX и формулировке
+сообщения для region-violations).

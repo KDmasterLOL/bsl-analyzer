@@ -38,3 +38,15 @@ HIR определяет опасный вызов `УстановитьПрив
 ## Вывод
 
 Текущее правило полезно как сигнал, но для качества нужна модель жизненного цикла привилегированного режима.
+
+## Закрыто Track 2
+
+**Phase A §1.6 Group C (commit `f0c617e1`, 2026-05):** hardcoded
+`True`/non-literal проверка заменена на lattice-driven дисptch:
+`SecurityModeState` saturating-counter (Phase A §1.2,
+`crates/dataflow/src/security_state.rs`), `value_state` const-fold
+(§1.3), Salsa-обёртка через `AnalysisProvider::module_security_state`
+(§1.4b+c, `72b7c3eb`). Detection переехал в `check()` runner-шага;
+HIR-side detection полностью удалён (§1.6-C-5). Полная
+inter-procedural прозрачность для вызова с произвольной переменной
+без known value — Track 6.

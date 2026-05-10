@@ -174,3 +174,12 @@ visitor, который один раз проходит HIR и отдает н�
 HIR visitor для метрик метода и доведение cognitive rules до выбранной модели
 Sonar/BSL, особенно для логических sequences, jumps, nested ternary и
 рекурсии.
+
+## Закрыто Track 2
+
+**Phase B §6.1 (`80fe948c`) + §6.4 migration (`f4dd106b`) + §6.5
+recursion penalty (`a532468d`), 2026-05:** detection переехал на
+`HirMethodMetrics.cognitive` (single-pass HIR visitor в
+`crates/hir-def/src/metrics.rs`); recursion penalty (+1) подключается
+через `effect_summary.is_recursive` (Phase A §1.4). Salsa-обёртка —
+§6.3 (`a72ad08c`).

@@ -54,3 +54,9 @@ context filters. Внешний код можно сохранить как бо
 Идея правильная, но реализация живет отдельно от HIR security detector и
 сильно зависит от качества metadata path matching.
 
+
+## Закрыто Track 2
+
+**Phase A §1.6 Group B (commit `9588c13e`, 2026-05):** registry-driven
+recognition (`Category::ExecuteExternalCode`) + CFE-aware visibility
+helpers из Track 1. Локальный AST fallback убран.

@@ -37,3 +37,11 @@
 ## Вывод
 
 Правило покрывает больше, чем следует из названия: не только missing, но и extra/order/duplicate. Это стоит отразить в пользовательской документации.
+
+## Закрыто Track 2
+
+**Phase B §5.3 (commit `bbaf2bde`, 2026-05):** добавлен strict-mode
+content-quality knob — handler теперь проверяет не только presence
+описания, но и пустоту/whitespace-only. Phase B §5.1 (Slice A,
+`55ce9dc0`) — общий `MethodDocs`/`VariableDocs` parser, source
+которого этот handler потребляет.

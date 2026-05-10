@@ -36,3 +36,7 @@ SDBL dispatch для `UnionWithoutAll`; handler мапит диапазон в B
 ## Вывод
 
 Простая и полезная query performance проверка, но автоматическое исправление должно учитывать возможное изменение результата.
+
+## Закрыто Track 2
+
+**Phase C §4 audit pass (task #84, 2026-05):** Track A — без изменений.

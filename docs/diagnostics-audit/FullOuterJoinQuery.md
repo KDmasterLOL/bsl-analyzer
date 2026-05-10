@@ -49,3 +49,7 @@ Query analyzer может добавить explain-like hints: таблицы, j
 Правило простое и хорошо ложится на SDBL HIR. Улучшения - richer query context
 и DBMS-aware severity.
 
+
+## Закрыто Track 2
+
+**Phase C §4 audit pass (task #84, 2026-05):** Track A — без изменений.

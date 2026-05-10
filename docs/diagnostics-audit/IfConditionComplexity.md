@@ -51,3 +51,8 @@ diagnostic threshold; handler применяет config.
 Правило полезное, но threshold нужно применять после полного расчета, а не
 частично в lowering.
 
+
+## Закрыто Track 2
+
+**Phase B §6.4 (commit `ea375773`, 2026-05):** detection переехал на
+`HirMethodMetrics.if_condition_max` (single-pass visitor, §6.1).

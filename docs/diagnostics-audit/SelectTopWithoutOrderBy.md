@@ -36,3 +36,7 @@ SDBL diagnostic передает `top_value`, `in_union`, `has_where`, `range`. 
 ## Вывод
 
 Правило покрывает важный детерминизм запросов, но рекомендации пока слишком общие.
+
+## Закрыто Track 2
+
+**Phase C §4 audit pass (task #84, 2026-05):** Track A — без изменений.
