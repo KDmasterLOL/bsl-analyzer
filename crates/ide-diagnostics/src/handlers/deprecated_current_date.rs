@@ -93,6 +93,7 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::Severity;
+    use expect_test::expect;
     #[test]
     fn test_deprecated_russian() {
         let code = r#"
@@ -102,13 +103,17 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
             .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
+        expect![[r#"
+            DeprecatedCurrentDate @ 3:12..3:23
+              message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
         assert_eq!(deprecated_diags[0].severity, Severity::Major); // ERROR + MAJOR maps to Major
-        assert!(deprecated_diags[0].message.contains("ТекущаяДатаСеанса"));
+        assert!(deprecated_diags[0].message.contains("ТекущаяДатаСеанса")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -120,12 +125,16 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
             .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("CurrentSessionDate"));
+        expect![[r#"
+            DeprecatedCurrentDate @ 3:12..3:23
+              message: Use "CurrentSessionDate" instead of deprecated "CurrentDate"
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("CurrentSessionDate")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -137,12 +146,12 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
             .collect();
 
         // Should not trigger for method calls
-        assert_eq!(deprecated_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -156,11 +165,21 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
             .collect();
 
-        assert_eq!(deprecated_diags.len(), 3);
+        expect![[r#"
+            DeprecatedCurrentDate @ 3:13..3:24
+              message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
+              severity: Major
+            DeprecatedCurrentDate @ 4:13..4:24
+              message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
+              severity: Major
+            DeprecatedCurrentDate @ 5:13..5:24
+              message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -182,9 +201,16 @@ Procedure A()
 EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
             .collect();
-        assert_eq!(deprecated_diags.len(), 2, "Expected exactly 2 diagnostics");
+        expect![[r#"
+            DeprecatedCurrentDate @ 3:20..3:31
+              message: Используйте "ТекущаяДатаСеанса" вместо устаревшего "ТекущаяДата"
+              severity: Major
+            DeprecatedCurrentDate @ 12:17..12:28
+              message: Use "CurrentSessionDate" instead of deprecated "CurrentDate"
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
     }
 }

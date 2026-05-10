@@ -92,6 +92,7 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::Severity;
+    use expect_test::expect;
     #[test]
     fn test_deprecated_russian() {
         let code = r#"
@@ -101,11 +102,15 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
+        expect![[r#"
+            DeprecatedFind @ 3:15..3:20
+              message: Используйте "СтрНайти" вместо устаревшего "Найти"
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
         assert_eq!(deprecated_diags[0].severity, Severity::Information);
-        assert!(deprecated_diags[0].message.contains("СтрНайти"));
+        assert!(deprecated_diags[0].message.contains("СтрНайти")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -117,10 +122,14 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("StrFind"));
+        expect![[r#"
+            DeprecatedFind @ 3:16..3:20
+              message: Use "StrFind" instead of deprecated "Find"
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("StrFind")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -132,10 +141,10 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
 
         // Should not trigger for method calls
-        assert_eq!(deprecated_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -150,9 +159,22 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
 
-        assert_eq!(deprecated_diags.len(), 4);
+        expect![[r#"
+            DeprecatedFind @ 3:12..3:17
+              message: Используйте "СтрНайти" вместо устаревшего "Найти"
+              severity: Information
+            DeprecatedFind @ 4:12..4:17
+              message: Используйте "СтрНайти" вместо устаревшего "Найти"
+              severity: Information
+            DeprecatedFind @ 5:12..5:17
+              message: Используйте "СтрНайти" вместо устаревшего "Найти"
+              severity: Information
+            DeprecatedFind @ 6:12..6:17
+              message: Используйте "СтрНайти" вместо устаревшего "Найти"
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -171,7 +193,14 @@ If FinD("A", "B") Then
 EndIf;"#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
-        assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+        expect![[r#"
+            DeprecatedFind @ 4:9..4:14
+              message: Используйте "СтрНайти" вместо устаревшего "Найти"
+              severity: Information
+            DeprecatedFind @ 10:4..10:8
+              message: Use "StrFind" instead of deprecated "Find"
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
     }
 }

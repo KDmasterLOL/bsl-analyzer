@@ -85,8 +85,9 @@ fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsCont
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range_multiline;
+    use crate::test_utils::format_diags;
     use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
@@ -145,13 +146,18 @@ mod tests {
         let code = "Процедура Тест1() Экспорт\nКонецПроцедуры\n\nПроцедура Тест2()\nКонецПроцедуры\n\nФункция Тест3() Экспорт\nКонецФункции\n\nФункция Тест4()\nКонецФункции";
         let diagnostics = check_as_command_module(code);
 
-        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics");
+        expect![[r#"
+            CommandModuleExportMethods @ 1:11..1:16
+              message: Экспортные методы в модулях команд не имеют смысла
+              severity: Hint
+            CommandModuleExportMethods @ 7:9..7:14
+              message: Экспортные методы в модулях команд не имеют смысла
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
 
         // Строка 0, колонки 10-15: имя "Тест1"
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 10, 0, 15);
 
         // Строка 6, колонки 8-13: имя "Тест3"
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 6, 8, 6, 13);
     }
 
     #[test]
@@ -165,21 +171,29 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_as_command_module(code);
-        assert_eq!(diagnostics.len(), 0, "Non-exported methods should be ignored");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_exported_procedure() {
         let code = "Процедура Тест1() Экспорт\nКонецПроцедуры";
         let diagnostics = check_as_command_module(code);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for exported procedure");
+        expect![[r#"
+            CommandModuleExportMethods @ 1:11..1:16
+              message: Экспортные методы в модулях команд не имеют смысла
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_exported_function() {
         let code = "Функция Тест3() Экспорт\n    Возврат 0;\nКонецФункции";
         let diagnostics = check_as_command_module(code);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for exported function");
+        expect![[r#"
+            CommandModuleExportMethods @ 1:9..1:14
+              message: Экспортные методы в модулях команд не имеют смысла
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -187,6 +201,6 @@ mod tests {
         // Export in regular module should NOT trigger this diagnostic
         let code = "Процедура Тест() Экспорт\nКонецПроцедуры";
         let diagnostics = check_as_regular_module(code);
-        assert_eq!(diagnostics.len(), 0, "Regular modules should not be checked");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

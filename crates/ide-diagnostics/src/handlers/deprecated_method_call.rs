@@ -205,7 +205,8 @@ fn build_message(method_name: &str, deprecation_info: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_hir_diagnostic, format_diags};
+    use expect_test::expect;
 
     #[test]
     fn test_local_deprecated_call() {
@@ -219,11 +220,17 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall)
+            .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("УстаревшаяПроцедура"));
+        expect![[r#"
+            DeprecatedMethodCall @ 7:5..7:24
+              message: Удалите вызов устаревшего метода "УстаревшаяПроцедура".
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("УстаревшаяПроцедура")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -239,11 +246,13 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall)
+            .collect();
 
         // No diagnostic - deprecated can call deprecated
-        assert_eq!(deprecated_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -257,11 +266,13 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall)
+            .collect();
 
         // No diagnostic - method is not deprecated
-        assert_eq!(deprecated_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -276,11 +287,16 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall)
+            .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("НоваяПроцедура"));
+        expect![[r#"
+            DeprecatedMethodCall @ 7:5..7:24
+              message: Удалите вызов устаревшего метода "УстаревшаяПроцедура". Используйте НоваяПроцедура() вместо этого метода.
+              severity: Information"#]].assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("НоваяПроцедура")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -297,11 +313,17 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall)
+            .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("УстаревшаяПроцедура"));
+        expect![[r#"
+            DeprecatedMethodCall @ 2:1..2:20
+              message: Удалите вызов устаревшего метода "УстаревшаяПроцедура".
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("УстаревшаяПроцедура")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -316,11 +338,17 @@ Procedure Test()
 EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall)
+            .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("DeprecatedProcedure"));
+        expect![[r#"
+            DeprecatedMethodCall @ 7:5..7:24
+              message: Remove deprecated method "DeprecatedProcedure" call.
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("DeprecatedProcedure")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -365,20 +393,29 @@ EndProcedure
 "#;
 
         let diagnostics = check_hir_diagnostic_with_fixtures(fixture);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall)
+            .collect();
 
         // Should have 4 diagnostics for deprecated calls:
         // 1. УстаревшаяПроцедура()
         // 2. УстаревшаяФункция()
         // 3. А = УстаревшаяФункция()
         // 4. Если УстаревшаяФункция() Тогда
-        assert_eq!(
-            deprecated_diags.len(),
-            4,
-            "Expected 4 diagnostics for cross-module deprecated calls. Got: {:?}",
-            deprecated_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
-        );
+        expect![[r#"
+            DeprecatedMethodCall @ 1:1..12:22
+              message: Удалите вызов устаревшего метода "УстаревшаяФункция". Используйте НеУстаревшаяФункция().
+              severity: Information
+            DeprecatedMethodCall @ 3:4..1:1
+              message: Удалите вызов устаревшего метода "УстаревшаяПроцедура".
+              severity: Information
+            DeprecatedMethodCall @ 7:26..7:43
+              message: Удалите вызов устаревшего метода "УстаревшаяФункция". Используйте НеУстаревшаяФункция().
+              severity: Information
+            DeprecatedMethodCall @ 16:1..17:7
+              message: Удалите вызов устаревшего метода "УстаревшаяФункция". Используйте НеУстаревшаяФункция().
+              severity: Information"#]].assert_eq(&format_diags(fixture, &deprecated_diags));
     }
 
     #[test]
@@ -398,15 +435,12 @@ EndProcedure
 "#;
 
         let diagnostics = check_hir_diagnostic_with_fixtures(fixture);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall)
+            .collect();
 
         // No diagnostic - deprecated can call deprecated
-        assert_eq!(
-            deprecated_diags.len(),
-            0,
-            "Expected 0 diagnostics - deprecated can call deprecated. Got: {:?}",
-            deprecated_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
-        );
+        expect![[r#""#]].assert_eq(&format_diags(fixture, &deprecated_diags));
     }
 }

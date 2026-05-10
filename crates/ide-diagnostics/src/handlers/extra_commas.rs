@@ -58,14 +58,19 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_trailing_comma_single_arg() {
         // Метод1(Парам1, , Парам2,) - trailing comma after last arg
         let code = "Результат = Метод1(Парам1, , Парам2,);";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 1);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#"
+            ExtraCommas @ 1:36..1:37
+              message: Не используйте запятые для параметры по умолчанию в конце вызова метода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -74,8 +79,12 @@ mod tests {
         let code = "Результат = Метод2(Парам1, Парам2,,,);";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 1);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#"
+            ExtraCommas @ 1:36..1:37
+              message: Не используйте запятые для параметры по умолчанию в конце вызова метода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -84,8 +93,12 @@ mod tests {
         let code = "Результат = Модуль.Метод3(Парам1, Парам2, Парам3,, );";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 1);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#"
+            ExtraCommas @ 1:50..1:51
+              message: Не используйте запятые для параметры по умолчанию в конце вызова метода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -94,8 +107,12 @@ mod tests {
         let code = "Результат = Модуль.Метод4(Парам1, , Парам2,,,,);";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 1);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#"
+            ExtraCommas @ 1:46..1:47
+              message: Не используйте запятые для параметры по умолчанию в конце вызова метода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -104,8 +121,12 @@ mod tests {
         let code = "Если Метод5(Парам1, , Парам2,,,,) Тогда\nКонецЕсли;";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 1);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#"
+            ExtraCommas @ 1:32..1:33
+              message: Не используйте запятые для параметры по умолчанию в конце вызова метода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -114,8 +135,12 @@ mod tests {
         let code = "Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда\nКонецЕсли;";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 1);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#"
+            ExtraCommas @ 1:39..1:40
+              message: Не используйте запятые для параметры по умолчанию в конце вызова метода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -129,8 +154,8 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 0);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -141,8 +166,8 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 0);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -152,8 +177,12 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 1);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#"
+            ExtraCommas @ 2:23..2:24
+              message: Не используйте запятые для параметры по умолчанию в конце вызова метода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -163,9 +192,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
         // Сообщается только о первой лишней запятой
-        assert_eq!(extra_diags.len(), 1);
+        expect![[r#"
+            ExtraCommas @ 2:25..2:26
+              message: Не используйте запятые для параметры по умолчанию в конце вызова метода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &extra_diags));
     }
 
     #[test]
@@ -175,7 +208,7 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        assert_eq!(extra_diags.len(), 0);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &extra_diags));
     }
 }

@@ -146,8 +146,9 @@ fn message_ru() -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_hir_diagnostic, format_diags};
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     /// Function with ElseIf chain but no final Else - missing return on fallthrough path.
     #[test]
@@ -315,11 +316,15 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let missing_return_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
             .collect();
 
-        assert_eq!(missing_return_diags.len(), 1, "Expected 1 diagnostic for missing else branch");
+        expect![[r#"
+            AllFunctionPathMustHaveReturn @ 2:9..2:13
+              message: Не все пути выполнения функции возвращают значение
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &missing_return_diags));
     }
 
     /// Test that functions with returns on all paths don't trigger diagnostic

@@ -82,6 +82,7 @@ pub fn from_hir(
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_simple_duplicate() {
         let code = r#"
@@ -98,11 +99,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        assert_eq!(dupl_diags.len(), 1, "Expected 1 diagnostic for duplicate x = 1 condition");
+        expect![[r#"
+            IfElseDuplicatedCondition @ 7:15..7:21
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     #[test]
@@ -121,11 +125,11 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        assert_eq!(dupl_diags.len(), 0, "Should not report different conditions");
+        expect![[r#""#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     #[test]
@@ -142,15 +146,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        assert_eq!(
-            dupl_diags.len(),
-            1,
-            "Should detect п = 1 and П = 1 as identical (case-insensitive)"
-        );
+        expect![[r#"
+            IfElseDuplicatedCondition @ 5:15..5:21
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     #[test]
@@ -167,15 +170,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        assert_eq!(
-            dupl_diags.len(),
-            1,
-            "Should detect conditions as identical despite whitespace differences"
-        );
+        expect![[r#"
+            IfElseDuplicatedCondition @ 5:15..5:27
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     #[test]
@@ -192,11 +194,11 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        assert_eq!(dupl_diags.len(), 0, "String literals should be case-sensitive: 'Ё' != 'ё'");
+        expect![[r#""#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     #[test]
@@ -213,11 +215,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        assert_eq!(dupl_diags.len(), 1, "Should detect identical string literal conditions");
+        expect![[r#"
+            IfElseDuplicatedCondition @ 5:15..5:28
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     #[test]
@@ -238,14 +243,20 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
         // Should find 2 diagnostics:
         // 1. Inner if: п = 2 duplicate
         // 2. Outer if: п = 1 duplicate
-        assert_eq!(dupl_diags.len(), 2, "Should detect duplicates in both outer and inner if");
+        expect![[r#"
+            IfElseDuplicatedCondition @ 6:19..6:25
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning
+            IfElseDuplicatedCondition @ 9:15..9:21
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     /// Triple duplicate condition group: п = 1 appears three times, two warnings
@@ -271,12 +282,18 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
         // п = 1 is duplicated twice (3rd and 5th branch), П = 1 normalized is also п = 1 (4th duplicate)
-        assert_eq!(dupl_diags.len(), 2, "Should find 2 duplicates of п = 1");
+        expect![[r#"
+            IfElseDuplicatedCondition @ 7:15..7:21
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
+              severity: Warning
+            IfElseDuplicatedCondition @ 11:15..11:27
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
+              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     /// Nested if with duplicate in both outer and inner chains
@@ -306,12 +323,18 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
         // Inner: п = 2 duplicated once; outer: п = 1 duplicated once
-        assert_eq!(dupl_diags.len(), 2, "Should find 2 duplicates (inner and outer)");
+        expect![[r#"
+            IfElseDuplicatedCondition @ 10:19..10:25
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
+              severity: Warning
+            IfElseDuplicatedCondition @ 15:15..15:21
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
+              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
 
     /// String case-sensitive: "Ё" != "ё" so no duplicate; "ё" = "ё" is duplicate
@@ -331,10 +354,10 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(no_dup_code);
         let dupl_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
-        assert_eq!(dupl_diags.len(), 0, "Different string case should not be duplicate");
+        expect![[r#""#]].assert_eq(&format_diags(no_dup_code, &dupl_diags));
 
         let dup_code = r#"
 Процедура Тест()
@@ -352,9 +375,15 @@ mod tests {
 
         let diagnostics2 = check_hir_diagnostic(dup_code);
         let dupl_diags2: Vec<_> = diagnostics2
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
-        assert_eq!(dupl_diags2.len(), 2, "Same string literal should produce 2 duplicates");
+        expect![[r#"
+            IfElseDuplicatedCondition @ 5:15..5:28
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning
+            IfElseDuplicatedCondition @ 7:15..7:28
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning"#]].assert_eq(&format_diags(dup_code, &dupl_diags2));
     }
 }

@@ -87,6 +87,7 @@ pub fn from_hir(
 mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, Severity};
+    use expect_test::expect;
     /// Detects all names that collide with the 8.3.12 global bitwise API.
     #[test]
     fn test_8312() {
@@ -162,46 +163,80 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let collision_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
         // Expected 20 diagnostics
-        assert_eq!(collision_diags.len(), 20, "Expected 20 diagnostics");
+        expect![[r#"
+            GlobalContextMethodCollision8312 @ 1:9..1:21
+              message: Имя метода "ПроверитьБит" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 4:9..4:32
+              message: Имя метода "ПроверитьПоБитовойМаске" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 7:9..7:22
+              message: Имя метода "УстановитьБит" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 10:9..10:19
+              message: Имя метода "ПобитовоеИ" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 13:9..13:21
+              message: Имя метода "ПобитовоеИли" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 16:9..16:20
+              message: Имя метода "ПобитовоеНе" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 19:9..19:21
+              message: Имя метода "ПобитовоеИНе" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 22:9..22:35
+              message: Имя метода "ПобитовоеИсключительноеИли" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 25:9..25:28
+              message: Имя метода "ПобитовыйСдвигВлево" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 28:9..28:29
+              message: Имя метода "ПобитовыйСдвигВправо" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 31:9..31:17
+              message: Имя метода "CheckBit" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 34:9..34:23
+              message: Имя метода "CheckByBitMask" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 37:9..37:15
+              message: Имя метода "SetBit" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 40:9..40:19
+              message: Имя метода "BitwiseAnd" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 43:9..43:18
+              message: Имя метода "BitwiseOr" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 46:9..46:19
+              message: Имя метода "BitwiseNot" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 49:9..49:22
+              message: Имя метода "BitwiseAndNot" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 52:9..52:19
+              message: Имя метода "BitwiseXor" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 55:9..55:25
+              message: Имя метода "BitwiseShiftLeft" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 58:9..58:26
+              message: Имя метода "BitwiseShiftRight" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker"#]].assert_eq(&format_diags(code, &collision_diags));
 
-        // Verify all diagnostic ranges
-        // Format: line, start_col, end_col
-        let expected_ranges = [
-            (0, 8, 20),  // ПроверитьБит
-            (3, 8, 31),  // ПроверитьПоБитовойМаске
-            (6, 8, 21),  // УстановитьБит
-            (9, 8, 18),  // ПобитовоеИ
-            (12, 8, 20), // ПобитовоеИли
-            (15, 8, 19), // ПобитовоеНе
-            (18, 8, 20), // ПобитовоеИНе
-            (21, 8, 34), // ПобитовоеИсключительноеИли
-            (24, 8, 27), // ПобитовыйСдвигВлево
-            (27, 8, 28), // ПобитовыйСдвигВправо
-            (30, 8, 16), // CheckBit
-            (33, 8, 22), // CheckByBitMask
-            (36, 8, 14), // SetBit
-            (39, 8, 18), // BitwiseAnd
-            (42, 8, 17), // BitwiseOr
-            (45, 8, 18), // BitwiseNot
-            (48, 8, 21), // BitwiseAndNot
-            (51, 8, 18), // BitwiseXor
-            (54, 8, 24), // BitwiseShiftLeft
-            (57, 8, 25), // BitwiseShiftRight
-        ];
-
-        for (i, (line, start_col, end_col)) in expected_ranges.iter().enumerate() {
+        for (i, diag) in collision_diags.iter().enumerate() {
             assert_eq!(
-                collision_diags[i].severity,
+                diag.severity,
                 Severity::Blocker,
                 "Diagnostic {} should have Blocker severity",
                 i
             );
-            assert_diagnostic_range(code, collision_diags[i], *line, *start_col, *end_col);
         }
     }
 
@@ -219,12 +254,12 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let collision_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
         // These methods have prefixes/suffixes so they don't conflict
-        assert_eq!(collision_diags.len(), 0, "Methods with prefix/suffix should not trigger");
+        expect![[r#""#]].assert_eq(&format_diags(code, &collision_diags));
     }
 
     /// Test case-insensitive matching (Russian uppercase)
@@ -235,12 +270,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let collision_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
-        assert_eq!(collision_diags.len(), 1);
-        assert_diagnostic_range(code, collision_diags[0], 0, 8, 20);
+        expect![[r#"
+            GlobalContextMethodCollision8312 @ 1:9..1:21
+              message: Имя метода "ПРОВЕРИТЬБИТ" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker"#]].assert_eq(&format_diags(code, &collision_diags));
     }
 
     /// Test case-insensitive matching (English mixed case)
@@ -251,12 +288,14 @@ EndFunction"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let collision_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
-        assert_eq!(collision_diags.len(), 1);
-        assert_diagnostic_range(code, collision_diags[0], 0, 9, 17);
+        expect![[r#"
+            GlobalContextMethodCollision8312 @ 1:10..1:18
+              message: Имя метода "CheckBit" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker"#]].assert_eq(&format_diags(code, &collision_diags));
     }
 
     /// Test multiple conflicting functions
@@ -273,11 +312,20 @@ EndFunction"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let collision_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
-        assert_eq!(collision_diags.len(), 3, "Should detect all 3 collisions");
+        expect![[r#"
+            GlobalContextMethodCollision8312 @ 1:9..1:21
+              message: Имя метода "ПроверитьБит" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 4:9..4:17
+              message: Имя метода "CheckBit" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker
+            GlobalContextMethodCollision8312 @ 7:9..7:19
+              message: Имя метода "ПобитовоеИ" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12
+              severity: Blocker"#]].assert_eq(&format_diags(code, &collision_diags));
     }
 
     /// Test non-conflicting function names
@@ -291,10 +339,10 @@ EndFunction"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let collision_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
-        assert_eq!(collision_diags.len(), 0, "Non-conflicting names should not trigger");
+        expect![[r#""#]].assert_eq(&format_diags(code, &collision_diags));
     }
 }

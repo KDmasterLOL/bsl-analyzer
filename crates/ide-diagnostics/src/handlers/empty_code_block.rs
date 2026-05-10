@@ -52,6 +52,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_empty_else_block() {
@@ -65,9 +66,12 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range_multiline(code, diags[0], 4, 4, 4, 9);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        expect![[r#"
+            EmptyCodeBlock @ 5:5..5:10
+              message: Пустой блок кода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -79,9 +83,12 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range_multiline(code, diags[0], 1, 4, 1, 20);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        expect![[r#"
+            EmptyCodeBlock @ 2:5..2:21
+              message: Пустой блок кода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -93,9 +100,12 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range_multiline(code, diags[0], 1, 4, 1, 21);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        expect![[r#"
+            EmptyCodeBlock @ 2:5..2:22
+              message: Пустой блок кода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -107,9 +117,19 @@ mod tests {
 КонецЕсли;"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
         // Empty if, empty elseif, empty else = 3 diagnostics
-        assert_eq!(diags.len(), 3);
+        expect![[r#"
+            EmptyCodeBlock @ 2:1..2:17
+              message: Пустой блок кода
+              severity: Warning
+            EmptyCodeBlock @ 3:1..3:22
+              message: Пустой блок кода
+              severity: Warning
+            EmptyCodeBlock @ 4:5..4:10
+              message: Пустой блок кода
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -124,8 +144,8 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
-        assert_eq!(diags.len(), 0, "Empty except blocks not reported by EmptyCodeBlock");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -136,7 +156,7 @@ mod tests {
 КонецФункции"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
-        assert_eq!(diags.len(), 0, "Empty function body not reported by EmptyCodeBlock");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 }

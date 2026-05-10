@@ -34,6 +34,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     /// All branches always return True — should trigger.
     #[test]
     fn test_fixture_all_branches_return_true() {
@@ -51,11 +52,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for ПроверитьСтроку");
-        assert_diagnostic_range(code, func_diags[0], 0, 8, 23);
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 1:9..1:24
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     /// Same string in all branches — should trigger.
@@ -73,11 +76,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for Метод1");
-        assert_diagnostic_range(code, func_diags[0], 0, 8, 14);
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 1:9..1:15
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     /// Same number in all branches — should trigger.
@@ -93,11 +98,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for СтавкаНДС");
-        assert_diagnostic_range(code, func_diags[0], 0, 8, 17);
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 1:9..1:18
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     /// Attachable method with same Null — skipped by default.
@@ -115,10 +122,10 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Attachable methods should be skipped");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     /// Non-attachable function returning same Null — should trigger.
@@ -136,11 +143,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for КакаяТоКоманда");
-        assert_diagnostic_range(code, func_diags[0], 0, 8, 22);
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 1:9..1:23
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     /// Case-insensitive string comparison: "Значение", "значение", "ЗНАЧЕНИЕ" treated as same.
@@ -161,11 +170,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for ПроверкаРегистраДляСтрок");
-        assert_diagnostic_range(code, func_diags[0], 0, 8, 32);
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 1:9..1:33
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -177,10 +188,10 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Single return should not trigger");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -196,10 +207,10 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Returning variable should not trigger (not primitive)");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -215,10 +226,10 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Different primitive values should not trigger");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -236,10 +247,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 1, "Same boolean should trigger");
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 2:9..2:24
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -254,10 +268,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 1, "Same number should trigger");
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 2:9..2:18
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -274,10 +291,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 1, "Same string should trigger");
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 2:9..2:15
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -292,14 +312,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(
-            func_diags.len(),
-            1,
-            "Null and NULL should be treated as same (case-insensitive)"
-        );
+        expect![[r#"
+            FunctionReturnsSamePrimitive @ 2:9..2:23
+              message: Функция всегда возвращает одно и то же примитивное значение. Замените функцию на константу или переменную модуля.
+              severity: Major"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -314,10 +333,10 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Attachable methods should be skipped by default");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -332,9 +351,9 @@ EndFunction
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Attachable_ (English) methods should be skipped");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 }

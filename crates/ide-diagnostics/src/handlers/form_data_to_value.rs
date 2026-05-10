@@ -53,6 +53,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_qualified_call_in_procedure_no_annotation() {
         // Тест(): Форма.ДанныеФормыВЗначение - qualified call in unannotated procedure triggers
@@ -62,8 +63,12 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "Qualified call in plain procedure triggers");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 3:16..3:36
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -75,8 +80,12 @@ mod tests {
 КонецФункции"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "Global call in @НаСервере function triggers");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 3:10..3:30
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -88,8 +97,8 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 0, "БезКонтекста should NOT trigger");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -101,8 +110,8 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 0, "НаКлиентеНаСервереБезКонтекста should NOT trigger");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -114,8 +123,12 @@ mod tests {
 EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "English qualified call in plain procedure triggers");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 3:15..3:30
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -126,8 +139,12 @@ EndProcedure"#;
 EndFunction"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "English global call in plain function triggers");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 2:5..2:20
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -139,8 +156,12 @@ EndFunction"#;
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "Should detect global call in context method");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 3:5..3:25
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -152,8 +173,12 @@ EndFunction"#;
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "Should detect qualified call in context method");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 3:11..3:31
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -166,8 +191,8 @@ EndFunction"#;
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 0, "Should skip БезКонтекста methods");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -180,8 +205,8 @@ EndFunction"#;
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 0, "Should skip НаКлиентеНаСервереБезКонтекста");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -194,8 +219,12 @@ EndFunction"#;
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "Should detect in @НаСервере methods");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 4:5..4:25
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -208,8 +237,12 @@ EndFunction"#;
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "Should detect in @НаКлиенте methods");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 4:5..4:25
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -221,8 +254,12 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 1, "Should detect English method names");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 3:5..3:20
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -235,8 +272,15 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 2, "Should be case-insensitive");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#"
+            FormDataToValue @ 3:5..3:25
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint
+            FormDataToValue @ 4:5..4:25
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -248,7 +292,7 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        assert_eq!(form_diags.len(), 0, "Method references without calls should be ignored");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
     }
 }

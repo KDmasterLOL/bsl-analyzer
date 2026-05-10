@@ -93,6 +93,7 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::Severity;
+    use expect_test::expect;
     #[test]
     fn test_deprecated_russian() {
         let code = r#"
@@ -101,12 +102,17 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMessage).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
+        expect![[r#"
+            DeprecatedMessage @ 3:5..3:13
+              message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
+              severity: Information"#]].assert_eq(&format_diags(code, &deprecated_diags));
         assert_eq!(deprecated_diags[0].severity, Severity::Information);
-        assert!(deprecated_diags[0].message.contains("СообщитьПользователю"));
+        assert!(deprecated_diags[0].message.contains("СообщитьПользователю")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -117,11 +123,17 @@ Procedure Test()
 EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMessage).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("MessageToUser"));
+        expect![[r#"
+            DeprecatedMessage @ 3:5..3:12
+              message: Use "CommonUse.MessageToUser" instead of deprecated "Message"
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("MessageToUser")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -132,11 +144,13 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMessage).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .collect();
 
         // Should not trigger for method calls
-        assert_eq!(deprecated_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -150,10 +164,24 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let deprecated_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMessage).collect();
+        let deprecated_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .collect();
 
-        assert_eq!(deprecated_diags.len(), 4);
+        expect![[r#"
+            DeprecatedMessage @ 3:5..3:13
+              message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
+              severity: Information
+            DeprecatedMessage @ 4:5..4:13
+              message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
+              severity: Information
+            DeprecatedMessage @ 5:5..5:13
+              message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
+              severity: Information
+            DeprecatedMessage @ 6:5..6:13
+              message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
+              severity: Information"#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 
     #[test]
@@ -168,10 +196,16 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMessage).collect();
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("MessageToUser"));
+        let diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .collect();
+        expect![[r#"
+            DeprecatedMessage @ 4:9..4:16
+              message: Use "CommonUse.MessageToUser" instead of deprecated "Message"
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diags));
+        assert!(diags[0].message.contains("MessageToUser")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -183,9 +217,14 @@ EndProcedure
 ДругойМетод();
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMessage).collect();
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("СообщитьПользователю"));
+        let diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedMessage)
+            .collect();
+        expect![[r#"
+            DeprecatedMessage @ 2:1..2:9
+              message: Используйте "ОбщегоНазначения.СообщитьПользователю" вместо устаревшего "Сообщить"
+              severity: Information"#]].assert_eq(&format_diags(code, &diags));
+        assert!(diags[0].message.contains("СообщитьПользователю")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 }

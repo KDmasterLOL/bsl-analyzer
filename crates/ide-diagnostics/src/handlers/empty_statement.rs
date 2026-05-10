@@ -58,18 +58,24 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use expect_test::expect;
     #[test]
     fn test_empty_statement_after_then() {
         // Semicolon immediately after "Тогда" is an empty statement
         let code = "А = 0;\nЕсли Истина Тогда ; // Диагностика должна сработать здесь\n  А = 0;; // и здесь\n  А = 0;\nКонецЕсли;";
         let diagnostics = check_hir_diagnostic(code);
         let empty_stmt_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
-        assert_eq!(empty_stmt_diags.len(), 2, "Expected 2 diagnostics");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
+        expect![[r#"
+            EmptyStatement @ 2:19..2:20
+              message: Пустой оператор
+              severity: Hint
+            EmptyStatement @ 3:9..3:10
+              message: Пустой оператор
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &empty_stmt_diags));
         // Line 1 (0-indexed), cols 18-19: semicolon after "Тогда"
-        assert_diagnostic_range(code, empty_stmt_diags[0], 1, 18, 19);
         // Line 2 (0-indexed), cols 8-9: second semicolon in ";;"
-        assert_diagnostic_range(code, empty_stmt_diags[1], 2, 8, 9);
     }
 
     #[test]
@@ -82,12 +88,8 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let empty_stmt_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
-        assert_eq!(
-            empty_stmt_diags.len(),
-            0,
-            "Parse errors should suppress empty statement diagnostics"
-        );
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &empty_stmt_diags));
     }
 
     #[test]
@@ -101,8 +103,8 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let empty_stmt_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
-        assert_eq!(empty_stmt_diags.len(), 0);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &empty_stmt_diags));
     }
 
     #[test]
@@ -114,7 +116,11 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let empty_stmt_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
-        assert_eq!(empty_stmt_diags.len(), 1, "Expected 1 empty statement");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
+        expect![[r#"
+            EmptyStatement @ 3:11..3:12
+              message: Пустой оператор
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &empty_stmt_diags));
     }
 }

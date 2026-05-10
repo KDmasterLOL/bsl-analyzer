@@ -298,6 +298,7 @@ fn extract_callee_name(node: &SyntaxNode) -> Option<String> {
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use expect_test::expect;
 
     #[test]
     fn test_duplicate_in_method() {
@@ -311,9 +312,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostic for 4 occurrences of Строка2");
-        assert_diagnostic_range(code, &diagnostics[0], 1, 8, 17);
-        assert!(diagnostics[0].message.contains("Строка2"));
+        expect![[r#"
+            DuplicateStringLiteral @ 2:9..2:18
+              message: Необходимо избавиться от многократного использования строкового литерала ""Строка2""
+              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
+        assert!(diagnostics[0].message.contains("Строка2")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -328,13 +331,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Should find 1 diagnostic for case-insensitive duplicates"
-        );
-        assert_diagnostic_range(code, &diagnostics[0], 1, 9, 19);
-        assert!(diagnostics[0].message.contains("Строка22"));
+        expect![[r#"
+            DuplicateStringLiteral @ 2:10..2:20
+              message: Необходимо избавиться от многократного использования строкового литерала ""Строка22""
+              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
+        assert!(diagnostics[0].message.contains("Строка22")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -348,7 +349,10 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         // caseSensitive=false (default): groups 3 together (3 > 2) → 1 diagnostic
-        assert_eq!(diagnostics.len(), 1, "Should group case-insensitive strings");
+        expect![[r#"
+            DuplicateStringLiteral @ 3:9..3:17
+              message: Необходимо избавиться от многократного использования строкового литерала ""Ошибка""
+              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -362,7 +366,7 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         // minTextLength=5 (including quotes), "OK" with quotes is 4 chars → filtered
-        assert_eq!(diagnostics.len(), 0, "Should filter short strings");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -375,7 +379,7 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         // allowedNumberCopies=2 (default): 2 occurrences is allowed, need > 2
-        assert_eq!(diagnostics.len(), 0, "Should not report at threshold");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -389,7 +393,10 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         // allowedNumberCopies=2: 3 occurrences > 2 → 1 diagnostic
-        assert_eq!(diagnostics.len(), 1, "Should report when exceeding threshold");
+        expect![[r#"
+            DuplicateStringLiteral @ 3:9..3:17
+              message: Необходимо избавиться от многократного использования строкового литерала ""Текст1""
+              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -402,7 +409,7 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Strings inside Тип() should be excluded");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -415,7 +422,7 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Strings inside Type() should be excluded");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -431,7 +438,10 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         // Only non-Тип() occurrences count: 3 > 2 → 1 diagnostic
-        assert_eq!(diagnostics.len(), 1, "Only non-excluded occurrences should count");
+        expect![[r#"
+            DuplicateStringLiteral @ 5:9..5:34
+              message: Необходимо избавиться от многократного использования строкового литерала ""СправочникСсылка.Товары""
+              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -444,11 +454,7 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Strings inside ОписаниеТипов() constructor should be excluded"
-        );
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -467,6 +473,6 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, check);
         // analyzeFile=false (default): each method is separate scope
         // Each method has 2 occurrences, threshold is >2 → 0 diagnostics
-        assert_eq!(diagnostics.len(), 0, "Should not report across method scopes");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

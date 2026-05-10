@@ -1098,7 +1098,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use expect_test::expect;
 
     #[test]
     fn test_simple_duplicate() {
@@ -1110,9 +1111,11 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect one duplicate");
-
-        assert_diagnostic_range(code, &diagnostics[0], 4, 4, 29);
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 5:5..5:30
+              message: Проверьте повторную вставку Значение в коллекцию Массив
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1126,7 +1129,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should NOT detect duplicate after generation change");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1143,7 +1146,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Special literals should be allowed to duplicate");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1155,9 +1158,11 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect duplicate with global function");
-
-        assert_diagnostic_range(code, &diagnostics[0], 3, 4, 34);
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 4:5..4:35
+              message: Проверьте повторную вставку Значение в коллекцию Коллекция()
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1178,11 +1183,7 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, check);
         // Current HIR limitation: 0 diagnostics (code inside preprocessor not analyzed)
         // Expected: 1 diagnostic (duplicate key across branches)
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "HIR does not currently analyze code inside preprocessor directives"
-        );
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1199,11 +1200,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Should NOT detect duplicate (local break may prevent execution)"
-        );
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1216,9 +1213,11 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect duplicate with method in collection path");
-
-        assert_diagnostic_range(code, &diagnostics[0], 4, 4, 49);
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 5:5..5:50
+              message: Проверьте повторную вставку "Значение" в коллекцию Данные.Метод().Коллекция
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1230,9 +1229,10 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect duplicate with complex argument");
-
-        assert_diagnostic_range(code, &diagnostics[0], 3, 4, 77);
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 4:5..4:78
+              message: Проверьте повторную вставку Данные.Метод().ПовторнаяКоллекция в коллекцию Данные.Метод().ОбщаяКоллекция
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1246,11 +1246,11 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Вставить duplicate key detected even with different value"
-        );
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 5:5..5:35
+              message: Проверьте повторную вставку "Ключ1", 2 в коллекцию Коллекция
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1265,7 +1265,11 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Nested field chain duplicate detected");
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 5:9..5:56
+              message: Проверьте повторную вставку "Пользователь" в коллекцию Итог.Коллекция.Индексы
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1278,7 +1282,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Different receivers are not duplicates");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1297,7 +1301,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "After Новый Массив reinit, duplicate tracking resets");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1317,7 +1321,7 @@ mod tests {
 КонецФункции
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Возврат interrupts flow - no duplicate");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1338,7 +1342,10 @@ mod tests {
 КонецФункции
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Loop break does not interrupt outer flow");
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 10:5..10:66
+              message: Проверьте повторную вставку "ДополнительныеРеквизиты", Истина в коллекцию ВидыСвойствНабора
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1351,7 +1358,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Different arg counts for Добавить are not duplicates");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1365,7 +1372,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Different key values are not duplicates");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]

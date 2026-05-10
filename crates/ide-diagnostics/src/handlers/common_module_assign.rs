@@ -109,8 +109,9 @@ pub fn from_hir(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_hir_diagnostic, format_diags};
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_no_metadata() {
         // Without metadata, no CommonModuleAssign diagnostics should be emitted
@@ -119,11 +120,13 @@ mod tests {
 КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let common_module_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CommonModuleAssign).collect();
+        let common_module_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::CommonModuleAssign)
+            .collect();
 
         // No metadata available, so no diagnostics
-        assert_eq!(common_module_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &common_module_diags));
     }
 
     #[test]
@@ -134,11 +137,13 @@ mod tests {
 КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let common_module_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CommonModuleAssign).collect();
+        let common_module_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::CommonModuleAssign)
+            .collect();
 
         // Field access is not a simple identifier assignment
-        assert_eq!(common_module_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &common_module_diags));
     }
 
     #[test]
@@ -149,11 +154,13 @@ mod tests {
 КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let common_module_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CommonModuleAssign).collect();
+        let common_module_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::CommonModuleAssign)
+            .collect();
 
         // Index access is not a simple identifier assignment
-        assert_eq!(common_module_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &common_module_diags));
     }
 
     #[test]
@@ -165,8 +172,10 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         // Without metadata, candidates are filtered out
-        let common_module_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CommonModuleAssign).collect();
-        assert_eq!(common_module_diags.len(), 0);
+        let common_module_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::CommonModuleAssign)
+            .collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &common_module_diags));
     }
 }

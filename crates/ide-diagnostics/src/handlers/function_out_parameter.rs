@@ -44,6 +44,7 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_function_out_parameter() {
@@ -62,14 +63,17 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FunctionOutParameter).collect();
+        let func_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
+            .collect();
 
         // Only function Б modifies parameter А (by-reference); procedure А is allowed
-        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic");
-
-        assert_diagnostic_range(code, func_diags[0], 5, 4, 5);
-        assert!(func_diags[0].message.contains("а"));
+        expect![[r#"
+            FunctionOutParameter @ 6:5..6:6
+              message: Функция изменяет параметр 'а'. Используйте возвращаемое значение вместо выходного параметра
+              severity: Warning"#]].assert_eq(&format_diags(code, &func_diags));
+        assert!(func_diags[0].message.contains("а")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -80,9 +84,11 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FunctionOutParameter).collect();
-        assert_eq!(func_diags.len(), 0, "Procedures are allowed to modify parameters");
+        let func_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
+            .collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -94,9 +100,11 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FunctionOutParameter).collect();
-        assert_eq!(func_diags.len(), 0, "Val parameters can be modified (local copy)");
+        let func_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
+            .collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -108,9 +116,14 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FunctionOutParameter).collect();
-        assert_eq!(func_diags.len(), 1, "Should detect case-insensitive match");
+        let func_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
+            .collect();
+        expect![[r#"
+            FunctionOutParameter @ 3:5..3:13
+              message: Функция изменяет параметр 'ПАРАМЕТР'. Используйте возвращаемое значение вместо выходного параметра
+              severity: Warning"#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -122,9 +135,11 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FunctionOutParameter).collect();
-        assert_eq!(func_diags.len(), 0, "Property assignment should not be flagged");
+        let func_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
+            .collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -137,8 +152,16 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FunctionOutParameter).collect();
-        assert_eq!(func_diags.len(), 2, "Should detect multiple parameter modifications");
+        let func_diags: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
+            .collect();
+        expect![[r#"
+            FunctionOutParameter @ 3:5..3:11
+              message: Функция изменяет параметр 'Данные'. Используйте возвращаемое значение вместо выходного параметра
+              severity: Warning
+            FunctionOutParameter @ 4:5..4:14
+              message: Функция изменяет параметр 'Результат'. Используйте возвращаемое значение вместо выходного параметра
+              severity: Warning"#]].assert_eq(&format_diags(code, &func_diags));
     }
 }
