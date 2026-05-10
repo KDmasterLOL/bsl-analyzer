@@ -15,6 +15,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ./scripts/setup-hooks.sh           # install pre-commit hooks (fmt + clippy + tests)
 UPDATE_EXPECT=1 cargo test         # accept new snapshot baselines
+# Snapshot diagnostic tests use `check_diagnostics_snapshot[_for]` from `crates/ide-diagnostics/src/test_utils.rs`; rebase via `UPDATE_EXPECT=1 cargo test -p ide-diagnostics <name>`.
 
 # Run the LSP server locally
 cargo run -p bsl-analyzer --bin bsl-analyzer-app -- lsp

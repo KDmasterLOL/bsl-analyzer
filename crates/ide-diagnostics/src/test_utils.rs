@@ -3,7 +3,7 @@
 //! This module provides helper functions for testing diagnostics,
 //! including position calculation and assertion helpers.
 
-use crate::Diagnostic;
+use crate::{Diagnostic, DiagnosticCode, Severity};
 use hir::DefDatabase;
 use ide_db::TextRange;
 
@@ -230,6 +230,115 @@ where
 /// Run ALL diagnostics on test code.
 pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     check_ast_diagnostic(code, crate::diagnostics)
+}
+
+/// Deterministic snapshot format for diagnostic lists.
+/// Per-diag block:
+///   <DiagnosticCode> @ <l>:<c>..<l>:<c>
+///     message: <text>
+///     severity: <Severity>
+/// Sorted by (start_line, start_col, end_line, end_col, code as u16,
+/// severity, message). Range coords 1-based.
+pub fn format_diags(source: &str, diags: &[Diagnostic]) -> String {
+    let mut entries = diags
+        .iter()
+        .map(|diag| {
+            let (start_line, start_col, end_line, end_col) = range_to_line_col(source, diag.range);
+            FormattedDiag {
+                diag,
+                start_line: start_line + 1,
+                start_col: start_col + 1,
+                end_line: end_line + 1,
+                end_col: end_col + 1,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|left, right| {
+        (
+            left.start_line,
+            left.start_col,
+            left.end_line,
+            left.end_col,
+            left.diag.code as u16,
+            severity_sort_key(left.diag.severity),
+            left.diag.message.as_str(),
+        )
+            .cmp(&(
+                right.start_line,
+                right.start_col,
+                right.end_line,
+                right.end_col,
+                right.diag.code as u16,
+                severity_sort_key(right.diag.severity),
+                right.diag.message.as_str(),
+            ))
+    });
+
+    let mut output = String::new();
+    for (idx, entry) in entries.iter().enumerate() {
+        if idx > 0 {
+            output.push('\n');
+        }
+        use std::fmt::Write as _;
+        writeln!(
+            output,
+            "{} @ {}:{}..{}:{}",
+            entry.diag.code.as_str(),
+            entry.start_line,
+            entry.start_col,
+            entry.end_line,
+            entry.end_col
+        )
+        .expect("writing to String should not fail");
+        writeln!(output, "  message: {}", entry.diag.message)
+            .expect("writing to String should not fail");
+        write!(output, "  severity: {}", entry.diag.severity.as_str())
+            .expect("writing to String should not fail");
+    }
+    output
+}
+
+/// Snapshot all diagnostics for `source`.
+pub fn check_diagnostics_snapshot(source: &str, expected: expect_test::Expect) {
+    let diagnostics = check_hir_diagnostic(source);
+    expected.assert_eq(&format_diags(source, &diagnostics));
+}
+
+/// Snapshot diagnostics filtered to a single DiagnosticCode.
+pub fn check_diagnostics_snapshot_for(
+    source: &str,
+    code_filter: DiagnosticCode,
+    expected: expect_test::Expect,
+) {
+    let diagnostics = check_hir_diagnostic(source);
+    expected.assert_eq(&format_diags_for(source, &diagnostics, code_filter));
+}
+
+struct FormattedDiag<'a> {
+    diag: &'a Diagnostic,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+}
+
+fn format_diags_for(source: &str, diags: &[Diagnostic], code_filter: DiagnosticCode) -> String {
+    let filtered =
+        diags.iter().filter(|diag| diag.code == code_filter).cloned().collect::<Vec<_>>();
+    format_diags(source, &filtered)
+}
+
+fn severity_sort_key(severity: Severity) -> u8 {
+    match severity {
+        Severity::Blocker => 0,
+        Severity::Critical => 1,
+        Severity::Major => 2,
+        Severity::Error => 3,
+        Severity::Warning => 4,
+        Severity::Information => 5,
+        Severity::Hint => 6,
+    }
 }
 
 /// Run diagnostics on test code with CommonModule fixtures.
@@ -776,6 +885,74 @@ pub fn make_non_common_module_metadata(
         http_service: None,
         web_service: None,
         form: None,
+    }
+}
+
+#[cfg(test)]
+mod format_diags_tests {
+    use super::*;
+
+    fn diag(
+        code: DiagnosticCode,
+        message: &str,
+        severity: Severity,
+        start: u32,
+        end: u32,
+    ) -> Diagnostic {
+        Diagnostic {
+            code,
+            message: message.to_string(),
+            severity,
+            range: TextRange::new(start.into(), end.into()),
+            tags: vec![],
+            fixes: vec![],
+        }
+    }
+
+    #[test]
+    fn format_diags_empty_list() {
+        assert_eq!(format_diags("", &[]), "");
+    }
+
+    #[test]
+    fn format_diags_sort_stable_across_input_permutations() {
+        let source = "abc\ndef\nghi";
+        let first = diag(DiagnosticCode::LineLength, "third", Severity::Warning, 8, 9);
+        let second = diag(DiagnosticCode::EmptyCodeBlock, "first", Severity::Major, 0, 1);
+        let third = diag(DiagnosticCode::BadWords, "second", Severity::Critical, 4, 6);
+        let ordered = vec![first.clone(), second.clone(), third.clone()];
+        let shuffled = vec![third, first, second];
+
+        assert_eq!(format_diags(source, &ordered), format_diags(source, &shuffled));
+    }
+
+    #[test]
+    fn format_diags_ties_break_on_end_position() {
+        let source = "abcdef";
+        let longer = diag(DiagnosticCode::LineLength, "longer", Severity::Warning, 0, 4);
+        let shorter = diag(DiagnosticCode::LineLength, "shorter", Severity::Warning, 0, 2);
+
+        assert_eq!(
+            format_diags(source, &[longer, shorter]),
+            "LineLength @ 1:1..1:3\n  message: shorter\n  severity: Warning\nLineLength @ 1:1..1:5\n  message: longer\n  severity: Warning"
+        );
+    }
+
+    #[test]
+    fn check_diagnostics_snapshot_for_filters_by_code() {
+        let source = "abcdef";
+        let matching = diag(DiagnosticCode::LineLength, "kept", Severity::Warning, 0, 2);
+        let non_matching = diag(DiagnosticCode::BadWords, "dropped", Severity::Major, 3, 4);
+
+        expect_test::expect![[r#"
+            LineLength @ 1:1..1:3
+              message: kept
+              severity: Warning"#]]
+        .assert_eq(&format_diags_for(
+            source,
+            &[matching, non_matching],
+            DiagnosticCode::LineLength,
+        ));
     }
 }
 
