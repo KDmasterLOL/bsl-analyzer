@@ -46,6 +46,9 @@
 
 ## Track 3 — Тестовая инфраструктура
 
+**Closed 2026-05-11.** See `TRACK_3_CLOSURE.md` for slice-by-slice
+breakdown and acceptance gate evidence.
+
 - helper для diagnostics-with-configuration (фикстуры `Configuration.xml` + `CommonModules/`) → **`ide-diagnostics`** test infra + фикстуры на уровне **`bsl-metadata`**
 - BSL/EN bilingual parity matrix → **`ide-diagnostics`** snapshot harness
 - CFE / visible-configurations test harness → **`bsl-metadata`** + **`project-model`** test infra
