@@ -178,8 +178,22 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic_with_config};
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
+
+    fn check_bad_words_snapshot(
+        code: &str,
+        config: DiagnosticsConfig,
+        expected: expect_test::Expect,
+    ) {
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let filtered = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::BadWords)
+            .collect::<Vec<_>>();
+        expected.assert_eq(&format_diags(code, &filtered));
+    }
 
     #[test]
     fn test_bad_words_disabled() {
@@ -189,10 +203,7 @@ mod tests {
 КонецПроцедуры"#;
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Should NOT detect - empty pattern (disabled)
-        assert_eq!(diagnostics.len(), 0);
+        check_bad_words_snapshot(code, config, expect![[r#""#]]);
     }
 
     #[test]
@@ -210,10 +221,7 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Should NOT detect - no matches
-        assert_eq!(diagnostics.len(), 0);
+        check_bad_words_snapshot(code, config, expect![[r#""#]]);
     }
 
     #[test]
@@ -231,12 +239,14 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Should detect TODO
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::BadWords);
-        assert!(diagnostics[0].message.contains("TODO"));
+        check_bad_words_snapshot(
+            code,
+            config,
+            expect![[r#"
+            BadWords @ 2:5..2:9
+              message: Использование запрещённого слова 'TODO'
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -256,10 +266,20 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Should detect all 3 variations (case insensitive)
-        assert_eq!(diagnostics.len(), 3);
+        check_bad_words_snapshot(
+            code,
+            config,
+            expect![[r#"
+            BadWords @ 2:5..2:9
+              message: Использование запрещённого слова 'todo'
+              severity: Warning
+            BadWords @ 3:5..3:9
+              message: Использование запрещённого слова 'ToDo'
+              severity: Warning
+            BadWords @ 4:5..4:9
+              message: Использование запрещённого слова 'TODO'
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -279,10 +299,20 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Should detect all 3 bad words
-        assert_eq!(diagnostics.len(), 3);
+        check_bad_words_snapshot(
+            code,
+            config,
+            expect![[r#"
+            BadWords @ 2:5..2:9
+              message: Использование запрещённого слова 'TODO'
+              severity: Warning
+            BadWords @ 3:5..3:10
+              message: Использование запрещённого слова 'FIXME'
+              severity: Warning
+            BadWords @ 4:5..4:9
+              message: Использование запрещённого слова 'HACK'
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -301,10 +331,7 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Should NOT detect in comment (findInComments = false)
-        assert_eq!(diagnostics.len(), 0);
+        check_bad_words_snapshot(code, config, expect![[r#""#]]);
     }
 
     /// Fresh local fixture with comment scanning enabled.
@@ -329,35 +356,29 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Expected 6 diagnostics with badWords="legacy|draft", findInComments=true
-        assert_eq!(diagnostics.len(), 6, "Should find 6 diagnostics");
-
-        // Verify exact positions
-        // Line 0, cols 3-9: legacy (in comment)
-        assert_diagnostic_range(code, &diagnostics[0], 0, 3, 9);
-        assert!(diagnostics[0].message.contains("legacy"));
-
-        // Line 0, cols 10-15: draft (in comment)
-        assert_diagnostic_range(code, &diagnostics[1], 0, 10, 15);
-        assert!(diagnostics[1].message.contains("draft"));
-
-        // Line 4, cols 4-10: Legacy (query identifier)
-        assert_diagnostic_range(code, &diagnostics[2], 4, 4, 10);
-        assert!(diagnostics[2].message.contains("Legacy"));
-
-        // Line 6, cols 12-17: Draft (metadata name)
-        assert_diagnostic_range(code, &diagnostics[3], 6, 12, 17);
-        assert!(diagnostics[3].message.contains("Draft"));
-
-        // Line 6, cols 26-31: Draft (alias)
-        assert_diagnostic_range(code, &diagnostics[4], 6, 26, 31);
-        assert!(diagnostics[4].message.contains("Draft"));
-
-        // Line 8, cols 0-5: Draft (variable name)
-        assert_diagnostic_range(code, &diagnostics[5], 8, 0, 5);
-        assert!(diagnostics[5].message.contains("Draft"));
+        check_bad_words_snapshot(
+            code,
+            config,
+            expect![[r#"
+            BadWords @ 1:4..1:10
+              message: Использование запрещённого слова 'legacy'
+              severity: Warning
+            BadWords @ 1:11..1:16
+              message: Использование запрещённого слова 'draft'
+              severity: Warning
+            BadWords @ 5:5..5:11
+              message: Использование запрещённого слова 'Legacy'
+              severity: Warning
+            BadWords @ 7:13..7:18
+              message: Использование запрещённого слова 'Draft'
+              severity: Warning
+            BadWords @ 7:27..7:32
+              message: Использование запрещённого слова 'Draft'
+              severity: Warning
+            BadWords @ 9:1..9:6
+              message: Использование запрещённого слова 'Draft'
+              severity: Warning"#]],
+        );
     }
 
     /// Fresh local fixture with comment scanning disabled.
@@ -377,23 +398,22 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Expected 4 diagnostics with badWords="legacy|draft", findInComments=false
-        // (excludes first two from comment line)
-        assert_eq!(diagnostics.len(), 4, "Expected 4 diagnostics without comments");
-
-        // Verify exact positions (same as above, but without first two)
-        // Line 4, cols 4-10: Legacy (query identifier)
-        assert_diagnostic_range(code, &diagnostics[0], 4, 4, 10);
-
-        // Line 6, cols 12-17: Draft (metadata name)
-        assert_diagnostic_range(code, &diagnostics[1], 6, 12, 17);
-
-        // Line 6, cols 26-31: Draft (alias)
-        assert_diagnostic_range(code, &diagnostics[2], 6, 26, 31);
-
-        // Line 8, cols 0-5: Draft (variable name)
-        assert_diagnostic_range(code, &diagnostics[3], 8, 0, 5);
+        check_bad_words_snapshot(
+            code,
+            config,
+            expect![[r#"
+            BadWords @ 5:5..5:11
+              message: Использование запрещённого слова 'Legacy'
+              severity: Warning
+            BadWords @ 7:13..7:18
+              message: Использование запрещённого слова 'Draft'
+              severity: Warning
+            BadWords @ 7:27..7:32
+              message: Использование запрещённого слова 'Draft'
+              severity: Warning
+            BadWords @ 9:1..9:6
+              message: Использование запрещённого слова 'Draft'
+              severity: Warning"#]],
+        );
     }
 }

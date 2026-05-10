@@ -118,8 +118,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_diagnostics_snapshot_for, check_sdbl_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;
 
@@ -135,8 +134,14 @@ mod tests {
     |ПО Склады.Кладовщик = Сотрудники.Ссылка
     |";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Unprotected field from LEFT JOIN");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 4:14..5:6
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -152,8 +157,14 @@ mod tests {
     |ПО Склады.Кладовщик = Сотрудники3.Ссылка
     |";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Only bare field triggers, ISNULL-wrapped is safe");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 4:14..4:32
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -170,8 +181,14 @@ mod tests {
     |И ЕСТЬNULL(Сотрудники4.Флаг, Истина)
     |";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Unprotected field in WHERE triggers");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 8:10..9:6
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -187,8 +204,14 @@ mod tests {
     |ПО Склады5.Кладовщик = Сотрудники5.Ссылка
     |";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Unprotected field from RIGHT JOIN");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 4:14..4:28
+                  message: Для полей из ПРАВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -203,8 +226,11 @@ mod tests {
     |ПО Склады6.Кладовщик = Сотрудники6.Ссылка
     |";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "INNER JOIN should never trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -223,8 +249,20 @@ mod tests {
     |ПО Склады8.Кладовщик = Сотрудники8.Ссылка
     |";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 3, "3 unprotected fields from FULL JOIN");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 4:14..4:32
+                  message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical
+                FieldsFromJoinsWithoutIsNull @ 5:6..5:20
+                  message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical
+                FieldsFromJoinsWithoutIsNull @ 6:6..6:29
+                  message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -240,8 +278,11 @@ mod tests {
     |ГДЕ (Сотрудники9.Реквизит ЕСТЬ НЕ NULL)
     |";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "IS NOT NULL in WHERE exempts field");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -257,8 +298,14 @@ mod tests {
     |ГДЕ Сотрудники13.Реквизит ЕСТЬ NULL
     |";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "IS NULL in WHERE does not protect SELECT field");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 4:14..5:6
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -288,15 +335,10 @@ mod tests {
     |        ПО ПартнерыКИ.Ссылка = КартыЛояльности.Партнер";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        // No unprotected fields: all joined table fields are either:
-        // - in ЕСТЬNULL (КИПочта.АдресЭП)
-        // - in IS NULL check (КартыЛояльности.Ссылка)
-        // - in JOIN ON conditions only (КИПочта.Ссылка, КИПочта.АдресЭП, etc.)
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Fields in JOIN ON conditions should not trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
         );
     }
 
@@ -318,17 +360,10 @@ mod tests {
     |        ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        // ЧекККМ.Ссылка is from INNER JOIN - not nullable, should not trigger.
-        // ДокЗаказ.НомерДокумента is protected by ЕСТЬNULL.
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Fields from INNER-joined table should not trigger even with nested LEFT JOIN. Got: {:?}",
-            diagnostics.iter().map(|d| {
-                let text = &code[usize::from(d.range.start())..usize::from(d.range.end())];
-                format!("{}: {}", text, d.message)
-            }).collect::<Vec<_>>()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
         );
     }
 
@@ -346,25 +381,13 @@ mod tests {
         |ГДЕ
         |    ИсполнениеРезультатыПроверки.ЗадачаПроверяющего = &ЗадачаПроверяющего");
 КонецПроцедуры"#;
-
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for unprotected field");
-
-        // Extract the highlighted text from the diagnostic range
-        let diag = &diagnostics[0];
-        let highlighted = &code[diag.range.start().into()..diag.range.end().into()];
-
-        // Should highlight "ЗадачиИсполнителей.Исполнитель", not "ЛЕВОЕ СОЕДИНЕНИЕ..."
-        assert!(
-            highlighted.contains("ЗадачиИсполнителей"),
-            "Diagnostic should highlight the field 'ЗадачиИсполнителей.Исполнитель', got: '{}'",
-            highlighted
-        );
-        assert!(
-            !highlighted.contains("СОЕДИНЕНИЕ") && !highlighted.contains("JOIN"),
-            "Diagnostic should NOT highlight the JOIN clause, got: '{}'",
-            highlighted
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 3:14..3:44
+                  message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
         );
     }
 

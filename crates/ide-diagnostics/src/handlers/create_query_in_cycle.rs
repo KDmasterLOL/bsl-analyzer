@@ -81,7 +81,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
+
     #[test]
     fn test_query_in_for_loop() {
         let code = r#"
@@ -92,12 +94,14 @@ mod tests {
 КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        // Find CreateQueryInCycle diagnostic (may not be first due to other diagnostics)
-        let query_diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CreateQueryInCycle).collect();
-        assert_eq!(query_diagnostics.len(), 1, "Expected exactly 1 CreateQueryInCycle diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CreateQueryInCycle,
+            expect![[r#"
+            CreateQueryInCycle @ 5:5..5:23
+              message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -112,10 +116,14 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let query_diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CreateQueryInCycle).collect();
-        assert_eq!(query_diagnostics.len(), 1, "Expected exactly 1 CreateQueryInCycle diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CreateQueryInCycle,
+            expect![[r#"
+            CreateQueryInCycle @ 7:21..7:39
+              message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -128,10 +136,14 @@ Procedure Test()
     EndDo;
 EndProcedure
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let query_diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CreateQueryInCycle).collect();
-        assert_eq!(query_diagnostics.len(), 1, "Expected exactly 1 CreateQueryInCycle diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CreateQueryInCycle,
+            expect![[r#"
+            CreateQueryInCycle @ 5:9..5:24
+              message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -144,10 +156,14 @@ EndProcedure
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let query_diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CreateQueryInCycle).collect();
-        assert_eq!(query_diagnostics.len(), 1, "Expected exactly 1 CreateQueryInCycle diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CreateQueryInCycle,
+            expect![[r#"
+            CreateQueryInCycle @ 5:9..5:27
+              message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -160,13 +176,13 @@ EndProcedure
 КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let query_diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CreateQueryInCycle).collect();
-        assert_eq!(
-            query_diagnostics.len(),
-            1,
-            "Expected exactly 1 CreateQueryInCycle diagnostic for QueryBuilder"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CreateQueryInCycle,
+            expect![[r#"
+            CreateQueryInCycle @ 5:5..5:19
+              message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
+              severity: Critical"#]],
         );
     }
 }

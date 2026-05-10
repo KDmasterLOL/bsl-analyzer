@@ -44,12 +44,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_diagnostics_snapshot_for, check_sdbl_diagnostic,
-    };
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;
+
     #[test]
     fn test_multi_case_where_or() {
         // Large inline regression fixture for OR-in-WHERE coverage.
@@ -130,17 +128,29 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
-
-        // Uses 0-indexed lines (line 7 = 1-based line 8)
-        assert_diagnostic_range(code, &diagnostics[0], 7, 15, 18);
-        assert_diagnostic_range(code, &diagnostics[1], 19, 8, 11);
-        assert_diagnostic_range(code, &diagnostics[2], 31, 38, 41);
-        assert_diagnostic_range(code, &diagnostics[3], 43, 8, 11);
-        assert_diagnostic_range(code, &diagnostics[4], 44, 36, 39);
-        assert_diagnostic_range(code, &diagnostics[5], 58, 21, 24);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 8:16..8:19
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning
+                LogicalOrInTheWhereSectionOfQuery @ 20:9..20:12
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning
+                LogicalOrInTheWhereSectionOfQuery @ 32:39..32:42
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning
+                LogicalOrInTheWhereSectionOfQuery @ 44:9..44:12
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning
+                LogicalOrInTheWhereSectionOfQuery @ 45:37..45:40
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning
+                LogicalOrInTheWhereSectionOfQuery @ 59:22..59:25
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -149,8 +159,14 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT Name FROM Products WHERE Type = 1 OR Category = 2";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 3:56..3:58
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -159,8 +175,14 @@ mod tests {
 Процедура Тест()
     Запрос = "ВЫБРАТЬ * ИЗ Товары ГДЕ Цена = 100 ИЛИ Количество = 0";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 3:50..3:53
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -169,8 +191,14 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T WHERE A = 1 AND (B = 2 OR C = 3)";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect OR inside parentheses");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 3:54..3:56
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -179,8 +207,17 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T WHERE A = 1 OR B = 2 OR C = 3";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Should detect both OR operators");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 3:43..3:45
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning
+                LogicalOrInTheWhereSectionOfQuery @ 3:52..3:54
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -189,8 +226,14 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T1 WHERE ID IN (SELECT ID FROM T2 WHERE A = 1 OR B = 2)";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect OR in nested subquery WHERE");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 3:75..3:77
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -199,8 +242,11 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT CASE WHEN Flag OR True THEN 1 ELSE 0 END AS Result FROM T WHERE ID = 1";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should NOT detect OR in CASE expression (not in WHERE)");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -209,11 +255,10 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T1 LEFT JOIN T2 ON T1.A = T2.A OR T1.B = T2.B WHERE T1.ID = 1";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Should NOT detect OR in JOIN ON clause (different diagnostic)"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#""#]],
         );
     }
 
@@ -223,8 +268,11 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM Products";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should not fail on missing WHERE");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -237,8 +285,14 @@ mod tests {
     |   Таблица.Поле1 = 1
     |   И (Таблица.Поле2 = 2 ИЛИ Таблица.Поле3 = 3)";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect OR inside parentheses after AND");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 7:30..7:33
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -247,8 +301,14 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T WHERE Field1 = &Param1 AND (Field2 = &Param2 OR Field3 = &Param3)";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect OR with parameters");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 3:76..3:78
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 
     #[test]

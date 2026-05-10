@@ -53,9 +53,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
-    use crate::{DiagnosticCode, Severity};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_join_with_virtual_table_single_line() {
@@ -65,10 +65,14 @@ mod tests {
     Запрос.Текст = "Выбрать Т.Ссылка Из Справочник.Справочник1 СПр Левое соединение РегистрСведений.Курсы.СрезПоследних КАК Т По СПр.Поле1 = Т.Валюта";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 JoinWithVirtualTable diagnostic");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::JoinWithVirtualTable);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#"
+                JoinWithVirtualTable @ 3:85..3:121
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -82,8 +86,14 @@ mod tests {
     |По СПр.Поле1 = Т.Местонахождение";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 JoinWithVirtualTable diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#"
+                JoinWithVirtualTable @ 5:6..5:57
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -97,8 +107,14 @@ mod tests {
     |По СПр.Поле1 = Т.Местонахождение";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 JoinWithVirtualTable diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#"
+                JoinWithVirtualTable @ 5:6..5:57
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -112,8 +128,17 @@ mod tests {
     |По Курсы.Поле1 = Т.Измерение";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Expected 2 JoinWithVirtualTable diagnostics");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#"
+                JoinWithVirtualTable @ 4:10..4:54
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning
+                JoinWithVirtualTable @ 5:6..5:57
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -126,8 +151,11 @@ mod tests {
     |(Выбрать СС.Ссылка Из Справочник.Справочник2 КАК СС Где СС.Ссылка = &Параметр) КАК Т";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Virtual table in FROM without JOIN should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -137,8 +165,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ РегистрСведений.Курсы.СрезПоследних КАК Т ПО ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "JOIN with virtual table should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#"
+                JoinWithVirtualTable @ 3:48..3:84
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -148,8 +182,11 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ Справочник.Товары ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Цены ПО ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "JOIN with regular table should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -159,8 +196,11 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрНакопления.Склады.Остатки(Склад = &Параметр) КАК Р";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Virtual table in FROM without JOIN should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -170,8 +210,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрСведений.Курсы.СрезПоследних(&Период) КАК К ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Virtual table in FROM with JOIN should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#"
+                JoinWithVirtualTable @ 3:28..3:72
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -184,7 +230,16 @@ mod tests {
     |ЛЕВОЕ СОЕДИНЕНИЕ РегистрНакопления.Склады.Остатки КАК О ПО ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Should detect both virtual tables in JOINs");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::JoinWithVirtualTable,
+            expect![[r#"
+                JoinWithVirtualTable @ 5:23..5:59
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning
+                JoinWithVirtualTable @ 6:23..6:56
+                  message: Не следует использовать соединения с виртуальными таблицами
+                  severity: Warning"#]],
+        );
     }
 }
