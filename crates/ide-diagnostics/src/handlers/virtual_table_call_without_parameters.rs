@@ -51,9 +51,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_sdbl_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_detects_virtual_table_calls_without_parameters() {
         let code = r#"Процедура Тест1()
@@ -139,25 +139,23 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 4, "Expected 4 virtual table errors");
-
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::VirtualTableCallWithoutParameters);
-        }
-
-        let mut sorted = diagnostics.clone();
-        sorted.sort_by_key(|d| d.range.start());
-
-        // Тест1 строка 5: СрезПоследних без скобок
-        assert_diagnostic_range_multiline(code, &sorted[0], 5, 8, 5, 44);
-        // Тест5 строка 48: Остатки() пустые скобки
-        assert_diagnostic_range_multiline(code, &sorted[1], 48, 8, 48, 42);
-        // Тест6 строка 58: Остатки(, ) оба параметра пусты
-        assert_diagnostic_range_multiline(code, &sorted[2], 58, 8, 58, 44);
-        // Тест8 строка 78: Остатки(&Период, ) второй параметр пуст
-        assert_diagnostic_range_multiline(code, &sorted[3], 78, 8, 78, 51);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            expect![[r#"
+                VirtualTableCallWithoutParameters @ 6:9..6:45
+                  message: Не следует использовать виртуальные таблицы без параметров
+                  severity: Major
+                VirtualTableCallWithoutParameters @ 49:9..49:43
+                  message: Не следует использовать виртуальные таблицы без параметров
+                  severity: Major
+                VirtualTableCallWithoutParameters @ 59:9..59:45
+                  message: Не следует использовать виртуальные таблицы без параметров
+                  severity: Major
+                VirtualTableCallWithoutParameters @ 79:9..79:52
+                  message: Не следует использовать виртуальные таблицы без параметров
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -167,8 +165,11 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрНакопления.Склады.Остатки(Склад = &Параметр)";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Virtual table with params should be OK");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -178,8 +179,11 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрСведений.Курсы.СрезПоследних(&Период)";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Period-only param should be OK for СрезПоследних");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -189,8 +193,11 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрНакопления.Склады.Остатки(, Склад = &Параметр)";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Empty period with condition should be OK");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -200,8 +207,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрСведений.Курсы.СрезПоследних";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Virtual table without parens should trigger error");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            expect![[r#"
+                VirtualTableCallWithoutParameters @ 3:28..3:63
+                  message: Не следует использовать виртуальные таблицы без параметров
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -211,8 +224,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрНакопления.Склады.Остатки()";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Empty parens should trigger error");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            expect![[r#"
+                VirtualTableCallWithoutParameters @ 3:28..3:62
+                  message: Не следует использовать виртуальные таблицы без параметров
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -222,8 +241,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрНакопления.Склады.Остатки(&Период, )";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Empty second param should trigger error");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            expect![[r#"
+                VirtualTableCallWithoutParameters @ 3:28..3:71
+                  message: Не следует использовать виртуальные таблицы без параметров
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -233,7 +258,13 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ РегистрНакопления.Склады.Остатки(, )";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Both empty params should trigger error");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            expect![[r#"
+                VirtualTableCallWithoutParameters @ 3:28..3:64
+                  message: Не следует использовать виртуальные таблицы без параметров
+                  severity: Major"#]],
+        );
     }
 }

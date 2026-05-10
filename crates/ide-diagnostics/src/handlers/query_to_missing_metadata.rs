@@ -54,9 +54,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_sdbl_diagnostic, check_snapshot_with_config_xml};
-    use crate::{DiagnosticCode, Severity};
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_snapshot_with_config_xml};
+    use crate::DiagnosticCode;
     use expect_test::expect;
     #[test]
     fn test_no_metadata_no_diagnostics() {
@@ -66,9 +65,11 @@ mod tests {
     Запрос.Текст = "ВЫБРАТЬ Т.Поле ИЗ Справочник.НесуществующийСправочник КАК Т";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        // Without metadata, no diagnostics are emitted
-        assert!(diagnostics.is_empty());
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryToMissingMetadata,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -79,14 +80,11 @@ mod tests {
     Запрос.Текст = "ВЫБРАТЬ Т.Поле ИЗ Справочник.Валюты КАК Т";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        // Without metadata, diagnostics won't fire, but we test the handler runs without errors
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::QueryToMissingMetadata);
-            assert_eq!(diag.severity, Severity::Blocker);
-            assert!(diag.message.contains("несуществующему метаданному"));
-        }
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryToMissingMetadata,
+            expect![[r#""#]],
+        );
     }
 
     #[test]

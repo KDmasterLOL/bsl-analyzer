@@ -38,13 +38,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_union_all_from_fixture() {
-        use crate::test_utils::assert_diagnostic_range;
         let code = r#"Запрос = Новый Запрос(
     "ВЫБРАТЬ РАЗРЕШЕННЫЕ ПЕРВЫЕ 1
     |   Справочник1.Поле1 КАК Поле1,
@@ -114,15 +113,17 @@ mod tests {
     |   Справочник3.Ссылка = &Ссылка3"
 );
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 2, "Expected 2 UNION without ALL");
-
-        assert_eq!(diagnostics[0].code, DiagnosticCode::UnionAll);
-        assert!(diagnostics[0].message.contains("ОБЪЕДИНИТЬ"));
-
-        assert_diagnostic_range(code, &diagnostics[0], 21, 5, 15);
-        assert_diagnostic_range(code, &diagnostics[1], 56, 5, 15);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnionAll,
+            expect![[r#"
+            UnionAll @ 22:6..22:16
+              message: Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ
+              severity: Information
+            UnionAll @ 57:6..57:16
+              message: Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -132,8 +133,14 @@ Procedure Test()
     Query = "SELECT * FROM T1 UNION SELECT * FROM T2";
 EndProcedure
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "UNION without ALL should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnionAll,
+            expect![[r#"
+            UnionAll @ 3:31..3:36
+              message: Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -143,8 +150,14 @@ EndProcedure
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ОБЪЕДИНИТЬ ВЫБРАТЬ * ИЗ Т2";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "ОБЪЕДИНИТЬ without ВСЕ should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnionAll,
+            expect![[r#"
+            UnionAll @ 3:31..3:41
+              message: Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -154,8 +167,7 @@ EndProcedure
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ОБЪЕДИНИТЬ ВСЕ ВЫБРАТЬ * ИЗ Т2";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "UNION ALL should not trigger");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnionAll, expect![[r#""#]]);
     }
 
     #[test]
@@ -165,8 +177,17 @@ EndProcedure
     Query = "SELECT * FROM T1 UNION SELECT * FROM T2 UNION SELECT * FROM T3";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Should detect 2 UNIONs without ALL");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnionAll,
+            expect![[r#"
+            UnionAll @ 3:31..3:36
+              message: Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ
+              severity: Information
+            UnionAll @ 3:54..3:59
+              message: Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -176,8 +197,14 @@ EndProcedure
     Query = "SELECT * FROM T1 UNION ALL SELECT * FROM T2 UNION SELECT * FROM T3";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect 1 UNION without ALL");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnionAll,
+            expect![[r#"
+            UnionAll @ 3:58..3:63
+              message: Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -193,7 +220,13 @@ EndProcedure
              |ИЗ Продажи";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect UNION in multiline query");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnionAll,
+            expect![[r#"
+            UnionAll @ 6:15..6:25
+              message: Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ
+              severity: Information"#]],
+        );
     }
 }

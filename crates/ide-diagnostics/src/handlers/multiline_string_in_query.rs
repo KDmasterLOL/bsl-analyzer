@@ -117,15 +117,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_sdbl_diagnostic};
-    use crate::{DiagnosticCode, Severity};
-
-    fn check_metadata(diag: &crate::Diagnostic) {
-        assert_eq!(diag.code, DiagnosticCode::MultilineStringInQuery);
-        assert_eq!(diag.severity, Severity::Critical);
-        assert_eq!(diag.message, "Проверьте корректность многострочного литерала");
-    }
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_empty_string_in_query_creates_multiline() {
@@ -154,17 +148,20 @@ mod tests {
     |	ПриходныйОрдерНоменклатура.Ссылка = &Ссылка";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 3);
-
-        for diag in &diagnostics {
-            check_metadata(diag);
-        }
-
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 5, 8, 6, 5);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 6, 31, 10, 10);
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 15, 60, 16, 68);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MultilineStringInQuery,
+            expect![[r#"
+                MultilineStringInQuery @ 6:9..7:6
+                  message: Проверьте корректность многострочного литерала
+                  severity: Critical
+                MultilineStringInQuery @ 7:32..11:11
+                  message: Проверьте корректность многострочного литерала
+                  severity: Critical
+                MultilineStringInQuery @ 16:61..17:69
+                  message: Проверьте корректность многострочного литерала
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -184,8 +181,11 @@ mod tests {
     |ИЗ Справочник.ФизическиеЛица КАК Т";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MultilineStringInQuery,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -198,7 +198,10 @@ mod tests {
     |ИЗ Справочник.Справочник";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MultilineStringInQuery,
+            expect![[r#""#]],
+        );
     }
 }

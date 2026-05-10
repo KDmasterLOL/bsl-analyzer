@@ -73,9 +73,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
+
+    fn check_snapshot(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SelectTopWithoutOrderBy, expected);
+    }
     #[test]
     fn test_top_10_in_batch_order_by_in_other_query() {
         // TOP 10 in first batch query; second query has ORDER BY - still 1 diagnostic
@@ -95,14 +99,13 @@ mod tests {
              |   Справочник.Код";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "TOP 10 without ORDER BY should trigger even when another batch query has ORDER BY"
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 3:23..3:32
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
         );
-        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
-        assert_diagnostic_range(code, &diagnostics[0], 2, 22, 31);
     }
 
     #[test]
@@ -122,14 +125,13 @@ mod tests {
              |           Справочник.Контрагенты)";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "TOP 10 in WHERE IN subquery without ORDER BY should trigger"
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 9:30..9:39
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
         );
-        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
-        assert_diagnostic_range(code, &diagnostics[0], 8, 29, 38);
     }
 
     #[test]
@@ -149,12 +151,7 @@ mod tests {
              |           Справочник.Контрагенты)";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "TOP 1 in WHERE IN subquery should be skipped by default skipSelectTopOne=true"
-        );
+        check_snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
@@ -173,14 +170,13 @@ mod tests {
              |   Ссылка";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "TOP 10 in nested FROM subquery without ORDER BY should trigger"
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 6:27..6:36
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
         );
-        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
-        assert_diagnostic_range(code, &diagnostics[0], 5, 26, 35);
     }
 
     #[test]
@@ -199,12 +195,7 @@ mod tests {
              |   Ссылка";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "TOP 1 in nested FROM subquery should be skipped by default skipSelectTopOne=true"
-        );
+        check_snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
@@ -226,14 +217,13 @@ mod tests {
              |   Справочник.Код";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "TOP 10 in WHERE IN subquery should trigger even when outer query has ORDER BY"
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 9:30..9:39
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
         );
-        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
-        assert_diagnostic_range(code, &diagnostics[0], 8, 29, 38);
     }
 
     #[test]
@@ -270,21 +260,19 @@ mod tests {
              |   Ссылка";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            3,
-            "Expected 3 diagnostics: WHERE subquery TOP 10, UNION TOP 10, UNION TOP 1"
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 9:30..9:39
+              message: Измените запрос, добавив сортировку
+              severity: Warning
+            SelectTopWithoutOrderBy @ 16:23..16:32
+              message: Измените запрос, добавив сортировку
+              severity: Warning
+            SelectTopWithoutOrderBy @ 23:23..23:31
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
         );
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::SelectTopWithoutOrderBy);
-        }
-        // WHERE IN subquery TOP 10
-        assert_diagnostic_range(code, &diagnostics[0], 8, 29, 38);
-        // UNION ALL member TOP 10
-        assert_diagnostic_range(code, &diagnostics[1], 15, 22, 31);
-        // UNION ALL member TOP 1 (always reported in UNION)
-        assert_diagnostic_range(code, &diagnostics[2], 22, 22, 30);
     }
 
     #[test]
@@ -317,19 +305,16 @@ mod tests {
              |   Ссылка";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Expected 2 diagnostics: nested WHERE subquery TOP 10 and nested UNION TOP 10"
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 12:34..12:43
+              message: Измените запрос, добавив сортировку
+              severity: Warning
+            SelectTopWithoutOrderBy @ 19:26..19:35
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
         );
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::SelectTopWithoutOrderBy);
-        }
-        // Nested WHERE IN subquery TOP 10
-        assert_diagnostic_range(code, &diagnostics[0], 11, 33, 42);
-        // Nested UNION ALL member TOP 10
-        assert_diagnostic_range(code, &diagnostics[1], 18, 25, 34);
     }
 
     #[test]
@@ -351,12 +336,7 @@ mod tests {
              |   ВЫБРАТЬ &ТекстОстаткиПоМесяцам) КАК ОстаткиНоменклатуры";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Query with &Parameter substitution and no TOP should not trigger"
-        );
+        check_snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
@@ -370,8 +350,7 @@ mod tests {
              |   Поле";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "TOP 0 with ORDER BY should not trigger");
+        check_snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
@@ -381,11 +360,13 @@ mod tests {
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 10 * ИЗ Справочник.Товары";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
-        // Line 2, "ПЕРВЫЕ 10" starts at col 22, ends at col 31
-        assert_diagnostic_range(code, &diagnostics[0], 2, 22, 31);
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 3:23..3:32
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -395,8 +376,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 10 * ИЗ Справочник.Товары УПОРЯДОЧИТЬ ПО Наименование";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "TOP with ORDER BY should not trigger");
+        check_snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
@@ -406,8 +386,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 1 * ИЗ Справочник.Товары ГДЕ Код = &Код";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "TOP 1 with WHERE should not trigger");
+        check_snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
@@ -417,8 +396,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ ПЕРВЫЕ 1 * ИЗ Справочник.Товары";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "TOP 1 without WHERE should be skipped by default");
+        check_snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
@@ -430,10 +408,13 @@ mod tests {
              |ВЫБРАТЬ * ИЗ Т2";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "TOP in UNION should always trigger");
-        // Line 2, "ПЕРВЫЕ 10" at col 22-31
-        assert_diagnostic_range(code, &diagnostics[0], 2, 22, 31);
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 3:23..3:32
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -443,9 +424,12 @@ Procedure Test()
     Query = "SELECT TOP 10 * FROM Catalog.Products";
 EndProcedure
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "TOP without ORDER BY should trigger");
-        // Line 2, "TOP 10" at col 20-26
-        assert_diagnostic_range(code, &diagnostics[0], 2, 20, 26);
+        check_snapshot(
+            code,
+            expect![[r#"
+            SelectTopWithoutOrderBy @ 3:21..3:27
+              message: Измените запрос, добавив сортировку
+              severity: Warning"#]],
+        );
     }
 }
