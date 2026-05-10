@@ -906,6 +906,68 @@ pub fn check_snapshot_with_config_xml(
     expected.assert_eq(&format_diags(source, &diagnostics));
 }
 
+/// Run all diagnostics on `source` with a base Configuration.xml plus visible CFE extensions.
+///
+/// The [`test_fixture::CfeFixtureBuilder`] output owns the real CFE tree.
+/// This wrapper extends the Phase B
+/// Configuration.xml project setup by registering `set_all_config_paths`
+/// with the base config first and each extension after it.
+pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Diagnostic> {
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::metadata::intern_configuration_path;
+    use ide_db::RootDatabaseImpl;
+    use vfs::{FileId, FileSet, VfsPath};
+
+    materialize_cfe_loader_compat(&fixture);
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(fixture.config_paths());
+
+    let mut file_set = FileSet::default();
+    let caller_file_id = FileId(0);
+    let caller_path = fixture.root().join("CommonModules/Caller/Ext/Module.bsl");
+    file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
+
+    let mut module_files = Vec::new();
+    for extension in fixture.extensions() {
+        for module in extension.modules() {
+            let fid = FileId((module_files.len() + 1) as u32);
+            let path =
+                extension.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
+            file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
+            module_files.push((fid, module.source()));
+        }
+    }
+
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller_file_id, SourceRootId(0));
+    db.set_file_text(caller_file_id, source);
+    for (fid, body) in module_files {
+        db.set_file_source_root(fid, SourceRootId(0));
+        db.set_file_text(fid, body);
+    }
+
+    let config_path = fixture.root().to_string_lossy();
+    let config_path_input =
+        intern_configuration_path(&db, config_path.as_ref(), db.metadata_version());
+    let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
+    let config = crate::DiagnosticsConfig::all_enabled();
+    let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
+
+    crate::diagnostics(&ctx)
+}
+
+/// Snapshot all diagnostics for a CFE-backed CommonModule layout.
+pub fn check_snapshot_with_cfe(
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    expected: expect_test::Expect,
+) {
+    let diagnostics = check_with_cfe(source, fixture);
+    expected.assert_eq(&format_diags(source, &diagnostics));
+}
+
 struct ConfigXmlFixtureProject {
     root: std::path::PathBuf,
     registered_modules: Vec<(String, String)>,
@@ -1018,6 +1080,10 @@ fn declared_common_module_names(config_xml: &str) -> Vec<String> {
 }
 
 fn common_module_xml(name: &str, idx: usize) -> String {
+    common_module_xml_with_privileged(name, idx, false)
+}
+
+fn common_module_xml_with_privileged(name: &str, idx: usize, privileged: bool) -> String {
     let uuid = format!("00000000-0000-0000-0000-{:012}", idx + 1);
     format!(
         r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
@@ -1030,13 +1096,39 @@ fn common_module_xml(name: &str, idx: usize) -> String {
             <Server>true</Server>
             <ExternalConnection>false</ExternalConnection>
             <ServerCall>false</ServerCall>
-            <Privileged>false</Privileged>
+            <Privileged>{}</Privileged>
             <ReturnValuesReuse>DontUse</ReturnValuesReuse>
         </Properties>
     </CommonModule>
 </MetaDataObject>"#,
-        escape_xml_text(name)
+        escape_xml_text(name),
+        privileged
     )
+}
+
+fn materialize_cfe_loader_compat(fixture: &test_fixture::CfeFixture) {
+    let mut idx = 0usize;
+    for extension in fixture.extensions() {
+        for module in extension.modules() {
+            let common_modules_dir = extension.root().join("CommonModules");
+            let ext_dir = common_modules_dir.join(module.name()).join("Ext");
+            std::fs::create_dir_all(&ext_dir).expect("create CFE CommonModule Ext directory");
+            std::fs::write(ext_dir.join("Module.bsl"), module.source())
+                .expect("write CFE CommonModule Ext body");
+
+            let privileged = extension_config_marks_module_privileged(extension.config_xml());
+            std::fs::write(
+                common_modules_dir.join(format!("{}.xml", module.name())),
+                common_module_xml_with_privileged(module.name(), idx, privileged),
+            )
+            .expect("write CFE CommonModule XML");
+            idx += 1;
+        }
+    }
+}
+
+fn extension_config_marks_module_privileged(config_xml: &str) -> bool {
+    config_xml.contains("<Privileged>true</Privileged>")
 }
 
 fn escape_xml_text(input: &str) -> String {

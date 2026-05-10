@@ -96,9 +96,10 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_snapshot_with_cfe};
     use crate::DiagnosticCode;
     use expect_test::expect;
+    use test_fixture::CfeFixtureBuilder;
 
     #[test]
     fn test_all_constructor_types_in_procedure() {
@@ -163,6 +164,33 @@ mod tests {
                   message: File system access detected (security review required)
                   severity: Major
                 FileSystemAccess @ 15:16..15:57
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
+    }
+
+    #[test]
+    fn test_cfe_harness_preserves_file_system_access_diagnostic() {
+        let code = r#"#Область ПрограммныйИнтерфейс
+// Описание
+Процедура Тест() Экспорт
+    Если Новый File(ИмяФайла) = Неопределено Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
+#КонецОбласти"#;
+        let mut builder = CfeFixtureBuilder::new("");
+        builder.add_extension("SecurityExt", "").add_extension_module(
+            "SecurityExt",
+            "РасширениеБезопасность",
+            "Процедура Заглушка() Экспорт\nКонецПроцедуры",
+        );
+
+        check_snapshot_with_cfe(
+            code,
+            builder.build(),
+            expect![[r#"
+                FileSystemAccess @ 4:10..4:30
                   message: File system access detected (security review required)
                   severity: Major"#]],
         );

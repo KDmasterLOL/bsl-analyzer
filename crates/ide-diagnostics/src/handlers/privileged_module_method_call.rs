@@ -237,11 +237,12 @@ fn find_stmt_containing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::format_diags;
+    use crate::test_utils::{check_snapshot_with_cfe, format_diags};
     use crate::DiagnosticsConfig;
     use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
+    use test_fixture::CfeFixtureBuilder;
     use vfs::{FileId, FileSet, VfsPath};
     #[test]
     fn test_no_metadata_returns_empty() {
@@ -322,6 +323,43 @@ mod tests {
             check,
         );
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_cfe_privileged_module_call_emits() {
+        let code = r#"
+#Область ПрограммныйИнтерфейс
+// Описание
+Процедура Тест() Экспорт
+    РасширениеПривилегированный.Выполнить();
+КонецПроцедуры
+#КонецОбласти
+"#;
+        let mut builder = CfeFixtureBuilder::new("");
+        builder
+            .add_extension(
+                "SecurityExt",
+                r#"<MetaDataObject>
+    <Privileged>true</Privileged>
+</MetaDataObject>"#,
+            )
+            .add_extension_module(
+                "SecurityExt",
+                "РасширениеПривилегированный",
+                r#"
+Процедура Выполнить() Экспорт
+КонецПроцедуры
+"#,
+            );
+
+        check_snapshot_with_cfe(
+            code,
+            builder.build(),
+            expect![[r#"
+                PrivilegedModuleMethodCall @ 5:5..5:44
+                  message: Проверьте обращение к методу Выполнить привилегированного модуля
+                  severity: Warning"#]],
+        );
     }
 
     #[test]

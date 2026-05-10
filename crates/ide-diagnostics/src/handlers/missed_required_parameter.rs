@@ -340,9 +340,10 @@ fn check_missing_params(method: &MethodSymbol, provided_args: &[bool]) -> Vec<St
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_snapshot_with_cfe};
     use crate::DiagnosticCode;
     use expect_test::expect;
+    use test_fixture::CfeFixtureBuilder;
 
     #[test]
     fn test_missed_required_parameter_simple() {
@@ -361,6 +362,39 @@ mod tests {
             expect![[r#"
                 MissedRequiredParameter @ 3:17..3:30
                   message: Укажите обязательный параметр 'Левый'
+                  severity: Major"#]],
+        );
+    }
+
+    #[test]
+    fn test_cfe_exported_common_module_signature_is_visible() {
+        let code = r#"
+#Область ПрограммныйИнтерфейс
+// Описание
+Процедура Тест() Экспорт
+    РасширениеApi.Требует();
+КонецПроцедуры
+#КонецОбласти
+"#;
+        let mut builder = CfeFixtureBuilder::new("");
+        builder.add_extension("ApiExt", "").add_extension_module(
+            "ApiExt",
+            "РасширениеApi",
+            r#"
+Процедура Требует(Значение) Экспорт
+КонецПроцедуры
+"#,
+        );
+
+        check_snapshot_with_cfe(
+            code,
+            builder.build(),
+            expect![[r#"
+                MissedRequiredParameter @ 5:5..5:26
+                  message: Укажите обязательный параметр 'Значение'
+                  severity: Major
+                MismatchedArgCount @ 5:5..5:26
+                  message: Неверное количество аргументов: ожидалось 1, передано 0
                   severity: Major"#]],
         );
     }

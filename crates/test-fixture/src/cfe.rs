@@ -1,0 +1,274 @@
+//! CFE extension fixture builder.
+//!
+//! The fixture writes the real extension tree used by 1C exports:
+//! `Configuration.xml` at the base root and each extension under
+//! `Extensions/<ExtName>`.
+
+use std::path::{Path, PathBuf};
+
+/// Builder for a base configuration plus visible CFE extensions.
+#[derive(Debug)]
+pub struct CfeFixtureBuilder {
+    base_config_xml: String,
+    extensions: Vec<CfeExtensionSpec>,
+}
+
+#[derive(Debug)]
+struct CfeExtensionSpec {
+    name: String,
+    config_xml: String,
+    modules: Vec<CfeModuleSpec>,
+}
+
+#[derive(Debug)]
+struct CfeModuleSpec {
+    name: String,
+    source: String,
+}
+
+/// Built CFE fixture. Owns the temporary directory and removes it on drop.
+#[derive(Debug)]
+pub struct CfeFixture {
+    root: PathBuf,
+    extensions: Vec<CfeExtension>,
+}
+
+/// Built extension fixture metadata.
+#[derive(Debug)]
+pub struct CfeExtension {
+    name: String,
+    root: PathBuf,
+    config_xml: String,
+    modules: Vec<CfeModule>,
+}
+
+/// Built extension module fixture metadata.
+#[derive(Debug)]
+pub struct CfeModule {
+    name: String,
+    path: PathBuf,
+    source: String,
+}
+
+impl CfeFixtureBuilder {
+    /// Create a fixture builder with the base `Configuration.xml`.
+    pub fn new(base_config_xml: &str) -> Self {
+        Self { base_config_xml: base_config_xml.to_string(), extensions: Vec::new() }
+    }
+
+    /// Add or replace an extension configuration.
+    pub fn add_extension(&mut self, name: &str, config_xml: &str) -> &mut Self {
+        if let Some(existing) = self.extensions.iter_mut().find(|ext| ext.name == name) {
+            existing.config_xml = config_xml.to_string();
+            return self;
+        }
+
+        self.extensions.push(CfeExtensionSpec {
+            name: name.to_string(),
+            config_xml: config_xml.to_string(),
+            modules: Vec::new(),
+        });
+        self
+    }
+
+    /// Add a CommonModule body under `Extensions/<ExtName>/CommonModules/<ModName>/Module.bsl`.
+    pub fn add_extension_module(
+        &mut self,
+        ext_name: &str,
+        module_name: &str,
+        bsl: &str,
+    ) -> &mut Self {
+        let ext = match self.extensions.iter_mut().find(|ext| ext.name == ext_name) {
+            Some(ext) => ext,
+            None => {
+                self.extensions.push(CfeExtensionSpec {
+                    name: ext_name.to_string(),
+                    config_xml: String::new(),
+                    modules: Vec::new(),
+                });
+                self.extensions.last_mut().expect("extension was just pushed")
+            }
+        };
+
+        if let Some(existing) = ext.modules.iter_mut().find(|module| module.name == module_name) {
+            existing.source = bsl.to_string();
+        } else {
+            ext.modules
+                .push(CfeModuleSpec { name: module_name.to_string(), source: bsl.to_string() });
+        }
+        self
+    }
+
+    /// Build the fixture on disk.
+    pub fn build(self) -> CfeFixture {
+        let root = next_cfe_fixture_root();
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create CFE fixture root");
+
+        let base_config_xml = if self.base_config_xml.trim().is_empty() {
+            minimal_configuration_xml("TestConfiguration")
+        } else {
+            self.base_config_xml
+        };
+        std::fs::write(root.join("Configuration.xml"), base_config_xml)
+            .expect("write base Configuration.xml");
+
+        let extensions_root = root.join("Extensions");
+        std::fs::create_dir_all(&extensions_root).expect("create Extensions directory");
+
+        let extensions = self
+            .extensions
+            .into_iter()
+            .map(|ext| {
+                let ext_root = extensions_root.join(&ext.name);
+                std::fs::create_dir_all(&ext_root).expect("create CFE extension directory");
+
+                let config_xml = if ext.config_xml.trim().is_empty() {
+                    minimal_configuration_xml(&ext.name)
+                } else {
+                    ext.config_xml
+                };
+                std::fs::write(ext_root.join("Configuration.xml"), &config_xml)
+                    .expect("write extension Configuration.xml");
+
+                let modules = ext
+                    .modules
+                    .into_iter()
+                    .map(|module| {
+                        let module_dir = ext_root.join("CommonModules").join(&module.name);
+                        std::fs::create_dir_all(&module_dir)
+                            .expect("create CFE CommonModule directory");
+                        let path = module_dir.join("Module.bsl");
+                        std::fs::write(&path, &module.source).expect("write CFE CommonModule body");
+
+                        CfeModule { name: module.name, path, source: module.source }
+                    })
+                    .collect();
+
+                CfeExtension { name: ext.name, root: ext_root, config_xml, modules }
+            })
+            .collect();
+
+        CfeFixture { root, extensions }
+    }
+}
+
+impl CfeFixture {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn extensions(&self) -> &[CfeExtension] {
+        &self.extensions
+    }
+
+    pub fn config_paths(&self) -> Vec<(Option<String>, PathBuf)> {
+        let mut paths = Vec::with_capacity(self.extensions.len() + 1);
+        paths.push((None, self.root.clone()));
+        paths.extend(self.extensions.iter().map(|ext| (Some(ext.name.clone()), ext.root.clone())));
+        paths
+    }
+}
+
+impl Drop for CfeFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl CfeExtension {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn config_xml(&self) -> &str {
+        &self.config_xml
+    }
+
+    pub fn modules(&self) -> &[CfeModule] {
+        &self.modules
+    }
+}
+
+impl CfeModule {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+fn next_cfe_fixture_root() -> PathBuf {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("bsl_analyzer_cfe_{}_{}", std::process::id(), id))
+}
+
+fn minimal_configuration_xml(name: &str) -> String {
+    format!(
+        r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>{}</Name>
+        </Properties>
+    </Configuration>
+</MetaDataObject>"#,
+        escape_xml_text(name)
+    )
+}
+
+fn escape_xml_text(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_writes_real_cfe_layout() {
+        let mut builder = CfeFixtureBuilder::new("");
+        builder.add_extension("ExtA", "").add_extension_module(
+            "ExtA",
+            "ApiModule",
+            "Процедура Метод() Экспорт\nКонецПроцедуры",
+        );
+
+        let fixture = builder.build();
+
+        assert!(fixture.root().join("Configuration.xml").is_file());
+        assert!(fixture
+            .root()
+            .join("Extensions/ExtA/CommonModules/ApiModule/Module.bsl")
+            .is_file());
+        assert_eq!(fixture.config_paths().len(), 2);
+    }
+
+    #[test]
+    fn drop_removes_temp_root() {
+        let root = {
+            let fixture = CfeFixtureBuilder::new("").build();
+            let root = fixture.root().to_path_buf();
+            assert!(root.exists());
+            root
+        };
+
+        assert!(!root.exists());
+    }
+}
