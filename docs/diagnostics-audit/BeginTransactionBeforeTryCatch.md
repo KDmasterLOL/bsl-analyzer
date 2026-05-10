@@ -172,3 +172,13 @@ diagnostics.
 шире, чем эта диагностика. Следующий практичный шаг — добавить тесты на
 пограничные syntactic cases и вести оставшиеся требования стандарта через
 соседние transaction diagnostics или общий CFG-анализ.
+
+## Закрыто Track 2
+
+**Phase D §2.3 mini-fix (commits `3d75ff2b`, `0d009baf`, 2026-05-10):**
+preprocessor-aware Begin/Try matching отложено в Track 6 — конкретный
+gap (BSL-safe both-branches `#Если/#Иначе` форма) задокументирован
+`#[ignore]`'d регрессионным тестом
+`begin_in_preproc_then_try_outside` в handler-модуле. Detection и
+эмиссия диагностики Track 2 не трогает; правило остаётся локальной
+statement-order проверкой.

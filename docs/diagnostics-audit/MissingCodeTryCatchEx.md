@@ -65,3 +65,16 @@ raise/log» (Track 6) и возможность кастомизировать L
 ## Вывод
 
 Диагностика хорошо ловит самый грубый случай, но качество обработки исключений шире, чем “пустой/не пустой блок”.
+
+## Закрыто Track 2
+
+**Phase D §2.1 + §2.2 (commit `40403b45`, 2026-05) + §2.3 mini-fix /
+closure annotations (`3d75ff2b`, `0d009baf`, 2026-05-10):** detection
+переехал на classifier-driven dispatch через
+`hir::catch_class::classify_catch_body` (six-class:
+Empty/RaisesOnly/LogsOnly/Mixed/RollbackOnly/Silent), потребляющий
+`Category::Logging` из единого `bsl_platform::security::registry`
+(Phase A §1.1, `b51c38b8`). Emit для Empty/Silent/RollbackOnly с
+class-specific сообщениями; RaisesOnly/LogsOnly/Mixed — корректные
+пути восстановления. `commentAsCode` опция применяется только к
+ветке Empty через AST (HIR не хранит trivia).
