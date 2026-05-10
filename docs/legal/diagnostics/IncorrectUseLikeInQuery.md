@@ -29,7 +29,7 @@ concatenation in the query text.
 Current diagnostic-layer implementation in
 `crates/ide-diagnostics/src/handlers/incorrect_use_like_in_query.rs` is local:
 
-- `sdbl_hir` emits `IncorrectUseLikeInQuery` with an SDBL range;
+- `sdbl_hir` emits `SdblDiagnostic::LikeUsage { kind: LikeUsageKind::Incorrect }` with an SDBL range (Track 2 §4 Slice 4: a single variant carries both `UsingLikeInQuery` and `IncorrectUseLikeInQuery` BSL-LS rules, discriminated by `kind`);
 - the IDE layer maps that range back into the BSL source and formats the
   message;
 - local tests cover valid and invalid pattern forms.
