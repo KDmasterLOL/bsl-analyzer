@@ -42,13 +42,13 @@ impl LoweringContext {
                 // Lower first query as main, collect diagnostics
                 if let Some(main_query) = queries.first() {
                     self.scope.push_frame();
-                    let mut main_hir = self.lower_query(main_query, false, has_union_siblings);
+                    let mut main_hir = self.lower_query(main_query, has_union_siblings);
                     self.scope.pop_frame();
 
                     // Lower remaining queries as UNION queries
                     for union_query in queries.iter().skip(1) {
                         self.scope.push_frame();
-                        let union_hir = self.lower_query(union_query, true, true);
+                        let union_hir = self.lower_query(union_query, true);
                         self.scope.pop_frame();
                         main_hir.diagnostics.extend(union_hir.diagnostics);
                     }

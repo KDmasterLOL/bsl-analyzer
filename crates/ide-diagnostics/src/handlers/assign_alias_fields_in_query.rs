@@ -26,10 +26,11 @@
 //! ```
 //!
 //! ## Rules
-//! - Only subqueries are checked (not main queries)
-//! - Asterisk fields (`*`, `Table.*`) don't require aliases
-//! - AS/КАК keyword must be explicit (implicit aliases are forbidden)
-//! - UNION: only first query in UNION is checked
+//! - Every SELECT clause is checked uniformly — main, UNION parts, and
+//!   subqueries (deliberate divergence from BSL-LS, which historically
+//!   excluded UNION secondary queries).
+//! - Asterisk fields (`*`, `Table.*`) don't require aliases.
+//! - AS/КАК keyword must be explicit (implicit aliases are forbidden).
 //!
 //! ## Implementation
 //!
@@ -269,12 +270,12 @@ mod tests {
 
     #[test]
     fn test_union_query() {
-        // UNION query - first query checked, UNION parts not checked
+        // UNION query — Track 2 §4 Slice 2: alias check applies uniformly to
+        // main and UNION parts (deliberate divergence from BSL-LS).
         let query = "SELECT Name AS N FROM Products UNION SELECT Title FROM Services";
         let diagnostics = check_standalone_query(query);
-        // First query OK (Name AS N), second query (Title without alias) not checked
-        // Because we only check main query, not UNION queries
-        assert_eq!(diagnostics.len(), 0);
+        // First SELECT OK (Name AS N); UNION SELECT Title without alias triggers.
+        assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]
@@ -308,15 +309,10 @@ mod tests {
 
         let diagnostics = check_standalone_query(query);
 
-        // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
-        // - Товары.Артикул without alias
-        // - Товары.Цена ЦенаПродажи without AS keyword
-        // UNION queries are skipped
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Expected 2 diagnostics from first SELECT (UNION queries skipped)"
-        );
+        // Track 2 §4 Slice 2: alias check covers UNION parts uniformly.
+        // First SELECT: 2 diagnostics (Товары.Артикул without alias + Товары.Цена ЦенаПродажи implicit alias).
+        // UNION SELECT: 3 diagnostics (Услуги.Артикул × 2 + Услуги.Тариф, all without alias).
+        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics across main + UNION SELECTs");
     }
 
     #[test]
@@ -427,15 +423,9 @@ mod tests {
 
         let diagnostics = check_standalone_query(query);
 
-        // Should have 2 diagnostics from first SELECT (before UNION):
-        // - Товары.Артикул without alias
-        // - Товары.Цена ЦенаПродажи without AS keyword
-        // UNION queries are skipped
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Expected 2 diagnostics from first SELECT (UNION queries skipped)"
-        );
+        // Track 2 §4 Slice 2: same fixture, alias check now covers UNION uniformly.
+        // First SELECT: 2 diagnostics; UNION SELECT: 3 diagnostics.
+        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics across main + UNION SELECTs");
     }
 
     #[test]
@@ -554,11 +544,10 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let (diagnostics, _) = check_diagnostic(code, config);
 
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Expected 2 diagnostics from first SELECT (UNION skipped)"
-        );
+        // Track 2 §4 Slice 2: alias check now covers UNION parts uniformly.
+        // First SELECT: 2 diagnostics (Валюты.Ссылка no alias + Валюты.Код Код implicit).
+        // UNION SELECT: 3 diagnostics (Валюты.Ссылка × 2 + Валюты.Код, all no alias).
+        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics across main + UNION SELECTs");
     }
 
     /// Second query (separate statement) also generates diagnostics independently.
@@ -603,7 +592,8 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let (diagnostics, _) = check_diagnostic(code, config);
 
-        assert_eq!(diagnostics.len(), 4, "Expected 4 diagnostics (2 per query)");
+        // Track 2 §4 Slice 2: 5 diagnostics per query (main 2 + UNION 3) × 2 queries = 10.
+        assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics (5 per query)");
     }
 
     /// Nested subquery - field inside subquery without alias triggers diagnostic.
@@ -623,6 +613,23 @@ mod tests {
         let (diagnostics, _) = check_diagnostic(code, config);
 
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic: Валюты.Ссылка in subquery");
+    }
+
+    /// Track 2 §4 Slice 2 regression guard — minimal UNION fixture.
+    ///
+    /// Main SELECT is fully aliased; UNION part has exactly one missing alias.
+    /// Pre-Slice 2 the UNION part was skipped, so the count was 0; the post-fix
+    /// count is 1. A future regression that re-introduces the UNION skip would
+    /// flip this back to 0 and trip the assertion.
+    #[test]
+    fn test_union_part_emits_when_alias_missing() {
+        let query = "SELECT Name AS Name FROM Products UNION ALL SELECT Title FROM Services";
+        let diagnostics = check_standalone_query(query);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "UNION part with a missing alias must emit exactly one diagnostic"
+        );
     }
 
     /// Query with leading newline and field without alias.

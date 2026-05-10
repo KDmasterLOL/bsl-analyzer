@@ -90,7 +90,7 @@ impl LoweringContext {
             let queries: Vec<_> = subquery.queries().collect();
             let has_union_siblings = queries.len() > 1;
 
-            for (idx, query) in queries.into_iter().enumerate() {
+            for query in queries {
                 // NOTE: Diagnostic for JOINs inside subquery is handled by lower_query()
                 // which calls lower_from_clause() -> lower_data_source_in_from()
                 // No need to check here to avoid duplication
@@ -99,8 +99,7 @@ impl LoweringContext {
                 self.scope.push_frame();
 
                 // Lower the nested query to HIR
-                // First query (idx=0) is the main query, rest are UNION queries
-                let nested_hir = self.lower_query(&query, idx > 0, has_union_siblings);
+                let nested_hir = self.lower_query(&query, has_union_siblings);
 
                 // Pop scope frame
                 self.scope.pop_frame();
