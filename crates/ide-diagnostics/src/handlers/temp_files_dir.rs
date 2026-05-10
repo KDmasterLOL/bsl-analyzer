@@ -50,6 +50,7 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::Severity;
+    use expect_test::expect;
     #[test]
     fn test_temp_files_dir_russian() {
         let code = r#"
@@ -61,9 +62,16 @@ mod tests {
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TempFilesDir).collect();
 
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].severity, Severity::Warning);
-        assert!(diags[0].message.contains("КаталогВременныхФайлов"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TempFilesDir,
+            expect![[r#"
+            TempFilesDir @ 3:15..3:37
+              message: Не рекомендуемый вызов функции КаталогВременныхФайлов()
+              severity: Warning"#]],
+        );
+        assert_eq!(diags[0].severity, Severity::Warning); // snapshot-skip: severity assertion intentionally retained.
+        assert!(diags[0].message.contains("КаталогВременныхФайлов")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -77,8 +85,15 @@ EndProcedure
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TempFilesDir).collect();
 
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("TempFilesDir"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TempFilesDir,
+            expect![[r#"
+            TempFilesDir @ 3:15..3:27
+              message: Not recommended TempFilesDir() call
+              severity: Warning"#]],
+        );
+        assert!(diags[0].message.contains("TempFilesDir")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -88,11 +103,7 @@ EndProcedure
     Каталог = Модуль.КаталогВременныхФайлов();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TempFilesDir).collect();
-
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::TempFilesDir, expect![[r#""#]]);
     }
 
     #[test]
@@ -104,11 +115,20 @@ EndProcedure
     К3 = КаталогВременныхФайлов();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TempFilesDir).collect();
-
-        assert_eq!(diags.len(), 3);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TempFilesDir,
+            expect![[r#"
+            TempFilesDir @ 3:10..3:32
+              message: Не рекомендуемый вызов функции КаталогВременныхФайлов()
+              severity: Warning
+            TempFilesDir @ 4:10..4:32
+              message: Не рекомендуемый вызов функции КаталогВременныхФайлов()
+              severity: Warning
+            TempFilesDir @ 5:10..5:32
+              message: Не рекомендуемый вызов функции КаталогВременныхФайлов()
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -124,14 +144,16 @@ Function Test()
     Catalog = TempFilesDir(); // Срабатывание здесь
     FileName = Str(New UUID);
 EndFunction"#;
-        let diagnostics = check_hir_diagnostic(input);
-
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TempFilesDir).collect();
-
-        assert_eq!(diags.len(), 2, "Expected 2 diagnostics");
-
-        assert_diagnostic_range(input, diags[0], 1, 14, 36);
-        assert_diagnostic_range(input, diags[1], 8, 14, 26);
+        check_diagnostics_snapshot_for(
+            input,
+            DiagnosticCode::TempFilesDir,
+            expect![[r#"
+            TempFilesDir @ 2:15..2:37
+              message: Не рекомендуемый вызов функции КаталогВременныхФайлов()
+              severity: Warning
+            TempFilesDir @ 9:15..9:27
+              message: Not recommended TempFilesDir() call
+              severity: Warning"#]],
+        );
     }
 }

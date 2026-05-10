@@ -108,12 +108,9 @@ pub fn from_hir(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
-
-    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
-        diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsageWriteLogEvent).collect()
-    }
+    use expect_test::expect;
 
     #[test]
     fn test_wrong_number_params() {
@@ -122,10 +119,14 @@ mod tests {
     ЗаписьЖурналаРегистрации("Событие");
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("параметров"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 3:5..3:40
+              message: Неверное число параметров метода
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -136,10 +137,14 @@ mod tests {
     ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка);
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("параметров"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 3:5..3:74
+              message: Неверное число параметров метода
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -150,10 +155,14 @@ mod tests {
     ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , );
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("параметров"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 3:5..3:78
+              message: Неверное число параметров метода
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -165,10 +174,14 @@ mod tests {
       , , ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("2й параметр"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 3:5..5:62
+              message: Не указан 2й параметр с типом "УровеньЖурналаРегистрации"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -178,10 +191,14 @@ mod tests {
     ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , , );
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("5й параметр"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 3:5..3:80
+              message: Не указан 5й параметр "Комментарий"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -196,10 +213,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("Ошибка"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:9..7:21
+              message: Нужно указывать уровень "Ошибка" при записи в журнал регистрации внутри блока Исключение-КонецПопытки
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -214,10 +235,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:9..7:30
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -233,10 +258,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:9..7:29
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -253,10 +282,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 7:9..8:50
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -272,10 +305,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:9..7:42
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -295,9 +332,7 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -309,9 +344,7 @@ mod tests {
         ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -328,9 +361,7 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -345,9 +376,7 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -365,9 +394,7 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -384,10 +411,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:9..8:62
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -405,10 +436,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 7:9..9:28
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -428,10 +463,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 8:9..10:28
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -452,10 +491,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 7:9..12:36
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -468,9 +511,7 @@ mod tests {
         ПодробноеПредставлениеОшибки);
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -487,9 +528,7 @@ mod tests {
         ТекстЗаписи);
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -513,9 +552,7 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -539,9 +576,7 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -563,9 +598,7 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -575,9 +608,14 @@ Procedure Test()
     WriteLogEvent("Event");
 EndProcedure
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 3:5..3:27
+              message: Неверное число параметров метода
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -587,9 +625,14 @@ EndProcedure
     ЗАПИСЬЖУРНАЛАРЕГИСТРАЦИИ("Событие");
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 3:5..3:40
+              message: Неверное число параметров метода
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -606,9 +649,7 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -625,10 +666,14 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:9..8:78
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -646,10 +691,14 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 7:9..9:28
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -669,10 +718,14 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 8:9..10:28
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -693,10 +746,14 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsageWriteLogEvent,
+            expect![[r#"
+            UsageWriteLogEvent @ 7:9..12:36
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -713,9 +770,7 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -731,9 +786,7 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -746,9 +799,7 @@ EndProcedure
         "Ошибка: " + ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -772,9 +823,7 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 
     #[test]
@@ -797,8 +846,6 @@ EndProcedure
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 }

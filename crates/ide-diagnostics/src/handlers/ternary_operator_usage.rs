@@ -31,12 +31,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, DiagnosticsConfig};
-
-    fn config_with_ternary_enabled() -> DiagnosticsConfig {
-        let mut config = DiagnosticsConfig::default();
-        config.enabled.push(DiagnosticCode::TernaryOperatorUsage);
-        config
-    }
+    use expect_test::expect;
 
     #[test]
     fn test_from_java_fixture() {
@@ -59,22 +54,23 @@ mod tests {
 Иначе
     Возврат Ложь;
 КонецЕсли;"#;
-        let diagnostics =
-            check_hir_diagnostic_with_config(code, config_with_ternary_enabled(), |ctx| {
-                crate::diagnostics(ctx)
-            });
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
-
-        assert_eq!(diags.len(), 4);
-        // Expected range: (1, 11, 10, 13) - 0-based line numbers
-        assert_diagnostic_range_multiline(code, diags[0], 1, 11, 10, 13);
-        // Expected range: (3, 13, 9, 14)
-        assert_diagnostic_range_multiline(code, diags[1], 3, 13, 9, 14);
-        // Expected range: (12, 9, 12, 85)
-        assert_diagnostic_range(code, diags[2], 12, 9, 85);
-        // Expected range: (14, 5, 14, 60)
-        assert_diagnostic_range(code, diags[3], 14, 5, 60);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TernaryOperatorUsage,
+            expect![[r#"
+                TernaryOperatorUsage @ 2:12..11:14
+                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+                  severity: Information
+                TernaryOperatorUsage @ 4:14..10:15
+                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+                  severity: Information
+                TernaryOperatorUsage @ 13:10..13:86
+                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+                  severity: Information
+                TernaryOperatorUsage @ 15:6..15:61
+                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -82,14 +78,14 @@ mod tests {
         let code = r#"Процедура Тест()
     Результат = ?(Условие, Истина, Ложь);
 КонецПроцедуры"#;
-        let diagnostics =
-            check_hir_diagnostic_with_config(code, config_with_ternary_enabled(), |ctx| {
-                crate::diagnostics(ctx)
-            });
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
-
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TernaryOperatorUsage,
+            expect![[r#"
+                TernaryOperatorUsage @ 2:17..2:41
+                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -97,14 +93,17 @@ mod tests {
         let code = r#"Процедура Тест()
     Результат = ?(Условие1, ?(Условие2, 1, 2), 3);
 КонецПроцедуры"#;
-        let diagnostics =
-            check_hir_diagnostic_with_config(code, config_with_ternary_enabled(), |ctx| {
-                crate::diagnostics(ctx)
-            });
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
-
-        assert_eq!(diags.len(), 2, "Should find both outer and inner ternary operators");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TernaryOperatorUsage,
+            expect![[r#"
+                TernaryOperatorUsage @ 2:17..2:50
+                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+                  severity: Information
+                TernaryOperatorUsage @ 2:29..2:46
+                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -120,6 +119,6 @@ mod tests {
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
 
-        assert_eq!(diags.len(), 0, "Should be disabled by default");
+        assert_eq!(diags.len(), 0, "Should be disabled by default"); // snapshot-skip: custom default-config assertion intentionally retained.
     }
 }

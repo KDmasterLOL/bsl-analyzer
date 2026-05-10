@@ -122,29 +122,46 @@ fn get_boolean_literal(expr: &SyntaxNode) -> Option<BooleanValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_direct_ternary() {
         let code = "А = ?(Б = 1, Истина, Ложь);";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::UselessTernaryOperator);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#"
+            UselessTernaryOperator @ 1:5..1:27
+              message: Бесполезный тернарный оператор
+              severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_inverted_ternary() {
         let code = "А = ?(Б = 0, False, True);";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#"
+            UselessTernaryOperator @ 1:5..1:26
+              message: Бесполезный тернарный оператор
+              severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_condition_is_boolean() {
         let code = "А = ?(истина, 1, 0);";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#"
+            UselessTernaryOperator @ 1:5..1:20
+              message: Бесполезный тернарный оператор
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -152,30 +169,31 @@ mod tests {
         let code = r#"ОбластьМакета.Параметры.ДебетСубСчета = ОбластьМакета.Параметры.ДебетСубСчета
 					+ ?(ПустаяСтрока(ОбластьМакета.Параметры.ДебетСубСчета), "", ", ")
 					+ СчетДт;"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Valid ternary should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_single_boolean_branch_is_not_useless() {
         // null-guard: ?(obj = Неопределено, Ложь, obj.Свойство)
         let code = r#"А = ?(СтрокаПредмета.Предмет = Неопределено, Ложь, СтрокаПредмета.Предмет.ПометкаУдаления);"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Single boolean branch (null-guard) should not trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#""#]],
         );
     }
 
     #[test]
     fn test_mixed_boolean_nonboolean_not_useless() {
         let code = "А = ?(Б = 1, True, 1);";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Single boolean branch with non-boolean should not trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#""#]],
         );
     }
 
@@ -200,20 +218,28 @@ mod tests {
 						+ ?(ПустаяСтрока(ОбластьМакета.Параметры.ДебетСубСчета), "", ", ")
 						+ СчетДт;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UselessTernaryOperator)
-            .collect();
-
-        assert_eq!(diags.len(), 6);
-
-        assert_diagnostic_range(code, diags[0], 1, 4, 26);
-        assert_diagnostic_range(code, diags[1], 2, 4, 25);
-        assert_diagnostic_range(code, diags[2], 3, 4, 26);
-        assert_diagnostic_range(code, diags[3], 4, 4, 25);
-        assert_diagnostic_range(code, diags[4], 5, 4, 19);
-        assert_diagnostic_range(code, diags[5], 6, 4, 18);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UselessTernaryOperator,
+            expect![[r#"
+            UselessTernaryOperator @ 2:5..2:27
+              message: Бесполезный тернарный оператор
+              severity: Hint
+            UselessTernaryOperator @ 3:5..3:26
+              message: Бесполезный тернарный оператор
+              severity: Hint
+            UselessTernaryOperator @ 4:5..4:27
+              message: Бесполезный тернарный оператор
+              severity: Hint
+            UselessTernaryOperator @ 5:5..5:26
+              message: Бесполезный тернарный оператор
+              severity: Hint
+            UselessTernaryOperator @ 6:5..6:20
+              message: Бесполезный тернарный оператор
+              severity: Hint
+            UselessTernaryOperator @ 7:5..7:19
+              message: Бесполезный тернарный оператор
+              severity: Hint"#]],
+        );
     }
 }

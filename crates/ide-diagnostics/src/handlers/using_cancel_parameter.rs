@@ -30,19 +30,23 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_cancel_assign_false() {
         let code = r#"Процедура Обработчик(Отказ)
     Отказ = Ложь;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 1, 4, 17);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingCancelParameter,
+            expect![[r#"
+            UsingCancelParameter @ 2:5..2:18
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -51,10 +55,11 @@ mod tests {
     Отказ = Истина;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
-        assert!(diags.is_empty(), "Assigning True should be allowed");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingCancelParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -63,10 +68,11 @@ mod tests {
     Отказ = Отказ ИЛИ НашаПроверка();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
-        assert!(diags.is_empty(), "OR with Cancel should be allowed");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingCancelParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -75,10 +81,11 @@ mod tests {
     Отказ = НашаПроверка() ИЛИ Отказ;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
-        assert!(diags.is_empty(), "expr OR Cancel should be allowed");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingCancelParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -87,10 +94,14 @@ mod tests {
     Отказ = Отказ И НашаПроверка();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
-        assert_eq!(diags.len(), 1, "AND with Cancel should NOT be allowed");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingCancelParameter,
+            expect![[r#"
+            UsingCancelParameter @ 2:5..2:36
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -99,10 +110,14 @@ mod tests {
     Отказ = Метод(Отказ);
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
-        assert_eq!(diags.len(), 1, "Method call without OR should not be allowed");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingCancelParameter,
+            expect![[r#"
+            UsingCancelParameter @ 2:5..2:26
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -111,10 +126,11 @@ mod tests {
     Отказ = Ложь;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
-        assert!(diags.is_empty(), "No Cancel param - no diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingCancelParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -179,17 +195,28 @@ mod tests {
 
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
-
-        assert_eq!(diags.len(), 6, "Expected 6 diagnostics ");
-
-        assert_diagnostic_range(code, diags[0], 7, 8, 21);
-        assert_diagnostic_range(code, diags[1], 14, 4, 27);
-        assert_diagnostic_range(code, diags[2], 42, 4, 65);
-        assert_diagnostic_range(code, diags[3], 43, 4, 65);
-        assert_diagnostic_range(code, diags[4], 44, 4, 65);
-        assert_diagnostic_range(code, diags[5], 45, 4, 69);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingCancelParameter,
+            expect![[r#"
+            UsingCancelParameter @ 8:9..8:22
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning
+            UsingCancelParameter @ 15:5..15:28
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning
+            UsingCancelParameter @ 43:5..43:66
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning
+            UsingCancelParameter @ 44:5..44:66
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning
+            UsingCancelParameter @ 45:5..45:66
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning
+            UsingCancelParameter @ 46:5..46:70
+              message: Неправильное использование параметра "Отказ"
+              severity: Warning"#]],
+        );
     }
 }

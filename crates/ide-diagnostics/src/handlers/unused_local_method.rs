@@ -211,9 +211,10 @@ fn is_handler_method(name_lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{
-        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
+        check_diagnostics_snapshot_for, check_hir_diagnostic, check_hir_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_detects_unused_local_methods() {
         let code = r#"
@@ -294,20 +295,17 @@ mod tests {
 СВызовами2();
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
-
-        assert_eq!(
-            unused_diags.len(),
-            2,
-            "Expected 2 diagnostics, got {}. Diagnostics: {:?}",
-            unused_diags.len(),
-            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalMethod,
+            expect![[r#"
+            UnusedLocalMethod @ 2:11..2:25
+              message: Неиспользуемый локальный метод "НеИспользуется"
+              severity: Warning
+            UnusedLocalMethod @ 71:11..71:42
+              message: Неиспользуемый локальный метод "ПодключаемаяМоя_НужнаяПроцедура"
+              severity: Warning"#]],
         );
-
-        assert_diagnostic_range(code, unused_diags[0], 1, 10, 24);
-        assert_diagnostic_range(code, unused_diags[1], 70, 10, 41);
     }
 
     #[test]
@@ -405,15 +403,17 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
         assert_eq!(
+            // snapshot-skip: custom configuration assertion intentionally retained.
             unused_diags.len(),
             3,
             "Expected 3 diagnostics with custom prefixes, got {}",
             unused_diags.len()
         );
 
-        assert_diagnostic_range(code, unused_diags[0], 1, 10, 24);
-        assert_diagnostic_range(code, unused_diags[1], 60, 10, 40);
-        assert_diagnostic_range(code, unused_diags[2], 63, 10, 39);
+        crate::test_utils::assert_diagnostic_range(code, unused_diags[0], 1, 10, 24); // snapshot-skip: custom configuration range assertion intentionally retained.
+        crate::test_utils::assert_diagnostic_range(code, unused_diags[1], 60, 10, 40); // snapshot-skip: custom configuration range assertion intentionally retained.
+        crate::test_utils::assert_diagnostic_range(code, unused_diags[2], 63, 10, 39);
+        // snapshot-skip: custom configuration range assertion intentionally retained.
     }
 
     #[test]
@@ -430,8 +430,15 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
-        assert_eq!(unused_diags.len(), 1);
-        assert!(unused_diags[0].message.contains("ЛокальнаяПроцедура"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalMethod,
+            expect![[r#"
+            UnusedLocalMethod @ 5:11..5:29
+              message: Неиспользуемый локальный метод "ЛокальнаяПроцедура"
+              severity: Warning"#]],
+        );
+        assert!(unused_diags[0].message.contains("ЛокальнаяПроцедура")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -449,8 +456,15 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
-        assert_eq!(unused_diags.len(), 1);
-        assert!(unused_diags[0].message.contains("Главная"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalMethod,
+            expect![[r#"
+            UnusedLocalMethod @ 5:11..5:18
+              message: Неиспользуемый локальный метод "Главная"
+              severity: Warning"#]],
+        );
+        assert!(unused_diags[0].message.contains("Главная")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -473,11 +487,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
-
-        assert_eq!(unused_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalMethod, expect![[r#""#]]);
     }
 
     #[test]
@@ -490,11 +500,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
-
-        assert_eq!(unused_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalMethod, expect![[r#""#]]);
     }
 
     #[test]
@@ -507,11 +513,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
-
-        assert_eq!(unused_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalMethod, expect![[r#""#]]);
     }
 
     #[test]
@@ -530,11 +532,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
-
-        assert_eq!(unused_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalMethod, expect![[r#""#]]);
     }
 
     #[test]
@@ -546,11 +544,7 @@ mod tests {
 ВызываемаяПроцедура();
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
-
-        assert_eq!(unused_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalMethod, expect![[r#""#]]);
     }
 
     #[test]
@@ -600,8 +594,8 @@ mod tests {
 
         // createPOST — HTTP service handler, should not be flagged
         // НеИспользуемая — not a handler, should be flagged
-        assert_eq!(unused_diags.len(), 1);
-        assert!(unused_diags[0].message.contains("НеИспользуемая"));
+        assert_eq!(unused_diags.len(), 1); // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
+        assert!(unused_diags[0].message.contains("НеИспользуемая")); // snapshot-skip: metadata-backed message assertion intentionally retained.
     }
 
     #[test]
@@ -659,13 +653,14 @@ mod tests {
         // ПриСозданииНаСервере — form event handler, should not be flagged
         // НеИспользуемая — not a handler, should be flagged
         assert_eq!(
+            // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
             unused_diags.len(),
             1,
             "Expected 1 diagnostic, got {}. Diagnostics: {:?}",
             unused_diags.len(),
             unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
-        assert!(unused_diags[0].message.contains("НеИспользуемая"));
+        assert!(unused_diags[0].message.contains("НеИспользуемая")); // snapshot-skip: metadata-backed message assertion intentionally retained.
     }
 
     #[test]
@@ -683,7 +678,14 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
-        assert_eq!(unused_diags.len(), 1);
-        assert!(unused_diags[0].message.contains("Главная"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalMethod,
+            expect![[r#"
+            UnusedLocalMethod @ 5:11..5:18
+              message: Неиспользуемый локальный метод "Главная"
+              severity: Warning"#]],
+        );
+        assert!(unused_diags[0].message.contains("Главная")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 }

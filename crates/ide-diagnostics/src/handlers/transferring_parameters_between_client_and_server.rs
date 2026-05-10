@@ -196,7 +196,8 @@ fn collect_assigned_from_stmt(stmt: &Stmt, body: &hir::Body, assigned: &mut FxHa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     #[test]
     fn test_by_ref_param_in_server_method_called_from_client() {
         let code = r#"&НаКлиенте
@@ -247,15 +248,14 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        let target_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::TransferringParametersBetweenClientAndServer)
-            .collect();
-
-        assert_eq!(target_diags.len(), 1, "Expected 1 diagnostic, got {}", target_diags.len());
-
-        assert_diagnostic_range(code, target_diags[0], 6, 18, 24);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TransferringParametersBetweenClientAndServer,
+            expect![[r#"
+                TransferringParametersBetweenClientAndServer @ 7:19..7:25
+                  message: Установите модификатор "Знач" для параметра Парам1 метода Сервер1
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -272,13 +272,11 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        let target_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::TransferringParametersBetweenClientAndServer)
-            .collect();
-
-        assert_eq!(target_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TransferringParametersBetweenClientAndServer,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -295,13 +293,11 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        let target_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::TransferringParametersBetweenClientAndServer)
-            .collect();
-
-        assert_eq!(target_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TransferringParametersBetweenClientAndServer,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -318,12 +314,10 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        let target_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::TransferringParametersBetweenClientAndServer)
-            .collect();
-
-        assert_eq!(target_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TransferringParametersBetweenClientAndServer,
+            expect![[r#""#]],
+        );
     }
 }

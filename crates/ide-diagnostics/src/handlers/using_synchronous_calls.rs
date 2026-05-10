@@ -49,7 +49,8 @@ pub fn from_hir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     #[test]
     fn test_sync_question() {
         let code = r#"Процедура ТестВопрос()
@@ -61,14 +62,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        // Вопрос (multiline call): line 2 col 12 -> line 3 col 57
-        assert_diagnostic_range_multiline(code, sync_diags[0], 2, 12, 3, 57);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:13..4:58
+              message: Вместо синхронного вызова "Вопрос" необходимо использовать "ПоказатьВопрос"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -77,13 +78,14 @@ mod tests {
     Предупреждение(НСтр("ru = 'Выберите документ!'; en = 'Select a document!'"), 10);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 1, 4, 84);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 2:5..2:85
+              message: Вместо синхронного вызова "Предупреждение" необходимо использовать "ПоказатьПредупреждение"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -95,13 +97,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 3, 4, 26);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 4:5..4:27
+              message: Вместо синхронного вызова "ОткрытьЗначение" необходимо использовать "ПоказатьЗначение"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -117,13 +120,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 5, 9, 58);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 6:10..6:59
+              message: Вместо синхронного вызова "ВвестиДату" необходимо использовать "ПоказатьВводДаты"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -145,13 +149,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 11, 9, 67);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 12:10..12:68
+              message: Вместо синхронного вызова "ВвестиЗначение" необходимо использовать "ПоказатьВводЗначения"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -166,13 +171,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 4, 9, 50);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 5:10..5:51
+              message: Вместо синхронного вызова "ВвестиСтроку" необходимо использовать "ПоказатьВводСтроки"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -186,13 +192,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 3, 9, 61);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 4:10..4:62
+              message: Вместо синхронного вызова "ВвестиЧисло" необходимо использовать "ПоказатьВводЧисла"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -203,13 +210,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 4, 50);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:5..3:51
+              message: Вместо синхронного вызова "УстановитьВнешнююКомпоненту" необходимо использовать "НачатьУстановкуВнешнейКомпоненты"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -220,13 +228,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 4, 33);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:5..3:34
+              message: Вместо синхронного вызова "ОткрытьФормуМодально" необходимо использовать "ОткрытьФорму"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -239,13 +248,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 3, 20, 56);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 4:21..4:57
+              message: Вместо синхронного вызова "УстановитьРасширениеРаботыСФайлами" необходимо использовать "НачатьУстановкуРасширенияРаботыСФайлами"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -258,13 +268,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 3, 20, 62);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 4:21..4:63
+              message: Вместо синхронного вызова "УстановитьРасширениеРаботыСКриптографией" необходимо использовать "НачатьУстановкуРасширенияРаботыСКриптографией"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -279,14 +290,17 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 2);
-        assert_diagnostic_range(code, sync_diags[0], 2, 12, 54);
-        assert_diagnostic_range(code, sync_diags[1], 3, 8, 129);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:13..3:55
+              message: Вместо синхронного вызова "ПодключитьРасширениеРаботыСКриптографией" необходимо использовать "НачатьПодключениеРасширенияРаботыСКриптографией"
+              severity: Warning
+            UsingSynchronousCalls @ 4:9..4:130
+              message: Вместо синхронного вызова "Предупреждение" необходимо использовать "ПоказатьПредупреждение"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -301,14 +315,17 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 2);
-        assert_diagnostic_range(code, sync_diags[0], 2, 12, 48);
-        assert_diagnostic_range(code, sync_diags[1], 3, 8, 109);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:13..3:49
+              message: Вместо синхронного вызова "ПодключитьРасширениеРаботыСФайлами" необходимо использовать "НачатьПодключениеРасширенияРаботыСФайлами"
+              severity: Warning
+            UsingSynchronousCalls @ 4:9..4:110
+              message: Вместо синхронного вызова "Предупреждение" необходимо использовать "ПоказатьПредупреждение"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -321,13 +338,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 4, 4, 88);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 5:5..5:89
+              message: Вместо синхронного вызова "ПоместитьФайл" необходимо использовать "НачатьПомещениеФайла"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -338,13 +356,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 4, 68);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:5..3:69
+              message: Вместо синхронного вызова "КопироватьФайл" необходимо использовать "НачатьКопированиеФайла"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -355,13 +374,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 4, 69);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:5..3:70
+              message: Вместо синхронного вызова "ПереместитьФайл" необходимо использовать "НачатьПеремещениеФайла"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -372,13 +392,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 21, 51);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:22..3:52
+              message: Вместо синхронного вызова "НайтиФайлы" необходимо использовать "НачатьПоискФайлов"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -394,13 +415,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 4, 8, 37);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 5:9..5:38
+              message: Вместо синхронного вызова "УдалитьФайлы" необходимо использовать "НачатьУдалениеФайлов"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -411,13 +433,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 4, 29);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:5..3:30
+              message: Вместо синхронного вызова "СоздатьКаталог" необходимо использовать "НачатьСозданиеКаталога"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -428,13 +451,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 16, 40);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:17..3:41
+              message: Вместо синхронного вызова "КаталогВременныхФайлов" необходимо использовать "НачатьПолучениеКаталогаВременныхФайлов"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -445,13 +469,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 16, 35);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:17..3:36
+              message: Вместо синхронного вызова "КаталогДокументов" необходимо использовать "НачатьПолучениеКаталогаДокументов"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -462,13 +487,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 16, 50);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:17..3:51
+              message: Вместо синхронного вызова "РабочийКаталогДанныхПользователя" необходимо использовать "НачатьПолучениеРабочегоКаталогаДанныхПользователя"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -484,13 +510,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 2, 16, 89);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 3:17..3:90
+              message: Вместо синхронного вызова "ПолучитьФайлы" необходимо использовать "НачатьПолучениеФайлов"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -502,13 +529,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 3, 16, 64);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 4:17..4:65
+              message: Вместо синхронного вызова "ПоместитьФайлы" необходимо использовать "НачатьПомещениеФайлов"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -532,13 +560,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 12, 12, 59);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 13:13..13:60
+              message: Вместо синхронного вызова "ЗапроситьРазрешениеПользователя" необходимо использовать "НачатьЗапросРазрешенияПользователя"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -550,13 +579,14 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 1);
-        assert_diagnostic_range(code, sync_diags[0], 3, 4, 38);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#"
+            UsingSynchronousCalls @ 4:5..4:39
+              message: Вместо синхронного вызова "ЗапуститьПриложение" необходимо использовать "НачатьЗапускПриложения"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -577,12 +607,11 @@ Procedure AtServerMethod()
     RunApp("app.exe");
 EndProcedure
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 0, "Server methods should not trigger UsingSynchronousCalls");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -596,11 +625,10 @@ EndProcedure
     НачатьЗапускПриложения(Оповещение, "app.exe");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let sync_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
-            .collect();
-        assert_eq!(sync_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingSynchronousCalls,
+            expect![[r#""#]],
+        );
     }
 }

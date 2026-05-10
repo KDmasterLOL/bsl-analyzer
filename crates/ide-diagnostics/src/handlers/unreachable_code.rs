@@ -339,10 +339,9 @@ fn message_ru() -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{
-        assert_diagnostic_range, assert_diagnostic_range_multiline, check_ast_diagnostic,
-    };
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_unreachable_after_return() {
@@ -352,12 +351,14 @@ mod tests {
     Сообщить("Недостижимо");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1);
-        assert_diagnostic_range(code, unreachable_diags[0], 3, 4, 27);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..4:28
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
@@ -368,12 +369,14 @@ mod tests {
     Сообщить("Недостижимо");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1);
-        assert_diagnostic_range(code, unreachable_diags[0], 3, 4, 27);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..4:28
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
@@ -386,12 +389,14 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1);
-        assert_diagnostic_range(code, unreachable_diags[0], 4, 8, 31);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 5:9..5:32
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
@@ -404,12 +409,14 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1);
-        assert_diagnostic_range(code, unreachable_diags[0], 4, 8, 31);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 5:9..5:32
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
@@ -422,12 +429,14 @@ mod tests {
     Сообщить(А + Б);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1);
-        assert_diagnostic_range_multiline(code, unreachable_diags[0], 3, 4, 5, 19);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..6:20
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
@@ -440,11 +449,7 @@ mod tests {
     Сообщить("Достижимо");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnreachableCode, expect![[r#""#]]);
     }
 
     #[test]
@@ -458,11 +463,7 @@ mod tests {
     КонецЕсли;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnreachableCode, expect![[r#""#]]);
     }
 
     #[test]
@@ -475,12 +476,14 @@ mod tests {
     Сообщить("Недостижимо");
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1);
-        assert_diagnostic_range(code, unreachable_diags[0], 5, 4, 27);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 6:5..6:28
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
@@ -496,12 +499,14 @@ mod tests {
     Сообщить(5);
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1, "Expected 1 unreachable code diagnostic");
-        assert_diagnostic_range(code, unreachable_diags[0], 8, 4, 15);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 9:5..9:16
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
@@ -519,12 +524,14 @@ mod tests {
 КонецФункции
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1, "Expected 1 unreachable code diagnostic");
-        assert_diagnostic_range(code, unreachable_diags[0], 9, 4, 15);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 10:5..10:16
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
@@ -713,62 +720,75 @@ mod tests {
 Возврат;
 Метод2();   // Ошибка: После Возврат
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 17, "Expected 17 unreachable code diagnostics");
-
-        use crate::test_utils::{assert_diagnostic_range, assert_diagnostic_range_multiline};
-        assert_diagnostic_range(code, unreachable_diags[0], 12, 12, 19);
-        assert_diagnostic_range(code, unreachable_diags[1], 21, 12, 19);
-        assert_diagnostic_range(code, unreachable_diags[2], 30, 12, 19);
-        assert_diagnostic_range_multiline(code, unreachable_diags[3], 37, 4, 41, 15);
-        assert_diagnostic_range_multiline(code, unreachable_diags[4], 46, 4, 51, 15);
-        assert_diagnostic_range(code, unreachable_diags[5], 58, 12, 19);
-        assert_diagnostic_range_multiline(code, unreachable_diags[6], 67, 12, 69, 20);
-        assert_diagnostic_range_multiline(code, unreachable_diags[7], 82, 16, 84, 24);
-        assert_diagnostic_range(code, unreachable_diags[8], 93, 8, 15);
-        assert_diagnostic_range(code, unreachable_diags[9], 102, 8, 16);
-        assert_diagnostic_range_multiline(code, unreachable_diags[10], 108, 16, 112, 26);
-        assert_diagnostic_range(code, unreachable_diags[11], 125, 4, 12);
-        assert_diagnostic_range(code, unreachable_diags[12], 138, 4, 15);
-        assert_diagnostic_range(code, unreachable_diags[13], 163, 4, 22);
-        assert_diagnostic_range(code, unreachable_diags[14], 171, 4, 12);
-        // Note: We include ВызватьИсключение as unreachable because the whole If is unreachable
-        // after preproc returns (minor difference from simple linear analysis).
-        assert_diagnostic_range_multiline(code, unreachable_diags[15], 175, 4, 178, 12);
-        // We include module-level Возврат as unreachable (cascading from preproc returns).
-        assert_diagnostic_range_multiline(code, unreachable_diags[16], 181, 0, 182, 8);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 13:13..13:20
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 22:13..22:20
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 31:13..31:20
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 38:5..42:16
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 47:5..52:16
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 59:13..59:20
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 68:13..70:21
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 83:17..85:25
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 94:9..94:16
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 103:9..103:17
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 109:17..113:27
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 126:5..126:13
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 139:5..139:16
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 164:5..164:23
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 172:5..172:13
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 176:5..179:13
+              message: Недостижимый код
+              severity: Error
+            UnreachableCode @ 182:1..183:9
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     #[test]
     fn test_if_elsif_with_raise_in_else_only() {
         let code = "Процедура Тест(Важность, ВариантВажности)\n\tЕсли Важность = \"Обычная\" Тогда\n\t\tВариантВажности = 1;\n\tИначеЕсли Важность = \"Высокая\" Тогда\n\t\tВариантВажности = 2;\n\tИначеЕсли Важность = \"Низкая\" Тогда\n\t\tВариантВажности = 3;\n\tИначе\n\t\tВызватьИсключение(\"Ошибка\");\n\tКонецЕсли;\nКонецПроцедуры\n";
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(
-            unreachable_diags.len(),
-            0,
-            "Should not detect unreachable code when only else branch has terminator"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnreachableCode, expect![[r#""#]]);
     }
 
     #[test]
     fn test_raise_with_two_arguments_in_if() {
         let code = "Функция Тест()\n\tДля Каждого Элемент Из Коллекция Цикл\n\t\tЕсли Условие Тогда\n\t\t\tТекст = СтрШаблон(\"Ошибка: %1\", Элемент);\n\t\t\tВызватьИсключение(Текст, КатегорияОшибки.ОшибкаХранимыхДанных);\n\t\tКонецЕсли;\n\t\tРезультат = Элемент + 1;\n\tКонецЦикла;\n\tВозврат Результат;\nКонецФункции\n";
 
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(
-            unreachable_diags.len(),
-            0,
-            "Should not detect unreachable code after if without else, even if if-branch has raise with 2 args"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnreachableCode, expect![[r#""#]]);
     }
 
     #[test]
@@ -784,14 +804,13 @@ mod tests {
     ТутОшибка = Истина;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(
-            unreachable_diags.len(),
-            1,
-            "Expected unreachable code after if/else where all branches return"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 9:5..9:23
+              message: Недостижимый код
+              severity: Error"#]],
         );
     }
 
@@ -807,11 +826,14 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1, "Expected unreachable foreach after return");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..8:16
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 
     /// Pins Track 1 Step C — `walk_goto_statement_hir` (plan §1.3)
@@ -840,18 +862,14 @@ mod tests {
     Сообщить("Достижимо");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(
-            unreachable_diags.len(),
-            1,
-            "expected one UnreachableCode for `Сообщить(\"Недостижимо\")` between \
-             `Перейти ~Конец` and `~Конец:`, got {} diagnostics",
-            unreachable_diags.len(),
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 4:5..4:28
+              message: Недостижимый код
+              severity: Error"#]],
         );
-        assert_diagnostic_range(code, unreachable_diags[0], 3, 4, 27);
     }
 
     #[test]
@@ -865,10 +883,13 @@ mod tests {
     Метод2();   // unreachable
 #КонецЕсли
 "#;
-        let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
-        let unreachable_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        assert_eq!(unreachable_diags.len(), 1, "Expected unreachable code in preproc else");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnreachableCode,
+            expect![[r#"
+            UnreachableCode @ 7:5..7:13
+              message: Недостижимый код
+              severity: Error"#]],
+        );
     }
 }

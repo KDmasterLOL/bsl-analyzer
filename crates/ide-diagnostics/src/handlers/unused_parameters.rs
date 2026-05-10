@@ -197,21 +197,23 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_unused_parameter() {
         let code = r#"Процедура ВсеПлохо(А1, Знач Б1 = Ложь)
     ВызовМетода(А1);
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 1);
-        assert!(unused[0].message.contains("Б1"));
-        assert_diagnostic_range(code, unused[0], 0, 28, 30);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedParameters,
+            expect![[r#"
+            UnusedParameters @ 1:29..1:31
+              message: Уберите неиспользуемый параметр "Б1"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -220,13 +222,14 @@ mod tests {
     Вызов(А2);
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 1);
-        assert!(unused[0].message.contains("Б2"));
-        assert_diagnostic_range(code, unused[0], 0, 36, 38);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedParameters,
+            expect![[r#"
+            UnusedParameters @ 1:37..1:39
+              message: Уберите неиспользуемый параметр "Б2"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -235,11 +238,7 @@ mod tests {
     Б3 = А3 + 1;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -247,11 +246,7 @@ mod tests {
         let code = r#"Процедура Просто(А) Экспорт
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -261,11 +256,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -275,11 +266,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -290,11 +277,7 @@ mod tests {
     Чтото[Объект3];
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -332,19 +315,17 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(
-            unused.len(),
-            2,
-            "Expected 2 unused parameters, got: {:?}",
-            unused.iter().map(|d| &d.message).collect::<Vec<_>>()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedParameters,
+            expect![[r#"
+            UnusedParameters @ 1:29..1:31
+              message: Уберите неиспользуемый параметр "Б1"
+              severity: Warning
+            UnusedParameters @ 5:37..5:39
+              message: Уберите неиспользуемый параметр "Б2"
+              severity: Warning"#]],
         );
-
-        assert_diagnostic_range(code, unused[0], 0, 28, 30);
-        assert_diagnostic_range(code, unused[1], 4, 36, 38);
     }
 
     #[test]
@@ -391,7 +372,7 @@ mod tests {
 
         // СписокПриАктивизацииСтроки is a form element event handler — its parameter
         // signature is fixed by the platform, so unused params should not be flagged
-        assert_eq!(unused.len(), 0);
+        assert_eq!(unused.len(), 0); // snapshot-skip: metadata-backed handler assertion intentionally retained.
     }
 
     #[test]
@@ -441,7 +422,7 @@ mod tests {
 
         // ЗапросPOST is an HTTP service handler — its parameter
         // signature is fixed by the platform, so unused params should not be flagged
-        assert_eq!(unused.len(), 0);
+        assert_eq!(unused.len(), 0); // snapshot-skip: metadata-backed handler assertion intentionally retained.
     }
 
     #[test]
@@ -456,18 +437,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        // ПриЗаписи is a platform event handler — must NOT flag unused params
-        // even when preceded by Перем declaration
-        assert_eq!(
-            unused.len(),
-            0,
-            "Platform handler after Перем should not flag unused params, got: {:?}",
-            unused.iter().map(|d| &d.message).collect::<Vec<_>>()
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -478,12 +448,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        // Подключаемый_ methods have fixed signature by platform callback contract
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -494,11 +459,7 @@ Procedure Attachable_ContinueCommandExecutionAtServer(ExecutionParameters, Addit
 EndProcedure
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -508,12 +469,14 @@ EndProcedure
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 1);
-        assert!(unused[0].message.contains("Параметр2"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedParameters,
+            expect![[r#"
+            UnusedParameters @ 1:39..1:48
+              message: Уберите неиспользуемый параметр "Параметр2"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -532,13 +495,7 @@ EndProcedure
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        // ПослеВыбораОснования is a NotifyDescription callback — its signature
-        // is fixed by the platform, so unused params should not be flagged
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -556,11 +513,7 @@ Procedure AfterSelection(SelectedItem, AdditionalParameters) Export
 EndProcedure
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -576,14 +529,14 @@ EndProcedure
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        // Cross-module NotifyDescription (КлиентскийМодуль, not ЭтотОбъект) —
-        // we can't confirm the callback is in this module, so unused params are still flagged
-        assert_eq!(unused.len(), 1);
-        assert!(unused[0].message.contains("ДопПараметры"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedParameters,
+            expect![[r#"
+            UnusedParameters @ 7:31..7:43
+              message: Уберите неиспользуемый параметр "ДопПараметры"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -600,13 +553,14 @@ EndProcedure
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        // Variable as first arg — can't statically resolve, so unused params are still flagged
-        assert_eq!(unused.len(), 1);
-        assert!(unused[0].message.contains("ДопПараметры"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedParameters,
+            expect![[r#"
+            UnusedParameters @ 8:31..8:43
+              message: Уберите неиспользуемый параметр "ДопПараметры"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -622,12 +576,7 @@ EndProcedure
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        // Dynamic constructor Новый("ОписаниеОповещения", ...) must also suppress
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -640,12 +589,7 @@ EndProcedure
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
-
-        // NotifyDescription created in module-level code must also suppress
-        assert_eq!(unused.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
     }
 
     #[test]
@@ -670,7 +614,6 @@ EndProcedure
         let unused: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
 
-        // Custom prefix "обр_" should suppress unused params for Обр_СобытиеФормы
-        assert_eq!(unused.len(), 0);
+        assert_eq!(unused.len(), 0); // snapshot-skip: custom configuration assertion intentionally retained.
     }
 }

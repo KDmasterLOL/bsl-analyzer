@@ -30,22 +30,23 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_basic() {
         let code = r#"Процедура Тест()
     Плохо = "Строка1" + + "Строка2";
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UnaryPlusInConcatenation)
-            .collect();
-        assert_eq!(diags.len(), 1, "Expected 1 UnaryPlusInConcatenation diagnostic");
-
-        assert_diagnostic_range(code, diags[0], 1, 24, 25);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnaryPlusInConcatenation,
+            expect![[r#"
+                UnaryPlusInConcatenation @ 2:25..2:26
+                  message: Унарный плюс в конкатенации строк
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -54,10 +55,10 @@ mod tests {
     Допустимо = "Хорошо" + + 5;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnaryPlusInConcatenation),
-            "Unary plus on numeric literal should not trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnaryPlusInConcatenation,
+            expect![[r#""#]],
         );
     }
 
@@ -90,21 +91,19 @@ mod tests {
 ОченьПлохо = Плохо + + Допустимо;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UnaryPlusInConcatenation)
-            .collect();
-
-        assert_eq!(
-            diags.len(),
-            3,
-            "Expected 3 UnaryPlusInConcatenation diagnostics, got {}",
-            diags.len()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnaryPlusInConcatenation,
+            expect![[r#"
+                UnaryPlusInConcatenation @ 7:21..7:22
+                  message: Унарный плюс в конкатенации строк
+                  severity: Blocker
+                UnaryPlusInConcatenation @ 10:34..10:35
+                  message: Унарный плюс в конкатенации строк
+                  severity: Blocker
+                UnaryPlusInConcatenation @ 25:22..25:23
+                  message: Унарный плюс в конкатенации строк
+                  severity: Blocker"#]],
         );
-
-        assert_diagnostic_range(code, diags[0], 6, 20, 21);
-        assert_diagnostic_range(code, diags[1], 9, 33, 34);
-        assert_diagnostic_range(code, diags[2], 24, 21, 22);
     }
 }

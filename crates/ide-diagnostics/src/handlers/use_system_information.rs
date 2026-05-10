@@ -30,8 +30,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_java_fixture() {
         let code = r#"Функция ТипТекущейПлатформы() Экспорт
@@ -48,22 +49,26 @@ mod tests {
 ИмяТипа = "СистемнаяИнформация";
 СистемнаяИнформация = Новый(ИмяТипа);
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseSystemInformation).collect();
-
-        assert_eq!(diags.len(), 5, "Expected 5 diagnostics, got {}", diags.len());
-
-        // Line 2 (0-indexed: 1), cols 26-51: Новый СистемнаяИнформация
-        assert_diagnostic_range(code, diags[0], 1, 26, 51);
-        // Line 6 (0-indexed: 5), cols 22-49: Новый СистемнаяИнформация()
-        assert_diagnostic_range(code, diags[1], 5, 22, 49);
-        // Line 7 (0-indexed: 6), cols 22-50: Новый("СистемнаяИнформация")
-        assert_diagnostic_range(code, diags[2], 6, 22, 50);
-        // Line 8 (0-indexed: 7), cols 22-38: Новый SystemInfo
-        assert_diagnostic_range(code, diags[3], 7, 22, 38);
-        // Line 9 (0-indexed: 8), cols 22-41: Новый("SystemInfo")
-        assert_diagnostic_range(code, diags[4], 8, 22, 41);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UseSystemInformation,
+            expect![[r#"
+            UseSystemInformation @ 2:27..2:52
+              message: Use of system information
+              severity: Warning
+            UseSystemInformation @ 6:23..6:50
+              message: Use of system information
+              severity: Warning
+            UseSystemInformation @ 7:23..7:51
+              message: Use of system information
+              severity: Warning
+            UseSystemInformation @ 8:23..8:39
+              message: Use of system information
+              severity: Warning
+            UseSystemInformation @ 9:23..9:42
+              message: Use of system information
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -75,10 +80,11 @@ mod tests {
     СистемнаяИнформация = Новый(ИмяТипа);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseSystemInformation).collect();
-        assert_eq!(diags.len(), 0, "Should not detect non-matching type names or variables");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UseSystemInformation,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -89,9 +95,16 @@ mod tests {
     Б = Новый systeminfo;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseSystemInformation).collect();
-        assert_eq!(diags.len(), 2, "Should detect case-insensitive type names");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UseSystemInformation,
+            expect![[r#"
+            UseSystemInformation @ 3:9..3:34
+              message: Use of system information
+              severity: Warning
+            UseSystemInformation @ 4:9..4:25
+              message: Use of system information
+              severity: Warning"#]],
+        );
     }
 }

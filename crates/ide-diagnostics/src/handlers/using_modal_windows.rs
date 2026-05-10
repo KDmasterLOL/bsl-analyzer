@@ -49,7 +49,8 @@ pub fn from_hir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
 
     #[test]
     fn test_modal_question() {
@@ -61,11 +62,14 @@ mod tests {
         Возврат;
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range_multiline(code, diags[0], 2, 12, 3, 57);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 3:13..4:58
+              message: Вместо модального метода "Вопрос" необходимо использовать "ПоказатьВопрос"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -73,11 +77,14 @@ mod tests {
         let code = r#"Процедура ТестПредупреждение()
     Предупреждение(НСтр("ru = 'Выберите документ!'; en = 'Select a document!'"), 10);
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 1, 4, 84);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 2:5..2:85
+              message: Вместо модального метода "Предупреждение" необходимо использовать "ПоказатьПредупреждение"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -86,11 +93,14 @@ mod tests {
     Товар = Справочники.Номенклатура.НайтиПоКоду(КодТовара);
     ОткрытьЗначение(Товар);
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 2, 4, 26);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 3:5..3:27
+              message: Вместо модального метода "ОткрытьЗначение" необходимо использовать "ПоказатьЗначение"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -103,11 +113,14 @@ mod tests {
         // запомнить дату напоминания
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 4, 9, 58);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 5:10..5:59
+              message: Вместо модального метода "ВвестиДату" необходимо использовать "ПоказатьВводДаты"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -126,11 +139,14 @@ mod tests {
         Сообщить("Введенное значение: "+ВыбЗнач);
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 10, 9, 67);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 11:10..11:68
+              message: Вместо модального метода "ВвестиЗначение" необходимо использовать "ПоказатьВводЗначения"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -142,11 +158,14 @@ mod tests {
         // запомнить текст напоминания
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 3, 9, 50);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 4:10..4:51
+              message: Вместо модального метода "ВвестиСтроку" необходимо использовать "ПоказатьВводСтроки"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -157,11 +176,14 @@ mod tests {
         // обработка введенного количества
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 2, 9, 61);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 3:10..3:62
+              message: Вместо модального метода "ВвестиЧисло" необходимо использовать "ПоказатьВводЧисла"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -169,11 +191,14 @@ mod tests {
         let code = r#"Процедура ТестУстановитьВнешнююКомпоненту()
     УстановитьВнешнююКомпоненту("ПутьККомпоненте");
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 1, 4, 50);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 2:5..2:51
+              message: Вместо модального метода "УстановитьВнешнююКомпоненту" необходимо использовать "НачатьУстановкуВнешнейКомпоненты"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -181,11 +206,14 @@ mod tests {
         let code = r#"Процедура ТестОткрытьФормуМодально()
     ОткрытьФормуМодально("Форма");
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 1, 4, 33);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 2:5..2:34
+              message: Вместо модального метода "ОткрытьФормуМодально" необходимо использовать "ОткрытьФорму"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -195,11 +223,14 @@ mod tests {
         Результат = УстановитьРасширениеРаботыСФайлами();
     #КонецЕсли
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 2, 20, 56);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 3:21..3:57
+              message: Вместо модального метода "УстановитьРасширениеРаботыСФайлами" необходимо использовать "НачатьУстановкуРасширенияРаботыСФайлами"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -209,11 +240,14 @@ mod tests {
         Результат = УстановитьРасширениеРаботыСКриптографией();
     #КонецЕсли
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 2, 20, 62);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 3:21..3:63
+              message: Вместо модального метода "УстановитьРасширениеРаботыСКриптографией" необходимо использовать "НачатьУстановкуРасширенияРаботыСКриптографией"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -222,11 +256,14 @@ mod tests {
     Перем АдресХранилища;
     ПоместитьФайл(АдресХранилища, ПутьКФайлу, ПутьКФайлу, Ложь, УникальныйИдентификатор);
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 2, 4, 88);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingModalWindows,
+            expect![[r#"
+            UsingModalWindows @ 3:5..3:89
+              message: Вместо модального метода "ПоместитьФайл" необходимо использовать "НачатьПомещениеФайла"
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -241,9 +278,6 @@ mod tests {
     ОткрытьФорму("Форма");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let modal_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingModalWindows).collect();
-        assert_eq!(modal_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingModalWindows, expect![[r#""#]]);
     }
 }
