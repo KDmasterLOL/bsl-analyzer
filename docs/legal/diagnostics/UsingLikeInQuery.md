@@ -15,7 +15,7 @@ The rule is based on a public technical concern: use of `LIKE` / `ПОДОБНО
 
 ## Audit result
 
-The current handler is local Rust code, but it is only a thin dispatch layer over `sdbl_hir::SdblDiagnostic::UsingLikeInQuery`.
+The current handler is local Rust code, but it is only a thin dispatch layer over `sdbl_hir::SdblDiagnostic::LikeUsage` (consumes both `LikeUsageKind::Allowed` and `LikeUsageKind::Incorrect`; the latter is what additionally fires `IncorrectUseLikeInQuery`).
 
 The important behavioral point is that the current implementation is intentionally conservative: it reports every detected `LIKE` / `ПОДОБНО` occurrence rather than trying to distinguish “safe” and “unsafe” forms.
 

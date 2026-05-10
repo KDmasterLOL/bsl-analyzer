@@ -227,30 +227,22 @@ pub enum SdblDiagnostic {
         range: TextRange,
     },
 
-    /// Using LIKE operator in query (unpredictable results).
+    /// Use of `LIKE` / `ПОДОБНО` operator in a query.
     ///
-    /// BSL-LS diagnostic code: UsingLikeInQuery
+    /// Track 2 §4 Slice 4: a single variant carries both BSL-LS rules
+    /// (`UsingLikeInQuery` always; `IncorrectUseLikeInQuery` when the
+    /// pattern operand is a column reference). The discriminator lives
+    /// in `kind`; consumer handlers filter accordingly.
     ///
-    /// Most algorithms can avoid using LIKE operator.
-    /// Results may differ significantly depending on DBMS.
-    UsingLikeInQuery {
+    /// The pattern (right operand) of `LIKE` / `ПОДОБНО` is expected to be
+    /// a string literal, a query parameter, or a function call. Using a
+    /// column reference yields unpredictable behaviour across DBMS engines
+    /// and is reported as `LikeUsageKind::Incorrect`.
+    LikeUsage {
         /// Source range.
         range: TextRange,
-    },
-
-    /// Incorrect use of LIKE operator - pattern must be a literal or parameter.
-    ///
-    /// BSL-LS diagnostic code: IncorrectUseLikeInQuery
-    ///
-    /// The pattern (right operand) of LIKE/ПОДОБНО must be:
-    /// - String literal ("pattern")
-    /// - Query parameter (&Parameter)
-    /// - Function call (SUBSTRING, etc.)
-    ///
-    /// Using column references causes unpredictable results on different DBMS.
-    IncorrectUseLikeInQuery {
-        /// Source range.
-        range: TextRange,
+        /// Pattern-shape classification.
+        kind: LikeUsageKind,
     },
 
     /// Using SELECT TOP/FIRST without ORDER BY clause.
@@ -276,6 +268,23 @@ pub enum SdblDiagnostic {
     },
 }
 
+/// Pattern-shape classification for `LikeUsage`.
+///
+/// Discriminates the two BSL-LS rules that fire on the same `LIKE` /
+/// `ПОДОБНО` site:
+/// - `Allowed` — the pattern is a string literal, query parameter, or
+///   function call. Only the «every LIKE is suspect» rule (`UsingLikeInQuery`)
+///   applies.
+/// - `Incorrect` — the pattern is a column reference (or otherwise
+///   unrecognized as one of the allowed shapes). Both rules apply
+///   (`UsingLikeInQuery` + `IncorrectUseLikeInQuery`); the latter is a
+///   standard violation rather than a code smell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LikeUsageKind {
+    Allowed,
+    Incorrect,
+}
+
 /// Reference to an unprotected field from JOIN.
 ///
 /// Used for detailed error reporting and future LSP RelatedInformation.
@@ -298,7 +307,7 @@ impl SdblDiagnostic {
             Self::VirtualTableCallWithoutParameters { .. } => Some(174),
             Self::QueryNestedFieldsByDot { .. } => None, // Uses string code
             Self::RefOveruse { .. } => None,             // Uses string code
-            Self::UsingLikeInQuery { .. } => None,       // Uses string code
+            Self::LikeUsage { .. } => None,              // Uses string code
             _ => None, // Other diagnostics don't have BSL-LS codes
         }
     }
@@ -406,10 +415,10 @@ impl SdblDiagnostic {
                  излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ"
                     .to_string()
             }
-            Self::UsingLikeInQuery { .. } => {
+            Self::LikeUsage { kind: LikeUsageKind::Allowed, .. } => {
                 "Измените выражение, чтобы не использовать 'ПОДОБНО'".to_string()
             }
-            Self::IncorrectUseLikeInQuery { .. } => {
+            Self::LikeUsage { kind: LikeUsageKind::Incorrect, .. } => {
                 "Нужно исправить выражение в соответствии со стандартом".to_string()
             }
             Self::SelectTopWithoutOrderBy { .. } => {
@@ -441,8 +450,7 @@ impl SdblDiagnostic {
             Self::QueryNestedFieldsByDot { range, .. } => *range,
             Self::RefOveruse { range } => *range,
             Self::UnionWithoutAll { range } => *range,
-            Self::UsingLikeInQuery { range } => *range,
-            Self::IncorrectUseLikeInQuery { range } => *range,
+            Self::LikeUsage { range, .. } => *range,
             Self::SelectTopWithoutOrderBy { range, .. } => *range,
         }
     }
@@ -473,8 +481,8 @@ impl SdblDiagnostic {
             Self::QueryNestedFieldsByDot { .. } => false, // Warning - performance issue
             Self::RefOveruse { .. } => false,      // Warning - performance issue
             Self::UnionWithoutAll { .. } => false, // Warning - performance issue
-            Self::UsingLikeInQuery { .. } => false, // Warning - unpredictable results
-            Self::IncorrectUseLikeInQuery { .. } => true, // Error - standard violation
+            Self::LikeUsage { kind: LikeUsageKind::Allowed, .. } => false, // Warning - unpredictable results
+            Self::LikeUsage { kind: LikeUsageKind::Incorrect, .. } => true, // Error - standard violation
             Self::SelectTopWithoutOrderBy { .. } => false, // Code smell - unpredictable results
         }
     }

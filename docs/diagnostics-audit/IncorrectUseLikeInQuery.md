@@ -20,8 +20,11 @@
 
 ## Как реализовано
 
-SDBL HIR эмитит `SdblDiagnostic::IncorrectUseLikeInQuery`; handler мапит range
-в BSL и возвращает generic message.
+SDBL HIR эмитит `SdblDiagnostic::LikeUsage { kind: LikeUsageKind::Incorrect }`
+(после Track 2 §4 Slice 4 — общий variant для обеих BSL-LS правил
+`UsingLikeInQuery` + `IncorrectUseLikeInQuery`, разделение по `kind`);
+handler фильтрует на `Incorrect`, мапит range в BSL и возвращает generic
+message.
 
 ## Что покрыто
 

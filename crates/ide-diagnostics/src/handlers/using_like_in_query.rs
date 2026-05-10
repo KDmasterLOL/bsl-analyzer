@@ -27,7 +27,10 @@ pub(crate) fn dispatch(
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if let sdbl_hir::SdblDiagnostic::UsingLikeInQuery { range } = diag {
+    // Track 2 §4 Slice 4: any LikeUsage (Allowed or Incorrect kind) triggers
+    // UsingLikeInQuery; the IncorrectUseLikeInQuery rule fires additionally
+    // for the Incorrect kind via its own handler.
+    if let sdbl_hir::SdblDiagnostic::LikeUsage { range, .. } = diag {
         crate::sdbl_utils::dispatch_simple(
             ctx,
             DiagnosticCode::UsingLikeInQuery,

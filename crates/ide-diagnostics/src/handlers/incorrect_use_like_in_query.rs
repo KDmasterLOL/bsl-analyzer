@@ -24,7 +24,9 @@ pub(crate) fn dispatch(
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if let sdbl_hir::SdblDiagnostic::IncorrectUseLikeInQuery { range } = diag {
+    if let sdbl_hir::SdblDiagnostic::LikeUsage { range, kind: sdbl_hir::LikeUsageKind::Incorrect } =
+        diag
+    {
         crate::sdbl_utils::dispatch_simple(
             ctx,
             DiagnosticCode::IncorrectUseLikeInQuery,

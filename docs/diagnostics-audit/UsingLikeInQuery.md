@@ -15,7 +15,11 @@
 
 ## Как реализовано
 
-SDBL HIR эмитит `SdblDiagnostic::UsingLikeInQuery`; handler мапит range из текста запроса обратно в BSL-строку и создает diagnostic. Диагностика выключена по умолчанию.
+SDBL HIR эмитит `SdblDiagnostic::LikeUsage` (после Track 2 §4 Slice 4 —
+общий variant для обеих BSL-LS правил `UsingLikeInQuery` +
+`IncorrectUseLikeInQuery`, разделение по `LikeUsageKind`); handler
+матчит `LikeUsage` любого `kind`, мапит range из текста запроса обратно
+в BSL-строку и создает diagnostic. Диагностика выключена по умолчанию.
 
 ## Что покрыто
 
