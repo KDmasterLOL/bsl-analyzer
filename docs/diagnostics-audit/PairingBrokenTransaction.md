@@ -43,3 +43,12 @@ CFG-based DFS по телам методов. Состояние хранит у
 **Phase D §2 audit (2026-05):** out-of-scope для Track 2. Существующий
 CFG-based анализ парности транзакций сохранён без изменений; общий
 transaction-shape analyzer — отдельный будущий трек.
+
+## Закрыто Track 3
+
+**Phase C C2 (commit `COMMIT_SHA`, 2026-05-10):** добавлен fixture
+`test_interprocedural_begin_commit_are_not_paired_snapshot` для пробела
+"Анализ ограничен телом метода; межпроцедурные begin/commit не
+моделируются". Snapshot фиксирует текущее method-local поведение: begin
+и commit в разных процедурах считаются двумя локальными нарушениями.
+Настоящие interprocedural transaction effects оставлены для Track 6.

@@ -292,8 +292,10 @@ mod tests {
     use super::check;
     use crate::test_utils::{
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+        check_diagnostics_snapshot_for,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
 
     /// Track 2 Phase D §2.2 — `RaisesOnly` catch-body classification:
     /// re-raising the exception via `ВызватьИсключение;` is proper
@@ -600,5 +602,67 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Valid exception handler should not trigger diagnostic");
+    }
+
+    #[test]
+    fn test_module_level_raises_only_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Попытка
+    Действие();
+Исключение
+    ВызватьИсключение;
+КонецПопытки;"#,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_logs_only_write_log_event_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ЗаписьЖурналаРегистрации("Ошибки", УровеньЖурналаРегистрации.Ошибка);
+    КонецПопытки;
+КонецПроцедуры"#,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_mixed_message_and_raise_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        Сообщить("error");
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры"#,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_rollback_only_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры"#,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#"
+                MissingCodeTryCatchEx @ 4:5..4:15
+                  message: Блок исключения только откатывает транзакцию, но не фиксирует ошибку: добавьте логирование или `ВызватьИсключение`
+                  severity: Major"#]],
+        );
     }
 }

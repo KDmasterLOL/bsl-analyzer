@@ -46,3 +46,13 @@ HIR lowering анализирует statement list и try/catch структур
 ограничен `BeginTransactionBeforeTryCatch` + `MissingCodeTryCatchEx`;
 правила про `ОтменитьТранзакцию` положение и парность — отдельный
 будущий трек по transaction-shape анализу.
+
+## Закрыто Track 3
+
+**Phase C C2 (commit `COMMIT_SHA`, 2026-05-10):** добавлены fixtures
+`test_first_rollback_without_local_transaction_snapshot` и
+`test_nested_try_body_rollback_snapshot` для пробела "не связывает
+RollbackTransaction с конкретной парой BeginTransaction/CommitTransaction
+и не анализирует вложенные транзакционные сценарии глубоко". Первый
+snapshot фиксирует позиционный scope диагностики; второй закрепляет
+текущее поведение на вложенном `Попытка`.

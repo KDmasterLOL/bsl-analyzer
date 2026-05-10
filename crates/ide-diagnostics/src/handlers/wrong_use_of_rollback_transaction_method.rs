@@ -33,6 +33,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_valid_first_in_except() {
         let code = r#"Процедура Тест()
@@ -189,5 +190,54 @@ EndFunction
         assert_diagnostic_range(code, diags[0], 7, 8, 29);
         assert_diagnostic_range(code, diags[1], 11, 4, 25);
         assert_diagnostic_range(code, diags[2], 29, 4, 26);
+    }
+
+    #[test]
+    fn test_first_rollback_without_local_transaction_snapshot() {
+        // Track 3 Phase C §4.2: this diagnostic is positional only.
+        // Pairing with a concrete Begin/Commit is handled by
+        // PairingBrokenTransaction, not by this handler.
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры"#,
+            DiagnosticCode::WrongUseOfRollbackTransactionMethod,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_nested_try_body_rollback_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    НачатьТранзакцию();
+    Попытка
+        Попытка
+            ОтменитьТранзакцию();
+        Исключение
+            ОтменитьТранзакцию();
+        КонецПопытки;
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры"#,
+            DiagnosticCode::WrongUseOfRollbackTransactionMethod,
+            expect![[r#"
+                WrongUseOfRollbackTransactionMethod @ 5:13..5:34
+                  message: Вызов 'ОтменитьТранзакцию'/'RollbackTransaction' должен находиться в блоке обработки исключений первым оператором
+                  severity: Critical
+                WrongUseOfRollbackTransactionMethod @ 5:13..5:34
+                  message: Вызов 'ОтменитьТранзакцию'/'RollbackTransaction' должен находиться в блоке обработки исключений первым оператором
+                  severity: Critical
+                WrongUseOfRollbackTransactionMethod @ 7:13..7:34
+                  message: Вызов 'ОтменитьТранзакцию'/'RollbackTransaction' должен находиться в блоке обработки исключений первым оператором
+                  severity: Critical"#]],
+        );
     }
 }

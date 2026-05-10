@@ -78,3 +78,12 @@ Empty/RaisesOnly/LogsOnly/Mixed/RollbackOnly/Silent), потребляющий
 class-specific сообщениями; RaisesOnly/LogsOnly/Mixed — корректные
 пути восстановления. `commentAsCode` опция применяется только к
 ветке Empty через AST (HIR не хранит trivia).
+
+## Закрыто Track 3
+
+**Phase C C2 (commit `COMMIT_SHA`, 2026-05-10):** добавлены snapshot
+fixtures для sparse classifier matrix без дублирования Empty/Silent:
+`test_module_level_raises_only_snapshot`, `test_logs_only_write_log_event_snapshot`,
+`test_mixed_message_and_raise_snapshot`, `test_rollback_only_snapshot`.
+Первые три фиксируют non-emitting paths (`RaisesOnly`, `LogsOnly`, `Mixed`);
+`RollbackOnly` фиксирует rollback-specific сообщение.

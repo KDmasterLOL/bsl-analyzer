@@ -190,3 +190,11 @@ transaction-набор уже разделен между несколькими
 остальной transaction-cluster (этот, `PairingBrokenTransaction`,
 `WrongUseOfRollbackTransactionMethod`, `TryNumber`) — отдельный
 будущий трек по transaction-shape анализу поверх CFG.
+
+## Закрыто Track 3
+
+**Phase C C2 (commit `COMMIT_SHA`, 2026-05-10):** добавлен fixture
+`test_nested_if_commit_in_try_snapshot` для пробела "CommitTransaction
+внутри Если в Попытка may not be detected". Snapshot фиксирует текущее
+поведение: diagnostic не эмитится для nested `Если`; исправление false
+negative оставлено для будущего transaction-shape анализа.

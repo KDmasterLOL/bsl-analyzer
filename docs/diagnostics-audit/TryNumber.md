@@ -43,3 +43,12 @@ HIR находит вызовы `Число`/`Number` внутри try-body; han
 ограничивает количество try-блоков в методе и не пересекается с
 catch-body classifier (`MissingCodeTryCatchEx`) или Begin-before-Try
 паттерном.
+
+## Закрыто Track 3
+
+**Phase C C2 (commit `COMMIT_SHA`, 2026-05-10):** добавлены fixtures
+`test_try_with_mixed_body_still_flags_number_snapshot` и
+`test_number_inside_if_in_try_snapshot` для пробела "Нет анализа того,
+действительно ли исключение перехватывает только conversion". Snapshot
+фиксирует текущую эвристику: любой global `Число`/`Number` в try-body
+эмитит diagnostic, включая вложенный `Если` и смешанный try-body.

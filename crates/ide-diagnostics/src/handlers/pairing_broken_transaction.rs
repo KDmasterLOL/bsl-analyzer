@@ -379,8 +379,9 @@ fn create_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_sdbl_diagnostic};
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_valid_pairing_with_commit() {
         let code = r#"
@@ -1157,6 +1158,30 @@ mod tests {
             pairing_diags.len() >= 10,
             "Expected at least 10 diagnostics from fixture, got {}",
             pairing_diags.len()
+        );
+    }
+
+    #[test]
+    fn test_interprocedural_begin_commit_are_not_paired_snapshot() {
+        // Track 3 Phase C §4.2: pairing is intentionally method-local
+        // today, so a Begin in one procedure and Commit in another are
+        // reported as two local lifecycle violations.
+        check_diagnostics_snapshot_for(
+            r#"Процедура Открыть()
+    НачатьТранзакцию();
+КонецПроцедуры
+
+Процедура Закрыть()
+    ЗафиксироватьТранзакцию();
+КонецПроцедуры"#,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 2:5..2:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 6:5..6:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major"#]],
         );
     }
 }

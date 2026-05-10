@@ -34,6 +34,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_valid_inside_try() {
         let code = r#"Процедура Пример1()
@@ -300,5 +301,29 @@ EndProcedure"#;
 
         assert_eq!(diags.len(), 1);
         assert_diagnostic_range(code, diags[0], 3, 4, 30);
+    }
+
+    #[test]
+    fn test_nested_if_commit_in_try_snapshot() {
+        // Track 3 Phase C §4.2: documents the current gap. The
+        // direct-statement check does not descend into IF_STMT inside
+        // the try body, so this nested CommitTransaction is not emitted
+        // even though code can continue after the if.
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест(Условие)
+    НачатьТранзакцию();
+    Попытка
+        Если Условие Тогда
+            ЗафиксироватьТранзакцию();
+        КонецЕсли;
+        ДействиеПослеФиксации();
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры"#,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#""#]],
+        );
     }
 }
