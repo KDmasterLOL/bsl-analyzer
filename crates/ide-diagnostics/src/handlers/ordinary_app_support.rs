@@ -92,8 +92,9 @@ fn get_module_range(ctx: &DiagnosticsContext) -> TextRange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range;
+    use crate::test_utils::format_diags;
     use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::path::PathBuf;
@@ -151,19 +152,10 @@ mod tests {
 "#;
         let (diagnostics, file_content) = check_with_config(code, fixtures_dir, true, true);
 
-        // Designer fixture has both flags set to false (default),
-        // so we expect 1 diagnostic for UseManagedFormInOrdinaryApplication = false
-        // (UseOrdinaryFormInManagedApplication = false is correct, so no diagnostic)
-        assert!(
-            !diagnostics.is_empty(),
-            "Expected at least 1 diagnostic, found {}",
-            diagnostics.len()
-        );
-
-        for diagnostic in &diagnostics {
-            assert_diagnostic_range(&file_content, diagnostic, 0, 0, 14);
-            assert_eq!(diagnostic.code, DiagnosticCode::OrdinaryAppSupport);
-        }
+        expect![[r#"
+            OrdinaryAppSupport @ 1:1..1:15
+              message: Установите свойство "Использовать управляемые формы в обычном приложении" в Истина
+              severity: Warning"#]].assert_eq(&format_diags(&file_content, &diagnostics));
     }
 
     #[test]
@@ -177,7 +169,7 @@ mod tests {
 "#;
         let (diagnostics, _) = check_with_config(code, fixtures_dir, true, false);
 
-        assert_eq!(diagnostics.len(), 0, "Disabled config should produce no diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -191,6 +183,6 @@ mod tests {
 "#;
         let (diagnostics, _) = check_with_config(code, fixtures_dir, false, true);
 
-        assert_eq!(diagnostics.len(), 0, "Non-SessionModule should produce no diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

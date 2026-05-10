@@ -261,8 +261,9 @@ fn create_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, Severity};
+    use crate::test_utils::format_diags;
+    use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::path::PathBuf;
@@ -330,50 +331,25 @@ mod tests {
         let code = "Функция Маркер()\nКонецФункции\n";
         let (diagnostics, file_content) = check_diagnostic(code, fixtures_dir);
 
-        // Should find 6 diagnostics
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics, found {}", diagnostics.len());
-
-        // All diagnostics should be at line 1, columns 1-8 (range 0-7)
-        for (i, diagnostic) in diagnostics.iter().enumerate() {
-            assert_diagnostic_range(&file_content, diagnostic, 0, 0, 7);
-            assert_eq!(
-                diagnostic.severity,
-                Severity::Blocker,
-                "Diagnostic {} should be BLOCKER",
-                i
-            );
-        }
-
-        // Verify messages (order-independent)
-        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
-
-        // Check for specific error messages
-        assert!(
-            messages
-                .iter()
-                .any(|m| m.contains("ОбщийПодпискиНаСобытия") && m.contains("Создайте модуль")),
-            "Should have MissingModule diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("некорректный обработчик")),
-            "Should have IncorrectFormat diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("Добавьте \"Сервер\"")),
-            "Should have ShouldBeServer diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("Заполните обработчик")),
-            "Should have EmptyHandler diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("ПодпискаНаСобытиеПриУстановкеНовогоКода")),
-            "Should have MissingMethod diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("РегистрацияИзмененийПередУдалением")),
-            "Should have NonExportMethod diagnostic"
-        );
+        expect![[r#"
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Добавьте "Сервер" модулю "КлиентскийОбщийМодуль" или исправьте некорректный обработчик подписки на событие "ПередЗаписьюДокумента"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Добавьте "Экспорт" процедуре "ПервыйОбщийМодуль.РегистрацияИзмененийПередУдалением"  или исправьте некорректный обработчик подписки на событие "РегистрацияИзмененийПередУдалением"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Заполните обработчик подписки на событие "ПередЗаписьюКонстанты"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Исправьте некорректный обработчик "CommonModule.ОбщийПодпискиНаСобытия" у подписки на событие "ПриЗаписиДокумента"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Создайте модуль "ОбщийПодпискиНаСобытия" или исправьте некорректный обработчик подписки на событие "ПриЗаписиСправочника"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Создайте процедуру "ПервыйОбщийМодуль.ПодпискаНаСобытиеПриУстановкеНовогоКода" или исправьте некорректный обработчик подписки на событие "ПриУстановкеНовогоКода"
+              severity: Blocker"#]].assert_eq(&format_diags(&file_content, &diagnostics));
     }
 
     #[test]
@@ -406,7 +382,6 @@ mod tests {
 
         let diagnostics = check(&ctx);
 
-        // Should return empty for non-SessionModule
-        assert_eq!(diagnostics.len(), 0, "Non-SessionModule should have no diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags("Процедура Тест()\nКонецПроцедуры", &diagnostics));
     }
 }

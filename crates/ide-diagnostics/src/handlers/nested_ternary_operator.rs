@@ -127,10 +127,9 @@ fn make_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range_multiline, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic, check_ast_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"ПериодПо = ?(Шапка.ЭтоУвольнение
@@ -161,12 +160,20 @@ mod tests {
 КонецЕсли;"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 4, "Should find exactly 4 diagnostics");
-
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 13, 8, 14);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 13, 5, 13, 50);
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 13, 73, 13, 104);
-        assert_diagnostic_range_multiline(code, &diagnostics[3], 22, 12, 22, 71);
+        expect![[r#"
+            NestedTernaryOperator @ 3:14..9:15
+              message: Не рекомендуется использовать вложенный тернарный оператор
+              severity: Warning
+            NestedTernaryOperator @ 14:6..14:51
+              message: Не рекомендуется использовать вложенный тернарный оператор
+              severity: Warning
+            NestedTernaryOperator @ 14:74..14:105
+              message: Не рекомендуется использовать вложенный тернарный оператор
+              severity: Warning
+            NestedTernaryOperator @ 23:13..23:72
+              message: Не рекомендуется использовать вложенный тернарный оператор
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -175,7 +182,7 @@ mod tests {
 Результат = ?(Условие, Истина, Ложь);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert!(diagnostics.is_empty(), "Simple ternary should not trigger diagnostic");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -184,7 +191,11 @@ mod tests {
 Результат = ?(Условие1, ?(Условие2, 1, 2), 3);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Nested ternary in assignment should trigger diagnostic");
+        expect![[r#"
+            NestedTernaryOperator @ 2:25..2:42
+              message: Не рекомендуется использовать вложенный тернарный оператор
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -195,7 +206,11 @@ mod tests {
 КонецЕсли;
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Ternary in if condition should trigger diagnostic");
+        expect![[r#"
+            NestedTernaryOperator @ 2:6..2:16
+              message: Не рекомендуется использовать вложенный тернарный оператор
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -208,7 +223,11 @@ mod tests {
 КонецЕсли;
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Ternary in elsif condition should trigger diagnostic");
+        expect![[r#"
+            NestedTernaryOperator @ 4:11..4:21
+              message: Не рекомендуется использовать вложенный тернарный оператор
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -220,6 +239,6 @@ mod tests {
         config.disabled.push(DiagnosticCode::NestedTernaryOperator);
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert!(diagnostics.is_empty(), "Disabled diagnostic should not find anything");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

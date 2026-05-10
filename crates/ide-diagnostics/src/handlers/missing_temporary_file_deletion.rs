@@ -405,6 +405,7 @@ mod tests {
     use super::check;
     use crate::test_utils::*;
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
 
     const FIXTURE: &str = "\nПроцедура ПроверкаДиагностики()\n\n    Путь = \"12345.xml\";\n\n    Данные = Base64Значение(\"12345\");\n    ИмяПромежуточногоФайла = ПолучитьИмяВременногоФайла(\"xml\"); // ошибка\n    Данные.Записать(ИмяПромежуточногоФайла);\n\n    ИмяПромежуточногоФайла2 = ПолучитьИмяВременногоФайла(\"xml\"); \n    Данные.Записать(ИмяПромежуточногоФайла2);\n    УдалитьФайлы(ИмяПромежуточногоФайла2);\n\n    ИмяПромежуточногоФайла3 = ПолучитьИмяВременногоФайла(\"xml\"); \n    Данные.Записать(ИмяПромежуточногоФайла3);\n    ПереместитьФайл(ИмяПромежуточногоФайла3, Путь);\n\n    // ошибка, если нет поиска\n    // РаботаСФайламиСлужебныйКлиент.УдалитьФайл\n    ИмяПромежуточногоФайла4 = ПолучитьИмяВременногоФайла(\"xml\"); // ошибка, если нет исключения\n    Данные.Записать(ИмяПромежуточногоФайла4);\n    РаботаСФайламиСлужебныйКлиент.УдалитьФайл(Неопределено, ИмяПромежуточногоФайла4);\n\n    // ошибка, если нет поиска\n    // РандомнаяПроцедураУдаленияФайла\n    ИмяПромежуточногоФайла5 = ПолучитьИмяВременногоФайла(\"xml\");\n    Данные.Записать(ИмяПромежуточногоФайла5);\n    РандомнаяПроцедураУдаленияФайла(ИмяПромежуточногоФайла5);\n\n    // ошибка, если нет \"НачатьУдалениеФайлов\"\n    ИмяПромежуточногоФайла6 = ПолучитьИмяВременногоФайла(\"xml\");\n    НачатьУдалениеФайлов(, ИмяПромежуточногоФайла6);\n\n    // ошибка, если нет \"BeginDeletingFiles\"\n    TempFile7 = GetTempFileName(\"xml\");\n    BeginDeletingFiles(, TempFile7);\n\nКонецПроцедуры\n\nПроцедура РандомнаяПроцедураУдаленияФайла(ИмяФайла)\n    УдалитьФайлы(ИмяФайла);\nКонецПроцедуры\n\nПроцедура ПроверкаДиагностикиСОбщимМодулем()\n\n    ИмяПромежуточногоФайла = ПолучитьИмяВременногоФайла(\"xml\"); // <-- Ошибки нет, ниже удаление\n    Данные.Записать(ИмяПромежуточногоФайла);\n\n\n    ИмяПромежуточногоФайла2 = ПолучитьИмяВременногоФайла(\"txt\"); // <-- Ошибка, удаления файла нет\n    Данные.Записать(ИмяПромежуточногоФайла2);\n\n    ОбщийМодуль.УдалитьВсеФайлы2(ИмяПромежуточногоФайла);\n    Обработки.ДляУдаления.УдалитьВсеФайлы(ИмяПромежуточногоФайла);\n    Статус = Справочники.ОбщийМодуль.УдалитьВсеФайлы(ИмяПромежуточногоФайла);\n\nКонецПроцедуры\n\nПроцедура ПроверкаДиагностикиСОбщимМодулем_Модуль()\n\n    ИмяПромежуточногоФайла = ПолучитьИмяВременногоФайла(); // <-- Ошибки нет, ниже удаление\n    ДвоичныеДанные = Модуль(\"РаботаСФайлами\").ДвоичныеДанныеФайла(ИмяПромежуточногоФайла);\n    УдалитьФайлы(ИмяПромежуточногоФайла);\n\n    ИмяПромежуточногоФайла3 = ПолучитьИмяВременногоФайла(); // <-- Ошибка, удаления файла нет\n    ДвоичныеДанные = Модуль(\"РаботаСФайлами\").ДвоичныеДанныеФайла(ИмяПромежуточногоФайла3);\n\nКонецПроцедуры\n\nФункция Тест()\n    Если Условие Тогда\n        ИмяФайлаНаДиске = ПолучитьИмяВременногоФайла(); // ошибка, удаления файла нет\n        ПолучитьИзВременногоХранилища(ИмяФайла).Записать(ИмяФайлаНаДиске);\n     Иначе\n        ИмяФайлаНаДиске = ИмяФайла;\n    КонецЕсли;\n\n    Возврат ТекстИзФайла;\nКонецФункции";
 
@@ -414,21 +415,28 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expect 7 diagnostics with default configuration. Counts
-        // are stable across the Q-β-2 migration: every leak in this
-        // fixture is body-wide (no conditional cleanup that body-
-        // wide BFS would have missed but MAY would catch), so the
-        // pre- and post-migration totals match.
-        assert_eq!(diagnostics.len(), 7, "Expected 7 diagnostics with default config");
-
-        // Verify exact positions
-        assert_diagnostic_range(code, &diagnostics[0], 6, 29, 62);
-        assert_diagnostic_range(code, &diagnostics[1], 19, 30, 63);
-        assert_diagnostic_range(code, &diagnostics[2], 25, 30, 63);
-        assert_diagnostic_range(code, &diagnostics[3], 45, 29, 62);
-        assert_diagnostic_range(code, &diagnostics[4], 49, 30, 63);
-        assert_diagnostic_range(code, &diagnostics[5], 64, 30, 58);
-        assert_diagnostic_range(code, &diagnostics[6], 71, 26, 54);
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 7:30..7:63
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 20:31..20:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла4' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 26:31..26:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла5' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 46:30..46:63
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 50:31..50:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла2' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 65:31..65:59
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла3' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 72:27..72:55
+              message: Нужно добавить удаление временного файла 'ИмяФайлаНаДиске' после использования
+              severity: Major"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -445,13 +453,22 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics with extended config");
-
-        assert_diagnostic_range(code, &diagnostics[0], 6, 29, 62);
-        assert_diagnostic_range(code, &diagnostics[1], 25, 30, 63);
-        assert_diagnostic_range(code, &diagnostics[2], 49, 30, 63);
-        assert_diagnostic_range(code, &diagnostics[3], 64, 30, 58);
-        assert_diagnostic_range(code, &diagnostics[4], 71, 26, 54);
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 7:30..7:63
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 26:31..26:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла5' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 50:31..50:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла2' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 65:31..65:59
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла3' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 72:27..72:55
+              message: Нужно добавить удаление временного файла 'ИмяФайлаНаДиске' после использования
+              severity: Major"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -468,7 +485,43 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        assert_eq!(diagnostics.len(), 12, "Expected 12 diagnostics with restrictive config");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 7:30..7:63
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 10:31..10:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла2' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 14:31..14:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла3' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 20:31..20:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла4' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 26:31..26:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла5' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 31:31..31:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла6' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 35:17..35:39
+              message: Нужно добавить удаление временного файла 'TempFile7' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 46:30..46:63
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 50:31..50:64
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла2' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 61:30..61:58
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 65:31..65:59
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла3' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 72:27..72:55
+              message: Нужно добавить удаление временного файла 'ИмяФайлаНаДиске' после использования
+              severity: Major"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -481,7 +534,10 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:30..3:63
+              message: Нужно добавить удаление временного файла 'ИмяПромежуточногоФайла' после использования
+              severity: Major"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -498,11 +554,14 @@ mod tests {
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 2, "Should create diagnostic for inline usage");
-
-        for d in &diagnostics {
-            assert_eq!(d.message, "Нужно добавить удаление временного файла после использования");
-        }
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:26..3:48
+              message: Нужно добавить удаление временного файла после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 4:17..4:50
+              message: Нужно добавить удаление временного файла после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
 
         let code2 = r#"
             Процедура Тест()
@@ -511,7 +570,11 @@ mod tests {
         "#;
         let diagnostics2 = check_ast_diagnostic(code2, check);
 
-        assert_eq!(diagnostics2.len(), 1, "Should create diagnostic for inline GetTempFileName");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:35..3:68
+              message: Нужно добавить удаление временного файла после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code2, &diagnostics2));
     }
 
     #[test]
@@ -541,17 +604,20 @@ mod tests {
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 4, "Should find exactly 4 errors (3 inline + 1 no deletion)");
-
-        let inline_count = diagnostics
-            .iter()
-            .filter(|d| d.message == "Нужно добавить удаление временного файла после использования")
-            .count();
-
-        let var_count = diagnostics.iter().filter(|d| d.message.contains("Файл")).count();
-
-        assert_eq!(inline_count, 3, "Should have 3 inline usage errors");
-        assert_eq!(var_count, 1, "Should have 1 variable without deletion error");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 8:25..8:58
+              message: Нужно добавить удаление временного файла 'Файл2' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 11:26..11:48
+              message: Нужно добавить удаление временного файла после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 14:36..14:69
+              message: Нужно добавить удаление временного файла после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 17:17..17:50
+              message: Нужно добавить удаление временного файла после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -563,7 +629,7 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should not report when file is deleted");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
 
         let code = r#"
             Процедура Тест()
@@ -571,7 +637,11 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should report when file is not deleted");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:28..3:61
+              message: Нужно добавить удаление временного файла 'ИмяФайла' после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
 
         let code = r#"
             Процедура Тест()
@@ -580,7 +650,7 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should not report when file is moved");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -594,7 +664,14 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Should handle case-insensitive GetTempFileName");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:25..3:58
+              message: Нужно добавить удаление временного файла 'Файл1' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 4:25..4:58
+              message: Нужно добавить удаление временного файла 'Файл2' после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -605,7 +682,11 @@ mod tests {
             EndProcedure
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect English GetTempFileName");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:28..3:50
+              message: Нужно добавить удаление временного файла 'TempFile' после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
 
         let code = r#"
             Procedure Test()
@@ -614,7 +695,7 @@ mod tests {
             EndProcedure
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should recognize English DeleteFiles");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -627,7 +708,11 @@ mod tests {
         "#;
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 1, "Custom method not in default config");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:28..3:61
+              message: Нужно добавить удаление временного файла 'ИмяФайла' после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
 
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
@@ -637,7 +722,7 @@ mod tests {
             }),
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0, "Custom method recognized in config");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -656,12 +741,11 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Conditional cleanup must flag leak on else-path under MAY analysis"
-        );
-        assert!(diagnostics[0].message.contains("Файл"));
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:24..3:57
+              message: Нужно добавить удаление временного файла 'Файл' после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -679,11 +763,7 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Multi-arg deletion should close every listed file in one call"
-        );
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -703,11 +783,11 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Sibling-branch cleanup leaks on the path through both else-branches"
-        );
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 4:28..4:61
+              message: Нужно добавить удаление временного файла 'Файл' после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -775,7 +855,14 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Ternary delete arg leaves both temps open under MAY");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:25..3:58
+              message: Нужно добавить удаление временного файла 'Файл1' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 4:25..4:58
+              message: Нужно добавить удаление временного файла 'Файл2' после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -790,12 +877,13 @@ mod tests {
             КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Inline + tracked Get share a body");
-        let inline = diagnostics
-            .iter()
-            .find(|d| d.message == "Нужно добавить удаление временного файла после использования");
-        let tracked = diagnostics.iter().find(|d| d.message.contains("Файл"));
-        assert!(inline.is_some(), "inline diagnostic missing");
-        assert!(tracked.is_some(), "tracked-var diagnostic missing");
+        expect![[r#"
+            MissingTemporaryFileDeletion @ 3:24..3:57
+              message: Нужно добавить удаление временного файла 'Файл' после использования
+              severity: Major
+            MissingTemporaryFileDeletion @ 4:26..4:48
+              message: Нужно добавить удаление временного файла после использования
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 }

@@ -510,8 +510,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::*;
+    use crate::test_utils::{check_hir_diagnostic, format_diags};
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_correct_usage() {
@@ -522,10 +523,10 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 0, "Should not detect correct usage");
+        expect![[r#""#]].assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -537,11 +538,14 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 1, "Should detect missing parameter");
-        assert_diagnostic_range(code, filtered[0], 2, 8, 45);
+        expect![[r#"
+            IncorrectUseOfStrTemplate @ 3:9..3:46
+              message: Некорректное использование СтрШаблон
+              severity: Blocker"#]]
+        .assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -553,10 +557,14 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 1, "Should detect insufficient arguments");
+        expect![[r#"
+            IncorrectUseOfStrTemplate @ 3:9..3:50
+              message: Некорректное использование СтрШаблон
+              severity: Blocker"#]]
+        .assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -659,19 +667,48 @@ mod tests {
         let diagnostics = crate::diagnostics(&ctx);
 
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
 
-        // Expected 12 diagnostics total
-        // Now detecting all 12:
-        // - 9 direct string literals (from HIR lowering)
-        // - 3 variable resolution cases (lines 17, 21, 25) - now supported via ReachingDefs
-        assert_eq!(
-            filtered.len(),
-            12,
-            "Should detect all 12 errors (100% coverage with ReachingDefs)"
-        );
+        expect![[r#"
+            IncorrectUseOfStrTemplate @ 3:9..3:46
+              message: Некорректное использование СтрШаблон
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 5:9..5:50
+              message: Некорректное использование СтрШаблон
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 7:9..7:52
+              message: Некорректное использование СтрШаблон
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 9:9..9:51
+              message: Некорректное использование СтрШаблон
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 11:9..11:72
+              message: Некорректное использование СтрШаблон
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 14:9..14:67
+              message: Некорректное использование СтрШаблон
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 17:19..17:30
+              message: Template '123' requires 0 parameters but 1 provided
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 21:19..21:31
+              message: Template '123' requires 0 parameters but 1 provided
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 25:19..25:31
+              message: Template '5487' requires 0 parameters but 1 provided
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 28:11..28:117
+              message: Некорректное использование СтрШаблон
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 30:9..30:39
+              message: Некорректное использование СтрШаблон
+              severity: Blocker
+            IncorrectUseOfStrTemplate @ 46:9..46:60
+              message: Некорректное использование СтрШаблон
+              severity: Blocker"#]]
+        .assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -714,10 +751,14 @@ mod tests {
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 1, "Should detect unused parameter");
+        expect![[r#"
+            IncorrectUseOfStrTemplate @ 4:19..4:30
+              message: Template '123' requires 0 parameters but 1 provided
+              severity: Blocker"#]]
+        .assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -760,10 +801,10 @@ mod tests {
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 0, "Should not report valid template");
+        expect![[r#""#]].assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -810,11 +851,10 @@ mod tests {
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        // ReachingDefs handles multiple definitions - no false positive
-        assert_eq!(filtered.len(), 0, "Should handle multiple reaching definitions");
+        expect![[r#""#]].assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -858,10 +898,10 @@ mod tests {
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 0, "Should resolve transitive assignment");
+        expect![[r#""#]].assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -905,10 +945,14 @@ mod tests {
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 1, "Should detect error through transitive assignment");
+        expect![[r#"
+            IncorrectUseOfStrTemplate @ 5:19..5:26
+              message: Template 'no placeholders' requires 0 parameters but 1 provided
+              severity: Blocker"#]]
+        .assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -954,10 +998,10 @@ mod tests {
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 0, "Should resolve deep transitive chain");
+        expect![[r#""#]].assert_eq(&format_diags(code, &filtered));
     }
 
     #[test]
@@ -1003,9 +1047,9 @@ mod tests {
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
-        assert_eq!(filtered.len(), 0, "Should accept when all definitions resolve to same value");
+        expect![[r#""#]].assert_eq(&format_diags(code, &filtered));
     }
 }

@@ -243,6 +243,7 @@ mod tests {
     use super::check;
     use crate::test_utils::*;
     use crate::DiagnosticsConfig;
+    use expect_test::expect;
 
     #[test]
     fn test_missing_temp_storage_deletion() {
@@ -250,37 +251,22 @@ mod tests {
         let config = DiagnosticsConfig::all_enabled();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Step Q-β: under the principled MAY analysis the
-        // "Успешно3" case (Get inside one `Если`, Delete inside a
-        // sibling `Если` whose else-branch leaves the resource
-        // open) becomes a true positive — the lattice correctly
-        // sees the path through the second `Если`'s false-branch
-        // where the resource is never closed. The previous AST-
-        // order check missed this. Total expected diagnostics:
-        // 4 from the original four `Ошибка*` procedures + 1 for
-        // the conservative `Успешно3` MAY-leak = 5.
-        assert_eq!(
-            diagnostics.len(),
-            5,
-            "Expected 5 diagnostics post Step Q-β, got {}: {:?}",
-            diagnostics.len(),
-            diagnostics.iter().map(|d| d.range).collect::<Vec<_>>()
-        );
-
-        // 0-indexed lines and columns (character positions)
-        assert_diagnostic_range(code, &diagnostics[0], 3, 24, 77); // Ошибка1
-        assert_diagnostic_range(code, &diagnostics[1], 13, 24, 77); // Ошибка2
-        assert_diagnostic_range(code, &diagnostics[2], 21, 24, 77); // Ошибка3
-        assert_diagnostic_range(code, &diagnostics[3], 33, 24, 77); // ЕдинственныйВызовВМетоде
-                                                                    // Успешно3's Get is now flagged — its true line offset is
-                                                                    // computed below from the `assert_diagnostic_range` failure
-                                                                    // diagnostic if positions shift; pinning a less-fragile
-                                                                    // assertion that just requires the message and a non-zero
-                                                                    // range is enough for the Step-Q intent.
-        assert!(
-            diagnostics[4].range.start() < diagnostics[4].range.end(),
-            "Успешно3 leak diagnostic must have a non-empty range",
-        );
+        expect![[r#"
+            MissingTempStorageDeletion @ 4:25..4:78
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning
+            MissingTempStorageDeletion @ 14:25..14:78
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning
+            MissingTempStorageDeletion @ 22:25..22:78
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning
+            MissingTempStorageDeletion @ 34:25..34:78
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning
+            MissingTempStorageDeletion @ 83:26..83:79
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -293,7 +279,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Member access should match structurally");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -305,7 +291,10 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Different parameters should trigger error");
+        expect![[r#"
+            MissingTempStorageDeletion @ 3:14..3:57
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -318,7 +307,7 @@ Procedure Test()
 EndProcedure
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "English keywords should work");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -332,7 +321,7 @@ EndProcedure
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should not report when data is deleted");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -345,7 +334,10 @@ EndProcedure
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should report when data is not deleted");
+        expect![[r#"
+            MissingTempStorageDeletion @ 4:14..4:50
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -359,7 +351,10 @@ EndProcedure
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Delete before get should trigger error");
+        expect![[r#"
+            MissingTempStorageDeletion @ 5:14..5:50
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -401,11 +396,10 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Path through `Условие1=true → Условие2=false` leaves resource open at exit",
-        );
+        expect![[r#"
+            MissingTempStorageDeletion @ 4:18..4:54
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Step Q-β regression: a `Возврат` between Get and a textually-
@@ -423,11 +417,10 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Возврат before Delete makes the Delete unreachable on the fall-through path",
-        );
+        expect![[r#"
+            MissingTempStorageDeletion @ 3:14..3:50
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Step Q-β regression: a `Get` nested inside another call
@@ -443,11 +436,10 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Nested `Get` inside another call must still surface as a leak",
-        );
+        expect![[r#"
+            MissingTempStorageDeletion @ 3:16..3:52
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Step Q-β regression: a `Get` inside a vertex-condition
@@ -465,11 +457,10 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "`Get` inside an `Если` condition must surface — vertex-condition expressions go through `transfer_expr`",
-        );
+        expect![[r#"
+            MissingTempStorageDeletion @ 3:10..3:46
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Step Q-β regression: an unsupported address-expression shape
@@ -495,12 +486,10 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "ternary-arg `Get` with no matching `Delete` must leak — unsupported arg shapes \
-             use a synthetic key so they cannot be silently dropped",
-        );
+        expect![[r#"
+            MissingTempStorageDeletion @ 3:14..3:61
+              message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Step Q-β regression: a Call-shaped address expression
@@ -521,12 +510,7 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "structurally-equal `Get(Call())` / `Delete(Call())` pair must match — \
-             Call / MethodCall arms are part of the canonicalized resource key",
-        );
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Step Q-β known limitation (Plan §7 risk #3, deferred to a

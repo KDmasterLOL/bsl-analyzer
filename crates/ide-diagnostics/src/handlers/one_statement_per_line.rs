@@ -36,6 +36,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use expect_test::expect;
     #[test]
     fn test_one_statement_per_line() {
         let code = r#"А = 0;;
@@ -62,34 +63,23 @@ mod tests {
 			"ETP",
 			ТипВнешнейКомпоненты.Native);
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::OneStatementPerLine).collect();
-
-        // Expected diagnostics for:
-        // Line 4:  "  А = 0;А = 1;" - second statement "А = 1" at (3, 8, 3, 13) without semicolon
-        // Line 9:  "Если Истина Тогда Сообщить(А=1); F=0; КонецЕсли;" - statements inside IF
-        // Line 13: "А=1; А=2; А=3;" - (12, 5, 12, 8), (12, 10, 12, 13) without semicolons
-        // Note: Statements inside single-line IF also count
-        // Note: Our parser doesn't include semicolon in statement range
-
-        // Minimum expected: line 4 and line 13 statements
-        assert!(diags.len() >= 3, "Expected at least 3 diagnostics, got {}", diags.len());
-
-        // Line 4 (0-indexed: 3), cols 8-13: "А = 1" (second statement without semicolon)
-        assert_diagnostic_range(code, diags[0], 3, 8, 13);
-
-        // Line 13 (0-indexed: 12): second and third statements
-        // Find diagnostics on line 12
-        let line_12_diags: Vec<_> = diags
-            .iter()
-            .filter(|d| {
-                let (sl, _, _, _) = crate::test_utils::range_to_line_col(code, d.range);
-                sl == 12
-            })
-            .collect();
-        assert_eq!(line_12_diags.len(), 2, "Expected 2 diagnostics on line 13");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::OneStatementPerLine,
+            expect![[r#"
+                OneStatementPerLine @ 4:9..4:14
+                  message: Несколько операторов в одной строке
+                  severity: Information
+                OneStatementPerLine @ 9:34..9:37
+                  message: Несколько операторов в одной строке
+                  severity: Information
+                OneStatementPerLine @ 13:6..13:9
+                  message: Несколько операторов в одной строке
+                  severity: Information
+                OneStatementPerLine @ 13:11..13:14
+                  message: Несколько операторов в одной строке
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -100,21 +90,17 @@ mod tests {
 Асинх Процедура а()
     Существует = Ждать ФайлНаДиске.СуществуетАсинх();
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::OneStatementPerLine).collect();
-
-        // Expected 2 diagnostics (0-indexed lines/cols):
-        // Line 2: "Ф=1; У=2; Е=3;" → (1, 5, 1, 9), (1, 10, 1, 14)
-        // Note: BSL parser doesn't include semicolon in expression range, so end col is one less
-        assert_eq!(diags.len(), 2, "Expected 2 diagnostics, got {}", diags.len());
-
-        // Line 2 (0-indexed: 1), cols 5-8: "У=2" (second statement without semicolon)
-        assert_diagnostic_range(code, diags[0], 1, 5, 8);
-
-        // Line 2 (0-indexed: 1), cols 10-13: "Е=3" (third statement without semicolon)
-        assert_diagnostic_range(code, diags[1], 1, 10, 13);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::OneStatementPerLine,
+            expect![[r#"
+                OneStatementPerLine @ 2:6..2:9
+                  message: Несколько операторов в одной строке
+                  severity: Information
+                OneStatementPerLine @ 2:11..2:14
+                  message: Несколько операторов в одной строке
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -126,10 +112,7 @@ mod tests {
     В = 3;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::OneStatementPerLine).collect();
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::OneStatementPerLine, expect![[r#""#]]);
     }
 
     #[test]
@@ -147,10 +130,6 @@ mod tests {
             ТипВнешнейКомпоненты.Native);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::OneStatementPerLine).collect();
-        // Should have no diagnostics because the statement contains preprocessor
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::OneStatementPerLine, expect![[r#""#]]);
     }
 }

@@ -138,8 +138,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         // Inline fixture with illegal Unicode characters preserved exactly.
@@ -176,52 +177,53 @@ mod tests {
             "\u{2212};\n", // line 28: standalone −
             "//конец файла\n",
         );
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        // Expected 14 diagnostics
-        assert_eq!(diagnostics.len(), 14, "Expected 14 diagnostics");
-
-        // Line 1 (0-indexed): СреднееТире = "–";
-        assert_diagnostic_range(code, &diagnostics[0], 1, 14, 17);
-
-        // Line 2: ЦифровоеТире = "‒";
-        assert_diagnostic_range(code, &diagnostics[1], 2, 15, 18);
-
-        // Line 3: ДлинноеТире = "—";
-        assert_diagnostic_range(code, &diagnostics[2], 3, 14, 17);
-
-        // Line 4: ГоризонтальнаяЛиния = "―";
-        assert_diagnostic_range(code, &diagnostics[3], 4, 22, 25);
-
-        // Line 5: НеправильныйМинус = "−";
-        assert_diagnostic_range(code, &diagnostics[4], 5, 20, 23);
-
-        // Line 6: Comment with soft hyphen
-        assert_diagnostic_range(code, &diagnostics[5], 6, 0, 33);
-
-        // Line 12: Comment with NBSP
-        assert_diagnostic_range(code, &diagnostics[6], 12, 0, 32);
-
-        // Line 14: Строка = "А" + " " + "И"; (NBSP in middle string)
-        assert_diagnostic_range(code, &diagnostics[7], 14, 15, 18);
-
-        // Line 17: Standalone NBSP
-        assert_diagnostic_range(code, &diagnostics[8], 17, 0, 1);
-
-        // Line 20: Standalone –
-        assert_diagnostic_range(code, &diagnostics[9], 20, 0, 1);
-
-        // Line 22: Standalone ‒
-        assert_diagnostic_range(code, &diagnostics[10], 22, 0, 1);
-
-        // Line 24: Standalone —
-        assert_diagnostic_range(code, &diagnostics[11], 24, 0, 1);
-
-        // Line 26: Standalone ―
-        assert_diagnostic_range(code, &diagnostics[12], 26, 0, 1);
-
-        // Line 28: Standalone −
-        assert_diagnostic_range(code, &diagnostics[13], 28, 0, 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InvalidCharacterInFile,
+            expect![[r#"
+                InvalidCharacterInFile @ 2:15..2:18
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 3:16..3:19
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 4:15..4:18
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 5:23..5:26
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 6:21..6:24
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 7:1..7:34
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 13:1..13:33
+                  message: Нужно заменить символ неразрывного пробела на обычный пробел
+                  severity: Major
+                InvalidCharacterInFile @ 15:16..15:19
+                  message: Нужно заменить символ неразрывного пробела на обычный пробел
+                  severity: Major
+                InvalidCharacterInFile @ 18:1..18:2
+                  message: Нужно заменить символ неразрывного пробела на обычный пробел
+                  severity: Major
+                InvalidCharacterInFile @ 21:1..21:2
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 23:1..23:2
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 25:1..25:2
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 27:1..27:2
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 29:1..29:2
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -229,11 +231,13 @@ mod tests {
         let code = r#"
 А = "тест–тест";
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for en dash");
-        assert_eq!(
-            diagnostics[0].message, "Нужно исправить на правильный символ \"-\"",
-            "Should use dash message"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InvalidCharacterInFile,
+            expect![[r#"
+                InvalidCharacterInFile @ 2:5..2:16
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major"#]],
         );
     }
 
@@ -241,11 +245,13 @@ mod tests {
     fn test_nbsp_in_comment() {
         // Non-breaking space in comment (U+00A0 explicitly)
         let code = "// Тест\u{00A0}неразрывный\u{00A0}пробел";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for non-breaking space");
-        assert_eq!(
-            diagnostics[0].message, "Нужно заменить символ неразрывного пробела на обычный пробел",
-            "Should use space message"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InvalidCharacterInFile,
+            expect![[r#"
+                InvalidCharacterInFile @ 1:1..1:27
+                  message: Нужно заменить символ неразрывного пробела на обычный пробел
+                  severity: Major"#]],
         );
     }
 
@@ -259,39 +265,56 @@ mod tests {
     // Комментарий - нормальный
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Regular hyphen and space should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InvalidCharacterInFile,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_all_illegal_dashes() {
         // Test all 6 types of illegal dashes (using explicit Unicode escapes)
         let code = "А = \"\u{AD}\";\nБ = \"\u{2012}\";\nВ = \"\u{2013}\";\nГ = \"\u{2014}\";\nД = \"\u{2015}\";\nЕ = \"\u{2212}\";";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics for all dash types");
-
-        for diagnostic in &diagnostics {
-            assert_eq!(
-                diagnostic.message, "Нужно исправить на правильный символ \"-\"",
-                "All should use dash message"
-            );
-        }
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InvalidCharacterInFile,
+            expect![[r#"
+                InvalidCharacterInFile @ 1:5..1:8
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 2:5..2:8
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 3:5..3:8
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 4:5..4:8
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 5:5..5:8
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 6:5..6:8
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major"#]],
+        );
     }
 
     #[test]
     fn test_mixed_invalid_chars() {
         // Mix of dashes and spaces (using explicit Unicode escapes)
         let code = "А = \"\u{2013}\";\nБ = \"\u{00A0}\";";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics");
-
-        assert_eq!(
-            diagnostics[0].message, "Нужно исправить на правильный символ \"-\"",
-            "First should be dash"
-        );
-        assert_eq!(
-            diagnostics[1].message, "Нужно заменить символ неразрывного пробела на обычный пробел",
-            "Second should be space"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InvalidCharacterInFile,
+            expect![[r#"
+                InvalidCharacterInFile @ 1:5..1:8
+                  message: Нужно исправить на правильный символ "-"
+                  severity: Major
+                InvalidCharacterInFile @ 2:5..2:8
+                  message: Нужно заменить символ неразрывного пробела на обычный пробел
+                  severity: Major"#]],
         );
     }
 }

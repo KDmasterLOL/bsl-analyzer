@@ -42,20 +42,22 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_procedure_with_reserved_word_execute() {
         let code = r#"Процедура Выполнить(Команда)
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ReservedWordAsMethodName)
-            .collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 0, 10, 19);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ReservedWordAsMethodName,
+            expect![[r#"
+            ReservedWordAsMethodName @ 1:11..1:20
+              message: Имя "Выполнить" является зарезервированным словом и не может использоваться как имя процедуры/функции
+              severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -63,45 +65,53 @@ mod tests {
         let code = r#"Функция Новый()
     Возврат 1;
 КонецФункции"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ReservedWordAsMethodName)
-            .collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 0, 8, 13);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ReservedWordAsMethodName,
+            expect![[r#"
+            ReservedWordAsMethodName @ 1:9..1:14
+              message: Имя "Новый" является зарезервированным словом и не может использоваться как имя процедуры/функции
+              severity: Blocker"#]],
+        );
     }
 
     #[test]
     fn test_procedure_with_reserved_word_if() {
         let code = r#"Процедура Если()
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ReservedWordAsMethodName)
-            .collect();
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ReservedWordAsMethodName,
+            expect![[r#"
+            ReservedWordAsMethodName @ 1:11..1:15
+              message: Имя "Если" является зарезервированным словом и не может использоваться как имя процедуры/функции
+              severity: Blocker"#]],
+        );
     }
 
     #[test]
     fn test_procedure_with_reserved_word_english() {
         let code = r#"Procedure Execute(Command)
 EndProcedure"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ReservedWordAsMethodName)
-            .collect();
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ReservedWordAsMethodName,
+            expect![[r#"
+            ReservedWordAsMethodName @ 1:11..1:18
+              message: Имя "Execute" является зарезервированным словом и не может использоваться как имя процедуры/функции
+              severity: Blocker"#]],
+        );
     }
 
     #[test]
     fn test_normal_procedure_name_ok() {
         let code = r#"Процедура МояПроцедура()
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(diagnostics.iter().all(|d| d.code != DiagnosticCode::ReservedWordAsMethodName));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ReservedWordAsMethodName,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -109,7 +119,10 @@ EndProcedure"#;
         let code = r#"Функция ПолучитьЗначение()
     Возврат 1;
 КонецФункции"#;
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(diagnostics.iter().all(|d| d.code != DiagnosticCode::ReservedWordAsMethodName));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ReservedWordAsMethodName,
+            expect![[r#""#]],
+        );
     }
 }

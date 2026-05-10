@@ -389,8 +389,9 @@ fn create_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, Severity};
+    use crate::test_utils::format_diags;
+    use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::path::PathBuf;
@@ -460,45 +461,25 @@ mod tests {
         let code = "Procedure Test()\nEndProcedure";
         let (diagnostics, file_content) = check_diagnostic(code, fixtures_dir);
 
-        // Should find 6 diagnostics total:
-        // 1. Missing method: НесуществующийМетод
-        // 2. Non-export: Тест
-        // 3. Empty body: НеУстаревшаяПроцедура (for РегламентноеЗадание1)
-        // 4. Empty body: НеУстаревшаяПроцедура (for РегламентноеЗадание2)
-        // 5. Duplicate handler: НеУстаревшаяПроцедура used twice
-        // 6. Method with parameters: ВерсионированиеПриЗаписи for predefined job
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics, found {}", diagnostics.len());
-
-        // Check that all diagnostics have correct range (0, 0, 9) - byte range
-        for diagnostic in diagnostics.iter() {
-            assert_diagnostic_range(&file_content, diagnostic, 0, 0, 9);
-            assert_eq!(diagnostic.severity, Severity::Critical);
-        }
-
-        // Verify specific messages (order-independent)
-        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
-
-        // Check for specific error messages
-        assert!(
-            messages.iter().any(|m| m.contains("НесуществующийМетод")),
-            "Should have MissingMethod diagnostic for НесуществующийМетод"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("Тест") && m.contains("Экспорт")),
-            "Should have NonExportMethod diagnostic for Тест"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("НеУстаревшаяПроцедура") && m.contains("тело")),
-            "Should have EmptyMethod diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("дубли")),
-            "Should have DuplicateHandler diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("параметров")),
-            "Should have MethodWithParameters diagnostic"
-        );
+        expect![[r#"
+            ScheduledJobHandler @ 1:1..1:10
+              message: Добавьте "Экспорт" методу "ПервыйОбщийМодуль.Тест" или исправьте некорректный обработчик регламентного задания "РегламентноеЗаданиеПриватныйМетод"
+              severity: Critical
+            ScheduledJobHandler @ 1:1..1:10
+              message: Добавьте код в тело обработчика "ПервыйОбщийМодуль.НеУстаревшаяПроцедура" регламентного задания "РегламентноеЗадание1"
+              severity: Critical
+            ScheduledJobHandler @ 1:1..1:10
+              message: Добавьте код в тело обработчика "ПервыйОбщийМодуль.НеУстаревшаяПроцедура" регламентного задания "РегламентноеЗадание2"
+              severity: Critical
+            ScheduledJobHandler @ 1:1..1:10
+              message: Исправьте дубли использования одного обработчика "ПервыйОбщийМодуль.НеУстаревшаяПроцедура" в разных регламентных заданиях. Задания: "РегламентноеЗадание1, РегламентноеЗадание2"
+              severity: Critical
+            ScheduledJobHandler @ 1:1..1:10
+              message: Исправьте некорректный обработчик "ПервыйОбщийМодуль.ВерсионированиеПриЗаписи" предопределенного регламентного задания "РегламентноеЗаданиеПредопределенноеНесколькоПараметров" - у метода не должно быть параметров
+              severity: Critical
+            ScheduledJobHandler @ 1:1..1:10
+              message: Укажите существующий обработчик вместо несуществующего "ПервыйОбщийМодуль.НесуществующийМетод" у регламентного задания "РегламентноеЗаданиеНесуществующийМетод"
+              severity: Critical"#]].assert_eq(&format_diags(&file_content, &diagnostics));
     }
 
     #[test]
@@ -531,7 +512,6 @@ mod tests {
 
         let diagnostics = check(&ctx);
 
-        // Should return empty for non-SessionModule
-        assert_eq!(diagnostics.len(), 0, "Non-SessionModule should have no diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags("Процедура Тест()\nКонецПроцедуры", &diagnostics));
     }
 }

@@ -67,6 +67,7 @@ fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsCont
 #[cfg(test)]
 mod tests {
     use crate::test_utils::*;
+    use expect_test::expect;
     #[test]
     fn test_from_java_fixture() {
         let code = r#"&НаКлиенте
@@ -124,29 +125,36 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, super::check);
 
-        assert_eq!(diagnostics.len(), 5);
-
-        // Variables (lines 16, 20, 26 - 1-indexed)
-        assert_diagnostic_range(code, &diagnostics[0], 15, 6, 30);
-        assert_diagnostic_range(code, &diagnostics[1], 19, 6, 30);
-        assert_diagnostic_range(code, &diagnostics[2], 25, 6, 30);
-
-        // Methods (lines 41, 50 - 1-indexed)
-        assert_diagnostic_range(code, &diagnostics[3], 40, 10, 34);
-        assert_diagnostic_range(code, &diagnostics[4], 49, 10, 34);
+        expect![[r#"
+            SeveralCompilerDirectives @ 16:7..16:31
+              message: Указано более одной директивы компиляции
+              severity: Critical
+            SeveralCompilerDirectives @ 20:7..20:31
+              message: Указано более одной директивы компиляции
+              severity: Critical
+            SeveralCompilerDirectives @ 26:7..26:31
+              message: Указано более одной директивы компиляции
+              severity: Critical
+            SeveralCompilerDirectives @ 41:11..41:35
+              message: Указано более одной директивы компиляции
+              severity: Critical
+            SeveralCompilerDirectives @ 50:11..50:35
+              message: Указано более одной директивы компиляции
+              severity: Critical"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_single_directive_ok() {
         let code = "&НаКлиенте\nПерем ОК;";
         let diagnostics = check_ast_diagnostic(code, super::check);
-        assert!(diagnostics.is_empty());
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_no_directive_ok() {
         let code = "Перем ОК;\n\nПроцедура Тест()\nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, super::check);
-        assert!(diagnostics.is_empty());
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

@@ -291,8 +291,9 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"Процедура Тест()
@@ -356,18 +357,20 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 3, "Should find 3 diagnostics");
-
-        // Line 33 (0-indexed 32), cols 9-35: Direct РольДоступна() in if
-        assert_diagnostic_range(code, &diagnostics[0], 32, 9, 35);
-
-        // Line 39 (0-indexed 38), cols 9-23: Variable ДоступРазрешен in if
-        assert_diagnostic_range(code, &diagnostics[1], 38, 9, 23);
-
-        // Line 57 (0-indexed 56), cols 14-40: Direct РольДоступна() in elsif
-        assert_diagnostic_range(code, &diagnostics[2], 56, 14, 40);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IsInRoleMethod,
+            expect![[r#"
+            IsInRoleMethod @ 33:10..33:36
+              message: Для проверки прав доступа в коде следует использовать метод ПравоДоступа
+              severity: Warning
+            IsInRoleMethod @ 39:10..39:24
+              message: Для проверки прав доступа в коде следует использовать метод ПравоДоступа
+              severity: Warning
+            IsInRoleMethod @ 57:15..57:41
+              message: Для проверки прав доступа в коде следует использовать метод ПравоДоступа
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -378,8 +381,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IsInRoleMethod,
+            expect![[r#"
+            IsInRoleMethod @ 3:10..3:30
+              message: Для проверки прав доступа в коде следует использовать метод ПравоДоступа
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -390,8 +399,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::IsInRoleMethod, expect![[r#""#]]);
     }
 
     #[test]
@@ -403,8 +411,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IsInRoleMethod,
+            expect![[r#"
+            IsInRoleMethod @ 4:10..4:16
+              message: Для проверки прав доступа в коде следует использовать метод ПравоДоступа
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -416,8 +430,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::IsInRoleMethod, expect![[r#""#]]);
     }
 
     #[test]
@@ -430,8 +443,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Reassignment should clear tracking");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::IsInRoleMethod, expect![[r#""#]]);
     }
 
     #[test]
@@ -443,8 +455,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IsInRoleMethod,
+            expect![[r#"
+            IsInRoleMethod @ 4:15..4:35
+              message: Для проверки прав доступа в коде следует использовать метод ПравоДоступа
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -455,8 +473,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IsInRoleMethod,
+            expect![[r#"
+            IsInRoleMethod @ 3:10..3:30
+              message: Для проверки прав доступа в коде следует использовать метод ПравоДоступа
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -467,8 +491,14 @@ Procedure Test()
     EndIf;
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IsInRoleMethod,
+            expect![[r#"
+            IsInRoleMethod @ 3:8..3:24
+              message: Для проверки прав доступа в коде следует использовать метод ПравоДоступа
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -480,7 +510,6 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "PrivilegedMode variable should protect");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::IsInRoleMethod, expect![[r#""#]]);
     }
 }

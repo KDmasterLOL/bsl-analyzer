@@ -338,8 +338,9 @@ fn expr_uses_binding(body: &hir::Body, expr_id: ExprId, binding_id: BindingId) -
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_diagnostics_snapshot_for, format_diags};
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_simple_overwrite() {
@@ -347,13 +348,14 @@ mod tests {
     Парам1 = 10; // ошибка
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let rewrite_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RewriteMethodParameter)
-            .collect();
-
-        assert_eq!(rewrite_diags.len(), 1, "Expected 1 RewriteMethodParameter diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#"
+            RewriteMethodParameter @ 2:5..2:11
+              message: Переприсваивание параметра метода 'Парам1'
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -362,13 +364,11 @@ mod tests {
     Парам21 = 10; // не ошибка - by-ref параметр
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let rewrite_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RewriteMethodParameter)
-            .collect();
-
-        assert_eq!(rewrite_diags.len(), 0, "By-ref parameters should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -377,13 +377,11 @@ mod tests {
     Парам41 = Парам41; // не ошибка - self-assign
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let rewrite_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RewriteMethodParameter)
-            .collect();
-
-        assert_eq!(rewrite_diags.len(), 0, "Self-assign should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -392,18 +390,15 @@ mod tests {
     Парам51 = Метод(Парам51); // не ошибка - используется в RHS
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let rewrite_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RewriteMethodParameter)
-            .collect();
-
-        assert_eq!(rewrite_diags.len(), 0, "Parameter used in RHS should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RewriteMethodParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_java_fixture_all_16_cases() {
-        use crate::test_utils::assert_diagnostic_range;
         let code = r#"Процедура Тест1(Знач Парам1)
     Парам1 = 10; // ошибка
 КонецПроцедуры
@@ -475,36 +470,27 @@ mod tests {
     Парам161.Значение = Парам161; // не ошибка
     Парам161 = 10; // не ошибка
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let rewrite_diags: Vec<_> = diagnostics
-            .iter()
+        let diagnostics = crate::test_utils::check_hir_diagnostic(code);
+        let rewrite_diags = diagnostics
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::RewriteMethodParameter)
-            .collect();
-
-        // Validate exactly 5 diagnostics (matching Expected values)
-        assert_eq!(
-            rewrite_diags.len(),
-            5,
-            "Expected 5 RewriteMethodParameter diagnostics from test fixture"
-        );
-
-        // Uses 0-based line, character columns (not byte offsets)
-        // Range covers only identifier, not full statement
-
-        // Line 2 (Тест1): Парам1 = 10; - "Парам1" is 6 chars at col 4-10
-        assert_diagnostic_range(code, rewrite_diags[0], 1, 4, 10);
-
-        // Line 10 (Тест3): Парам31 = 3; - "Парам31" is 7 chars at col 4-11
-        assert_diagnostic_range(code, rewrite_diags[1], 9, 4, 11);
-
-        // Line 23 (Тест6): Парам61 = 12; - "Парам61" is 7 chars at col 4-11
-        assert_diagnostic_range(code, rewrite_diags[2], 22, 4, 11);
-
-        // Line 30 (Тест7): Парам71 = 12; - "Парам71" is 7 chars at col 4-11
-        assert_diagnostic_range(code, rewrite_diags[3], 29, 4, 11);
-
-        // Line 38 (Тест9): Парам91 = 12; - "Парам91" is 7 chars at col 4-11
-        assert_diagnostic_range(code, rewrite_diags[4], 37, 4, 11);
+            .collect::<Vec<_>>();
+        expect![[r#"
+            RewriteMethodParameter @ 2:5..2:11
+              message: Переприсваивание параметра метода 'Парам1'
+              severity: Warning
+            RewriteMethodParameter @ 10:5..10:12
+              message: Переприсваивание параметра метода 'Парам31'
+              severity: Warning
+            RewriteMethodParameter @ 23:5..23:12
+              message: Переприсваивание параметра метода 'Парам61'
+              severity: Warning
+            RewriteMethodParameter @ 30:5..30:12
+              message: Переприсваивание параметра метода 'Парам71'
+              severity: Warning
+            RewriteMethodParameter @ 38:5..38:12
+              message: Переприсваивание параметра метода 'Парам91'
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &rewrite_diags));
     }
 }

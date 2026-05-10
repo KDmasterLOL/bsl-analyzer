@@ -66,8 +66,9 @@ pub fn from_hir(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_hir_diagnostic};
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_missing_common_module_method() {
@@ -150,15 +151,11 @@ mod tests {
 КонецФункции
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == crate::DiagnosticCode::MissingCommonModuleMethod)
-            .collect();
-
-        // Shadowing is handled automatically by analyze_qualified_call
-        // which checks if base is a local variable before creating QualifiedPath
-        assert_eq!(diags.len(), 0, "Expected 0 diagnostics for shadowed variables");
+        check_diagnostics_snapshot_for(
+            code,
+            crate::DiagnosticCode::MissingCommonModuleMethod,
+            expect![[r#""#]],
+        );
     }
 
     #[test]

@@ -124,8 +124,9 @@ fn create_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, Severity};
+    use crate::test_utils::format_diags;
+    use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::path::PathBuf;
@@ -178,19 +179,10 @@ mod tests {
         let code = "//test - ManagedApplicationModule";
         let (diagnostics, file_content) = check_diagnostic(code, fixtures_dir);
 
-        // Should find 1 diagnostic for Роль1
-        // ПолныеПрава is in allowed list by default
-        // Роль2 has setForNewObjects=false
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic, found {}", diagnostics.len());
-
-        // Check diagnostic details
-        let diag = &diagnostics[0];
-        assert_eq!(diag.code, DiagnosticCode::SetPermissionsForNewObjects);
-        assert_eq!(diag.severity, Severity::Critical); // VULNERABILITY + CRITICAL maps to Critical severity
-        assert!(diag.message.contains("Роль1"), "Message should mention Роль1");
-
-        // Check range
-        assert_diagnostic_range(&file_content, diag, 0, 0, 9);
+        expect![[r#"
+            SetPermissionsForNewObjects @ 1:1..1:10
+              message: У роли "Роль1" не должен быть установлен флаг "Устанавливать права для новых объектов"
+              severity: Critical"#]].assert_eq(&format_diags(&file_content, &diagnostics));
     }
 
     #[test]
@@ -223,8 +215,7 @@ mod tests {
 
         let diagnostics = check(&ctx);
 
-        // Should return empty for non-ManagedApplicationModule
-        assert_eq!(diagnostics.len(), 0, "Non-ManagedApplicationModule should have no diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags("Процедура Тест()\nКонецПроцедуры", &diagnostics));
     }
 
     #[test]
@@ -274,15 +265,12 @@ mod tests {
 
         let diagnostics = check(&ctx);
 
-        // Should find 2 diagnostics: Роль1 and ПолныеПрава
-        // Роль2 is in custom allowed list
-        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics, found {}", diagnostics.len());
-
-        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
-        assert!(messages.iter().any(|m| m.contains("Роль1")), "Should have diagnostic for Роль1");
-        assert!(
-            messages.iter().any(|m| m.contains("ПолныеПрава")),
-            "Should have diagnostic for ПолныеПрава"
-        );
+        expect![[r#"
+            SetPermissionsForNewObjects @ 1:1..1:7
+              message: У роли "ПолныеПрава" не должен быть установлен флаг "Устанавливать права для новых объектов"
+              severity: Critical
+            SetPermissionsForNewObjects @ 1:1..1:7
+              message: У роли "Роль1" не должен быть установлен флаг "Устанавливать права для новых объектов"
+              severity: Critical"#]].assert_eq(&format_diags("//test", &diagnostics));
     }
 }

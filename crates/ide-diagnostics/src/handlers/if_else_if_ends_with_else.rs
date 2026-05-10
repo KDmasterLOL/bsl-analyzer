@@ -66,8 +66,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_if_elsif_without_else() {
         let code = r#"Процедура Тест(Значение)
@@ -78,13 +79,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        // Should detect missing else
-        assert_eq!(endif_diags.len(), 1);
-        assert_eq!(endif_diags[0].code, DiagnosticCode::IfElseIfEndsWithElse);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#"
+                IfElseIfEndsWithElse @ 6:5..6:14
+                  message: Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -99,12 +101,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        // Should not detect - has else
-        assert_eq!(endif_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -115,12 +116,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        // Should not detect - no elsif
-        assert_eq!(endif_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -133,12 +133,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        // Should not detect - no elsif
-        assert_eq!(endif_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -153,12 +152,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        // Should detect missing else
-        assert_eq!(endif_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#"
+                IfElseIfEndsWithElse @ 8:5..8:14
+                  message: Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -179,12 +180,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        // Should detect only first if (missing else)
-        assert_eq!(endif_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#"
+                IfElseIfEndsWithElse @ 6:5..6:14
+                  message: Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -201,12 +204,17 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        // Should detect both (nested and outer)
-        assert_eq!(endif_diags.len(), 2);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#"
+                IfElseIfEndsWithElse @ 7:9..7:18
+                  message: Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе
+                  severity: Warning
+                IfElseIfEndsWithElse @ 10:5..10:14
+                  message: Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе
+                  severity: Warning"#]],
+        );
     }
 
     /// FizzBuzz pattern: if/elseif without else warns; with else passes
@@ -222,11 +230,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        assert_eq!(endif_diags.len(), 1, "FizzBuzz without else should warn");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#"
+                IfElseIfEndsWithElse @ 8:5..8:14
+                  message: Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе
+                  severity: Warning"#]],
+        );
     }
 
     /// FizzBuzz pattern with else - should pass
@@ -244,10 +255,10 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let endif_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
-
-        assert_eq!(endif_diags.len(), 0, "FizzBuzz with else should pass");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IfElseIfEndsWithElse,
+            expect![[r#""#]],
+        );
     }
 }

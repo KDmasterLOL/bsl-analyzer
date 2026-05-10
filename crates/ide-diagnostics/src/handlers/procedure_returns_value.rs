@@ -32,19 +32,22 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_procedure_with_return_value() {
         let code = r#"Процедура Тест()
     Возврат 42;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ProcedureReturnsValue)
-            .collect();
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ProcedureReturnsValue,
+            expect![[r#"
+            ProcedureReturnsValue @ 2:5..2:16
+              message: Процедура не должна возвращать значение
+              severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -52,8 +55,11 @@ mod tests {
         let code = r#"Процедура Тест()
     Возврат;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(diagnostics.iter().all(|d| d.code != DiagnosticCode::ProcedureReturnsValue));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ProcedureReturnsValue,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -65,15 +71,10 @@ mod tests {
         Возврат
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ProcedureReturnsValue)
-            .collect();
-        assert_eq!(
-            diags.len(),
-            0,
-            "Return without semicolon before КонецЕсли should not trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ProcedureReturnsValue,
+            expect![[r#""#]],
         );
     }
 
@@ -82,8 +83,11 @@ mod tests {
         let code = r#"Функция Тест()
     Возврат 42;
 КонецФункции"#;
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(diagnostics.iter().all(|d| d.code != DiagnosticCode::ProcedureReturnsValue));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ProcedureReturnsValue,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -131,18 +135,19 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ProcedureReturnsValue)
-            .collect();
-        assert_eq!(diags.len(), 3);
-        // Note: Our RETURN_STMT includes `;`, so end columns match line length
-        // Line 9: `    Возврат Тест;` - cols 4-17
-        assert_diagnostic_range(code, diags[0], 8, 4, 17);
-        // Line 17: `        Возврат ОдноЗначение() + " 2";` - cols 8-38
-        assert_diagnostic_range(code, diags[1], 16, 8, 38);
-        // Line 29: `            Возврат Накопитель;` - cols 12-31
-        assert_diagnostic_range(code, diags[2], 28, 12, 31);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ProcedureReturnsValue,
+            expect![[r#"
+            ProcedureReturnsValue @ 9:5..9:18
+              message: Процедура не должна возвращать значение
+              severity: Blocker
+            ProcedureReturnsValue @ 17:9..17:39
+              message: Процедура не должна возвращать значение
+              severity: Blocker
+            ProcedureReturnsValue @ 29:13..29:32
+              message: Процедура не должна возвращать значение
+              severity: Blocker"#]],
+        );
     }
 }

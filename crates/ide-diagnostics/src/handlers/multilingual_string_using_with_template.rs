@@ -163,8 +163,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic_with_config};
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_only_ru() {
         // Default config: declaredLanguages = "ru"
@@ -208,12 +209,14 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expected 2 diagnostics with default config (declaredLanguages = "ru")
-        assert_eq!(diagnostics.len(), 2, "Should find 2 diagnostics for ru only");
-
-        // Verify exact positions (0-indexed)
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 19, 38, 19, 89);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 24, 31, 24, 82);
+        expect![[r#"
+            MultilingualStringUsingWithTemplate @ 20:39..20:90
+              message: Добавьте строки для языков: [ru]
+              severity: Major
+            MultilingualStringUsingWithTemplate @ 25:32..25:83
+              message: Добавьте строки для языков: [ru]
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -265,13 +268,21 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expected 4 diagnostics with declaredLanguages = "ru,en"
-        assert_eq!(diagnostics.len(), 4, "Should find 4 diagnostics for ru,en");
-
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 18, 38, 18, 89);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 19, 38, 19, 89);
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 21, 28, 21, 79);
-        assert_diagnostic_range_multiline(code, &diagnostics[3], 24, 31, 24, 82);
+        let snapshot = format_diags(code, &diagnostics).replace("[ru, en]", "[en, ru]");
+        expect![[r#"
+            MultilingualStringUsingWithTemplate @ 19:39..19:90
+              message: Добавьте строки для языков: [en]
+              severity: Major
+            MultilingualStringUsingWithTemplate @ 20:39..20:90
+              message: Добавьте строки для языков: [ru]
+              severity: Major
+            MultilingualStringUsingWithTemplate @ 22:29..22:80
+              message: Добавьте строки для языков: [en]
+              severity: Major
+            MultilingualStringUsingWithTemplate @ 25:32..25:83
+              message: Добавьте строки для языков: [ru]
+              severity: Major"#]]
+        .assert_eq(&snapshot);
     }
 
     #[test]
@@ -290,7 +301,7 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0, "Should not detect when all languages present");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -310,6 +321,6 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0, "Should not fire when NStr is not in StrTemplate");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

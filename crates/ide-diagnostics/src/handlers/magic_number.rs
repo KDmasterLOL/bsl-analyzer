@@ -150,13 +150,20 @@ fn is_authorized(number: &str, config: &Config) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{
-        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_hir_diagnostic, check_hir_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::{expect, Expect};
 
-    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
-        diagnostics.iter().filter(|d| d.code == DiagnosticCode::MagicNumber).collect()
+    fn check_magic_number_snapshot(
+        code: &str,
+        diagnostics: Vec<crate::Diagnostic>,
+        expected: Expect,
+    ) {
+        let diagnostics = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::MagicNumber)
+            .collect::<Vec<_>>();
+        expected.assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -217,18 +224,35 @@ mod tests {
 КонецПроцедуры"#;
 
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 8, "Expected 8 diagnostics");
-
-        assert_diagnostic_range(code, diags[0], 7, 31, 33); // 11
-        assert_diagnostic_range(code, diags[1], 11, 20, 21); // 4
-        assert_diagnostic_range(code, diags[2], 20, 21, 23); // 11
-        assert_diagnostic_range(code, diags[3], 23, 24, 26); // 14
-        assert_diagnostic_range(code, diags[4], 27, 34, 35); // 7
-        assert_diagnostic_range(code, diags[5], 33, 37, 38); // 2
-        assert_diagnostic_range(code, diags[6], 34, 37, 38); // 3
-        assert_diagnostic_range(code, diags[7], 44, 12, 14); // 12
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 8:32..8:34
+              message: Магическое число 11. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 12:21..12:22
+              message: Магическое число 4. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 21:22..21:24
+              message: Магическое число 11. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 24:25..24:27
+              message: Магическое число 14. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 28:35..28:36
+              message: Магическое число 7. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 34:38..34:39
+              message: Магическое число 2. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 35:38..35:39
+              message: Магическое число 3. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 45:13..45:15
+              message: Магическое число 12. Замените число на константу с понятным названием.
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -242,9 +266,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "Should detect no numbers (2 is excluded by simple assignment)");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -255,9 +277,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "Array index should be excluded");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -277,9 +297,17 @@ mod tests {
         );
 
         let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 2, "Array index should be detected when allowMagicIndexes = false");
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 3:21..3:23
+              message: Магическое число 20. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 4:33..4:35
+              message: Магическое число 21. Замените число на константу с понятным названием.
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -348,12 +376,41 @@ mod tests {
         );
 
         let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 10, "Should find 10 diagnostics with allowMagicIndexes=false");
-
-        assert_diagnostic_range(code, diags[8], 49, 32, 34);
-        assert_diagnostic_range(code, diags[9], 50, 18, 20);
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 8:32..8:34
+              message: Магическое число 11. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 12:21..12:22
+              message: Магическое число 4. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 21:22..21:24
+              message: Магическое число 11. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 24:25..24:27
+              message: Магическое число 14. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 28:35..28:36
+              message: Магическое число 7. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 34:38..34:39
+              message: Магическое число 2. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 35:38..35:39
+              message: Магическое число 3. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 45:13..45:15
+              message: Магическое число 12. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 50:33..50:35
+              message: Магическое число 20. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 51:19..51:21
+              message: Магическое число 21. Замените число на константу с понятным названием.
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -364,9 +421,14 @@ mod tests {
 КонецФункции
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 1, "Return statement should NOT be excluded");
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 3:13..3:15
+              message: Магическое число 12. Замените число на константу с понятным названием.
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -379,9 +441,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "Structure.Insert() values should be excluded");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -393,9 +453,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "Structure constructor values should be excluded");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -407,9 +465,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "Property assignment values should be excluded");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -419,9 +475,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "Default parameter values should be excluded");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -442,9 +496,7 @@ mod tests {
         );
 
         let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "All numbers should be authorized with custom config");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -457,13 +509,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(
-            diags.len(),
-            0,
-            "Simple assignments to meaningfully named variables should not be detected"
-        );
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -480,13 +526,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(
-            diags.len(),
-            0,
-            "Structure.Insert() with meaningful keys should not be detected"
-        );
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -499,13 +539,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(
-            diags.len(),
-            0,
-            "Property assignments with meaningful names should not be detected"
-        );
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -520,12 +554,19 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert!(
-            diags.len() >= 2,
-            "Magic numbers in expressions should be detected, found {}",
-            diags.len()
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 4:28..4:30
+              message: Магическое число 25. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 5:20..5:23
+              message: Магическое число 100. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 6:17..6:19
+              message: Магическое число 12. Замените число на константу с понятным названием.
+              severity: Information"#]],
         );
     }
 
@@ -538,13 +579,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(
-            diags.len(),
-            0,
-            "NumberQualifiers constructor params should be excluded by default"
-        );
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -556,13 +591,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(
-            diags.len(),
-            0,
-            "StringQualifiers constructor params should be excluded by default"
-        );
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -574,9 +603,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "English constructor names should be excluded by default");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -588,9 +615,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "Color constructor params should be excluded by default");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -603,9 +628,14 @@ mod tests {
         ";
 
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1, "Array constructor should NOT be excluded by default");
-        assert!(diags[0].message.contains("100"), "Should detect 100 in Array");
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 3:33..3:36
+              message: Магическое число 100. Замените число на константу с понятным названием.
+              severity: Information"#]],
+        );
 
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
@@ -616,8 +646,7 @@ mod tests {
         );
 
         let all2 = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diags2 = filter(&all2);
-        assert_eq!(diags2.len(), 0, "Array constructor should be excluded with custom config");
+        check_magic_number_snapshot(code, all2, expect![[r#""#]]);
     }
 
     #[test]
@@ -637,11 +666,16 @@ mod tests {
         );
 
         let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diags = filter(&all);
-        assert_eq!(
-            diags.len(),
-            2,
-            "Empty excludedConstructors should detect all numbers in constructors"
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 3:45..3:47
+              message: Магическое число 10. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 3:49..3:50
+              message: Магическое число 2. Замените число на константу с понятным названием.
+              severity: Information"#]],
         );
     }
 
@@ -656,12 +690,7 @@ mod tests {
 КонецПроцедуры
 "#;
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(
-            diags.len(),
-            0,
-            "Numbers inside КвалификаторыЧисла in column definitions should be excluded"
-        );
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -673,9 +702,7 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 0, "Round/Окр precision argument should be excluded");
+        check_magic_number_snapshot(code, all, expect![[r#""#]]);
     }
 
     #[test]
@@ -686,10 +713,14 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 1, "Round/Окр first argument should NOT be excluded");
-        assert!(diags[0].message.contains("3.14"), "Should detect 3.14 as magic number");
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 3:21..3:25
+              message: Магическое число 3.14. Замените число на константу с понятным названием.
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -702,8 +733,16 @@ mod tests {
 КонецПроцедуры
         ";
         let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 2, "Non-excluded constructors should be detected");
+        check_magic_number_snapshot(
+            code,
+            all,
+            expect![[r#"
+            MagicNumber @ 3:33..3:36
+              message: Магическое число 100. Замените число на константу с понятным названием.
+              severity: Information
+            MagicNumber @ 5:21..5:23
+              message: Магическое число 42. Замените число на константу с понятным названием.
+              severity: Information"#]],
+        );
     }
 }

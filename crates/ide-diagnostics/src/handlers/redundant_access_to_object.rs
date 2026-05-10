@@ -176,8 +176,9 @@ fn get_check_record_set_module(ctx: &DiagnosticsContext) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_diagnostics_snapshot_for, format_diags};
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_this_object_field_access() {
         // ThisObject field access - should emit candidate (but no diagnostic without metadata)
@@ -185,13 +186,11 @@ mod tests {
     ЭтотОбъект.Контрагент = Данные.Контрагент;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        // Without metadata context (ObjectModule), no diagnostics
-        let redundant_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RedundantAccessToObject)
-            .collect();
-        assert_eq!(redundant_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RedundantAccessToObject,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -201,13 +200,11 @@ mod tests {
     ЭтотОбъект["ПолеКонтактнойИнформации"] = Данные.Телефон;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let redundant_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RedundantAccessToObject)
-            .collect();
-        // INDEX_EXPR is not a FIELD_EXPR, so no candidate emitted
-        assert_eq!(redundant_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RedundantAccessToObject,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -225,11 +222,15 @@ mod tests {
 
         let diagnostics =
             check_metadata_diagnostic(metadata, code, |_meta, ctx| crate::diagnostics(ctx));
-        let redundant_diags: Vec<_> = diagnostics
-            .iter()
+        let redundant_diags = diagnostics
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::RedundantAccessToObject)
-            .collect();
-        assert_eq!(redundant_diags.len(), 1);
+            .collect::<Vec<_>>();
+        expect![[r#"
+            RedundantAccessToObject @ 2:17..2:33
+              message: Избыточное обращение к объекту
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &redundant_diags));
     }
 
     #[test]
@@ -239,12 +240,10 @@ mod tests {
     ThisObject.Counterparty = Data.Counterparty;
 EndProcedure"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        // Without metadata context, no diagnostics
-        let redundant_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::RedundantAccessToObject)
-            .collect();
-        assert_eq!(redundant_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::RedundantAccessToObject,
+            expect![[r#""#]],
+        );
     }
 }
