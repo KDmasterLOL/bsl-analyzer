@@ -215,4 +215,141 @@ mod tests {
             "Should detect both: subquery in FROM with JOINs + subquery in JOIN"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Track 2 §4 Slice 3 — aggregation exemption
+    //
+    // A subquery that aggregates (GROUP BY or aggregate function in SELECT
+    // list) is doing something the underlying table cannot, so the
+    // «no joins on subqueries» rule does not apply. Tests below exercise
+    // both emit sites (`join_clause.rs` for joined-side subquery,
+    // `from_clause.rs` for FROM-side subquery with subsequent joins) and
+    // guard the narrow scope: only function-call positions are aggregation
+    // signals, so columns or aliases named after an aggregate function must
+    // still trigger the diagnostic.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_join_with_sum_subquery_exempted() {
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ T1.Ссылка ИЗ Документ.Заказ КАК T1
+              ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор, СУММА(Сумма) КАК Итог
+                                ИЗ РегистрНакопления.Х
+                                СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
+              ПО T1.Ссылка = Агрегат.Регистратор";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Aggregating subquery (SUM + GROUP BY) must be exempted from JoinWithSubQuery"
+        );
+    }
+
+    #[test]
+    fn test_join_with_count_english_subquery_exempted() {
+        let code = r#"
+Процедура Тест()
+    Запрос = "SELECT * FROM Catalog.Products AS P
+              LEFT JOIN (SELECT COUNT(*) AS Total FROM Catalog.Suppliers) AS Counts
+              ON 1 = 1";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "English COUNT in subquery must exempt JoinWithSubQuery");
+    }
+
+    #[test]
+    fn test_join_with_group_by_only_subquery_exempted() {
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ T1.Ссылка ИЗ Документ.Заказ КАК T1
+              ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор ИЗ РегистрНакопления.Х
+                                СГРУППИРОВАТЬ ПО Регистратор) КАК Группы
+              ПО T1.Ссылка = Группы.Регистратор";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "GROUP BY alone must exempt JoinWithSubQuery");
+    }
+
+    #[test]
+    fn test_join_with_nested_isnull_around_sum_exempted() {
+        // Per Codex finding 5: aggregate wrapped inside another function call
+        // must still be detected as aggregation (descendants walk).
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ T1.Ссылка ИЗ Документ.Заказ КАК T1
+              ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Регистратор, ЕСТЬNULL(СУММА(Сумма), 0) КАК Итог
+                                ИЗ РегистрНакопления.Х
+                                СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
+              ПО T1.Ссылка = Агрегат.Регистратор";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "ISNULL(SUM(...), 0) wrapper must still register as aggregation"
+        );
+    }
+
+    #[test]
+    fn test_from_aggregating_subquery_with_join_exempted() {
+        // Covers the second emit site at `from_clause.rs:38-44` — FROM is a
+        // subquery and that subquery has subsequent JOINs.
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ Агрегат.Регистратор
+              ИЗ (ВЫБРАТЬ Регистратор, СУММА(Сумма) КАК Итог
+                  ИЗ РегистрНакопления.Х
+                  СГРУППИРОВАТЬ ПО Регистратор) КАК Агрегат
+              ЛЕВОЕ СОЕДИНЕНИЕ Документ.Заказ КАК T2
+              ПО Агрегат.Регистратор = T2.Ссылка";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Aggregating FROM-subquery with later JOINs must be exempted"
+        );
+    }
+
+    #[test]
+    fn test_join_with_subquery_column_named_summa_still_emits() {
+        // Per Codex finding 3: a column named `Сумма` is NOT in function-call
+        // position and must NOT suppress the diagnostic. This guards against
+        // a regression where a flat IDENT scan would falsely exempt non-aggregating
+        // subqueries that happen to mention an aggregate-keyword identifier.
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ * ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Сумма ИЗ Т2) КАК С ПО Т1.ID = С.ID";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Column named Сумма (no aggregation) must still emit the diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_join_with_subquery_alias_named_sum_still_emits() {
+        // Same guard against alias false-positive in English.
+        let code = r#"
+Процедура Тест()
+    Запрос = "SELECT * FROM T1 LEFT JOIN (SELECT Field1 AS Sum FROM T2) AS S ON T1.ID = S.ID";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Alias named Sum (no aggregation) must still emit the diagnostic"
+        );
+    }
 }

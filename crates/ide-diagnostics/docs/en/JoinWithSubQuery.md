@@ -50,6 +50,31 @@ Preferred approach:
 |    ПО Продажи.Товар = Остатки.Номенклатура";
 ```
 
+## Aggregation exemption
+
+Subqueries that aggregate are exempted: a subquery is allowed to participate
+in a join when it contains a `GROUP BY` (`СГРУППИРОВАТЬ ПО`) clause **or** an
+aggregate function call (`СУММА`/`SUM`, `СРЕДНЕЕ`/`AVG`, `МИНИМУМ`/`MIN`,
+`МАКСИМУМ`/`MAX`, `КОЛИЧЕСТВО`/`COUNT`) directly in its `SELECT` list.
+Aggregating subqueries do something the underlying table cannot, so the rule
+does not apply.
+
+```bsl
+Запрос.Текст =
+"ВЫБРАТЬ Заказы.Ссылка
+|ИЗ Документ.ЗаказПокупателя КАК Заказы
+|    ЛЕВОЕ СОЕДИНЕНИЕ (
+|        ВЫБРАТЬ Регистратор, СУММА(Сумма) КАК Итог
+|        ИЗ РегистрНакопления.Х
+|        СГРУППИРОВАТЬ ПО Регистратор
+|    ) КАК Агрегат
+|    ПО Заказы.Ссылка = Агрегат.Регистратор";  // OK: aggregating subquery
+```
+
+The aggregation check inspects only function-call positions, so a column
+reference or alias that happens to be named `Сумма`/`Sum` does not suppress
+the diagnostic.
+
 ## Sources
 * [Standard: Restrictions on SubQuery and Virtual Table Joins (RU)](https://its.1c.ru/db/v8std#content:655:hdoc)
 * [Public mirror: v8std.ru / #std655](https://v8std.ru/std/655/)
