@@ -43,3 +43,12 @@ Handler берет method docs, пропускает hyperlink docs и пров�
 **Phase B §5.3 (commit `6d8a1eb2`, 2026-05):** закрыт audit gap «case
 без комментария вообще не покрывался, если PublicMethodsDescription
 disabled» — handler теперь fall-through'ит на MRVD при PMD-disabled.
+
+## Закрыто Track 3
+
+**Phase C sub-slice C4 REDO (commit `<pending>`, 2026-05-10):** добавлены
+MRVD-only snapshot-fixtures `test_hyperlink_only_delegated_doc_snapshot`,
+`test_empty_doc_body_regression_guard_snapshot` и
+`test_pmd_enabled_context_no_double_diag_snapshot` для hyperlink-only
+delegated docs, пустого тела doc-comment после `Параметры:` и PMD-enabled
+no-double-diagnostic контекста.

@@ -203,8 +203,10 @@ mod tests {
     use super::check;
     use crate::test_utils::{
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+        check_diagnostics_snapshot_for,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_function_without_comments() {
         let code = "Функция Example()\nКонецФункции";
@@ -326,6 +328,41 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, check);
         // Hyperlink references bypass validation
         assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_hyperlink_only_delegated_doc_snapshot() {
+        check_diagnostics_snapshot_for(
+            "// См. ДругойМетод()\nФункция Example() Экспорт\nКонецФункции",
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_empty_doc_body_regression_guard_snapshot() {
+        check_diagnostics_snapshot_for(
+            "// Параметры:\n//\nФункция Example() Экспорт\nКонецФункции",
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#"
+                MissingReturnedValueDescription @ 3:9..3:16
+                  message: Добавьте описание возвращаемого значения функции
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_pmd_enabled_context_no_double_diag_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"#Область ПрограммныйИнтерфейс
+
+Функция Example() Экспорт
+КонецФункции
+
+#КонецОбласти"#,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
