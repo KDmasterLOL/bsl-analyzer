@@ -61,6 +61,14 @@
 Handler `from_hir()` только конвертирует `BodyDiagnostic` в IDE diagnostic с
 фиксированным сообщением.
 
+**Track 2 §2.3 (2026-05-10):** preprocessor-aware расширение паттерна
+«`НачатьТранзакцию(); #Если ... Попытка ... #КонецЕсли`» отложено в
+Track 6 (preprocessor source-of-truth) — текущая локальная statement-order
+логика финализирует pending до рекурсии в `PRE_IF_DIR`/`PRE_REGION_DIR`
+и даёт false-positive на этом паттерне. Регрессионный тест зафиксирован
+как `#[ignore]`'d `begin_in_preproc_then_try_outside` в handler-модуле
+с обоснованием Track 6 deferral.
+
 ## Что покрыто
 
 - корректный паттерн `НачатьТранзакцию(); Попытка ...`;

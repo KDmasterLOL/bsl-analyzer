@@ -210,6 +210,45 @@ EndProcedure"#;
         assert_eq!(diags[0].code, DiagnosticCode::BeginTransactionBeforeTryCatch);
     }
 
+    /// Track 2 Phase D §2.3 mini-fix (deferred): preprocessor-aware
+    /// recognition of `НачатьТранзакцию(); #Если ... Попытка ...`. The
+    /// current local pending-statement logic walks each `STMT_LIST`
+    /// independently; when `НачатьТранзакцию` sits in the outer list and
+    /// the matching `Попытка` lives inside a nested `PRE_IF_DIR`, the
+    /// outer pending is finalised before recursing into the preproc
+    /// branch and a false-positive fires. Recognising this pattern
+    /// requires a preprocessor-source-of-truth path that is owned by
+    /// Track 6 (preprocessor branches), so this test is `#[ignore]`'d
+    /// and documents the gap as a known-limitation.
+    #[test]
+    #[ignore = "Track 6 dep: preprocessor-aware Begin/Try matching"]
+    fn begin_in_preproc_then_try_outside() {
+        let code = r#"Процедура Тест()
+    НачатьТранзакцию();
+    #Если Сервер Тогда
+    Попытка
+        ЗаписатьДанные();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+    #КонецЕсли
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
+            .collect();
+        assert_eq!(
+            diags.len(),
+            0,
+            "BeginTransaction immediately followed by a preprocessor-guarded Try \
+             should be valid once the preproc-aware path lands (Track 6)."
+        );
+    }
+
     /// Local integration fixture with several independent violations in one file.
     #[test]
     fn test_multiple_violations_in_one_module() {

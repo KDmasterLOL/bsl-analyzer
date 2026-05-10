@@ -17,9 +17,20 @@ This rule directly follows public 1C guidance on exception handling. Empty `По
 
 The current implementation is local and primarily HIR-based:
 
-- it scans lowered `Try` statements and checks whether the `Exception` branch is empty;
-- it uses a small AST fallback to place the diagnostic on the `Исключение` keyword;
-- it also uses AST fallback for the `commentAsCode` option.
+- it scans lowered `Try` statements and classifies each `Exception` body
+  via `hir::catch_class::classify_catch_body` (Track 2 Phase D §2.1) into
+  one of `Empty`, `RaisesOnly`, `LogsOnly`, `Mixed`, `RollbackOnly`,
+  `Silent`;
+- recognition of logging calls is delegated to the platform-wide security
+  registry (`Category::Logging`, Track 2 Phase A §1.1), no per-handler
+  whitelists;
+- it emits diagnostics for `Empty`, `Silent`, and `RollbackOnly`, with a
+  rollback-specific message for the latter; `RaisesOnly`, `LogsOnly`, and
+  `Mixed` are recognised as proper recovery paths and skipped;
+- it uses a small AST fallback to place the diagnostic on the `Исключение`
+  keyword;
+- it also uses AST fallback for the `commentAsCode` option, which only
+  affects the `Empty` branch (HIR drops trivia).
 
 By default, a comment-only `Exception` block is still considered empty. When `commentAsCode = true`, such a block is accepted.
 
