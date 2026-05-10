@@ -202,16 +202,19 @@ fn create_diagnostic(
 mod tests {
     use super::check;
     use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-        check_diagnostics_snapshot_for,
+        check_ast_diagnostic, check_ast_diagnostic_with_config, check_diagnostics_snapshot_for,
+        format_diags,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
     #[test]
     fn test_function_without_comments() {
         let code = "Функция Example()\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Non-export function without comments should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -222,13 +225,10 @@ mod tests {
         // own audit-gap fix for export-outside-region, not this rule. When
         // that lands, this assertion will need to follow.
         let code = "Функция Example() Экспорт\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "MissingReturnedValueDescription stays silent here so it doesn't \
-             double-emit with PublicMethodsDescription, which is enabled by default"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
         );
     }
 
@@ -241,67 +241,83 @@ mod tests {
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::PublicMethodsDescription);
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
-        assert!(diagnostics[0].message.contains("Добавьте описание"));
-        assert_diagnostic_range(code, &diagnostics[0], 0, 8, 15);
+        expect![[r#"
+            MissingReturnedValueDescription @ 1:9..1:16
+              message: Добавьте описание возвращаемого значения функции
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_function_with_description_no_return() {
         let code = "// Описание вроде\nФункция Example() Экспорт\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
-        assert!(diagnostics[0].message.contains("Добавьте описание"));
-        // Line 1 (0-indexed), "Example" at columns 8-15
-        assert_diagnostic_range(code, &diagnostics[0], 1, 8, 15);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#"
+                MissingReturnedValueDescription @ 2:9..2:16
+                  message: Добавьте описание возвращаемого значения функции
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_function_with_empty_return_block() {
         let code =
             "// Описание вроде\n// Возвращаемое значение:\nФункция Example() Экспорт\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
-        assert!(diagnostics[0].message.contains("Добавьте описание"));
-        // Line 2, "Example"
-        assert_diagnostic_range(code, &diagnostics[0], 2, 8, 15);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#"
+                MissingReturnedValueDescription @ 3:9..3:16
+                  message: Добавьте описание возвращаемого значения функции
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_function_with_complete_description() {
         let code = "// Описание вроде\n// Возвращаемое значение:\n// Строка - строка типа\nФункция Example()\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Function with complete description should be OK");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_procedure_with_return_description() {
         let code =
             "// Описание вроде\n// Возвращаемое значение:\n// Строка - строка типа\nПроцедура Example()\nКонецПроцедуры";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
-        assert!(diagnostics[0].message.contains("Удалите описание"));
-        // Line 3, "Example"
-        assert_diagnostic_range(code, &diagnostics[0], 3, 10, 17);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#"
+                MissingReturnedValueDescription @ 4:11..4:18
+                  message: Удалите описание возвращаемого значения для процедуры
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_procedure_without_return() {
         let code = "// Описание вроде\nПроцедура Example()\nКонецПроцедуры";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Procedure without return description should be OK");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_function_with_type_no_description_default_mode() {
         let code = "// Описание вроде\n// Возвращаемое значение:\n// Строка\nФункция Example()\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
         // Default mode (allowShortDescriptionReturnValues=true): type name alone is OK
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -315,19 +331,22 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
-        assert!(diagnostics[0].message.contains("Необходимо добавить описание типов"));
-        assert!(diagnostics[0].message.contains("Строка"));
-        assert_diagnostic_range(code, &diagnostics[0], 3, 8, 15);
+        expect![[r#"
+            MissingReturnedValueDescription @ 4:9..4:16
+              message: Необходимо добавить описание типов "Строка" возвращаемого значения
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_function_with_hyperlink_reference() {
         let code = "// См. Пример7()\nФункция Example()\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
         // Hyperlink references bypass validation
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -376,18 +395,22 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("Строка"));
-        assert!(diagnostics[0].message.contains("булево"));
-        assert_diagnostic_range(code, &diagnostics[0], 4, 8, 15);
+        expect![[r#"
+            MissingReturnedValueDescription @ 5:9..5:16
+              message: Необходимо добавить описание типов "Строка, булево" возвращаемого значения
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_english_keywords() {
         let code =
             "// Description\n// Returns:\n// String - result\nFunction Example()\nEndFunction";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "English keywords should work");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -410,13 +433,11 @@ mod tests {
     Структура.Вставить("Рецептура", "/hs/recipe/changestatus");
     Возврат Структура;
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
         // Should have NO diagnostics - return value is properly documented
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Function with structured return type description should be valid"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
         );
     }
 
@@ -424,9 +445,17 @@ mod tests {
     fn test_diagnostic_range_for_export_function() {
         // Test that diagnostic highlights only the function name, not "() Экспорт"
         let code = "// Описание\nФункция ПубликацииERP() Экспорт\nКонецФункции";
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#"
+                MissingReturnedValueDescription @ 2:9..2:22
+                  message: Добавьте описание возвращаемого значения функции
+                  severity: Warning"#]],
+        );
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic");
+        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic"); // snapshot-skip: verifies highlighted source text, not just coordinates.
 
         // Extract actual highlighted text
         let range = diagnostics[0].range;
@@ -449,9 +478,17 @@ mod tests {
         // are due to LSP server not converting byte positions to UTF-16 code units.
         // See: crates/bsl-analyzer/src/lsp/to_proto.rs:range() - needs to use position_utf16()
         let code = "// Описание\nФункция ЗапросВERP(СервисПубликации, ПараметрыЗапроса, Сессия = Неопределено) Экспорт\nКонецФункции";
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#"
+                MissingReturnedValueDescription @ 2:9..2:19
+                  message: Добавьте описание возвращаемого значения функции
+                  severity: Warning"#]],
+        );
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic");
+        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic"); // snapshot-skip: verifies mixed Cyrillic/Latin highlighted source text.
 
         // Extract actual highlighted text
         let range = diagnostics[0].range;
@@ -471,12 +508,10 @@ mod tests {
     fn test_non_export_function_no_diagnostic() {
         // Non-export (private) functions don't require return value documentation
         let code = "// Описание\nФункция НастройкиПодключения(СервисПубликации)\n\tВозврат Новый Структура;\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Non-export functions should not require return value documentation"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
         );
     }
 
@@ -485,26 +520,25 @@ mod tests {
         // Export functions with an existing comment must have return value documentation.
         let code =
             "// Описание\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Export function without return docs should trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#"
+                MissingReturnedValueDescription @ 2:9..2:29
+                  message: Добавьте описание возвращаемого значения функции
+                  severity: Warning"#]],
         );
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
-        assert!(diagnostics[0].message.contains("Добавьте описание"));
-        // Line 1, function name
-        assert_diagnostic_range(code, &diagnostics[0], 1, 8, 28);
     }
 
     #[test]
     fn test_export_function_with_complete_docs_ok() {
         // Export function with complete documentation should pass
         let code = "// Описание\n// Возвращаемое значение:\n//  Структура - настройки подключения\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 0, "Export function with return docs should be OK");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -518,9 +552,11 @@ mod tests {
     Возврат Новый Массив;
 КонецФункции"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 0, "Collection return docs with 'из см.' should be accepted");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -554,21 +590,14 @@ mod tests {
 Функция НовыйОтвет() Экспорт
     Возврат Новый Структура;
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Should trigger diagnostic - fields without main type declaration"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#"
+                MissingReturnedValueDescription @ 11:9..11:19
+                  message: Добавьте описание возвращаемого значения функции
+                  severity: Warning"#]],
         );
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
-        assert!(
-            diagnostics[0].message.contains("Добавьте описание"),
-            "Expected 'Добавьте описание' in message, got: {}",
-            diagnostics[0].message
-        );
-        // Line 10, function name НовыйОтвет
-        assert_diagnostic_range(code, &diagnostics[0], 10, 8, 18);
     }
 
     #[test]
@@ -585,12 +614,10 @@ mod tests {
 Функция НовыйОтвет() Экспорт
     Возврат Новый Структура;
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Should NOT trigger - main type 'Структура:' is declared before fields"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
         );
     }
 }

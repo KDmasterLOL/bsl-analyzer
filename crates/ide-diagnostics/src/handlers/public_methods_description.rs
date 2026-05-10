@@ -125,9 +125,11 @@ fn create_diagnostic(
 mod tests {
     use super::check;
     use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+        check_ast_diagnostic, check_ast_diagnostic_with_config, check_diagnostics_snapshot_for,
+        format_diags,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_default_mode() {
         let code = r#"#Область ПрограммныйИнтерфейс
@@ -242,11 +244,14 @@ mod tests {
 #КонецОбласти
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics in default mode");
-
-        assert_diagnostic_range(code, &diagnostics[0], 41, 8, 25);
-        assert_diagnostic_range(code, &diagnostics[1], 55, 8, 25);
+        expect![[r#"
+            PublicMethodsDescription @ 42:9..42:26
+              message: Добавьте описание метода программного интерфейса
+              severity: Hint
+            PublicMethodsDescription @ 56:9..56:26
+              message: Добавьте описание метода программного интерфейса
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -370,12 +375,17 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        assert_eq!(diagnostics.len(), 3, "Expected 3 diagnostics with checkAllRegion=true");
-
-        assert_diagnostic_range(code, &diagnostics[0], 41, 8, 25);
-        assert_diagnostic_range(code, &diagnostics[1], 55, 8, 25);
-        assert_diagnostic_range(code, &diagnostics[2], 103, 8, 25);
+        expect![[r#"
+            PublicMethodsDescription @ 42:9..42:26
+              message: Добавьте описание метода программного интерфейса
+              severity: Hint
+            PublicMethodsDescription @ 56:9..56:26
+              message: Добавьте описание метода программного интерфейса
+              severity: Hint
+            PublicMethodsDescription @ 104:9..104:26
+              message: Добавьте описание метода программного интерфейса
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -390,8 +400,11 @@ mod tests {
 
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Method with description should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PublicMethodsDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -405,8 +418,11 @@ mod tests {
 
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Non-export method should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PublicMethodsDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -420,11 +436,10 @@ mod tests {
 
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Export method outside API region should not trigger in default mode"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PublicMethodsDescription,
+            expect![[r#""#]],
         );
     }
 
@@ -446,11 +461,11 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Export method outside API region should trigger with checkAllRegion=true"
-        );
+        expect![[r#"
+            PublicMethodsDescription @ 4:9..4:28
+              message: Добавьте описание метода программного интерфейса
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -468,11 +483,13 @@ mod tests {
 
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Export method in nested region inside API region should trigger"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PublicMethodsDescription,
+            expect![[r#"
+                PublicMethodsDescription @ 6:9..6:20
+                  message: Добавьте описание метода программного интерфейса
+                  severity: Hint"#]],
         );
     }
 
@@ -487,8 +504,14 @@ EndFunction
 
 #EndRegion
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "English keywords should work");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PublicMethodsDescription,
+            expect![[r#"
+                PublicMethodsDescription @ 4:10..4:23
+                  message: Добавьте описание метода программного интерфейса
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -502,11 +525,10 @@ EndFunction
 
 #EndRegion
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Internal region should not be checked (only Public/ПрограммныйИнтерфейс)"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PublicMethodsDescription,
+            expect![[r#""#]],
         );
     }
 
@@ -521,11 +543,10 @@ EndFunction
 
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "СлужебныйПрограммныйИнтерфейс region should not be checked"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PublicMethodsDescription,
+            expect![[r#""#]],
         );
     }
 }

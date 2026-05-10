@@ -121,9 +121,9 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     const FIXTURE: &str = r#"
 Перем ПеременнаяБезОписания;
 
@@ -192,99 +192,148 @@ mod tests {
 
     #[test]
     fn test_java_fixture_compatibility() {
-        let diagnostics = check_ast_diagnostic(FIXTURE, check);
-
-        let mvd: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::MissingVariablesDescription)
-            .collect();
-
-        assert_eq!(mvd.len(), 5, "Expected 5 diagnostics");
-
-        assert_diagnostic_range(FIXTURE, mvd[0], 1, 6, 27);
-        assert_diagnostic_range(FIXTURE, mvd[1], 3, 6, 45);
-        assert_diagnostic_range(FIXTURE, mvd[2], 17, 6, 38);
-        assert_diagnostic_range(FIXTURE, mvd[3], 21, 6, 56);
-        assert_diagnostic_range(FIXTURE, mvd[4], 37, 6, 49);
+        check_diagnostics_snapshot_for(
+            FIXTURE,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#"
+                MissingVariablesDescription @ 2:7..2:28
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information
+                MissingVariablesDescription @ 4:7..4:46
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information
+                MissingVariablesDescription @ 18:7..18:39
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information
+                MissingVariablesDescription @ 22:7..22:57
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information
+                MissingVariablesDescription @ 38:7..38:50
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_trailing_comment() {
         let code = "Перем Переменная; // описание";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_no_description() {
         let code = "Перем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingVariablesDescription);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#"
+                MissingVariablesDescription @ 1:7..1:17
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_leading_comment_direct() {
         let code = "// описание\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_leading_comment_with_empty_line() {
         let code = "// описание\n\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#"
+                MissingVariablesDescription @ 3:7..3:17
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_annotated_variable_with_trailing_comment() {
         let code = "&НаКлиенте\nПерем Переменная; // описание";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_annotated_variable_with_header_comment() {
         let code = "// описание\n&НаКлиенте\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_annotated_variable_with_comment_between() {
         let code = "&НаКлиенте\n// описание\n&НаСервере\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_annotated_variable_with_comment_below() {
         let code = "&НаКлиенте\n// описание\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_annotated_variable_no_description() {
         let code = "&НаКлиенте\n&НаСервере\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#"
+                MissingVariablesDescription @ 3:7..3:17
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_local_variable_not_checked() {
         let code = "Процедура Тест()\n    Перем Локальная;\nКонецПроцедуры";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_multiple_variables() {
         let code = "Перем А;\nПерем Б; // описание\n// описание\nПерем В;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingVariablesDescription);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#"
+                MissingVariablesDescription @ 1:7..1:8
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -293,9 +342,14 @@ mod tests {
         // accepted by the legacy binary helper. The structured parser
         // returns `purpose: None`, so the handler now emits.
         let code = "//\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingVariablesDescription);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#"
+                MissingVariablesDescription @ 2:7..2:17
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -304,8 +358,11 @@ mod tests {
         // with `MissingParameterDescription` and
         // `MissingReturnedValueDescription` hyperlink handling.
         let code = "// См. ОбщегоНазначения.СомеVariable\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -315,8 +372,11 @@ mod tests {
         // the hyperlink and the handler skips. Documents the boundary
         // between whitespace-only filtering and hyperlink delegation.
         let code = "//\n// См. ОбщегоНазначения.Имя\nПерем Переменная;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -327,10 +387,16 @@ mod tests {
         // `VariableId`, so `ctx.variable_docs(id)` resolves correctly
         // per declaration and every undocumented duplicate emits.
         let code = "Перем Дубликат;\nПерем Дубликат;";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2);
-        for d in &diagnostics {
-            assert_eq!(d.code, DiagnosticCode::MissingVariablesDescription);
-        }
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingVariablesDescription,
+            expect![[r#"
+                MissingVariablesDescription @ 1:7..1:15
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information
+                MissingVariablesDescription @ 2:7..2:15
+                  message: Все объявления переменных должны иметь описание
+                  severity: Information"#]],
+        );
     }
 }

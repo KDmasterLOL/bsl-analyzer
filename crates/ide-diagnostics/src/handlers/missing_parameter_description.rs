@@ -265,122 +265,102 @@ fn create_diagnostic(
 mod tests {
     use super::check;
     use crate::test_utils::{
-        assert_diagnostic_message_at_line, check_ast_diagnostic, check_ast_diagnostic_with_config,
+        check_ast_diagnostic_with_config, check_diagnostics_snapshot_for, format_diags,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     const FIXTURE: &str = "Функция БезПараметровИОписания()\nКонецФункции\n\nФункция БезОписания(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть, но нет параметров\nФункция Пример1(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример2()\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример3(Параметр1)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример4(Параметр2, Параметр3)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр2 - Строка - Описание параметра 2\n// Параметр1 - Строка - Описание параметра 1\nФункция Пример5(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка\n// Параметр2\nФункция Пример6(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример7(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр3 - Строка - Описание параметра 3\n// Параметр4 - Строка - Описание параметра 4\n// Параметр5\nФункция Пример8(Параметр1, Параметр2)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\n// Параметр3 - Строка - Описание параметра 3\n// Параметр4 - Строка - Описание параметра 4\n// Параметр5 - тип\nФункция Пример9(Параметр1, Знач Параметр4)\nКонецФункции\n\n// Описание есть,\n// Параметры:\n// Параметр1 - Строка - Описание параметра 1\n// Параметр2 - Строка - Описание параметра 2\nФункция Пример10(параметр1, ПаРамЕтр2)\nКонецФункции\n\n// См. Пример10()\nФункция Пример11(параметр1, ПаРамЕтр2)\nКонецФункции\n\n// Загружает настройку из хранилища общих настроек, как метод платформы Загрузить,\n// объектов СтандартноеХранилищеНастроекМенеджер или ХранилищеНастроекМенеджер.<Имя хранилища>,\n// но с поддержкой длины ключа настроек более 128 символов путем хеширования части,\n// которая превышает 96 символов.\n// Кроме того, возвращает указанное значение по умолчанию, если настройки не существуют.\n// Если нет права СохранениеДанныхПользователя, возвращается значение по умолчанию без ошибки.\n//\n// В возвращаемом значении очищаются ссылки на несуществующий объект в базе данных, а именно\n// - возвращаемая ссылка заменяется на указанное значение по умолчанию;\n// - из данных типа Массив ссылки удаляются;\n// - у данных типа Структура и Соответствие ключ не меняется, а значение устанавливается Неопределено;\n// - анализ значений в данных типа Массив, Структура, Соответствие выполняется рекурсивно.\n//\n// Параметры:\n//   КлючОбъекта          - Строка           - см. синтакс-помощник платформы.\n//   КлючНастроек         - Строка           - см. синтакс-помощник платформы.\n//   ЗначениеПоУмолчанию  - Произвольный     - значение, которое возвращается, если настройки не существуют.\n//                                             Если не указано, возвращается значение Неопределено.\n//   ОписаниеНастроек     - ОписаниеНастроек - см. синтакс-помощник платформы.\n//   ИмяПользователя      - Строка           - см. синтакс-помощник платформы.\n//\n// Возвращаемое значение:\n//   Произвольный - см. синтакс-помощник платформы.\n//\nФункция BUG_1490(КлючОбъекта, КлючНастроек, ЗначениеПоУмолчанию = Неопределено,\n\t\t\tОписаниеНастроек = Неопределено, ИмяПользователя = Неопределено) Экспорт\nКонецФункции\n\n// Делает некоторые вещи с массивом строк\n//\n// Параметры:\n//  МассивСтрок - Массив из Строка - Массив строк\nФункция BUG_1620(МассивСтрок)\nКонецФункции";
 
     #[test]
     fn test_java_fixture_compatibility() {
-        let diagnostics = check_ast_diagnostic(FIXTURE, check);
-
-        let mpd: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::MissingParameterDescription)
-            .collect();
-
         // Was 12 before PR #3: a non-export purpose-only comment (line 7,
         // `// Описание есть, но нет параметров`) used to trigger
         // "Необходимо добавить описание всех параметров метода". Non-export
         // methods no longer require a Параметры section unless one is
         // already present.
-        assert_eq!(mpd.len(), 11, "Expected 11 diagnostics");
-
-        assert_diagnostic_message_at_line(
+        check_diagnostics_snapshot_for(
             FIXTURE,
-            &mpd,
-            14,
-            "Необходимо удалить описания параметров \"Параметр1, Параметр2\", отсутствующих в сигнатуре метода",
-        );
-
-        assert_diagnostic_message_at_line(
-            FIXTURE,
-            &mpd,
-            21,
-            "Необходимо удалить описания параметров \"Параметр2\", отсутствующих в сигнатуре метода",
-        );
-
-        let line28_diags: Vec<_> = mpd
-            .iter()
-            .filter(|d| {
-                let start: u32 = d.range.start().into();
-                let line = FIXTURE[..start as usize].matches('\n').count();
-                line == 28
-            })
-            .collect();
-        assert_eq!(line28_diags.len(), 2, "Line 28 should have 2 diagnostics");
-
-        assert_diagnostic_message_at_line(
-            FIXTURE,
-            &mpd,
-            35,
-            "Необходимо исправить порядок описаний параметров",
-        );
-
-        assert_diagnostic_message_at_line(
-            FIXTURE,
-            &mpd,
-            42,
-            "Необходимо добавить описание параметра \"Параметр2\"",
-        );
-
-        assert_diagnostic_message_at_line(
-            FIXTURE,
-            &mpd,
-            50,
-            "Необходимо удалить описания параметров \"Параметр2\", отсутствующих в сигнатуре метода",
-        );
-
-        let line58_diags: Vec<_> = mpd
-            .iter()
-            .filter(|d| {
-                let start: u32 = d.range.start().into();
-                let line = FIXTURE[..start as usize].matches('\n').count();
-                line == 58
-            })
-            .collect();
-        assert_eq!(line58_diags.len(), 3, "Line 58 should have 3 diagnostics");
-
-        assert_diagnostic_message_at_line(
-            FIXTURE,
-            &mpd,
-            68,
-            "Необходимо удалить описания параметров",
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#"
+                MissingParameterDescription @ 15:9..15:16
+                  message: Необходимо удалить описания параметров "Параметр1, Параметр2", отсутствующих в сигнатуре метода
+                  severity: Warning
+                MissingParameterDescription @ 22:9..22:16
+                  message: Необходимо удалить описания параметров "Параметр2", отсутствующих в сигнатуре метода
+                  severity: Warning
+                MissingParameterDescription @ 29:9..29:16
+                  message: Необходимо удалить описания параметров "Параметр1", отсутствующих в сигнатуре метода
+                  severity: Warning
+                MissingParameterDescription @ 29:28..29:37
+                  message: Необходимо добавить описание параметра "Параметр3"
+                  severity: Warning
+                MissingParameterDescription @ 36:9..36:16
+                  message: Необходимо исправить порядок описаний параметров
+                  severity: Warning
+                MissingParameterDescription @ 43:28..43:37
+                  message: Необходимо добавить описание параметра "Параметр2"
+                  severity: Warning
+                MissingParameterDescription @ 51:9..51:16
+                  message: Необходимо удалить описания параметров "Параметр2", отсутствующих в сигнатуре метода
+                  severity: Warning
+                MissingParameterDescription @ 59:9..59:16
+                  message: Необходимо удалить описания параметров "Параметр3, Параметр4", отсутствующих в сигнатуре метода
+                  severity: Warning
+                MissingParameterDescription @ 59:17..59:26
+                  message: Необходимо добавить описание параметра "Параметр1"
+                  severity: Warning
+                MissingParameterDescription @ 59:28..59:37
+                  message: Необходимо добавить описание параметра "Параметр2"
+                  severity: Warning
+                MissingParameterDescription @ 69:9..69:16
+                  message: Необходимо удалить описания параметров "Параметр2, Параметр3, Параметр5", отсутствующих в сигнатуре метода
+                  severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_no_description() {
         let code = "Функция БезОписания(Параметр1)\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_hyperlink_reference() {
         let code = "// См. ДругойМетод()\nФункция Пример(Параметр1)\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_non_export_purpose_only_comment_does_not_require_parameters() {
         let code =
             "// Межотчетный период\nПроцедура УстановитьУточнениеПериода(Проводки)\nКонецПроцедуры";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_export_purpose_only_comment_still_requires_parameters() {
         let code =
             "// Межотчетный период\nПроцедура УстановитьУточнениеПериода(Проводки) Экспорт\nКонецПроцедуры";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingParameterDescription);
-        assert!(diagnostics[0]
-            .message
-            .contains("Необходимо добавить описание всех параметров метода"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#"
+                MissingParameterDescription @ 2:11..2:37
+                  message: Необходимо добавить описание всех параметров метода
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -391,12 +371,14 @@ mod tests {
 //   Первый - Строка - первый параметр.
 Процедура Пример(Первый, Второй)
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingParameterDescription);
-        assert!(diagnostics[0]
-            .message
-            .contains("Необходимо добавить описание параметра \"Второй\""));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#"
+                MissingParameterDescription @ 5:26..5:32
+                  message: Необходимо добавить описание параметра "Второй"
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -406,8 +388,11 @@ mod tests {
 // См. УправлениеДоступомПереопределяемый.ПриЗаполненииСписковСОграничениемДоступа.
 Процедура ПриЗаполненииОграниченияДоступа(Ограничение) Экспорт
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -421,8 +406,11 @@ mod tests {
 //   ИсключитьЗаказ - Булево - признак исключения заказа.
 Функция ТаблицаОформлено(ТаблицаОтбора, ОтборПоИзмерениям = Неопределено, ИсключитьЗаказ = Ложь) Экспорт
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -436,8 +424,11 @@ mod tests {
 //   Булево - Истина, если организация - юридическое лицо.
 Функция ЭтоЮрЛицо(Организация) Экспорт
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -451,8 +442,11 @@ mod tests {
 //   Булево - Истина, если организация - юридическое лицо.
 Функция ЭтоЮрЛицо(Организация) Экспорт
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -462,8 +456,11 @@ mod tests {
 //   Параметр1 - Строка - описание
 Функция Пример(Параметр1)
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -473,8 +470,11 @@ mod tests {
 //   Параметр1 - Строка - описание
 Функция Пример(параметр1)
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -495,10 +495,11 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingParameterDescription);
-        assert!(diagnostics[0].message.contains("Необходимо добавить пояснение к параметру"));
-        assert!(diagnostics[0].message.contains("Параметр1"));
+        expect![[r#"
+            MissingParameterDescription @ 4:16..4:25
+              message: Необходимо добавить пояснение к параметру "Параметр1"
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -517,7 +518,7 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -539,7 +540,7 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -561,17 +562,14 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 2);
-        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
-        assert!(
-            messages.iter().any(|m| m.contains("Необходимо добавить пояснение к параметру")
-                && m.contains("Параметр1")),
-            "missing strict-mode content emission for Параметр1: {messages:?}"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("Необходимо исправить порядок описаний параметров")),
-            "missing order-mismatch emission: {messages:?}"
-        );
+        expect![[r#"
+            MissingParameterDescription @ 5:9..5:15
+              message: Необходимо исправить порядок описаний параметров
+              severity: Warning
+            MissingParameterDescription @ 5:16..5:25
+              message: Необходимо добавить пояснение к параметру "Параметр1"
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -583,7 +581,10 @@ mod tests {
 //   Параметр1 - Строка
 Функция Пример(Параметр1)
 КонецФункции"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingParameterDescription,
+            expect![[r#""#]],
+        );
     }
 }
