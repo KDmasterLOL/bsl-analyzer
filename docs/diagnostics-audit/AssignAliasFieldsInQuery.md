@@ -164,3 +164,18 @@ diagnostic, мапит диапазон обратно в BSL-строку и с
 помечено parse error, правило не сможет сработать. Следующий практичный шаг —
 сначала синхронизировать документацию с фактическим поведением, затем решить
 вопрос union-частей и добавить тесты на сложные SELECT-выражения.
+
+## Закрыто Track 3
+
+**Phase C sub-slice C3 (commit `<pending>`, 2026-05):** добавлены snapshot-fixtures
+для SDBL coverage gaps:
+
+- `track3_function_aggregate_and_case_fields_require_explicit_aliases_snapshot` —
+  фиксирует диагностики для функций, агрегатов и `ВЫБОР ... КОНЕЦ` без явного
+  псевдонима.
+- `track3_split_concatenated_query_is_not_reconstructed_snapshot` — regression
+  guard текущего поведения: запрос, собранный через конкатенацию, не
+  реконструируется перед SDBL extraction.
+
+Расширение extraction для конкатенации/шаблонных сборок запроса оставлено в
+Track 4/6; в Track 3 зафиксирован текущий результат без production changes.

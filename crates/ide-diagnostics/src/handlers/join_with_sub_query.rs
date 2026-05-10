@@ -41,8 +41,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_sdbl_diagnostic};
     use crate::{DiagnosticCode, Severity};
+    use expect_test::expect;
     #[test]
     fn test_join_with_sub_query_multi_case() {
         let code = r#"Процедура Тест1()
@@ -350,6 +351,80 @@ mod tests {
             diagnostics.len(),
             1,
             "Alias named Sum (no aggregation) must still emit the diagnostic"
+        );
+    }
+
+    #[test]
+    fn track3_join_with_nested_inner_aggregation_currently_emits_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ Заказы.Ссылка КАК Ссылка
+        |ИЗ Документ.ЗаказПокупателя КАК Заказы
+        |ЛЕВОЕ СОЕДИНЕНИЕ (
+        |   ВЫБРАТЬ Вложенный.Регистратор КАК Регистратор
+        |   ИЗ (
+        |       ВЫБРАТЬ Продажи.Регистратор КАК Регистратор,
+        |              СУММА(Продажи.Сумма) КАК Сумма
+        |       ИЗ РегистрНакопления.Продажи КАК Продажи
+        |       СГРУППИРОВАТЬ ПО Продажи.Регистратор
+        |   ) КАК Вложенный
+        |) КАК Итоги
+        |ПО Заказы.Ссылка = Итоги.Регистратор";
+КонецПроцедуры"#,
+            DiagnosticCode::JoinWithSubQuery,
+            expect![[r#"
+                JoinWithSubQuery @ 6:27..14:16
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn track3_join_with_having_only_aggregation_currently_emits_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ Заказы.Ссылка КАК Ссылка
+        |ИЗ Документ.ЗаказПокупателя КАК Заказы
+        |ЛЕВОЕ СОЕДИНЕНИЕ (
+        |   ВЫБРАТЬ Продажи.Регистратор КАК Регистратор
+        |   ИЗ РегистрНакопления.Продажи КАК Продажи
+        |   ИМЕЮЩИЕ КОЛИЧЕСТВО(Продажи.Регистратор) > 0
+        |) КАК Итоги
+        |ПО Заказы.Ссылка = Итоги.Регистратор";
+КонецПроцедуры"#,
+            DiagnosticCode::JoinWithSubQuery,
+            expect![[r#"
+                JoinWithSubQuery @ 6:27..10:16
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn track3_join_with_totals_subquery_currently_emits_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ Заказы.Ссылка КАК Ссылка
+        |ИЗ Документ.ЗаказПокупателя КАК Заказы
+        |ЛЕВОЕ СОЕДИНЕНИЕ (
+        |   ВЫБРАТЬ Продажи.Регистратор КАК Регистратор,
+        |          Продажи.Сумма КАК Сумма
+        |   ИЗ РегистрНакопления.Продажи КАК Продажи
+        |   ИТОГИ СУММА(Сумма) ПО Регистратор
+        |) КАК Итоги
+        |ПО Заказы.Ссылка = Итоги.Регистратор";
+КонецПроцедуры"#,
+            DiagnosticCode::JoinWithSubQuery,
+            expect![[r#"
+                JoinWithSubQuery @ 6:27..10:24
+                  message: Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью
+                  severity: Warning"#]],
         );
     }
 }

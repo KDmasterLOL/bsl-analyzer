@@ -39,3 +39,21 @@ SDBL diagnostic `QueryToMissingMetadata` содержит имя таблицы 
 ## Закрыто Track 2
 
 **Phase C §4 audit pass (task #84, 2026-05):** Track A — без изменений.
+
+## Закрыто Track 3
+
+**Phase C sub-slice C3 (commit `<pending>`, 2026-05):** добавлены
+Configuration.xml-backed snapshot-fixtures через `check_snapshot_with_config_xml`:
+
+- `track3_existing_common_module_reference_with_config_xml_snapshot` —
+  regression guard текущего поведения: ссылка на объявленный `ОбщийМодуль` в
+  SDBL пока диагностируется как отсутствующая metadata.
+- `track3_missing_common_module_reference_with_config_xml_snapshot` — ссылка на
+  несуществующий `ОбщийМодуль` диагностируется как `QueryToMissingMetadata`.
+- `track3_bilingual_common_module_references_with_config_xml_snapshot` —
+  русская `ОбщийМодуль.*` и английская `CommonModule.*` формы фиксируются в
+  одном SDBL query с `ОБЪЕДИНИТЬ ВСЕ`.
+
+Поддержка разрешения `CommonModule` через `Configuration.common_modules()`, а не
+только через `metadata_objects`, оставлена в Track 4/6; Track 3 ограничен
+fixtures и audit markdown.

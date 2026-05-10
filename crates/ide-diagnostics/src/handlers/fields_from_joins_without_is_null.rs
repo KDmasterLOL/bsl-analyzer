@@ -119,7 +119,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_sdbl_diagnostic};
+    use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_left_join_unprotected_field() {
@@ -363,6 +365,68 @@ mod tests {
             !highlighted.contains("СОЕДИНЕНИЕ") && !highlighted.contains("JOIN"),
             "Diagnostic should NOT highlight the JOIN clause, got: '{}'",
             highlighted
+        );
+    }
+
+    #[test]
+    fn track3_full_outer_join_classification_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "SELECT Employees.Ref AS EmployeeRef,
+        |       Warehouses.Ref AS WarehouseRef
+        |FROM Catalog.Warehouses AS Warehouses
+        |FULL OUTER JOIN Catalog.Employees AS Employees
+        |ON Warehouses.Manager = Employees.Ref";
+КонецПроцедуры"#,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 4:17..4:31
+                  message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical
+                FieldsFromJoinsWithoutIsNull @ 5:17..5:32
+                  message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
+        );
+    }
+
+    #[test]
+    fn track3_left_outer_join_isnull_wrapped_field_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ
+        |   ЕСТЬNULL(Сотрудники.Ссылка, ЗНАЧЕНИЕ(Справочник.Сотрудники.ПустаяСсылка)) КАК Сотрудник
+        |ИЗ
+        |   Справочник.Склады КАК Склады
+        |   ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+        |   ПО Склады.Кладовщик = Сотрудники.Ссылка";
+КонецПроцедуры"#,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn track3_right_outer_join_classification_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ
+        |   Склады.Ссылка КАК Склад
+        |ИЗ
+        |   Справочник.Склады КАК Склады
+        |   ПРАВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+        |   ПО Склады.Кладовщик = Сотрудники.Ссылка";
+КонецПроцедуры"#,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            expect![[r#"
+                FieldsFromJoinsWithoutIsNull @ 5:13..5:27
+                  message: Для полей из ПРАВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
+                  severity: Critical"#]],
         );
     }
 }

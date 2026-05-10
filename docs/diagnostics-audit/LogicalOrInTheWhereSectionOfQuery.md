@@ -43,3 +43,16 @@
 проанализирован — текущая реализация `sdbl-hir` уже эмитит для
 вложенных WHERE; работ Track 2 не требуется. Closed без implementation
 slice.
+
+## Закрыто Track 3
+
+**Phase C sub-slice C3 (commit `<pending>`, 2026-05):** subquery WHERE gap закрыт
+новыми snapshot-fixtures:
+
+- `track3_or_in_russian_subquery_where_snapshot` — `ИЛИ` во вложенном
+  русском `ГДЕ`.
+- `track3_or_in_deep_subquery_where_snapshot` — `OR` в глубоко вложенном
+  английском `WHERE`.
+
+Оба fixtures используют `check_diagnostics_snapshot_for` и подтверждают, что
+текущий SDBL dispatch мапит диагностику из subquery WHERE обратно в BSL-строку.

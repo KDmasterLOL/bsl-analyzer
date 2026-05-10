@@ -132,7 +132,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
+    use expect_test::expect;
     use parser::parse_sdbl;
 
     /// Helper for debug tests that need to return file content along with diagnostics.
@@ -643,5 +645,51 @@ mod tests {
         let (diagnostics, _) = check_diagnostic(code, config);
 
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic: ВТ_ТЧ.НомерСтроки without alias");
+    }
+
+    #[test]
+    fn track3_function_aggregate_and_case_fields_require_explicit_aliases_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ
+        |   ЕСТЬNULL(Товары.Артикул, """"),
+        |   СУММА(Товары.Количество),
+        |   ВЫБОР
+        |       КОГДА Товары.ПометкаУдаления ТОГДА 1
+        |       ИНАЧЕ 0
+        |   КОНЕЦ
+        |ИЗ
+        |   Справочник.Номенклатура КАК Товары";
+КонецПроцедуры"#,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#"
+                AssignAliasFieldsInQuery @ 5:13..5:43
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning
+                AssignAliasFieldsInQuery @ 6:13..6:37
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning
+                AssignAliasFieldsInQuery @ 7:13..10:18
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn track3_split_concatenated_query_is_not_reconstructed_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ
+        |   " + ИмяПоля + "
+        |ИЗ
+        |   Справочник.Номенклатура КАК Товары";
+КонецПроцедуры"#,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#""#]],
+        );
     }
 }

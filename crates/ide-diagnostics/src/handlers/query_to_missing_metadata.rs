@@ -55,8 +55,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
+    use crate::test_utils::{check_sdbl_diagnostic, check_snapshot_with_config_xml};
     use crate::{DiagnosticCode, Severity};
+    use expect_test::expect;
     #[test]
     fn test_no_metadata_no_diagnostics() {
         let code = r#"
@@ -86,5 +87,136 @@ mod tests {
             assert_eq!(diag.severity, Severity::Blocker);
             assert!(diag.message.contains("несуществующему метаданному"));
         }
+    }
+
+    #[test]
+    fn track3_existing_common_module_reference_with_config_xml_snapshot() {
+        let config_xml = r#"
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>TestConfiguration</Name>
+        </Properties>
+        <ChildObjects>
+            <CommonModule>ЗапросыМетаданных</CommonModule>
+        </ChildObjects>
+    </Configuration>
+</MetaDataObject>
+"#;
+        let common_module = r#"
+#Область ПрограммныйИнтерфейс
+Процедура Тест() Экспорт
+КонецПроцедуры
+#КонецОбласти
+"#;
+
+        check_snapshot_with_config_xml(
+            r#"
+#Область ПрограммныйИнтерфейс
+// Проверяет ссылку на существующий общий модуль в запросе.
+Процедура Тест() Экспорт
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ Модуль.Ссылка КАК Ссылка ИЗ ОбщийМодуль.ЗапросыМетаданных КАК Модуль";
+КонецПроцедуры
+#КонецОбласти
+"#,
+            config_xml,
+            &[("ЗапросыМетаданных", common_module)],
+            expect![[r#"
+                QueryToMissingMetadata @ 6:57..6:87
+                  message: Исправьте обращение к несуществующему метаданному "ОбщийМодуль.ЗапросыМетаданных" в запросе
+                  severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn track3_missing_common_module_reference_with_config_xml_snapshot() {
+        let config_xml = r#"
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>TestConfiguration</Name>
+        </Properties>
+        <ChildObjects>
+            <CommonModule>ЗапросыМетаданных</CommonModule>
+        </ChildObjects>
+    </Configuration>
+</MetaDataObject>
+"#;
+        let common_module = r#"
+#Область ПрограммныйИнтерфейс
+Процедура Тест() Экспорт
+КонецПроцедуры
+#КонецОбласти
+"#;
+
+        check_snapshot_with_config_xml(
+            r#"
+#Область ПрограммныйИнтерфейс
+// Проверяет ссылку на отсутствующий общий модуль в запросе.
+Процедура Тест() Экспорт
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ Модуль.Ссылка КАК Ссылка ИЗ ОбщийМодуль.НесуществующийМодуль КАК Модуль";
+КонецПроцедуры
+#КонецОбласти
+"#,
+            config_xml,
+            &[("ЗапросыМетаданных", common_module)],
+            expect![[r#"
+                QueryToMissingMetadata @ 6:57..6:90
+                  message: Исправьте обращение к несуществующему метаданному "ОбщийМодуль.НесуществующийМодуль" в запросе
+                  severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn track3_bilingual_common_module_references_with_config_xml_snapshot() {
+        let config_xml = r#"
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>TestConfiguration</Name>
+        </Properties>
+        <ChildObjects>
+            <CommonModule>ЗапросыМетаданных</CommonModule>
+            <CommonModule>MetadataQueries</CommonModule>
+        </ChildObjects>
+    </Configuration>
+</MetaDataObject>
+"#;
+        let common_module = r#"
+#Область ПрограммныйИнтерфейс
+Процедура Тест() Экспорт
+КонецПроцедуры
+#КонецОбласти
+"#;
+
+        check_snapshot_with_config_xml(
+            r#"
+#Область ПрограммныйИнтерфейс
+// Проверяет русские и английские ссылки на общие модули.
+Процедура Тест() Экспорт
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ Русский.Ссылка КАК РусскаяСсылка
+        |ИЗ ОбщийМодуль.ЗапросыМетаданных КАК Русский
+        |
+        |ОБЪЕДИНИТЬ ВСЕ
+        |
+        |SELECT English.Ref AS EnglishRef
+        |FROM CommonModule.MetadataQueries AS English";
+КонецПроцедуры
+#КонецОбласти
+"#,
+            config_xml,
+            &[("ЗапросыМетаданных", common_module), ("MetadataQueries", common_module)],
+            expect![[r#"
+                QueryToMissingMetadata @ 8:13..8:43
+                  message: Исправьте обращение к несуществующему метаданному "ОбщийМодуль.ЗапросыМетаданных" в запросе
+                  severity: Blocker
+                QueryToMissingMetadata @ 13:15..13:44
+                  message: Исправьте обращение к несуществующему метаданному "CommonModule.MetadataQueries" в запросе
+                  severity: Blocker"#]],
+        );
     }
 }

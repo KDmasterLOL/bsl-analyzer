@@ -59,3 +59,18 @@ condition implication. Handler уже тонкий.
 **Phase C §4 delta-audit (2026-05):** `IS NULL` / LEFT/FULL OUTER JOIN
 семантика покрыта существующей классификацией в `sdbl-hir`; работ Track 2
 не требуется. Closed без implementation slice.
+
+## Закрыто Track 3
+
+**Phase C sub-slice C3 (commit `<pending>`, 2026-05):** добавлены
+snapshot-fixtures для LEFT/FULL/RIGHT OUTER JOIN classification gaps:
+
+- `track3_full_outer_join_classification_snapshot` — `FULL OUTER JOIN`
+  классифицируется как полное соединение и эмитит diagnostics для обеих сторон.
+- `track3_left_outer_join_isnull_wrapped_field_snapshot` — поле из
+  `ЛЕВОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ`, обернутое в `ЕСТЬNULL`, не диагностируется.
+- `track3_right_outer_join_classification_snapshot` — `ПРАВОЕ ВНЕШНЕЕ
+  СОЕДИНЕНИЕ` поддерживается и диагностирует nullable-поле левой стороны.
+
+Все fixtures используют `check_diagnostics_snapshot_for`; production changes не
+потребовались.

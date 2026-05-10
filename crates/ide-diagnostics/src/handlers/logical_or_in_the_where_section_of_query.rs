@@ -45,7 +45,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
+    use crate::test_utils::{
+        assert_diagnostic_range, check_diagnostics_snapshot_for, check_sdbl_diagnostic,
+    };
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_multi_case_where_or() {
         // Large inline regression fixture for OR-in-WHERE coverage.
@@ -245,5 +249,52 @@ mod tests {
 КонецПроцедуры"#;
         let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect OR with parameters");
+    }
+
+    #[test]
+    fn track3_or_in_russian_subquery_where_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ Товары.Ссылка КАК Ссылка
+        |ИЗ Справочник.Номенклатура КАК Товары
+        |ГДЕ Товары.Ссылка В (
+        |   ВЫБРАТЬ Остатки.Номенклатура КАК Номенклатура
+        |   ИЗ РегистрНакопления.ОстаткиТоваров КАК Остатки
+        |   ГДЕ Остатки.Склад = &Склад ИЛИ Остатки.Количество > 0
+        |)";
+КонецПроцедуры"#,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 9:40..9:43
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn track3_or_in_deep_subquery_where_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "SELECT Products.Ref AS Ref
+        |FROM Catalog.Products AS Products
+        |WHERE Products.Ref IN (
+        |   SELECT Balances.Product AS Product
+        |   FROM (
+        |       SELECT Stock.Product AS Product
+        |       FROM AccumulationRegister.Stock AS Stock
+        |       WHERE Stock.Warehouse = &Warehouse OR Stock.Quantity > 0
+        |   ) AS Balances
+        |)";
+КонецПроцедуры"#,
+            DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+            expect![[r#"
+                LogicalOrInTheWhereSectionOfQuery @ 11:52..11:54
+                  message: Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий
+                  severity: Warning"#]],
+        );
     }
 }
