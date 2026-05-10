@@ -841,6 +841,213 @@ where
     check_fn(&ctx)
 }
 
+/// Run all diagnostics on `source` with a Configuration.xml-backed CommonModule layout.
+///
+/// `config_xml` is written as the project's `Configuration.xml`. Each provided
+/// `(name, source)` CommonModule declared by `<CommonModule>Name</CommonModule>`
+/// is mounted as `CommonModules/<Name>/Ext/Module.bsl`; when `config_xml` is a
+/// skeleton with no CommonModule declarations, all provided modules are mounted.
+pub fn check_with_config_xml(
+    source: &str,
+    config_xml: &str,
+    common_modules: &[(&str, &str)],
+) -> Vec<Diagnostic> {
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::metadata::intern_configuration_path;
+    use ide_db::RootDatabaseImpl;
+    use vfs::{FileId, FileSet, VfsPath};
+
+    let project = ConfigXmlFixtureProject::new(config_xml, common_modules);
+    let registered_modules = project.registered_modules();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, project.root().to_path_buf())]);
+
+    let mut file_set = FileSet::default();
+    let caller_file_id = FileId(0);
+    let caller_path = project.root().join("CommonModules/Caller/Ext/Module.bsl");
+    file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
+
+    let mut module_file_ids = Vec::with_capacity(registered_modules.len());
+    for (idx, (name, _body)) in registered_modules.iter().enumerate() {
+        let fid = FileId((idx + 1) as u32);
+        let path = project.root().join(format!("CommonModules/{}/Ext/Module.bsl", name));
+        file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
+        module_file_ids.push(fid);
+    }
+
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(caller_file_id, SourceRootId(0));
+    db.set_file_text(caller_file_id, source);
+    for (fid, (_, body)) in module_file_ids.iter().zip(registered_modules.iter()) {
+        db.set_file_source_root(*fid, SourceRootId(0));
+        db.set_file_text(*fid, body);
+    }
+
+    let config_path = project.root().to_string_lossy();
+    let config_path_input =
+        intern_configuration_path(&db, config_path.as_ref(), db.metadata_version());
+    let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
+    let config = crate::DiagnosticsConfig::all_enabled();
+    let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
+
+    crate::diagnostics(&ctx)
+}
+
+/// Snapshot all diagnostics for a Configuration.xml-backed CommonModule layout.
+pub fn check_snapshot_with_config_xml(
+    source: &str,
+    config_xml: &str,
+    common_modules: &[(&str, &str)],
+    expected: expect_test::Expect,
+) {
+    let diagnostics = check_with_config_xml(source, config_xml, common_modules);
+    expected.assert_eq(&format_diags(source, &diagnostics));
+}
+
+struct ConfigXmlFixtureProject {
+    root: std::path::PathBuf,
+    registered_modules: Vec<(String, String)>,
+}
+
+impl ConfigXmlFixtureProject {
+    fn new(config_xml: &str, common_modules: &[(&str, &str)]) -> Self {
+        let root = next_config_xml_fixture_root();
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create config XML fixture root");
+        let config_body = if config_xml.trim().is_empty() {
+            minimal_configuration_xml()
+        } else {
+            config_xml.to_string()
+        };
+        std::fs::write(root.join("Configuration.xml"), config_body)
+            .expect("write Configuration.xml");
+
+        let declared_modules = declared_common_module_names(config_xml);
+        let registered_modules = common_modules
+            .iter()
+            .filter(|(name, _)| {
+                declared_modules.is_empty()
+                    || declared_modules
+                        .iter()
+                        .any(|declared| declared.to_lowercase() == name.to_lowercase())
+            })
+            .map(|(name, body)| ((*name).to_string(), (*body).to_string()))
+            .collect::<Vec<_>>();
+
+        for (idx, (name, body)) in registered_modules.iter().enumerate() {
+            let module_dir = root.join(format!("CommonModules/{name}"));
+            let ext_dir = module_dir.join("Ext");
+            std::fs::create_dir_all(&ext_dir).expect("create CommonModule Ext directory");
+            std::fs::write(ext_dir.join("Module.bsl"), body).expect("write CommonModule body");
+            std::fs::write(
+                root.join(format!("CommonModules/{name}.xml")),
+                common_module_xml(name, idx),
+            )
+            .expect("write CommonModule XML");
+        }
+
+        Self { root, registered_modules }
+    }
+
+    fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    fn registered_modules(&self) -> Vec<(&str, &str)> {
+        self.registered_modules.iter().map(|(name, body)| (name.as_str(), body.as_str())).collect()
+    }
+}
+
+impl Drop for ConfigXmlFixtureProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn next_config_xml_fixture_root() -> std::path::PathBuf {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("bsl_analyzer_config_xml_{}_{}", std::process::id(), id))
+}
+
+fn minimal_configuration_xml() -> String {
+    r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>TestConfiguration</Name>
+        </Properties>
+    </Configuration>
+</MetaDataObject>"#
+        .to_string()
+}
+
+fn declared_common_module_names(config_xml: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = config_xml;
+    const OPEN: &str = "<CommonModule";
+    const CLOSE: &str = "</CommonModule>";
+
+    while let Some(start) = rest.find(OPEN) {
+        rest = &rest[start + OPEN.len()..];
+        let Some(next) = rest.chars().next() else { break };
+        if !matches!(next, '>' | '/' | ' ' | '\t' | '\n' | '\r') {
+            rest = &rest[next.len_utf8()..];
+            continue;
+        }
+
+        let Some(open_end) = rest.find('>') else { break };
+        let tag_tail = &rest[..open_end];
+        let after_open = &rest[open_end + 1..];
+        if tag_tail.trim_end().ends_with('/') {
+            rest = after_open;
+            continue;
+        }
+
+        let Some(close_start) = after_open.find(CLOSE) else { break };
+        let name = after_open[..close_start].trim();
+        if !name.is_empty() && !name.contains('<') {
+            names.push(name.to_string());
+        }
+        rest = &after_open[close_start + CLOSE.len()..];
+    }
+
+    names
+}
+
+fn common_module_xml(name: &str, idx: usize) -> String {
+    let uuid = format!("00000000-0000-0000-0000-{:012}", idx + 1);
+    format!(
+        r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="{uuid}">
+        <Properties>
+            <Name>{}</Name>
+            <Global>false</Global>
+            <ClientManagedApplication>false</ClientManagedApplication>
+            <ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+            <Server>true</Server>
+            <ExternalConnection>false</ExternalConnection>
+            <ServerCall>false</ServerCall>
+            <Privileged>false</Privileged>
+            <ReturnValuesReuse>DontUse</ReturnValuesReuse>
+        </Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+        escape_xml_text(name)
+    )
+}
+
+fn escape_xml_text(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 /// Create a `ModuleMetadata` for a CommonModule (without execution context).
 pub fn make_common_module_metadata(module: bsl_metadata::CommonModule) -> hir::ModuleMetadata {
     hir::ModuleMetadata {
@@ -994,5 +1201,40 @@ mod tests {
         assert_eq!(start_col, 3); // Character position (в)
         assert_eq!(end_line, 0);
         assert_eq!(end_col, 9); // Character position (р)
+    }
+
+    #[test]
+    fn check_snapshot_with_config_xml_resolves_declared_common_module() {
+        let config_xml = r#"
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>TestConfiguration</Name>
+        </Properties>
+        <ChildObjects>
+            <CommonModule>ОбщийМодульТест</CommonModule>
+        </ChildObjects>
+    </Configuration>
+</MetaDataObject>
+"#;
+        let common_module = r#"
+Процедура Метод() Экспорт
+КонецПроцедуры
+"#;
+        let source = r#"
+#Область ПрограммныйИнтерфейс
+// Тестирует вызов общего модуля.
+Процедура Тест() Экспорт
+    ОбщийМодульТест.Метод();
+КонецПроцедуры
+#КонецОбласти
+"#;
+
+        check_snapshot_with_config_xml(
+            source,
+            config_xml,
+            &[("ОбщийМодульТест", common_module)],
+            expect_test::expect![""],
+        );
     }
 }
