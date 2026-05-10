@@ -96,46 +96,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 fn get_canonical_name(name: &str) -> String {
-    let lower = name.to_lowercase();
-    match lower.as_str() {
-        // Public / ПрограммныйИнтерфейс
-        "public" | "программныйинтерфейс" => "Public".to_string(),
-
-        // Internal / СлужебныйПрограммныйИнтерфейс
-        "internal" | "служебныйпрограммныйинтерфейс" => {
-            "Internal".to_string()
-        }
-
-        // Private / СлужебныеПроцедурыИФункции
-        "private" | "служебныепроцедурыифункции" => "Private".to_string(),
-
-        // EventHandlers / ОбработчикиСобытий
-        "eventhandlers" | "обработчикисобытий" => "EventHandlers".to_string(),
-
-        // FormEventHandlers / ОбработчикиСобытийФормы
-        "formeventhandlers" | "обработчикисобытийформы" => {
-            "FormEventHandlers".to_string()
-        }
-
-        // FormHeaderItemsEventHandlers / ОбработчикиСобытийЭлементовШапкиФормы
-        "formheaderitemseventhandlers" | "обработчикисобытийэлементовшапкиформы" => {
-            "FormHeaderItemsEventHandlers".to_string()
-        }
-
-        // FormCommandsEventHandlers / ОбработчикиКомандФормы
-        "formcommandseventhandlers" | "обработчикикомандформы" => {
-            "FormCommandsEventHandlers".to_string()
-        }
-
-        // Variables / ОписаниеПеременных
-        "variables" | "описаниепеременных" => "Variables".to_string(),
-
-        // Initialize / Инициализация
-        "initialize" | "инициализация" => "Initialize".to_string(),
-
-        // Non-standard regions: keep original name (case-sensitive)
-        _ => name.to_string(),
-    }
+    hir::module_structure::canonical::canonical_alias(name)
+        .map(str::to_string)
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn report_duplicates(

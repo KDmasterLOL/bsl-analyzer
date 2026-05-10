@@ -401,29 +401,13 @@ fn is_region_node_empty(region_node: &SyntaxNode) -> bool {
 /// of the §3.4 `EmptyRegion` classification — anything that lowers
 /// to a HIR statement or declaration the user expects to find inside
 /// a region.
+///
+/// Track 2 Phase C §3 Slice 1: delegates to the shared
+/// [`crate::module_structure::significant::is_significant_for_region_emptiness`]
+/// predicate. The membership matches what was historically inlined
+/// here.
 fn is_meaningful_region_content(node: &SyntaxNode) -> bool {
-    matches!(
-        node.kind(),
-        SyntaxKind::PROCEDURE_DEF
-            | SyntaxKind::FUNCTION_DEF
-            | SyntaxKind::VAR_DEF
-            | SyntaxKind::ASSIGN_STMT
-            | SyntaxKind::CALL_STMT
-            | SyntaxKind::RETURN_STMT
-            | SyntaxKind::IF_STMT
-            | SyntaxKind::WHILE_STMT
-            | SyntaxKind::FOR_STMT
-            | SyntaxKind::FOR_EACH_STMT
-            | SyntaxKind::TRY_STMT
-            | SyntaxKind::RAISE_STMT
-            | SyntaxKind::BREAK_STMT
-            | SyntaxKind::CONTINUE_STMT
-            | SyntaxKind::EXECUTE_STMT
-            | SyntaxKind::GOTO_STMT
-            | SyntaxKind::LABEL_STMT
-            | SyntaxKind::ADD_HANDLER_STMT
-            | SyntaxKind::REMOVE_HANDLER_STMT
-    )
+    crate::module_structure::significant::is_significant_for_region_emptiness(node.kind())
 }
 
 /// Lower AST to RegionTree.

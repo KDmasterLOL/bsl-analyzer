@@ -1,19 +1,24 @@
-//! Standard region names for different BSL module types.
+//! Standard region names allowed per BSL [`bsl_metadata::ModuleType`].
 //!
-//! Each module type (FormModule, ObjectModule, CommonModule, etc.) has a specific set
-//! of allowed standard region names. This module provides utilities to check if a region
-//! name matches the standards for a given module type.
+//! Each module type (FormModule, ObjectModule, CommonModule, etc.) admits
+//! a specific set of standard region names per the 1C standard. Form
+//! modules also allow the dynamic `ОбработчикиСобытийЭлементовТаблицыФормы<TableName>`
+//! / `FormTableItemsEventHandlers<TableName>` family — modelled as a
+//! prefix pattern.
 //!
+//! Track 2 Phase C §3 Slice 1: moved from
+//! `crates/ide-diagnostics/src/utils/standard_regions.rs` so BSL semantic
+//! policy lives in the HIR layer, not the diagnostics layer.
 
 use bsl_metadata::ModuleType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegionPattern {
+enum RegionPattern {
     Exact(&'static str, &'static str),
     Prefix(&'static str, &'static str),
 }
 
-fn get_standard_patterns(module_type: ModuleType) -> Vec<RegionPattern> {
+fn standard_patterns(module_type: ModuleType) -> Vec<RegionPattern> {
     use RegionPattern::*;
     let mut patterns = vec![];
 
@@ -87,8 +92,13 @@ fn get_standard_patterns(module_type: ModuleType) -> Vec<RegionPattern> {
     patterns
 }
 
+/// Returns `true` when `name` is a standard region name allowed in
+/// `module_type`. RU and EN spellings are both accepted, comparison is
+/// case-insensitive, and form-table prefix regions
+/// (`ОбработчикиСобытийЭлементовТаблицыФормы<TableName>`) match when the
+/// suffix is a syntactically valid identifier tail.
 pub fn is_standard_region(module_type: ModuleType, name: &str) -> bool {
-    let patterns = get_standard_patterns(module_type);
+    let patterns = standard_patterns(module_type);
 
     for pattern in &patterns {
         match pattern {
@@ -126,7 +136,6 @@ fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
         return None;
     }
 
-    // Find the byte offset after prefix characters (works with multi-byte UTF-8)
     let prefix_char_count = prefix.chars().count();
     let byte_offset =
         s.char_indices().nth(prefix_char_count).map(|(idx, _)| idx).unwrap_or(s.len());
@@ -145,24 +154,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_exact_match_russian() {
+    fn exact_match_russian() {
         assert!(is_standard_region(ModuleType::CommonModule, "ПрограммныйИнтерфейс"));
     }
 
     #[test]
-    fn test_exact_match_english() {
+    fn exact_match_english() {
         assert!(is_standard_region(ModuleType::CommonModule, "Public"));
     }
 
     #[test]
-    fn test_case_insensitive() {
+    fn case_insensitive() {
         assert!(is_standard_region(ModuleType::CommonModule, "public"));
         assert!(is_standard_region(ModuleType::CommonModule, "PUBLIC"));
         assert!(is_standard_region(ModuleType::CommonModule, "программныйинтерфейс"));
     }
 
     #[test]
-    fn test_prefix_match() {
+    fn prefix_match() {
         assert!(is_standard_region(ModuleType::FormModule, "FormTableItemsEventHandlersProducts"));
         assert!(is_standard_region(
             ModuleType::FormModule,
@@ -171,23 +180,23 @@ mod tests {
     }
 
     #[test]
-    fn test_prefix_exact() {
+    fn prefix_exact() {
         assert!(is_standard_region(ModuleType::FormModule, "FormTableItemsEventHandlers"));
     }
 
     #[test]
-    fn test_non_standard() {
+    fn non_standard_rejected() {
         assert!(!is_standard_region(ModuleType::CommonModule, "CustomRegion"));
         assert!(!is_standard_region(ModuleType::FormModule, "Переменные"));
     }
 
     #[test]
-    fn test_unknown_module_type() {
+    fn unknown_module_type_admits_nothing() {
         assert!(!is_standard_region(ModuleType::Unknown, "Public"));
     }
 
     #[test]
-    fn test_private_all_types() {
+    fn private_universal_across_types() {
         assert!(is_standard_region(ModuleType::CommonModule, "СлужебныеПроцедурыИФункции"));
         assert!(is_standard_region(ModuleType::CommonModule, "Private"));
         assert!(is_standard_region(ModuleType::FormModule, "СлужебныеПроцедурыИФункции"));
@@ -195,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_module_specific() {
+    fn module_specific_isolation() {
         assert!(is_standard_region(ModuleType::FormModule, "FormEventHandlers"));
         assert!(!is_standard_region(ModuleType::CommonModule, "FormEventHandlers"));
 

@@ -34,6 +34,7 @@ pub mod hir;
 pub mod item_tree;
 pub mod metrics;
 pub mod module_index;
+pub mod module_structure;
 pub mod name;
 pub mod path;
 pub mod queries;

@@ -38,6 +38,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::module_structure::significant::is_significant_for_code_out_of_region;
 use hir::RegionTree;
 use syntax::{ast, ast::AstNode, SyntaxKind, SyntaxNode};
 
@@ -111,7 +112,7 @@ fn check_node(
         }
 
         if is_module_level_element(&child)
-            && is_significant_element(&child)
+            && is_significant_for_code_out_of_region(&child)
             && !region_tree.is_range_inside_region(child.text_range())
         {
             let (element_type, range) = match child.kind() {
@@ -196,50 +197,6 @@ fn has_preceding_definition(parent: &SyntaxNode, node: &SyntaxNode) -> bool {
         }
     }
     false
-}
-
-fn is_significant_element(node: &SyntaxNode) -> bool {
-    match node.kind() {
-        SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF | SyntaxKind::VAR_DEF => true,
-
-        SyntaxKind::ASSIGN_STMT
-        | SyntaxKind::CALL_STMT
-        | SyntaxKind::IF_STMT
-        | SyntaxKind::WHILE_STMT
-        | SyntaxKind::FOR_STMT
-        | SyntaxKind::FOR_EACH_STMT
-        | SyntaxKind::TRY_STMT
-        | SyntaxKind::RETURN_STMT
-        | SyntaxKind::BREAK_STMT
-        | SyntaxKind::CONTINUE_STMT
-        | SyntaxKind::GOTO_STMT
-        | SyntaxKind::EXECUTE_STMT
-        | SyntaxKind::ADD_HANDLER_STMT
-        | SyntaxKind::REMOVE_HANDLER_STMT => true,
-
-        SyntaxKind::RAISE_STMT => false,
-
-        SyntaxKind::PRE_REGION_DIR => contains_executable_code(node),
-
-        _ => false,
-    }
-}
-
-fn contains_executable_code(node: &SyntaxNode) -> bool {
-    node.descendants().any(|n| match n.kind() {
-        SyntaxKind::CALL_STMT
-        | SyntaxKind::ASSIGN_STMT
-        | SyntaxKind::IF_STMT
-        | SyntaxKind::WHILE_STMT
-        | SyntaxKind::FOR_STMT
-        | SyntaxKind::FOR_EACH_STMT
-        | SyntaxKind::TRY_STMT
-        | SyntaxKind::RETURN_STMT
-        | SyntaxKind::BREAK_STMT
-        | SyntaxKind::CONTINUE_STMT => true,
-        SyntaxKind::RAISE_STMT => false,
-        _ => false,
-    })
 }
 
 #[cfg(test)]
