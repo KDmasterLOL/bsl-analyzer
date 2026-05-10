@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_union_with_diagnostics() {
-        // Test UNION query - only first SELECT is checked, UNION queries are skipped
+        // Track 2 §4 Slice 2: alias check covers main + UNION SELECTs uniformly.
         let query = r#"ВЫБРАТЬ
 	Товары.Артикул,
 	Товары.Артикул КАК АртикулТовара,
@@ -517,10 +517,12 @@ mod tests {
         assert_eq!(diagnostics.len(), 0, "TOP DISTINCT with explicit alias should pass");
     }
 
-    /// Two queries with UNION - each query has fields without AS keyword.
+    /// Two queries with UNION — each query has fields without AS keyword in
+    /// both the main and the UNION SELECT.
     ///
-    /// Expected 2 diagnostics per query (before UNION only): Валюты.Ссылка and Валюты.Код Код.
-    /// UNION queries are skipped.
+    /// Expected 5 diagnostics per query: 2 from main SELECT (Валюты.Ссылка no
+    /// alias + Валюты.Код Код implicit) + 3 from UNION SELECT (Валюты.Ссылка ×
+    /// 2 + Валюты.Код, all no alias).
     #[test]
     fn test_query_with_union_two_diagnostics() {
         let code = r#"Запрос = Новый Запрос;
