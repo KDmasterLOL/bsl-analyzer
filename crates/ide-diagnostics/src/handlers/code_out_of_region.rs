@@ -204,7 +204,10 @@ mod tests {
     use super::check;
     use crate::test_utils::{
         assert_diagnostic_range, assert_diagnostic_range_multiline, check_ast_diagnostic,
+        check_diagnostics_snapshot_for,
     };
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = "//////////////////////////////////////////////\n\
@@ -421,5 +424,87 @@ mod tests {
 
         // Diagnostic 0: Процедура Тест() (line 2, procedure name only)
         assert_diagnostic_range(code, &diagnostics[0], 1, 10, 14);
+    }
+
+    #[test]
+    fn test_goto_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Перейти ~Метка;"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:16
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_label_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"~Метка:"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_execute_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Выполнить("код");"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:18
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_add_handler_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"ДобавитьОбработчик ИмяСобытия, ОбработчикСобытия;"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:50
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_remove_handler_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"УдалитьОбработчик ИмяСобытия, ОбработчикСобытия;"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:49
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_standalone_raise_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"ВызватьИсключение;"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_pre_region_dir_covers_inner_code_but_not_following_stmt_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"#Область Инициализация
+Сообщить("Внутри");
+#КонецОбласти
+
+Сообщить("Снаружи");"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 5:1..5:21
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
     }
 }

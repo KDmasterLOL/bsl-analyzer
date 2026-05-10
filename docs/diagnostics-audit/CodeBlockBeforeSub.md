@@ -167,3 +167,16 @@ v8-code-style проверки `module-structure-top-region`,
 **Phase C §3.4 audit (2026-05):** правило truly orthogonal —
 SyntaxNode walk без зависимости от `RegionTree`/policy/significant
 helpers. Без изменений в Track 2.
+
+## Закрыто Track 3
+
+**Phase C sub-slice C1 (commit `[COMMIT]`, 2026-05):**
+
+- `test_non_region_code_before_region_wrapped_method_snapshot` — non-region
+  assignment before a region-wrapped method and later top-level method is
+  reported as `CodeBlockBeforeSub`.
+- `test_region_wrapped_method_after_non_region_code_snapshot` — non-region call
+  before a region-wrapped annotated method and later function is reported.
+- `test_nested_region_method_after_region_code_snapshot` — executable code in
+  an outer region before a nested region-wrapped method and later top-level
+  method is reported from the first executable statement.

@@ -227,7 +227,11 @@ fn is_executable_statement(node: &SyntaxNode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
+    use crate::test_utils::{
+        assert_diagnostic_range_multiline, check_ast_diagnostic, check_diagnostics_snapshot_for,
+    };
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_code_inside_region_before_sub() {
         // Executable code inside a top region before procedures should trigger.
@@ -358,5 +362,71 @@ EndProcedure
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "English keywords should work");
+    }
+
+    #[test]
+    fn test_non_region_code_before_region_wrapped_method_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Перем Состояние;
+
+Состояние = Истина;
+
+#Область СлужебныеПроцедурыИФункции
+Процедура Подготовить()
+КонецПроцедуры
+#КонецОбласти
+
+Процедура Выполнить()
+КонецПроцедуры"#,
+            DiagnosticCode::CodeBlockBeforeSub,
+            expect![[r#"
+                CodeBlockBeforeSub @ 3:1..3:19
+                  message: Обнаружен блок кода перед объявлением процедур и функций
+                  severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn test_region_wrapped_method_after_non_region_code_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Инициализировать();
+
+#Область ОбработчикиСобытий
+&НаКлиенте
+Процедура ПриОткрытии(Отказ)
+КонецПроцедуры
+#КонецОбласти
+
+Функция ПолучитьЗначение()
+    Возврат 1;
+КонецФункции"#,
+            DiagnosticCode::CodeBlockBeforeSub,
+            expect![[r#"
+                CodeBlockBeforeSub @ 1:1..1:19
+                  message: Обнаружен блок кода перед объявлением процедур и функций
+                  severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn test_nested_region_method_after_region_code_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"#Область Инициализация
+Настройки = Новый Структура;
+
+#Область ВнутренниеМетоды
+Процедура ЗаполнитьНастройки()
+КонецПроцедуры
+#КонецОбласти
+#КонецОбласти
+
+Процедура Выполнить()
+КонецПроцедуры"#,
+            DiagnosticCode::CodeBlockBeforeSub,
+            expect![[r#"
+                CodeBlockBeforeSub @ 2:1..8:14
+                  message: Обнаружен блок кода перед объявлением процедур и функций
+                  severity: Blocker"#]],
+        );
     }
 }

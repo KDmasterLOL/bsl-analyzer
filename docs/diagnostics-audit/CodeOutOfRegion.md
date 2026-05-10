@@ -172,3 +172,23 @@ significant-stmt list переехал в `hir_def::module_structure::significan
 (`is_significant_module_level_stmt`); audit gap по
 `RAISE_STMT`/`LABEL_STMT` закрыт там же. Walk через `RegionTree` API
 (Slice 2, `d32f55d9`).
+
+## Закрыто Track 3
+
+**Phase C sub-slice C1 (commit `[COMMIT]`, 2026-05):**
+
+- `test_goto_stmt_outside_region_snapshot` — module-level `Перейти ~Метка;`
+  outside any region is reported as `CodeOutOfRegion`.
+- `test_label_stmt_outside_region_snapshot` — documents the current deliberate
+  exclusion for a bare module-level `~Метка:`.
+- `test_execute_stmt_outside_region_snapshot` — module-level
+  `Выполнить("код");` outside any region is reported as `CodeOutOfRegion`.
+- `test_add_handler_stmt_outside_region_snapshot` — module-level
+  `ДобавитьОбработчик ...;` outside any region is reported.
+- `test_remove_handler_stmt_outside_region_snapshot` — module-level
+  `УдалитьОбработчик ...;` outside any region is reported.
+- `test_standalone_raise_stmt_outside_region_snapshot` — documents the current
+  deliberate exclusion for standalone module-level `ВызватьИсключение;`.
+- `test_pre_region_dir_covers_inner_code_but_not_following_stmt_snapshot` —
+  code inside `#Область` is covered, while following module-level code outside
+  the region is reported.
