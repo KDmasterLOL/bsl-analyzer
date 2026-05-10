@@ -211,15 +211,21 @@ EndProcedure"#;
     }
 
     /// Track 2 Phase D §2.3 mini-fix (deferred): preprocessor-aware
-    /// recognition of `НачатьТранзакцию(); #Если ... Попытка ...`. The
-    /// current local pending-statement logic walks each `STMT_LIST`
-    /// independently; when `НачатьТранзакцию` sits in the outer list and
-    /// the matching `Попытка` lives inside a nested `PRE_IF_DIR`, the
-    /// outer pending is finalised before recursing into the preproc
-    /// branch and a false-positive fires. Recognising this pattern
-    /// requires a preprocessor-source-of-truth path that is owned by
-    /// Track 6 (preprocessor branches), so this test is `#[ignore]`'d
-    /// and documents the gap as a known-limitation.
+    /// recognition of `НачатьТранзакцию(); #Если ... Попытка ... #Иначе
+    /// Попытка ... #КонецЕсли`. The fixture is BSL-safe — every active
+    /// preprocessor branch starts with `Попытка` immediately after the
+    /// shared outer `НачатьТранзакцию()`, so the runtime semantics are
+    /// always `Begin; Try`. The local pending-statement logic walks the
+    /// outer `STMT_LIST` and finalises pending when it sees the
+    /// `PRE_IF_DIR` (not a `TRY_STMT`), emitting a false positive even
+    /// though every expanded branch is well-formed. Recognising this
+    /// pattern requires per-branch preprocessor source-of-truth — owned
+    /// by Track 6 — so the test is `#[ignore]`'d and documents the gap
+    /// as a known-limitation. The single-branch form (`#Если ... Try
+    /// ... #КонецЕсли` without `#Иначе`) is intentionally NOT used here:
+    /// on the inactive branch there would be `Begin; КонецПроцедуры`
+    /// without a `Try`, which is a genuine violation the diagnostic is
+    /// meant to flag.
     #[test]
     #[ignore = "Track 6 dep: preprocessor-aware Begin/Try matching"]
     fn begin_in_preproc_then_try_outside() {
@@ -228,6 +234,14 @@ EndProcedure"#;
     #Если Сервер Тогда
     Попытка
         ЗаписатьДанные();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+    #Иначе
+    Попытка
+        ЗаписатьДанныеКлиента();
         ЗафиксироватьТранзакцию();
     Исключение
         ОтменитьТранзакцию();
@@ -244,8 +258,9 @@ EndProcedure"#;
         assert_eq!(
             diags.len(),
             0,
-            "BeginTransaction immediately followed by a preprocessor-guarded Try \
-             should be valid once the preproc-aware path lands (Track 6)."
+            "BeginTransaction immediately followed by a preprocessor block \
+             where every active branch starts with `Попытка` should be valid \
+             once the preproc-aware path lands (Track 6)."
         );
     }
 

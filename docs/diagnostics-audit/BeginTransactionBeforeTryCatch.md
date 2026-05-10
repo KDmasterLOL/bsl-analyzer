@@ -61,13 +61,18 @@
 Handler `from_hir()` только конвертирует `BodyDiagnostic` в IDE diagnostic с
 фиксированным сообщением.
 
-**Track 2 §2.3 (2026-05-10):** preprocessor-aware расширение паттерна
-«`НачатьТранзакцию(); #Если ... Попытка ... #КонецЕсли`» отложено в
-Track 6 (preprocessor source-of-truth) — текущая локальная statement-order
-логика финализирует pending до рекурсии в `PRE_IF_DIR`/`PRE_REGION_DIR`
-и даёт false-positive на этом паттерне. Регрессионный тест зафиксирован
+**Track 2 §2.3 (2026-05-10):** preprocessor-aware расширение отложено в
+Track 6 (preprocessor source-of-truth). Конкретный gap — паттерн, в
+котором `НачатьТранзакцию()` стоит снаружи, а каждая активная ветка
+`#Если/#Иначе` начинается с `Попытка` (т.е. рантайм-семантика всегда
+`Begin; Try`, BSL-валидно). Локальная statement-order логика
+финализирует pending на `PRE_IF_DIR` (не `TRY_STMT`) и даёт false
+positive. Single-branch форма (`#Если Тогда ... Попытка ... #КонецЕсли`
+без `#Иначе`) — наоборот, true positive: на неактивной ветке после
+`НачатьТранзакцию()` нет `Попытка`. Регрессионный тест зафиксирован
 как `#[ignore]`'d `begin_in_preproc_then_try_outside` в handler-модуле
-с обоснованием Track 6 deferral.
+с обоснованием Track 6 deferral и явным указанием на all-branches
+требование fixture.
 
 ## Что покрыто
 
