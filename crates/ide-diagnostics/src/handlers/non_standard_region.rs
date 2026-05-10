@@ -44,20 +44,18 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let regions = ctx.module_level_regions();
-
-    if regions.is_empty() {
-        return Vec::new();
-    }
+    let region_tree = ctx.region_tree();
 
     let mut diagnostics = Vec::new();
-    for region in regions.iter() {
-        if !is_standard_region(module_type, &region.name) {
+    for idx in region_tree.module_level_regions() {
+        let region = region_tree.region(idx);
+        let name = region.name.as_str();
+        if !is_standard_region(module_type, name) {
             diagnostics.push(Diagnostic {
                 code,
-                message: format!("Нужно удалить нестандартный раздел \"{}\"", region.name),
+                message: format!("Нужно удалить нестандартный раздел \"{}\"", name),
                 severity: ctx.severity(code),
-                range: region.range,
+                range: region.directive_range,
                 tags: ctx.tags(code),
                 fixes: vec![],
             });

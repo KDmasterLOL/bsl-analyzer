@@ -380,11 +380,6 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.region_tree(self.file_id))
     }
 
-    /// Get module-level regions for current file.
-    pub fn module_level_regions(&self) -> Arc<Vec<base_db::RegionInfo>> {
-        self.query(|p| p.module_level_regions(self.file_id))
-    }
-
     /// Get SDBL HIR for all queries in current file.
     pub fn sdbl_hir_in_file(&self) -> ide_db::SdblHirEntries {
         self.query(|p| p.sdbl_hir_in_file(self.file_id))

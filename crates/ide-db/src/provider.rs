@@ -181,9 +181,6 @@ pub trait AnalysisProvider {
     /// Get region tree for file (module structure with regions).
     fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree>;
 
-    /// Get module-level regions (top-level regions in file).
-    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>>;
-
     // ========================================================================
     // SDBL Queries (for query diagnostics)
     // ========================================================================

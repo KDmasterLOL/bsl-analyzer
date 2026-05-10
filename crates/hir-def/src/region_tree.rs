@@ -39,6 +39,12 @@ pub struct RegionData {
     /// Full range of the region (from #Область to #КонецОбласти).
     pub range: TextRange,
 
+    /// Track 2 Phase C §3 Slice 2: range of just the directive line
+    /// (`#Область ИмяОбласти` / `#Region Public` — opening directive,
+    /// excluding the body and `#КонецОбласти`). DuplicateRegion and
+    /// NonStandardRegion emit on this geometry.
+    pub directive_range: TextRange,
+
     /// Range of just the region name (for renaming, highlighting).
     pub name_range: TextRange,
 
@@ -50,6 +56,13 @@ pub struct RegionData {
 
     /// Depth in the region hierarchy (0 for top-level).
     pub depth: u32,
+
+    /// Track 2 Phase C §3 Slice 2: `true` when the region sits inside
+    /// a procedure or function body (i.e. its containing syntax has
+    /// crossed a `PROCEDURE_DEF`/`FUNCTION_DEF` boundary). Module-level
+    /// region diagnostics filter these out via
+    /// [`RegionTree::module_level_regions`].
+    pub is_method_local: bool,
 
     /// Track 2 Phase C §3.4: `true` when the region contains only
     /// comments / whitespace / nested empty regions — i.e. nothing
@@ -108,6 +121,18 @@ impl RegionTree {
     /// Get top-level regions.
     pub fn root_regions(&self) -> &[RegionIdx] {
         &self.root_regions
+    }
+
+    /// Track 2 Phase C §3 Slice 2: iterate the regions that sit at
+    /// module level — i.e. the roots that are NOT inside any
+    /// procedure / function body. Used by `DuplicateRegion` and
+    /// `NonStandardRegion`, which only care about the module's
+    /// top-level region structure. Method-local regions remain
+    /// available through [`RegionTree::regions`] /
+    /// [`RegionTree::root_regions`] for handlers that want them
+    /// (e.g. `EmptyRegion`).
+    pub fn module_level_regions(&self) -> impl Iterator<Item = RegionIdx> + '_ {
+        self.root_regions.iter().copied().filter(move |&idx| !self.regions[idx].is_method_local)
     }
 
     /// Track 2 Phase C §3.4: `true` when the region at `idx` is
@@ -244,41 +269,60 @@ struct RegionTreeBuilder {
     tree: RegionTree,
     /// Stack of parent regions during traversal.
     parent_stack: Vec<RegionIdx>,
+    /// Track 2 Phase C §3 Slice 2: depth of the enclosing
+    /// procedure / function chain. Incremented on `PROCEDURE_DEF` /
+    /// `FUNCTION_DEF` entry; any region recorded while
+    /// `procedure_depth > 0` is flagged `is_method_local = true`.
+    procedure_depth: u32,
 }
 
 impl RegionTreeBuilder {
     fn new() -> Self {
-        Self { tree: RegionTree::new(), parent_stack: Vec::new() }
+        Self { tree: RegionTree::new(), parent_stack: Vec::new(), procedure_depth: 0 }
     }
 
     fn build(mut self, root: &SyntaxNode) -> RegionTree {
-        self.collect_regions(root);
+        self.descend(root);
         self.tree
     }
 
-    fn collect_regions(&mut self, node: &SyntaxNode) {
+    /// Single descent function used both at the top level and for the
+    /// interior of a `PRE_REGION_DIR` (nested regions). Tracks
+    /// procedure-body containment so method-local regions can be
+    /// distinguished from module-level ones.
+    ///
+    /// Walks **all** descendant nodes by default so a region nested
+    /// arbitrarily deep — for example inside a control-flow body
+    /// (`Если` / `Пока` / `Для` / `Попытка`) inside a procedure — is
+    /// still picked up. Two structural cases get special treatment:
+    /// - `PRE_REGION_DIR` is consumed by [`Self::process_region`]
+    ///   (which performs its own recursion through `descend(node)`),
+    ///   so we do NOT also recurse here — that would visit the
+    ///   region's children twice.
+    /// - `PROCEDURE_DEF` / `FUNCTION_DEF` bracket the recursion with
+    ///   `procedure_depth +/- 1` so anything recorded inside is
+    ///   classified `is_method_local = true`.
+    fn descend(&mut self, node: &SyntaxNode) {
         for child in node.children() {
             match child.kind() {
                 SyntaxKind::PRE_REGION_DIR => {
                     self.process_region(&child);
                 }
-                // Recurse into preprocessor conditionals.
-                SyntaxKind::PRE_IF_DIR
-                | SyntaxKind::PRE_ELSE_CLAUSE
-                | SyntaxKind::PRE_ELSIF_CLAUSE => {
-                    self.collect_regions(&child);
+                SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
+                    self.procedure_depth += 1;
+                    self.descend(&child);
+                    self.procedure_depth -= 1;
                 }
-                // Track 2 Phase C §3.4 fix: descend into method bodies
-                // and statement lists so the RegionTree captures
-                // method-local regions too. The legacy
-                // `lower_region_stmts` emit ran inside method
-                // lowering for these; without recursing here the §3.4
-                // `EmptyRegion` migration would silently drop
-                // method-local empty regions.
-                SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF | SyntaxKind::STMT_LIST => {
-                    self.collect_regions(&child);
+                // Default: recurse into every other child. Regions
+                // appear at statement positions, and statements live
+                // inside `STMT_LIST` / preprocessor conditionals /
+                // control-flow nodes — none of which need to be
+                // enumerated explicitly. Walking expression subtrees
+                // is harmless because they contain no
+                // `PRE_REGION_DIR` nodes.
+                _ => {
+                    self.descend(&child);
                 }
-                _ => {}
             }
         }
     }
@@ -297,6 +341,7 @@ impl RegionTreeBuilder {
 
         // Calculate ranges
         let range = node.text_range();
+        let directive_range = first_line_range(node);
 
         // Name range: find the IDENT token after #Область/#Region
         let name_range = self.find_name_range(node, &name);
@@ -314,10 +359,12 @@ impl RegionTreeBuilder {
         let region_idx = self.tree.regions.alloc(RegionData {
             name,
             range,
+            directive_range,
             name_range,
             parent,
             children: Vec::new(),
             depth,
+            is_method_local: self.procedure_depth > 0,
             is_empty,
         });
 
@@ -331,27 +378,12 @@ impl RegionTreeBuilder {
             self.tree.root_regions.push(region_idx);
         }
 
-        // Push onto stack and recurse for nested regions
+        // Push onto stack and recurse for nested children. Sharing
+        // `descend` ensures procedures / functions inside a region
+        // continue to be classified as a method-local boundary.
         self.parent_stack.push(region_idx);
-        self.collect_nested_regions(node);
+        self.descend(node);
         self.parent_stack.pop();
-    }
-
-    fn collect_nested_regions(&mut self, region_node: &SyntaxNode) {
-        // Look for nested regions inside this region
-        for child in region_node.children() {
-            match child.kind() {
-                SyntaxKind::PRE_REGION_DIR => {
-                    self.process_region(&child);
-                }
-                SyntaxKind::PRE_IF_DIR
-                | SyntaxKind::PRE_ELSE_CLAUSE
-                | SyntaxKind::PRE_ELSIF_CLAUSE => {
-                    self.collect_regions(&child);
-                }
-                _ => {}
-            }
-        }
     }
 
     fn find_name_range(&self, node: &SyntaxNode, name: &Name) -> TextRange {
@@ -370,13 +402,23 @@ impl RegionTreeBuilder {
         }
 
         // Fallback: use first line range
-        let text = node.text().to_string();
-        let first_line_len = text.lines().next().map(|l| l.len()).unwrap_or(0);
-        TextRange::new(
-            node.text_range().start(),
-            node.text_range().start() + text_size::TextSize::from(first_line_len as u32),
-        )
+        first_line_range(node)
     }
+}
+
+/// Track 2 Phase C §3 Slice 2: shared first-line geometry helper. The
+/// `RegionData::directive_range` field and `find_name_range`'s fallback
+/// both want the range of the opening line of `node` — the
+/// `#Область ИмяОбласти` directive (and any whitespace/comment
+/// preceding the next newline). Centralised here so the byte-range
+/// arithmetic doesn't drift between callers.
+fn first_line_range(node: &SyntaxNode) -> TextRange {
+    let text = node.text().to_string();
+    let first_line_len = text.lines().next().map(str::len).unwrap_or(0);
+    TextRange::new(
+        node.text_range().start(),
+        node.text_range().start() + text_size::TextSize::from(first_line_len as u32),
+    )
 }
 
 /// Track 2 Phase C §3.4: classify whether a `PRE_REGION_DIR` node
@@ -732,5 +774,130 @@ EndProcedure
 
         let non_api_region = tree.root_api_region_for_range(non_api_range);
         assert!(non_api_region.is_none(), "Non-API region should return None");
+    }
+
+    // -- Track 2 Phase C §3 Slice 2 ----------------------------------------
+
+    #[test]
+    fn test_directive_range_is_first_line_of_region() {
+        let code =
+            "#Область ПрограммныйИнтерфейс\nПроцедура Тест()\nКонецПроцедуры\n#КонецОбласти\n";
+        let tree = parse_and_lower(code);
+
+        let region = tree.region(tree.root_regions()[0]);
+        let dir_text = &code[region.directive_range];
+        assert_eq!(dir_text, "#Область ПрограммныйИнтерфейс");
+        // The full block range covers the closing directive too.
+        assert!(region.range.contains_inclusive(region.directive_range.end()));
+    }
+
+    #[test]
+    fn test_module_level_region_is_not_method_local() {
+        let code = "#Область Public\n#КонецОбласти\n";
+        let tree = parse_and_lower(code);
+        let region = tree.region(tree.root_regions()[0]);
+        assert!(!region.is_method_local);
+        assert_eq!(tree.module_level_regions().count(), 1);
+    }
+
+    #[test]
+    fn test_region_inside_procedure_is_method_local() {
+        let code = r#"
+Процедура Тест()
+    #Область Локальная
+    Сообщить("OK");
+    #КонецОбласти
+КонецПроцедуры
+"#;
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 1, "the local region must be captured");
+        let region = tree.region(tree.root_regions()[0]);
+        assert!(region.is_method_local, "region inside Procedure body should be method-local");
+        assert_eq!(
+            tree.module_level_regions().count(),
+            0,
+            "module_level_regions() must filter method-local out"
+        );
+    }
+
+    #[test]
+    fn test_region_inside_function_is_method_local() {
+        let code = r#"
+Функция Тест()
+    #Область Локальная
+    Возврат 1;
+    #КонецОбласти
+КонецФункции
+"#;
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 1);
+        assert!(tree.region(tree.root_regions()[0]).is_method_local);
+    }
+
+    #[test]
+    fn test_module_level_outer_with_method_local_inner() {
+        // Codex round-3 MAJOR Q8: the case
+        // `#Область Outer > Процедура > #Область Local` was previously
+        // missed by `collect_nested_regions` (which did not descend
+        // into PROCEDURE_DEF). The unified `descend` walker now records
+        // Local correctly and flags it method-local while Outer stays
+        // module-level.
+        let code = r#"
+#Область Outer
+    Процедура Тест()
+        #Область Local
+        Сообщить("OK");
+        #КонецОбласти
+    КонецПроцедуры
+#КонецОбласти
+"#;
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 2);
+
+        let outer = tree.regions_by_name("Outer");
+        let local = tree.regions_by_name("Local");
+        assert_eq!(outer.len(), 1);
+        assert_eq!(local.len(), 1);
+
+        assert!(!tree.region(outer[0]).is_method_local, "Outer is module-level");
+        assert!(tree.region(local[0]).is_method_local, "Local is method-local");
+
+        let module_level: Vec<_> = tree.module_level_regions().collect();
+        assert_eq!(module_level.len(), 1);
+        assert_eq!(module_level[0], outer[0]);
+    }
+
+    #[test]
+    fn test_region_inside_if_body_inside_procedure_is_method_local() {
+        // Codex round-3 review of Slice 2: `descend` previously stopped
+        // at the explicit kind list (`STMT_LIST` only), so a region
+        // inside `Procedure > Если > Область Local` was silently
+        // dropped. The unconditional descent default arm catches it.
+        let code = r#"
+Процедура Тест()
+    Если Истина Тогда
+        #Область Local
+        Сообщить("OK");
+        #КонецОбласти
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let tree = parse_and_lower(code);
+        assert_eq!(tree.len(), 1, "region nested inside if-body must be captured");
+        let region = tree.region(tree.root_regions()[0]);
+        assert!(region.is_method_local);
+        assert_eq!(tree.module_level_regions().count(), 0);
+    }
+
+    #[test]
+    fn test_directive_range_for_method_local_region() {
+        let code = "Процедура Тест()\n    #Область Local\n    Сообщить(\"OK\");\n    #КонецОбласти\nКонецПроцедуры\n";
+        let tree = parse_and_lower(code);
+        let region = tree.region(tree.root_regions()[0]);
+        let dir_text = &code[region.directive_range];
+        assert!(
+            dir_text.trim_start().starts_with("#Область Local"),
+            "directive_range should isolate the opening directive line, got: {dir_text:?}"
+        );
     }
 }

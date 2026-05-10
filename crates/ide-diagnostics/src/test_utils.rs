@@ -512,14 +512,6 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         ide_db::base_db::SourceRootId(0)
     }
 
-    fn module_level_regions(
-        &self,
-        file_id: vfs::FileId,
-    ) -> std::sync::Arc<Vec<ide_db::base_db::RegionInfo>> {
-        use base_db::RootQueryDb;
-        self.db.module_level_regions(file_id)
-    }
-
     fn sdbl_hir_in_file(
         &self,
         file_id: vfs::FileId,

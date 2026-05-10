@@ -497,39 +497,6 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(hir::lower_regions(&parse.syntax_node()))
     }
 
-    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
-        use syntax::{
-            ast::{self, AstNode},
-            SyntaxKind, TextRange, TextSize,
-        };
-
-        let parse = self.parse(file_id);
-        let root = parse.syntax_node();
-
-        let mut regions = Vec::new();
-        for child in root.children() {
-            if child.kind() == SyntaxKind::PRE_REGION_DIR {
-                if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
-                    if region.is_start() {
-                        if let Some(name) = region.name() {
-                            let text = child.text().to_string();
-                            let first_line = text.lines().next().unwrap_or(&text);
-                            let first_line_len = first_line.len();
-
-                            let start = child.text_range().start();
-                            let end = start + TextSize::from(first_line_len as u32);
-                            let range = TextRange::new(start, end);
-
-                            regions.push(base_db::RegionInfo { name, range });
-                        }
-                    }
-                }
-            }
-        }
-
-        Arc::new(regions)
-    }
-
     fn sdbl_hir_in_file(&self, file_id: FileId) -> crate::SdblHirEntries {
         // Check ParsedFile cache (lazy computation via OnceLock)
         if let Some(ref shared_state) = self.shared_state {

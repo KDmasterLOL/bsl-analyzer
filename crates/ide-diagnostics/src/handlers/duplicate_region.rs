@@ -59,7 +59,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::base_db::RegionInfo;
+use hir::RegionTree;
 use ide_db::TextRange;
 use std::collections::HashMap;
 
@@ -86,37 +86,37 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Use Salsa-cached query (LRU=256) - shared with non_standard_region
-    let regions = ctx.module_level_regions();
-
-    let diagnostics = report_duplicates(&regions, code, ctx);
+    let region_tree = ctx.region_tree();
+    let diagnostics = report_duplicates(&region_tree, code, ctx);
 
     tracing::debug!(count = diagnostics.len(), "DuplicateRegion diagnostics found");
     diagnostics
 }
 
-fn get_canonical_name(name: &str) -> String {
+fn canonical_key(name: &str) -> String {
     hir::module_structure::canonical::canonical_alias(name)
         .map(str::to_string)
         .unwrap_or_else(|| name.to_string())
 }
 
 fn report_duplicates(
-    regions: &[RegionInfo],
+    region_tree: &RegionTree,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     let mut groups: HashMap<String, Vec<(String, TextRange)>> = HashMap::new();
 
-    // Group regions by canonical name
-    for region in regions {
-        let canonical = get_canonical_name(&region.name);
-        groups.entry(canonical).or_default().push((region.name.clone(), region.range));
+    for idx in region_tree.module_level_regions() {
+        let region = region_tree.region(idx);
+        let canonical = canonical_key(region.name.as_str());
+        groups
+            .entry(canonical)
+            .or_default()
+            .push((region.name.as_str().to_string(), region.directive_range));
     }
 
     let mut diagnostics = Vec::new();
 
-    // Report first occurrence for each duplicate group
     for (_canonical, group) in groups {
         if group.len() > 1 {
             let (first_name, first_range) = &group[0];
@@ -132,7 +132,6 @@ fn report_duplicates(
         }
     }
 
-    // Sort by position for deterministic ordering
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
 
     diagnostics

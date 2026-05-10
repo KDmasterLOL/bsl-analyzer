@@ -186,10 +186,6 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.region_tree(file_id)
     }
 
-    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
-        self.db.module_level_regions(file_id)
-    }
-
     fn sdbl_hir_in_file(&self, file_id: FileId) -> crate::SdblHirEntries {
         self.db.sdbl_hir_in_file(file_id)
     }
