@@ -33,9 +33,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{
-        assert_diagnostic_range, check_diagnostics_snapshot_for, check_hir_diagnostic,
-    };
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;
     #[test]
@@ -64,15 +62,20 @@ mod tests {
 F = Number();
 А = Число(Б);
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TryNumber).collect();
-
-        assert_eq!(diagnostics.len(), 3, "Expected 3 diagnostics");
-
-        assert_diagnostic_range(code, diagnostics[0], 8, 4, 12);
-        assert_diagnostic_range(code, diagnostics[1], 9, 4, 13);
-        assert_diagnostic_range(code, diagnostics[2], 12, 8, 17);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TryNumber,
+            expect![[r#"
+            TryNumber @ 9:5..9:13
+              message: Не используйте try-catch для приведения к числу
+              severity: Warning
+            TryNumber @ 10:5..10:14
+              message: Не используйте try-catch для приведения к числу
+              severity: Warning
+            TryNumber @ 13:9..13:18
+              message: Не используйте try-catch для приведения к числу
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -85,11 +88,14 @@ F = Number();
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let try_number: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TryNumber).collect();
-
-        assert_eq!(try_number.len(), 1, "HIR should detect TryNumber");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TryNumber,
+            expect![[r#"
+            TryNumber @ 4:13..4:21
+              message: Не используйте try-catch для приведения к числу
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -102,10 +108,7 @@ F = Number();
 КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TryNumber).collect();
-        assert_eq!(diagnostics.len(), 0, "Number in except block should not be detected");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::TryNumber, expect![[r#""#]]);
     }
 
     #[test]
@@ -116,10 +119,7 @@ F = Number();
 А = Число(Б);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TryNumber).collect();
-        assert_eq!(diagnostics.len(), 0, "Number outside try block should not be detected");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::TryNumber, expect![[r#""#]]);
     }
 
     #[test]
@@ -132,10 +132,17 @@ F = Number();
 КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TryNumber).collect();
-        assert_eq!(diagnostics.len(), 2, "Should be case-insensitive");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TryNumber,
+            expect![[r#"
+            TryNumber @ 4:9..4:17
+              message: Не используйте try-catch для приведения к числу
+              severity: Warning
+            TryNumber @ 5:9..5:18
+              message: Не используйте try-catch для приведения к числу
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -149,10 +156,14 @@ F = Number();
 КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TryNumber).collect();
-        assert_eq!(diagnostics.len(), 1, "Should detect in nested try blocks");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TryNumber,
+            expect![[r#"
+            TryNumber @ 5:13..5:22
+              message: Не используйте try-catch для приведения к числу
+              severity: Warning"#]],
+        );
     }
 
     #[test]

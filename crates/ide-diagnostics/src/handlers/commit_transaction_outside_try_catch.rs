@@ -49,12 +49,11 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 0, "CommitTransaction properly protected should be valid");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -65,13 +64,14 @@ mod tests {
     ЗафиксироватьТранзакцию();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "CommitTransaction outside try should be error");
-        assert_diagnostic_range(code, diags[0], 3, 4, 30);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#"
+                CommitTransactionOutsideTryCatch @ 4:5..4:31
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -89,13 +89,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "CommitTransaction in except handler should be error");
-        assert_diagnostic_range(code, diags[0], 6, 12, 38);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#"
+                CommitTransactionOutsideTryCatch @ 7:13..7:39
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -112,13 +113,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "Code after CommitTransaction should be error");
-        assert_diagnostic_range(code, diags[0], 4, 8, 34);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#"
+                CommitTransactionOutsideTryCatch @ 5:9..5:35
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -127,12 +129,11 @@ mod tests {
     Коннектор.ЗафиксироватьТранзакцию();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 0, "Qualified call should be ignored");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -143,13 +144,14 @@ mod tests {
     CommitTransaction();
 EndProcedure"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "English CommitTransaction should be detected");
-        assert_diagnostic_range(code, diags[0], 3, 4, 24);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#"
+                CommitTransactionOutsideTryCatch @ 4:5..4:25
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -160,12 +162,14 @@ EndProcedure"#;
     ЗАФИКСИРОВАТЬТРАНЗАКЦИЮ();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "Case-insensitive matching should work");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#"
+                CommitTransactionOutsideTryCatch @ 4:5..4:31
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -249,14 +253,29 @@ EndProcedure"#;
     КонецПопытки;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-
-        // Пример1 is correct (no error), Пример2-7 each have 1 error = 6 errors
-        assert_eq!(diags.len(), 6, "Should detect 6 diagnostics");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#"
+                CommitTransactionOutsideTryCatch @ 21:5..21:31
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major
+                CommitTransactionOutsideTryCatch @ 30:13..30:39
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major
+                CommitTransactionOutsideTryCatch @ 42:9..42:35
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major
+                CommitTransactionOutsideTryCatch @ 51:5..51:31
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major
+                CommitTransactionOutsideTryCatch @ 59:9..59:35
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major
+                CommitTransactionOutsideTryCatch @ 71:9..71:35
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -276,12 +295,14 @@ EndProcedure"#;
     КонецЦикла;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "CommitTransaction with code after in loop should be error");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#"
+                CommitTransactionOutsideTryCatch @ 6:13..6:39
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -293,14 +314,14 @@ EndProcedure"#;
     ЗафиксироватьТранзакцию();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
-            .collect();
-
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 3, 4, 30);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CommitTransactionOutsideTryCatch,
+            expect![[r#"
+                CommitTransactionOutsideTryCatch @ 4:5..4:31
+                  message: Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'
+                  severity: Major"#]],
+        );
     }
 
     #[test]

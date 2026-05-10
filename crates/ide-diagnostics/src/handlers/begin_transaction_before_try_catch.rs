@@ -83,6 +83,8 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
+
     #[test]
     fn test_valid_before_try() {
         let code = r#"Процедура Тест()
@@ -96,12 +98,11 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 0, "BeginTransaction immediately before Try should be valid");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -116,13 +117,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "Code between BeginTransaction and Try should be error");
-        assert_diagnostic_range(code, diags[0], 1, 4, 23);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#"
+                BeginTransactionBeforeTryCatch @ 2:5..2:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -137,13 +139,14 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "BeginTransaction inside Try should be error");
-        assert_diagnostic_range(code, diags[0], 2, 8, 27);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#"
+                BeginTransactionBeforeTryCatch @ 3:9..3:28
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -154,13 +157,14 @@ mod tests {
     ЗафиксироватьТранзакцию();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "BeginTransaction without Try should be error");
-        assert_diagnostic_range(code, diags[0], 1, 4, 23);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#"
+                BeginTransactionBeforeTryCatch @ 2:5..2:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -170,12 +174,11 @@ mod tests {
     ЗаписатьДанные();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 0, "Qualified call should be ignored");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -185,13 +188,14 @@ mod tests {
     SaveData();
 EndProcedure"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "English BeginTransaction should be detected");
-        assert_eq!(diags[0].code, DiagnosticCode::BeginTransactionBeforeTryCatch);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#"
+                BeginTransactionBeforeTryCatch @ 2:5..2:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -201,13 +205,14 @@ EndProcedure"#;
     Данные();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
-            .collect();
-        assert_eq!(diags.len(), 1, "Case-insensitive matching should work");
-        assert_eq!(diags[0].code, DiagnosticCode::BeginTransactionBeforeTryCatch);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#"
+                BeginTransactionBeforeTryCatch @ 2:5..2:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major"#]],
+        );
     }
 
     /// Track 2 Phase D §2.3 mini-fix (deferred): preprocessor-aware
@@ -304,18 +309,22 @@ EndProcedure"#;
     КонецПопытки;
 КонецЦикла;"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
-            .collect();
-
-        assert_eq!(diags.len(), 4, "Should detect 4 diagnostics in the combined fixture");
-
-        // Verify exact positions
-        assert_diagnostic_range(code, diags[0], 1, 4, 23); // code before Try
-        assert_diagnostic_range(code, diags[1], 12, 8, 27); // inside Try
-        assert_diagnostic_range(code, diags[2], 21, 4, 23); // no Try after
-        assert_diagnostic_range(code, diags[3], 27, 4, 23); // loop with code before Try
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#"
+                BeginTransactionBeforeTryCatch @ 2:5..2:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major
+                BeginTransactionBeforeTryCatch @ 13:9..13:28
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major
+                BeginTransactionBeforeTryCatch @ 22:5..22:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major
+                BeginTransactionBeforeTryCatch @ 28:5..28:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major"#]],
+        );
     }
 }

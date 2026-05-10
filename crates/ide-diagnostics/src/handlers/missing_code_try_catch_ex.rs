@@ -291,8 +291,8 @@ fn emit_at_except_keyword(
 mod tests {
     use super::check;
     use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-        check_diagnostics_snapshot_for,
+        check_ast_diagnostic, check_ast_diagnostic_with_config, check_diagnostics_snapshot_for,
+        format_diags,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
@@ -309,8 +309,11 @@ mod tests {
         ВызватьИсключение;
     КонецПопытки;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Re-raise must not be flagged as silent swallow");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
     }
 
     /// Track 2 Phase D §2.2 — `LogsOnly` catch-body classification:
@@ -325,8 +328,11 @@ mod tests {
         Сообщить("error");
     КонецПопытки;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Logging-API call must not be flagged");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
     }
 
     /// Track 2 Phase D §2.2 — `Silent` catch-body classification: the
@@ -343,9 +349,17 @@ mod tests {
         ОбработатьОшибку();
     КонецПопытки;
 КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#"
+                MissingCodeTryCatchEx @ 4:5..4:15
+                  message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
+                  severity: Major"#]],
+        );
+
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Silent swallow must be flagged");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingCodeTryCatchEx);
+        // snapshot-skip: verifies message-substring compatibility wording.
         assert!(
             diagnostics[0].message.contains("молча"),
             "Silent message should mention the swallow, got: {}",
@@ -367,9 +381,17 @@ mod tests {
         ОтменитьТранзакцию();
     КонецПопытки;
 КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#"
+                MissingCodeTryCatchEx @ 4:5..4:15
+                  message: Блок исключения только откатывает транзакцию, но не фиксирует ошибку: добавьте логирование или `ВызватьИсключение`
+                  severity: Major"#]],
+        );
+
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Rollback-alone must emit");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingCodeTryCatchEx);
+        // snapshot-skip: verifies message-substring compatibility wording.
         assert!(
             diagnostics[0].message.contains("откатывает"),
             "Rollback message should mention rollback, got: {}",
@@ -389,8 +411,11 @@ mod tests {
         Сообщить("error");
     КонецПопытки;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Rollback + log must not emit");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
     }
 
     /// Track 2 Phase D §2.2 — `Mixed` catch-body classification:
@@ -406,8 +431,11 @@ mod tests {
         ВызватьИсключение;
     КонецПопытки;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Log-then-reraise must not be flagged");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -474,24 +502,23 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        // Track 2 Phase D §2.2: 4 expected emits — the §2 classifier
-        // adds Silent detection for catch bodies whose contents are
-        // not Raise / log-call. The outer Проц3 except contains a
-        // nested Try (which the classifier treats as "other"), so it
-        // is now flagged as Silent in addition to the prior 3 Empty
-        // cases.
-        assert_eq!(diagnostics.len(), 4, "Should detect 3 Empty + 1 Silent");
-
-        // Line 23 (Проц2 Empty)
-        assert_diagnostic_range(code, &diagnostics[0], 23, 4, 14);
-        // Line 32 (Функ1 Empty — HIR drops comments)
-        assert_diagnostic_range(code, &diagnostics[1], 32, 4, 14);
-        // Line 50 (Проц3 outer Silent — new in §2.2)
-        assert_diagnostic_range(code, &diagnostics[2], 50, 4, 14);
-        // Line 54 (Проц3 inner Empty)
-        assert_diagnostic_range(code, &diagnostics[3], 54, 8, 18);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#"
+                MissingCodeTryCatchEx @ 24:5..24:15
+                  message: Отсутствует код в блоке исключения
+                  severity: Major
+                MissingCodeTryCatchEx @ 33:5..33:15
+                  message: Отсутствует код в блоке исключения
+                  severity: Major
+                MissingCodeTryCatchEx @ 51:5..51:15
+                  message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
+                  severity: Major
+                MissingCodeTryCatchEx @ 55:9..55:19
+                  message: Отсутствует код в блоке исключения
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -566,20 +593,16 @@ mod tests {
             .insert(DiagnosticCode::MissingCodeTryCatchEx, serde_json::Value::Object(params));
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Track 2 Phase D §2.2 + commentAsCode=true: Функ1's
-        // Empty-with-comments is suppressed (line 32 gone). Проц2
-        // Empty stays (no comments in its except clause). Проц3 outer
-        // Silent (nested Try) stays — `commentAsCode` only affects
-        // the Empty branch. Проц3 inner Empty stays.
-        assert_eq!(diagnostics.len(), 3, "1 Empty suppressed + 2 Empty + 1 Silent remain");
-
-        // Line 23 (Проц2 Empty — no comments to suppress)
-        assert_diagnostic_range(code, &diagnostics[0], 23, 4, 14);
-        // Line 50 (Проц3 outer Silent — commentAsCode irrelevant)
-        assert_diagnostic_range(code, &diagnostics[1], 50, 4, 14);
-        // Line 54 (Проц3 inner Empty)
-        assert_diagnostic_range(code, &diagnostics[2], 54, 8, 18);
+        expect![[r#"
+            MissingCodeTryCatchEx @ 24:5..24:15
+              message: Отсутствует код в блоке исключения
+              severity: Major
+            MissingCodeTryCatchEx @ 51:5..51:15
+              message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
+              severity: Major
+            MissingCodeTryCatchEx @ 55:9..55:19
+              message: Отсутствует код в блоке исключения
+              severity: Major"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -600,8 +623,11 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Valid exception handler should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingCodeTryCatchEx,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
