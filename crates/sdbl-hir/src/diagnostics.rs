@@ -188,6 +188,16 @@ pub enum SdblDiagnostic {
     QueryNestedFieldsByDot {
         /// Source range.
         range: TextRange,
+        /// Number of dot-separated parts in the ColumnRef path.
+        ///
+        /// `Some(n)` for ColumnRef contexts — subject to the `minPathDepth`
+        /// handler-side filter (default 3). HIR lowering still enforces the hard
+        /// floor `n >= 2`; one-part identifiers carry no dereference to flag.
+        ///
+        /// `None` for non-path contexts — virtual-table parameter dereference,
+        /// CAST chained `member_access` — these are different rules whose
+        /// thresholds are intrinsic to their syntax and always emit.
+        parts_count: Option<u32>,
     },
 
     /// Redundant use of .Ссылка (Reference) field in SDBL query.
@@ -428,7 +438,7 @@ impl SdblDiagnostic {
             Self::LogicalOrInJoin { range } => *range,
             Self::FieldsFromJoinWithoutNullCheck { range, .. } => *range,
             Self::MultilineString { range } => *range,
-            Self::QueryNestedFieldsByDot { range } => *range,
+            Self::QueryNestedFieldsByDot { range, .. } => *range,
             Self::RefOveruse { range } => *range,
             Self::UnionWithoutAll { range } => *range,
             Self::UsingLikeInQuery { range } => *range,

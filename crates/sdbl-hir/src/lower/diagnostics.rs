@@ -481,17 +481,17 @@ impl LoweringContext {
     fn check_expr_for_nested_fields(&mut self, expr: &ExprHir, in_virtual_table_params: bool) {
         match expr {
             ExprHir::ColumnRef { parts, range, .. } => {
-                // Check for nested field dereference
-                let is_nested = if in_virtual_table_params {
-                    // Inside virtual table params: 2+ parts (if not MDO type)
-                    parts.len() >= 2 && !crate::is_mdo_type(parts[0].as_str())
-                } else {
-                    // Normal context: 3+ parts (if not MDO type)
-                    parts.len() >= 3 && !crate::is_mdo_type(parts[0].as_str())
-                };
-
-                if is_nested {
-                    self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot { range: *range });
+                // Hard floor: 2+ parts (one or more dereferences) and not an MDO type
+                // path. Within virtual-table parameters, every 2+ part column ref is
+                // already an N+1 vector; in normal contexts the handler enforces a
+                // configurable `minPathDepth` floor (default 3) on top.
+                if parts.len() >= 2 && !crate::is_mdo_type(parts[0].as_str()) {
+                    let parts_count =
+                        if in_virtual_table_params { None } else { Some(parts.len() as u32) };
+                    self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot {
+                        range: *range,
+                        parts_count,
+                    });
                 }
             }
 
@@ -503,7 +503,10 @@ impl LoweringContext {
 
                 // CAST with 2+ member access fields is a dereference
                 if matches!(function, crate::hir::FunctionKind::Cast) && member_access.len() > 1 {
-                    self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot { range: *range });
+                    self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot {
+                        range: *range,
+                        parts_count: None,
+                    });
                 }
             }
 

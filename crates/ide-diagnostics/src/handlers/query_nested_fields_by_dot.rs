@@ -20,7 +20,16 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Default minimum path depth for normal-context column-ref dereferences.
+/// Matches BSL-LS default and preserves pre-config behaviour.
+const DEFAULT_MIN_PATH_DEPTH: i64 = 3;
+
 /// Single-pass dispatch for `QueryNestedFieldsByDot`.
+///
+/// Filtering rules:
+/// - `parts_count = Some(n)` (normal-context column ref): emit only when `n >= minPathDepth`.
+/// - `parts_count = None` (virtual-table parameters, CAST member chain): always emit;
+///   threshold lives in the syntax of the construct itself.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -28,7 +37,16 @@ pub(crate) fn dispatch(
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if let sdbl_hir::SdblDiagnostic::QueryNestedFieldsByDot { range } = diag {
+    if let sdbl_hir::SdblDiagnostic::QueryNestedFieldsByDot { range, parts_count } = diag {
+        if let Some(n) = parts_count {
+            let min = ctx
+                .config
+                .get_int(DiagnosticCode::QueryNestedFieldsByDot, "minPathDepth")
+                .unwrap_or(DEFAULT_MIN_PATH_DEPTH);
+            if (*n as i64) < min {
+                return;
+            }
+        }
         crate::sdbl_utils::dispatch_simple(
             ctx,
             DiagnosticCode::QueryNestedFieldsByDot,
@@ -272,5 +290,67 @@ mod tests {
 "#;
         let diagnostics = check_sdbl_diagnostic(code, check);
         assert!(diagnostics.is_empty(), "Two-part paths should not trigger diagnostic");
+    }
+
+    fn config_with_min_path_depth(depth: i64) -> crate::DiagnosticsConfig {
+        let mut config = crate::DiagnosticsConfig::default();
+        config.enabled.push(DiagnosticCode::QueryNestedFieldsByDot);
+        config.parameters.insert(
+            DiagnosticCode::QueryNestedFieldsByDot,
+            serde_json::json!({ "minPathDepth": depth }),
+        );
+        config
+    }
+
+    #[test]
+    fn test_min_path_depth_above_three_drops_three_part_normal_context() {
+        // 3-part normal-context column ref: handler filter drops when minPathDepth > 3.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ T.Ссылка.Контрагент ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(4);
+        let diagnostics = crate::test_utils::check_hir_diagnostic_with_config(code, config, check);
+        assert!(
+            diagnostics.is_empty(),
+            "minPathDepth=4 must suppress 3-part normal-context column refs, got {:?}",
+            diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_min_path_depth_above_three_preserves_cast_member_chain() {
+        // CAST chained `member_access` carries `parts_count: None` and is unaffected by config.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫРАЗИТЬ(T.Ссылка КАК Документ.Заказ).Валюта.Курс
+    |ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(99);
+        let diagnostics = crate::test_utils::check_hir_diagnostic_with_config(code, config, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "CAST member chain (parts_count=None) must emit regardless of minPathDepth"
+        );
+    }
+
+    #[test]
+    fn test_min_path_depth_two_emits_two_part_normal_context() {
+        // 2-part normal-context column ref: silent at default (min=3), emits at min=2.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ T.Поле ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(2);
+        let diagnostics = crate::test_utils::check_hir_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 1, "minPathDepth=2 must emit on a 2-part column ref");
     }
 }
