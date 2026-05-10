@@ -131,6 +131,7 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
@@ -171,11 +172,13 @@ mod tests {
 
 "#;
         let diagnostics = check_violations_directly(code);
-
-        assert_eq!(diagnostics.len(), 2, "Expected 2 violations: Execute and Eval");
-
-        assert_diagnostic_range(code, &diagnostics[0], 2, 4, 22);
-        assert_diagnostic_range(code, &diagnostics[1], 6, 12, 29);
+        expect![[r#"
+            ExecuteExternalCodeInCommonModule @ 3:5..3:23
+              message: Execution of external code in a common module on a server is a potential vulnerability
+              severity: Warning
+            ExecuteExternalCodeInCommonModule @ 7:13..7:30
+              message: Execution of external code in a common module on a server is a potential vulnerability
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -185,8 +188,11 @@ mod tests {
     Выполнить(Строка);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "No configuration should return empty");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCodeInCommonModule,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -197,7 +203,7 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_violations_directly(code);
-        assert_eq!(diagnostics.len(), 0, "Qualified Eval calls should be ignored");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -208,7 +214,7 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_violations_directly(code);
-        assert_eq!(diagnostics.len(), 0, "Similar method names should be ignored");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -286,6 +292,6 @@ mod tests {
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
-        assert!(diagnostics.is_empty(), "Disabled config should return empty diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags("", &diagnostics));
     }
 }

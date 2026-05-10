@@ -237,7 +237,9 @@ fn find_stmt_containing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::format_diags;
     use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use vfs::{FileId, FileSet, VfsPath};
@@ -268,7 +270,7 @@ mod tests {
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
-        assert!(diagnostics.is_empty(), "No metadata should return empty diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Track 2 §1.7-A — e2e: direct unguarded call to a privileged
@@ -293,11 +295,11 @@ mod tests {
             &[("ПривилегМодуль", PRIVILEGED_MODULE_BODY)],
             check,
         );
-        let priv_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PrivilegedModuleMethodCall)
-            .collect();
-        assert_eq!(priv_diags.len(), 1, "direct call to privileged module must emit");
+        expect![[r#"
+            PrivilegedModuleMethodCall @ 3:5..3:27
+              message: Проверьте обращение к методу Метод привилегированного модуля
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Track 2 §1.7-A — e2e: a privileged-module call dominated by a
@@ -319,15 +321,7 @@ mod tests {
             &[("ПривилегМодуль", PRIVILEGED_MODULE_BODY)],
             check,
         );
-        let priv_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PrivilegedModuleMethodCall)
-            .collect();
-        assert!(
-            priv_diags.is_empty(),
-            "RoleCheck-guarded privileged call must be suppressed; got {} diagnostic(s)",
-            priv_diags.len()
-        );
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -353,6 +347,6 @@ mod tests {
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
-        assert!(diagnostics.is_empty(), "Disabled config should return empty diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags("", &diagnostics));
     }
 }

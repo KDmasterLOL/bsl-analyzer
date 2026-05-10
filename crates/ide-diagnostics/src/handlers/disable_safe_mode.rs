@@ -122,9 +122,9 @@ fn get_message(method_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
-    use crate::Severity;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_set_safe_mode_false() {
         let code = r#"
@@ -132,12 +132,14 @@ mod tests {
     УстановитьБезопасныйРежим(Ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 1);
-        assert_eq!(safe_mode_diags[0].severity, Severity::Major); // VULNERABILITY + MAJOR maps to Major
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -147,11 +149,7 @@ mod tests {
     УстановитьБезопасныйРежим(Истина);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DisableSafeMode, expect![[r#""#]]);
     }
 
     #[test]
@@ -162,11 +160,14 @@ mod tests {
     УстановитьБезопасныйРежим(Значение);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 4:5..4:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -176,11 +177,14 @@ mod tests {
     УстановитьОтключениеБезопасногоРежима(Истина);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:42
+              message: Отключение безопасного режима через УстановитьОтключениеБезопасногоРежима создает уязвимость безопасности
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -190,11 +194,7 @@ mod tests {
     УстановитьОтключениеБезопасногоРежима(Ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DisableSafeMode, expect![[r#""#]]);
     }
 
     #[test]
@@ -204,11 +204,7 @@ mod tests {
     Модуль.УстановитьБезопасныйРежим(Ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DisableSafeMode, expect![[r#""#]]);
     }
 
     #[test]
@@ -219,11 +215,17 @@ mod tests {
     SetSafeModeDisabled(True);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 2);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:16
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major
+            DisableSafeMode @ 4:5..4:24
+              message: Отключение безопасного режима через УстановитьОтключениеБезопасногоРежима создает уязвимость безопасности
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -234,11 +236,17 @@ mod tests {
     установитьбезопасныйрежим(ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 2);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major
+            DisableSafeMode @ 4:5..4:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
     }
 
     /// Track 2 §1.6 Group C — Codex round-3 stop-hook regression
@@ -256,10 +264,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-        assert_eq!(safe_mode_diags.len(), 1, "SetSafeMode(Ложь) inside If condition must emit");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:10..3:35
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
     }
 
     /// Track 2 §1.6 Group C — Codex round-2 stop-hook regression
@@ -273,13 +285,13 @@ mod tests {
     Сообщить(УстановитьБезопасныйРежим(Ложь));
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-        assert_eq!(
-            safe_mode_diags.len(),
-            1,
-            "nested SetSafeMode(Ложь) inside function arg must emit"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:14..3:39
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
         );
     }
 
@@ -305,10 +317,22 @@ mod tests {
     УстановитьОтключениеБезопасногоРежима(Ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 4, "Expected 4 diagnostics");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major
+            DisableSafeMode @ 6:5..6:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major
+            DisableSafeMode @ 10:5..10:42
+              message: Отключение безопасного режима через УстановитьОтключениеБезопасногоРежима создает уязвимость безопасности
+              severity: Major
+            DisableSafeMode @ 13:5..13:42
+              message: Отключение безопасного режима через УстановитьОтключениеБезопасногоРежима создает уязвимость безопасности
+              severity: Major"#]],
+        );
     }
 }

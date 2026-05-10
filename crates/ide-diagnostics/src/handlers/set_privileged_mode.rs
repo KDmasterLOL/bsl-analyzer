@@ -105,7 +105,8 @@ fn emit_for_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     #[test]
     fn test_from_java_fixture() {
         let code = r#"&НаСервере
@@ -117,15 +118,17 @@ mod tests {
     УстановитьПривилегированныйРежим(Ложь); // нет замечания
 КонецПроцедуры
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SetPrivilegedMode).collect();
-
-        assert_eq!(diags.len(), 2);
-        // Line 2 (0-indexed): УстановитьПривилегированныйРежим(Истина)
-        assert_diagnostic_range(code, diags[0], 2, 4, 36);
-        // Line 4 (0-indexed): УстановитьПривилегированныйРежим(Значение)
-        assert_diagnostic_range(code, diags[1], 4, 4, 36);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SetPrivilegedMode,
+            expect![[r#"
+                SetPrivilegedMode @ 3:5..3:37
+                  message: Проверьте установку привилегированного режима
+                  severity: Warning
+                SetPrivilegedMode @ 5:5..5:37
+                  message: Проверьте установку привилегированного режима
+                  severity: Warning"#]],
+        );
     }
 
     /// Track 2 §1.6 Group C — Codex round-1 MAJOR regression guard:
@@ -136,9 +139,13 @@ mod tests {
     fn test_module_level_call_emits() {
         let code = r#"УстановитьПривилегированныйРежим(Истина);
 "#;
-        let diagnostics = check_dataflow_diagnostic(code, check);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SetPrivilegedMode).collect();
-        assert_eq!(diags.len(), 1, "module-level SetPrivilegedMode(Истина) must emit");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SetPrivilegedMode,
+            expect![[r#"
+                SetPrivilegedMode @ 1:1..1:33
+                  message: Проверьте установку привилегированного режима
+                  severity: Warning"#]],
+        );
     }
 }

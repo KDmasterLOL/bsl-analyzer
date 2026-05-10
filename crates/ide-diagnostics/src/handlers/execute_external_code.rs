@@ -81,8 +81,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_execute_on_server() {
         let code = r#"
@@ -91,10 +92,14 @@ mod tests {
     Выполнить(Строка);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 1, "Execute on server should be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCode,
+            expect![[r#"
+                ExecuteExternalCode @ 4:5..4:23
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -105,10 +110,14 @@ mod tests {
     Выполнить(Строка);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 1, "Execute on server-without-context should be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCode,
+            expect![[r#"
+                ExecuteExternalCode @ 4:5..4:23
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -119,10 +128,14 @@ mod tests {
     Возврат Вычислить(Строка);
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 1, "Eval on ClientAtServerWithoutContext should be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCode,
+            expect![[r#"
+                ExecuteExternalCode @ 4:13..4:30
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -132,10 +145,14 @@ mod tests {
     Возврат Вычислить(Строка);
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 1, "Eval in method without directive should be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCode,
+            expect![[r#"
+                ExecuteExternalCode @ 3:13..3:30
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -146,10 +163,7 @@ mod tests {
     Возврат Вычислить(Строка);
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 0, "Client-only annotation should be exempt");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expect![[r#""#]]);
     }
 
     #[test]
@@ -160,10 +174,7 @@ mod tests {
     Выполнить(Строка);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 0, "Client-only code should be exempted");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expect![[r#""#]]);
     }
 
     #[test]
@@ -174,10 +185,14 @@ mod tests {
     Выполнить(Строка);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 1, "Server-side code should be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCode,
+            expect![[r#"
+                ExecuteExternalCode @ 4:5..4:23
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -187,10 +202,14 @@ mod tests {
     Возврат Вычислить(Строка);
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 1, "Eval call should be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCode,
+            expect![[r#"
+                ExecuteExternalCode @ 3:13..3:30
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -200,10 +219,7 @@ mod tests {
     Возврат Объект.Вычислить();
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 0, "Qualified calls should be ignored");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expect![[r#""#]]);
     }
 
     #[test]
@@ -213,10 +229,7 @@ mod tests {
     Возврат ВычислитьЧтоТо(Строка);
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(exec_diags.len(), 0, "Similar method names should be ignored");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expect![[r#""#]]);
     }
 
     #[test]
@@ -227,13 +240,13 @@ mod tests {
     Возврат Вычислить(Строка);
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-        assert_eq!(
-            exec_diags.len(),
-            1,
-            "Client+Server annotation should be detected (has server context)"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCode,
+            expect![[r#"
+                ExecuteExternalCode @ 4:13..4:30
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical"#]],
         );
     }
 
@@ -249,12 +262,17 @@ mod tests {
     Возврат Вычислить(Строка);
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let exec_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
-
         // ExecuteExternalCode should catch these too (no client-only annotation)
-        assert_eq!(exec_diags.len(), 2, "Should detect both Execute and Eval in CommonModule");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCode,
+            expect![[r#"
+                ExecuteExternalCode @ 3:5..3:23
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical
+                ExecuteExternalCode @ 7:13..7:30
+                  message: Запрещено выполнять внешний код на сервере
+                  severity: Critical"#]],
+        );
     }
 }

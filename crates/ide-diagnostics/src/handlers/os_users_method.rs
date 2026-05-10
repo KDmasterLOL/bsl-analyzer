@@ -32,8 +32,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_detects_os_users_calls() {
         let code = r#"Функция Тест1()
@@ -52,18 +53,20 @@ Users = OSUsers(); // сработает здесь
 Users = osUsers(); // сработает здесь
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::OSUsersMethod).collect();
-
-        assert_eq!(diags.len(), 3, "Expected 3 diagnostics");
-
-        // Line 6 (1-indexed) = 5 (0-indexed), cols 15-29: ПользователиОС
-        assert_diagnostic_range(code, diags[0], 5, 15, 29);
-        // Line 10 (1-indexed) = 9 (0-indexed), cols 8-15: OSUsers
-        assert_diagnostic_range(code, diags[1], 9, 8, 15);
-        // Line 14 (1-indexed) = 13 (0-indexed), cols 8-15: osUsers
-        assert_diagnostic_range(code, diags[2], 13, 8, 15);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::OSUsersMethod,
+            expect![[r#"
+            OSUsersMethod @ 6:16..6:30
+              message: Check for a potentially dangerous OSUsers method call
+              severity: Warning
+            OSUsersMethod @ 10:9..10:16
+              message: Check for a potentially dangerous OSUsers method call
+              severity: Warning
+            OSUsersMethod @ 14:9..14:16
+              message: Check for a potentially dangerous OSUsers method call
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -74,10 +77,17 @@ Users = osUsers(); // сработает здесь
     OSUSERS();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::OSUsersMethod).collect();
-        assert_eq!(diags.len(), 2, "Should detect uppercase method calls");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::OSUsersMethod,
+            expect![[r#"
+            OSUsersMethod @ 3:5..3:19
+              message: Check for a potentially dangerous OSUsers method call
+              severity: Warning
+            OSUsersMethod @ 4:5..4:12
+              message: Check for a potentially dangerous OSUsers method call
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -88,9 +98,6 @@ Users = osUsers(); // сработает здесь
     МойМодуль.ПользователиОС();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::OSUsersMethod).collect();
-        assert_eq!(diags.len(), 0, "Should not detect non-call references or qualified calls");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::OSUsersMethod, expect![[r#""#]]);
     }
 }
