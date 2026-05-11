@@ -238,9 +238,9 @@ fn traverse_node<DB: RootDatabase>(
                     continue;
                 }
 
-                // 2. Resolved semantic highlighting for IDENT tokens at use sites.
-                if token.kind() == SyntaxKind::IDENT {
-                    if let Some(hl) = highlight_ident_semantic(ctx, &token) {
+                // 2. Resolved semantic highlighting for name tokens at use sites.
+                if token.kind().is_name_token() {
+                    if let Some(hl) = highlight_name_semantic(ctx, &token) {
                         highlights.push(hl);
                         continue;
                     }
@@ -270,77 +270,71 @@ fn traverse_node<DB: RootDatabase>(
     }
 }
 
-/// Highlight an IDENT token using semantic analysis (Definition API + ExprScopes).
-///
-/// Resolution order (properly handles shadowing):
-/// 1. Builtin functions (always highlighted even if shadowed - important for user awareness)
-/// 2. Local symbols via ExprScopes (parameters and local variables - shadow everything else)
-/// 3. Other symbols via Semantics API (module methods, variables, MDO types, etc.)
-/// 4. MDO plural forms as fallback (if not resolved by Semantics API)
-fn highlight_ident_semantic<DB: RootDatabase>(
+/// Highlight a name token using the shared type-aware semantic symbol API.
+fn highlight_name_semantic<DB: RootDatabase>(
     ctx: &mut HighlightContext<DB>,
     token: &SyntaxToken,
 ) -> Option<HlRange> {
     let range = token.text_range();
 
-    tracing::debug!("highlight_ident_semantic: processing token={}", token.text());
+    tracing::debug!("highlight_name_semantic: processing token={}", token.text());
 
-    // Use unified Semantics API for ALL resolution
-    // It handles the correct priority order:
-    // 1. Qualified names (X.Y.Z)
-    // 2. Local symbols (parameters, local variables)
-    // 3. Builtin platform functions
-    // 4. MDO plural forms
-    // 5. Module-level symbols (methods, variables)
     let sema = hir::Semantics::new(ctx.db);
-    let definition = sema.resolve_name_to_definition(ctx.file_id, token)?;
+    let symbol = sema.symbol_for_token(ctx.file_id, token)?;
 
-    tracing::debug!("highlight_ident_semantic: {} resolved to {:?}", token.text(), definition);
+    tracing::debug!("highlight_name_semantic: {} resolved to {:?}", token.text(), symbol);
 
-    // Convert Definition to HlTag + HlModifiers
-    let tag = match &definition {
-        hir::Definition::Method(_) => HlTag::Function,
-        hir::Definition::Variable(_) => HlTag::Variable,
-        hir::Definition::Parameter { .. } => HlTag::Parameter,
-        hir::Definition::Local { .. } => HlTag::Variable,
-        hir::Definition::BuiltinFunction(_) => HlTag::BuiltinFunction,
-        hir::Definition::BuiltinMethodHandle { .. } => HlTag::Function,
-        hir::Definition::MdoCollectionType(_) => HlTag::Class,
-        hir::Definition::MdoObject { .. } => HlTag::Type,
-        hir::Definition::MdoManagerModule { .. } => HlTag::Namespace,
-        hir::Definition::Module(_) => HlTag::Namespace,
-        hir::Definition::VirtualTableField { .. } => HlTag::Property,
-        hir::Definition::Unresolved => return None,
+    let tag = match &symbol.definition {
+        Some(hir::Definition::BuiltinFunction(_)) => HlTag::BuiltinFunction,
+        _ => match symbol.kind {
+            hir::SemanticSymbolKind::Function => HlTag::Function,
+            hir::SemanticSymbolKind::Method => HlTag::Function,
+            hir::SemanticSymbolKind::Parameter => HlTag::Parameter,
+            hir::SemanticSymbolKind::Variable => HlTag::Variable,
+            hir::SemanticSymbolKind::Property => HlTag::Property,
+            hir::SemanticSymbolKind::Type => HlTag::Type,
+            hir::SemanticSymbolKind::Namespace => HlTag::Namespace,
+            hir::SemanticSymbolKind::Class => HlTag::Class,
+        },
     };
 
     // Collect external file IDs for preloading
     // This enables warming up caches before user navigates via goto_definition
-    match &definition {
-        hir::Definition::MdoManagerModule { file_id, .. } if *file_id != ctx.file_id => {
-            ctx.resolved_external_files.insert(*file_id);
+    if let Some(definition) = &symbol.definition {
+        match definition {
+            hir::Definition::MdoManagerModule { file_id, .. } if *file_id != ctx.file_id => {
+                ctx.resolved_external_files.insert(*file_id);
+            }
+            hir::Definition::Module(module_id) if module_id.file_id != ctx.file_id => {
+                ctx.resolved_external_files.insert(module_id.file_id);
+            }
+            hir::Definition::Method(method_id) if method_id.module.file_id != ctx.file_id => {
+                ctx.resolved_external_files.insert(method_id.module.file_id);
+            }
+            _ => {}
         }
-        hir::Definition::Module(module_id) if module_id.file_id != ctx.file_id => {
-            ctx.resolved_external_files.insert(module_id.file_id);
-        }
-        hir::Definition::Method(method_id) if method_id.module.file_id != ctx.file_id => {
-            ctx.resolved_external_files.insert(method_id.module.file_id);
-        }
-        _ => {}
     }
 
     let mut modifiers = HlMod::new();
 
     // Add EXPORT modifier for exported symbols
-    if definition.is_export(ctx.db) {
-        modifiers = modifiers.with(HlMod::EXPORT);
+    if let Some(definition) = &symbol.definition {
+        if definition.is_export(ctx.db) {
+            modifiers = modifiers.with(HlMod::EXPORT);
+        }
     }
 
     // Add EXPORT modifier for builtin functions
     if matches!(
-        definition,
-        hir::Definition::BuiltinFunction(_) | hir::Definition::BuiltinMethodHandle { .. }
+        symbol.definition,
+        Some(hir::Definition::BuiltinFunction(_))
+            | Some(hir::Definition::BuiltinMethodHandle { .. })
     ) {
         modifiers = modifiers.with(HlMod::EXPORT);
+    }
+
+    if symbol.declaration.as_ref().is_some_and(|declaration| declaration.range == range) {
+        modifiers = modifiers.with(HlMod::DECLARATION);
     }
 
     Some(HlRange { range, tag, modifiers })
@@ -620,6 +614,33 @@ mod tests {
             var_highlights.len() >= 2,
             "Expected at least 2 variable highlights, got {}",
             var_highlights.len()
+        );
+    }
+
+    #[test]
+    fn test_highlight_implicit_local_variable() {
+        let code = r#"
+Процедура Тест()
+    НаборЗаписей = 42;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        let ranges: Vec<_> = highlights
+            .highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Variable
+                    && code[hl.range.start().into()..hl.range.end().into()] == *"НаборЗаписей"
+            })
+            .collect();
+
+        assert_eq!(ranges.len(), 2, "implicit local should be highlighted at declaration and use");
+        assert!(
+            ranges.iter().any(|hl| hl.modifiers.contains(HlMod::DECLARATION)),
+            "first assignment should be marked as declaration"
         );
     }
 
@@ -1375,6 +1396,48 @@ EndFunction
         });
 
         assert!(plural_highlight, "Документы should still be highlighted as Class");
+    }
+
+    #[test]
+    fn test_highlight_record_set_chain_uses_inferred_receiver_types() {
+        let code = r#"
+Процедура Тест(Значение)
+    НаборЗаписей = РегистрыСведений.РегистрСведений1.СоздатьНаборЗаписей();
+    НаборЗаписей.Отбор.Справочник1.Установить(Значение);
+    НаборЗаписей.Загрузить(Новый ТаблицаЗначений);
+    НаборЗаписей.Записать();
+КонецПроцедуры
+"#;
+
+        let (mut db, file_id) = create_db_with_file(code);
+        db.set_all_config_paths(vec![(None, designer_fixture_path())]);
+        let highlights = highlight(&db, file_id);
+
+        let local_count = highlights
+            .highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Variable
+                    && code[hl.range.start().into()..hl.range.end().into()] == *"НаборЗаписей"
+            })
+            .count();
+        assert!(local_count >= 4, "НаборЗаписей should be an inferred implicit local");
+
+        for expected in ["Отбор", "Справочник1"] {
+            let found = highlights.highlights.iter().any(|hl| {
+                hl.tag == HlTag::Property
+                    && code[hl.range.start().into()..hl.range.end().into()] == *expected
+            });
+            assert!(found, "{expected} should be highlighted as typed property");
+        }
+
+        for expected in ["Установить", "Загрузить", "Записать"] {
+            let found = highlights.highlights.iter().any(|hl| {
+                hl.tag == HlTag::Function
+                    && code[hl.range.start().into()..hl.range.end().into()] == *expected
+            });
+            assert!(found, "{expected} should be highlighted as typed method");
+        }
     }
 
     #[test]

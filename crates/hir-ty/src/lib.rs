@@ -67,8 +67,8 @@ pub use hir_def::ty::{
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use infer::{
-    CallArgBinding, InferenceContext, InferenceDiagnostic, InferenceResult, ParamsShape,
-    UnresolvedMethodKind,
+    CallArgBinding, ImplicitLocalAssignment, ImplicitLocalInfo, InferenceContext,
+    InferenceDiagnostic, InferenceResult, ParamsShape, UnresolvedMethodKind,
 };
 pub use lower::TyLoweringContext;
 pub use manager_lookup::{lookup_manager_field, ManagerMemberInfo};

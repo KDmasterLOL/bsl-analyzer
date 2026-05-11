@@ -53,7 +53,8 @@ pub fn handle_goto_definition(
     let text = source_doc.text();
     let line_index = source_doc.line_index();
 
-    let offset = crate::lsp::offset(line_index, text, position)?;
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
 
     let target = ctx.analysis.goto_definition(file_id, offset.into());
 
@@ -76,9 +77,13 @@ pub fn handle_goto_definition(
 
             let target_line_index = LineIndex::new(&target_text);
 
-            let target_range =
-                crate::lsp::range(&target_line_index, &target_text, nav_target.range)
-                    .ok_or_else(|| anyhow::anyhow!("Failed to convert range"))?;
+            let target_range = crate::lsp::range_with_encoding(
+                &target_line_index,
+                &target_text,
+                nav_target.range,
+                ctx.position_encoding,
+            )
+            .ok_or_else(|| anyhow::anyhow!("Failed to convert range"))?;
 
             let location = Location { uri: target_url, range: target_range };
 
@@ -120,7 +125,8 @@ pub fn handle_find_references(
     let text = doc.text();
     let line_index = doc.line_index();
 
-    let offset = crate::lsp::offset(line_index, text, position)?;
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
 
     let locations = ctx.analysis.find_references(file_id, offset.into());
 
@@ -164,7 +170,8 @@ pub fn handle_document_highlight(
     let text = doc.text();
     let line_index = doc.line_index();
 
-    let offset = crate::lsp::offset(line_index, text, position)?;
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
 
     let highlights = ctx.analysis.document_highlights(file_id, offset.into());
     if highlights.is_empty() {
@@ -174,7 +181,12 @@ pub fn handle_document_highlight(
     let lsp_highlights: Vec<LspDocumentHighlight> = highlights
         .into_iter()
         .filter_map(|highlight| {
-            let range = crate::lsp::range(line_index, text, highlight.range)?;
+            let range = crate::lsp::range_with_encoding(
+                line_index,
+                text,
+                highlight.range,
+                ctx.position_encoding,
+            )?;
             Some(LspDocumentHighlight {
                 range,
                 kind: Some(convert_document_highlight_kind(highlight.kind)),
@@ -256,13 +268,16 @@ pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<O
     let text = doc.text();
     let line_index = doc.line_index();
 
-    let offset = crate::lsp::offset(line_index, text, position)?;
+    let offset =
+        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
 
     let hover_result = ctx.analysis.hover(file_id, offset.into(), ctx.diagnostics_config.locale);
 
     match hover_result {
         Some(result) => {
-            let range = result.range.and_then(|r| crate::lsp::range(line_index, text, r));
+            let range = result.range.and_then(|r| {
+                crate::lsp::range_with_encoding(line_index, text, r, ctx.position_encoding)
+            });
 
             let contents = HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -323,13 +338,16 @@ pub fn handle_completion(
     }
 
     // Convert position to offset (handle race condition with didChange)
-    let offset = match crate::lsp::offset(line_index, text, position) {
-        Ok(o) => o,
-        Err(_) => {
-            tracing::warn!("Position out of bounds, likely race with didChange - returning empty");
-            return Ok(None);
-        }
-    };
+    let offset =
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::warn!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
     tracing::info!("Converted position to offset: {:?}", offset);
 
     let items = ctx.analysis.completions(
@@ -398,7 +416,12 @@ pub fn handle_semantic_tokens_full(
         "semantic_tokens: analysis.highlight() completed"
     );
 
-    let tokens = crate::lsp::semantic_tokens(line_index, text, &highlight_result.highlights);
+    let tokens = crate::lsp::semantic_tokens_with_encoding(
+        line_index,
+        text,
+        &highlight_result.highlights,
+        ctx.position_encoding,
+    );
     let total_elapsed = start.elapsed();
     tracing::warn!(
         file_id = file_id.0,
@@ -446,8 +469,10 @@ pub fn handle_document_symbol(
         return Ok(None);
     }
 
-    let lsp_symbols: Vec<lsp_types::DocumentSymbol> =
-        symbols.into_iter().filter_map(|s| convert_document_symbol(line_index, text, s)).collect();
+    let lsp_symbols: Vec<lsp_types::DocumentSymbol> = symbols
+        .into_iter()
+        .filter_map(|s| convert_document_symbol(line_index, text, s, ctx.position_encoding))
+        .collect();
 
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
 }
@@ -477,13 +502,16 @@ pub fn handle_signature_help(
     let text = doc.text();
     let line_index = doc.line_index();
 
-    let offset = match crate::lsp::offset(line_index, text, position) {
-        Ok(o) => o,
-        Err(_) => {
-            tracing::warn!("Position out of bounds, likely race with didChange - returning empty");
-            return Ok(None);
-        }
-    };
+    let offset =
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::warn!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let sig_help = ctx.analysis.signature_help(file_id, offset.into());
 
@@ -544,7 +572,12 @@ pub fn handle_code_action(
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
     let text = doc.text();
     let line_index = doc.line_index();
-    let range = crate::lsp::text_range(line_index, text, params.range)?;
+    let range = crate::lsp::text_range_with_encoding(
+        line_index,
+        text,
+        params.range,
+        ctx.position_encoding,
+    )?;
 
     let diagnostics = ctx.analysis.file_diagnostics_cached(file_id, ctx.diagnostics_config.clone());
 
@@ -557,9 +590,14 @@ pub fn handle_code_action(
             continue;
         }
         for fix in &diag.fixes {
-            if let Some(action) =
-                crate::lsp::to_proto::code_action(line_index, text, &uri, diag, fix)
-            {
+            if let Some(action) = crate::lsp::to_proto::code_action_with_encoding(
+                line_index,
+                text,
+                &uri,
+                diag,
+                fix,
+                ctx.position_encoding,
+            ) {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
         }
@@ -576,9 +614,11 @@ fn convert_document_symbol(
     line_index: &LineIndex,
     text: &str,
     sym: ide::DocumentSymbol,
+    encoding: crate::lsp::PositionEncoding,
 ) -> Option<lsp_types::DocumentSymbol> {
-    let range = crate::lsp::range(line_index, text, sym.range)?;
-    let selection_range = crate::lsp::range(line_index, text, sym.selection_range)?;
+    let range = crate::lsp::range_with_encoding(line_index, text, sym.range, encoding)?;
+    let selection_range =
+        crate::lsp::range_with_encoding(line_index, text, sym.selection_range, encoding)?;
 
     let kind = match sym.kind {
         ide::SymbolKind::Procedure | ide::SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
@@ -592,7 +632,7 @@ fn convert_document_symbol(
         let converted: Vec<_> = sym
             .children
             .into_iter()
-            .filter_map(|c| convert_document_symbol(line_index, text, c))
+            .filter_map(|c| convert_document_symbol(line_index, text, c, encoding))
             .collect();
         if converted.is_empty() {
             None
@@ -638,9 +678,15 @@ impl<'ctx> ReferenceLocationConverter<'ctx> {
     }
 
     fn convert(&mut self, ide_loc: IdeLocation) -> Result<Location> {
+        let encoding = self.ctx.position_encoding;
         let target = self.target_file(ide_loc.file_id)?;
-        let range = crate::lsp::range(&target.line_index, &target.text, ide_loc.range)
-            .ok_or_else(|| anyhow::anyhow!("Failed to convert reference range"))?;
+        let range = crate::lsp::range_with_encoding(
+            &target.line_index,
+            &target.text,
+            ide_loc.range,
+            encoding,
+        )
+        .ok_or_else(|| anyhow::anyhow!("Failed to convert reference range"))?;
         Ok(Location { uri: target.uri.clone(), range })
     }
 
@@ -770,7 +816,12 @@ pub fn handle_formatting(
         .edits
         .into_iter()
         .filter_map(|edit| {
-            let range = crate::lsp::range(&line_index, &text, edit.range)?;
+            let range = crate::lsp::range_with_encoding(
+                &line_index,
+                &text,
+                edit.range,
+                snap.position_encoding,
+            )?;
             Some(lsp_types::TextEdit { range, new_text: edit.new_text })
         })
         .collect();
@@ -818,7 +869,12 @@ pub fn handle_range_formatting(
 
     // Convert LSP range to TextRange
     let start = std::time::Instant::now();
-    let range = crate::lsp::text_range(&line_index, &text, params.range)?;
+    let range = crate::lsp::text_range_with_encoding(
+        &line_index,
+        &text,
+        params.range,
+        snap.position_encoding,
+    )?;
     tracing::debug!("text_range conversion: {:?}, range: {:?}", start.elapsed(), range);
 
     // Get formatting config
@@ -840,7 +896,12 @@ pub fn handle_range_formatting(
         .edits
         .into_iter()
         .filter_map(|edit| {
-            let range = crate::lsp::range(&line_index, &text, edit.range)?;
+            let range = crate::lsp::range_with_encoding(
+                &line_index,
+                &text,
+                edit.range,
+                snap.position_encoding,
+            )?;
             Some(lsp_types::TextEdit { range, new_text: edit.new_text })
         })
         .collect();
@@ -883,7 +944,8 @@ pub fn handle_on_type_formatting(
     let line_index = LineIndex::new(&text);
 
     // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, &text, position)?;
+    let offset =
+        crate::lsp::offset_with_encoding(&line_index, &text, position, snap.position_encoding)?;
 
     // Get the typed character
     let char_typed = params.ch.chars().next().unwrap_or('\0');
@@ -899,7 +961,12 @@ pub fn handle_on_type_formatting(
             let lsp_edits: Vec<lsp_types::TextEdit> = ide_edits
                 .into_iter()
                 .filter_map(|edit| {
-                    let range = crate::lsp::range(&line_index, &text, edit.range)?;
+                    let range = crate::lsp::range_with_encoding(
+                        &line_index,
+                        &text,
+                        edit.range,
+                        snap.position_encoding,
+                    )?;
                     Some(lsp_types::TextEdit { range, new_text: edit.new_text })
                 })
                 .collect();
@@ -976,6 +1043,7 @@ mod tests {
             workspace_root: state.workspace_root.clone(),
             project: state.project.clone(),
             diagnostics_config: state.diagnostics_config.clone(),
+            position_encoding: state.position_encoding,
             vfs_done: state.vfs_done,
             task_sender: state.task_pool.pool.sender.clone(),
             mem_docs: state.mem_docs.freeze(),

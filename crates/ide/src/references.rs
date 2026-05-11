@@ -17,7 +17,7 @@
 //! - **With WorkspaceIndex**: O(C×M) where C=10-100 files → ~3 seconds
 //! - **Speedup**: ~10-30x for large projects
 
-use hir::{classify_token, Name, NameClass, Semantics};
+use hir::{Name, SemanticSymbol, SemanticSymbolKey, Semantics};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -50,49 +50,20 @@ pub fn find_references<DB: RootDatabase>(
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    // Find token at position. Accept any name-token — keyword-shaped
-    // names sitting in field-tail slots (`Запрос.Выполнить`, where
-    // `Выполнить` is `KW_EXECUTE`) reach the resolver via the
-    // classifier rather than being dropped by an `IDENT`-only gate.
     let token = match root.token_at_offset(offset).right_biased() {
         Some(t) if t.kind().is_name_token() => t,
         _ => return Vec::new(),
     };
 
     let sema = Semantics::new(db);
-
-    let definition = match classify_token(&token) {
-        NameClass::FieldName { token, .. } => {
-            // Same precedence as goto: try platform-method first
-            // (`Запрос.Выполнить` resolves to a `BuiltinMethod`,
-            // which is then handled by the search-scope branch
-            // below — empty scope). Fall back to qualified-name
-            // resolution for cross-module / MDO targets.
-            match sema.resolve_method_call_to_definition(file_id, &token) {
-                Some(d) => d,
-                None => match sema.resolve_name_to_definition(file_id, &token) {
-                    Some(d) => d,
-                    None => return Vec::new(),
-                },
-            }
-        }
-        NameClass::FreeName { token } => match sema.resolve_name_to_definition(file_id, &token) {
-            Some(d) => d,
-            None => return Vec::new(),
-        },
-        NameClass::TypeRef { .. }
-        | NameClass::Literal { .. }
-        | NameClass::Keyword { .. }
-        | NameClass::Other => return Vec::new(),
-    };
-
-    let target_name = match definition.name(db) {
-        Some(name) => name,
+    let symbol = match sema.symbol_for_token(file_id, &token) {
+        Some(symbol) => symbol,
         None => return Vec::new(),
     };
+    let target_name = symbol.name.clone();
 
     // Determine search scope based on Definition type
-    let files_to_search = get_search_scope(db, file_id, &definition, &target_name);
+    let files_to_search = get_search_scope(db, file_id, &symbol, &target_name);
 
     tracing::debug!(
         file_count = files_to_search.len(),
@@ -103,7 +74,7 @@ pub fn find_references<DB: RootDatabase>(
     // Find references across all candidate files
     let mut all_references = Vec::new();
     for &search_file_id in &files_to_search {
-        let references = find_definition_references(db, search_file_id, &definition);
+        let references = find_symbol_references(db, search_file_id, &symbol);
         all_references.extend(references);
     }
 
@@ -135,10 +106,22 @@ pub fn find_references<DB: RootDatabase>(
 fn get_search_scope<DB: RootDatabase>(
     db: &DB,
     current_file: FileId,
-    definition: &hir::Definition,
+    symbol: &SemanticSymbol,
     _target_name: &Name,
 ) -> Vec<FileId> {
     use hir::Definition;
+
+    match &symbol.key {
+        SemanticSymbolKey::BodyLocal { .. } | SemanticSymbolKey::ImplicitLocal { .. } => {
+            return vec![current_file];
+        }
+        SemanticSymbolKey::TypedMember { .. } => return vec![],
+        SemanticSymbolKey::Definition(_) => {}
+    }
+
+    let Some(definition) = symbol.definition.as_ref() else {
+        return vec![];
+    };
 
     match definition {
         // Local symbols - only in current file
@@ -197,18 +180,14 @@ fn get_search_scope<DB: RootDatabase>(
 /// 2. Walk syntax tree, find all IDENT tokens with matching name (case-insensitive)
 /// 3. For each candidate, resolve to Definition and compare
 /// 4. Return matching locations
-fn find_definition_references<DB: RootDatabase>(
+fn find_symbol_references<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
-    target_definition: &hir::Definition,
+    target_symbol: &SemanticSymbol,
 ) -> Vec<Location> {
-    let _span = tracing::debug_span!("find_definition_references", ?file_id).entered();
+    let _span = tracing::debug_span!("find_symbol_references", ?file_id).entered();
 
-    // Get name to search for
-    let target_name = match target_definition.name(db) {
-        Some(name) => name,
-        None => return Vec::new(), // Unresolved or builtin without name
-    };
+    let target_name = target_symbol.name.clone();
 
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
@@ -235,22 +214,13 @@ fn find_definition_references<DB: RootDatabase>(
         // (literal `Истина` if it shared a text with a user binding,
         // bare keywords, etc.) — they would never resolve to the
         // target definition anyway.
-        let candidate_def = match classify_token(&token) {
-            NameClass::FieldName { token, .. } => sema
-                .resolve_method_call_to_definition(file_id, &token)
-                .or_else(|| sema.resolve_name_to_definition(file_id, &token)),
-            NameClass::FreeName { token } => sema.resolve_name_to_definition(file_id, &token),
-            NameClass::TypeRef { .. }
-            | NameClass::Literal { .. }
-            | NameClass::Keyword { .. }
-            | NameClass::Other => None,
+        let Some(candidate_symbol) = sema.symbol_for_token(file_id, &token) else {
+            continue;
         };
 
-        if let Some(candidate_def) = candidate_def {
-            if &candidate_def == target_definition {
-                let range = token.text_range();
-                references.push(Location { file_id, range });
-            }
+        if candidate_symbol.key == target_symbol.key {
+            let range = token.text_range();
+            references.push(Location { file_id, range });
         }
     }
 
@@ -480,6 +450,67 @@ mod tests {
             3,
             "Expected exactly 3 references (declaration + 2 usages), found {}",
             references.len()
+        );
+    }
+
+    #[test]
+    fn test_find_implicit_local_references_do_not_cross_methods() {
+        let source = r#"
+Процедура Первый()
+    НаборЗаписей = 1;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+
+Процедура Второй()
+    НаборЗаписей = 2;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+        "#;
+
+        let (db, file_id) = create_db_with_file(source);
+        let offset = TextSize::from(source.find("НаборЗаписей").unwrap() as u32);
+
+        let references = find_references(&db, file_id, offset);
+
+        assert_eq!(references.len(), 2, "implicit locals must be scoped to their body");
+        for location in references {
+            let start: u32 = location.range.start().into();
+            assert!(
+                start < source.find("Процедура Второй").unwrap() as u32,
+                "reference from the second method leaked into the first method result"
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_implicit_local_references_split_by_inferred_type() {
+        let source = r#"
+Процедура Тест()
+    НаборЗаписей = 1;
+    Сообщить(НаборЗаписей);
+
+    НаборЗаписей = "строка";
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+        "#;
+
+        let (db, file_id) = create_db_with_file(source);
+        let second_assignment = source.find("НаборЗаписей = \"строка\"").unwrap() as u32;
+
+        let first_offset = TextSize::from(source.find("НаборЗаписей").unwrap() as u32);
+        let first_refs = find_references(&db, file_id, first_offset);
+        assert_eq!(first_refs.len(), 2, "number-typed implicit local should stay separate");
+        assert!(
+            first_refs.iter().all(|loc| u32::from(loc.range.start()) < second_assignment),
+            "string-typed occurrences leaked into number-typed references: {first_refs:?}"
+        );
+
+        let second_offset = TextSize::from(second_assignment);
+        let second_refs = find_references(&db, file_id, second_offset);
+        assert_eq!(second_refs.len(), 2, "string-typed implicit local should stay separate");
+        assert!(
+            second_refs.iter().all(|loc| u32::from(loc.range.start()) >= second_assignment),
+            "number-typed occurrences leaked into string-typed references: {second_refs:?}"
         );
     }
 

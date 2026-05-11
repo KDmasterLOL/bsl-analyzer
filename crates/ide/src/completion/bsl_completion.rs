@@ -8,9 +8,9 @@
 
 use bsl_platform::{GlobalFunction, PlatformDataInner};
 use either::Either;
-use hir::{ExprScopes, ScopeDef};
+use hir::{DefWithBodyId, ExprScopes, ScopeDef};
 use ide_db::{RootDatabase, TextRange};
-use syntax::{ast::AstNode, NodeOrToken, SyntaxKind};
+use syntax::{ast::AstNode, SyntaxKind};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
@@ -322,51 +322,33 @@ fn complete_local_symbols<DB: RootDatabase>(
         });
     }
 
-    // Collect implicit variables from assignment targets (e.g. Партнер = ...)
-    // This is done here (not in ExprScopes) because ExprScopes doesn't know about
-    // module-level variables, and we'd incorrectly shadow them.
-    let body_node = match &method_def {
-        Either::Left(proc) => proc.body().map(|b| b.syntax().clone()),
-        Either::Right(func) => func.body().map(|b| b.syntax().clone()),
-    };
-    if let Some(body) = body_node {
-        for node in body.descendants() {
-            if node.kind() != SyntaxKind::ASSIGN_STMT {
-                continue;
+    // Collect implicit locals from inference, not by re-scanning assignment
+    // syntax. Inference is the layer that knows whether `X = ...` is really
+    // a local variable or a typed form/self property assignment.
+    if let Some(owner) = owner_for_method_range(db, file_id, method_range) {
+        let infer = db.infer(file_id);
+        if let Some(implicit_locals) = infer.implicit_locals_by_body.get(&owner) {
+            for (lower, info) in implicit_locals {
+                if seen.contains(lower) {
+                    continue;
+                }
+                if !lower.starts_with(&prefix_lower) {
+                    seen.insert(lower.clone());
+                    continue;
+                }
+                seen.insert(lower.clone());
+                let text = info.name.as_str().to_string();
+                completions.push(CompletionItem {
+                    label: text.clone(),
+                    detail: Some("Переменная".to_string()),
+                    kind: CompletionItemKind::Field,
+                    insert_text: text,
+                    documentation: None,
+                    sort_text: None,
+                    filter_text: None,
+                    source: None,
+                });
             }
-            let Some(first) = node.first_child_or_token() else { continue };
-            if first.kind() != SyntaxKind::IDENT {
-                continue;
-            }
-            // The parser wraps identifiers in an IDENT node (not a bare token),
-            // so first_child_or_token() returns NodeOrToken::Node for simple
-            // assignments like `Партнер = ...`. We need to handle both cases.
-            let text: String = match &first {
-                NodeOrToken::Token(t) => t.text().to_string(),
-                NodeOrToken::Node(n) => match n.first_token() {
-                    Some(t) => t.text().to_string(),
-                    None => continue,
-                },
-            };
-            let lower = text.to_lowercase();
-            if seen.contains(&lower) {
-                continue;
-            }
-            if !lower.starts_with(&prefix_lower) {
-                seen.insert(lower);
-                continue;
-            }
-            seen.insert(lower);
-            completions.push(CompletionItem {
-                label: text.clone(),
-                detail: Some("Переменная".to_string()),
-                kind: CompletionItemKind::Field,
-                insert_text: text,
-                documentation: None,
-                sort_text: None,
-                filter_text: None,
-                source: None,
-            });
         }
     }
 
@@ -378,6 +360,25 @@ fn complete_local_symbols<DB: RootDatabase>(
     );
 
     completions
+}
+
+fn owner_for_method_range<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    method_range: TextRange,
+) -> Option<DefWithBodyId> {
+    let tree = db.item_tree(file_id);
+    for (idx, item) in tree.top_level_items().iter().enumerate() {
+        let range = match item {
+            hir::ModItem::Procedure(proc_idx) => tree.procedure(*proc_idx).source_range,
+            hir::ModItem::Function(func_idx) => tree.function(*func_idx).source_range,
+            _ => continue,
+        };
+        if range == method_range {
+            return Some(DefWithBodyId::Method(idx as u32));
+        }
+    }
+    None
 }
 
 /// Find containing method for a token.
@@ -1185,6 +1186,7 @@ mod tests {
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
 
         // Position inside the method body (after assignments)
         let offset = syntax::TextSize::from(source.find("ВременнаяПеременная").unwrap() as u32);

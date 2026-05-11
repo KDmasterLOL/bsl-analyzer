@@ -12,6 +12,8 @@ use lsp_types::{
     SemanticTokensLegend, Url,
 };
 
+use crate::lsp::PositionEncoding;
+
 /// Converts a TextRange to an LSP Range.
 ///
 /// Uses UTF-16 code units for positions as required by LSP protocol.
@@ -20,6 +22,21 @@ use lsp_types::{
 /// # Errors
 /// Returns an error if the range is out of bounds.
 pub fn range(line_index: &LineIndex, text: &str, range: TextRange) -> Option<Range> {
+    range_with_encoding(line_index, text, range, PositionEncoding::Utf16)
+}
+
+pub fn range_with_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    range: TextRange,
+    encoding: PositionEncoding,
+) -> Option<Range> {
+    if encoding == PositionEncoding::Utf8 {
+        let start = position(line_index, range.start())?;
+        let end = position(line_index, range.end())?;
+        return Some(Range { start, end });
+    }
+
     let start = position_utf16(line_index, text, range.start())?;
     let end = position_utf16(line_index, text, range.end())?;
     Some(Range { start, end })
@@ -78,7 +95,16 @@ pub fn diagnostic_tags(tags: &[IdeTag]) -> Option<Vec<DiagnosticTag>> {
 /// # Errors
 /// Returns None if the diagnostic range cannot be converted.
 pub fn diagnostic(line_index: &LineIndex, text: &str, diag: &IdeDiagnostic) -> Option<Diagnostic> {
-    let range = range(line_index, text, diag.range)?;
+    diagnostic_with_encoding(line_index, text, diag, PositionEncoding::Utf16)
+}
+
+pub fn diagnostic_with_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    diag: &IdeDiagnostic,
+    encoding: PositionEncoding,
+) -> Option<Diagnostic> {
+    let range = range_with_encoding(line_index, text, diag.range, encoding)?;
     let severity = severity(diag.severity);
     let code = Some(NumberOrString::String(diag.code.as_str().to_string()));
     let tags = diagnostic_tags(&diag.tags);
@@ -98,7 +124,16 @@ pub fn diagnostic(line_index: &LineIndex, text: &str, diag: &IdeDiagnostic) -> O
 
 /// Converts multiple diagnostics to LSP format.
 pub fn diagnostics(line_index: &LineIndex, text: &str, diags: &[IdeDiagnostic]) -> Vec<Diagnostic> {
-    diags.iter().filter_map(|d| diagnostic(line_index, text, d)).collect()
+    diagnostics_with_encoding(line_index, text, diags, PositionEncoding::Utf16)
+}
+
+pub fn diagnostics_with_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    diags: &[IdeDiagnostic],
+    encoding: PositionEncoding,
+) -> Vec<Diagnostic> {
+    diags.iter().filter_map(|d| diagnostic_with_encoding(line_index, text, d, encoding)).collect()
 }
 
 /// Converts a FileId + TextRange to an LSP Location.
@@ -111,7 +146,17 @@ pub fn location(
     url: &Url,
     text_range: TextRange,
 ) -> Option<Location> {
-    let lsp_range = range(line_index, text, text_range)?;
+    location_with_encoding(line_index, text, url, text_range, PositionEncoding::Utf16)
+}
+
+pub fn location_with_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    url: &Url,
+    text_range: TextRange,
+    encoding: PositionEncoding,
+) -> Option<Location> {
+    let lsp_range = range_with_encoding(line_index, text, text_range, encoding)?;
     Some(Location { uri: url.clone(), range: lsp_range })
 }
 
@@ -123,7 +168,7 @@ pub fn related_information(
     message: String,
     text_range: TextRange,
 ) -> Option<DiagnosticRelatedInformation> {
-    let loc = location(line_index, text, url, text_range)?;
+    let loc = location_with_encoding(line_index, text, url, text_range, PositionEncoding::Utf16)?;
     Some(DiagnosticRelatedInformation { location: loc, message })
 }
 
@@ -135,11 +180,22 @@ pub fn code_action(
     diag: &IdeDiagnostic,
     fix: &ide::Fix,
 ) -> Option<lsp_types::CodeAction> {
+    code_action_with_encoding(line_index, text, uri, diag, fix, PositionEncoding::Utf16)
+}
+
+pub fn code_action_with_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    uri: &Url,
+    diag: &IdeDiagnostic,
+    fix: &ide::Fix,
+    encoding: PositionEncoding,
+) -> Option<lsp_types::CodeAction> {
     let edits: Vec<lsp_types::TextEdit> = fix
         .edits
         .iter()
         .filter_map(|edit| {
-            let edit_range = range(line_index, text, edit.range)?;
+            let edit_range = range_with_encoding(line_index, text, edit.range, encoding)?;
             Some(lsp_types::TextEdit { range: edit_range, new_text: edit.new_text.clone() })
         })
         .collect();
@@ -154,7 +210,7 @@ pub fn code_action(
     Some(lsp_types::CodeAction {
         title: fix.label.clone(),
         kind: Some(lsp_types::CodeActionKind::QUICKFIX),
-        diagnostics: Some(vec![diagnostic(line_index, text, diag)?]),
+        diagnostics: Some(vec![diagnostic_with_encoding(line_index, text, diag, encoding)?]),
         edit: Some(lsp_types::WorkspaceEdit { changes: Some(changes), ..Default::default() }),
         is_preferred: Some(true),
         ..Default::default()
@@ -257,6 +313,15 @@ pub fn semantic_tokens(
     text: &str,
     highlights: &[HlRange],
 ) -> Vec<SemanticToken> {
+    semantic_tokens_with_encoding(line_index, text, highlights, PositionEncoding::Utf16)
+}
+
+pub fn semantic_tokens_with_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    highlights: &[HlRange],
+    encoding: PositionEncoding,
+) -> Vec<SemanticToken> {
     let mut tokens = Vec::with_capacity(highlights.len());
     let mut prev_line = 0;
     let mut prev_start = 0;
@@ -279,15 +344,12 @@ pub fn semantic_tokens(
             }
         }
 
-        // CRITICAL: Use UTF-16 positions, not byte positions!
-        let start_pos = match position_utf16(line_index, text, hl.range.start()) {
+        let start_pos = match position_for_encoding(line_index, text, hl.range.start(), encoding) {
             Some(pos) => pos,
             None => continue,
         };
 
-        // CRITICAL: Use UTF-16 length, not byte length!
-        // For Cyrillic: "ПрограммныйИнтерфейс" = 40 bytes but only 20 UTF-16 code units
-        let length = LineIndex::utf16_len(text, hl.range);
+        let length = token_len_for_encoding(text, hl.range, encoding);
 
         let delta_line = start_pos.line - prev_line;
         let delta_start =
@@ -307,6 +369,25 @@ pub fn semantic_tokens(
     }
 
     tokens
+}
+
+fn position_for_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    offset: TextSize,
+    encoding: PositionEncoding,
+) -> Option<Position> {
+    match encoding {
+        PositionEncoding::Utf8 => position(line_index, offset),
+        PositionEncoding::Utf16 => position_utf16(line_index, text, offset),
+    }
+}
+
+fn token_len_for_encoding(text: &str, range: TextRange, encoding: PositionEncoding) -> u32 {
+    match encoding {
+        PositionEncoding::Utf8 => u32::from(range.len()),
+        PositionEncoding::Utf16 => LineIndex::utf16_len(text, range),
+    }
 }
 
 #[cfg(test)]
@@ -384,6 +465,59 @@ mod tests {
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].delta_line, 0);
         assert_eq!(tokens[1].delta_line, 1);
+    }
+
+    #[test]
+    fn test_semantic_tokens_encode_cyrillic_identifier_span_as_utf16() {
+        let text = "    НаборЗаписей = НаборЗаписей\n";
+        let line_index = LineIndex::new(text);
+        let start = text.find("НаборЗаписей").unwrap() as u32;
+        let end = start + "НаборЗаписей".len() as u32;
+
+        let highlights = vec![HlRange {
+            range: TextRange::new(start.into(), end.into()),
+            tag: HlTag::Variable,
+            modifiers: HlMod::new(),
+        }];
+
+        let tokens = semantic_tokens(&line_index, text, &highlights);
+
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].delta_line, 0);
+        assert_eq!(tokens[0].delta_start, 4);
+        assert_eq!(tokens[0].length, "НаборЗаписей".encode_utf16().count() as u32);
+    }
+
+    #[test]
+    fn test_semantic_tokens_utf8_encoding_does_not_shift_record_set_identifier() {
+        let text = "\t\t\tНаборЗаписей = НаборЗаписей;\n";
+        let line_index = LineIndex::new(text);
+        let start = text.rfind("НаборЗаписей").unwrap() as u32;
+        let end = start + "НаборЗаписей".len() as u32;
+
+        let highlights = vec![HlRange {
+            range: TextRange::new(start.into(), end.into()),
+            tag: HlTag::Variable,
+            modifiers: HlMod::new(),
+        }];
+
+        let utf8_tokens =
+            semantic_tokens_with_encoding(&line_index, text, &highlights, PositionEncoding::Utf8);
+
+        assert_eq!(utf8_tokens.len(), 1);
+        assert_eq!(utf8_tokens[0].delta_start, start);
+        assert_eq!(utf8_tokens[0].length, "НаборЗаписей".len() as u32);
+        assert!(text[start as usize..].starts_with("НаборЗаписей"));
+
+        let utf16_tokens =
+            semantic_tokens_with_encoding(&line_index, text, &highlights, PositionEncoding::Utf16);
+        let utf16_col_as_byte_col = utf16_tokens[0].delta_start as usize;
+        let shifted_prefix = text.find("писей = НаборЗаписей").unwrap();
+        assert_eq!(
+            utf16_col_as_byte_col - 1,
+            shifted_prefix,
+            "the old UTF-16 token column lands in the observed shifted highlight"
+        );
     }
 
     /// End-to-end check: `ide::highlight()` on the Zed-regression example must
