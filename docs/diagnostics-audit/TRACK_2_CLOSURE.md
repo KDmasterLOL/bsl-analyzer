@@ -180,13 +180,35 @@ fact:
 ### Track 6 — cross-module SCC follow-ups (pre-existing)
 
 - **Cross-module SCC walk for `is_recursive` flagging** in
-  `effect_summary` (task #50).
+  `effect_summary` (task #50) — **STILL OPEN**. Re-scoped after
+  recon (2026-05-11): proper fix requires either a workspace-wide
+  modules Salsa input or per-method DFS with custom cycle handling
+  (~300-800 LOC), since Salsa 0.26's `cycle_fn` only fires on cycle
+  head and the codebase has no workspace-aggregator precedent. The
+  single downstream consumer is `cognitive_complexity.rs:141`
+  (+1 bonus). Most-common false-negative (self-recursion via
+  ЭтотОбъект.foo()) was eliminated by closing #51 below. Remaining
+  gap is cross-module mutual recursion (A→B→A), rare in BSL.
 - **`ЭтотОбъект.method()` normalization** in call-graph extractor
-  (task #51).
-- **Pre-lowercase registry hot-path lookups** (task #52).
+  (task #51) — **CLOSED 2026-05-11, commit `9b5b82aa`**.
+  `field_callee_to_edge` now detects `ЭтотОбъект` / `ThisObject` in
+  the qualifier and emits `DirectLocal` (or `ThisObjectMethod` if
+  the local method isn't resolvable). The `is_recursive` known-
+  limitation note in `crates/ide-db/src/effects.rs:46-56` was
+  rewritten to reflect this fix.
+- **Pre-lowercase registry hot-path lookups** (task #52) —
+  **CLOSED 2026-05-11, commit `c41599f6`**. New `lookup_global_lc`
+  / `lookup_constructor_lc` methods on `SecurityRegistry` accept
+  caller-provided already-lowercase `&str`; internal map split into
+  separate globals/constructors `FxHashMap<String, usize>` so
+  `.get(&str)` uses `String: Borrow<str>` zero-alloc. Hot callers
+  in `dataflow::effect_summary` and `dataflow::security_state`
+  migrated. Convenience methods retained.
 
-These three were carried forward from before Track 2 and remain open;
-they do not block Track 2 acceptance.
+Originally all three were carried forward from before Track 2;
+#51 and #52 are now closed. #50 remains open and is owned by
+Track 6 (or a dedicated follow-up if a cross-module SCC need
+materialises sooner).
 
 ## Pointers
 
