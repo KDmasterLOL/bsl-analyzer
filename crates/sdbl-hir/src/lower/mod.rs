@@ -118,7 +118,7 @@ pub fn lower_sdbl_to_hir(
             // Push scope frame for main query (clears FROM/JOIN scope, keeps temp tables)
             ctx.scope.push_frame();
 
-            let query_hir = ctx.lower_query(&main_query, has_union_siblings);
+            let query_hir = ctx.lower_query(&main_query, has_union_siblings, true);
             // IMPORTANT: Use select_query.text_range() to include outer SELECT clause
             // when query has INTO clause (e.g., SELECT ... ПОМЕСТИТЬ ... ИЗ (subquery))
             let range = select_query.syntax().text_range();
@@ -206,7 +206,7 @@ pub fn lower_sdbl_to_hir(
                 ctx.scope.push_frame();
 
                 // UNION queries always have union siblings (by definition)
-                let query_hir = ctx.lower_query(&union_query, true);
+                let query_hir = ctx.lower_query(&union_query, true, false);
                 let range = union_query.syntax().text_range();
 
                 tracing::debug!(
@@ -265,10 +265,12 @@ impl LoweringContext {
     /// # Arguments
     /// * `query` - The query AST node to lower
     /// * `has_union_siblings` - Whether this query has UNION siblings (for SelectTopWithoutOrderBy)
+    /// * `check_field_aliases` - Whether result field aliases are semantically relevant
     pub(crate) fn lower_query(
         &mut self,
         query: &syntax::ast::SdblQuery,
         has_union_siblings: bool,
+        check_field_aliases: bool,
     ) -> SdblHir {
         // Record SELECT keyword
         self.record_keyword_by_text(
@@ -298,9 +300,9 @@ impl LoweringContext {
         let (distinct, top, top_range) = self.extract_limitations(query.syntax());
 
         // 5. Lower SELECT clause (uses scope for name resolution).
-        // Alias-without-AS diagnostics are emitted uniformly for main and UNION
-        // queries by `check_alias_without_as_keyword` — see its doc-comment for
-        // the BSL-LS divergence note.
+        // Alias-without-AS diagnostics are emitted for result-shaping SELECTs.
+        // In a UNION chain, result column names are defined by the first query,
+        // so secondary UNION branches do not require field aliases.
         let select = self.lower_field_list(query.field_list(), distinct, top);
 
         // 6. Lower WHERE clause
@@ -357,7 +359,9 @@ impl LoweringContext {
         self.check_joins_for_unprotected_fields(&hir);
 
         // 12. Check SELECT fields for missing AS keyword (after complete HIR built)
-        self.check_alias_without_as_keyword(&hir);
+        if check_field_aliases {
+            self.check_alias_without_as_keyword(&hir);
+        }
 
         // 13. Check for nested field dereference by dot (N+1 query problem)
         self.check_nested_fields_by_dot(&hir);

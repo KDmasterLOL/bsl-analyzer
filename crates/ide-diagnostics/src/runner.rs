@@ -194,7 +194,7 @@ where
 
     let elapsed = start.elapsed();
     if elapsed.as_millis() > 80 {
-        tracing::debug!(
+        tracing::info!(
             diagnostic = name,
             elapsed_ms = elapsed.as_millis(),
             count = result.len(),

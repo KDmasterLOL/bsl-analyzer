@@ -67,7 +67,7 @@
 //! argument; convergence guaranteed by `cycle_fn` returning a value
 //! equal to `last_provisional` once no new bits are set.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use base_db::FileIdInput;
 use hir::{
@@ -432,6 +432,7 @@ pub fn module_security_state_query<'db>(
     let file_id = file_id_input.file_id(db);
     let module_id = ModuleId::new(file_id);
     let _span = tracing::info_span!("module_security_state", ?module_id).entered();
+    let total_start = Instant::now();
 
     let module_cfgs = db.module_cfgs(file_id_input);
     let module_bodies = db.module_bodies(module_id);
@@ -443,8 +444,21 @@ pub fn module_security_state_query<'db>(
             Some(c) => c.clone(),
             None => continue,
         };
+        let method_start = Instant::now();
+        let block_count = cfg.vertices().count();
+        let stmt_count = body.stmt_count();
         if let Some(result) = security_state::analyze(cfg, body.clone()) {
             methods.insert(local_id, Arc::new(result));
+        }
+        let elapsed_ms = method_start.elapsed().as_millis();
+        if elapsed_ms >= 100 {
+            tracing::info!(
+                local_id,
+                block_count,
+                stmt_count,
+                elapsed_ms,
+                "Slow module security-state method"
+            );
         }
     }
 
@@ -464,12 +478,26 @@ pub fn module_security_state_query<'db>(
         .and_then(|body| {
             db.unwind_if_revision_cancelled();
             let cfg = db.module_level_cfg(module_id);
-            security_state::analyze(cfg, body.clone()).map(Arc::new)
+            let start = Instant::now();
+            let block_count = cfg.vertices().count();
+            let stmt_count = body.stmt_count();
+            let result = security_state::analyze(cfg, body.clone()).map(Arc::new);
+            let elapsed_ms = start.elapsed().as_millis();
+            if elapsed_ms >= 100 {
+                tracing::info!(
+                    block_count,
+                    stmt_count,
+                    elapsed_ms,
+                    "Slow module-level security-state"
+                );
+            }
+            result
         });
 
-    tracing::debug!(
+    tracing::info!(
         count = methods.len(),
         module_level = module_level.is_some(),
+        elapsed_ms = total_start.elapsed().as_millis(),
         "Module security-state batch built"
     );
     Arc::new(ModuleSecurityState { methods, module_level })

@@ -22,7 +22,7 @@
 //! **Line Index:**
 //! - [`line_index_query`] - Convert byte offsets to line/column positions (LRU: 256)
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use base_db::FileIdInput;
 use hir::ModuleId;
@@ -510,6 +510,7 @@ pub fn module_liveness_analysis_query<'db>(
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_liveness", ?module_id).entered();
+    let total_start = Instant::now();
 
     // Get shared CFGs (Salsa cached!)
     let module_cfgs = db.module_cfgs(file_id_input);
@@ -525,6 +526,9 @@ pub fn module_liveness_analysis_query<'db>(
             Some(cfg) => cfg,
             None => continue,
         };
+        let method_start = Instant::now();
+        let block_count = cfg.vertices().count();
+        let stmt_count = body.stmt_count();
 
         // Build variable index
         let var_index = hir::dataflow::liveness::VariableIndex::from_body(body);
@@ -538,9 +542,24 @@ pub fn module_liveness_analysis_query<'db>(
         ) {
             results.insert(local_id, Arc::new(liveness_result));
         }
+
+        let elapsed_ms = method_start.elapsed().as_millis();
+        if elapsed_ms >= 100 {
+            tracing::info!(
+                local_id,
+                block_count,
+                stmt_count,
+                elapsed_ms,
+                "Slow module liveness method"
+            );
+        }
     }
 
-    tracing::debug!(count = results.len(), "Analyzed liveness");
+    tracing::info!(
+        count = results.len(),
+        elapsed_ms = total_start.elapsed().as_millis(),
+        "Module liveness batch complete"
+    );
     Arc::new(hir::dataflow::liveness::ModuleLiveness::new(results))
 }
 

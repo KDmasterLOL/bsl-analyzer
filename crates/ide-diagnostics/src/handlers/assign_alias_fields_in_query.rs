@@ -26,9 +26,10 @@
 //! ```
 //!
 //! ## Rules
-//! - Every SELECT clause is checked uniformly — main, UNION parts, and
-//!   subqueries (deliberate divergence from BSL-LS, which historically
-//!   excluded UNION secondary queries).
+//! - Result-shaping SELECT clauses are checked: standalone queries, first
+//!   UNION branches, and nested subqueries.
+//! - Secondary UNION branches are skipped because result column names are
+//!   defined by the first SELECT in the UNION chain.
 //! - Asterisk fields (`*`, `Table.*`) don't require aliases.
 //! - AS/КАК keyword must be explicit (implicit aliases are forbidden).
 //!
@@ -254,16 +255,10 @@ mod tests {
 
     #[test]
     fn test_union_query() {
-        // UNION query — Track 2 §4 Slice 2: alias check applies uniformly to
-        // main and UNION parts (deliberate divergence from BSL-LS).
+        // UNION result column names are defined by the first SELECT.
+        // Secondary UNION branches do not need field aliases.
         let query = "SELECT Name AS N FROM Products UNION SELECT Title FROM Services";
-        check_standalone_query_snapshot(
-            query,
-            expect![[r#"
-            AssignAliasFieldsInQuery @ 1:45..1:50
-              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-              severity: Warning"#]],
-        );
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
@@ -307,15 +302,6 @@ mod tests {
               severity: Warning
             AssignAliasFieldsInQuery @ 4:2..4:25
               message: Поле 'ЦенаПродажи' должно иметь явный псевдоним с ключевым словом AS/КАК
-              severity: Warning
-            AssignAliasFieldsInQuery @ 11:2..11:16
-              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-              severity: Warning
-            AssignAliasFieldsInQuery @ 12:2..12:16
-              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-              severity: Warning
-            AssignAliasFieldsInQuery @ 13:2..13:14
-              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
               severity: Warning"#]],
         );
     }
@@ -412,7 +398,8 @@ mod tests {
 
     #[test]
     fn test_union_with_diagnostics() {
-        // Track 2 §4 Slice 2: alias check covers main + UNION SELECTs uniformly.
+        // Alias check covers the first SELECT in a UNION chain. Secondary
+        // branches are matched by position and do not define result names.
         let query = r#"ВЫБРАТЬ
 	Товары.Артикул,
 	Товары.Артикул КАК АртикулТовара,
@@ -437,15 +424,6 @@ mod tests {
               severity: Warning
             AssignAliasFieldsInQuery @ 4:2..4:25
               message: Поле 'ЦенаПродажи' должно иметь явный псевдоним с ключевым словом AS/КАК
-              severity: Warning
-            AssignAliasFieldsInQuery @ 11:2..11:16
-              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-              severity: Warning
-            AssignAliasFieldsInQuery @ 12:2..12:16
-              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-              severity: Warning
-            AssignAliasFieldsInQuery @ 13:2..13:14
-              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
               severity: Warning"#]],
         );
     }
@@ -533,12 +511,11 @@ mod tests {
         check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
-    /// Two queries with UNION — each query has fields without AS keyword in
-    /// both the main and the UNION SELECT.
+    /// A query with UNION checks aliases only in the first SELECT.
     ///
-    /// Expected 5 diagnostics per query: 2 from main SELECT (Валюты.Ссылка no
-    /// alias + Валюты.Код Код implicit) + 3 from UNION SELECT (Валюты.Ссылка ×
-    /// 2 + Валюты.Код, all no alias).
+    /// Expected 2 diagnostics: Валюты.Ссылка has no alias and Валюты.Код uses
+    /// an implicit alias. The secondary UNION SELECT is ignored because it does
+    /// not define result column names.
     #[test]
     fn test_query_with_union_two_diagnostics() {
         let code = r#"Запрос = Новый Запрос;
@@ -568,15 +545,6 @@ mod tests {
                   severity: Warning
                 AssignAliasFieldsInQuery @ 6:4..6:18
                   message: Поле 'Код' должно иметь явный псевдоним с ключевым словом AS/КАК
-                  severity: Warning
-                AssignAliasFieldsInQuery @ 13:4..13:17
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-                  severity: Warning
-                AssignAliasFieldsInQuery @ 14:4..14:17
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-                  severity: Warning
-                AssignAliasFieldsInQuery @ 15:4..15:14
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
                   severity: Warning"#]],
         );
     }
@@ -630,29 +598,11 @@ mod tests {
                 AssignAliasFieldsInQuery @ 6:4..6:18
                   message: Поле 'Код' должно иметь явный псевдоним с ключевым словом AS/КАК
                   severity: Warning
-                AssignAliasFieldsInQuery @ 13:4..13:17
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-                  severity: Warning
-                AssignAliasFieldsInQuery @ 14:4..14:17
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-                  severity: Warning
-                AssignAliasFieldsInQuery @ 15:4..15:14
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-                  severity: Warning
                 AssignAliasFieldsInQuery @ 22:4..22:17
                   message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
                   severity: Warning
                 AssignAliasFieldsInQuery @ 24:4..24:18
                   message: Поле 'Код' должно иметь явный псевдоним с ключевым словом AS/КАК
-                  severity: Warning
-                AssignAliasFieldsInQuery @ 31:4..31:17
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-                  severity: Warning
-                AssignAliasFieldsInQuery @ 32:4..32:17
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-                  severity: Warning
-                AssignAliasFieldsInQuery @ 33:4..33:14
-                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
                   severity: Warning"#]],
         );
     }
@@ -680,21 +630,39 @@ mod tests {
         );
     }
 
-    /// Track 2 §4 Slice 2 regression guard — minimal UNION fixture.
+    /// Regression guard for UNION field aliases.
     ///
-    /// Main SELECT is fully aliased; UNION part has exactly one missing alias.
-    /// Pre-Slice 2 the UNION part was skipped, so the count was 0; the post-fix
-    /// count is 1. A future regression that re-introduces the UNION skip would
-    /// flip this back to 0 and trip the assertion.
+    /// Main SELECT is fully aliased; UNION part has a missing alias. This is OK:
+    /// secondary UNION branches do not define result column names.
     #[test]
-    fn test_union_part_emits_when_alias_missing() {
+    fn test_union_part_does_not_emit_when_alias_missing() {
         let query = "SELECT Name AS Name FROM Products UNION ALL SELECT Title FROM Services";
-        check_standalone_query_snapshot(
-            query,
-            expect![[r#"
-            AssignAliasFieldsInQuery @ 1:52..1:57
-              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
-              severity: Warning"#]],
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_union_part_uses_first_query_aliases_regression() {
+        let code = r#"Запрос = Новый Запрос;
+Запрос.Текст =
+	"ВЫБРАТЬ
+	|	ДополнительныеРеквизиты.Ссылка КАК Набор,
+	|	ДополнительныеРеквизиты.Свойство КАК Свойство
+	|ПОМЕСТИТЬ ВТ_ВсеНаборы
+	|ИЗ
+	|	Справочник.НаборыДополнительныхРеквизитовИСведений.ДополнительныеРеквизиты КАК ДополнительныеРеквизиты
+	|
+	|ОБЪЕДИНИТЬ ВСЕ
+	|
+	|ВЫБРАТЬ
+	|	ДополнительныеСведения.Ссылка,
+	|	ДополнительныеСведения.Свойство
+	|ИЗ
+	|	Справочник.НаборыДополнительныхРеквизитовИСведений.ДополнительныеСведения КАК ДополнительныеСведения";"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#""#]],
         );
     }
 

@@ -594,10 +594,10 @@ impl LoweringContext {
     /// * `hir` - The lowered HIR (must have select.fields populated)
     ///
     /// # Note
-    /// Applies uniformly to main and UNION queries — every SELECT clause must
-    /// declare explicit aliases per BSL standards. This is a deliberate
-    /// divergence from BSL-LS, which historically excluded UNION secondary
-    /// queries from this check.
+    /// In a UNION chain, this check is called only for the first query because
+    /// result column names are defined by the first SELECT. Secondary UNION
+    /// branches are shape-compatible by position and their field aliases are not
+    /// semantically relevant.
     pub(super) fn check_alias_without_as_keyword(&mut self, hir: &SdblHir) {
         for field in &hir.select.fields {
             // Skip asterisk fields

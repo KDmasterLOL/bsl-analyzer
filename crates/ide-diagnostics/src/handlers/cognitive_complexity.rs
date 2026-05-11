@@ -86,7 +86,11 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{MethodId, ModItem, ModuleId};
+use hir::{
+    call_graph::{CallTarget, CallerId, EdgeKind, ModuleCallSummary},
+    ModItem, ModuleId,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -121,6 +125,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let item_tree = ctx.item_tree();
     let module_id = ModuleId::new(ctx.file_id);
+    let recursive_methods = local_recursive_methods(&ctx.call_summary(module_id));
 
     // Sort by `local_id` for deterministic output ordering — matches
     // the §6.4 cohort follow-up applied to method_size etc.
@@ -130,15 +135,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for local_id in local_ids {
         let Some(metrics) = module_metrics.get(local_id) else { continue };
-        // Track 2 Phase B §6.5: SonarSource Cognitive Complexity v1.4
-        // recursion penalty — `+1` when the method is self-recursive
-        // or part of a recursion cycle (intra-module SCC). Sourced
-        // from `EffectSummary::is_recursive` (§1.4) so the penalty
-        // tracks the same call-graph fixed-point the security-state
-        // handlers consume.
-        let method_id = MethodId { module: module_id, local_id };
-        let effect = ctx.method_effect_summary(method_id);
-        let recursion_bonus = if effect.is_recursive { 1 } else { 0 };
+        // SonarSource Cognitive Complexity v1.4 recursion penalty: +1
+        // when the method is self-recursive or part of a local recursive
+        // cycle. Keep this on the cheap call-summary path; pulling the
+        // security EffectSummary batch here triggers cross-module effect
+        // fixpoints for a diagnostic that only needs recursion.
+        let recursion_bonus = if recursive_methods.contains(&local_id) { 1 } else { 0 };
         let total = metrics.cognitive + recursion_bonus;
         if total <= threshold {
             continue;
@@ -170,6 +172,37 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         });
     }
     out
+}
+
+fn local_recursive_methods(summary: &ModuleCallSummary) -> FxHashSet<u32> {
+    let mut graph: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    for edge in &summary.call_edges {
+        if !matches!(edge.kind, EdgeKind::DirectLocal) {
+            continue;
+        }
+        let CallerId::Method(caller_id) = edge.caller else { continue };
+        let CallTarget::Local { callee_local_id } = edge.target else { continue };
+        graph.entry(caller_id).or_default().push(callee_local_id);
+    }
+
+    let mut recursive = FxHashSet::default();
+    for &start in graph.keys() {
+        let mut stack = graph.get(&start).cloned().unwrap_or_default();
+        let mut visited = FxHashSet::default();
+        while let Some(node) = stack.pop() {
+            if node == start {
+                recursive.insert(start);
+                break;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            if let Some(next) = graph.get(&node) {
+                stack.extend(next.iter().copied());
+            }
+        }
+    }
+    recursive
 }
 
 #[cfg(test)]
@@ -325,12 +358,11 @@ mod tests {
     /// Track 2 Phase B §6.5 — recursion penalty regression guard.
     /// SonarSource Cognitive Complexity v1.4 spec adds `+1` for any
     /// recursive call (self or mutual). The §6.4 visitor's HIR-walk
-    /// can't see call edges, so the penalty is sourced from
-    /// `EffectSummary::is_recursive` (§1.4) and applied in the
-    /// handler. This test pins the +1 increment against a tight
-    /// fixture: a self-recursive function with cognitive=2 (one
-    /// `Если` increment) plus the recursion bonus = 3, fires when
-    /// `complexityThreshold = 2`.
+    /// can't see call edges, so the handler sources the penalty from
+    /// the module call summary. This test pins the +1 increment against
+    /// a tight fixture: a self-recursive function with cognitive=1
+    /// (one `Если` increment) plus the recursion bonus = 2, fires when
+    /// `complexityThreshold = 1`.
     #[test]
     fn test_recursion_penalty_self_call() {
         let code = r#"Функция Факториал(N)

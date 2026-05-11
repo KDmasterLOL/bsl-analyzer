@@ -36,13 +36,6 @@ fn is_handled_uri(uri: &Url) -> bool {
 /// still triggers `Cancelled::PendingWrite`; both flavors are caught by `Cancelled::catch`,
 /// while bug panics propagate out and are logged by the task pool.
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
-    // Don't schedule diagnostics until VFS is ready.
-    // They will be scheduled again after VFS loading completes.
-    if !state.vfs_done {
-        tracing::debug!("VFS not ready, skipping diagnostics scheduling");
-        return;
-    }
-
     if let Some(prev) = state.diagnostics_tokens.remove(uri) {
         prev.cancel();
     }
@@ -64,10 +57,12 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     let config = state.diagnostics_config().clone();
     let uri = uri.clone();
     let queued_at = Instant::now();
+    tracing::info!(%uri, generation, vfs_done = state.vfs_done, "diagnostics scheduled");
 
     state.task_pool.pool.spawn(move || {
         let started_at = Instant::now();
         let queue_wait_ms = started_at.duration_since(queued_at).as_millis() as u64;
+        tracing::info!(%uri, generation, queue_wait_ms, "diagnostics worker started");
         let result = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
             let file_id_input = FileIdInput::new(&db, file_id);
             let config_id = base_db::DiagnosticsConfigId::new(&db, config);
@@ -86,11 +81,16 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
                     diagnostic_count = diagnostics.len(),
                     "diagnostics ready",
                 );
-                Task::DiagnosticsReady { uri, diagnostics, generation }
+                Task::DiagnosticsReady {
+                    uri,
+                    diagnostics,
+                    generation,
+                    completed_at: Instant::now(),
+                }
             }
             Err(_) => {
                 tracing::debug!(%uri, queue_wait_ms, compute_ms, "diagnostics cancelled");
-                Task::DiagnosticsCancelled { generation }
+                Task::DiagnosticsCancelled { generation, completed_at: Instant::now() }
             }
         }
     });
@@ -427,6 +427,12 @@ mod tests {
         // Check MemDocs
         assert!(state.mem_docs.contains(&params.text_document.uri));
         assert_eq!(state.mem_docs.get(&params.text_document.uri), Some(params.text_document.text));
+
+        // Cold-start regression: diagnostics for an opened document must not
+        // wait for the full VFS loader sweep to finish.
+        assert!(!state.vfs_done);
+        assert_eq!(state.diagnostics_generation, 1);
+        assert!(state.diagnostics_tokens.contains_key(&params.text_document.uri));
     }
 
     #[test]

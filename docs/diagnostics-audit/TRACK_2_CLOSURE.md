@@ -101,7 +101,7 @@ fact:
 |---|---|---|
 | §4 audit pass | Track A/B/C confirmation across 20 SDBL handlers | task #84 |
 | §4 Slice 1 | `QueryNestedFieldsByDot` `minPathDepth` config + schema | `329802ad` |
-| §4 Slice 2 | `AssignAliasFieldsInQuery` covers UNION parts uniformly | `5efc5362` |
+| §4 Slice 2 | `AssignAliasFieldsInQuery` UNION coverage pass; current behavior checks only first UNION branch aliases because it defines result column names | `5efc5362` |
 | §4 Slice 3 | `JoinWithSubQuery` exempts aggregating subqueries (function-call-positioned scan) | `c3cd1917` |
 | §4 Slice 4 | Collapse `UsingLikeInQuery` + `IncorrectUseLikeInQuery` into `SdblDiagnostic::LikeUsage { kind }` | `f65d5446` |
 | §4 delta-audit | `FieldsFromJoinsWithoutIsNull`, `LogicalOrInTheWhereSectionOfQuery` — closed without code work | — |

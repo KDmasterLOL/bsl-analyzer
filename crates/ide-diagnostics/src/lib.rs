@@ -141,6 +141,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// This is the single source of truth for panic recovery in diagnostic collection.
 fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnostic> {
     let start = std::time::Instant::now();
+    tracing::debug!(collector = name, "collector started");
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(diags) => diags,
         Err(e) => {
