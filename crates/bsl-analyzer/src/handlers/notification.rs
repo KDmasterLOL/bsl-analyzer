@@ -262,8 +262,12 @@ pub fn handle_did_change(
         params.content_changes.len()
     );
 
-    // Apply changes to MemDocs
-    state.mem_docs.update(&uri, params.content_changes);
+    if let Err(err) =
+        state.mem_docs.update_with_encoding(&uri, params.content_changes, state.position_encoding)
+    {
+        tracing::error!(%uri, error = %err, encoding = ?state.position_encoding, "didChange edit rejected");
+        return Ok(());
+    }
 
     // Get updated text
     let text = state
@@ -475,6 +479,45 @@ mod tests {
 
         // Check MemDocs has updated text
         assert_eq!(state.mem_docs.get(&uri), Some("new text".to_string()));
+    }
+
+    #[test]
+    fn test_did_change_uses_negotiated_utf8_encoding() {
+        let (mut state, _receiver) = create_test_state();
+        state.position_encoding = crate::lsp::PositionEncoding::Utf8;
+
+        let uri = lsp_types::Url::parse("file:///test.bsl").unwrap();
+        handle_did_open(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "bsl".to_string(),
+                    version: 1,
+                    text: "Процедура Тест()\nКонецПроцедуры".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        let params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier { uri: uri.clone(), version: 2 },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: Some(lsp_types::Range {
+                    start: lsp_types::Position { line: 0, character: 19 },
+                    end: lsp_types::Position { line: 0, character: 19 },
+                }),
+                range_length: Some(0),
+                text: "Новая".to_string(),
+            }],
+        };
+
+        handle_did_change(&mut state, params).unwrap();
+
+        assert_eq!(
+            state.mem_docs.get(&uri),
+            Some("Процедура НоваяТест()\nКонецПроцедуры".to_string())
+        );
     }
 
     #[test]

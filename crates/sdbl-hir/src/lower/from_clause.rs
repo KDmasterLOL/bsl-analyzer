@@ -2,6 +2,7 @@
 
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{FieldDef, Name, ResolvedTable, TableRef};
+use crate::scope::is_standard_attribute_name;
 use crate::standard_fields::{is_virtual_table_name, virtual_table_type};
 use crate::SdblType;
 use bsl_metadata::MdoType;
@@ -815,7 +816,14 @@ impl LoweringContext {
 
                     for attribute in &obj.attributes {
                         let ty = self.resolve_attribute_type(&attribute.attr_type);
-                        fields.push(FieldDef::new(attribute.name.clone(), ty));
+                        let is_standard = is_standard_attribute_name(&attribute.name)
+                            || attribute.name_en.as_deref().is_some_and(is_standard_attribute_name);
+                        fields.push(FieldDef::new_with_names(
+                            attribute.name.clone(),
+                            attribute.name_en.clone(),
+                            ty,
+                            is_standard,
+                        ));
                     }
 
                     tracing::debug!(

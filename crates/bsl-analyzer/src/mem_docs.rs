@@ -8,10 +8,13 @@
 
 use std::sync::Arc;
 
-use line_index::{LineCol, LineIndex, TextSize};
+use anyhow::{anyhow, bail, Result};
+use line_index::{LineCol, LineIndex};
 use lsp_types::{TextDocumentContentChangeEvent, Url};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
+
+use crate::lsp::PositionEncoding;
 
 /// In-memory document storage.
 ///
@@ -101,60 +104,39 @@ impl MemDocs {
         self.docs.write().insert(uri, data);
     }
 
-    /// Applies incremental changes to a document.
+    /// Applies incremental changes to a document using LSP's default UTF-16 coordinates.
     ///
     /// This is called on `textDocument/didChange`.
     /// Supports both full document sync and incremental changes.
     pub fn update(&mut self, uri: &Url, changes: Vec<TextDocumentContentChangeEvent>) {
+        if let Err(err) = self.update_with_encoding(uri, changes, PositionEncoding::Utf16) {
+            tracing::error!(%uri, error = %err, "failed to apply document changes");
+        }
+    }
+
+    /// Applies incremental changes to a document using the negotiated LSP position encoding.
+    pub fn update_with_encoding(
+        &mut self,
+        uri: &Url,
+        changes: Vec<TextDocumentContentChangeEvent>,
+        encoding: PositionEncoding,
+    ) -> Result<()> {
         let mut docs = self.docs.write();
 
         if let Some(data) = docs.get_mut(uri) {
             for change in changes {
                 if let Some(range) = change.range {
-                    // Incremental change
-                    // CRITICAL: LSP uses UTF-16 code units for positions, not byte offsets!
-                    // Must convert UTF-16 → byte offsets before using with Rust strings.
-                    //
-                    // For Cyrillic: "Процедура" = 9 UTF-16 code units, but 18 bytes UTF-8
-                    // If we use UTF-16 positions directly, we'll try to split a multibyte char → panic
+                    let start = lsp_position_to_offset(
+                        &data.line_index,
+                        &data.text,
+                        range.start,
+                        encoding,
+                    )?;
+                    let end =
+                        lsp_position_to_offset(&data.line_index, &data.text, range.end, encoding)?;
 
-                    // Convert UTF-16 positions to byte offsets
-                    let start_byte_col = data
-                        .line_index
-                        .utf16_col_to_byte_col(&data.text, range.start.line, range.start.character)
-                        .unwrap_or(0);
-
-                    let end_byte_col = data
-                        .line_index
-                        .utf16_col_to_byte_col(&data.text, range.end.line, range.end.character)
-                        .unwrap_or_else(|| {
-                            // Fallback: use line length if UTF-16 offset is out of bounds
-                            data.line_index.line_len(range.end.line).unwrap_or(0)
-                        });
-
-                    // Convert line/col to absolute byte offsets
-                    let start_offset = data
-                        .line_index
-                        .offset(LineCol { line: range.start.line, col: start_byte_col })
-                        .unwrap_or(TextSize::from(0));
-
-                    let end_offset = data
-                        .line_index
-                        .offset(LineCol { line: range.end.line, col: end_byte_col })
-                        .unwrap_or(TextSize::from(data.text.len() as u32));
-
-                    let start = usize::from(start_offset);
-                    let end = usize::from(end_offset);
-
-                    // Clamp to valid char boundaries to prevent panics
-                    // when line_index is slightly out of sync with text
-                    let start = data.text.floor_char_boundary(start.min(data.text.len()));
-                    let end = data.text.floor_char_boundary(end.min(data.text.len()));
-
-                    // Apply the change
                     data.text.replace_range(start..end, &change.text);
                 } else {
-                    // Full document sync
                     data.text = change.text;
                 }
 
@@ -166,6 +148,8 @@ impl MemDocs {
         } else {
             tracing::warn!("Attempted to update non-existent document: {}", uri);
         }
+
+        Ok(())
     }
 
     /// Removes a document.
@@ -234,9 +218,54 @@ impl MemDocs {
     }
 }
 
+fn lsp_position_to_offset(
+    line_index: &LineIndex,
+    text: &str,
+    position: lsp_types::Position,
+    encoding: PositionEncoding,
+) -> Result<usize> {
+    let line_len = line_index
+        .line_len(position.line)
+        .ok_or_else(|| anyhow!("line {} is out of bounds", position.line))?;
+
+    let byte_col = match encoding {
+        PositionEncoding::Utf8 => position.character,
+        PositionEncoding::Utf16 => line_index
+            .utf16_col_to_byte_col(text, position.line, position.character)
+            .ok_or_else(|| {
+                anyhow!(
+                    "UTF-16 column {} is out of bounds on line {}",
+                    position.character,
+                    position.line
+                )
+            })?,
+    };
+
+    if byte_col > line_len {
+        bail!(
+            "column {} is out of bounds on line {} with length {} bytes",
+            byte_col,
+            position.line,
+            line_len
+        );
+    }
+
+    let offset = line_index
+        .offset(LineCol { line: position.line, col: byte_col })
+        .ok_or_else(|| anyhow!("position {:?} is out of bounds", position))?;
+    let offset = usize::from(offset);
+
+    if !text.is_char_boundary(offset) {
+        bail!("position {:?} resolves to non-character boundary byte offset {}", position, offset);
+    }
+
+    Ok(offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use line_index::TextSize;
 
     #[test]
     fn test_insert_and_get() {
@@ -376,6 +405,51 @@ mod tests {
         mem_docs.update(&uri, changes);
 
         assert_eq!(mem_docs.get(&uri), Some("Функция Новый()\nКонецФункции".to_string()));
+    }
+
+    #[test]
+    fn test_update_incremental_cyrillic_utf8_encoding() {
+        let mut mem_docs = MemDocs::new();
+        let uri = Url::parse("file:///test.bsl").unwrap();
+
+        mem_docs.insert(uri.clone(), "Процедура Тест()\nКонецПроцедуры".to_string(), 1);
+
+        let changes = vec![TextDocumentContentChangeEvent {
+            range: Some(lsp_types::Range {
+                start: lsp_types::Position { line: 0, character: 19 },
+                end: lsp_types::Position { line: 0, character: 19 },
+            }),
+            range_length: Some(0),
+            text: "Новая".to_string(),
+        }];
+
+        mem_docs.update_with_encoding(&uri, changes, PositionEncoding::Utf8).unwrap();
+
+        assert_eq!(mem_docs.get(&uri), Some("Процедура НоваяТест()\nКонецПроцедуры".to_string()));
+        assert_eq!(mem_docs.get_version(&uri), Some(2));
+    }
+
+    #[test]
+    fn test_update_incremental_utf8_rejects_non_char_boundary() {
+        let mut mem_docs = MemDocs::new();
+        let uri = Url::parse("file:///test.bsl").unwrap();
+
+        mem_docs.insert(uri.clone(), "Функция Старый()\nКонецФункции".to_string(), 1);
+
+        let changes = vec![TextDocumentContentChangeEvent {
+            range: Some(lsp_types::Range {
+                start: lsp_types::Position { line: 0, character: 1 },
+                end: lsp_types::Position { line: 0, character: 1 },
+            }),
+            range_length: Some(0),
+            text: "X".to_string(),
+        }];
+
+        let result = mem_docs.update_with_encoding(&uri, changes, PositionEncoding::Utf8);
+
+        assert!(result.is_err());
+        assert_eq!(mem_docs.get(&uri), Some("Функция Старый()\nКонецФункции".to_string()));
+        assert_eq!(mem_docs.get_version(&uri), Some(1));
     }
 
     #[test]

@@ -771,6 +771,87 @@ fn test_sdbl_hir_in_file_basic() {
 }
 
 #[test]
+fn sdbl_hir_for_extension_file_uses_base_configuration_standard_attributes() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let main_root = temp_dir.path().join("src/cf");
+    let extension_root = temp_dir.path().join("src/cfe/BMS_RU_UT");
+    std::fs::create_dir_all(main_root.join("Catalogs")).unwrap();
+    std::fs::create_dir_all(extension_root.join("Catalogs")).unwrap();
+
+    std::fs::write(main_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(extension_root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        main_root.join("Catalogs/Номенклатура.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties>
+            <Name>Номенклатура</Name>
+            <Hierarchical>true</Hierarchical>
+            <CodeLength>9</CodeLength>
+            <DescriptionLength>25</DescriptionLength>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        extension_root.join("Catalogs/Номенклатура.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000002">
+        <Properties>
+            <ObjectBelonging>Adopted</ObjectBelonging>
+            <Name>Номенклатура</Name>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("BMS_RU_UT".to_string()), extension_root.clone()),
+    ]);
+
+    let file_id = FileId(0);
+    let file_path = extension_root.join("CommonModules/Модуль/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(file_id, SourceRootId(0));
+
+    db.set_file_text(
+        file_id,
+        r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Номенклатура.Родитель КАК Родитель ИЗ Справочник.Номенклатура КАК Номенклатура";
+КонецПроцедуры"#,
+    );
+
+    let hirs = db.sdbl_hir_in_file(file_id);
+    assert_eq!(hirs.len(), 1, "Should have 1 SDBL HIR");
+
+    let package = &hirs[0].1;
+    let unresolved: Vec<_> = package
+        .source_map
+        .tokens_by_category(sdbl_hir::TokenCategory::UnresolvedFieldName)
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect();
+    let resolved: Vec<_> = package
+        .source_map
+        .tokens_by_category(sdbl_hir::TokenCategory::FieldName)
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect();
+
+    assert!(resolved.contains(&"Родитель"), "Родитель should resolve: {resolved:?}");
+    assert!(!unresolved.contains(&"Родитель"), "Родитель must not be unresolved: {unresolved:?}");
+}
+
+#[test]
 fn test_sdbl_hir_in_file_multiple_queries() {
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
