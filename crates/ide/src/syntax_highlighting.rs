@@ -827,6 +827,32 @@ mod tests {
     }
 
     #[test]
+    fn test_sdbl_totals_by_only_hierarchy_highlighting() {
+        let code = r#"
+Функция Тест()
+    Запрос = "ВЫБРАТЬ
+             |    Группа КАК Группа
+             |ИЗ
+             |    Товары
+             |ИТОГИ ПО
+             |    Группа ТОЛЬКО ИЕРАРХИЯ";
+    Возврат Запрос;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        for keyword in ["ИТОГИ", "ПО", "ТОЛЬКО", "ИЕРАРХИЯ"] {
+            let found = highlights.highlights.iter().any(|hl| {
+                hl.tag == HlTag::Keyword
+                    && &code[hl.range.start().into()..hl.range.end().into()] == keyword
+            });
+
+            assert!(found, "`{keyword}` should be highlighted as Keyword");
+        }
+    }
+
+    #[test]
     fn test_sdbl_aggregate_functions() {
         let code = r#"
 Функция Тест()

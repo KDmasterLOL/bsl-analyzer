@@ -210,6 +210,63 @@ impl LoweringContext {
         }
     }
 
+    /// Record TOTALS BY clause semantic tokens.
+    ///
+    /// TOTALS BY group items can reference selected output columns and can carry
+    /// flat `ONLY`/`HIERARCHY` modifiers. The HIR does not model totals yet, so
+    /// this pass keeps semantic highlighting attached to the parser contract.
+    pub(super) fn lower_totals_by_clause(
+        &mut self,
+        query_node: &syntax::SyntaxNode,
+        select: &SelectHir,
+    ) {
+        let Some(totals_clause) =
+            query_node.children().find(|n| n.kind() == syntax::SyntaxKind::SDBL_TOTALS_BY)
+        else {
+            return;
+        };
+
+        let mut after_by = false;
+
+        for child in totals_clause.children_with_tokens() {
+            match child {
+                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                    let text = token.text();
+                    if text.eq_ignore_ascii_case("TOTALS") || text.eq_ignore_ascii_case("ИТОГИ")
+                    {
+                        self.record_token(&token, crate::source_map::TokenCategory::ClauseKeyword);
+                    } else if text.eq_ignore_ascii_case("BY") || text.eq_ignore_ascii_case("ПО") {
+                        self.record_token(&token, crate::source_map::TokenCategory::ClauseKeyword);
+                        after_by = true;
+                    } else if matches!(
+                        text.to_uppercase().as_str(),
+                        "ONLY" | "ТОЛЬКО" | "HIERARCHY" | "ИЕРАРХИЯ"
+                    ) {
+                        self.record_token(&token, crate::source_map::TokenCategory::Modifier);
+                    }
+                }
+                syntax::NodeOrToken::Node(node) if is_sdbl_clause_expr(&node) => {
+                    if after_by {
+                        if let Some(column_ref) = simple_selected_output_ref(&node, select) {
+                            if let Some(token) =
+                                column_ref.children_with_tokens().find_map(|it| it.into_token())
+                            {
+                                self.record_token(
+                                    &token,
+                                    crate::source_map::TokenCategory::FieldAlias,
+                                );
+                            }
+                            continue;
+                        }
+                    }
+
+                    self.lower_expr(&node);
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(super) fn lower_drop_query(&mut self, drop_query: &syntax::SyntaxNode) {
         self.record_keyword_by_text(
             drop_query,
@@ -260,6 +317,21 @@ impl LoweringContext {
             }
         }
     }
+}
+
+fn is_sdbl_clause_expr(node: &syntax::SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
+            | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
+            | syntax::SyntaxKind::SDBL_NOT_EXPR
+            | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
+            | syntax::SyntaxKind::SDBL_COLUMN_REF
+            | syntax::SyntaxKind::SDBL_LITERAL
+            | syntax::SyntaxKind::SDBL_MULTI_STRING
+            | syntax::SyntaxKind::SDBL_FUNCTION_CALL
+            | syntax::SyntaxKind::SDBL_PAREN_EXPR
+    )
 }
 
 fn simple_selected_output_ref(

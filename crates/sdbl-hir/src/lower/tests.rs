@@ -150,6 +150,43 @@ fn test_source_map_collects_union_keywords() {
 }
 
 #[test]
+fn test_totals_by_only_hierarchy_source_map() {
+    let result = lower_query_with_source_map(
+        "ВЫБРАТЬ Группа КАК Группа ИЗ Товары ИТОГИ ПО Группа ТОЛЬКО ИЕРАРХИЯ",
+    );
+    let sm = &result.source_map;
+
+    for keyword in ["ИТОГИ", "ПО"] {
+        assert!(
+            sm.clause_keywords.iter().any(|token| token.text == keyword),
+            "Expected TOTALS BY clause keyword `{keyword}` in source map"
+        );
+    }
+
+    for modifier in ["ТОЛЬКО", "ИЕРАРХИЯ"] {
+        assert!(
+            sm.modifiers.iter().any(|token| token.text == modifier),
+            "Expected TOTALS BY modifier `{modifier}` in source map"
+        );
+    }
+
+    let totals_start = sm
+        .clause_keywords
+        .iter()
+        .find(|token| token.text == "ИТОГИ")
+        .expect("Expected TOTALS BY keyword")
+        .range
+        .start();
+
+    assert!(
+        sm.field_aliases
+            .iter()
+            .any(|token| token.text == "Группа" && token.range.start() > totals_start),
+        "Expected TOTALS BY output reference `Группа` to be recorded as a field alias"
+    );
+}
+
+#[test]
 fn test_aliased_table() {
     // Note: Parser may not handle AS alias correctly - just verify FROM clause exists
     let hir = lower_query("SELECT Код FROM Справочник.Валюты");

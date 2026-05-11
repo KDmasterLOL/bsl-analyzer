@@ -127,6 +127,7 @@ pub fn lower_sdbl_to_hir(
             ctx.scope.push_frame();
 
             let query_hir = ctx.lower_query(&main_query, has_union_siblings, true);
+            ctx.lower_totals_by_clause(select_query.syntax(), &query_hir.select);
             // IMPORTANT: Use select_query.text_range() to include outer SELECT clause
             // when query has INTO clause (e.g., SELECT ... ПОМЕСТИТЬ ... ИЗ (subquery))
             let range = select_query.syntax().text_range();
