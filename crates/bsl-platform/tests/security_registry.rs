@@ -75,6 +75,37 @@ fn empty_and_unknown_lookups_return_none() {
     assert!(reg.lookup_constructor("__definitely_not_a_type__").is_none());
 }
 
+#[test]
+fn lc_global_lookup_matches_base_for_ascii_case_insensitive_name() {
+    let reg = registry();
+    let base = reg.lookup_global("SetPrivilegedMode").expect("base lookup failed");
+    let lc = reg.lookup_global_lc("setprivilegedmode").expect("_lc lookup failed");
+    assert!(std::ptr::eq(base, lc), "_lc lookup returned a different entry");
+}
+
+#[test]
+fn lc_global_lookup_matches_base_for_cyrillic_name() {
+    let reg = registry();
+    let base = reg.lookup_global("ОтменитьТранзакцию").expect("base lookup failed");
+    let lc_name = "ОтменитьТранзакцию".to_lowercase();
+    let lc = reg.lookup_global_lc(&lc_name).expect("_lc lookup failed");
+    assert!(std::ptr::eq(base, lc), "_lc lookup returned a different entry");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "lookup_global_lc requires pre-lowercased input")]
+fn lc_lookup_debug_asserts_on_mixed_case_input() {
+    let _ = registry().lookup_global_lc("SetPrivilegedMode");
+}
+
+#[test]
+fn lc_empty_string_returns_none() {
+    let reg = registry();
+    assert!(reg.lookup_global_lc("").is_none());
+    assert!(reg.lookup_constructor_lc("").is_none());
+}
+
 /// Categories that the security handlers in §1.6 will switch over to
 /// must each have at least one entry — otherwise the migration will
 /// trip the first time the handler queries the registry.

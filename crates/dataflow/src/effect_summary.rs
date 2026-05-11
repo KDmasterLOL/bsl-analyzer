@@ -137,21 +137,29 @@ impl EffectSummary {
     /// classifier — §1.6 handlers can call this to decide whether a
     /// callee name belongs to a category they care about.
     pub fn classify_global_call(name: &str) -> Self {
-        let Some(entry) = registry().lookup_global(name) else {
-            return Self::EMPTY;
-        };
-        bits_for_category(entry.category)
+        classify_global_call_lc(&name.to_lowercase())
     }
 
     /// Effect bits contributed by a single `Новый <Type>(…)` constructor.
     /// Returns [`Self::EMPTY`] for unknown types or for categories
     /// whose constructor variant is benign.
     pub fn classify_constructor(type_name: &str) -> Self {
-        let Some(entry) = registry().lookup_constructor(type_name) else {
-            return Self::EMPTY;
-        };
-        bits_for_category(entry.category)
+        classify_constructor_lc(&type_name.to_lowercase())
     }
+}
+
+fn classify_global_call_lc(lc_name: &str) -> EffectSummary {
+    let Some(entry) = registry().lookup_global_lc(lc_name) else {
+        return EffectSummary::EMPTY;
+    };
+    bits_for_category(entry.category)
+}
+
+fn classify_constructor_lc(lc_type_name: &str) -> EffectSummary {
+    let Some(entry) = registry().lookup_constructor_lc(lc_type_name) else {
+        return EffectSummary::EMPTY;
+    };
+    bits_for_category(entry.category)
 }
 
 fn bits_for_category(category: Category) -> EffectSummary {
@@ -263,7 +271,8 @@ where
                 //   cannot reduce it to a static summary, so we skip.
                 let key = match callee_expr {
                     Expr::Path(name) => {
-                        let direct = EffectSummary::classify_global_call(name.as_str());
+                        let lc_name = name.as_str().to_lowercase();
+                        let direct = classify_global_call_lc(&lc_name);
                         if !direct.is_empty() {
                             summary.join_in_place(&direct);
                             None
@@ -300,7 +309,8 @@ where
                 }
             }
             Expr::New { type_name: Some(name), .. } => {
-                let bits = EffectSummary::classify_constructor(name.as_str());
+                let lc_name = name.as_str().to_lowercase();
+                let bits = classify_constructor_lc(&lc_name);
                 summary.join_in_place(&bits);
             }
             _ => {}

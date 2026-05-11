@@ -41,32 +41,36 @@ pub fn registry() -> &'static SecurityRegistry {
 /// `en` strings are skipped to keep the EN side disambiguated.
 pub struct SecurityRegistry {
     entries: &'static [SecurityEntry],
-    /// `(lower_name, kind) -> entry index`. Two indices share one map
-    /// because `kind` already separates global-method names from
-    /// constructor-type names (BSL allows the same lexeme to play both
-    /// roles for some types, e.g. `Файл`).
-    by_name_kind: FxHashMap<(String, EntryKind), usize>,
+    /// `lower_name -> entry index` for global-method names.
+    globals: FxHashMap<String, usize>,
+    /// `lower_name -> entry index` for constructor-type names.
+    constructors: FxHashMap<String, usize>,
 }
 
 impl SecurityRegistry {
     fn build() -> Self {
-        let mut by_name_kind: FxHashMap<(String, EntryKind), usize> = FxHashMap::default();
+        let mut globals: FxHashMap<String, usize> = FxHashMap::default();
+        let mut constructors: FxHashMap<String, usize> = FxHashMap::default();
 
         for (idx, entry) in ENTRIES.iter().enumerate() {
+            let map = match entry.kind {
+                EntryKind::GlobalMethod => &mut globals,
+                EntryKind::Constructor => &mut constructors,
+            };
             let ru_key = entry.ru.to_lowercase();
-            insert_key(&mut by_name_kind, ru_key.clone(), entry.kind, idx);
+            insert_key(map, ru_key.clone(), idx);
             if !entry.en.is_empty() {
                 let en_key = entry.en.to_lowercase();
                 // Some BSL types (e.g. `xBase`) share the same lexeme on
                 // both sides; skip the second insert rather than treat it
                 // as a collision.
                 if en_key != ru_key {
-                    insert_key(&mut by_name_kind, en_key, entry.kind, idx);
+                    insert_key(map, en_key, idx);
                 }
             }
         }
 
-        Self { entries: ENTRIES, by_name_kind }
+        Self { entries: ENTRIES, globals, constructors }
     }
 
     /// All entries in declaration order.
@@ -75,13 +79,50 @@ impl SecurityRegistry {
     }
 
     /// Look up a global method by name (RU or EN, case-insensitive).
+    ///
+    /// Convenience slow path for one-off lookups; hot callers that already
+    /// have a lowercased key should use [`Self::lookup_global_lc`].
     pub fn lookup_global(&self, name: &str) -> Option<&'static SecurityEntry> {
-        self.lookup_with_kind(name, EntryKind::GlobalMethod)
+        self.lookup_global_lc(&name.to_lowercase())
+    }
+
+    /// Look up a global method by an already-lowercase name.
+    ///
+    /// Hot-path variant: callers must pass a lowercased RU or EN key so the
+    /// registry can probe the `String` map with `&str` and avoid allocating.
+    pub fn lookup_global_lc(&self, lc_name: &str) -> Option<&'static SecurityEntry> {
+        debug_assert!(
+            lc_name == lc_name.to_lowercase(),
+            "lookup_global_lc requires pre-lowercased input, got: {lc_name}"
+        );
+        if lc_name.is_empty() {
+            return None;
+        }
+        self.globals.get(lc_name).map(|&idx| &self.entries[idx])
     }
 
     /// Look up a `Новый <Type>(...)` / `New <Type>(...)` entry.
+    ///
+    /// Convenience slow path for one-off lookups; hot callers that already
+    /// have a lowercased key should use [`Self::lookup_constructor_lc`].
     pub fn lookup_constructor(&self, type_name: &str) -> Option<&'static SecurityEntry> {
-        self.lookup_with_kind(type_name, EntryKind::Constructor)
+        self.lookup_constructor_lc(&type_name.to_lowercase())
+    }
+
+    /// Look up a `Новый <Type>(...)` / `New <Type>(...)` entry by an
+    /// already-lowercase type name.
+    ///
+    /// Hot-path variant: callers must pass a lowercased RU or EN key so the
+    /// registry can probe the `String` map with `&str` and avoid allocating.
+    pub fn lookup_constructor_lc(&self, lc_name: &str) -> Option<&'static SecurityEntry> {
+        debug_assert!(
+            lc_name == lc_name.to_lowercase(),
+            "lookup_constructor_lc requires pre-lowercased input, got: {lc_name}"
+        );
+        if lc_name.is_empty() {
+            return None;
+        }
+        self.constructors.get(lc_name).map(|&idx| &self.entries[idx])
     }
 
     /// Filter the catalogue by category. Returns a freshly allocated `Vec`
@@ -100,27 +141,14 @@ impl SecurityRegistry {
     ) -> Option<(&'static SecurityEntry, &'static SecurityEntry)> {
         None
     }
-
-    fn lookup_with_kind(&self, name: &str, kind: EntryKind) -> Option<&'static SecurityEntry> {
-        if name.is_empty() {
-            return None;
-        }
-        let key = name.to_lowercase();
-        self.by_name_kind.get(&(key, kind)).map(|&idx| &self.entries[idx])
-    }
 }
 
-fn insert_key(
-    map: &mut FxHashMap<(String, EntryKind), usize>,
-    key: String,
-    kind: EntryKind,
-    idx: usize,
-) {
+fn insert_key(map: &mut FxHashMap<String, usize>, key: String, idx: usize) {
     debug_assert!(
         !key.is_empty(),
         "registry entry has empty key — `en` should be checked before insertion"
     );
-    if let Some(prev) = map.insert((key, kind), idx) {
+    if let Some(prev) = map.insert(key, idx) {
         // The audit-test in `tests/security_registry.rs` enforces this on
         // CI, but a runtime collision in `build()` would silently drop a
         // previous entry — surface it on the first call.

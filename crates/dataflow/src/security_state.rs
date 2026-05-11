@@ -413,7 +413,8 @@ fn recognize_security_call(
     let Expr::Path(callee_name) = body.expr(ExprId::from_idx(*callee)) else {
         return None;
     };
-    let entry = registry().lookup_global(callee_name.as_str())?;
+    let lc_name = callee_name.as_str().to_lowercase();
+    let entry = registry().lookup_global_lc(&lc_name)?;
     if !matches!(entry.category, Category::PrivilegedMode | Category::SafeMode) {
         return None;
     }
