@@ -36,7 +36,9 @@
 use bsl_metadata::{Form, FormElement};
 use hir_def::configs::VisibleConfig;
 use hir_def::resolver::Resolver;
-use hir_def::ty::{FormDataBinding, FormDataTarget, FormElementKind, MetadataKind, Ty};
+use hir_def::ty::{
+    FormDataBinding, FormDataKind, FormDataTarget, FormElementKind, MetadataKind, Ty,
+};
 use hir_def::Name;
 
 use crate::db::HirDatabase;
@@ -273,9 +275,11 @@ fn resolve_data_path(
     }
 
     let target = match &current_ty {
-        // Tabular-section reference: enumerator stores the qualified
-        // name as `"Owner.Section"`. Split it back into structured
-        // form so Phase 5 doesn't have to re-parse.
+        // MDO tabular-section reference: both the object-module surface
+        // (`MetadataRef{TabularSection}`) and the managed-form surface
+        // (`FormData{Collection}`) store the qualified name as
+        // `"Owner.Section"`. Split it back into structured form so Phase 5
+        // doesn't have to re-parse.
         //
         // Scope note: `<Columns>`-backed form attributes (e.g. an
         // attribute typed as `v8:ValueTable` with a `<Columns>`
@@ -292,6 +296,15 @@ fn resolve_data_path(
             let (owner, section) = raw.rsplit_once('.')?;
             FormDataTarget::TabularSection {
                 mdo_type: *parent,
+                owner: Name::new(owner),
+                section: Name::new(section),
+            }
+        }
+        Ty::FormData { kind: FormDataKind::Collection, underlying: Some((mdo_type, name)) } => {
+            let raw = name.as_str();
+            let (owner, section) = raw.rsplit_once('.')?;
+            FormDataTarget::TabularSection {
+                mdo_type: *mdo_type,
                 owner: Name::new(owner),
                 section: Name::new(section),
             }

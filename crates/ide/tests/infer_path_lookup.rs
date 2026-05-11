@@ -93,3 +93,24 @@ fn implicit_local_assignment_shadows_module_procedure() {
         "implicit local must shadow module procedure; `Рез` should inherit Number"
     );
 }
+
+#[test]
+fn implicit_local_assignment_shadows_builtin_in_value_position() {
+    // Builtins are resolved from call syntax (`Строка(...)`), not from a
+    // bare value/receiver token. Once `Строка = 42` creates an implicit
+    // local, `Рез = Строка` must read the local Number rather than collapse
+    // to the platform builtin/function-name fallback.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Строка = 42;
+    Рез = Строка;
+    Возврат Рез;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_type(&db, file_id, "рез"),
+        Some(Ty::Number),
+        "implicit local named like a builtin must win in value position"
+    );
+}
