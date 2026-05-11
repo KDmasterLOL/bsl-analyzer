@@ -9,9 +9,11 @@
 //!
 //! Invariants locked in:
 //!
-//! 1. **Single Resolver cascade** — builtins shadow both user locals and
-//!    manager-plural globals. A regression here would mean some callsite
-//!    re-introduced a parallel lookup that bypasses `Scope::Builtins`.
+//! 1. **Single Resolver cascade** — user bindings shadow manager-plural and
+//!    platform names in value position, while builtin calls (`Name(...)`)
+//!    still resolve through the call-specific builtin path. A regression here
+//!    would mean some callsite re-introduced a parallel lookup that bypasses
+//!    the shared cascade.
 //!
 //! 2. **One lowering pipeline** — `Новый X`, `Тип("…")`-shaped JSDoc, and
 //!    manager-chain calls all share `TyLoweringContext`. The test below

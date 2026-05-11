@@ -213,7 +213,12 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
     let type_key = platform_type_key(receiver_ty)?;
     let data = PlatformData::instance();
     let method = data.get_method(type_key, method_name.as_str())?;
-    Some(to_method_info(method))
+    let mut info = to_method_info(method);
+    if let Some(row) = form_data_collection_row_ty(receiver_ty) {
+        info.return_ty =
+            rewrite_form_data_collection_item_return(info.return_ty, &row, method.name.as_str());
+    }
+    Some(info)
 }
 
 /// Pick the `PlatformData::get_method` key for a scalar receiver.
@@ -290,6 +295,44 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
         // no platform table to query.
         Ty::FormControl { kind, .. } => hir_def::ty::form_control_platform_type_name(*kind),
     }
+}
+
+fn form_data_collection_row_ty(receiver_ty: &Ty) -> Option<Ty> {
+    let Ty::FormData {
+        kind: hir_def::ty::FormDataKind::Collection,
+        underlying: Some((mdo_type, section_name)),
+    } = receiver_ty
+    else {
+        return None;
+    };
+    if !section_name.as_str().contains('.') {
+        return None;
+    }
+    Some(Ty::MetadataRef {
+        kind: MetadataKind::TabularSectionRow { parent: *mdo_type },
+        name: section_name.clone(),
+    })
+}
+
+fn rewrite_form_data_collection_item_return(ty: Ty, row: &Ty, method_name: &str) -> Ty {
+    match ty {
+        Ty::PlatformObject(ref name) if is_form_data_collection_item_type_name(name.as_str()) => {
+            row.clone()
+        }
+        Ty::Union(members) => Ty::union(
+            members
+                .iter()
+                .map(|m| rewrite_form_data_collection_item_return(m.clone(), row, method_name))
+                .collect(),
+        ),
+        Ty::Array if is_row_array_method(method_name) => Ty::TypedArray(Box::new(row.clone())),
+        other => other,
+    }
+}
+
+fn is_form_data_collection_item_type_name(name: &str) -> bool {
+    let lc = name.to_lowercase();
+    lc == "данныеформыэлементколлекции" || lc == "formdatacollectionitem"
 }
 
 /// Convert a `PlatformMethod` entry into the semantic `MethodInfo`.

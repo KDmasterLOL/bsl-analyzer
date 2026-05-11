@@ -24,7 +24,7 @@
 //! silent in the inference diagnostic surface.
 
 use bsl_platform::PlatformDataInner;
-use hir::{InferenceDiagnostic, UnresolvedMethodKind};
+use hir::{InferenceDiagnostic, MetadataKind, Name, Ty, UnresolvedMethodKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::PathBuf;
@@ -67,6 +67,11 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
         .collect()
 }
 
+fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
+    use hir::HirDatabase;
+    db.infer(file_id).var_types.get(var_lower).cloned()
+}
+
 #[test]
 fn chained_form_attribute_method_call_silent() {
     // The user-reported scenario expressed through the chained shape
@@ -96,6 +101,47 @@ fn chained_form_attribute_method_call_silent() {
         kinds.is_empty(),
         "form-attribute method call must not produce UnresolvedMethodCall, got: {:?}",
         kinds
+    );
+}
+
+#[test]
+fn form_data_collection_find_by_id_silent_and_preserves_row_schema() {
+    // `НайтиПоИдентификатору` exists on `ДанныеФормыКоллекция`, not on the
+    // ordinary object-module `ТабличнаяЧасть` surface. In a managed form,
+    // `Объект.<ТЧ>` must therefore keep the form-data collection wrapper
+    // while still remembering the tabular-section row schema for chained
+    // column access.
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    let bsl = "Процедура Тест()\n    \
+        Строка = Объект.НастройкиЭксель.НайтиПоИдентификатору(1);\n    \
+        ИтогАктивна = Строка.Активна;\n\
+        КонецПроцедуры\n";
+    let (db, file_id) = setup_form_module(data_processor_module_path(), bsl);
+
+    let kinds = unresolved_kinds(&db, file_id);
+    assert!(
+        kinds.is_empty(),
+        "FormDataCollection.НайтиПоИдентификатору must not produce UnresolvedMethodCall, got: {:?}",
+        kinds
+    );
+
+    let row = Ty::MetadataRef {
+        kind: MetadataKind::TabularSectionRow { parent: bsl_metadata::MdoType::DataProcessor },
+        name: Name::new("ТестоваяОбработка.НастройкиЭксель"),
+    };
+    assert_eq!(
+        var_ty(&db, file_id, "строка"),
+        Some(Ty::union(vec![row, Ty::Undefined])),
+        "FindByID must rebind FormDataCollectionItem to the concrete tabular-section row",
+    );
+    assert_eq!(
+        var_ty(&db, file_id, "итогактивна"),
+        Some(Ty::Boolean),
+        "row column access after FindByID must keep the tabular-section schema",
     );
 }
 

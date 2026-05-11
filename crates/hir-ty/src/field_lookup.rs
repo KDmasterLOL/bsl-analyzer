@@ -54,6 +54,46 @@ pub(crate) fn project_form_data_for_fields(ty: &Ty) -> Option<Ty> {
     Some(Ty::MetadataRef { kind: object_kind, name: name.clone() })
 }
 
+fn lookup_form_data_tabular_section_field(
+    configs: &[VisibleConfig],
+    receiver_ty: &Ty,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let Ty::FormData { kind, underlying: Some((mdo_type, mdo_name)) } = receiver_ty else {
+        return None;
+    };
+    if !matches!(kind, FormDataKind::Structure | FormDataKind::StructureWithCollection) {
+        return None;
+    }
+
+    let needle = field_name.as_str().to_lowercase();
+    for cfg in configs.iter().rev() {
+        let Some(mdo) = cfg.configuration.find_metadata_object(*mdo_type, mdo_name.as_str()) else {
+            continue;
+        };
+        let Some(ts) = mdo.tabular_sections.iter().find(|ts| {
+            ts.name().to_lowercase() == needle
+                || ts.name_en().is_some_and(|en| en.to_lowercase() == needle)
+        }) else {
+            continue;
+        };
+
+        let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
+        return Some(FieldInfo {
+            name: Name::new(ts.name()),
+            name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
+            ty: Ty::FormData {
+                kind: FormDataKind::Collection,
+                underlying: Some((*mdo_type, qualified)),
+            },
+            is_readonly: false,
+            origin: crate::field_enum::FieldOrigin::TabularSection,
+        });
+    }
+
+    None
+}
+
 /// Resolve a field access on a typed receiver.
 ///
 /// Returns `None` when:
@@ -71,6 +111,10 @@ pub fn lookup_field(
     receiver_ty: &Ty,
     field_name: &Name,
 ) -> Option<FieldInfo> {
+    if let Some(info) = lookup_form_data_tabular_section_field(configs, receiver_ty, field_name) {
+        return Some(info);
+    }
+
     // Managed-form attribute projection happens BEFORE `ThisObject`
     // coercion: a `Ty::FormData { Structure | StructureWithCollection,
     // underlying: Some((mdo, n)) }` walks the MDO's attribute table for

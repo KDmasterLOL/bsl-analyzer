@@ -1231,21 +1231,17 @@ impl<'db> InferenceContext<'db> {
     ///
     /// Lookup order mirrors BSL visibility:
     ///
-    /// 1. **Platform builtins** — acknowledged by either
-    ///    [`Resolver::resolve_name`] (via the `Scope::Builtins` port into
-    ///    `bsl_platform`) **or** by the hand-curated `hir-ty::builtin`
-    ///    signature table. Either source is enough: the platform index
-    ///    covers more names, but the `hir-ty::builtin` table carries the
-    ///    only typed signatures today and includes constructor-like
-    ///    globals (`Новый`, `ПустоеЗначение`, `ОписаниеТипов`, `Выполнить`,
-    ///    …) that are absent from the platform global-function index.
-    ///    Builtins are never shadowed by user code.
-    /// 2. **Implicit locals** — BSL has no explicit `Var` declarations;
+    /// 1. **Implicit locals** — BSL has no explicit `Var` declarations;
     ///    a name springs into existence at its first assignment. The
     ///    inference context captures those types in [`Self::var_types`]
     ///    as [`Stmt::Assign`] is walked in [`Self::infer_stmts`].
-    ///    Implicit locals *do* shadow module-level names, so `var_types`
-    ///    is checked before the module/variable Resolver branches.
+    ///    In value / receiver position, implicit locals shadow module-level,
+    ///    manager, form, platform, and builtin names.
+    /// 2. **Declared locals / parameters / module symbols** — returned as
+    ///    `Unknown` today when no type was inferred yet, but they still
+    ///    shadow platform builtins in value position. Builtin functions are
+    ///    resolved from `infer_call` only when the syntax is actually a call
+    ///    (`Name(...)`), not when `Name` is a bare value.
     /// 3. **Module-level methods / variables** — returned as `Unknown`
     ///    today (no signature carrier yet); Task 2.x will synthesise
     ///    `Ty::Function` from `MethodId`.
@@ -1296,35 +1292,41 @@ impl<'db> InferenceContext<'db> {
 
         let resolved = resolver.resolve_name(self.db, name);
 
-        // 1. Builtins — union of Resolver's platform-global view and the
-        //    narrower hir-ty signature table. BSL has no first-class
-        //    function values: a bare identifier `СтрокаСоединения…`
-        //    without parentheses cannot evaluate to a function — the
-        //    only way to invoke a builtin is `Name(...)`, handled by
-        //    `infer_call`'s `Expr::Path` callee branch which looks up
-        //    the signature directly. So at value position we collapse
-        //    the builtin hit to `Ty::Unknown`; otherwise a parameter
-        //    or local variable that happens to share its name with a
-        //    platform global (e.g. the user-declared
-        //    `Знач СтрокаСоединенияИнформационнойБазы = ""`) would
-        //    false-fire `TypeMismatch { expected: String, actual:
-        //    Function }` when read as an argument.
+        // 1. BSL implicit locals shadow every global-ish name in value /
+        //    receiver position. Builtins are handled in `infer_call` only
+        //    when the syntax is a call (`Name(...)`); a bare path `Name`
+        //    cannot be a function value in BSL.
+        if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
+            trace!("resolved {} via var_types = {:?}", name, ty);
+            return ty.clone();
+        }
+
+        let user_shadows =
+            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)));
+        let body_binding_shadows = self.body_declares_binding(name);
+
+        // 2. Declared-but-untyped locals / parameters / module symbols still
+        //    shadow platform builtins and globals in value position. We may
+        //    not know their type yet, but resolving them as a builtin would
+        //    be worse: e.g. `Строка = ...; Строка.Поле` must use the local
+        //    receiver, while the builtin `Строка(...)` remains available in
+        //    call position through `infer_call`.
+        if user_shadows || body_binding_shadows {
+            return Ty::Unknown;
+        }
+
+        // 3. Builtins — union of Resolver's platform-global view and the
+        //    narrower hir-ty signature table. At value position we collapse
+        //    a builtin hit to `Ty::Unknown`; BSL has no first-class function
+        //    values, and the typed function signature path starts from
+        //    `infer_call`'s `Expr::Path` callee branch.
         let resolver_says_builtin = matches!(resolved, Some(Resolution::Builtin(_)));
         let hir_sig = builtin::builtin_functions().get(name.as_str());
         if resolver_says_builtin || hir_sig.is_some() {
             return Ty::Unknown;
         }
 
-        // 2. BSL implicit locals shadow module-level and manager names.
-        //    A user writing `Документы = 42;` rebinds the identifier in the
-        //    local scope — the manager collective is only visible if no
-        //    local assignment exists.
-        if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
-            trace!("resolved {} via var_types = {:?}", name, ty);
-            return ty.clone();
-        }
-
-        // 3. MDO plural globals (`Документы`, `Справочники`, …) lower into
+        // 4. MDO plural globals (`Документы`, `Справочники`, …) lower into
         //    `Ty::ManagerCollection(MdoType)`. This is the single path a
         //    plural form takes when no local variable shadows it; consumers
         //    (hover / completion) observe the collective type and can
@@ -1344,14 +1346,7 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        // Shared shadowing rule for steps 4 and 5: a module-level `Метод()`
-        // or `Перем` declaration with this name takes priority over any
-        // platform / form-self property. We hoist the predicate so both
-        // steps consult the same binding.
-        let user_shadows =
-            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)));
-
-        // 4. Managed-form Self property — inside a managed-form module,
+        // 5. Managed-form Self property — inside a managed-form module,
         //    bare `Элементы`, `Команды`, `Параметры`, `Заголовок`, … are
         //    properties of `ФормаКлиентскогоПриложения`. The form-self
         //    helper does a cheap platform-data lookup first, so non-form
@@ -1371,7 +1366,7 @@ impl<'db> InferenceContext<'db> {
         //    captures *assigned* implicit locals; an unassigned parameter
         //    or `Перем X;` without a prior write is invisible to it.
         //    `body_declares_binding` plugs that gap.
-        if !user_shadows && !self.body_declares_binding(name) {
+        if !user_shadows && !body_binding_shadows {
             if let Some(resolution) =
                 crate::form_self::resolve_form_self_property(self.db, &resolver, name)
             {
@@ -1380,7 +1375,7 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        // 4b. Managed-form attribute — user-declared реквизиты of the
+        // 5b. Managed-form attribute — user-declared реквизиты of the
         //     enclosing form (`<Attributes><Attribute name="…">` in
         //     Form.xml). Same shadowing gate as form-self property:
         //     module-level methods, `Перем` declarations, parameters and
@@ -1403,14 +1398,14 @@ impl<'db> InferenceContext<'db> {
         //     Cheap-first probe: `resolve_form_attribute` opens with the
         //     same `resolve_this_form` gate `form_self` uses, so non-form
         //     modules pay nothing.
-        if !user_shadows && !self.body_declares_binding(name) {
+        if !user_shadows && !body_binding_shadows {
             if let Some(ty) = crate::form_attr::resolve_form_attribute(self.db, &resolver, name) {
                 trace!("resolved {} as managed-form attribute", name);
                 return ty;
             }
         }
 
-        // 5. Platform global-context properties — top-level identifiers
+        // 6. Platform global-context properties — top-level identifiers
         //    declared on `Global context` in HBK whose declared type is the
         //    foreign key into the platform type/method catalogue
         //    (`ОбработкаОшибок: МенеджерОбработкиОшибок`,
@@ -1451,7 +1446,7 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
-        // 6. Module-level methods / variables (Unknown today; Task 2.x
+        // 7. Module-level methods / variables (Unknown today; Task 2.x
         //    will synthesise Ty::Function from MethodId).
         match resolved {
             Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => Ty::Unknown,
@@ -2855,6 +2850,13 @@ fn receiver_display_name(receiver_ty: &Ty) -> Option<hir_def::Name> {
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
         Ty::ObjectManager { kind: mdo_type, name } => {
+            let plural = mdo_type_to_plural(*mdo_type)?;
+            Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
+        }
+        Ty::FormData {
+            kind: hir_def::ty::FormDataKind::Collection,
+            underlying: Some((mdo_type, name)),
+        } => {
             let plural = mdo_type_to_plural(*mdo_type)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
