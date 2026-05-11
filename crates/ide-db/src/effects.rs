@@ -26,8 +26,8 @@
 //!
 //! `is_recursive` is set ONLY by [`detect_recursive_methods`], which
 //! follows `EdgeKind::DirectLocal` edges within a single module. Two
-//! shapes that escape this detection are documented and accepted as
-//! follow-up work, not silent bugs:
+//! cross-module shapes that escape this detection are documented and
+//! accepted as follow-up work, not silent bugs:
 //!
 //! - **Cross-module mutual recursion (`A.foo → B.bar → A.foo`).**
 //!   Salsa 0.26's `cycle_fn` recovery is *query-head dependent*: only
@@ -43,17 +43,9 @@
 //!   `module_call_summary` qualified edges (Tarjan/Kosaraju), tracked
 //!   as the follow-up task and integration-tested in §1.7.
 //!
-//! - **Self-recursion through `ЭтотОбъект.foo()`.** The HIR shape is
-//!   `Field { base: Path("ЭтотОбъект"), field: "foo" }`. `analyze_method_effects`
-//!   classifies it as `CalleeKey::Qualified`, but
-//!   [`resolve_qualified_callee`] looks only in the workspace
-//!   common-module index, which does not contain `ЭтотОбъект`. The
-//!   resolver returns `None`, no edge is recorded, and
-//!   [`detect_recursive_methods`] (which only sees `DirectLocal`
-//!   edges) misses it. The proper fix is to normalize `ЭтотОбъект` /
-//!   `ThisObject` to a `DirectLocal` edge inside the call-graph
-//!   extractor in `hir-def/call_graph.rs`, then this module
-//!   automatically picks it up. Tracked as the same follow-up.
+//! - **Self-recursion through `ЭтотОбъект.foo()`.** Fixed in this
+//!   commit: the call_graph extractor normalizes `ЭтотОбъект.foo()` to
+//!   `DirectLocal` — [`detect_recursive_methods`] now picks it up.
 //!
 //! # Cycle API verification (Salsa 0.26)
 //!
