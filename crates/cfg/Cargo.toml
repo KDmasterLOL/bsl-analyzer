@@ -16,7 +16,7 @@ hir-def = { path = "../hir-def" }
 text-size.workspace = true
 
 [dev-dependencies]
-expect-test = "1.4"
+expect-test.workspace = true
 rowan.workspace = true
 la-arena.workspace = true
 ordered-float.workspace = true

@@ -13,20 +13,17 @@ impl LoweringContext {
     /// * `field_list` - The field list AST node
     /// * `distinct` - Whether DISTINCT is specified
     /// * `top` - TOP N limit if specified
-    /// * `is_union` - Whether this is a UNION query (skips alias diagnostics)
     pub(super) fn lower_field_list(
         &mut self,
         field_list: Option<syntax::ast::SdblFieldList>,
         distinct: bool,
         top: Option<u32>,
-        is_union: bool,
     ) -> SelectHir {
         let Some(fl) = field_list else {
             return SelectHir::empty();
         };
 
-        let fields: Vec<FieldHir> =
-            fl.fields().map(|f| self.lower_selected_field(&f, is_union)).collect();
+        let fields: Vec<FieldHir> = fl.fields().map(|f| self.lower_selected_field(&f)).collect();
 
         SelectHir { fields, distinct, top }
     }
@@ -105,14 +102,9 @@ impl LoweringContext {
     ///
     /// Collects all information needed for diagnostics into HIR fields.
     /// Diagnostics are emitted in a separate post-lowering phase.
-    ///
-    /// # Arguments
-    /// * `field` - The field AST node
-    /// * `_is_union` - Whether this is a UNION query (unused, kept for API stability)
     pub(super) fn lower_selected_field(
         &mut self,
         field: &syntax::ast::SdblSelectedField,
-        _is_union: bool,
     ) -> FieldHir {
         let field_range = field.syntax().text_range();
 

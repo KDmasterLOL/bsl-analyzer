@@ -24,7 +24,9 @@ pub(crate) fn dispatch(
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if let sdbl_hir::SdblDiagnostic::IncorrectUseLikeInQuery { range } = diag {
+    if let sdbl_hir::SdblDiagnostic::LikeUsage { range, kind: sdbl_hir::LikeUsageKind::Incorrect } =
+        diag
+    {
         crate::sdbl_utils::dispatch_simple(
             ctx,
             DiagnosticCode::IncorrectUseLikeInQuery,
@@ -47,9 +49,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
+
     #[test]
     fn test_detects_invalid_like_patterns() {
         let code = r#"Процедура Тест()
@@ -88,28 +91,41 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 10, "Expected 10 incorrect LIKE usages");
-
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::IncorrectUseLikeInQuery);
-        }
-
-        let mut sorted_diagnostics = diagnostics.clone();
-        sorted_diagnostics.sort_by_key(|d| d.range.start());
-
-        // Verify diagnostic positions
-        assert_diagnostic_range(code, &sorted_diagnostics[0], 6, 8, 44);
-        assert_diagnostic_range(code, &sorted_diagnostics[1], 7, 8, 48);
-        assert_diagnostic_range(code, &sorted_diagnostics[2], 8, 8, 39);
-        assert_diagnostic_range(code, &sorted_diagnostics[3], 19, 16, 52);
-        assert_diagnostic_range(code, &sorted_diagnostics[4], 20, 16, 48);
-        assert_diagnostic_range(code, &sorted_diagnostics[5], 21, 16, 47);
-        assert_diagnostic_range(code, &sorted_diagnostics[6], 24, 15, 51);
-        assert_diagnostic_range(code, &sorted_diagnostics[7], 27, 18, 49);
-        assert_diagnostic_range(code, &sorted_diagnostics[8], 29, 8, 44);
-        assert_diagnostic_range(code, &sorted_diagnostics[9], 32, 10, 41);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IncorrectUseLikeInQuery,
+            expect![[r#"
+                IncorrectUseLikeInQuery @ 7:9..7:45
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 8:9..8:49
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 9:9..9:40
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 20:17..20:53
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 21:17..21:49
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 22:17..22:48
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 25:16..25:52
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 28:19..28:50
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 30:9..30:45
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major
+                IncorrectUseLikeInQuery @ 33:11..33:42
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -119,8 +135,11 @@ mod tests {
     Запрос = "ВЫБРАТЬ Поле1 ПОДОБНО ""шаблон"" КАК Результат ИЗ Т1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "String literal should be valid pattern");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IncorrectUseLikeInQuery,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -130,8 +149,11 @@ mod tests {
     Запрос = "ВЫБРАТЬ Поле1 ПОДОБНО &Параметр КАК Результат ИЗ Т1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Parameter should be valid pattern");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IncorrectUseLikeInQuery,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -141,8 +163,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ Поле1 ПОДОБНО Таблица.Поле2 КАК Результат ИЗ Т1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Column reference should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IncorrectUseLikeInQuery,
+            expect![[r#"
+                IncorrectUseLikeInQuery @ 3:23..3:50
+                  message: Нужно исправить выражение в соответствии со стандартом
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -152,7 +180,10 @@ mod tests {
     Запрос = "ВЫБРАТЬ &Параметр ПОДОБНО ПОДСТРОКА(""Строка"", 1, 1) КАК Результат ИЗ Т1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Function call should be valid pattern");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::IncorrectUseLikeInQuery,
+            expect![[r#""#]],
+        );
     }
 }

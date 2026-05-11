@@ -31,7 +31,8 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     #[test]
     fn test_wrong_use_function_proceed_with_call() {
         let code = r#"Процедура НегативныйТест1()
@@ -83,26 +84,23 @@ mod tests {
     Возврат Перем1;
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::WrongUseFunctionProceedWithCall)
-            .collect();
-
-        assert_eq!(diags.len(), 4, "Expected 4 diagnostics, got {}", diags.len());
-
-        // Line 2 (1-indexed), cols 4-19 (0-indexed): ПродолжитьВЫЗОВ()
-        assert_diagnostic_range(code, diags[0], 1, 4, 19);
-
-        // Line 6 (1-indexed), cols 4-19 (0-indexed): ProceedWithCall(Парам1)
-        assert_diagnostic_range(code, diags[1], 5, 4, 19);
-
-        // Line 11 (1-indexed), cols 13-28 (0-indexed): ПродолжитьВызов() with &Перед
-        assert_diagnostic_range(code, diags[2], 10, 13, 28);
-
-        // Line 17 (1-indexed), cols 13-28 (0-indexed): ProceedWithCall() with &После
-        assert_diagnostic_range(code, diags[3], 16, 13, 28);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::WrongUseFunctionProceedWithCall,
+            expect![[r#"
+                WrongUseFunctionProceedWithCall @ 2:5..2:20
+                  message: Использовать функцию ПродолжитьВызов() можно только в расширениях и только в методах с аннотацией &Вместо.
+                  severity: Blocker
+                WrongUseFunctionProceedWithCall @ 6:5..6:20
+                  message: Использовать функцию ПродолжитьВызов() можно только в расширениях и только в методах с аннотацией &Вместо.
+                  severity: Blocker
+                WrongUseFunctionProceedWithCall @ 11:14..11:29
+                  message: Использовать функцию ПродолжитьВызов() можно только в расширениях и только в методах с аннотацией &Вместо.
+                  severity: Blocker
+                WrongUseFunctionProceedWithCall @ 17:14..17:29
+                  message: Использовать функцию ПродолжитьВызов() можно только в расширениях и только в методах с аннотацией &Вместо.
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -113,12 +111,11 @@ mod tests {
     ПродолжитьВызов();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::WrongUseFunctionProceedWithCall)
-            .collect();
-        assert_eq!(diags.len(), 0, "Should not trigger for &Вместо method");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::WrongUseFunctionProceedWithCall,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -130,11 +127,10 @@ mod tests {
     Модуль.ПродолжитьВызовОбработчика();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::WrongUseFunctionProceedWithCall)
-            .collect();
-        assert_eq!(diags.len(), 0, "Similar function names should not be flagged");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::WrongUseFunctionProceedWithCall,
+            expect![[r#""#]],
+        );
     }
 }

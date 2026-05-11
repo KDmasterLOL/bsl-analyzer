@@ -34,7 +34,8 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"Процедура Тест()
@@ -55,29 +56,32 @@ mod tests {
     ExternalReports.Connect("Path", true).Create("name"); // <-- Ошибка
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingExternalCodeTools)
-            .collect();
-
-        assert_eq!(diags.len(), 7, "Expected 7 diagnostics");
-
-        // 0-indexed lines from test file:
-        // Line 1 (0-idx): ВнешниеОбработки.Подключить
-        assert_diagnostic_range(code, diags[0], 1, 19, 70);
-        // Line 2 (0-idx): ВнешниеОбработки.Создать
-        assert_diagnostic_range(code, diags[1], 2, 16, 54);
-        // Line 4 (0-idx): ExternalReports.Connect
-        assert_diagnostic_range(code, diags[2], 4, 16, 53);
-        // Line 5 (0-idx): ExternalReports.Create
-        assert_diagnostic_range(code, diags[3], 5, 12, 45);
-        // Line 7 (0-idx): РасширенияКонфигурации.Создать
-        assert_diagnostic_range(code, diags[4], 7, 17, 64);
-        // Line 9 (0-idx): РасширенияКонфигурации.Создать (inside list)
-        assert_diagnostic_range(code, diags[5], 9, 30, 78);
-        // Line 15 (0-idx): ExternalReports.Connect (chained call - only inner call detected)
-        assert_diagnostic_range(code, diags[6], 15, 4, 41);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingExternalCodeTools,
+            expect![[r#"
+            UsingExternalCodeTools @ 2:20..2:71
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 3:17..3:55
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 5:17..5:54
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 6:13..6:46
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 8:18..8:65
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 10:31..10:79
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 16:5..16:42
+              message: Potentially unsafe use of external code tools
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -87,12 +91,11 @@ mod tests {
     Справочники.ВнешниеОбработки.Подключить("ПутьКОбработке", ЛОЖЬ);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingExternalCodeTools)
-            .collect();
-        assert_eq!(diags.len(), 0, "Qualified access should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingExternalCodeTools,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -102,12 +105,11 @@ mod tests {
     Обработка.ExternalReports.Connect("Path", true);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingExternalCodeTools)
-            .collect();
-        assert_eq!(diags.len(), 0, "Variable access should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingExternalCodeTools,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -119,12 +121,20 @@ mod tests {
     РасширенияКонфигурации.Создать("Расширение");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingExternalCodeTools)
-            .collect();
-        assert_eq!(diags.len(), 3, "Should detect all Russian variants");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingExternalCodeTools,
+            expect![[r#"
+            UsingExternalCodeTools @ 3:5..3:36
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 4:5..4:37
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 5:5..5:49
+              message: Potentially unsafe use of external code tools
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -136,12 +146,20 @@ Procedure Test()
     ConfigurationExtensions.Create("Extension");
 EndProcedure
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingExternalCodeTools)
-            .collect();
-        assert_eq!(diags.len(), 3, "Should detect all English variants");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingExternalCodeTools,
+            expect![[r#"
+            UsingExternalCodeTools @ 3:5..3:42
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 4:5..4:36
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 5:5..5:48
+              message: Potentially unsafe use of external code tools
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -152,12 +170,17 @@ EndProcedure
     externaldataprocessors.create("Name");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingExternalCodeTools)
-            .collect();
-        assert_eq!(diags.len(), 2, "Should be case-insensitive");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingExternalCodeTools,
+            expect![[r#"
+            UsingExternalCodeTools @ 3:5..3:36
+              message: Potentially unsafe use of external code tools
+              severity: Warning
+            UsingExternalCodeTools @ 4:5..4:42
+              message: Potentially unsafe use of external code tools
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -168,11 +191,10 @@ EndProcedure
     ВнешниеОбработки.Создать("Имя");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingExternalCodeTools)
-            .collect();
-        assert_eq!(diags.len(), 0, "Local variable with same name should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingExternalCodeTools,
+            expect![[r#""#]],
+        );
     }
 }

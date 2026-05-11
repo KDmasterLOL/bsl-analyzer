@@ -25,10 +25,7 @@ pub use input::{
     SourceRoot, SourceRootId, SourceRootInput,
 };
 pub use locale::{Locale, UnknownLocale};
-pub use queries::{
-    method_regions_query, module_level_regions_query, parse_query, resolve_vfs_path_query,
-    RegionInfo,
-};
+pub use queries::{method_regions_query, parse_query, resolve_vfs_path_query};
 
 /// The main Salsa database trait for source file operations.
 ///
@@ -80,7 +77,10 @@ pub trait SourceDatabase: salsa::Database {
 ///
 /// ## Region Analysis
 /// - [`method_regions`](Self::method_regions) - Methods in API regions (LRU: 256)
-/// - [`module_level_regions`](Self::module_level_regions) - All top-level regions (LRU: 256)
+///
+/// Module-level regions are exposed via `hir::RegionTree::module_level_regions`
+/// (see `crates/hir-def/src/region_tree.rs`); the previous flat
+/// `module_level_regions_query` was removed in Track 2 Phase C §3 Slice 2.
 ///
 /// # Implementation Pattern
 ///
@@ -145,31 +145,6 @@ pub trait RootQueryDb: SourceDatabase {
         &self,
         file_id: FileId,
     ) -> Arc<std::collections::HashMap<syntax::TextRange, String>>;
-
-    /// Extract all module-level regions from a BSL file.
-    ///
-    /// Returns cached list of region names with their source ranges (first line only).
-    /// Only top-level regions are collected (nested regions inside methods are excluded).
-    ///
-    /// # Performance
-    /// - **LRU cache:** 256 files (region collection is inexpensive)
-    /// - **Depends on:** [`parse`](Self::parse)
-    /// - **Shared usage:** 4+ region diagnostics (NonStandardRegion, DuplicateRegion, etc.)
-    ///
-    /// # Usage Example
-    ///
-    /// ```ignore
-    /// let regions = db.module_level_regions(file_id);
-    ///
-    /// for region in regions.iter() {
-    ///     // region.name - region name (e.g., "Public", "Internal")
-    ///     // region.range - TextRange of first line of #Область directive
-    /// }
-    /// ```
-    ///
-    /// # Implementation
-    /// Should delegate to [`module_level_regions_query`].
-    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<RegionInfo>>;
 }
 
 /// Helper structure for managing file state with concurrent access.
@@ -462,11 +437,6 @@ mod tests {
         ) -> Arc<std::collections::HashMap<syntax::TextRange, String>> {
             let input = self.file_text_input(file_id);
             method_regions_query(self, input)
-        }
-
-        fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<RegionInfo>> {
-            let input = self.file_text_input(file_id);
-            module_level_regions_query(self, input)
         }
     }
 

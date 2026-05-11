@@ -45,15 +45,9 @@ pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> 
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
-
-    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
-        diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::UsingObjectNotAvailableUnix)
-            .collect()
-    }
+    use expect_test::expect;
 
     #[test]
     fn test_comprehensive() {
@@ -139,14 +133,20 @@ mod tests {
     Почта = Новый ИнтернетПочта();
     Возврат Почта;
 КонецФункции"#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 3, "Expected 3 diagnostics, got {}", diags.len());
-
-        assert_diagnostic_range(code, diags[0], 3, 11, 54);
-        assert_diagnostic_range(code, diags[1], 4, 11, 83);
-        assert_diagnostic_range(code, diags[2], 20, 9, 20);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#"
+                UsingObjectNotAvailableUnix @ 4:12..4:55
+                  message: Проверить, что задействованы аналоги "COMОбъект" при работе в Unix-клиенте.
+                  severity: Critical
+                UsingObjectNotAvailableUnix @ 5:12..5:84
+                  message: Проверить, что задействованы аналоги "COMОбъект" при работе в Unix-клиенте.
+                  severity: Critical
+                UsingObjectNotAvailableUnix @ 21:10..21:21
+                  message: Проверить, что задействованы аналоги "Почта" при работе в Unix-клиенте.
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -156,10 +156,14 @@ mod tests {
     obj = Новый COMОбъект("test");
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].code, DiagnosticCode::UsingObjectNotAvailableUnix);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#"
+                UsingObjectNotAvailableUnix @ 3:11..3:34
+                  message: Проверить, что задействованы аналоги "COMОбъект" при работе в Unix-клиенте.
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -169,8 +173,14 @@ mod tests {
     Почта = Новый Почта;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#"
+                UsingObjectNotAvailableUnix @ 3:13..3:24
+                  message: Проверить, что задействованы аналоги "Почта" при работе в Unix-клиенте.
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -182,8 +192,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Should not trigger with Linux guard");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -195,8 +208,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Should not trigger with Windows guard");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -208,8 +224,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Should not trigger with MacOS guard");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -223,8 +242,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Should not trigger with nested guard");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -234,8 +256,11 @@ mod tests {
     Почта = Новый ИнтернетПочта();
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "ИнтернетПочта should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -245,8 +270,14 @@ mod tests {
     m = New Mail;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 1, "English Mail should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#"
+                UsingObjectNotAvailableUnix @ 3:9..3:17
+                  message: Проверить, что задействованы аналоги "Mail" при работе в Unix-клиенте.
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -256,8 +287,14 @@ mod tests {
     obj = New COMObject("test");
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 1, "English COMObject should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#"
+                UsingObjectNotAvailableUnix @ 3:11..3:32
+                  message: Проверить, что задействованы аналоги "COMObject" при работе в Unix-клиенте.
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -269,7 +306,10 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "HIR should NOT detect with Windows guard");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingObjectNotAvailableUnix,
+            expect![[r#""#]],
+        );
     }
 }

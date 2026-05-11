@@ -104,15 +104,20 @@ fn is_structure_or_fixed_structure(type_name: &Option<Name>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
+
     #[test]
     fn test_no_diagnostic_for_empty_structure() {
         let code = r#"
 Результат = Новый Структура;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -120,8 +125,11 @@ mod tests {
         let code = r#"
 А = Новый Структура(Новый ФиксированнаяСтруктура(Мок_ПараметрыПроцедуры));
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -132,8 +140,11 @@ mod tests {
                              ТекстЗапроса,
                              Новый Структура);
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -143,8 +154,14 @@ mod tests {
                              Новый Структура("Код, Наименование"),
                              10);
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            expect![[r#"
+                NestedConstructorsInStructureDeclaration @ 2:13..4:33
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -154,8 +171,14 @@ Result = New Structure("GoodsData, Count",
                         New Structure("Code, Name"),
                         10);
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            expect![[r#"
+                NestedConstructorsInStructureDeclaration @ 2:10..4:28
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -163,8 +186,11 @@ Result = New Structure("GoodsData, Count",
         let code = r#"
 Result = New Structure("field1, field2, field3", New Array(), New Array(), New Array());
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -235,18 +261,34 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
     // FP
     А = Новый Структура(Новый ФиксированнаяСтруктура(Мок_ПараметрыПроцедуры));
     А = Новый ФиксированнаяСтруктура(Новый Структура("Источник, Данные"));"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 8, "Should find exactly 8 diagnostics");
-
-        // Verify exact positions (uses 0-indexed lines)
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 10, 16, 12, 36);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 14, 16, 23, 62);
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 25, 16, 27, 96);
-        assert_diagnostic_range_multiline(code, &diagnostics[3], 26, 32, 27, 95);
-        assert_diagnostic_range_multiline(code, &diagnostics[4], 38, 13, 40, 31);
-        assert_diagnostic_range_multiline(code, &diagnostics[5], 42, 13, 51, 50);
-        assert_diagnostic_range_multiline(code, &diagnostics[6], 53, 13, 55, 79);
-        assert_diagnostic_range_multiline(code, &diagnostics[7], 54, 28, 55, 78);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            expect![[r#"
+                NestedConstructorsInStructureDeclaration @ 11:17..13:37
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information
+                NestedConstructorsInStructureDeclaration @ 15:17..24:63
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information
+                NestedConstructorsInStructureDeclaration @ 26:17..28:97
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information
+                NestedConstructorsInStructureDeclaration @ 27:33..28:96
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information
+                NestedConstructorsInStructureDeclaration @ 39:14..41:32
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information
+                NestedConstructorsInStructureDeclaration @ 43:14..52:51
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information
+                NestedConstructorsInStructureDeclaration @ 54:14..56:80
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information
+                NestedConstructorsInStructureDeclaration @ 55:29..56:79
+                  message: Не используйте конструкторы с параметрами при объявлении структуры
+                  severity: Information"#]],
+        );
     }
 }

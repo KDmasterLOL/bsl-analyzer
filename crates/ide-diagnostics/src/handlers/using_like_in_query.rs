@@ -27,7 +27,10 @@ pub(crate) fn dispatch(
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if let sdbl_hir::SdblDiagnostic::UsingLikeInQuery { range } = diag {
+    // Track 2 §4 Slice 4: any LikeUsage (Allowed or Incorrect kind) triggers
+    // UsingLikeInQuery; the IncorrectUseLikeInQuery rule fires additionally
+    // for the Incorrect kind via its own handler.
+    if let sdbl_hir::SdblDiagnostic::LikeUsage { range, .. } = diag {
         crate::sdbl_utils::dispatch_simple(
             ctx,
             DiagnosticCode::UsingLikeInQuery,
@@ -46,9 +49,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_detects_like_usages_in_query_fixture() {
         let code = r#"Процедура Тест()
@@ -87,41 +90,74 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 21, "Expected 21 LIKE usages");
-
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::UsingLikeInQuery);
-            assert!(diag.message.contains("ПОДОБНО"));
-        }
-
-        let mut sorted_diagnostics = diagnostics.clone();
-        sorted_diagnostics.sort_by_key(|d| d.range.start());
-
-        // Verify all 21 diagnostic positions
-        // Note: Some positions differ by 1 char due to quote correction differences
-        assert_diagnostic_range(code, &sorted_diagnostics[0], 4, 8, 40);
-        assert_diagnostic_range(code, &sorted_diagnostics[1], 5, 8, 39);
-        assert_diagnostic_range(code, &sorted_diagnostics[2], 6, 8, 44);
-        assert_diagnostic_range(code, &sorted_diagnostics[3], 7, 8, 48);
-        assert_diagnostic_range(code, &sorted_diagnostics[4], 8, 8, 39);
-        assert_diagnostic_range(code, &sorted_diagnostics[5], 9, 8, 36);
-        assert_diagnostic_range(code, &sorted_diagnostics[6], 10, 8, 36);
-        assert_diagnostic_range(code, &sorted_diagnostics[7], 11, 8, 53);
-        assert_diagnostic_range(code, &sorted_diagnostics[8], 17, 15, 47);
-        assert_diagnostic_range(code, &sorted_diagnostics[9], 18, 16, 47);
-        assert_diagnostic_range(code, &sorted_diagnostics[10], 19, 16, 52);
-        assert_diagnostic_range(code, &sorted_diagnostics[11], 20, 16, 48);
-        assert_diagnostic_range(code, &sorted_diagnostics[12], 21, 16, 47);
-        assert_diagnostic_range(code, &sorted_diagnostics[13], 24, 15, 51);
-        assert_diagnostic_range(code, &sorted_diagnostics[14], 25, 18, 50);
-        assert_diagnostic_range(code, &sorted_diagnostics[15], 26, 18, 49);
-        assert_diagnostic_range(code, &sorted_diagnostics[16], 27, 18, 49);
-        assert_diagnostic_range(code, &sorted_diagnostics[17], 29, 8, 44);
-        assert_diagnostic_range(code, &sorted_diagnostics[18], 30, 10, 42);
-        assert_diagnostic_range(code, &sorted_diagnostics[19], 31, 10, 41);
-        assert_diagnostic_range(code, &sorted_diagnostics[20], 32, 10, 41);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingLikeInQuery,
+            expect![[r#"
+                UsingLikeInQuery @ 5:9..5:41
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 6:9..6:40
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 7:9..7:45
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 8:9..8:49
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 9:9..9:40
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 10:9..10:37
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 11:9..11:37
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 12:9..12:54
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 18:16..18:48
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 19:17..19:48
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 20:17..20:53
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 21:17..21:49
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 22:17..22:48
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 25:16..25:52
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 26:19..26:51
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 27:19..27:50
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 28:19..28:50
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 30:9..30:45
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 31:11..31:43
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 32:11..32:42
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 33:11..33:42
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -131,8 +167,14 @@ Procedure Test()
     Query = "SELECT Field1 LIKE 'pattern' AS Result FROM T1";
 EndProcedure
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "LIKE should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingLikeInQuery,
+            expect![[r#"
+                UsingLikeInQuery @ 3:21..3:34
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -142,8 +184,14 @@ EndProcedure
     Запрос = "ВЫБРАТЬ Поле1 ПОДОБНО ""шаблон"" КАК Результат ИЗ Т1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "ПОДОБНО should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingLikeInQuery,
+            expect![[r#"
+                UsingLikeInQuery @ 3:23..3:47
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -153,8 +201,14 @@ EndProcedure
     Запрос = "ВЫБРАТЬ Поле1 НЕ ПОДОБНО ""шаблон"" КАК Результат ИЗ Т1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "NOT LIKE should also trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingLikeInQuery,
+            expect![[r#"
+                UsingLikeInQuery @ 3:23..3:50
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -164,8 +218,14 @@ EndProcedure
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ГДЕ Поле1 ПОДОБНО ""шаблон""";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "LIKE in WHERE should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingLikeInQuery,
+            expect![[r#"
+                UsingLikeInQuery @ 3:35..3:59
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -175,8 +235,14 @@ EndProcedure
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО Т1.Поле1 ПОДОБНО Т2.Поле2";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "LIKE in JOIN condition should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingLikeInQuery,
+            expect![[r#"
+                UsingLikeInQuery @ 3:54..3:79
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -190,7 +256,19 @@ EndProcedure
              |ГДЕ Т1.Поле3 ПОДОБНО ""c""";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 3, "Should detect all 3 LIKE usages");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingLikeInQuery,
+            expect![[r#"
+                UsingLikeInQuery @ 4:18..4:40
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 5:18..5:40
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major
+                UsingLikeInQuery @ 7:19..7:41
+                  message: Измените выражение, чтобы не использовать 'ПОДОБНО'
+                  severity: Major"#]],
+        );
     }
 }

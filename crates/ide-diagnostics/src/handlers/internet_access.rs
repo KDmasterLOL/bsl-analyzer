@@ -53,6 +53,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::security::{registry, Category};
 use hir::{Expr, ExprId, IdConversion, Literal};
 use ide_db::TextRange;
 
@@ -70,30 +71,14 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Constructor types that indicate internet access.
-///
-/// Case-insensitive patterns (stored in lowercase).
-/// Supports both Russian and English keywords.
-const NEW_EXPRESSION_PATTERNS: &[&str] = &[
-    "ftpсоединение",
-    "ftpconnection",
-    "httpсоединение",
-    "httpconnection",
-    "wsопределения",
-    "wsdefinitions",
-    "wsпрокси",
-    "wsproxy",
-    "интернетпочтовыйпрофиль",
-    "internetmailprofile",
-    "интернетпочта",
-    "internetmail",
-    "почта",
-    "mail",
-    "httpзапрос",
-    "httprequest",
-    "интернетпрокси",
-    "internetproxy",
-];
+/// Track 2 §1.6: Constructor lookup against the security registry —
+/// `Category::Internet` covers FTP / HTTP / WS / mail / proxy types.
+/// The legacy hardcoded `NEW_EXPRESSION_PATTERNS` list is gone; the
+/// registry parity test in `bsl-platform/tests/security_registry.rs`
+/// asserts every legacy name is present, so behaviour is preserved.
+fn is_internet_constructor(name: &str) -> bool {
+    registry().lookup_constructor(name).is_some_and(|e| matches!(e.category, Category::Internet))
+}
 
 /// HIR-based check for internet access operations.
 ///
@@ -146,19 +131,14 @@ fn check_body_for_internet_access(
 
             // Pattern 1: Новый HTTPСоединение(...)
             if let Some(name) = type_name {
-                let type_text = name.as_str().to_lowercase();
-                if NEW_EXPRESSION_PATTERNS.contains(&type_text.as_str()) {
+                if is_internet_constructor(name.as_str()) {
                     detected = true;
                 }
-            } else {
+            } else if !args.is_empty() {
                 // Pattern 2: Новый("HTTPСоединение")
-                if !args.is_empty() {
-                    if let Expr::Literal(Literal::String(s)) = body.expr(ExprId::from_idx(args[0]))
-                    {
-                        let type_text = s.to_lowercase();
-                        if NEW_EXPRESSION_PATTERNS.contains(&type_text.as_str()) {
-                            detected = true;
-                        }
+                if let Expr::Literal(Literal::String(s)) = body.expr(ExprId::from_idx(args[0])) {
+                    if is_internet_constructor(s) {
+                        detected = true;
                     }
                 }
             }
@@ -174,9 +154,9 @@ fn check_body_for_internet_access(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_comprehensive() {
@@ -216,38 +196,50 @@ mod tests {
 
 Профиль = Новый Почта; // ошибка
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        // Expected 13 internet-access detections
-        assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics");
-
-        // assert_diagnostic_range uses 0-indexed lines
-
-        assert_diagnostic_range(code, &diagnostics[0], 1, 20, 75);
-
-        assert_diagnostic_range(code, &diagnostics[1], 3, 18, 72);
-
-        assert_diagnostic_range(code, &diagnostics[2], 5, 16, 80);
-
-        assert_diagnostic_range(code, &diagnostics[3], 8, 8, 111);
-
-        assert_diagnostic_range(code, &diagnostics[4], 13, 21, 65);
-
-        assert_diagnostic_range(code, &diagnostics[5], 14, 17, 35);
-
-        assert_diagnostic_range(code, &diagnostics[6], 15, 17, 47);
-
-        assert_diagnostic_range(code, &diagnostics[7], 16, 17, 43);
-
-        assert_diagnostic_range(code, &diagnostics[8], 17, 21, 51);
-
-        assert_diagnostic_range(code, &diagnostics[9], 21, 14, 43);
-
-        assert_diagnostic_range(code, &diagnostics[10], 27, 14, 32);
-
-        assert_diagnostic_range(code, &diagnostics[11], 31, 14, 35);
-
-        assert_diagnostic_range(code, &diagnostics[12], 34, 10, 21);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InternetAccess,
+            expect![[r#"
+            InternetAccess @ 2:21..2:76
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 4:19..4:73
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 6:17..6:81
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 9:9..9:112
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 14:22..14:66
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 15:18..15:36
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 16:18..16:48
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 17:18..17:44
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 18:22..18:52
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 22:15..22:44
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 28:15..28:33
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 32:15..32:36
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 35:11..35:22
+              message: Internet access detected (security review required)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -257,9 +249,14 @@ mod tests {
     HTTP = Новый HTTPСоединение("server", 80);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::InternetAccess);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InternetAccess,
+            expect![[r#"
+            InternetAccess @ 3:12..3:46
+              message: Internet access detected (security review required)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -269,9 +266,14 @@ Procedure Test()
     HTTP = New HTTPConnection("server", 80);
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::InternetAccess);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InternetAccess,
+            expect![[r#"
+            InternetAccess @ 3:12..3:44
+              message: Internet access detected (security review required)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -283,8 +285,20 @@ EndProcedure
     H3 = Новый HttpСоединение("s", 80);      // mixed
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 3);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InternetAccess,
+            expect![[r#"
+            InternetAccess @ 3:10..3:39
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 4:10..4:39
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 5:10..5:39
+              message: Internet access detected (security review required)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -311,8 +325,65 @@ EndProcedure
     P2 = Новый InternetProxy();
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 18, "All constructor types detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InternetAccess,
+            expect![[r#"
+            InternetAccess @ 3:10..3:31
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 4:10..4:31
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 5:10..5:32
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 6:10..6:32
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 7:10..7:31
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 8:10..8:31
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 9:10..9:26
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 10:10..10:25
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 11:10..11:41
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 12:10..12:37
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 13:10..13:31
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 14:10..14:30
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 15:10..15:23
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 16:10..16:22
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 17:10..17:28
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 18:10..18:29
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 19:10..19:32
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 20:10..20:31
+              message: Internet access detected (security review required)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -324,8 +395,7 @@ EndProcedure
     Т = Новый ТаблицаЗначений();
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Standard types should be ignored");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::InternetAccess, expect![[r#""#]]);
     }
 
     #[test]
@@ -335,8 +405,14 @@ EndProcedure
     Профиль = Новый("InternetMail");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "String constructor detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InternetAccess,
+            expect![[r#"
+            InternetAccess @ 3:15..3:36
+              message: Internet access detected (security review required)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -350,7 +426,22 @@ EndProcedure
     P = Новый ИнтернетПрокси();
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 4);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::InternetAccess,
+            expect![[r#"
+            InternetAccess @ 4:9..4:42
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 5:9..5:43
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 6:9..6:29
+              message: Internet access detected (security review required)
+              severity: Major
+            InternetAccess @ 7:9..7:31
+              message: Internet access detected (security review required)
+              severity: Major"#]],
+        );
     }
 }

@@ -161,34 +161,42 @@ fn create_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
+    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use expect_test::expect;
     #[test]
     fn test_empty_file() {
         let code = "";
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_single_empty_line() {
         let code = "Процедура А()\n\nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_two_empty_lines() {
         let code = "Процедура А()\n\n\nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 1, 0, 2, 0);
+        expect![[r#"
+            ConsecutiveEmptyLines @ 2:1..3:1
+              message: Найдено 2 подряд идущих пустых строк (максимум: 1)
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_spaces_only_line() {
         let code = "Процедура А()\n  \n  \nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            ConsecutiveEmptyLines @ 2:1..3:1
+              message: Найдено 2 подряд идущих пустых строк (максимум: 1)
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -197,7 +205,7 @@ mod tests {
         let diagnostics = check_ast_diagnostic(text, check);
         // NOTE: Test fixture normalizes text, so single "\n" becomes empty file
         // This is expected behavior - LineIndex doesn't count trailing empty line
-        assert_eq!(diagnostics.len(), 0, "Single newline file is normalized to empty");
+        expect![[r#""#]].assert_eq(&format_diags(text, &diagnostics));
     }
 
     #[test]
@@ -205,8 +213,11 @@ mod tests {
         // Three consecutive empty lines should produce 1 diagnostic
         let code = "Процедура А()\n\n\n\nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 1, 0, 3, 0);
+        expect![[r#"
+            ConsecutiveEmptyLines @ 2:1..4:1
+              message: Найдено 3 подряд идущих пустых строк (максимум: 1)
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -214,13 +225,20 @@ mod tests {
         // Two separate groups of consecutive empty lines
         let code = "А = 1;\n\n\nБ = 2;\n\n\nВ = 3;";
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2);
+        expect![[r#"
+            ConsecutiveEmptyLines @ 2:1..3:1
+              message: Найдено 2 подряд идущих пустых строк (максимум: 1)
+              severity: Hint
+            ConsecutiveEmptyLines @ 5:1..6:1
+              message: Найдено 2 подряд идущих пустых строк (максимум: 1)
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_no_diagnostic_for_exactly_one_empty_line_between_methods() {
         let code = "Процедура А()\nКонецПроцедуры\n\nПроцедура Б()\nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

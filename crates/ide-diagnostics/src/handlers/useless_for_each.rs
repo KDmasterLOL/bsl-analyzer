@@ -49,12 +49,9 @@ pub fn from_hir(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
-
-    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
-        diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseLessForEach).collect()
-    }
+    use expect_test::expect;
 
     #[test]
     fn test_unused_iterator() {
@@ -65,10 +62,14 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].code, DiagnosticCode::UseLessForEach);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UseLessForEach,
+            expect![[r#"
+            UseLessForEach @ 3:17..3:25
+              message: Итератор не используется в теле цикла
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -80,8 +81,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Iterator passed to method should count as usage");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UseLessForEach, expect![[r#""#]]);
     }
 
     #[test]
@@ -93,12 +93,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(
-            filter(&all).len(),
-            0,
-            "Iterator in right side of assignment should count as usage"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UseLessForEach, expect![[r#""#]]);
     }
 
     #[test]
@@ -110,8 +105,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Iterator assigned should count as usage");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UseLessForEach, expect![[r#""#]]);
     }
 
     #[test]
@@ -123,8 +117,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Property access should count as usage");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UseLessForEach, expect![[r#""#]]);
     }
 
     #[test]
@@ -137,8 +130,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Iterator in condition should count as usage");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UseLessForEach, expect![[r#""#]]);
     }
 
     #[test]
@@ -150,8 +142,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Method call on iterator should count as usage");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UseLessForEach, expect![[r#""#]]);
     }
 
     #[test]
@@ -163,8 +154,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Chained method call should count as usage");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UseLessForEach, expect![[r#""#]]);
     }
 
     #[test]
@@ -218,14 +208,17 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        let mut diags = filter(&all);
-        diags.sort_by_key(|d| d.range.start());
-
-        assert_eq!(diags.len(), 2, "Should find 2 diagnostics");
-
-        assert_diagnostic_range(code, diags[0], 2, 12, 20);
-        assert_diagnostic_range(code, diags[1], 39, 16, 26);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UseLessForEach,
+            expect![[r#"
+            UseLessForEach @ 3:13..3:21
+              message: Итератор не используется в теле цикла
+              severity: Critical
+            UseLessForEach @ 40:17..40:27
+              message: Итератор не используется в теле цикла
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -237,7 +230,6 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "HIR should not trigger for used iterator");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UseLessForEach, expect![[r#""#]]);
     }
 }

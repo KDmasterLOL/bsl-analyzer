@@ -99,14 +99,15 @@ fn is_structure_or_fixed_structure(type_name: &Option<Name>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use expect_test::expect;
     #[test]
     fn test_no_diagnostic_for_empty_structure() {
         let code = r#"
 Результат = Новый Структура;
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -115,7 +116,7 @@ mod tests {
 Результат = Новый Структура("Номенклатура, Характеристика, Количество, Стоимость");
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -124,7 +125,7 @@ mod tests {
 Результат = Новый Структура("Номенклатура, Характеристика, Количество", Номенклатура, Характеристика, 5);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -133,9 +134,11 @@ mod tests {
 Результат = Новый Структура("Номенклатура, Характеристика, Количество, Стоимость", Номенклатура, Характеристика, 5, 10);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("4"));
-        assert!(diagnostics[0].message.contains("3"));
+        expect![[r#"
+            NumberOfValuesInStructureConstructor @ 2:13..2:120
+              message: Слишком много значений в конструкторе Структура (4, при допустимом 3)
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -144,7 +147,11 @@ mod tests {
 Result = New Structure("Goods, Property, Count, Cost", Goods, Property, 5, 10);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            NumberOfValuesInStructureConstructor @ 2:10..2:79
+              message: Слишком много значений в конструкторе Структура (4, при допустимом 3)
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -153,7 +160,7 @@ Result = New Structure("Goods, Property, Count, Cost", Goods, Property, 5, 10);
 Результат = Новый ОписаниеТипов(ИсходноеОписаниеТипов, ДобавляемыеТипы, ВычитаемыеТипы, КвалификаторыЧисла, КвалификаторыСтроки);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -162,7 +169,7 @@ Result = New Structure("Goods, Property, Count, Cost", Goods, Property, 5, 10);
 Результат = Новый ФиксированнаяСтруктура("Номенклатура, Характеристика, Количество", Номенклатура, Характеристика, 5);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -255,12 +262,19 @@ Result = New FixedStructure("Goods, Property, Count", Goods, Property, 5);
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 4, "Should find exactly 4 diagnostics");
-
-        // Verify exact positions (uses 0-indexed lines)
-        assert_diagnostic_range(code, &diagnostics[0], 18, 12, 119);
-        assert_diagnostic_range(code, &diagnostics[1], 23, 28, 89);
-        assert_diagnostic_range(code, &diagnostics[2], 65, 9, 78);
-        assert_diagnostic_range(code, &diagnostics[3], 70, 28, 88);
+        expect![[r#"
+            NumberOfValuesInStructureConstructor @ 19:13..19:120
+              message: Слишком много значений в конструкторе Структура (4, при допустимом 3)
+              severity: Information
+            NumberOfValuesInStructureConstructor @ 24:29..24:90
+              message: Слишком много значений в конструкторе Структура (4, при допустимом 3)
+              severity: Information
+            NumberOfValuesInStructureConstructor @ 66:10..66:79
+              message: Слишком много значений в конструкторе Структура (4, при допустимом 3)
+              severity: Information
+            NumberOfValuesInStructureConstructor @ 71:29..71:89
+              message: Слишком много значений в конструкторе Структура (4, при допустимом 3)
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 }

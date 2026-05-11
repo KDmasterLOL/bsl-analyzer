@@ -10,9 +10,9 @@ use lsp_server::{Connection, Message, Notification, Request};
 use lsp_types::{
     notification::{Exit, Notification as _},
     request::Shutdown,
-    CodeActionProviderCapability, InitializeParams, SemanticTokensFullOptions,
-    SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    CodeActionProviderCapability, FoldingRangeProviderCapability, InitializeParams,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
     WorkDoneProgressOptions,
 };
 
@@ -152,10 +152,8 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
 
         // Schedule pending diagnostics after all events drained.
         // This ensures rapid changes (e.g., 50dd) are coalesced into a single diagnostic run.
-        if state.vfs_done {
-            if let Some(uri) = state.pending_diagnostics_uri.take() {
-                crate::handlers::schedule_diagnostics(state, &uri);
-            }
+        if let Some(uri) = state.pending_diagnostics_uri.take() {
+            crate::handlers::schedule_diagnostics(state, &uri);
         }
     }
 
@@ -190,7 +188,6 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             match n_done {
                 LoadingProgress::Finished => {
                     let finalize_start = std::time::Instant::now();
-                    state.vfs_done = true;
                     tracing::info!("VFS loading complete");
 
                     // Loader batches were already streamed into VFS as they arrived
@@ -216,6 +213,7 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     );
                     state.warm_metadata_cache();
 
+                    state.vfs_done = true;
                     state.report_progress("Loading", Progress::End, Some("Done".into()), Some(1.0));
 
                     // Schedule diagnostics for files that were opened before VFS finished
@@ -320,8 +318,19 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
     use crate::global_state::Task;
 
     match task {
-        Task::DiagnosticsReady { uri, diagnostics, generation } => {
+        Task::DiagnosticsReady { uri, diagnostics, generation, completed_at } => {
             if generation >= state.diagnostics_generation {
+                let publish_delay_ms = completed_at.elapsed().as_millis() as u64;
+                let diagnostic_count = diagnostics.len();
+                let allocated_mb = profile::memory_usage().allocated.megabytes();
+                tracing::info!(
+                    %uri,
+                    generation,
+                    publish_delay_ms,
+                    diagnostic_count,
+                    allocated_mb,
+                    "publishing diagnostics",
+                );
                 let params =
                     lsp_types::PublishDiagnosticsParams { uri, diagnostics, version: None };
                 let notification =
@@ -335,8 +344,12 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
                 );
             }
         }
-        Task::DiagnosticsCancelled { generation } => {
-            tracing::debug!(generation, "diagnostics cancelled");
+        Task::DiagnosticsCancelled { generation, completed_at } => {
+            tracing::debug!(
+                generation,
+                publish_delay_ms = completed_at.elapsed().as_millis() as u64,
+                "diagnostics cancelled",
+            );
         }
         Task::DependenciesPreloaded { file_id, count } => {
             tracing::debug!(file_id = file_id.0, count, "dependencies preloaded");
@@ -482,9 +495,9 @@ fn handle_vfs_msg(
 /// Handles an LSP request.
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
-        CodeActionRequest, Completion, DocumentSymbolRequest, Formatting, GotoDefinition,
-        HoverRequest, OnTypeFormatting, RangeFormatting, References, SemanticTokensFullRequest,
-        SignatureHelpRequest,
+        CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
+        FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest, OnTypeFormatting,
+        RangeFormatting, References, SemanticTokensFullRequest, SignatureHelpRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -498,6 +511,8 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         // main loop stays responsive to $/cancelRequest and subsequent edits.
         .on_latency::<GotoDefinition>(crate::handlers::handle_goto_definition)
         .on_latency::<References>(crate::handlers::handle_find_references)
+        .on_latency::<DocumentHighlightRequest>(crate::handlers::handle_document_highlight)
+        .on_latency::<FoldingRangeRequest>(crate::handlers::handle_folding_range)
         .on_latency::<HoverRequest>(crate::handlers::handle_hover)
         .on_latency::<Completion>(crate::handlers::handle_completion)
         .on_latency::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
@@ -581,6 +596,12 @@ fn server_capabilities() -> ServerCapabilities {
         // Document symbols (outline, breadcrumbs)
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
 
+        // Document highlights (same-document occurrences)
+        document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
+
+        // Folding ranges
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+
         // Code actions (quick fixes)
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
 
@@ -622,5 +643,8 @@ mod tests {
             }
             _ => panic!("Expected incremental text document sync"),
         }
+
+        assert_eq!(caps.document_highlight_provider, Some(lsp_types::OneOf::Left(true)));
+        assert_eq!(caps.folding_range_provider, Some(FoldingRangeProviderCapability::Simple(true)));
     }
 }

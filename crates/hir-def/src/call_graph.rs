@@ -274,9 +274,14 @@ fn extract_from_body(
                     }
                     // Field { base: Path(module), field: method } — streaming mode
                     Expr::Field { base: field_base, field } => {
-                        if let Some(edge) =
-                            field_callee_to_edge(body, caller, *field_base, field, range)
-                        {
+                        if let Some(edge) = field_callee_to_edge(
+                            body,
+                            caller,
+                            *field_base,
+                            field,
+                            range,
+                            local_method_ids,
+                        ) {
                             call_edges.push(edge);
                         }
                     }
@@ -414,6 +419,7 @@ fn qualified_path_to_edge(
 /// Build a CallEdge from `Call { callee: Field { base, field } }` pattern.
 ///
 /// Handles two cases:
+/// - `Field { base: Path(ЭтотОбъект), field: method }` → direct local call
 /// - `Field { base: Path(module), field: method }` → 2-segment qualified call
 /// - `Field { base: Field { base: Path(mdo_type), field: mdo_name }, field: method }` → 3-segment manager access
 fn field_callee_to_edge(
@@ -422,17 +428,36 @@ fn field_callee_to_edge(
     field_base: ExprIdx,
     field: &Name,
     range: TextRange,
+    local_method_ids: &FxHashMap<String, u32>,
 ) -> Option<CallEdge> {
     match body.expr_idx(field_base) {
-        Expr::Path(module_name) => Some(CallEdge {
-            caller,
-            target: CallTarget::QualifiedModule {
-                module_name: module_name.clone(),
-                method_name: field.clone(),
-            },
-            kind: EdgeKind::DirectQualifiedModule,
-            range,
-        }),
+        Expr::Path(module_name) => {
+            let module_name_lower = module_name.as_str().to_lowercase();
+            if is_this_object(&module_name_lower) {
+                let method_name_lower = field.as_str().to_lowercase();
+                let target =
+                    if let Some(&callee_local_id) = local_method_ids.get(&method_name_lower) {
+                        CallTarget::Local { callee_local_id }
+                    } else {
+                        tracing::debug!(
+                            method_name = field.as_str(),
+                            "Unresolved this-object method call in call graph extraction"
+                        );
+                        CallTarget::ThisObjectMethod { method_name: field.clone() }
+                    };
+                Some(CallEdge { caller, target, kind: EdgeKind::DirectLocal, range })
+            } else {
+                Some(CallEdge {
+                    caller,
+                    target: CallTarget::QualifiedModule {
+                        module_name: module_name.clone(),
+                        method_name: field.clone(),
+                    },
+                    kind: EdgeKind::DirectQualifiedModule,
+                    range,
+                })
+            }
+        }
         Expr::Field { base: inner_base, field: inner_field } => {
             if let Expr::Path(mdo_type_name) = body.expr_idx(*inner_base) {
                 let target =
@@ -650,6 +675,88 @@ mod tests {
             CallTarget::QualifiedModule { module_name, method_name }
                 if module_name.as_str() == "ОбщийМодуль"
                     && method_name.as_str() == "ВнешнийМетод"
+        ));
+    }
+
+    #[test]
+    fn test_this_object_call_normalized_to_direct_local() {
+        let code = r#"
+Процедура A()
+    ЭтотОбъект.B();
+КонецПроцедуры
+
+Процедура B()
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        let b_id = summary
+            .methods
+            .iter()
+            .find(|method| method.name.as_str() == "B")
+            .expect("B method must be extracted")
+            .local_id;
+        assert_eq!(summary.call_edges.len(), 1);
+        assert_eq!(summary.call_edges[0].kind, EdgeKind::DirectLocal);
+        assert_eq!(summary.call_edges[0].target, CallTarget::Local { callee_local_id: b_id });
+    }
+
+    #[test]
+    fn test_this_object_call_english_normalized() {
+        let code = r#"
+Procedure A()
+    ThisObject.B();
+EndProcedure
+
+Procedure B()
+EndProcedure
+"#;
+        let summary = parse_and_extract(code);
+
+        let b_id = summary
+            .methods
+            .iter()
+            .find(|method| method.name.as_str() == "B")
+            .expect("B method must be extracted")
+            .local_id;
+        assert_eq!(summary.call_edges.len(), 1);
+        assert_eq!(summary.call_edges[0].kind, EdgeKind::DirectLocal);
+        assert_eq!(summary.call_edges[0].target, CallTarget::Local { callee_local_id: b_id });
+    }
+
+    #[test]
+    fn test_this_object_call_unknown_method_emits_this_object_method_variant() {
+        let code = r#"
+Процедура A()
+    ЭтотОбъект.Unknown();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        assert_eq!(summary.call_edges.len(), 1);
+        assert_eq!(summary.call_edges[0].kind, EdgeKind::DirectLocal);
+        assert_eq!(
+            summary.call_edges[0].target,
+            CallTarget::ThisObjectMethod { method_name: Name::new("Unknown") }
+        );
+    }
+
+    #[test]
+    fn test_qualified_module_call_unchanged() {
+        let code = r#"
+Процедура Тест()
+    СоседнийМодуль.Метод();
+КонецПроцедуры
+"#;
+        let summary = parse_and_extract(code);
+
+        assert_eq!(summary.call_edges.len(), 1);
+        assert_eq!(summary.call_edges[0].kind, EdgeKind::DirectQualifiedModule);
+        assert!(matches!(
+            &summary.call_edges[0].target,
+            CallTarget::QualifiedModule { module_name, method_name }
+                if module_name.as_str() == "СоседнийМодуль"
+                    && method_name.as_str() == "Метод"
         ));
     }
 

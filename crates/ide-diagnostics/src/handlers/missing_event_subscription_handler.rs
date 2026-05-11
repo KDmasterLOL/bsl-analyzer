@@ -35,8 +35,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // 3. Load configuration metadata
-    let configuration = match ctx.load_configuration() {
+    // 3. Load main configuration — `event_subscriptions()` is a main-only
+    // collection (CFEs cannot declare new event subscriptions), so we
+    // iterate the main config; the per-handler CommonModule lookup goes
+    // through `is_common_module_anywhere` / `find_common_module_anywhere`
+    // because handlers may resolve to a CommonModule defined in a CFE.
+    let configuration = match ctx.main_configuration() {
         Some(config) => config,
         None => return Vec::new(),
     };
@@ -44,7 +48,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 4. Process all event subscriptions
     let mut diagnostics = Vec::new();
     for event_sub in configuration.event_subscriptions() {
-        check_event_subscription(ctx, event_sub, &configuration, code, &mut diagnostics);
+        check_event_subscription(ctx, event_sub, code, &mut diagnostics);
     }
 
     diagnostics
@@ -66,7 +70,6 @@ fn is_session_module(ctx: &DiagnosticsContext) -> bool {
 fn check_event_subscription(
     ctx: &DiagnosticsContext,
     event_sub: &EventSubscription,
-    configuration: &bsl_metadata::Configuration,
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -99,9 +102,9 @@ fn check_event_subscription(
         None => return, // Invalid prefix, ignore
     };
 
-    // CHECK 3: CommonModule exists
-    let common_module = match configuration.find_common_module(&handler.module_name) {
-        Some(cm) => cm,
+    // CHECK 3: CommonModule exists somewhere (main or CFE).
+    let (_visible, common_module) = match ctx.find_common_module_anywhere(&handler.module_name) {
+        Some(found) => found,
         None => {
             diagnostics.push(create_diagnostic(
                 ctx,
@@ -127,57 +130,57 @@ fn check_event_subscription(
     }
 
     // CHECK 5 & 6: Method exists and exported
-    check_method(ctx, event_sub, &handler, common_module, code, diagnostics);
+    check_method(ctx, event_sub, &handler, code, diagnostics);
 }
 
-/// Validate method exists and is exported
+/// Validate method exists and is exported across CFE-unioned defining files.
+///
+/// 1C extension semantics treat same-name CommonModules across main + CFE
+/// as one logical module whose methods are unioned across all defining
+/// files. A handler resolved here may be defined in any one of them, so
+/// we iterate every defining file via `find_common_module_files_anywhere`
+/// and accept the first exported match. Only when **no** defining file
+/// has the method (or every file has it as non-export) do we emit a
+/// diagnostic — this is the same posture as
+/// `missed_required_parameter::check_qualified_call`.
 fn check_method(
     ctx: &DiagnosticsContext,
     event_sub: &EventSubscription,
     handler: &EventSubscriptionHandler,
-    common_module: &bsl_metadata::CommonModule,
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Resolve CommonModule file via VFS
-    let module_file_id = match ctx.find_common_module_file(common_module) {
-        Some(id) => id,
-        None => return, // Module has no source code, skip method check
-    };
-
-    // Build SymbolTree for CommonModule
-    let module_id = ModuleId::new(module_file_id);
-    let symbol_tree = ctx.symbol_tree_for(module_id);
-
-    // Lookup method
-    let method_name_obj = Name::new(&handler.method_name);
-    let method = symbol_tree.find_method(&method_name_obj);
-
-    match method {
-        None => {
-            // CHECK 5: Method does not exist
-            diagnostics.push(create_diagnostic(
-                ctx,
-                DiagnosticType::MissingMethod,
-                event_sub.name(),
-                &format!("{}.{}", handler.module_name, handler.method_name),
-                code,
-            ));
-        }
-        Some(m) if !m.is_export => {
-            // CHECK 6: Method not exported
-            diagnostics.push(create_diagnostic(
-                ctx,
-                DiagnosticType::NonExportMethod,
-                event_sub.name(),
-                &format!("{}.{}", handler.module_name, handler.method_name),
-                code,
-            ));
-        }
-        Some(_) => {
-            // Valid: method exists and is exported
-        }
+    let module_files = ctx.find_common_module_files_anywhere(&handler.module_name);
+    if module_files.is_empty() {
+        // No source code in any visible configuration — skip method check.
+        return;
     }
+
+    let method_name_obj = Name::new(&handler.method_name);
+    let mut saw_non_export = false;
+
+    for module_file_id in module_files {
+        let module_id = ModuleId::new(module_file_id);
+        let symbol_tree = ctx.symbol_tree_for(module_id);
+        let Some(method) = symbol_tree.find_method(&method_name_obj) else {
+            continue;
+        };
+        if method.is_export {
+            // Valid — method exists and is exported in some defining file.
+            return;
+        }
+        saw_non_export = true;
+    }
+
+    let detail = format!("{}.{}", handler.module_name, handler.method_name);
+    let dtype = if saw_non_export {
+        // CHECK 6: method exists in some defining file but never as export.
+        DiagnosticType::NonExportMethod
+    } else {
+        // CHECK 5: method does not exist in any defining file.
+        DiagnosticType::MissingMethod
+    };
+    diagnostics.push(create_diagnostic(ctx, dtype, event_sub.name(), &detail, code));
 }
 
 /// Diagnostic type for different validation failures
@@ -258,8 +261,9 @@ fn create_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, Severity};
+    use crate::test_utils::format_diags;
+    use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::path::PathBuf;
@@ -327,50 +331,25 @@ mod tests {
         let code = "Функция Маркер()\nКонецФункции\n";
         let (diagnostics, file_content) = check_diagnostic(code, fixtures_dir);
 
-        // Should find 6 diagnostics
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics, found {}", diagnostics.len());
-
-        // All diagnostics should be at line 1, columns 1-8 (range 0-7)
-        for (i, diagnostic) in diagnostics.iter().enumerate() {
-            assert_diagnostic_range(&file_content, diagnostic, 0, 0, 7);
-            assert_eq!(
-                diagnostic.severity,
-                Severity::Blocker,
-                "Diagnostic {} should be BLOCKER",
-                i
-            );
-        }
-
-        // Verify messages (order-independent)
-        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
-
-        // Check for specific error messages
-        assert!(
-            messages
-                .iter()
-                .any(|m| m.contains("ОбщийПодпискиНаСобытия") && m.contains("Создайте модуль")),
-            "Should have MissingModule diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("некорректный обработчик")),
-            "Should have IncorrectFormat diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("Добавьте \"Сервер\"")),
-            "Should have ShouldBeServer diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("Заполните обработчик")),
-            "Should have EmptyHandler diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("ПодпискаНаСобытиеПриУстановкеНовогоКода")),
-            "Should have MissingMethod diagnostic"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("РегистрацияИзмененийПередУдалением")),
-            "Should have NonExportMethod diagnostic"
-        );
+        expect![[r#"
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Добавьте "Сервер" модулю "КлиентскийОбщийМодуль" или исправьте некорректный обработчик подписки на событие "ПередЗаписьюДокумента"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Добавьте "Экспорт" процедуре "ПервыйОбщийМодуль.РегистрацияИзмененийПередУдалением"  или исправьте некорректный обработчик подписки на событие "РегистрацияИзмененийПередУдалением"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Заполните обработчик подписки на событие "ПередЗаписьюКонстанты"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Исправьте некорректный обработчик "CommonModule.ОбщийПодпискиНаСобытия" у подписки на событие "ПриЗаписиДокумента"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Создайте модуль "ОбщийПодпискиНаСобытия" или исправьте некорректный обработчик подписки на событие "ПриЗаписиСправочника"
+              severity: Blocker
+            MissingEventSubscriptionHandler @ 1:1..1:8
+              message: Создайте процедуру "ПервыйОбщийМодуль.ПодпискаНаСобытиеПриУстановкеНовогоКода" или исправьте некорректный обработчик подписки на событие "ПриУстановкеНовогоКода"
+              severity: Blocker"#]].assert_eq(&format_diags(&file_content, &diagnostics));
     }
 
     #[test]
@@ -403,7 +382,6 @@ mod tests {
 
         let diagnostics = check(&ctx);
 
-        // Should return empty for non-SessionModule
-        assert_eq!(diagnostics.len(), 0, "Non-SessionModule should have no diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags("Процедура Тест()\nКонецПроцедуры", &diagnostics));
     }
 }

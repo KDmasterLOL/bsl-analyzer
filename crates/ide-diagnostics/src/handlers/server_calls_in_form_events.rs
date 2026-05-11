@@ -239,8 +239,22 @@ mod tests {
 
     use super::*;
     use crate::test_utils::{
-        check_hir_diagnostic, check_metadata_diagnostic, check_metadata_diagnostic_with_fixtures,
+        check_diagnostics_snapshot_for, check_metadata_diagnostic,
+        check_metadata_diagnostic_with_fixtures, format_diags,
     };
+    use expect_test::expect;
+
+    fn check_server_calls_snapshot(
+        code: &str,
+        diagnostics: Vec<Diagnostic>,
+        expected: expect_test::Expect,
+    ) {
+        let diagnostics = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
+            .collect::<Vec<_>>();
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
 
     fn form_module_metadata(form_xml: &str) -> hir::ModuleMetadata {
         let form = bsl_metadata::xml_parser::parse_form_xml(form_xml).unwrap();
@@ -270,13 +284,11 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let server_calls_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
-            .collect();
-
-        assert_eq!(server_calls_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ServerCallsInFormEvents,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -292,13 +304,11 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let server_calls_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
-            .collect();
-
-        assert_eq!(server_calls_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ServerCallsInFormEvents,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -314,13 +324,11 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let server_calls_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
-            .collect();
-
-        assert_eq!(server_calls_diags.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ServerCallsInFormEvents,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -354,15 +362,13 @@ mod tests {
 
         let metadata = form_module_metadata(form_xml);
         let diagnostics = check_metadata_diagnostic(metadata, code, |_metadata, ctx| check(ctx));
-        let server_calls_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
-            .collect();
-
-        assert_eq!(server_calls_diags.len(), 1);
-        assert_eq!(
-            server_calls_diags[0].message,
-            "В событиях ПриАктивизацииСтроки и НачалоВыбора не должно быть вызовов серверных процедур. Процедура \"СерверныйМетод\" выполняется на сервере"
+        check_server_calls_snapshot(
+            code,
+            diagnostics,
+            expect![[r#"
+            ServerCallsInFormEvents @ 8:5..8:21
+              message: В событиях ПриАктивизацииСтроки и НачалоВыбора не должно быть вызовов серверных процедур. Процедура "СерверныйМетод" выполняется на сервере
+              severity: Critical"#]],
         );
     }
 
@@ -395,16 +401,14 @@ mod tests {
         let metadata = form_module_metadata(form_xml);
         let diagnostics =
             check_metadata_diagnostic_with_fixtures(metadata, fixture, |_metadata, ctx| check(ctx));
-        let server_calls_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
-            .collect();
-
-        assert_eq!(server_calls_diags.len(), 1);
-        assert!(
-            server_calls_diags[0].message.contains("СерверныйМетод"),
-            "unexpected message: {}",
-            server_calls_diags[0].message
+        let source = fixture.split("//- /test.bsl").nth(1).unwrap_or(fixture);
+        check_server_calls_snapshot(
+            source,
+            diagnostics,
+            expect![[r#"
+            ServerCallsInFormEvents @ 4:4..4:32
+              message: В событиях ПриАктивизацииСтроки и НачалоВыбора не должно быть вызовов серверных процедур. Процедура "СерверныйМетод" выполняется на сервере
+              severity: Critical"#]],
         );
     }
 
@@ -434,16 +438,7 @@ mod tests {
 
         let metadata = form_module_metadata(form_xml);
         let diagnostics = check_metadata_diagnostic(metadata, code, |_metadata, ctx| check(ctx));
-        let server_calls_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
-            .collect();
-
-        assert_eq!(
-            server_calls_diags.len(),
-            0,
-            "НаСервереБезКонтекста не должен вызывать диагностику"
-        );
+        check_server_calls_snapshot(code, diagnostics, expect![[r#""#]]);
     }
 
     #[test]
@@ -477,21 +472,13 @@ mod tests {
 
         let metadata = form_module_metadata(form_xml);
         let diagnostics = check_metadata_diagnostic(metadata, code, |_metadata, ctx| check(ctx));
-        let server_calls_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ServerCallsInFormEvents)
-            .collect();
-
-        assert_eq!(server_calls_diags.len(), 1, "Should detect server call through idle handler");
-        assert_eq!(
-            server_calls_diags[0].severity,
-            crate::Severity::Information,
-            "Severity should be Information for idle handler path"
-        );
-        assert!(
-            server_calls_diags[0].message.contains("обработчике ожидания"),
-            "Message should mention idle handler: {}",
-            server_calls_diags[0].message
+        check_server_calls_snapshot(
+            code,
+            diagnostics,
+            expect![[r#"
+            ServerCallsInFormEvents @ 8:5..8:21
+              message: В обработчике ожидания, подключённом из события формы, рекомендуется использовать &НаСервереБезКонтекста. Процедура "СерверныйМетод" выполняется на сервере с контекстом
+              severity: Information"#]],
         );
     }
 
@@ -522,9 +509,13 @@ mod tests {
         let metadata = form_module_metadata(form_xml);
         let diagnostics = check_metadata_diagnostic(metadata, code, |_metadata, ctx| check(ctx));
 
-        assert!(
-            diagnostics.iter().any(|d| d.code == DiagnosticCode::ServerCallsInFormEvents),
-            "expected case-insensitive handler lookup to find the method"
+        check_server_calls_snapshot(
+            code,
+            diagnostics,
+            expect![[r#"
+            ServerCallsInFormEvents @ 8:5..8:21
+              message: В событиях ПриАктивизацииСтроки и НачалоВыбора не должно быть вызовов серверных процедур. Процедура "СерверныйМетод" выполняется на сервере
+              severity: Critical"#]],
         );
     }
 }

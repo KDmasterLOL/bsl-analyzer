@@ -67,8 +67,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"Перем ёжики; // Здесь должна сработать диагностика
@@ -79,16 +80,26 @@ mod tests {
     Сообщить(СтрШаблон(ТекстСообщения, Ёлки)); // Здесь должна сработать диагностика
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics");
-
-        // Expected diagnostic positions:
-        assert_diagnostic_range(code, &diagnostics[0], 0, 6, 11);
-        assert_diagnostic_range(code, &diagnostics[1], 2, 10, 20);
-        assert_diagnostic_range(code, &diagnostics[2], 2, 21, 25);
-        assert_diagnostic_range(code, &diagnostics[3], 3, 13, 17);
-        assert_diagnostic_range(code, &diagnostics[4], 5, 39, 43);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::YoLetterUsage,
+            expect![[r#"
+            YoLetterUsage @ 1:7..1:12
+              message: В текстах модулей не допускается использовать букву "Ё".
+              severity: Hint
+            YoLetterUsage @ 3:11..3:21
+              message: В текстах модулей не допускается использовать букву "Ё".
+              severity: Hint
+            YoLetterUsage @ 3:22..3:26
+              message: В текстах модулей не допускается использовать букву "Ё".
+              severity: Hint
+            YoLetterUsage @ 4:14..4:18
+              message: В текстах модулей не допускается использовать букву "Ё".
+              severity: Hint
+            YoLetterUsage @ 6:40..6:44
+              message: В текстах модулей не допускается использовать букву "Ё".
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -98,8 +109,7 @@ mod tests {
     Сообщить("Ёлка и ёжик в строке");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "String literals should not be flagged");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::YoLetterUsage, expect![[r#""#]]);
     }
 
     #[test]
@@ -109,23 +119,32 @@ mod tests {
 Процедура Ежик()
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Regular 'е' should not be flagged");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::YoLetterUsage, expect![[r#""#]]);
     }
 
     #[test]
     fn test_lowercase_yo() {
         let code = r#"Перем ёжик;"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 0, 6, 10);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::YoLetterUsage,
+            expect![[r#"
+            YoLetterUsage @ 1:7..1:11
+              message: В текстах модулей не допускается использовать букву "Ё".
+              severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_uppercase_yo() {
         let code = r#"Перем Ёлка;"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 0, 6, 10);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::YoLetterUsage,
+            expect![[r#"
+            YoLetterUsage @ 1:7..1:11
+              message: В текстах модулей не допускается использовать букву "Ё".
+              severity: Hint"#]],
+        );
     }
 }

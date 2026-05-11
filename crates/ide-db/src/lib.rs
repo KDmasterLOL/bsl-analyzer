@@ -24,6 +24,7 @@ pub use vfs;
 // ========================================================================
 
 pub mod database;
+pub mod effects;
 pub mod features;
 pub mod metadata;
 pub mod provider;
@@ -61,6 +62,12 @@ pub use streaming::{
 pub use queries::{
     all_sdbl_in_file_query, configuration_path_for_file, line_index_query, liveness_analysis_query,
     method_cfg_query, module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
+};
+
+// Track 2 §1.4b — security/effect Salsa wrappers
+pub use effects::{
+    method_effect_summary_query, module_effect_summaries_query, module_security_state_query,
+    ModuleEffectSummaries, ModuleSecurityState,
 };
 
 // Metadata helpers

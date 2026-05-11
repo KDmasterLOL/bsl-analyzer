@@ -101,9 +101,8 @@ fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsCont
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_metadata_diagnostic,
-    };
+    use crate::test_utils::{check_ast_diagnostic, check_metadata_diagnostic, format_diags};
+    use expect_test::expect;
 
     fn object_module_metadata() -> hir::ModuleMetadata {
         hir::ModuleMetadata::unknown(bsl_metadata::ModuleType::ObjectModule)
@@ -126,11 +125,17 @@ mod tests {
         let diagnostics =
             check_metadata_diagnostic(object_module_metadata(), code, |_, ctx| super::check(ctx));
 
-        assert_eq!(diagnostics.len(), 3, "Expected 3 diagnostics");
-
-        assert_diagnostic_range(code, &diagnostics[0], 3, 0, 10);
-        assert_diagnostic_range(code, &diagnostics[1], 4, 0, 10);
-        assert_diagnostic_range(code, &diagnostics[2], 8, 0, 10);
+        expect![[r#"
+            CompilationDirectiveNeedLess @ 4:1..4:11
+              message: Удалите директиву компиляции
+              severity: Warning
+            CompilationDirectiveNeedLess @ 5:1..5:11
+              message: Удалите директиву компиляции
+              severity: Warning
+            CompilationDirectiveNeedLess @ 9:1..9:11
+              message: Удалите директиву компиляции
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]

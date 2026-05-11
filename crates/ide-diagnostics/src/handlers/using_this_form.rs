@@ -31,8 +31,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_hir_diagnostic};
     use crate::Severity;
+    use expect_test::expect;
     #[test]
     fn test_basic_this_form_usage() {
         let code = r#"
@@ -44,8 +45,15 @@ mod tests {
         let this_form_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingThisForm).collect();
 
-        assert_eq!(this_form_diags.len(), 1);
-        assert_eq!(this_form_diags[0].severity, Severity::Information);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingThisForm,
+            expect![[r#"
+            UsingThisForm @ 3:21..3:29
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information"#]],
+        );
+        assert_eq!(this_form_diags[0].severity, Severity::Information); // snapshot-skip: severity assertion intentionally retained.
     }
 
     #[test]
@@ -55,11 +63,14 @@ mod tests {
     ЭтаФорма.Закрыть();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let this_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingThisForm).collect();
-
-        assert_eq!(this_form_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingThisForm,
+            expect![[r#"
+            UsingThisForm @ 3:5..3:13
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -72,11 +83,7 @@ mod tests {
     Возврат ЭтаФорма;
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let this_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingThisForm).collect();
-
-        assert_eq!(this_form_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingThisForm, expect![[r#""#]]);
     }
 
     #[test]
@@ -86,11 +93,7 @@ mod tests {
     ЭтаФорма();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let this_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingThisForm).collect();
-
-        assert_eq!(this_form_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingThisForm, expect![[r#""#]]);
     }
 
     #[test]
@@ -100,11 +103,7 @@ mod tests {
     Модуль.ЭтаФорма();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let this_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingThisForm).collect();
-
-        assert_eq!(this_form_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingThisForm, expect![[r#""#]]);
     }
 
     #[test]
@@ -114,11 +113,7 @@ mod tests {
     Струткура.ЭтаФорма = "123";
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let this_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingThisForm).collect();
-
-        assert_eq!(this_form_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingThisForm, expect![[r#""#]]);
     }
 
     #[test]
@@ -129,11 +124,17 @@ Procedure Test()
     ThisForm.Close();
 EndProcedure
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let this_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingThisForm).collect();
-
-        assert_eq!(this_form_diags.len(), 2);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingThisForm,
+            expect![[r#"
+            UsingThisForm @ 3:18..3:26
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 4:5..4:13
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -194,40 +195,58 @@ EndProcedure
 Струткура.ЭтаФорма = "123";
 ЭтаФорма.Реквизит = "123";
 Чтото().а = "123";"#;
-        let diagnostics = check_hir_diagnostic(input);
-
-        let this_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingThisForm).collect();
-
-        assert_eq!(
-            this_form_diags.len(),
-            16,
-            "Expected 16 diagnostics, got {}",
-            this_form_diags.len()
+        check_diagnostics_snapshot_for(
+            input,
+            DiagnosticCode::UsingThisForm,
+            expect![[r#"
+            UsingThisForm @ 4:21..4:29
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 5:30..5:38
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 6:5..6:13
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 7:13..7:21
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 14:20..14:28
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 15:21..15:29
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 16:34..16:42
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 17:13..17:21
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 41:17..41:25
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 42:26..42:34
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 43:1..43:9
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 45:77..45:85
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 46:9..46:17
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 48:15..48:23
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 48:25..48:33
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information
+            UsingThisForm @ 55:1..55:9
+              message: Вместо устаревшего свойства "ЭтаФорма" следует использовать "ЭтотОбъект"
+              severity: Information"#]],
         );
-
-        // Lines 3-6: function without ЭтаФорма parameter - 4 diagnostics
-        assert_diagnostic_range_multiline(input, this_form_diags[0], 3, 20, 3, 28);
-        assert_diagnostic_range_multiline(input, this_form_diags[1], 4, 29, 4, 37);
-        assert_diagnostic_range_multiline(input, this_form_diags[2], 5, 4, 5, 12);
-        assert_diagnostic_range_multiline(input, this_form_diags[3], 6, 12, 6, 20);
-
-        // Lines 13-16: procedure without ЭтаФорма parameter - 4 diagnostics
-        assert_diagnostic_range_multiline(input, this_form_diags[4], 13, 19, 13, 27);
-        assert_diagnostic_range_multiline(input, this_form_diags[5], 14, 20, 14, 28);
-        assert_diagnostic_range_multiline(input, this_form_diags[6], 15, 33, 15, 41);
-        assert_diagnostic_range_multiline(input, this_form_diags[7], 16, 12, 16, 20);
-
-        // Lines 40-47: module-level code - 7 diagnostics
-        assert_diagnostic_range_multiline(input, this_form_diags[8], 40, 16, 40, 24);
-        assert_diagnostic_range_multiline(input, this_form_diags[9], 41, 25, 41, 33);
-        assert_diagnostic_range_multiline(input, this_form_diags[10], 42, 0, 42, 8);
-        assert_diagnostic_range_multiline(input, this_form_diags[11], 44, 76, 44, 84);
-        assert_diagnostic_range_multiline(input, this_form_diags[12], 45, 8, 45, 16);
-        assert_diagnostic_range_multiline(input, this_form_diags[13], 47, 14, 47, 22);
-        assert_diagnostic_range_multiline(input, this_form_diags[14], 47, 24, 47, 32);
-
-        // Line 54: ЭтаФорма.Реквизит = "123" - 1 diagnostic
-        assert_diagnostic_range_multiline(input, this_form_diags[15], 54, 0, 54, 8);
     }
 }

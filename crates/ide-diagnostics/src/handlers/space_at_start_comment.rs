@@ -145,8 +145,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_space_at_start_comment() {
         let code = r#"// Это хороший комментарий, с пробелом
@@ -185,42 +186,41 @@ mod tests {
 
 /// Текст без ошибки
 ////Текст с ошибкой"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        // TODO: Implement CodeRecognizer to skip commented code (lines 31-33)
-        // Expected 7 diagnostics, we get 10 because we don't skip commented code yet.
-        // Expected diagnostics:
-        // 1. Line 6: //Плохой комментарий
-        // 2. Line 8: //И это плохой (inline comment)
-        // 3. Line 9: //Так тоже плохо
-        // 4. Line 20: //(с) Похоже... (cyrillic 'с', not in default annotations)
-        // 5. Line 22: //// Плохой... (4 slashes without space in strict mode)
-        // 6. Line 30: //&НаКлиенте (commented code, skipped by CodeRecognizer)
-        // 7. Line 34: /// Текст... (3 slashes with text, error in strict mode)
-        // 8. Line 35: ////Текст... (4 slashes with text)
-
-        // We get extra diagnostics for commented code (lines 31-32)
-        assert!(
-            diagnostics.len() >= 5,
-            "Expected at least 5 diagnostics, got {}",
-            diagnostics.len()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SpaceAtStartComment,
+            expect![[r#"
+                SpaceAtStartComment @ 7:1..7:21
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 9:13..9:27
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 10:17..10:33
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 21:1..21:57
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 23:1..23:57
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 31:1..31:13
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 32:1..32:36
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 33:1..33:17
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 35:1..35:21
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 36:1..36:20
+                  message: Comment should have space after //
+                  severity: Hint"#]],
         );
-
-        // Check first 5 diagnostics that don't depend on CodeRecognizer
-        // Line 6 (0-indexed), cols 0-20: //Плохой комментарий
-        assert_diagnostic_range(code, &diagnostics[0], 6, 0, 20);
-
-        // Line 8 (0-indexed), cols 12-26: //И это плохой
-        assert_diagnostic_range(code, &diagnostics[1], 8, 12, 26);
-
-        // Line 9 (0-indexed), cols 16-32: //Так тоже плохо
-        assert_diagnostic_range(code, &diagnostics[2], 9, 16, 32);
-
-        // Line 20 (0-indexed), cols 0-56: //(с) Похоже на строку с копирайтом
-        assert_diagnostic_range(code, &diagnostics[3], 20, 0, 56);
-
-        // Line 22 (0-indexed), cols 0-56: //// Плохой комментарий
-        assert_diagnostic_range(code, &diagnostics[4], 22, 0, 56);
     }
 
     #[test]
@@ -233,8 +233,7 @@ mod tests {
 // Строка ниже используется как разделитель
 /////////////////////////////////////////////////////////////////////////////////
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SpaceAtStartComment, expect![[r#""#]]);
     }
 
     #[test]
@@ -245,8 +244,7 @@ mod tests {
 //(c) Это строка с копирайтом
 //© Это рамка копирайта
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SpaceAtStartComment, expect![[r#""#]]);
     }
 
     #[test]
@@ -256,8 +254,20 @@ mod tests {
 Перем1 = 7; //И это плохой
                 //Так тоже плохо
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 3, "Expected 3 bad comments");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SpaceAtStartComment,
+            expect![[r#"
+                SpaceAtStartComment @ 2:1..2:21
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 3:13..3:27
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 4:17..4:33
+                  message: Comment should have space after //
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -278,14 +288,7 @@ mod tests {
     Результат = Новый Структура;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        // Should have 0 diagnostics - all empty comment lines (just //) are valid
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Empty comment lines should not trigger diagnostic, got {} diagnostics",
-            diagnostics.len()
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SpaceAtStartComment, expect![[r#""#]]);
     }
 
     #[test]
@@ -297,13 +300,7 @@ mod tests {
 //
 // Хороший комментарий
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        // All empty lines with // are good, last line with space is also good
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Empty comments with various whitespace should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SpaceAtStartComment, expect![[r#""#]]);
     }
 
     #[test]
@@ -313,11 +310,16 @@ mod tests {
 //Плохо
 //Тоже плохо
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Comments with text but no space should trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SpaceAtStartComment,
+            expect![[r#"
+                SpaceAtStartComment @ 2:1..2:8
+                  message: Comment should have space after //
+                  severity: Hint
+                SpaceAtStartComment @ 3:1..3:13
+                  message: Comment should have space after //
+                  severity: Hint"#]],
         );
     }
 
@@ -331,10 +333,7 @@ mod tests {
     Текст = "Текст с // внутри строки"; // И еще
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        // Should have 0 diagnostics - all comments have space after //
-        // If we get false positives on // inside strings, this test will fail
-        assert_eq!(diagnostics.len(), 0, "Should not detect // inside strings as comments");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SpaceAtStartComment, expect![[r#""#]]);
     }
 
     #[test]
@@ -343,7 +342,6 @@ mod tests {
         let code = r#"
 URL = "http://example.com";
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "URL inside string should not trigger diagnostic");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SpaceAtStartComment, expect![[r#""#]]);
     }
 }

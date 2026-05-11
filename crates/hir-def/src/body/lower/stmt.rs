@@ -21,55 +21,6 @@ use super::expr::{exprs_are_equal, lower_expr_node};
 use super::preproc::{lower_preproc_if, lower_region_stmts};
 use super::LoweringCtx;
 
-// ============================================================================
-// Nesting depth tracking for NestedStatements diagnostic
-// ============================================================================
-
-/// Enter a nesting statement (IF, WHILE, FOR, TRY).
-/// Increments nesting depth and resets child tracking for this level.
-fn enter_nesting_stmt(ctx: &mut LoweringCtx) {
-    ctx.nesting_depth += 1;
-    ctx.had_nested_child = false;
-}
-
-/// Exit a nesting statement.
-/// If this is a leaf statement (no nested children) and depth exceeds threshold, emits diagnostic.
-fn exit_nesting_stmt(
-    ctx: &mut LoweringCtx,
-    keyword_range: TextRange,
-    method_name: &str,
-    is_function: bool,
-) {
-    // If no nested child was found, this is a leaf - emit diagnostic
-    // The from_hir() handler will filter by maxAllowedLevel config
-    if !ctx.had_nested_child {
-        ctx.emit(BodyDiagnostic::NestedStatements {
-            method_name: method_name.to_string(),
-            depth: ctx.nesting_depth,
-            is_function,
-            range: keyword_range,
-        });
-    }
-
-    // Mark that parent has a nested child (this nesting statement)
-    ctx.had_nested_child = true;
-    ctx.nesting_depth -= 1;
-}
-
-/// Get the first keyword (IF/WHILE/FOR/TRY) range from a nesting statement node.
-fn get_nesting_keyword_range(node: &SyntaxNode) -> TextRange {
-    node.children_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|t| {
-            matches!(
-                t.kind(),
-                SyntaxKind::KW_IF | SyntaxKind::KW_WHILE | SyntaxKind::KW_FOR | SyntaxKind::KW_TRY
-            )
-        })
-        .map(|t| t.text_range())
-        .unwrap_or_else(|| node.text_range())
-}
-
 /// Find the range for IF/THEN header (from IF to THEN keyword).
 fn find_if_then_range(if_stmt: &SyntaxNode) -> TextRange {
     let mut start = None;
@@ -120,73 +71,6 @@ fn find_else_range(else_clause: &SyntaxNode) -> TextRange {
         }
     }
     else_clause.text_range()
-}
-
-/// Count boolean operations (AND/OR) in an expression.
-///
-/// This's `Trees.findAllRuleNodes(expression, BSLParser.RULE_boolOperation).size()`
-/// Complexity = number of boolean operations + 1
-fn count_bool_operations(expr_node: &SyntaxNode) -> usize {
-    let mut count = 0;
-
-    // Traverse all descendants looking for BINARY_EXPR with AND/OR
-    for node in expr_node.descendants() {
-        if node.kind() == SyntaxKind::BINARY_EXPR {
-            // Check if it has AND or OR operator
-            let has_bool_op = node.children_with_tokens().any(|child| {
-                child
-                    .as_token()
-                    .is_some_and(|tok| matches!(tok.kind(), SyntaxKind::KW_AND | SyntaxKind::KW_OR))
-            });
-            if has_bool_op {
-                count += 1;
-            }
-        }
-    }
-
-    count
-}
-
-/// Get condition range, trimming trailing whitespace.
-///
-/// Rowan CST node ranges include trailing trivia; reported diagnostic ranges
-/// should not. Trim trailing whitespace from the expression range.
-fn get_condition_range(expr_node: &SyntaxNode) -> TextRange {
-    let text = expr_node.text().to_string();
-    let trimmed = text.trim_end();
-    let trimmed_len = trimmed.len();
-    let original_len = text.len();
-
-    if trimmed_len == original_len {
-        expr_node.text_range()
-    } else {
-        let start = expr_node.text_range().start();
-        let end = start + text_size::TextSize::from(trimmed_len as u32);
-        TextRange::new(start, end)
-    }
-}
-
-/// Check condition complexity and emit diagnostic if too complex.
-///
-/// Default max complexity is 3 (hardcoded here as we don't have config during lowering).
-/// The actual config check happens in from_hir().
-fn check_condition_complexity(ctx: &mut LoweringCtx, condition_node: &SyntaxNode) {
-    // Default max complexity
-    const DEFAULT_MAX_COMPLEXITY: usize = 3;
-
-    let bool_op_count = count_bool_operations(condition_node);
-    let complexity = bool_op_count + 1;
-
-    // Always emit if complexity > default threshold
-    // from_hir() will check against user config and filter if needed
-    if complexity > DEFAULT_MAX_COMPLEXITY {
-        let range = get_condition_range(condition_node);
-        ctx.emit(BodyDiagnostic::IfConditionComplexity {
-            complexity,
-            max_complexity: DEFAULT_MAX_COMPLEXITY,
-            range,
-        });
-    }
 }
 
 /// Normalize condition text for comparison.
@@ -596,6 +480,21 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     if let Some((ref name, range)) = target_name {
         let key = name.as_str().to_lowercase();
 
+        // Capture the pre-existing binding kind BEFORE the implicit
+        // `register_local_var` below — once we've registered, the
+        // local table always reports `Local`, masking the genuine
+        // "no shadowing" case where this assignment is the
+        // first introduction of the name. The downstream
+        // `CommonModuleAssign` handler uses this payload to fast-
+        // path-skip on shadowing without rebuilding a `Resolver`.
+        let existing_binding_kind = if ctx.local_vars.contains_key(&key) {
+            Some(crate::body::ExistingBindingKind::Local)
+        } else if ctx.param_names.contains(&key) {
+            Some(crate::body::ExistingBindingKind::Param)
+        } else {
+            None
+        };
+
         // Register as local variable for implicit variable declaration (BSL allows this).
         // This is important for UsingExternalCodeTools to distinguish local vars from globals.
         if !ctx.local_vars.contains_key(&key) && !ctx.param_names.contains(&key) {
@@ -608,6 +507,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         ctx.emit(BodyDiagnostic::CommonModuleAssign {
             variable_name: name.as_str().to_string(),
             range,
+            existing_binding_kind,
         });
 
         // Check for ThisObjectAssign diagnostic.
@@ -829,10 +729,6 @@ fn has_platform_type_check(condition_node: &SyntaxNode) -> bool {
 
 /// Lower if statement.
 fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     let mut children = node.children().peekable();
 
     // Condition (first EXPR or expression node)
@@ -844,11 +740,6 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     if has_platform_type_check(&condition_node) {
         ctx.in_platform_guard = true;
     }
-
-    // Check if condition complexity for IfConditionComplexity diagnostic
-    // Complexity = number of boolean operations + 1
-    // We emit with actual complexity and let from_hir() check against config
-    check_condition_complexity(ctx, &condition_node);
 
     let condition = lower_expr_node(ctx, &condition_node);
 
@@ -879,9 +770,6 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     for elsif in node.children().filter(|n| n.kind() == SyntaxKind::ELSIF_CLAUSE) {
         let mut elsif_children = elsif.children();
         if let Some(cond_node) = elsif_children.next() {
-            // Check elsif condition complexity
-            check_condition_complexity(ctx, &cond_node);
-
             // Collect elsif condition for duplicate detection
             condition_nodes.push(cond_node.clone());
 
@@ -946,10 +834,6 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Restore platform guard state
     ctx.in_platform_guard = saved_platform_guard;
 
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
-
     Some(Stmt::If(Box::new(crate::hir::IfStmt {
         condition,
         then_branch: then_branch.into_boxed_slice(),
@@ -960,10 +844,6 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
 /// Lower while statement.
 fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     let mut children = node.children();
 
     let condition_node = children.next()?;
@@ -990,19 +870,11 @@ fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Leave loop scope
     ctx.leave_loop();
 
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
-
     Some(Stmt::While { condition, body })
 }
 
 /// Lower for statement.
 fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     // Find loop variable (IDENT token after FOR keyword)
     let var_token = node
         .children_with_tokens()
@@ -1055,19 +927,11 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Leave loop scope
     ctx.leave_loop();
 
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
-
     Some(Stmt::For { var, from, to, body })
 }
 
 /// Lower for-each statement.
 fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     // Find loop variable (first IDENT token)
     let var_token = node
         .children_with_tokens()
@@ -1141,19 +1005,11 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
     // Leave loop scope
     ctx.leave_loop();
 
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
-
     Some(Stmt::ForEach { var, collection, body })
 }
 
 /// Lower try statement.
 fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
-    // Track nesting depth for NestedStatements diagnostic
-    enter_nesting_stmt(ctx);
-    let keyword_range = get_nesting_keyword_range(node);
-
     // Check CommitTransaction placement within this try-catch
     let violations = check_commit_transaction_in_try(node);
     for (commit_node, _violation) in violations {
@@ -1195,10 +1051,6 @@ fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             })
         })
         .unwrap_or_default();
-
-    // Exit nesting tracking (emit diagnostic if leaf)
-    let method_name = ctx.current_method_name.clone().unwrap_or_default();
-    exit_nesting_stmt(ctx, keyword_range, &method_name, ctx.is_function);
 
     Some(Stmt::Try { body, except })
 }

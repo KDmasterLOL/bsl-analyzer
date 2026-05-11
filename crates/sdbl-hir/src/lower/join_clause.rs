@@ -109,10 +109,15 @@ impl LoweringContext {
 
         // Lower joined table
         let table = if let Some(ds) = join.data_source() {
-            // Check if JOIN's data source is a subquery
-            if ds.subquery().is_some() {
-                self.diagnostics
-                    .push(SdblDiagnostic::JoinWithSubQuery { range: ds.syntax().text_range() });
+            // Check if JOIN's data source is a subquery.
+            // Track 2 §4 Slice 3: aggregating subqueries (GROUP BY or aggregate
+            // function in SELECT) are exempted — they are doing something the
+            // underlying table cannot, so the rule does not apply.
+            if let Some(subquery) = ds.subquery() {
+                if !super::from_clause::subquery_has_aggregation(&subquery) {
+                    self.diagnostics
+                        .push(SdblDiagnostic::JoinWithSubQuery { range: ds.syntax().text_range() });
+                }
             }
 
             // NOTE: Nested JOINs are now handled by lower_join_clause_recursive()

@@ -154,45 +154,65 @@ fn collect_comment_tokens(root: &SyntaxNode) -> Vec<syntax::SyntaxToken> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic_with_config, check_diagnostics_snapshot_for};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_todo_tag() {
         let code = "// TODO: fix this";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("TODO"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingServiceTag,
+            expect![[r#"
+            UsingServiceTag @ 1:1..1:18
+              message: Обнаружен служебный тег "TODO"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_fixme_tag() {
         let code = "// FIXME: broken";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("FIXME"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingServiceTag,
+            expect![[r#"
+            UsingServiceTag @ 1:1..1:17
+              message: Обнаружен служебный тег "FIXME"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_debug_tag_russian() {
         let code = "// отладка";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingServiceTag,
+            expect![[r#"
+            UsingServiceTag @ 1:1..1:11
+              message: Обнаружен служебный тег "отладка"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_no_diagnostic_for_normal_comment() {
         let code = "// This is a normal comment";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingServiceTag, expect![[r#""#]]);
     }
 
     #[test]
     fn test_case_insensitive() {
         let code = "// todo: something";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingServiceTag,
+            expect![[r#"
+            UsingServiceTag @ 1:1..1:19
+              message: Обнаружен служебный тег "todo"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -311,31 +331,74 @@ EndProcedure
 Procedure AfterWrite(WriteParameters)
     //Insert handler contents
 EndProcedure"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 21, "Should find 21 diagnostics");
-
-        assert_diagnostic_range(code, &diagnostics[0], 1, 0, 36);
-        assert_diagnostic_range(code, &diagnostics[1], 13, 4, 50);
-        assert_diagnostic_range(code, &diagnostics[2], 21, 4, 29);
-        assert_diagnostic_range(code, &diagnostics[3], 25, 0, 26);
-        assert_diagnostic_range(code, &diagnostics[4], 26, 33, 58);
-        assert_diagnostic_range(code, &diagnostics[5], 28, 4, 11);
-        assert_diagnostic_range(code, &diagnostics[6], 29, 20, 30);
-        assert_diagnostic_range(code, &diagnostics[7], 31, 4, 12);
-        assert_diagnostic_range(code, &diagnostics[8], 32, 21, 31);
-        assert_diagnostic_range(code, &diagnostics[9], 34, 8, 21);
-        assert_diagnostic_range(code, &diagnostics[10], 42, 4, 51);
-        assert_diagnostic_range(code, &diagnostics[11], 61, 4, 51);
-        assert_diagnostic_range(code, &diagnostics[12], 65, 0, 11);
-        assert_diagnostic_range(code, &diagnostics[13], 67, 0, 11);
-        assert_diagnostic_range(code, &diagnostics[14], 71, 4, 36);
-        assert_diagnostic_range(code, &diagnostics[15], 77, 4, 39);
-        assert_diagnostic_range(code, &diagnostics[16], 82, 4, 27);
-        assert_diagnostic_range(code, &diagnostics[17], 88, 4, 31);
-        assert_diagnostic_range(code, &diagnostics[18], 98, 4, 38);
-        assert_diagnostic_range(code, &diagnostics[19], 105, 4, 28);
-        assert_diagnostic_range(code, &diagnostics[20], 112, 4, 29);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingServiceTag,
+            expect![[r#"
+            UsingServiceTag @ 2:1..2:37
+              message: Обнаружен служебный тег "TODO"
+              severity: Hint
+            UsingServiceTag @ 14:5..14:51
+              message: Обнаружен служебный тег "FIXME"
+              severity: Hint
+            UsingServiceTag @ 22:5..22:30
+              message: Обнаружен служебный тег "TODO"
+              severity: Hint
+            UsingServiceTag @ 26:1..26:27
+              message: Обнаружен служебный тег "!!!_nik"
+              severity: Hint
+            UsingServiceTag @ 27:34..27:59
+              message: Обнаружен служебный тег "!!_nik"
+              severity: Hint
+            UsingServiceTag @ 29:5..29:12
+              message: Обнаружен служебный тег "@nik"
+              severity: Hint
+            UsingServiceTag @ 30:21..30:31
+              message: Обнаружен служебный тег "отладка"
+              severity: Hint
+            UsingServiceTag @ 32:5..32:13
+              message: Обнаружен служебный тег "debug"
+              severity: Hint
+            UsingServiceTag @ 33:22..33:32
+              message: Обнаружен служебный тег "отладка"
+              severity: Hint
+            UsingServiceTag @ 35:9..35:22
+              message: Обнаружен служебный тег "дляотладки"
+              severity: Hint
+            UsingServiceTag @ 43:5..43:52
+              message: Обнаружен служебный тег "{{КОНСТРУКТОР_ЗАПРОСА_С_ОБРАБО"
+              severity: Hint
+            UsingServiceTag @ 62:5..62:52
+              message: Обнаружен служебный тег "}}КОНСТРУКТОР_ЗАПРОСА_С_ОБРАБО"
+              severity: Hint
+            UsingServiceTag @ 66:1..66:12
+              message: Обнаружен служебный тег "{{MRG["
+              severity: Hint
+            UsingServiceTag @ 68:1..68:12
+              message: Обнаружен служебный тег "}}MRG["
+              severity: Hint
+            UsingServiceTag @ 72:5..72:37
+              message: Обнаружен служебный тег "для"
+              severity: Hint
+            UsingServiceTag @ 78:5..78:40
+              message: Обнаружен служебный тег "Вставить"
+              severity: Hint
+            UsingServiceTag @ 83:5..83:28
+              message: Обнаружен служебный тег "Insert"
+              severity: Hint
+            UsingServiceTag @ 89:5..89:32
+              message: Обнаружен служебный тег "Insert"
+              severity: Hint
+            UsingServiceTag @ 99:5..99:39
+              message: Обнаружен служебный тег "Вставить"
+              severity: Hint
+            UsingServiceTag @ 106:5..106:29
+              message: Обнаружен служебный тег "Paste"
+              severity: Hint
+            UsingServiceTag @ 113:5..113:30
+              message: Обнаружен служебный тег "Insert"
+              severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -460,8 +523,9 @@ EndProcedure"#;
             .insert(DiagnosticCode::UsingServiceTag, serde_json::json!({"serviceTags": "todo"}));
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 2, "With only 'todo' tag, should have 2 diagnostics");
-        assert_diagnostic_range(code, &diagnostics[0], 1, 0, 36);
-        assert_diagnostic_range(code, &diagnostics[1], 21, 4, 29);
+        assert_eq!(diagnostics.len(), 2, "With only 'todo' tag, should have 2 diagnostics"); // snapshot-skip: custom configuration assertion intentionally retained.
+        crate::test_utils::assert_diagnostic_range(code, &diagnostics[0], 1, 0, 36); // snapshot-skip: custom configuration range assertion intentionally retained.
+        crate::test_utils::assert_diagnostic_range(code, &diagnostics[1], 21, 4, 29);
+        // snapshot-skip: custom configuration range assertion intentionally retained.
     }
 }

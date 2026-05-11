@@ -3,8 +3,8 @@
 //!
 //! ## Provenance
 //!
-//! The `SdblTokenKind` enum below is split by banner comments into two
-//! clearly demarcated provenance sections:
+//! The `SdblTokenKind` enum below is split by banner comments into
+//! several clearly demarcated provenance sections:
 //!
 //! - **Slice 1 — clean-room.** Whitespace, line terminators, line
 //!   comments, separators, punctuation, comparison and arithmetic
@@ -25,10 +25,29 @@
 //!   (TRUE / FALSE / NULL). Attested in
 //!   `docs/legal/sdbl-clean-room-slice2.md`.
 //!
-//! - **Slices 3–5 — pending.** Remaining long-tail keywords,
-//!   built-in functions, metadata-object tokens, virtual-table tokens,
-//!   type literals, the UNDEFINED literal, period-type tokens, and
-//!   the logos error fallback. These remain as carried over from the
+//! - **Slice 2-addendum — clean-room.** Long-tail clause keywords
+//!   excluded from Slice 2's scope: DROP / AUTOORDER / ASC / DESC /
+//!   HIERARCHY / ALLOWED / FOR / UPDATE / INDEX / ONLY / OVERALL /
+//!   PERIODS / ESCAPE / REFS / CAST / TYPE / VALUE. Re-derived from
+//!   v8327doc Глава 8 «Работа с запросами» (the canonical SDBL
+//!   grammar specification) with pubqlang corroborating examples.
+//!   Attested in `docs/legal/sdbl-clean-room-slice2-addendum.md`.
+//!
+//! - **Slice 3a — clean-room (complete, 2026-05-07).** Primitive
+//!   type literals (Boolean / Number / String / Date), the
+//!   UNDEFINED literal, and the narrow period-type keywords
+//!   carried as dedicated lexer tokens (TENDAYS / HALFYEAR).
+//!   Re-derived from v8327doc Глава 8 «Работа с запросами» with
+//!   pubqlang corroborating examples; the C0a discrepancy audit
+//!   found zero regex defects so the slice is a PRESERVE-shape
+//!   arc. Attested in `docs/legal/sdbl-clean-room-slice3a.md`.
+//!
+//! - **Slices 3b, 4, 5 — pending.** Metadata-object tokens
+//!   (Slice 3b — `Mdo*` minus `MdoExternalDataSource`), built-in
+//!   functions (Slice 4 — `Fn*`), virtual-table tokens and the
+//!   platform-late `MdoExternalDataSource` metadata prefix
+//!   (Slice 5 — `Vt*` plus `MdoExternalDataSource`), and the
+//!   logos error fallback. These remain as carried over from the
 //!   pre-clean-room implementation and will be re-derived by
 //!   subsequent slices.
 //!
@@ -467,66 +486,347 @@ pub enum SdblTokenKind {
     LitNull,
 
     // ============================================================================
-    // LEGACY (Slices 3–5 pending — not part of the clean-room claim)
+    // CLEAN-ROOM Slice 2-addendum — clause keyword leftovers
     // ============================================================================
     //
-    // The variants below are carried over unchanged from the
-    // pre-clean-room implementation. They remain Tier B material for
-    // the duration of the staged migration; the next slices will
-    // re-derive remaining long-tail keywords, built-in functions,
-    // metadata-object tokens, virtual tables, type literals, and
-    // period-type tokens from ITS documentation.
+    // Every variant in this section carries an inline provenance
+    // comment citing the v8327doc Глава 8 page section (and
+    // corroborating pubqlang chapters where applicable) it was
+    // re-derived from. Nothing in this block was copied from the
+    // pre-clean-room regex text of these variants or from any
+    // third-party SDBL lexer; the canonical SDBL grammar source is
+    // the v8.3.27 Developer's Reference Глава 8 «Работа с запросами»
+    // at <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>,
+    // with pubqlang chapters at
+    // <https://its.1c.ru/db/pubqlang/content/N/hdoc> providing
+    // corroborating examples. Full per-variant tier classification
+    // and source map lives in
+    // `docs/legal/sdbl-clean-room-slice2-addendum.md` § Per-variant
+    // tier source map.
+    //
+    // Convenience index (RUS / ENG → Variant — primary citation).
+    // The `#[regex]` attributes below are the single source of
+    // truth; this table is a scanning aid only.
+    //
+    //   DROP query:
+    //     УНИЧТОЖИТЬ / DROP              -> KwDrop       (v8327doc Гл. 8)
+    //
+    //   Order-by direction & modifiers:
+    //     ВОЗР / ASC                     -> KwAsc        (pubqlang/16)
+    //     УБЫВ / DESC                    -> KwDesc       (pubqlang/16)
+    //     ИЕРАРХИЯ / HIERARCHY           -> KwHierarchy  (v8327doc Гл. 8 / pubqlang/27)
+    //     АВТОУПОРЯДОЧИВАНИЕ / AUTOORDER -> KwAutoOrder  (pubqlang/17)
+    //
+    //   SELECT prefix qualifier:
+    //     РАЗРЕШЕННЫЕ / ALLOWED          -> KwAllowed    (v8327doc Гл. 8 — Slice 7-addendum)
+    //
+    //   FOR UPDATE / INDEX BY:
+    //     ДЛЯ / FOR                      -> KwFor        (v8327doc Гл. 8)
+    //     ИЗМЕНЕНИЯ / UPDATE             -> KwUpdate     (v8327doc Гл. 8)
+    //     ИНДЕКСИРОВАТЬ / INDEX          -> KwIndex      (v8327doc Гл. 8)
+    //
+    //   TOTALS modifiers:
+    //     ТОЛЬКО / ONLY                  -> KwOnly       (v8327doc Гл. 8)
+    //     ОБЩИЕ / OVERALL                -> KwOverall    (pubqlang/39)
+    //     ПЕРИОДАМИ / PERIODS            -> KwPeriods    (v8327doc Гл. 8 — instrumental case)
+    //
+    //   LIKE / REFS modifiers:
+    //     СПЕЦСИМВОЛ / ESCAPE            -> KwEscape     (v8327doc Гл. 8)
+    //     ССЫЛКА / REFS                  -> KwRefs       (v8327doc Гл. 8 / pubqlang/40)
+    //
+    //   CAST / TYPE / VALUE expressions:
+    //     ВЫРАЗИТЬ / CAST                -> KwCast       (v8327doc Гл. 8 / pubqlang/40)
+    //     ТИП / TYPE                     -> KwType       (v8327doc Гл. 8)
+    //     ЗНАЧЕНИЕ / VALUE               -> KwValue      (pubqlang/31)
+
+    // --- DROP query ---
+
+    // v8327doc Глава 8 — DROP query: `УНИЧТОЖИТЬ <ident>` destroys a
+    // temporary table at end-of-batch (canonical syntax + Term word-
+    // list slot УНИЧТОЖИТЬ ↔ DROP). Corroborating pubqlang/51, /73
+    // describe temp-table lifecycle.
     #[regex(r"(?i)уничтожить|(?i)drop")]
     KwDrop,
 
+    // --- Order-by direction & modifiers ---
+
+    // pubqlang/17 — AUTOORDER: bare-keyword tail clause requesting
+    // automatic ordering by the table's reference field
+    // (`chapter_017.html:17, 32, 52` canonical bare-keyword form).
+    // Bilingual АВТОУПОРЯДОЧИВАНИЕ ↔ AUTOORDER.
     #[regex(r"(?i)автоупорядочивание|(?i)autoorder")]
     KwAutoOrder,
 
+    // pubqlang/16 — ORDER BY direction marker: ascending. Bilingual
+    // ВОЗР ↔ ASC.
     #[regex(r"(?i)возр|(?i)asc")]
     KwAsc,
 
+    // pubqlang/16 — ORDER BY direction marker: descending. Bilingual
+    // УБЫВ ↔ DESC.
     #[regex(r"(?i)убыв|(?i)desc")]
     KwDesc,
 
+    // v8327doc Глава 8 — ORDER BY / TOTALS BY group spec: HIERARCHY
+    // modifier (canonical EBNF `[[ТОЛЬКО] ИЕРАРХИЯ]`). Corroborating
+    // pubqlang/27 (`chapter_027.html:39, 51, 71`)
+    // `УПОРЯДОЧИТЬ ПО Наименование ИЕРАРХИЯ`.
     #[regex(r"(?i)иерархия|(?i)hierarchy")]
     KwHierarchy,
 
+    // --- SELECT prefix qualifier ---
+
+    // v8327doc Глава 8 — SELECT prefix qualifier: РАЗРЕШЕННЫЕ filters
+    // the result set by row-level security (canonical EBNF first-
+    // prefix slot in `<Описание запроса>` + bilingual word-list
+    // РАЗРЕШЕННЫЕ ↔ ALLOWED + RLS-scope prose). Already attested
+    // Tier-A1 by Slice 7-addendum at
+    // `docs/legal/sdbl-clean-room-slice7-addendum.md`.
     #[regex(r"(?i)разрешенные|(?i)allowed")]
     KwAllowed,
 
+    // --- FOR UPDATE / INDEX BY ---
+
+    // v8327doc Глава 8 — FOR UPDATE clause: `[ДЛЯ ИЗМЕНЕНИЯ
+    // [<Список таблиц верхнего уровня>]]` enables row-locking for
+    // the named source tables (canonical EBNF + bilingual word-list
+    // ДЛЯ ↔ FOR + canonical example).
     #[regex(r"(?i)для|(?i)for")]
     KwFor,
 
+    // v8327doc Глава 8 — FOR UPDATE clause companion to KwFor: Term
+    // word-list ИЗМЕНЕНИЯ ↔ UPDATE + combined-Term entry
+    // `ДЛЯ ИЗМЕНЕНИЯ` + canonical EBNF.
     #[regex(r"(?i)изменения|(?i)update")]
     KwUpdate,
 
+    // v8327doc Глава 8 — INDEX BY clause: `[ИНДЕКСИРОВАТЬ ПО
+    // [НАБОРАМ] <Список полей>]` adds an index on temporary-table
+    // fields for downstream join performance (canonical EBNF +
+    // Term word-list ИНДЕКСИРОВАТЬ ↔ INDEX + canonical examples).
     #[regex(r"(?i)индексировать|(?i)index")]
     KwIndex,
 
+    // --- TOTALS modifiers ---
+
+    // v8327doc Глава 8 — TOTALS BY group modifier: `[[ТОЛЬКО]
+    // ИЕРАРХИЯ]` excludes detail rows so only hierarchy aggregates
+    // appear (Term word-list ТОЛЬКО ↔ ONLY + canonical EBNF +
+    // canonical example `Номенклатура ТОЛЬКО ИЕРАРХИЯ`).
     #[regex(r"(?i)только|(?i)only")]
     KwOnly,
 
+    // pubqlang/39 — TOTALS BY group: ОБЩИЕ marks the grand-total
+    // group (`chapter_039.html:13, 25, 29, 48, 49, 51` canonical
+    // `ИТОГИ ... ПО ОБЩИЕ`). Bilingual ОБЩИЕ ↔ OVERALL via the
+    // v8327doc Глава 8 word-list slot.
     #[regex(r"(?i)общие|(?i)overall")]
     KwOverall,
 
-    #[regex(r"(?i)периоды|(?i)periods")]
+    // v8327doc Глава 8 — TOTALS BY period spec: `[ПЕРИОДАМИ
+    // (<period-types>, <begin>, <end>)]` enables time-bucketed
+    // totals (bilingual word-list ПЕРИОДАМИ ↔ PERIODS + canonical
+    // EBNF in TOTALS group spec + prose «при помощи ключевого слова
+    // ПЕРИОДАМИ» + canonical example
+    // `Период ПЕРИОДАМИ(МИНУТА, ДАТАВРЕМЯ(...), ДАТАВРЕМЯ(...))`).
+    // The Russian spelling is **instrumental case** `ПЕРИОДАМИ` per
+    // the canonical source — the pre-Slice-2-addendum regex matched
+    // the wrong form `ПЕРИОДЫ` (nominative); the C2 fix flips the
+    // Russian alternation to canonical per
+    // `docs/legal/sdbl-clean-room-slice2-addendum.md` § Behaviour
+    // change Option A. Parser-tree invariant — the converter at
+    // `crates/parser/src/sdbl_token_converter.rs` maps
+    // `KwPeriods → TokenKind::Ident` and Slice 11 explicitly defers
+    // structured PERIODS handling to Slice 12, so the regex flip
+    // changes no observable parse-tree shape today.
+    #[regex(r"(?i)периодами|(?i)periods")]
     KwPeriods,
 
+    // --- LIKE / REFS modifiers ---
+
+    // v8327doc Глава 8 — LIKE escape clause: `[СПЕЦСИМВОЛ <Литерал
+    // типа СТРОКА>]` overrides the default LIKE escape character
+    // (bilingual word-list СПЕЦСИМВОЛ ↔ ESCAPE + canonical EBNF in
+    // LIKE slot + prose).
     #[regex(r"(?i)спецсимвол|(?i)escape")]
     KwEscape,
 
+    // v8327doc Глава 8 — REFS predicate: `<Выражение> ССЫЛКА <Имя
+    // таблицы>` tests whether a composite-typed expression is a
+    // reference to the named metadata object (Term word-list
+    // ССЫЛКА + canonical EBNF + canonical example). Corroborating
+    // pubqlang/40 (`chapter_040.html:83, 98`) canonical example
+    // `(ОстаткиТоваров.Регистратор ССЫЛКА Документ.ПриходнаяНакладная)`.
     #[regex(r"(?i)ссылка|(?i)refs")]
     KwRefs,
 
+    // --- CAST / TYPE / VALUE expressions ---
+
+    // v8327doc Глава 8 — CAST expression: `ВЫРАЗИТЬ ( <Выражение>
+    // КАК <Тип значения> )` performs composite-type narrowing
+    // (Term word-list ВЫРАЗИТЬ + canonical EBNF). Corroborating
+    // pubqlang/40 (`chapter_040.html:24, 66, 84-86, 99, 102`)
+    // canonical examples and aggregate-result-shape prose.
     #[regex(r"(?i)выразить|(?i)cast")]
     KwCast,
 
+    // v8327doc Глава 8 — TYPE expression: `ТИП(<Имя типа>)`
+    // produces a type-instance value usable as the right-hand side
+    // of a comparison with `ТИПЗНАЧЕНИЯ()` or as the КАК-target of
+    // a ВЫРАЗИТЬ() call (canonical EBNF).
     #[regex(r"(?i)тип|(?i)type")]
     KwType,
 
+    // pubqlang/31 — VALUE expression: `ЗНАЧЕНИЕ(<полный путь>)`
+    // evaluates to a system-enum value or a predefined-data
+    // reference (`chapter_031.html:25` canonical example
+    // `Товары.Родитель = ЗНАЧЕНИЕ(Справочник.Товары.ПустаяСсылка)`;
+    // `:28` prose «литерал функционального типа ЗНАЧЕНИЕ()»).
+    // Corroborating pubqlang/96 (`chapter_096.html:26`)
+    // `ЗНАЧЕНИЕ(Перечисление.ВидыОпераций.ПоступлениеОтПроизводителей)`.
     #[regex(r"(?i)значение|(?i)value")]
     KwValue,
 
+    // ============================================================================
+    // CLEAN-ROOM Slice 3a — primitive types, undefined literal, narrow period vocabulary (complete, 2026-05-07)
+    // ============================================================================
+    //
+    // Every variant in this section carries an inline provenance
+    // comment citing the v8327doc Глава 8 «Работа с запросами»
+    // bilingual word-list row and a contextual EBNF / prose anchor
+    // for the variant's grammar role. Nothing in this block was
+    // copied from the pre-clean-room regex text or from any third-
+    // party SDBL lexer; the canonical SDBL grammar source is the
+    // v8.3.27 Developer's Reference Глава 8 «Работа с запросами»
+    // at <https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000453>,
+    // with pubqlang chapters at
+    // <https://its.1c.ru/db/pubqlang/content/N/hdoc> providing
+    // corroborating prose. Full per-variant tier source map, the
+    // C0a discrepancy audit, and the verification recipe live in
+    // `docs/legal/sdbl-clean-room-slice3a.md`. The C0a audit found
+    // zero regex defects, so the seven `#[regex]` bodies below
+    // were not modified at C2 — only the per-variant docstrings,
+    // the thematic separators, and this convenience index are new
+    // in C2 relative to the C1 banner relocation.
+    //
+    // Convenience index (RUS / ENG → Variant — primary citation).
+    // The `#[regex]` attributes below are the single source of
+    // truth; this table is a scanning aid only.
+    //
+    //   Primitive type literals (4):
+    //     БУЛЕВО / BOOLEAN         → TypeBoolean    (CAST type slot 1; <Значение> typed-literal slot)
+    //     ЧИСЛО / NUMBER           → TypeNumber     (CAST type slot 2 with optional length+precision; <Литерал типа Число> EBNF)
+    //     СТРОКА / STRING          → TypeString     (CAST type slot 3 with optional length; <Литерал типа Строка> EBNF)
+    //     ДАТА / DATE              → TypeDate       (CAST type slot 4; <Литерал типа Дата> EBNF via ДАТАВРЕМЯ(...))
+    //
+    //   Undefined literal (1):
+    //     НЕОПРЕДЕЛЕНО / UNDEFINED → LitUndefined   (<Значение> grammar slot, companion to LitNull)
+    //
+    //   Narrow period-type keywords (2):
+    //     ДЕКАДА / TENDAYS         → PeriodTenDays  (ПЕРИОДАМИ(...) period-type slot 9 of 10)
+    //     ПОЛУГОДИЕ / HALFYEAR     → PeriodHalfYear (ПЕРИОДАМИ(...) period-type slot 10 of 10)
+    //
+    // Cross-references: the four `Type*` variants gate the
+    // `<Имя типа>` argument position of the `ТИП(<Имя типа>)`
+    // expression introduced by Slice 2-addendum's `KwType`. Both
+    // `Period*` variants gate the period-type-list argument of the
+    // `ПЕРИОДАМИ(...)` call introduced by Slice 2-addendum's
+    // `KwPeriods`.
+
+    // --- Primitive type literals ---
+
+    // v8327doc Глава 8 — primitive type literal: bilingual word-
+    // list БУЛЕВО ↔ BOOLEAN. Used as the first slot of the
+    // `<Тип значения>` production for the CAST operator
+    // (`ВЫРАЗИТЬ ( <Выражение> КАК <Тип значения> )`) and as a
+    // typed-literal type-tag in the `<Значение>` grammar via
+    // `типа Булево` prose. Cross-ref: `KwType` (Slice 2-addendum)
+    // for the `ТИП(Булево)` form.
+    #[regex(r"(?i)булево|(?i)boolean")]
+    TypeBoolean,
+
+    // v8327doc Глава 8 — primitive type literal: bilingual word-
+    // list ЧИСЛО ↔ NUMBER. CAST type slot
+    // `Число [(Длина[, Точность])]` accepts optional length and
+    // precision modifiers in parens; the standalone `<Литерал типа
+    // Число>` EBNF is `<Целое число>[.<Целое число>]`. Cross-ref:
+    // `KwType` for `ТИП(Число)`.
+    #[regex(r"(?i)число|(?i)number")]
+    TypeNumber,
+
+    // v8327doc Глава 8 — primitive type literal: bilingual word-
+    // list СТРОКА ↔ STRING. CAST type slot `Строка [(Длина)]`
+    // accepts an optional length modifier in parens; the
+    // standalone `<Литерал типа Строка>` EBNF is
+    // `"<Последовательность символов>"`. Cross-ref: `KwType` for
+    // `ТИП(Строка)`.
+    #[regex(r"(?i)строка|(?i)string")]
+    TypeString,
+
+    // v8327doc Глава 8 — primitive type literal: bilingual word-
+    // list ДАТА ↔ DATE. CAST type slot `Дата` (no length /
+    // precision modifiers); the standalone `<Литерал типа Дата>`
+    // EBNF uses the `ДАТАВРЕМЯ(<int>, <int>, <int>[, <int>, <int>,
+    // <int>])` constructor with year/month/day plus optional
+    // hour/minute/second. Cross-ref: `KwType` for `ТИП(Дата)`.
+    #[regex(r"(?i)дата|(?i)date")]
+    TypeDate,
+
+    // --- Undefined literal ---
+
+    // v8327doc Глава 8 — typed-undefined literal: bilingual
+    // word-list НЕОПРЕДЕЛЕНО ↔ UNDEFINED. Sits in the `<Значение>`
+    // EBNF production alongside ИСТИНА, ЛОЖЬ, the typed numeric /
+    // string / date literals, parameter literals, and NULL. The
+    // companion NULL literal is owned by Slice 2's `LitNull`. The
+    // converter at `crates/parser/src/sdbl_token_converter.rs`
+    // treats the two literals asymmetrically: `LitNull` maps to
+    // `TokenKind::Ident` (parser disambiguates by text via
+    // `at_keyword("NULL")`), while `LitUndefined` maps to a
+    // dedicated `TokenKind::KwUndefined` so the parser can match
+    // it directly without a text probe.
+    #[regex(r"(?i)неопределено|(?i)undefined")]
+    LitUndefined,
+
+    // --- Narrow period-type keywords ---
+
+    // v8327doc Глава 8 — TOTALS BY period-type literal: bilingual
+    // word-list ДЕКАДА ↔ TENDAYS. Slot 9 of the 10-element
+    // canonical period-type list inside `ПЕРИОДАМИ(<period-types>,
+    // <begin>, <end>)`. The full canonical list (per the TOTALS
+    // group EBNF and matching prose enumeration) is `Секунда |
+    // Минута | Час | День | Неделя | Месяц | Квартал | Год |
+    // Декада | Полугодие`; slots 1-8 are owned by `Fn*` tokens in
+    // the LEGACY block (function-side priority = 2 — they double
+    // as date/time function names). Cross-ref: `KwPeriods`
+    // (Slice 2-addendum) introduces the `ПЕРИОДАМИ` keyword.
+    #[regex(r"(?i)декада|(?i)tendays")]
+    PeriodTenDays,
+
+    // v8327doc Глава 8 — TOTALS BY period-type literal: bilingual
+    // word-list ПОЛУГОДИЕ ↔ HALFYEAR. Slot 10 (last) of the
+    // 10-element canonical period-type list inside
+    // `ПЕРИОДАМИ(<period-types>, <begin>, <end>)`. See
+    // `PeriodTenDays` above for the full canonical list and the
+    // `Fn*`-shadowing of slots 1-8. Cross-ref: `KwPeriods`
+    // (Slice 2-addendum) introduces the `ПЕРИОДАМИ` keyword.
+    #[regex(r"(?i)полугодие|(?i)halfyear")]
+    PeriodHalfYear,
+
+    // ============================================================================
+    // LEGACY (Slices 3b, 4, 5 pending — Mdo*/function/virtual-table vocabularies + ExternalDataSource)
+    // ============================================================================
+    //
+    // The variants below are carried over unchanged from the
+    // pre-clean-room implementation. They remain Tier B material
+    // for the duration of the staged migration; the next slices
+    // will re-derive built-in functions (Slice 4 — `Fn*`),
+    // metadata-object tokens (Slice 3b — the 14 `Mdo*` variants
+    // excluding `MdoExternalDataSource`), virtual-table tokens
+    // and the platform-late `MdoExternalDataSource` metadata
+    // prefix (Slice 5 — `Vt*` + `MdoExternalDataSource`) from ITS
+    // documentation. The `Error` fallback is the final clean-up
+    // step.
     #[regex(r"(?i)сумма|(?i)sum")]
     FnSum,
 
@@ -717,29 +1017,6 @@ pub enum SdblTokenKind {
 
     #[regex(r"(?i)оборотыдткт|(?i)drcrturnovers")]
     VtDrCrTurnovers,
-
-    #[regex(r"(?i)булево|(?i)boolean")]
-    TypeBoolean,
-
-    #[regex(r"(?i)число|(?i)number")]
-    TypeNumber,
-
-    #[regex(r"(?i)строка|(?i)string")]
-    TypeString,
-
-    #[regex(r"(?i)дата|(?i)date")]
-    TypeDate,
-
-    #[regex(r"(?i)неопределено|(?i)undefined")]
-    LitUndefined,
-
-    // Note: Most period types are the same as date functions above.
-    // Only unique period types are listed here.
-    #[regex(r"(?i)декада|(?i)tendays")]
-    PeriodTenDays,
-
-    #[regex(r"(?i)полугодие|(?i)halfyear")]
-    PeriodHalfYear,
 
     /// Logos error fallback for any byte sequence that does not match
     /// a declared token. Retained unchanged pending the full Slice 1

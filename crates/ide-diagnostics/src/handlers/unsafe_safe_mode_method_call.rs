@@ -28,8 +28,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     const FIXTURE: &str = r#"Процедура Тест()
     Если БезопасныйРежим() ИЛИ Тест = Истина Тогда  // Срабатывание
@@ -81,10 +82,6 @@ mod tests {
 
 КонецПроцедуры"#;
 
-    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
-        diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnsafeSafeModeMethodCall).collect()
-    }
-
     #[test]
     fn test_safe_direct_assignment() {
         let code = r#"
@@ -92,8 +89,11 @@ mod tests {
     Перем1 = БезопасныйРежим();
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -103,8 +103,11 @@ mod tests {
     Перем2 = Метод(БезопасныйРежим());
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -115,8 +118,11 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -127,8 +133,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#"
+                UnsafeSafeModeMethodCall @ 3:10..3:25
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -139,8 +151,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#"
+                UnsafeSafeModeMethodCall @ 3:13..3:28
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -151,36 +169,92 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#"
+                UnsafeSafeModeMethodCall @ 3:10..3:25
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
     fn test_comprehensive_fixture() {
-        let code = FIXTURE;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 10, "Expected exactly 10 diagnostics");
+        check_diagnostics_snapshot_for(
+            FIXTURE,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#"
+                UnsafeSafeModeMethodCall @ 2:10..2:25
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 4:18..4:33
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 8:13..8:28
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 12:34..12:49
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 15:48..15:63
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 17:51..17:66
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 19:35..19:50
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 21:35..21:50
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 24:21..24:36
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 27:10..27:25
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
     fn test_comprehensive_fixture_positions() {
-        let code = FIXTURE;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-
-        assert_eq!(diags.len(), 10);
-
-        assert_diagnostic_range(code, diags[0], 1, 9, 24);
-        assert_diagnostic_range(code, diags[1], 3, 17, 32);
-        assert_diagnostic_range(code, diags[2], 7, 12, 27);
-        assert_diagnostic_range(code, diags[3], 11, 33, 48);
-        assert_diagnostic_range(code, diags[4], 14, 47, 62);
-        assert_diagnostic_range(code, diags[5], 16, 50, 65);
-        assert_diagnostic_range(code, diags[6], 18, 34, 49);
-        assert_diagnostic_range(code, diags[7], 20, 34, 49);
-        assert_diagnostic_range(code, diags[8], 23, 20, 35);
-        assert_diagnostic_range(code, diags[9], 26, 9, 24);
+        check_diagnostics_snapshot_for(
+            FIXTURE,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#"
+                UnsafeSafeModeMethodCall @ 2:10..2:25
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 4:18..4:33
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 8:13..8:28
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 12:34..12:49
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 15:48..15:63
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 17:51..17:66
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 19:35..19:50
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 21:35..21:50
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 24:21..24:36
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker
+                UnsafeSafeModeMethodCall @ 27:10..27:25
+                  message: Use explicit comparison with boolean when calling SafeMode method
+                  severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -191,7 +265,10 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnsafeSafeModeMethodCall,
+            expect![[r#""#]],
+        );
     }
 }

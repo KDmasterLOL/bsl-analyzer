@@ -351,42 +351,150 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
     }
 
-    fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {
-        let parse = self.parse(file_id);
-        Arc::new(hir::lower_regions(&parse.syntax_node()))
+    fn module_security_state(&self, file_id: FileId) -> Arc<crate::effects::ModuleSecurityState> {
+        // §1.4c override for streaming: the security-state lattice is
+        // per-method (no cross-method dependency edges), so the same
+        // on-the-fly compute pattern as `module_path_terminates` works
+        // here. Run `dataflow::security_state::analyze` against each
+        // method body and assemble the batch.
+        let module_id = ModuleId::new(file_id);
+        let module_cfgs = self.module_cfgs(file_id);
+        let module_bodies = self.module_bodies(module_id);
+
+        let mut methods = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            let cfg = match module_cfgs.get(local_id) {
+                Some(c) => c.clone(),
+                None => continue,
+            };
+            if let Some(result) = hir::dataflow::security_state::analyze(cfg, body.clone()) {
+                methods.insert(local_id, Arc::new(result));
+            }
+        }
+        // Codex round-1 MAJOR fix: cover module-level (top-level) code
+        // too. Streaming mode has no `module_level_cfg_query` Salsa
+        // cache, so build the CFG on-the-fly the same way
+        // `module_level_cfg_query` does.
+        let module_level = module_bodies
+            .module_code()
+            .filter(|body| !body.body_stmts_typed().is_empty())
+            .and_then(|body| {
+                let cfg = Arc::new(hir::cfg::CfgBuilder::new().build_graph_from_hir(
+                    body.body_stmts_typed(),
+                    body,
+                    None,
+                ));
+                hir::dataflow::security_state::analyze(cfg, body.clone()).map(Arc::new)
+            });
+        // The `ModuleSecurityState` fields are private — use the
+        // crate-private constructor exposed below to keep the trait
+        // boundary clean.
+        Arc::new(crate::effects::ModuleSecurityState::from_methods_with_module_level(
+            methods,
+            module_level,
+        ))
     }
 
-    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
-        use syntax::{
-            ast::{self, AstNode},
-            SyntaxKind, TextRange, TextSize,
-        };
+    // Note: `method_effect_summary` deliberately uses the trait's
+    // default impl (returns `EffectSummary::EMPTY`). Cross-module
+    // recursion resolution requires Salsa cycle handling, which is
+    // unsafe to do on-the-fly without caching — see §1.4c default-impl
+    // rationale in `provider.rs`.
 
-        let parse = self.parse(file_id);
-        let root = parse.syntax_node();
+    // Track 2 Phase B §6.3 — complexity-metric overrides. Both are
+    // pure HIR-/CFG-walks with no cross-module dependencies, so the
+    // on-the-fly compute pattern (matching `module_security_state`
+    // above) works in streaming mode without Salsa caching.
 
-        let mut regions = Vec::new();
-        for child in root.children() {
-            if child.kind() == SyntaxKind::PRE_REGION_DIR {
-                if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
-                    if region.is_start() {
-                        if let Some(name) = region.name() {
-                            let text = child.text().to_string();
-                            let first_line = text.lines().next().unwrap_or(&text);
-                            let first_line_len = first_line.len();
+    fn module_hir_metrics(&self, file_id: FileId) -> Arc<crate::queries::ModuleHirMetrics> {
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.module_bodies(module_id);
+        let mut methods: FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>> = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            let mut metrics = hir::metrics::compute_hir_metrics(body);
+            if let Some(lower_result) = module_bodies.lower_result(local_id) {
+                metrics.size_lines = lower_result.size_lines;
+            }
+            methods.insert(local_id, Arc::new(metrics));
+        }
+        let module_code = module_bodies
+            .module_code()
+            .map(|body| Arc::new(hir::metrics::compute_hir_metrics(body)));
+        Arc::new(crate::queries::ModuleHirMetrics::from_methods(methods, module_code))
+    }
 
-                            let start = child.text_range().start();
-                            let end = start + TextSize::from(first_line_len as u32);
-                            let range = TextRange::new(start, end);
+    /// Per-method shim — Codex stop-hook fix: without this override
+    /// the trait default returned `HirMethodMetrics::default()` for
+    /// every method in streaming mode, silently zeroing every
+    /// migrated complexity diagnostic. Look up against the
+    /// streaming-computed module batch.
+    fn method_hir_metrics(&self, method: hir::MethodId) -> Arc<hir::metrics::HirMethodMetrics> {
+        let batch = self.module_hir_metrics(method.module.file_id);
+        batch
+            .get(method.local_id)
+            .unwrap_or_else(|| Arc::new(hir::metrics::HirMethodMetrics::default()))
+    }
 
-                            regions.push(base_db::RegionInfo { name, range });
-                        }
-                    }
-                }
+    fn module_cyclomatic(&self, file_id: FileId) -> Arc<crate::queries::ModuleCyclomatic> {
+        let module_id = ModuleId::new(file_id);
+        let module_cfgs = self.module_cfgs(file_id);
+        let module_bodies = self.module_bodies(module_id);
+        // Track 2 Phase B §6.5: SonarQube-style cyclomatic = textbook
+        // V(G) + boolean_ops + ternary (see `module_cyclomatic_query`
+        // in `queries.rs` for the rationale).
+        let module_metrics = self.module_hir_metrics(file_id);
+        let mut methods: FxHashMap<u32, u32> = FxHashMap::default();
+        for (local_id, _body) in module_bodies.iter_bodies() {
+            let Some(cfg) = module_cfgs.get(local_id) else { continue };
+            let base = hir::cfg::cyclomatic_complexity(cfg.as_ref());
+            let extras = module_metrics
+                .get(local_id)
+                .map(|m| m.boolean_ops_count + m.ternary_count)
+                .unwrap_or(0);
+            methods.insert(local_id, base + extras);
+        }
+        Arc::new(crate::queries::ModuleCyclomatic::from_methods(methods))
+    }
+
+    /// Per-method shim. Codex stop-hook fix: without this override the
+    /// trait default returned `1` (the conventional base) for every
+    /// method, silently masking all `CyclomaticComplexity` diagnostics
+    /// in streaming mode.
+    fn method_cyclomatic(&self, method: hir::MethodId) -> u32 {
+        self.module_cyclomatic(method.module.file_id).get(method.local_id)
+    }
+
+    fn module_path_terminates(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        let module_id = ModuleId::new(file_id);
+        let module_cfgs = self.module_cfgs(file_id);
+        let module_bodies = self.module_bodies(module_id);
+
+        let mut results = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            let cfg = match module_cfgs.get(local_id) {
+                Some(cfg) => cfg,
+                None => continue,
+            };
+
+            if let Some(result) = hir::dataflow::path_terminates::analyze_path_terminates(
+                body,
+                cfg,
+                hir::dataflow::path_terminates::PathTerminatesConfig::default(),
+                hir::dataflow::DEFAULT_MAX_ITERATIONS,
+            ) {
+                results.insert(local_id, Arc::new(result));
             }
         }
 
-        Arc::new(regions)
+        Arc::new(hir::dataflow::path_terminates::ModulePathTerminates::new(results))
+    }
+
+    fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {
+        let parse = self.parse(file_id);
+        Arc::new(hir::lower_regions(&parse.syntax_node()))
     }
 
     fn sdbl_hir_in_file(&self, file_id: FileId) -> crate::SdblHirEntries {
@@ -455,6 +563,12 @@ impl AnalysisProvider for StreamingProvider {
         let symbol_tree = self.symbol_tree(method_id.module);
         let method = symbol_tree.find_method_by_id(method_id)?;
         method.docs.clone()
+    }
+
+    fn variable_docs(&self, variable_id: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
+        let symbol_tree = self.symbol_tree(variable_id.module);
+        let variable = symbol_tree.find_variable_by_id(variable_id)?;
+        variable.docs.clone()
     }
 
     fn reaching_definitions(

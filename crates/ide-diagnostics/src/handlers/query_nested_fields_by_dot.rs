@@ -20,7 +20,16 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Default minimum path depth for normal-context column-ref dereferences.
+/// Matches BSL-LS default and preserves pre-config behaviour.
+const DEFAULT_MIN_PATH_DEPTH: i64 = 3;
+
 /// Single-pass dispatch for `QueryNestedFieldsByDot`.
+///
+/// Filtering rules:
+/// - `parts_count = Some(n)` (normal-context column ref): emit only when `n >= minPathDepth`.
+/// - `parts_count = None` (virtual-table parameters, CAST member chain): always emit;
+///   threshold lives in the syntax of the construct itself.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -28,7 +37,16 @@ pub(crate) fn dispatch(
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if let sdbl_hir::SdblDiagnostic::QueryNestedFieldsByDot { range } = diag {
+    if let sdbl_hir::SdblDiagnostic::QueryNestedFieldsByDot { range, parts_count } = diag {
+        if let Some(n) = parts_count {
+            let min = ctx
+                .config
+                .get_int(DiagnosticCode::QueryNestedFieldsByDot, "minPathDepth")
+                .unwrap_or(DEFAULT_MIN_PATH_DEPTH);
+            if (*n as i64) < min {
+                return;
+            }
+        }
         crate::sdbl_utils::dispatch_simple(
             ctx,
             DiagnosticCode::QueryNestedFieldsByDot,
@@ -52,9 +70,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
-    use crate::{DiagnosticCode, Severity};
+    use crate::test_utils::{
+        check_diagnostics_snapshot_for, check_hir_diagnostic_with_config, format_diags,
+    };
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_query_nested_fields_by_dot() {
         let code = r#"//Проверяемые кейсы:
@@ -211,41 +231,47 @@ mod tests {
 // №6 | 1
 // №7 | 1
 //Итого: 12"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        // Expected: 12 diagnostics.
-        //
-        // Found diagnostics:
-        // Query 1 (SELECT + WHERE):
-        // - Line 22: ЗаказКлиентаТовары.Ссылка.Организация (3 parts)
-        // - Line 23: ЗаказКлиентаТовары.Ссылка.Контрагент (3 parts)
-        // - Line 24: ЗаказКлиентаТовары.Ссылка.Партнер (3 parts)
-        // - Line 25: ЗаказКлиентаТовары.Ссылка.ОбъектРасчетов (3 parts)
-        // - Line 30: ЗаказКлиентаТовары.Ссылка.Дата (3 parts, WHERE clause)
-        //
-        // Query 2 (virtual table params):
-        // - Line 54: АналитикаУчетаПоПартнерам.Партнер (2 parts in virtual table)
-        // - Line 55: АналитикаУчетаПоПартнерам.Контрагент (2 parts in virtual table)
-        // - Line 56: АналитикаУчетаПоПартнерам.Организация (2 parts in virtual table)
-        //
-        // Query 4 (JOIN ON clause):
-        // - Line 102: ВТ_РасчетыСКлиентами.АналитикаУчетаПоПартнерам.Партнер (3 parts)
-        // - Line 103: ВТ_РасчетыСКлиентами.АналитикаУчетаПоПартнерам.Контрагент (3 parts)
-        // - Line 104: ВТ_РасчетыСКлиентами.АналитикаУчетаПоПартнерам.Организация (3 parts)
-        //
-        // Query 5 (CAST member access):
-        // - Line 116: ВЫРАЗИТЬ(...).Валюта.Наценка (2 fields after CAST)
-        assert_eq!(diagnostics.len(), 12, "Expected 12 diagnostics, got {}", diagnostics.len());
-
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::QueryNestedFieldsByDot);
-            assert_eq!(diag.severity, Severity::Warning);
-            assert_eq!(diag.message, "Обнаружено разыменование ссылочного поля");
-        }
-
-        // Verify first diagnostic position (line 22 in BSL file, 0-indexed = 21)
-        // "|<tab><tab>ЗаказКлиентаТовары.Ссылка.Организация " - col 3 to 41 (0-indexed)
-        assert_diagnostic_range(code, &diagnostics[0], 21, 3, 41);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryNestedFieldsByDot,
+            expect![[r#"
+                QueryNestedFieldsByDot @ 22:4..22:42
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 23:4..23:41
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 24:4..24:38
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 25:4..25:45
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 30:4..30:35
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 54:7..54:40
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 54:42..54:78
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 54:80..54:117
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 102:8..102:63
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 103:8..103:66
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 104:8..104:67
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning
+                QueryNestedFieldsByDot @ 116:4..116:84
+                  message: Обнаружено разыменование ссылочного поля
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -257,8 +283,11 @@ mod tests {
     Запрос.Текст = "ВЫБРАТЬ Справочник.Валюты.Код ИЗ Справочник.Валюты";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert!(diagnostics.is_empty(), "MDO type paths should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryNestedFieldsByDot,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -270,7 +299,84 @@ mod tests {
     Запрос.Текст = "ВЫБРАТЬ T.Ссылка ИЗ Документ.Заказ КАК T";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert!(diagnostics.is_empty(), "Two-part paths should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryNestedFieldsByDot,
+            expect![[r#""#]],
+        );
+    }
+
+    fn config_with_min_path_depth(depth: i64) -> crate::DiagnosticsConfig {
+        let mut config = crate::DiagnosticsConfig::default();
+        config.enabled.push(DiagnosticCode::QueryNestedFieldsByDot);
+        config.parameters.insert(
+            DiagnosticCode::QueryNestedFieldsByDot,
+            serde_json::json!({ "minPathDepth": depth }),
+        );
+        config
+    }
+
+    #[test]
+    fn test_min_path_depth_above_three_drops_three_part_normal_context() {
+        // 3-part normal-context column ref: handler filter drops when minPathDepth > 3.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ T.Ссылка.Контрагент ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(4);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
+            .collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_min_path_depth_above_three_preserves_cast_member_chain() {
+        // CAST chained `member_access` carries `parts_count: None` and is unaffected by config.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ ВЫРАЗИТЬ(T.Ссылка КАК Документ.Заказ).Валюта.Курс
+    |ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(99);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
+            .collect();
+        expect![[r#"
+            QueryNestedFieldsByDot @ 5:14..6:6
+              message: Обнаружено разыменование ссылочного поля
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_min_path_depth_two_emits_two_part_normal_context() {
+        // 2-part normal-context column ref: silent at default (min=3), emits at min=2.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ T.Поле ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(2);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
+            .collect();
+        expect![[r#"
+            QueryNestedFieldsByDot @ 4:29..4:36
+              message: Обнаружено разыменование ссылочного поля
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 }

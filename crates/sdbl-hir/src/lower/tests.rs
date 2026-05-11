@@ -500,7 +500,6 @@ fn test_case_expression_parsed() {
     let query = "SELECT CASE Status WHEN 1 THEN 'Active' END FROM Products";
     let parse = parser::parse_sdbl(query);
     let tree = format!("{:#?}", parse.syntax_node());
-    eprintln!("Parse tree:\n{}", tree);
 
     // Check if CASE node exists
     assert!(tree.contains("SDBL_CASE_EXPR"), "CASE expression not in parse tree");
@@ -676,6 +675,42 @@ fn test_temp_table_in_union() {
     } else {
         panic!("Expected TempTable variant, got: {:?}", temp_table_ref.metadata);
     }
+}
+
+#[test]
+fn test_drop_query_semantic_tokens() {
+    let result = lower_query_with_source_map("УНИЧТОЖИТЬ ВТ_ВсеСвойства");
+    let sm = &result.source_map;
+
+    assert!(result.queries().is_empty(), "DROP query should not create SELECT HIR");
+
+    let clause_keywords: Vec<_> = sm.clause_keywords.iter().map(|t| t.text.as_str()).collect();
+    let table_names: Vec<_> = sm.table_names.iter().map(|t| t.text.as_str()).collect();
+
+    assert!(
+        clause_keywords.contains(&"УНИЧТОЖИТЬ"),
+        "DROP keyword should be highlighted, got: {clause_keywords:?}"
+    );
+    assert!(
+        table_names.contains(&"ВТ_ВсеСвойства"),
+        "temporary table name should be highlighted, got: {table_names:?}"
+    );
+}
+
+#[test]
+fn test_drop_query_removes_temp_table_from_subsequent_scope() {
+    let query = "ВЫБРАТЬ Поле КАК Поле ПОМЕСТИТЬ ВТ ИЗ Источник; УНИЧТОЖИТЬ ВТ; ВЫБРАТЬ Поле ИЗ ВТ";
+
+    let result = lower_query_with_source_map(query);
+
+    assert_eq!(result.queries().len(), 2, "DROP query should not create SELECT HIR");
+
+    let second_hir = &result.queries()[1].hir;
+    assert_eq!(second_hir.from.len(), 1);
+    assert!(
+        !second_hir.from[0].is_resolved(),
+        "temporary table must not remain resolved after DROP/УНИЧТОЖИТЬ"
+    );
 }
 
 // ===== Tabular Section Resolution Tests =====
@@ -1012,24 +1047,6 @@ fn test_incomplete_on_collects_all_tables() {
 
     let parse = parser::parse_sdbl(query);
 
-    // DEBUG: Print parse errors
-    println!("\n=== PARSE ERRORS ===");
-    println!("Error count: {}", parse.errors().len());
-    for (i, err) in parse.errors().iter().enumerate() {
-        println!("  Error {}: {:?}", i + 1, err);
-    }
-
-    // DEBUG: Print syntax tree structure
-    println!("\n=== SYNTAX TREE ===");
-    let root = parse.syntax_node();
-    let tree_str = format!("{:#?}", root);
-    // Print first 2000 chars of tree
-    if tree_str.len() > 2000 {
-        println!("{}...(truncated)", &tree_str[..2000]);
-    } else {
-        println!("{}", tree_str);
-    }
-
     use syntax::ast::AstNode;
     let package =
         syntax::ast::SdblQueryPackage::cast(parse.syntax_node()).expect("Should parse package");
@@ -1050,11 +1067,6 @@ fn test_incomplete_on_collects_all_tables() {
     assert_eq!(query_hir.from[0].alias.as_ref().map(|s| s.as_str()), Some("Т1"));
 
     // Check JOINs - should have BOTH joins despite incomplete ON
-    println!("Number of JOINs in HIR: {}", query_hir.joins.len());
-    for (i, join) in query_hir.joins.iter().enumerate() {
-        println!("  JOIN {}: {} (alias: {:?})", i, join.table.full_name, join.table.alias);
-    }
-
     assert_eq!(query_hir.joins.len(), 2, "Should collect both nested JOINs");
 
     // Verify table names
@@ -1069,8 +1081,6 @@ fn test_incomplete_on_collects_all_tables() {
     let t3_join = query_hir.joins.iter().find(|j| j.table.full_name == "Таблица3").unwrap();
     assert_eq!(t3_join.table.alias.as_ref().map(|s| s.as_str()), Some("Т3"));
 
-    // ВАЖНО: Проверяем, что source_map содержит токены для highlighting
-    println!("\nSource map token count: {}", hir_package.source_map.all_tokens().count());
     assert!(
         hir_package.source_map.all_tokens().count() > 0,
         "Source map should have tokens for highlighting"
@@ -1089,40 +1099,16 @@ fn test_parse_continues_after_incomplete_field() {
         И Т2.Другое = &Параметр
         И Т1.Еще = Т2.Финал"#;
 
-    println!("\n=== QUERY ===");
-    println!("{}", query);
-
     let parse = parser::parse_sdbl(query);
-
-    println!("\n=== PARSE ERRORS ===");
-    println!("Error count: {}", parse.errors().len());
-    for (i, err) in parse.errors().iter().enumerate() {
-        println!("  Error {}: {:?}", i + 1, err);
-    }
-
-    let root = parse.syntax_node();
-
-    println!("\n=== SYNTAX TREE (first 3000 chars) ===");
-    let tree_str = format!("{:#?}", root);
-    if tree_str.len() > 3000 {
-        println!("{}...(truncated)", &tree_str[..3000]);
-    } else {
-        println!("{}", tree_str);
-    }
 
     // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
-
-    println!("\n=== HIR ===");
-    println!("HIR queries: {}", hir_package.queries.len());
-    println!("Source map tokens: {}", hir_package.source_map.all_tokens().count());
 
     // Check if HIR found the query despite parse errors
     assert_eq!(hir_package.queries.len(), 1, "Should have 1 query even with incomplete ON");
 
     // Check if source_map has tokens for ALL parts of query (including after incomplete field)
     let token_count = hir_package.source_map.all_tokens().count();
-    println!("Tokens for highlighting: {}", token_count);
 
     // Should have many tokens (keywords, identifiers, etc.) - even with incomplete fields
     assert!(
@@ -1154,42 +1140,18 @@ fn test_multiple_incomplete_fields_with_operators() {
             И ПроцессыДействий. = &Действие
         ПО ВТ_ЗадачиСхемы. = ДанныеБизнесПроцессов."#;
 
-    println!("\n=== QUERY ===");
-    println!("{}", query);
-
     let parse = parser::parse_sdbl(query);
-
-    println!("\n=== PARSE ERRORS ===");
-    println!("Error count: {}", parse.errors().len());
-    for (i, err) in parse.errors().iter().enumerate() {
-        println!("  Error {}: {:?}", i + 1, err);
-    }
-
-    let root = parse.syntax_node();
-
-    println!("\n=== SYNTAX TREE (last 2000 chars) ===");
-    let tree_str = format!("{:#?}", root);
-    if tree_str.len() > 2000 {
-        let start = tree_str.len().saturating_sub(2000);
-        println!("...{}", &tree_str[start..]);
-    } else {
-        println!("{}", tree_str);
-    }
 
     // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
-    println!("\n=== HIR ===");
-    println!("HIR queries: {}", hir_package.queries.len());
-    println!("Source map tokens: {}", hir_package.source_map.all_tokens().count());
-
     // Check token count for highlighting
     let token_count = hir_package.source_map.all_tokens().count();
-    println!("Tokens for highlighting: {}", token_count);
-
-    // PROBLEM: Parser должен создавать токены даже с incomplete fields
-    // Если highlighting ломается, это видно по малому количеству токенов
-    println!("\n⚠️  If token count is low, highlighting will break for this query!");
+    assert!(
+        token_count > 10,
+        "Should have significant tokens for highlighting, got {}",
+        token_count
+    );
 }
 
 #[test]
@@ -1202,40 +1164,17 @@ fn test_incomplete_as_alias_in_select() {
 ГДЕ
     Валюты.СпособУстановкиКурса = ЗНАЧЕНИЕ(Перечисление.СпособыУстановкиКурсаВалюты.РасчетПоФормуле)"#;
 
-    println!("\n=== QUERY ===");
-    println!("{}", query);
-
     let parse = parser::parse_sdbl(query);
-
-    println!("\n=== PARSE ERRORS ===");
-    println!("Error count: {}", parse.errors().len());
-    for (i, err) in parse.errors().iter().enumerate() {
-        println!("  Error {}: {:?}", i + 1, err);
-    }
-
-    let root = parse.syntax_node();
-
-    println!("\n=== SYNTAX TREE (first 3000 chars) ===");
-    let tree_str = format!("{:#?}", root);
-    if tree_str.len() > 3000 {
-        println!("{}...(truncated)", &tree_str[..3000]);
-    } else {
-        println!("{}", tree_str);
-    }
 
     // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
-    println!("\n=== HIR ===");
-    println!("HIR queries: {}", hir_package.queries.len());
-    println!("Source map tokens: {}", hir_package.source_map.all_tokens().count());
-
     let token_count = hir_package.source_map.all_tokens().count();
-    println!("Tokens for highlighting: {}", token_count);
-
-    // Parser должен продолжить работу после incomplete AS
-    println!(
-        "\n⚠️  Parser should continue after incomplete AS and generate tokens for highlighting!"
+    assert_eq!(hir_package.queries.len(), 1, "Should have 1 query even with incomplete AS");
+    assert!(
+        token_count > 10,
+        "Should have significant tokens for highlighting, got {}",
+        token_count
     );
 }
 
@@ -1258,41 +1197,12 @@ fn test_incomplete_table_reference_in_from() {
 ГДЕ
     Валюты.СпособУстановкиКурса = ЗНАЧЕНИЕ(Перечисление.СпособыУстановкиКурсаВалюты.РасчетПоФормуле)"#;
 
-    println!("\n=== QUERY ===");
-    println!("{}", query);
-
     let parse = parser::parse_sdbl(query);
-
-    println!("\n=== PARSE ERRORS ===");
-    println!("Error count: {}", parse.errors().len());
-    for (i, err) in parse.errors().iter().enumerate() {
-        println!("  Error {}: {:?}", i + 1, err);
-    }
-
-    let root = parse.syntax_node();
-
-    println!("\n=== FULL SYNTAX TREE ===");
-    let tree_str = format!("{:#?}", root);
-    println!("{}", tree_str);
 
     // Lower to HIR
     let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
 
-    println!("\n=== HIR ===");
-    println!("HIR queries: {}", hir_package.queries.len());
-    println!("Source map tokens: {}", hir_package.source_map.all_tokens().count());
-
     let token_count = hir_package.source_map.all_tokens().count();
-    println!("Tokens for highlighting: {}", token_count);
-
-    // NOTE: HIR currently doesn't support UNION ALL, so we only get first query
-    // Parser correctly parses both queries (see syntax tree), but HIR lowering
-    // only processes the first SELECT before UNION
-    // TODO: Add UNION support to HIR
-
-    // Check that parser handles incomplete table ref without breaking
-    println!("\n⚠️  Parser creates empty ERROR for incomplete table ref");
-    println!("⚠️  Token count: {} - highlighting should work", token_count);
 
     // Verify parser didn't break on incomplete table ref
     assert!(token_count > 20, "Should have significant tokens despite incomplete table ref");
@@ -1952,21 +1862,7 @@ fn test_query_range_includes_all_select_fields_with_case() {
 
     let parsed = parser::parse_sdbl(query);
 
-    // DEBUG: посмотрим что парсер увидел
-    println!("=== PARSE TREE ===");
-    println!("{:#?}", parsed.syntax_node());
-    println!("\n=== PARSE ERRORS ===");
-    for error in parsed.errors() {
-        println!("{:?}", error);
-    }
-
     let package = lower_sdbl_to_hir(&parsed, None);
-
-    println!("\n=== LOWERED QUERIES ===");
-    println!("Total queries: {}", package.queries.len());
-    for (i, q) in package.queries.iter().enumerate() {
-        println!("Query {}: range={:?}", i, q.range);
-    }
 
     // Должно быть 2 запроса
     assert_eq!(package.queries.len(), 2, "Should have 2 queries");
@@ -2500,14 +2396,12 @@ fn test_join_paren_field_resolution() {
         source_map.tokens_by_category(crate::source_map::TokenCategory::UnresolvedFieldName);
     let resolved = source_map.tokens_by_category(crate::source_map::TokenCategory::FieldName);
 
-    println!("Unresolved fields: {:?}", unresolved.iter().map(|t| &t.text).collect::<Vec<_>>());
-    println!("Resolved fields: {:?}", resolved.iter().map(|t| &t.text).collect::<Vec<_>>());
-
     assert!(
         unresolved.is_empty(),
         "Fields inside parens should resolve. Unresolved: {:?}",
         unresolved.iter().map(|t| &t.text).collect::<Vec<_>>()
     );
+    assert!(!resolved.is_empty(), "Fields inside parens should produce resolved field tokens");
 }
 
 // ===== Virtual Table Field Resolution Tests =====
@@ -2762,6 +2656,66 @@ fn test_virtual_table_semantic_tokens_resolved() {
         !unresolved.iter().any(|t| t == "СуммаОборот"),
         "СуммаОборот should NOT be in unresolved, got: {:?}",
         unresolved
+    );
+}
+
+#[test]
+fn chart_of_characteristic_ref_and_index_by_are_semantically_highlighted() {
+    use bsl_metadata::{Attribute, AttributeType, Configuration, MdoType, MetadataObject};
+
+    let mut config = Configuration::new("TestConfig");
+    let mut cct = MetadataObject::new(
+        MdoType::ChartOfCharacteristicTypes,
+        "ДополнительныеРеквизитыИСведения",
+    );
+    cct.attributes.push(Attribute {
+        name: "Ссылка".to_string(),
+        name_en: Some("Ref".to_string()),
+        attr_type: AttributeType::Ref {
+            mdo_type: MdoType::ChartOfCharacteristicTypes,
+            name: "ДополнительныеРеквизитыИСведения".to_string(),
+        },
+    });
+    config.add_metadata_object(cct);
+
+    let code = r#"ВЫБРАТЬ
+	ДополнительныеРеквизитыИСведения.Ссылка КАК Свойство
+ПОМЕСТИТЬ ВТ_ВсеСвойства
+ИЗ
+	ПланВидовХарактеристик.ДополнительныеРеквизитыИСведения КАК ДополнительныеРеквизитыИСведения
+
+ИНДЕКСИРОВАТЬ ПО
+	Свойство"#;
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let sm = &package.source_map;
+
+    let resolved_fields: Vec<_> = sm.field_names.iter().map(|t| t.text.as_str()).collect();
+    let unresolved_fields: Vec<_> =
+        sm.unresolved_field_names.iter().map(|t| t.text.as_str()).collect();
+    let clause_keywords: Vec<_> = sm.clause_keywords.iter().map(|t| t.text.as_str()).collect();
+    let field_aliases: Vec<_> = sm.field_aliases.iter().map(|t| t.text.as_str()).collect();
+
+    assert!(
+        resolved_fields.contains(&"Ссылка"),
+        "Ссылка should resolve for ChartOfCharacteristicTypes, got fields: {resolved_fields:?}"
+    );
+    assert!(
+        !unresolved_fields.contains(&"Ссылка"),
+        "Ссылка must not be unresolved, got: {unresolved_fields:?}"
+    );
+    assert!(
+        clause_keywords.contains(&"ИНДЕКСИРОВАТЬ"),
+        "INDEX BY keyword should be highlighted, got: {clause_keywords:?}"
+    );
+    assert!(
+        clause_keywords.contains(&"ПО"),
+        "INDEX BY 'ПО' keyword should be highlighted, got: {clause_keywords:?}"
+    );
+    assert!(
+        field_aliases.iter().filter(|name| **name == "Свойство").count() >= 2,
+        "SELECT alias and INDEX BY reference should be field aliases, got: {field_aliases:?}"
     );
 }
 

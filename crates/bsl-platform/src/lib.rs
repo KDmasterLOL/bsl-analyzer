@@ -29,6 +29,7 @@
 //! ```
 
 mod db;
+pub mod security;
 pub mod standard_mdo_attributes;
 mod types;
 
@@ -55,6 +56,20 @@ pub use db::{
 };
 pub use types::*;
 
+/// Split a raw HBK type-string on either `,` or `;` separator, trimming each
+/// segment and dropping empties.
+///
+/// 1С platform pages mix the two separators between alternatives:
+/// `param_type = "Форма ; Элемент управления"`,
+/// `return_type = "Null, Булево; Дата"`, and a stray trailing separator
+/// (`"Метаданные, Массив ;"`) is common scraper noise. Treating both
+/// characters uniformly and folding away empties is the single contract
+/// every consumer (`hir-ty` lowering, hover, completion) shares — we keep
+/// it here so each consumer cannot drift into its own ad-hoc split.
+pub fn split_type_alternatives(raw: &str) -> Vec<&str> {
+    raw.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,6 +83,20 @@ mod tests {
         let methods = data.all_methods();
 
         println!("Loaded {} types and {} methods", types.len(), methods.len());
+    }
+
+    #[test]
+    fn split_type_alternatives_handles_comma_semicolon_and_trailing_garbage() {
+        assert_eq!(split_type_alternatives("Число"), vec!["Число"]);
+        assert_eq!(split_type_alternatives("Число, Строка"), vec!["Число", "Строка"]);
+        assert_eq!(split_type_alternatives("Форма ; Элемент"), vec!["Форма", "Элемент"]);
+        // 1С HBK scraper emits a stray trailing `;` after a `,`-list — both
+        // separators are folded uniformly.
+        assert_eq!(split_type_alternatives("Метаданные, Массив ;"), vec!["Метаданные", "Массив"],);
+        // All-separator / all-whitespace inputs produce no segments after
+        // empty-filter; callers see this and fall back to `Ty::Unknown`.
+        assert!(split_type_alternatives(", ,").is_empty());
+        assert!(split_type_alternatives("").is_empty());
     }
 
     #[test]

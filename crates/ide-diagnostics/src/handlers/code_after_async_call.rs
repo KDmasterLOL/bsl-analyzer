@@ -112,8 +112,9 @@ pub fn from_hir(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::{check_hir_diagnostic, format_diags};
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     fn check_diagnostic(code: &str) -> Vec<crate::Diagnostic> {
         check_hir_diagnostic(code)
@@ -132,7 +133,7 @@ mod tests {
 "#;
 
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "No code after async should be valid");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -145,9 +146,11 @@ mod tests {
 "#;
 
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Code after async should be an error");
+        expect![[r#"
+            CodeAfterAsyncCall @ 3:5..3:54
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
         // Line 2 (0-indexed from start of code including leading newline)
-        assert_diagnostic_range(code, &diagnostics[0], 2, 4, 53);
     }
 
     #[test]
@@ -160,7 +163,7 @@ mod tests {
 "#;
 
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Return after async should be valid");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -175,7 +178,10 @@ mod tests {
 "#;
 
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Code after IF containing async should be an error");
+        expect![[r#"
+            CodeAfterAsyncCall @ 4:9..4:58
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -188,7 +194,10 @@ EndProcedure
 "#;
 
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "English async methods should be detected");
+        expect![[r#"
+            CodeAfterAsyncCall @ 3:5..3:53
+              message: После вызова асинхронного метода 'ShowInputNumber' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -201,7 +210,7 @@ EndProcedure
 "#;
 
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Qualified calls should be ignored");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -216,7 +225,7 @@ EndProcedure
 "#;
 
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Break after async in loop should be valid");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -229,7 +238,10 @@ EndProcedure
     Сообщить("Введенное количество равно " + ДополнительныеПараметры.Результат);
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            CodeAfterAsyncCall @ 4:5..4:98
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -246,7 +258,10 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            CodeAfterAsyncCall @ 5:9..5:102
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -263,7 +278,10 @@ EndProcedure
     Сообщить("Введенное количество равно " + ДополнительныеПараметры.Результат);
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            CodeAfterAsyncCall @ 5:9..5:102
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -282,7 +300,10 @@ EndProcedure
     Сообщить("Введенное количество равно " + ДополнительныеПараметры.Результат);
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            CodeAfterAsyncCall @ 6:13..6:106
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -301,7 +322,10 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            CodeAfterAsyncCall @ 6:13..6:106
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -380,7 +404,10 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            CodeAfterAsyncCall @ 6:13..6:106
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -391,7 +418,7 @@ EndProcedure
     // комментарий
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -407,7 +434,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -423,7 +450,7 @@ EndProcedure
     КодВКонцеМетода();
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -440,7 +467,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -458,7 +485,10 @@ EndProcedure
     КодПослеЦикла();
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            CodeAfterAsyncCall @ 6:13..6:106
+              message: После вызова асинхронного метода 'ПоказатьВводЧисла' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -474,6 +504,6 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

@@ -221,18 +221,38 @@ pub fn get_current_version(cache_dir: &Path) -> Option<String> {
 }
 
 pub fn update_current_link(cache_dir: &Path, target: &Path) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let link_path = cache_dir.join("current");
     let target_name = target.file_name().context("Target has no filename")?;
 
-    // Atomic update: write new value into a per-process temp, then
+    // Atomic update: write new value into a *per-call* temp, then
     // `rename(2)` over `current`. Without this, an unlocked reader could
     // observe `current` momentarily absent during a `--launcher-update`
     // and bail with "not installed" while a valid analyzer exists.
+    //
+    // The temp filename has to be unique across **threads of the same
+    // process** as well as across processes — `std::process::id()` is
+    // the same for every thread, and `SystemTime::now()` is not
+    // guaranteed to be monotonic across simultaneous calls on systems
+    // where the syscall resolution is coarser than the inter-thread
+    // timing. A monotonic process-local counter (`UNIQUE`) breaks the
+    // tie deterministically, fixing a race where two threads computed
+    // the same `temp_path` and the second `symlink(2)` failed with
+    // EEXIST. The counter is `Relaxed` because we only need every
+    // value to differ — there is no happens-before requirement on the
+    // ordering with respect to other operations.
+    static UNIQUE: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let temp_path =
-        cache_dir.join(format!("{}{}-{}", CURRENT_LINK_TEMP_PREFIX, std::process::id(), nanos));
+    let seq = UNIQUE.fetch_add(1, Ordering::Relaxed);
+    let temp_path = cache_dir.join(format!(
+        "{}{}-{}-{}",
+        CURRENT_LINK_TEMP_PREFIX,
+        std::process::id(),
+        nanos,
+        seq,
+    ));
     let _ = fs::remove_file(&temp_path);
 
     #[cfg(unix)]

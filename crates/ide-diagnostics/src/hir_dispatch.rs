@@ -11,11 +11,9 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::AllFunctionPathMustHaveReturn,
     DiagnosticCode::BeginTransactionBeforeTryCatch,
     DiagnosticCode::CodeAfterAsyncCall,
-    DiagnosticCode::CognitiveComplexity,
     DiagnosticCode::CommitTransactionOutsideTryCatch,
     DiagnosticCode::CommonModuleAssign,
     DiagnosticCode::CreateQueryInCycle,
-    DiagnosticCode::CyclomaticComplexity,
     DiagnosticCode::DeletingCollectionItem,
     DiagnosticCode::DeprecatedAttributes8312,
     DiagnosticCode::DeprecatedCurrentDate,
@@ -25,9 +23,7 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::DeprecatedMethods8317,
     DiagnosticCode::DeprecatedMethodCall,
     DiagnosticCode::DeprecatedTypeManagedForm,
-    DiagnosticCode::DisableSafeMode,
     DiagnosticCode::EmptyCodeBlock,
-    DiagnosticCode::EmptyRegion,
     DiagnosticCode::EmptyStatement,
     DiagnosticCode::ExecuteExternalCode,
     DiagnosticCode::ExternalAppStarting,
@@ -40,18 +36,13 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::FunctionShouldHaveReturn,
     DiagnosticCode::GetFormMethod,
     DiagnosticCode::GlobalContextMethodCollision8312,
-    DiagnosticCode::IfConditionComplexity,
     DiagnosticCode::IfElseDuplicatedCodeBlock,
     DiagnosticCode::IfElseDuplicatedCondition,
     DiagnosticCode::IfElseIfEndsWithElse,
     DiagnosticCode::IncorrectUseOfStrTemplate,
     DiagnosticCode::MagicNumber,
-    DiagnosticCode::MethodSize,
     DiagnosticCode::MissedRequiredParameter,
     DiagnosticCode::MissingCommonModuleMethod,
-    DiagnosticCode::NestedStatements,
-    DiagnosticCode::NumberOfOptionalParams,
-    DiagnosticCode::NumberOfParams,
     DiagnosticCode::OneStatementPerLine,
     DiagnosticCode::OSUsersMethod,
     DiagnosticCode::ProcedureReturnsValue,
@@ -61,7 +52,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::SelfAssign,
     DiagnosticCode::SelfInsertion,
     DiagnosticCode::SemicolonPresence,
-    DiagnosticCode::SetPrivilegedMode,
     DiagnosticCode::StyleElementConstructors,
     DiagnosticCode::TempFilesDir,
     DiagnosticCode::TernaryOperatorUsage,
@@ -153,9 +143,6 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::DeprecatedTypeManagedForm { type_name, range } => {
             handlers::deprecated_type_managed_form::from_hir(type_name, *range, ctx)
         }
-        BodyDiagnostic::DisableSafeMode { method_name, range } => {
-            handlers::disable_safe_mode::from_hir(method_name, *range, ctx)
-        }
         BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
             handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
         }
@@ -184,8 +171,13 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => {
             handlers::commit_transaction_outside_try_catch::from_hir(*range, ctx)
         }
-        BodyDiagnostic::CommonModuleAssign { variable_name, range } => {
-            handlers::common_module_assign::from_hir(variable_name, *range, ctx)
+        BodyDiagnostic::CommonModuleAssign { variable_name, range, existing_binding_kind } => {
+            handlers::common_module_assign::from_hir(
+                variable_name,
+                *range,
+                *existing_binding_kind,
+                ctx,
+            )
         }
         BodyDiagnostic::RewriteMethodParameter { param_id, stmt_id, stmt_range, ident_range } => {
             handlers::rewrite_method_parameter::from_hir(
@@ -234,17 +226,11 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::FunctionReturnsSamePrimitive { range } => {
             handlers::function_returns_same_primitive::from_hir(*range, ctx)
         }
-        BodyDiagnostic::EmptyRegion { name, range } => {
-            handlers::empty_region::from_hir(name, *range, ctx)
-        }
         BodyDiagnostic::EmptyStatement { range } => {
             handlers::empty_statement::from_hir(*range, ctx)
         }
         BodyDiagnostic::MissingSemicolon { range } => {
             handlers::semicolon_presence::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::IfConditionComplexity { complexity, max_complexity, range } => {
-            handlers::if_condition_complexity::from_hir(*complexity, *max_complexity, *range, ctx)
         }
         BodyDiagnostic::IfElseDuplicatedCondition { first_occurrence_index, range } => {
             handlers::if_else_duplicated_condition::from_hir(*first_occurrence_index, *range, ctx)
@@ -270,9 +256,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::RedundantAccessToObject { kind, range } => {
             handlers::redundant_access_to_object::from_hir(kind, *range, ctx)
-        }
-        BodyDiagnostic::SetPrivilegedModeCall { range } => {
-            handlers::set_privileged_mode::from_hir(*range, ctx)
         }
         BodyDiagnostic::StyleElementConstructors { type_name, range } => {
             handlers::style_element_constructors::from_hir(type_name, *range, ctx)
@@ -326,43 +309,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::ThisObjectAssign { range } => {
             handlers::this_object_assign::from_hir(*range, ctx)
-        }
-        // Phase 4: Method-scoped diagnostics
-        BodyDiagnostic::CognitiveComplexity { method_name, complexity, is_function, range } => {
-            handlers::cognitive_complexity::from_hir(
-                method_name,
-                *complexity,
-                *is_function,
-                *range,
-                ctx,
-            )
-        }
-        BodyDiagnostic::CyclomaticComplexity { method_name, complexity, is_function, range } => {
-            handlers::cyclomatic_complexity::from_hir(
-                method_name,
-                *complexity,
-                *is_function,
-                *range,
-                ctx,
-            )
-        }
-        BodyDiagnostic::MethodSize { method_name, size, is_function, range } => {
-            handlers::method_size::from_hir(method_name, *size, *is_function, *range, ctx)
-        }
-        BodyDiagnostic::NestedStatements { method_name, depth, is_function, range } => {
-            handlers::nested_statements::from_hir(method_name, *depth, *is_function, *range, ctx)
-        }
-        BodyDiagnostic::NumberOfParams { method_name, count, is_function, range } => {
-            handlers::number_of_params::from_hir(method_name, *count, *is_function, *range, ctx)
-        }
-        BodyDiagnostic::NumberOfOptionalParams { method_name, count, is_function, range } => {
-            handlers::number_of_optional_params::from_hir(
-                method_name,
-                *count,
-                *is_function,
-                *range,
-                ctx,
-            )
         }
         BodyDiagnostic::TryNumber { range } => handlers::try_number::from_hir(*range, ctx),
         BodyDiagnostic::UsingObjectNotAvailableUnix { type_name, range } => {

@@ -32,62 +32,72 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_array_add_self() {
         let code =
             "Процедура Тест()\nТовары = Новый Массив();\nТовары.Добавить(Товары);\nКонецПроцедуры";
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 2, 0, 23);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfInsertion,
+            expect![[r#"
+            SelfInsertion @ 3:1..3:24
+              message: Удалите вставку коллекции в саму себя
+              severity: Major"#]],
+        );
     }
 
     #[test]
     fn test_structure_insert_self() {
         let code = "Процедура Тест()\nНастройки = Новый Структура();\nНастройки.Вставить(\"Ключ\", Настройки);\nКонецПроцедуры";
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfInsertion,
+            expect![[r#"
+            SelfInsertion @ 3:1..3:38
+              message: Удалите вставку коллекции в саму себя
+              severity: Major"#]],
+        );
     }
 
     #[test]
     fn test_different_objects_ok() {
         let code = "Процедура Тест()\nМассив1 = Новый Массив();\nМассив2 = Новый Массив();\nМассив1.Добавить(Массив2);\nКонецПроцедуры";
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SelfInsertion, expect![[r#""#]]);
     }
 
     #[test]
     fn test_other_method_ok() {
         let code = "Процедура Тест()\nМодуль.ВыполнитьПроверку(Модуль);\nКонецПроцедуры";
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SelfInsertion, expect![[r#""#]]);
     }
 
     #[test]
     fn test_english_methods() {
         let code = "Procedure Test()\nArr = New Array();\nArr.Add(Arr);\nEndProcedure";
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfInsertion,
+            expect![[r#"
+            SelfInsertion @ 3:1..3:13
+              message: Удалите вставку коллекции в саму себя
+              severity: Major"#]],
+        );
     }
 
     #[test]
     fn test_insert_english() {
         let code = "Procedure Test()\nMap = New Map();\nMap.Insert(\"key\", Map);\nEndProcedure";
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
-        assert_eq!(diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfInsertion,
+            expect![[r#"
+            SelfInsertion @ 3:1..3:23
+              message: Удалите вставку коллекции в саму себя
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -111,17 +121,16 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
-
-        // Expected: 2 diagnostics
-        // Line 3: НастройкиПроверки.Вставить("ТутЯ", НастройкиПроверки);
-        // Line 9: Товары.Добавить(Товары);
-        assert_eq!(diags.len(), 2, "Should find 2 diagnostics");
-
-        // Verify positions
-        assert_diagnostic_range(code, diags[0], 3, 4, 57);
-        assert_diagnostic_range(code, diags[1], 9, 4, 27);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfInsertion,
+            expect![[r#"
+            SelfInsertion @ 4:5..4:58
+              message: Удалите вставку коллекции в саму себя
+              severity: Major
+            SelfInsertion @ 10:5..10:28
+              message: Удалите вставку коллекции в саму себя
+              severity: Major"#]],
+        );
     }
 }

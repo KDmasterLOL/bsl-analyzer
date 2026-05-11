@@ -42,13 +42,13 @@ impl LoweringContext {
                 // Lower first query as main, collect diagnostics
                 if let Some(main_query) = queries.first() {
                     self.scope.push_frame();
-                    let mut main_hir = self.lower_query(main_query, false, has_union_siblings);
+                    let mut main_hir = self.lower_query(main_query, has_union_siblings, true);
                     self.scope.pop_frame();
 
                     // Lower remaining queries as UNION queries
                     for union_query in queries.iter().skip(1) {
                         self.scope.push_frame();
-                        let union_hir = self.lower_query(union_query, true, true);
+                        let union_hir = self.lower_query(union_query, true, false);
                         self.scope.pop_frame();
                         main_hir.diagnostics.extend(union_hir.diagnostics);
                     }
@@ -400,16 +400,17 @@ impl LoweringContext {
             syntax::TextRange::new(start, end)
         };
 
+        // Track 2 §4 Slice 4: single LikeUsage variant carries both
+        // UsingLikeInQuery (always) and IncorrectUseLikeInQuery (when the
+        // pattern operand is a column reference) as different kinds. Each
+        // consumer handler filters on `kind` accordingly.
+        let kind = if is_column_ref_pattern(&pattern) {
+            crate::diagnostics::LikeUsageKind::Incorrect
+        } else {
+            crate::diagnostics::LikeUsageKind::Allowed
+        };
         self.diagnostics
-            .push(crate::diagnostics::SdblDiagnostic::UsingLikeInQuery { range: tight_range });
-
-        // Check if pattern is a column reference - this is incorrect usage
-        // Pattern must be: string literal, parameter, or function call
-        if is_column_ref_pattern(&pattern) {
-            self.diagnostics.push(crate::diagnostics::SdblDiagnostic::IncorrectUseLikeInQuery {
-                range: tight_range,
-            });
-        }
+            .push(crate::diagnostics::SdblDiagnostic::LikeUsage { range: tight_range, kind });
 
         ExprHir::Like {
             expr: Box::new(expr),

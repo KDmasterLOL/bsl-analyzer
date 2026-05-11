@@ -4,7 +4,9 @@
 
 mod completion;
 pub mod config_finder;
+mod document_highlight;
 mod document_symbols;
+mod folding;
 pub mod formatting;
 mod goto_definition;
 mod hover;
@@ -14,6 +16,8 @@ pub mod streaming;
 mod syntax_highlighting;
 
 pub use completion::{CompletionItem, CompletionItemKind};
+pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
+pub use folding::{FoldingRange, FoldingRangeKind};
 pub use formatting::{FormattingConfig, FormattingResult};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
@@ -75,6 +79,17 @@ impl Analysis {
     pub fn find_references(&self, file_id: FileId, offset: u32) -> Vec<Location> {
         let offset = TextSize::from(offset);
         references::find_references(&self.db, file_id, offset)
+    }
+
+    /// Returns same-document highlights for the symbol at the position.
+    pub fn document_highlights(&self, file_id: FileId, offset: u32) -> Vec<DocumentHighlight> {
+        let offset = TextSize::from(offset);
+        document_highlight::document_highlights(&self.db, file_id, offset)
+    }
+
+    /// Returns folding ranges for a file.
+    pub fn folding_ranges(&self, file_id: FileId) -> Vec<FoldingRange> {
+        folding::folding_ranges(&self.db, file_id)
     }
 
     /// Returns code completions at the position.

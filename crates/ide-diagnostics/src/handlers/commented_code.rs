@@ -572,8 +572,9 @@ fn message_ru() -> String {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::check_ast_diagnostic;
+    use crate::test_utils::{check_ast_diagnostic, format_diags};
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_no_diagnostic_for_regular_comments() {
         let code = r#"Функция Тест()
@@ -584,7 +585,7 @@ mod tests {
 КонецФункции"#;
 
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Regular comments should not be flagged");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -596,7 +597,11 @@ mod tests {
 КонецФункции"#;
 
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect commented assignment");
+        expect![[r#"
+            CommentedCode @ 3:5..3:14
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -607,7 +612,11 @@ mod tests {
 //    НужноПересчитать = Истина;
 //КонецЕсли;"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Multi-line commented code block should be 1 diagnostic");
+        expect![[r#"
+            CommentedCode @ 1:1..4:13
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -619,7 +628,11 @@ mod tests {
 ////
 ////КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Commented-out procedure should be detected");
+        expect![[r#"
+            CommentedCode @ 1:1..3:29
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -628,16 +641,15 @@ mod tests {
         let code = r#"//Параметры.Вставить("ДатаНачала", ТекущаяДата());
 //Параметры.Вставить("ДатаОкончания", ТекущаяДата());"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Two consecutive commented lines should give 1 diagnostic"
-        );
+        expect![[r#"
+            CommentedCode @ 1:1..2:54
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_range_excludes_wrapping_descriptive_comments() {
-        use crate::test_utils::assert_diagnostic_range_multiline;
         // Descriptive comments wrapping commented-out code should not be included in range
         let code = r#"Процедура Тест()
     // ++ Проверяем одинаковые значения
@@ -651,12 +663,15 @@ mod tests {
 КонецПроцедуры"#;
 
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect commented code block");
+        expect![[r#"
+            CommentedCode @ 3:5..8:22
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
 
         // Range should cover only lines 2-7 (code), not line 1 (// ++) or line 8 (// --)
         // Line 2: "    //Таблица = Источник;" starts at col 4
         // Line 7: "    //Возврат Истина;" ends at end of that line
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 4, 7, 21);
     }
 
     #[test]
@@ -673,6 +688,6 @@ mod tests {
             serde_json::json!({"exclusionPrefixes": "<code>"}),
         );
         let diagnostics = crate::test_utils::check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0, "Lines with exclusion prefix should not be flagged");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

@@ -526,7 +526,12 @@ mod tests {
     use super::*;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
+    use std::path::PathBuf;
     use vfs::{FileId, FileSet, VfsPath};
+
+    fn designer_fixture_path() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer"))
+    }
 
     fn create_db_with_file(source: &str) -> (RootDatabaseImpl, FileId) {
         let mut db = RootDatabaseImpl::default();
@@ -1311,11 +1316,33 @@ EndFunction
     }
 
     #[test]
-    #[ignore = "Requires complex metadata configuration setup"]
+    #[ignore = "Track 3 Phase G dep: needs Definition/PathResolution support for config-backed MDO object names"]
     fn test_highlight_metadata_object_name_with_config() {
-        // TODO: Add test with metadata configuration once test infrastructure is ready
-        // Should highlight: РегистрыСведений.ОчередьЗапросовERP
-        //                                   ^^^^^^^^^^^^^^^^^ as Type
+        let code = r#"
+Функция Тест()
+    Ссылка = РегистрыСведений.РегистрСведений1.СоздатьНаборЗаписей();
+    Возврат Ссылка;
+КонецФункции
+"#;
+
+        let (mut db, file_id) = create_db_with_file(code);
+        db.set_all_config_paths(vec![(None, designer_fixture_path())]);
+        let highlights = highlight(&db, file_id);
+
+        let plural_highlight = highlights.highlights.iter().any(|hl| {
+            hl.tag == HlTag::Class
+                && code[hl.range.start().into()..hl.range.end().into()] == *"РегистрыСведений"
+        });
+        assert!(plural_highlight, "РегистрыСведений should be highlighted as Class");
+
+        let metadata_name_highlight = highlights.highlights.iter().any(|hl| {
+            hl.tag == HlTag::Type
+                && code[hl.range.start().into()..hl.range.end().into()] == *"РегистрСведений1"
+        });
+        assert!(
+            metadata_name_highlight,
+            "РегистрСведений1 should be highlighted as Type with configuration loaded"
+        );
     }
 
     #[test]
@@ -1351,7 +1378,7 @@ EndFunction
     }
 
     #[test]
-    #[ignore = "Requires workspace scope and manager module infrastructure"]
+    #[ignore = "Track 3 Phase G dep: requires CfeFixtureBuilder (§8 CFE harness)"]
     fn test_highlight_manager_module_method() {
         // This test verifies that manager module methods are properly highlighted
         // Example: РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь()

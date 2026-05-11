@@ -87,6 +87,7 @@ pub fn from_hir(
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_no_get_form() {
         let code = r#"
@@ -96,8 +97,8 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
-        assert_eq!(get_form_diags.len(), 0, "Should NOT detect - using ОткрытьФорму");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &get_form_diags));
     }
 
     #[test]
@@ -109,9 +110,12 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
-        assert_eq!(get_form_diags.len(), 1, "Should detect global ПолучитьФорму");
-        assert!(get_form_diags[0].message.contains("ПолучитьФорму"));
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        expect![[r#"
+            GetFormMethod @ 3:22..3:35
+              message: Использование метода 'ПолучитьФорму' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
+        assert!(get_form_diags[0].message.contains("ПолучитьФорму")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -123,9 +127,12 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
-        assert_eq!(get_form_diags.len(), 1, "Should detect global GetForm");
-        assert!(get_form_diags[0].message.contains("GetForm"));
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        expect![[r#"
+            GetFormMethod @ 3:12..3:19
+              message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
+        assert!(get_form_diags[0].message.contains("GetForm")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -138,8 +145,11 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
-        assert_eq!(get_form_diags.len(), 1, "Should detect object method ПолучитьФорму");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        expect![[r#"
+            GetFormMethod @ 4:17..4:30
+              message: Использование метода 'ПолучитьФорму' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
     }
 
     #[test]
@@ -152,8 +162,11 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
-        assert_eq!(get_form_diags.len(), 1, "Should detect object method GetForm");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        expect![[r#"
+            GetFormMethod @ 4:16..4:23
+              message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
     }
 
     #[test]
@@ -169,8 +182,23 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
-        assert_eq!(get_form_diags.len(), 5, "Should detect all case variations");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        expect![[r#"
+            GetFormMethod @ 3:14..3:27
+              message: Использование метода 'получитьформу' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 4:14..4:27
+              message: Использование метода 'ПОЛУЧИТЬФОРМУ' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 5:14..5:27
+              message: Использование метода 'ПолучитьФОРМУ' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 6:14..6:21
+              message: Использование метода 'getform' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 7:14..7:21
+              message: Использование метода 'GETFORM' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
     }
 
     #[test]
@@ -186,8 +214,20 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
-        assert_eq!(get_form_diags.len(), 4, "Should detect all 4 calls");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        expect![[r#"
+            GetFormMethod @ 3:14..3:27
+              message: Использование метода 'ПолучитьФорму' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 4:14..4:21
+              message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 6:18..6:31
+              message: Использование метода 'ПолучитьФорму' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 7:18..7:25
+              message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
     }
 
     #[test]
@@ -212,16 +252,23 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
 
         // Expected 4 diagnostics
-        assert_eq!(get_form_diags.len(), 4, "Expected 4 diagnostics");
+        expect![[r#"
+            GetFormMethod @ 3:15..3:28
+              message: Использование метода 'ПолучитьФорму' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 7:22..7:35
+              message: Использование метода 'ПолучитьФорму' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 12:16..12:23
+              message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major
+            GetFormMethod @ 16:12..16:19
+              message: Использование метода 'GetForm' приводит к ошибкам. Используйте 'ОткрытьФорму()' вместо него
+              severity: Major"#]].assert_eq(&format_diags(code, &get_form_diags));
 
         // Expected diagnostic ranges (0-based lines):
-
-        assert_diagnostic_range(code, get_form_diags[0], 2, 14, 27);
-        assert_diagnostic_range(code, get_form_diags[1], 6, 21, 34);
-        assert_diagnostic_range(code, get_form_diags[2], 11, 15, 22);
-        assert_diagnostic_range(code, get_form_diags[3], 15, 11, 18);
     }
 }

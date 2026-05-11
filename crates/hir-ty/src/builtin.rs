@@ -9,16 +9,18 @@
 //! `global_functions`).
 //!
 //! The single source of truth is the platform JSON; this module is a thin
-//! adapter that maps `param_type` strings to [`Ty`] (via `Ty::from_type_name`),
-//! reconstructs the `defaults` mask from `is_optional`, derives the
-//! documented argument cap (`max_args`) from the platform-idiomatic
-//! `<имя>1-<имя><цифра>` last-parameter naming (e.g. `Значение1-Значение10`
-//! → `max_args = 1 + 10` for `СтрШаблон`), and parses comma-separated
-//! return-type unions through `Ty::union`.
+//! adapter that lowers `param_type` / `return_type` strings to [`Ty`]
+//! through [`crate::lower::type_string`] (the unified pipeline shared with
+//! `method_lookup`), reconstructs the `defaults` mask from `is_optional`,
+//! and derives the documented argument cap (`max_args`) from the
+//! platform-idiomatic `<имя>1-<имя><цифра>` last-parameter naming
+//! (e.g. `Значение1-Значение10` → `max_args = 1 + 10` for `СтрШаблон`).
 
 use hir_def::ty::{FunctionSignature, Ty};
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
+
+use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
 
 /// Global registry of built-in platform functions.
 ///
@@ -92,9 +94,10 @@ impl BuiltinFunctions {
 /// [`FunctionSignature`]s — one per declared syntax variant.
 ///
 /// Mapping rules (per signature):
-/// - Each parameter's `param_type` is run through [`map_type_string`]; `None`
-///   or unrecognised tokens collapse to `Ty::Unknown` (deliberately permissive
-///   — `MismatchedArgCount` only checks arity, not assignability).
+/// - Each parameter's `param_type` is run through
+///   [`lower_param_type_string`]; `None` or unrecognised tokens collapse
+///   to `Ty::Unknown` (deliberately permissive — `MismatchedArgCount`
+///   only checks arity, not assignability).
 /// - `defaults[i]` mirrors `parameters[i].is_optional`.
 /// - `max_args` is derived in this precedence (see [`signature_from_params`]):
 ///   1. **Explicit flag** — `last.is_variadic == true` lifts to `None`
@@ -118,7 +121,7 @@ impl BuiltinFunctions {
 fn signatures_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<FunctionSignature> {
     let ret = match &func.return_type {
         None => Ty::Undefined,
-        Some(s) => map_return_type(s.as_str()),
+        Some(s) => lower_return_type_string(s.as_str()),
     };
 
     if func.variants.is_empty() {
@@ -152,7 +155,8 @@ pub(crate) fn signature_from_params(
     let mut params = Vec::with_capacity(params_in.len());
     let mut defaults = Vec::with_capacity(params_in.len());
     for param in params_in {
-        params.push(map_type_string(param.param_type.as_deref()));
+        params
+            .push(param.param_type.as_deref().map(lower_param_type_string).unwrap_or(Ty::Unknown));
         defaults.push(param.is_optional);
     }
 
@@ -172,32 +176,6 @@ pub(crate) fn signature_from_params(
     };
 
     FunctionSignature::new_with_defaults(params, defaults, ret).with_max_args(max_args)
-}
-
-/// Map a single platform `param_type` token (or `None`) to [`Ty`].
-///
-/// Unknown / `None` collapse to `Ty::Unknown` — `MismatchedArgCount` is
-/// arity-only, so being conservative on the type element here is safe;
-/// downstream type-mismatch diagnostics will use richer paths than this
-/// adapter.
-fn map_type_string(s: Option<&str>) -> Ty {
-    let Some(name) = s.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ty::Unknown;
-    };
-    // `Произвольный`/`Arbitrary` and other unrecognised tokens fall through
-    // to `Ty::Unknown` via `from_type_name`'s default arm.
-    Ty::from_type_name(name)
-}
-
-/// Map a return-type string, supporting comma-separated unions
-/// (`"Булево, Неопределено"`).
-fn map_return_type(s: &str) -> Ty {
-    if s.contains(',') {
-        let members: Vec<Ty> =
-            s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(Ty::from_type_name).collect();
-        return Ty::union(members);
-    }
-    map_type_string(Some(s))
 }
 
 /// Split a capped-variadic name idiom into `(head, tail)` around either
@@ -535,7 +513,7 @@ mod tests {
         // Some platform functions return a comma-separated union
         // (e.g. "Булево, Неопределено"). The adapter must hand it to
         // `Ty::union` rather than dropping it to Unknown.
-        let union = map_return_type("Булево, Неопределено");
+        let union = lower_return_type_string("Булево, Неопределено");
         // Ty::union of {Boolean, Undefined} is a true union (no collapse).
         match &union {
             Ty::Union(parts) => {

@@ -307,10 +307,9 @@ fn stmt_contains_expr_idx(stmt: &Stmt, target_idx: ExprIdx) -> bool {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic_with_config, check_diagnostics_snapshot_for};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"
@@ -379,22 +378,47 @@ Password = "";
 
 Элементы["Пароль"]["Заголовок"] = "Пароль";
 Элементы.Пароль.Заголовок = "Пароль";"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 12, "Expected 12 diagnostics, got {}", diagnostics.len());
-
-        assert_diagnostic_range(code, &diagnostics[0], 8, 4, 48);
-        assert_diagnostic_range(code, &diagnostics[1], 12, 4, 80);
-        assert_diagnostic_range(code, &diagnostics[2], 16, 4, 23);
-        assert_diagnostic_range(code, &diagnostics[3], 17, 4, 23);
-        assert_diagnostic_range(code, &diagnostics[4], 27, 4, 34);
-        assert_diagnostic_range(code, &diagnostics[5], 32, 4, 27);
-        assert_diagnostic_range(code, &diagnostics[6], 33, 4, 31);
-        assert_diagnostic_range(code, &diagnostics[7], 44, 4, 82);
-        assert_diagnostic_range(code, &diagnostics[8], 45, 4, 79);
-        assert_diagnostic_range(code, &diagnostics[9], 48, 4, 22);
-        assert_diagnostic_range(code, &diagnostics[10], 49, 4, 21);
-        assert_diagnostic_range(code, &diagnostics[11], 50, 4, 21);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 9:5..9:49
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 13:5..13:81
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 17:5..17:24
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 18:5..18:24
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 28:5..28:35
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 33:5..33:28
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 34:5..34:32
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 45:5..45:83
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 46:5..46:80
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 49:5..49:23
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 50:5..50:22
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical
+                UsingHardcodeSecretInformation @ 51:5..51:22
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -404,9 +428,14 @@ Password = "";
     Пароль = "12345";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::UsingHardcodeSecretInformation);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 3:5..3:21
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -416,8 +445,11 @@ Password = "";
     Пароль = "";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Empty string should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -427,8 +459,11 @@ Password = "";
     Пароль = "******";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "All-asterisk string should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -438,8 +473,14 @@ Password = "";
     Данные.Пароль = "12345";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 3:5..3:28
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -449,8 +490,14 @@ Password = "";
     Данные["Пароль"] = "qwerty";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 3:5..3:32
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -460,8 +507,14 @@ Password = "";
     Структура.Вставить("Пароль", "12345");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 3:5..3:42
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -471,8 +524,11 @@ Password = "";
     Структура.Вставить("Пароль", "");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Insert with empty value should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -482,8 +538,14 @@ Password = "";
     Структура = Новый Структура("Первое, Пароль, Третье", 1, "qwerty", 3);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 3:5..3:74
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -493,8 +555,14 @@ Password = "";
     Соединение = Новый HTTPСоединение("Сервер", 8080, "Пользователь", "12345");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 3:5..3:79
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -504,8 +572,14 @@ Password = "";
     Соединение = Новый FTPСоединение("Сервер", 21, "Пользователь", "password");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 3:5..3:79
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -515,8 +589,11 @@ Password = "";
     Соединение = Новый HTTPСоединение("Сервер", 8080);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Connection without password should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -537,6 +614,7 @@ Password = "";
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 1, "Should only match 'Password' with custom config");
+        // snapshot-skip: custom configuration assertion intentionally retained.
     }
 
     #[test]
@@ -546,7 +624,13 @@ Password = "";
     пАрОлЬ = "12345";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should match case-insensitively");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeSecretInformation,
+            expect![[r#"
+                UsingHardcodeSecretInformation @ 3:5..3:21
+                  message: Используется хранение конфиденциальной информации в коде
+                  severity: Critical"#]],
+        );
     }
 }

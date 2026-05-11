@@ -71,8 +71,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_global_methods_detected() {
         // КомандаСистемы, ЗапуститьПриложение, НачатьЗапускПриложения
@@ -89,10 +90,23 @@ mod tests {
     НачатьЗапускПриложения(ОписаниеОповещения, СтрокаКоманды, ТекущийКаталог, ДождатьсяЗавершения);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 4, "Expected 4 diagnostics for global methods");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 8:5..8:19
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 9:5..9:24
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 10:5..10:24
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 11:5..11:27
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -109,10 +123,23 @@ mod tests {
     ФайловаяСистема.ЗапуститьПрограмму(СтрокаКоманды, ПараметрыКоманды);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 4, "Expected 4 diagnostics for run program methods");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 6:27..6:45
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 7:27..7:45
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 8:21..8:39
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 9:21..9:39
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -128,10 +155,20 @@ mod tests {
     ФайловаяСистемаКлиент.ОткрытьФайл(СтрокаКоманды, ОписаниеОповещения);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 3, "Expected 3 diagnostics for open explorer/file methods");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 6:27..6:43
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 7:27..7:38
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 8:27..8:38
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -147,10 +184,14 @@ mod tests {
     Ждать ЗапуститьПриложениеАсинх(СтрокаКоманды, ТекущийКаталог, ДождатьсяЗавершения);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 1, "Expected 1 diagnostic for async app launch");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 8:11..8:35
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -169,10 +210,23 @@ mod tests {
     ЗапуститьСистему(ДополнительныеПараметрыКоманднойСтроки, ДождатьсяЗавершения, КодВозврата);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 4, "Expected 4 diagnostics for ЗапуститьСистему variants");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 8:5..8:21
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 9:5..9:21
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 10:5..10:21
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 11:5..11:21
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -182,10 +236,14 @@ mod tests {
     КомандаСистемы("cmd.exe");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 1, "Should detect global method call");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 3:5..3:19
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -195,10 +253,14 @@ mod tests {
     ФайловаяСистемаКлиент.ЗапуститьПрограмму("calc.exe");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 1, "Should detect object method call");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 3:27..3:45
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -208,10 +270,7 @@ mod tests {
     МойМодуль.ЗапуститьВнешнееПриложение("cmd");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 0, "Similar method names should be ignored");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExternalAppStarting, expect![[r#""#]]);
     }
 
     #[test]
@@ -223,10 +282,20 @@ Procedure Test()
     RunSystem();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 3, "Should detect English method names");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 3:5..3:11
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 4:5..4:11
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 5:5..5:14
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -237,10 +306,17 @@ Procedure Test()
     ЗАПУСТИТЬПриложение("app");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 2, "Should be case-insensitive");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExternalAppStarting,
+            expect![[r#"
+                ExternalAppStarting @ 3:5..3:19
+                  message: External application launch detected
+                  severity: Warning
+                ExternalAppStarting @ 4:5..4:24
+                  message: External application launch detected
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -250,9 +326,6 @@ Procedure Test()
     Переменная = КомандаСистемы;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let ext_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
-        assert_eq!(ext_diags.len(), 0, "Method references without calls should be ignored");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExternalAppStarting, expect![[r#""#]]);
     }
 }

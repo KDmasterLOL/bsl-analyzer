@@ -249,9 +249,9 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"
@@ -337,19 +337,38 @@ mod tests {
 Структура.Вставить("ИнтернетПочтовыйПрофиль",  Новый ИнтернетПочтовыйПрофиль);
 Структура.ТаймАут(ИнтернетПочтовыйПрофиль.ТаймАут); // Где то тут будет FP
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 9, "Expected 9 diagnostics");
-
-        assert_diagnostic_range(code, &diagnostics[0], 3, 20, 75);
-        assert_diagnostic_range(code, &diagnostics[1], 5, 20, 92);
-        assert_diagnostic_range(code, &diagnostics[2], 9, 18, 72);
-        assert_diagnostic_range(code, &diagnostics[3], 13, 16, 80);
-        assert_diagnostic_range(code, &diagnostics[4], 21, 21, 65);
-        assert_diagnostic_range(code, &diagnostics[5], 34, 14, 43);
-        assert_diagnostic_range(code, &diagnostics[6], 71, 26, 114);
-        assert_diagnostic_range(code, &diagnostics[7], 78, 10, 39);
-        assert_diagnostic_range(code, &diagnostics[8], 80, 47, 76);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TimeoutsInExternalResources,
+            expect![[r#"
+                TimeoutsInExternalResources @ 4:21..4:76
+                  message: Timeout not specified when working with external resource
+                  severity: Critical
+                TimeoutsInExternalResources @ 6:21..6:93
+                  message: Timeout not specified when working with external resource
+                  severity: Critical
+                TimeoutsInExternalResources @ 10:19..10:73
+                  message: Timeout not specified when working with external resource
+                  severity: Critical
+                TimeoutsInExternalResources @ 14:17..14:81
+                  message: Timeout not specified when working with external resource
+                  severity: Critical
+                TimeoutsInExternalResources @ 22:22..22:66
+                  message: Timeout not specified when working with external resource
+                  severity: Critical
+                TimeoutsInExternalResources @ 35:15..35:44
+                  message: Timeout not specified when working with external resource
+                  severity: Critical
+                TimeoutsInExternalResources @ 72:27..72:115
+                  message: Timeout not specified when working with external resource
+                  severity: Critical
+                TimeoutsInExternalResources @ 79:11..79:40
+                  message: Timeout not specified when working with external resource
+                  severity: Critical
+                TimeoutsInExternalResources @ 81:48..81:77
+                  message: Timeout not specified when working with external resource
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -359,9 +378,14 @@ mod tests {
     FTPСоединение = Новый FTPСоединение(Сервер, Порт, Пользователь, Пароль);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::TimeoutsInExternalResources);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TimeoutsInExternalResources,
+            expect![[r#"
+                TimeoutsInExternalResources @ 3:21..3:76
+                  message: Timeout not specified when working with external resource
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -371,8 +395,11 @@ mod tests {
     FTPСоединение = Новый FTPСоединение(Сервер, Порт, Пользователь, Пароль,,, 60);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TimeoutsInExternalResources,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -383,8 +410,11 @@ mod tests {
     HTTPСоединение.Таймаут = 1;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Timeout set via property should not trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TimeoutsInExternalResources,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -395,8 +425,14 @@ mod tests {
     Возврат Профиль;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TimeoutsInExternalResources,
+            expect![[r#"
+                TimeoutsInExternalResources @ 3:15..3:44
+                  message: Timeout not specified when working with external resource
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -408,7 +444,10 @@ mod tests {
     Возврат Профиль;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TimeoutsInExternalResources,
+            expect![[r#""#]],
+        );
     }
 }

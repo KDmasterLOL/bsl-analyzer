@@ -1,4 +1,4 @@
-# Missing code in Raise block in "Try ... Raise ... EndTry" (MissingCodeTryCatchEx)
+# Exception block silently swallows the error (MissingCodeTryCatchEx)
 
 <!-- Блоки выше заполняются автоматически, не трогать -->
 ## Description
@@ -18,7 +18,21 @@ EndTry;
 
 As a rule, such a design hides a real problem, which is subsequently impossible to diagnose.
 
-The current implementation reports `Try ... Exception` blocks whose `Exception` branch has no executable statements. By default, a branch that contains only comments is still treated as empty.
+The current implementation classifies the `Exception` body (Track 2 Phase D
+§2.2) and fires for three cases:
+
+- the block is empty (no statements);
+- the block silently swallows the failure — it has statements, but none of
+  them re-raise (`Raise` / `ВызватьИсключение`) or call a logging API from
+  the platform registry (`Message`, `WriteLogEvent`, `Сообщить`,
+  `ЗаписьЖурналаРегистрации`);
+- the block only rolls back the transaction (`RollbackTransaction` /
+  `ОтменитьТранзакцию`) without recording or propagating the failure —
+  this case emits a rollback-specific message recommending to add a log
+  call or `Raise`.
+
+Proper recovery paths — re-raise, logging, or a combination — do not
+trigger the diagnostic.
 
 There is one configuration nuance:
 

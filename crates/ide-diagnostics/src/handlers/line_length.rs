@@ -384,10 +384,9 @@ fn generate_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic, check_ast_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
 
     // Large inline regression fixture for line-length coverage.
     // Line count and content must remain stable — position assertions depend on it.
@@ -463,9 +462,11 @@ mod tests {
         let code = r#"А = "фффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффф";"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Line 0: 121 characters (exceeds 120), diagnostic ends at column 121
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 0, 0, 121);
+        expect![[r#"
+            LineLength @ 1:1..1:122
+              message: Длина строки 121 превышает максимальную 120
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -474,8 +475,7 @@ mod tests {
         let code = "А = \"фф\";  // Short line";
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Should not trigger (under 120 chars)
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -483,23 +483,47 @@ mod tests {
         let code = FIXTURE;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics");
-
-        // Verify exact positions (0-based line numbers)
-        // Expected lines: 4, 5, 8, 11, 12, 36, 40, 44, 47, 49, 52, 56, 60
-        assert_diagnostic_range(code, &diagnostics[0], 4, 0, 121);
-        assert_diagnostic_range(code, &diagnostics[1], 5, 0, 122);
-        assert_diagnostic_range(code, &diagnostics[2], 8, 0, 127);
-        assert_diagnostic_range(code, &diagnostics[3], 11, 0, 136);
-        assert_diagnostic_range(code, &diagnostics[4], 12, 0, 135);
-        assert_diagnostic_range(code, &diagnostics[5], 36, 0, 127);
-        assert_diagnostic_range(code, &diagnostics[6], 40, 0, 140);
-        assert_diagnostic_range(code, &diagnostics[7], 44, 0, 143);
-        assert_diagnostic_range(code, &diagnostics[8], 47, 0, 139);
-        assert_diagnostic_range(code, &diagnostics[9], 49, 0, 138);
-        assert_diagnostic_range(code, &diagnostics[10], 52, 0, 177);
-        assert_diagnostic_range(code, &diagnostics[11], 56, 0, 162);
-        assert_diagnostic_range(code, &diagnostics[12], 60, 0, 145);
+        expect![[r#"
+            LineLength @ 5:1..5:122
+              message: Длина строки 121 превышает максимальную 120
+              severity: Information
+            LineLength @ 6:1..6:123
+              message: Длина строки 122 превышает максимальную 120
+              severity: Information
+            LineLength @ 9:1..9:128
+              message: Длина строки 127 превышает максимальную 120
+              severity: Information
+            LineLength @ 12:1..12:137
+              message: Длина строки 136 превышает максимальную 120
+              severity: Information
+            LineLength @ 13:1..13:136
+              message: Длина строки 135 превышает максимальную 120
+              severity: Information
+            LineLength @ 37:1..37:128
+              message: Длина строки 127 превышает максимальную 120
+              severity: Information
+            LineLength @ 41:1..41:141
+              message: Длина строки 140 превышает максимальную 120
+              severity: Information
+            LineLength @ 45:1..45:144
+              message: Длина строки 143 превышает максимальную 120
+              severity: Information
+            LineLength @ 48:1..48:140
+              message: Длина строки 139 превышает максимальную 120
+              severity: Information
+            LineLength @ 50:1..50:139
+              message: Длина строки 138 превышает максимальную 120
+              severity: Information
+            LineLength @ 53:1..53:178
+              message: Длина строки 177 превышает максимальную 120
+              severity: Information
+            LineLength @ 57:1..57:163
+              message: Длина строки 162 превышает максимальную 120
+              severity: Information
+            LineLength @ 61:1..61:146
+              message: Длина строки 145 превышает максимальную 120
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -512,10 +536,50 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // With maxLineLength=119, should have 14 diagnostics (adds line 3)
-        assert_eq!(diagnostics.len(), 14);
-        // First diagnostic should be on line 3 (0-based) with 120 characters
-        assert_diagnostic_range(code, &diagnostics[0], 3, 0, 120);
+        expect![[r#"
+            LineLength @ 4:1..4:121
+              message: Длина строки 120 превышает максимальную 119
+              severity: Information
+            LineLength @ 5:1..5:122
+              message: Длина строки 121 превышает максимальную 119
+              severity: Information
+            LineLength @ 6:1..6:123
+              message: Длина строки 122 превышает максимальную 119
+              severity: Information
+            LineLength @ 9:1..9:128
+              message: Длина строки 127 превышает максимальную 119
+              severity: Information
+            LineLength @ 12:1..12:137
+              message: Длина строки 136 превышает максимальную 119
+              severity: Information
+            LineLength @ 13:1..13:136
+              message: Длина строки 135 превышает максимальную 119
+              severity: Information
+            LineLength @ 37:1..37:128
+              message: Длина строки 127 превышает максимальную 119
+              severity: Information
+            LineLength @ 41:1..41:141
+              message: Длина строки 140 превышает максимальную 119
+              severity: Information
+            LineLength @ 45:1..45:144
+              message: Длина строки 143 превышает максимальную 119
+              severity: Information
+            LineLength @ 48:1..48:140
+              message: Длина строки 139 превышает максимальную 119
+              severity: Information
+            LineLength @ 50:1..50:139
+              message: Длина строки 138 превышает максимальную 119
+              severity: Information
+            LineLength @ 53:1..53:178
+              message: Длина строки 177 превышает максимальную 119
+              severity: Information
+            LineLength @ 57:1..57:163
+              message: Длина строки 162 превышает максимальную 119
+              severity: Information
+            LineLength @ 61:1..61:146
+              message: Длина строки 145 превышает максимальную 119
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -529,9 +593,41 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // With checkMethodDescription=false, should have 11 diagnostics
-        // (excludes method description comments on lines 55 and 59)
-        assert_eq!(diagnostics.len(), 11);
+        expect![[r#"
+            LineLength @ 5:1..5:122
+              message: Длина строки 121 превышает максимальную 120
+              severity: Information
+            LineLength @ 6:1..6:123
+              message: Длина строки 122 превышает максимальную 120
+              severity: Information
+            LineLength @ 9:1..9:128
+              message: Длина строки 127 превышает максимальную 120
+              severity: Information
+            LineLength @ 12:1..12:137
+              message: Длина строки 136 превышает максимальную 120
+              severity: Information
+            LineLength @ 13:1..13:136
+              message: Длина строки 135 превышает максимальную 120
+              severity: Information
+            LineLength @ 37:1..37:128
+              message: Длина строки 127 превышает максимальную 120
+              severity: Information
+            LineLength @ 41:1..41:141
+              message: Длина строки 140 превышает максимальную 120
+              severity: Information
+            LineLength @ 45:1..45:144
+              message: Длина строки 143 превышает максимальную 120
+              severity: Information
+            LineLength @ 48:1..48:140
+              message: Длина строки 139 превышает максимальную 120
+              severity: Information
+            LineLength @ 50:1..50:139
+              message: Длина строки 138 превышает максимальную 120
+              severity: Information
+            LineLength @ 53:1..53:178
+              message: Длина строки 177 превышает максимальную 120
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -545,7 +641,43 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // With excludeTrailingComments=true, should have 12 diagnostics
-        assert_eq!(diagnostics.len(), 12);
+        expect![[r#"
+            LineLength @ 5:1..5:122
+              message: Длина строки 121 превышает максимальную 120
+              severity: Information
+            LineLength @ 6:1..6:123
+              message: Длина строки 122 превышает максимальную 120
+              severity: Information
+            LineLength @ 9:1..9:128
+              message: Длина строки 127 превышает максимальную 120
+              severity: Information
+            LineLength @ 13:1..13:125
+              message: Длина строки 124 превышает максимальную 120
+              severity: Information
+            LineLength @ 37:1..37:128
+              message: Длина строки 127 превышает максимальную 120
+              severity: Information
+            LineLength @ 41:1..41:141
+              message: Длина строки 140 превышает максимальную 120
+              severity: Information
+            LineLength @ 45:1..45:144
+              message: Длина строки 143 превышает максимальную 120
+              severity: Information
+            LineLength @ 48:1..48:140
+              message: Длина строки 139 превышает максимальную 120
+              severity: Information
+            LineLength @ 50:1..50:139
+              message: Длина строки 138 превышает максимальную 120
+              severity: Information
+            LineLength @ 53:1..53:178
+              message: Длина строки 177 превышает максимальную 120
+              severity: Information
+            LineLength @ 57:1..57:163
+              message: Длина строки 162 превышает максимальную 120
+              severity: Information
+            LineLength @ 61:1..61:146
+              message: Длина строки 145 превышает максимальную 120
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 }

@@ -1,9 +1,35 @@
 //! Reports calls that disable or weaken safe mode.
+//!
+//! # Track 2 §1.6 Group C
+//!
+//! Detection moved out of HIR lowering into this handler's [`check`]
+//! function, consuming the §1.2 saturating-counter lattice + §1.3 const-
+//! propagation overlay through
+//! [`hir::dataflow::security_state::open_events`]. The lattice
+//! understands both call shapes via the curated security registry:
+//! `УстановитьБезопасныйРежим(Ложь)` and
+//! `УстановитьОтключениеБезопасногоРежима(Истина)` both push the
+//! unsafe-frame counter; their opposite-polarity arguments pop it. The
+//! handler emits one diagnostic per yielded `OpenEvent` whose category
+//! is [`Category::SafeMode`].
+//!
+//! Const-prop precision: `Значение = Ложь;
+//! УстановитьБезопасныйРежим(Значение)` is folded to `KnownFalse` and
+//! emits (lattice categorises it as opening the unsafe frame, just like
+//! the literal-`Ложь` form).
+//!
+//! # Coverage
+//!
+//! Both per-method bodies AND module-level top-level code are scanned —
+//! see [`hir::dataflow::security_state::open_events`] for the lattice
+//! event surface. Parity with the legacy HIR-side detector is preserved.
+
+use std::sync::Arc;
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
+use hir::dataflow::security_state::{open_events, Category};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
@@ -19,29 +45,62 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates a diagnostic from the HIR lowering result.
-pub fn from_hir(
-    method_name: &str,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
-    // Check if the diagnostic is disabled
+/// Track 2 §1.6 Group C — lattice-driven detection. Replaces the old
+/// `from_hir(method_name, range, ctx)` adapter.
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::DisableSafeMode;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
-    let message = get_message(method_name);
+    let module_security: Arc<ide_db::effects::ModuleSecurityState> = ctx.module_security_state();
+    if module_security.is_empty() {
+        return Vec::new();
+    }
+    let module_bodies = ctx.module_bodies();
 
-    Some(Diagnostic {
-        code,
-        message,
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+    let mut diagnostics = Vec::new();
+    for (local_id, _body) in module_bodies.iter_bodies() {
+        let Some(result) = module_security.get(local_id) else { continue };
+        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
+        emit_for_result(&result, source_map, code, ctx, &mut diagnostics);
+    }
+    if let Some(result) = module_security.module_level() {
+        if let Some(lower_result) = module_bodies.module_code_result() {
+            emit_for_result(&result, &lower_result.source_map, code, ctx, &mut diagnostics);
+        }
+    }
+    // Codex round-1 NIT: emit in source order.
+    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
+    diagnostics
+}
+
+fn emit_for_result(
+    result: &hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>,
+    source_map: &hir::BodySourceMap,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+    out: &mut Vec<Diagnostic>,
+) {
+    let body = result.body();
+    for event in open_events(result) {
+        if !matches!(event.category, Category::SafeMode) {
+            continue;
+        }
+        let Some(range) = source_map.expr_range(event.callee) else { continue };
+        let method_name = match body.expr(event.callee) {
+            hir::Expr::Path(name) => name.as_str(),
+            _ => continue,
+        };
+        out.push(Diagnostic {
+            code,
+            message: get_message(method_name),
+            severity: ctx.severity(code),
+            range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
 }
 
 fn get_message(method_name: &str) -> String {
@@ -63,9 +122,9 @@ fn get_message(method_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
-    use crate::Severity;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_set_safe_mode_false() {
         let code = r#"
@@ -73,12 +132,14 @@ mod tests {
     УстановитьБезопасныйРежим(Ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 1);
-        assert_eq!(safe_mode_diags[0].severity, Severity::Major); // VULNERABILITY + MAJOR maps to Major
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -88,11 +149,7 @@ mod tests {
     УстановитьБезопасныйРежим(Истина);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DisableSafeMode, expect![[r#""#]]);
     }
 
     #[test]
@@ -103,11 +160,14 @@ mod tests {
     УстановитьБезопасныйРежим(Значение);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 4:5..4:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -117,11 +177,14 @@ mod tests {
     УстановитьОтключениеБезопасногоРежима(Истина);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:42
+              message: Отключение безопасного режима через УстановитьОтключениеБезопасногоРежима создает уязвимость безопасности
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -131,11 +194,7 @@ mod tests {
     УстановитьОтключениеБезопасногоРежима(Ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DisableSafeMode, expect![[r#""#]]);
     }
 
     #[test]
@@ -145,11 +204,7 @@ mod tests {
     Модуль.УстановитьБезопасныйРежим(Ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::DisableSafeMode, expect![[r#""#]]);
     }
 
     #[test]
@@ -160,11 +215,17 @@ mod tests {
     SetSafeModeDisabled(True);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 2);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:16
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major
+            DisableSafeMode @ 4:5..4:24
+              message: Отключение безопасного режима через УстановитьОтключениеБезопасногоРежима создает уязвимость безопасности
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -175,11 +236,63 @@ mod tests {
     установитьбезопасныйрежим(ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major
+            DisableSafeMode @ 4:5..4:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
+    }
 
-        assert_eq!(safe_mode_diags.len(), 2);
+    /// Track 2 §1.6 Group C — Codex round-3 stop-hook regression
+    /// guard: security calls inside compound-statement condition
+    /// expressions (`If <cond> Then`, `While <cond>`) live in
+    /// dedicated CFG vertices, not BasicBlocks. `open_events` walks
+    /// those vertices too — without this, the diagnostic would
+    /// silently regress vs. the legacy HIR detector.
+    #[test]
+    fn test_call_in_if_condition_emits() {
+        let code = r#"
+Процедура Тест()
+    Если УстановитьБезопасныйРежим(Ложь) Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:10..3:35
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
+    }
+
+    /// Track 2 §1.6 Group C — Codex round-2 stop-hook regression
+    /// guard: nested security calls (e.g. as a function argument)
+    /// must still surface, matching legacy `lower_call_expr` behaviour
+    /// which fired on every CALL_EXPR regardless of nesting depth.
+    #[test]
+    fn test_nested_call_in_argument_emits() {
+        let code = r#"
+Процедура Тест()
+    Сообщить(УстановитьБезопасныйРежим(Ложь));
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:14..3:39
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -204,10 +317,22 @@ mod tests {
     УстановитьОтключениеБезопасногоРежима(Ложь);
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let safe_mode_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
-
-        assert_eq!(safe_mode_diags.len(), 4, "Expected 4 diagnostics");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::DisableSafeMode,
+            expect![[r#"
+            DisableSafeMode @ 3:5..3:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major
+            DisableSafeMode @ 6:5..6:30
+              message: Отключение безопасного режима создает уязвимость безопасности. Используйте УстановитьБезопасныйРежим(Истина) / SetSafeMode(True)
+              severity: Major
+            DisableSafeMode @ 10:5..10:42
+              message: Отключение безопасного режима через УстановитьОтключениеБезопасногоРежима создает уязвимость безопасности
+              severity: Major
+            DisableSafeMode @ 13:5..13:42
+              message: Отключение безопасного режима через УстановитьОтключениеБезопасногоРежима создает уязвимость безопасности
+              severity: Major"#]],
+        );
     }
 }

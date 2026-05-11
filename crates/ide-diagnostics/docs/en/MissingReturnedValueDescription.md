@@ -10,7 +10,7 @@ When an export function already has a documentation comment, that comment must c
 
 Missing whole-method documentation is handled by a separate diagnostic: `PublicMethodsDescription`.
 
-> **Dependency:** if `PublicMethodsDescription` is disabled in the config or filtered out, export functions with no documentation comment at all (including value-returning ones) will receive *no* diagnostic — neither from this check, nor from `PublicMethodsDescription`. To cover both cases — missing comment and missing returned-value section — both diagnostics must remain active.
+> **Dependency:** the missing-whole-comment case is normally covered by `PublicMethodsDescription`. If that diagnostic is disabled in the config or filtered out, this check steps in and reports export functions with no documentation comment at all, so the case is not silently dropped by both rules.
 
 Diagnostics detects typical errors:
 
@@ -23,7 +23,7 @@ The current implementation has a few important scope details:
 
 - missing returned-value sections are checked only for export functions that already have documentation comments;
 - procedures are checked only to ensure they do not contain a returned-value section;
-- a completely missing export-function comment is not reported by this diagnostic;
+- a completely missing export-function comment is reported by this diagnostic only when `PublicMethodsDescription` is disabled (otherwise the case is owned by that rule);
 - hyperlink-style comments such as `See OtherMethod()` are skipped;
 - the `allowShortDescriptionReturnValues` parameter controls whether a type name alone is accepted.
 

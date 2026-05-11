@@ -31,20 +31,23 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_this_object_assign_simple() {
         let code = r#"Процедура ПриСозданииНаСервере()
     ЭтотОбъект = РеквизитФормыВЗначение("Объект");
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let this_object_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ThisObjectAssign).collect();
-
-        assert_eq!(this_object_diags.len(), 1, "Expected 1 ThisObjectAssign diagnostic");
-        assert_diagnostic_range(code, this_object_diags[0], 1, 4, 14);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ThisObjectAssign,
+            expect![[r#"
+            ThisObjectAssign @ 2:5..2:15
+              message: Свойство ЭтотОбъект доступно только для чтения
+              severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -53,12 +56,14 @@ mod tests {
     ThisObject = FormAttributeToValue("Object");
 EndProcedure"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let this_object_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ThisObjectAssign).collect();
-
-        assert_eq!(this_object_diags.len(), 1, "Expected 1 ThisObjectAssign diagnostic");
-        assert_diagnostic_range(code, this_object_diags[0], 1, 4, 14);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ThisObjectAssign,
+            expect![[r#"
+            ThisObjectAssign @ 2:5..2:15
+              message: Свойство ЭтотОбъект доступно только для чтения
+              severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -67,11 +72,14 @@ EndProcedure"#;
     этотОБЪЕКТ = 1;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let this_object_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ThisObjectAssign).collect();
-
-        assert_eq!(this_object_diags.len(), 1, "Case-insensitive match should detect");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ThisObjectAssign,
+            expect![[r#"
+            ThisObjectAssign @ 2:5..2:15
+              message: Свойство ЭтотОбъект доступно только для чтения
+              severity: Blocker"#]],
+        );
     }
 
     #[test]
@@ -80,11 +88,7 @@ EndProcedure"#;
     ЭтотОбъект.Реквизит1 = А;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let this_object_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ThisObjectAssign).collect();
-
-        assert_eq!(this_object_diags.len(), 0, "Property access should not trigger diagnostic");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ThisObjectAssign, expect![[r#""#]]);
     }
 
     #[test]
@@ -96,13 +100,13 @@ EndProcedure"#;
 ЭтотОбъект.Реквизит1 = А;
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let this_object_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ThisObjectAssign).collect();
-
-        // Line 1: ЭтотОбъект = ... inside procedure - should be flagged
-        // Line 4: ЭтотОбъект.Реквизит1 = ... - property access, should NOT be flagged
-        assert_eq!(this_object_diags.len(), 1, "Only direct assignment should be flagged");
-        assert_diagnostic_range(code, this_object_diags[0], 1, 4, 14);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ThisObjectAssign,
+            expect![[r#"
+            ThisObjectAssign @ 2:5..2:15
+              message: Свойство ЭтотОбъект доступно только для чтения
+              severity: Blocker"#]],
+        );
     }
 }

@@ -11,13 +11,18 @@ use std::sync::Arc;
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
 use hir::{
-    DefWithBodyId, InferenceDiagnostic, InferenceResult, ItemTree, MethodDocs, MethodId,
-    ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
+    dataflow::effect_summary::EffectSummary, AssignmentResolution, DefWithBodyId,
+    InferenceDiagnostic, InferenceResult, ItemTree, MethodDocs, MethodId, ModuleBodies, ModuleId,
+    ModuleIndex, ModuleMetadata, SymbolTree, VariableDocs, VariableId,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
 
-use crate::SdblHirEntries;
+use crate::{
+    effects::ModuleSecurityState,
+    queries::{ModuleCyclomatic, ModuleHirMetrics},
+    SdblHirEntries,
+};
 
 /// Visible configuration for a file: main config or extension.
 ///
@@ -83,6 +88,27 @@ pub trait AnalysisProvider {
 
     /// Get module index (name -> FileId mapping).
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;
+
+    /// Classify an assignment target name at module scope.
+    ///
+    /// Used by [`CommonModuleAssign`] (Track 1 §4.6) to suppress the
+    /// diagnostic when the LHS of `Name = …` is shadowed by a
+    /// module-level `Перем`, or doesn't refer to anything visible
+    /// (resolution priority: `Local` > `Param` > `ModuleVariable` >
+    /// `CommonModule` > `Unknown`). Local/Param shadowing is caught
+    /// upstream by `BodyDiagnostic::CommonModuleAssign::existing_binding_kind`
+    /// (Step L), so the resolver-pass here only needs to disambiguate
+    /// `ModuleVariable` from `CommonModule` from `Unknown` —
+    /// `Resolver::for_module(...)` (no expression scopes) is sufficient.
+    ///
+    /// Default impl returns [`AssignmentResolution::Unknown`] so streaming
+    /// providers (which don't have access to the resolver) opt-out
+    /// without breaking consumers — the diagnostic conservatively
+    /// suppresses on `Unknown`, which under streaming mode is correct
+    /// because we can't prove the name refers to a CommonModule.
+    fn assignment_target_kind(&self, _file_id: FileId, _name: &str) -> AssignmentResolution {
+        AssignmentResolution::Unknown
+    }
 
     // ========================================================================
     // Per-file Data
@@ -155,9 +181,6 @@ pub trait AnalysisProvider {
     /// Get region tree for file (module structure with regions).
     fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree>;
 
-    /// Get module-level regions (top-level regions in file).
-    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>>;
-
     // ========================================================================
     // SDBL Queries (for query diagnostics)
     // ========================================================================
@@ -189,6 +212,14 @@ pub trait AnalysisProvider {
     /// before a procedure or function definition.
     fn method_docs(&self, method_id: MethodId) -> Option<Arc<MethodDocs>>;
 
+    /// Get parsed documentation for a module-level variable.
+    ///
+    /// Mirrors `method_docs` for variables: combines leading,
+    /// inter-annotation, and trailing-on-`;` comment regions into a
+    /// `VariableDocs`. Returns `None` when the variable has no
+    /// description anywhere.
+    fn variable_docs(&self, variable_id: VariableId) -> Option<Arc<VariableDocs>>;
+
     // ========================================================================
     // Dataflow Analysis (for complex diagnostics)
     // ========================================================================
@@ -207,6 +238,12 @@ pub trait AnalysisProvider {
         &self,
         file_id: FileId,
     ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>;
+
+    /// Get path-terminates analysis for all methods (batch).
+    fn module_path_terminates(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates>;
 
     // ========================================================================
     // Per-Method Dataflow (for specific diagnostics)
@@ -255,6 +292,69 @@ pub trait AnalysisProvider {
     ///
     /// Returns `None` if workspace root is not available or file not found.
     fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId>;
+
+    // ========================================================================
+    // Track 2 §1.4c — Security/effect analyses
+    // ========================================================================
+
+    /// Per-method security-effect summary (§1.4 — bitwise OR over the 6
+    /// security-relevant effect bits + transitive recursion flag).
+    ///
+    /// Default impl returns [`EffectSummary::EMPTY`] so providers that
+    /// don't run the analysis (most non-Salsa modes) opt out without
+    /// breaking consumers — §6.5's cognitive recursion penalty and
+    /// §1.6's `PrivilegedModuleMethodCall` handler interpret an EMPTY
+    /// summary as "no known transitive effects", which is a safe
+    /// degraded reading when caching is unavailable.
+    fn method_effect_summary(&self, _method: MethodId) -> Arc<EffectSummary> {
+        Arc::new(EffectSummary::EMPTY)
+    }
+
+    /// Per-module privileged/safe-mode lifetime state (§1.2 saturating
+    /// counter lattice batched per method).
+    ///
+    /// Default impl returns an empty [`ModuleSecurityState`] (no
+    /// methods analysed) so providers that don't run the analysis opt
+    /// out cleanly. The §1.6 `SetPrivilegedMode` / `DisableSafeMode`
+    /// handlers degrade to their pre-Track-2 behaviour when this
+    /// returns empty.
+    fn module_security_state(&self, _file_id: FileId) -> Arc<ModuleSecurityState> {
+        Arc::new(ModuleSecurityState::default())
+    }
+
+    // ========================================================================
+    // Track 2 Phase B §6.3 — complexity metrics
+    // ========================================================================
+
+    /// Per-method HIR-structural metrics (cognitive, max_nesting,
+    /// per-condition logical-op counts). The §6.4-migrated handlers
+    /// (`CognitiveComplexity`, `NestedStatements`, `IfConditionComplexity`)
+    /// read this to replace their per-handler HIR walks.
+    ///
+    /// Default impl returns the empty-method state so providers that
+    /// don't run the analysis (degraded modes) opt out cleanly.
+    fn method_hir_metrics(&self, _method: MethodId) -> Arc<hir::metrics::HirMethodMetrics> {
+        Arc::new(hir::metrics::HirMethodMetrics::default())
+    }
+
+    /// Module batch over [`hir::metrics::HirMethodMetrics`]. Returned
+    /// by `module_hir_metrics_query`; the per-method shim
+    /// [`Self::method_hir_metrics`] reads from it.
+    fn module_hir_metrics(&self, _file_id: FileId) -> Arc<ModuleHirMetrics> {
+        Arc::new(ModuleHirMetrics::default())
+    }
+
+    /// Per-method McCabe cyclomatic complexity, computed from the
+    /// CFG by [`hir::cfg::cyclomatic_complexity`]. Default `1`
+    /// matches the conventional base value for trivial methods.
+    fn method_cyclomatic(&self, _method: MethodId) -> u32 {
+        1
+    }
+
+    /// Module batch over per-method cyclomatic values.
+    fn module_cyclomatic(&self, _file_id: FileId) -> Arc<ModuleCyclomatic> {
+        Arc::new(ModuleCyclomatic::default())
+    }
 }
 
 #[cfg(test)]

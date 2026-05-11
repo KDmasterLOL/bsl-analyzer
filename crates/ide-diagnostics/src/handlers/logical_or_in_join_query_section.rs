@@ -54,9 +54,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
-    use crate::{DiagnosticCode, Severity};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
+
     #[test]
     fn test_logical_or_in_join_query_section() {
         // Large inline regression fixture for OR-in-JOIN coverage.
@@ -103,24 +104,35 @@ mod tests {
 // так как планировщик запросов имеет возможность преобразовывать такое условие в IN, тем самым оптимизируя.
 
 //Итоговое количество срабатываний - 8."#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        // Expect exactly 8 diagnostics.
-        assert_eq!(diagnostics.len(), 8, "Expected 8 diagnostics");
-
-        // Verify all are on correct code
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::LogicalOrInJoinQuerySection);
-            // CodeSmell + Major → Warning (per metadata mapping)
-            assert_eq!(diag.severity, Severity::Warning);
-            assert!(diag.message.contains("ИЛИ"));
-        }
-
-        // Line 13 (0-based, fixture line index): first OR in JOIN condition
-        assert_diagnostic_range(code, &diagnostics[0], 12, 62, 65);
-
-        // Line 13: second OR in same expression
-        assert_diagnostic_range(code, &diagnostics[1], 12, 108, 111);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            expect![[r#"
+                LogicalOrInJoinQuerySection @ 13:63..13:66
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning
+                LogicalOrInJoinQuerySection @ 13:109..13:112
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning
+                LogicalOrInJoinQuerySection @ 20:16..20:19
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning
+                LogicalOrInJoinQuerySection @ 25:15..25:18
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning
+                LogicalOrInJoinQuerySection @ 27:15..27:18
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning
+                LogicalOrInJoinQuerySection @ 28:15..28:18
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning
+                LogicalOrInJoinQuerySection @ 30:15..30:18
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning
+                LogicalOrInJoinQuerySection @ 31:15..31:18
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -133,8 +145,11 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Same field OR should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -145,8 +160,11 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "OR in SELECT should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -158,9 +176,14 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Multiple fields with OR should trigger diagnostic");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::LogicalOrInJoinQuerySection);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            expect![[r#"
+                LogicalOrInJoinQuerySection @ 3:90..3:92
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -173,8 +196,14 @@ Procedure Test()
 EndProcedure
 "#;
 
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "English OR should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            expect![[r#"
+                LogicalOrInJoinQuerySection @ 5:36..5:38
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -187,7 +216,13 @@ EndProcedure
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Russian ИЛИ should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            expect![[r#"
+                LogicalOrInJoinQuerySection @ 5:34..5:37
+                  message: Обнаружен оператор 'ИЛИ' в условии соединения
+                  severity: Warning"#]],
+        );
     }
 }

@@ -28,6 +28,7 @@
 
 pub(crate) mod builtin_names;
 pub(crate) mod metadata_resolver;
+pub mod type_string;
 
 use std::collections::HashSet;
 

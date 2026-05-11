@@ -1,11 +1,12 @@
 //! Salsa database trait for type inference queries.
 
-use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId};
+use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId, MethodIdInput};
 use std::sync::Arc;
 use vfs::FileId;
 
 use crate::infer::{InferenceDiagnostic, InferenceResult};
 use crate::narrow::NarrowState;
+use crate::proc_signature::ProcSignature;
 use crate::Ty;
 
 /// Database trait for HIR type inference.
@@ -120,4 +121,15 @@ pub trait HirDatabase: ConfigsDatabase {
     ///
     /// [`narrow_or_base`]: ../../../hir/fn.narrow_or_base.html
     fn type_narrowing_enabled(&self) -> bool;
+
+    /// Lower a workspace-defined method's `(params, return_ty)` signature
+    /// from its docstring.
+    ///
+    /// Returns gradual `Ty::Unknown` for any parameter / return slot the
+    /// docstring omits — call sites consuming this signature must accept
+    /// `Unknown` actuals via the existing `is_assignable` rule.
+    ///
+    /// # Implementation
+    /// Should delegate to [`crate::proc_signature::proc_signature_query`].
+    fn proc_signature(&self, method_input: MethodIdInput<'_>) -> Arc<ProcSignature>;
 }

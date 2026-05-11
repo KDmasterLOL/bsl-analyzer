@@ -81,8 +81,8 @@ fn check_method(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
-    use crate::{DiagnosticCode, Severity};
+    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"Процедура МимоРаз()
@@ -105,43 +105,45 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // "СработкаПоНеобязательныйПередОбязательным(Раз, Два = 2, Три = 3, Четыре, Пять, Шесть, Семь=7)"
-        // Required after optional: Четыре, Пять, Шесть
-        assert_eq!(diagnostics.len(), 3);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::OrderOfParams);
-        // CodeSmell + Major → Warning (per metadata mapping)
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
-        assert!(diagnostics[0].message.contains("Четыре"));
-        assert!(diagnostics[1].message.contains("Пять"));
-        assert!(diagnostics[2].message.contains("Шесть"));
+        expect![[r#"
+            OrderOfParams @ 15:76..15:82
+              message: Переместите обязательный параметр 'Четыре' перед необязательными
+              severity: Warning
+            OrderOfParams @ 15:84..15:88
+              message: Переместите обязательный параметр 'Пять' перед необязательными
+              severity: Warning
+            OrderOfParams @ 15:90..15:95
+              message: Переместите обязательный параметр 'Шесть' перед необязательными
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_no_params() {
         let code = r#"Процедура Тест() КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_all_required() {
         let code = r#"Процедура Тест(А, Б, В) КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_all_optional() {
         let code = r#"Процедура Тест(А = 1, Б = 2, В = 3) КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_correct_order() {
         let code = r#"Процедура Тест(А, Б, В = 3, Г = 4) КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -149,9 +151,11 @@ mod tests {
         let code = r#"Процедура Тест(А, Б = 2, В)
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // В is required after optional Б
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 0, 25, 26); // В
+        expect![[r#"
+            OrderOfParams @ 1:26..1:27
+              message: Переместите обязательный параметр 'В' перед необязательными
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -159,9 +163,13 @@ mod tests {
         let code = r#"Процедура Тест(А = 1, Б, В)
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // Б and В are required after optional А
-        assert_eq!(diagnostics.len(), 2);
-        assert!(diagnostics[0].message.contains("Б"));
-        assert!(diagnostics[1].message.contains("В"));
+        expect![[r#"
+            OrderOfParams @ 1:23..1:24
+              message: Переместите обязательный параметр 'Б' перед необязательными
+              severity: Warning
+            OrderOfParams @ 1:26..1:27
+              message: Переместите обязательный параметр 'В' перед необязательными
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 }

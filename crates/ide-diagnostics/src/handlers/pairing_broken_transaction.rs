@@ -277,8 +277,14 @@ fn dfs_check_paths(
             }
         }
     } else {
-        // Skip AdjacentCode edges: they represent dead code after Continue/Return/Raise
-        // and carry stale transaction levels that cause false positives.
+        // Skip *only* AdjacentCode edges: they represent dead code after
+        // Return/Raise and carry stale transaction levels that cause false
+        // positives. `LoopBreak` / `LoopContinue` are live edges (Track 1
+        // Step C, plan §1.3) and must be walked — `Прервать` propagates the
+        // current transaction state to the loop-exit block (where an
+        // orphan-Begin will surface at procedure exit), and `Продолжить`
+        // returns to the loop header carrying the closed-transaction state
+        // for the next iteration.
         let successors: Vec<_> = ctx
             .cfg
             .outgoing_edges(node)
@@ -372,9 +378,9 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_valid_pairing_with_commit() {
         let code = r#"
@@ -384,12 +390,11 @@ mod tests {
     ЗафиксироватьТранзакцию();
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-        assert_eq!(pairing_diags.len(), 0, "Valid pairing with commit should have no diagnostics");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -401,15 +406,10 @@ mod tests {
     ОтменитьТранзакцию();
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Valid pairing with rollback should have no diagnostics"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -424,16 +424,13 @@ mod tests {
     ЗафиксироватьТранзакцию();
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-        // Rollback closes the transaction, then Commit has no matching Begin
-        assert_eq!(
-            pairing_diags.len(),
-            1,
-            "Rollback then Commit should produce orphaned Commit diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 6:5..6:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major"#]],
         );
     }
 
@@ -445,12 +442,14 @@ mod tests {
     ЗафиксироватьТранзакцию();
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-        assert_eq!(pairing_diags.len(), 1, "Orphaned commit should have 1 diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 4:5..4:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -461,14 +460,14 @@ mod tests {
     Действие();
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-        // Now: 1 diagnostic for Begin without Commit OR Rollback
-        // (transaction can be closed by either, so one error instead of two)
-        assert_eq!(pairing_diags.len(), 1, "Orphaned begin should have 1 diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 3:5..3:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'BeginTransaction'
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -481,16 +480,13 @@ mod tests {
     ЗафиксироватьТранзакцию();
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-        // First Begin has no matching end (Commit is consumed by second Begin)
-        assert_eq!(
-            pairing_diags.len(),
-            1,
-            "Nested incomplete transactions should have 1 diagnostic for first Begin"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 3:5..3:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major"#]],
         );
     }
 
@@ -506,19 +502,16 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        // CFG should catch:
-        // - Path 1 (true branch): Begin without Commit → orphaned begin
-        // - Path 2 (false branch): Commit without Begin → orphaned commit
-        assert!(
-            pairing_diags.len() >= 2,
-            "Branch imbalance should catch both orphaned begin and commit, got {}",
-            pairing_diags.len()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 4:9..4:27
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 6:9..6:34
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major"#]],
         );
     }
 
@@ -557,17 +550,10 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Standard try-except transaction pattern should have NO diagnostics, got {}",
-            pairing_diags.len()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -586,16 +572,10 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Try-except with commit/rollback should have NO diagnostics"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -614,17 +594,13 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        // Normal path: Begin -> no end -> orphaned Begin
-        assert_eq!(
-            pairing_diags.len(),
-            1,
-            "Try-except with only rollback should produce 1 orphaned Begin diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 3:5..3:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major"#]],
         );
     }
 
@@ -644,17 +620,13 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        // Exception path: Begin -> no end -> orphaned Begin
-        assert_eq!(
-            pairing_diags.len(),
-            1,
-            "Try-except with only commit should produce 1 orphaned Begin diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 3:5..3:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major"#]],
         );
     }
 
@@ -676,16 +648,10 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Nested try-except with proper transaction handling should have NO diagnostics"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -713,16 +679,10 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Multiple sequential transactions properly paired should have NO diagnostics"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -744,16 +704,10 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Conditional inside try with commit after should have NO diagnostics"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -773,16 +727,13 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        // Path with early return: Begin -> Return -> exit without end
-        assert!(
-            !pairing_diags.is_empty(),
-            "Early return before commit should produce orphaned Begin diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 3:5..3:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major"#]],
         );
     }
 
@@ -804,19 +755,10 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        // All paths are covered:
-        // - Normal path: Begin -> Commit -> end
-        // - Raise path: Begin -> Raise -> Except -> Rollback -> Raise -> exit
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Raise inside try should transfer to except, transaction is properly paired"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -841,18 +783,10 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        // Raise in inner try goes to inner except, then continues to Commit
-        // All paths close the transaction
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Nested try-except with raise should be properly handled"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -868,14 +802,14 @@ mod tests {
     ЗафиксироватьТранзакцию();
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        // Path with Raise: Begin -> Raise -> exit (no Commit/Rollback)
-        assert_eq!(pairing_diags.len(), 1, "Raise outside try leaves transaction open");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 3:5..3:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major"#]],
+        );
     }
 
     /// Begin inside try with nested try-raise: inner except re-raises to outer except
@@ -899,17 +833,68 @@ mod tests {
     КонецПопытки;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
+        );
+    }
 
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Begin inside try with nested raise should have NO diagnostics, got: {:?}",
-            pairing_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    /// Pins Track 1 Step P (plan §1.8a, risk #6) — `Прервать` after a
+    /// closed transaction inside a loop must not produce a pairing
+    /// diagnostic. After Step C `walk_break_statement_hir` emits a
+    /// `LoopBreak` *live* edge to the loop-exit block (not the old
+    /// `AdjacentCode` dead edge), and the DFS skip-list still
+    /// excludes only `AdjacentCode`, so the post-break exit block
+    /// inherits `state.level == 0` from the closed transaction.
+    /// Without Step C this case lowered through `AdjacentCode` and
+    /// the after-loop block was never visited, masking real
+    /// orphan-begin bugs.
+    #[test]
+    fn test_break_after_commit_in_loop_valid() {
+        let code = r#"
+Процедура Тест()
+    Пока Истина Цикл
+        НачатьТранзакцию();
+        Действие();
+        ЗафиксироватьТранзакцию();
+        Прервать;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
+        );
+    }
+
+    /// Step P companion to `test_break_after_commit_in_loop_valid`:
+    /// `Прервать` while the transaction is still open must surface
+    /// the orphaned `НачатьТранзакцию`. The `LoopBreak` edge carries
+    /// `state.level == 1` to the loop-exit block, which then reaches
+    /// the procedure exit with `begin_stack` non-empty — exactly the
+    /// path the orphan-detector flags. Without Step C this path was
+    /// invisible (dead `AdjacentCode` edge) and the diagnostic
+    /// silently passed.
+    #[test]
+    fn test_break_with_open_transaction_invalid() {
+        let code = r#"
+Процедура Тест()
+    Пока Истина Цикл
+        НачатьТранзакцию();
+        Действие();
+        Прервать;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 4:9..4:27
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major"#]],
         );
     }
 
@@ -937,17 +922,10 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
-
-        assert_eq!(
-            pairing_diags.len(),
-            0,
-            "Multiple Commit+Continue in loop should have NO diagnostics, got: {:?}",
-            pairing_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#""#]],
         );
     }
 
@@ -1070,17 +1048,94 @@ mod tests {
     зафиксироватьТРАНЗакциЮ(); // Парность не соблюдается здесь
     ОтменитьТранзакцию();
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        let pairing_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
-            .collect();
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 6:5..6:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 14:5..14:24
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'CommitTransaction'
+                  severity: Major
+                PairingBrokenTransaction @ 22:5..22:24
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'CommitTransaction'
+                  severity: Major
+                PairingBrokenTransaction @ 28:5..28:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 32:5..32:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'BeginTransaction'
+                  severity: Major
+                PairingBrokenTransaction @ 40:5..40:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 41:5..41:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 45:5..45:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 72:5..72:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 75:5..75:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 78:5..78:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 84:5..84:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 85:5..85:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 88:5..88:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 89:5..89:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 90:5..90:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 102:5..102:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 103:5..103:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 115:5..115:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'зафиксироватьТРАНЗакциЮ'
+                  severity: Major
+                PairingBrokenTransaction @ 116:5..116:25
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ОтменитьТранзакцию'
+                  severity: Major"#]],
+        );
+    }
 
-        // CFG-based approach may find more issues due to path analysis
-        assert!(
-            pairing_diags.len() >= 10,
-            "Expected at least 10 diagnostics from fixture, got {}",
-            pairing_diags.len()
+    #[test]
+    fn test_interprocedural_begin_commit_are_not_paired_snapshot() {
+        // Track 3 Phase C §4.2: pairing is intentionally method-local
+        // today, so a Begin in one procedure and Commit in another are
+        // reported as two local lifecycle violations.
+        check_diagnostics_snapshot_for(
+            r#"Процедура Открыть()
+    НачатьТранзакцию();
+КонецПроцедуры
+
+Процедура Закрыть()
+    ЗафиксироватьТранзакцию();
+КонецПроцедуры"#,
+            DiagnosticCode::PairingBrokenTransaction,
+            expect![[r#"
+                PairingBrokenTransaction @ 2:5..2:23
+                  message: Нарушена парность использования метода 'ЗафиксироватьТранзакцию/ОтменитьТранзакцию' и 'НачатьТранзакцию'
+                  severity: Major
+                PairingBrokenTransaction @ 6:5..6:30
+                  message: Нарушена парность использования метода 'НачатьТранзакцию' и 'ЗафиксироватьТранзакцию'
+                  severity: Major"#]],
         );
     }
 }

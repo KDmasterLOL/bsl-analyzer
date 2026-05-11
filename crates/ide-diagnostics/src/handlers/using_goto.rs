@@ -31,7 +31,8 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     #[test]
     fn test_using_goto() {
         let code = r#"Процедура БезПерейти()
@@ -72,18 +73,17 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let goto_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingGoto).collect();
-
-        assert_eq!(goto_diags.len(), 2, "Expected 2 diagnostics");
-
-        // Line 8 (0-indexed), cols 4-14: `Перейти ~а;`
-        assert_diagnostic_range(code, goto_diags[0], 8, 4, 14);
-
-        // Line 22 (0-indexed), cols 8-22: `Перейти ~Петля;`
-        assert_diagnostic_range(code, goto_diags[1], 22, 8, 22);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingGoto,
+            expect![[r#"
+            UsingGoto @ 9:5..9:15
+              message: Оператор "Перейти" не должен использоваться
+              severity: Warning
+            UsingGoto @ 23:9..23:23
+              message: Оператор "Перейти" не должен использоваться
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -95,9 +95,6 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let goto_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingGoto).collect();
-        assert_eq!(goto_diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingGoto, expect![[r#""#]]);
     }
 }

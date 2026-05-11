@@ -96,8 +96,10 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::*;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_snapshot_with_cfe};
     use crate::DiagnosticCode;
+    use expect_test::expect;
+    use test_fixture::CfeFixtureBuilder;
 
     #[test]
     fn test_all_constructor_types_in_procedure() {
@@ -118,10 +120,80 @@ mod tests {
     Значение = Новый BinaryData(ИмяФайла);
     Значение = Новый FileStream(ИмяФайла, РежимОткрытия);
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 14, "All 14 constructor types detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 2:16..2:36
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 3:16..3:42
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 4:16..4:32
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 5:16..5:32
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 6:16..6:39
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 7:16..7:39
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 8:16..8:34
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 9:16..9:45
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 10:16..10:45
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 11:16..11:42
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 12:16..12:42
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 13:16..13:46
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 14:16..14:42
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 15:16..15:57
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
+    }
+
+    #[test]
+    fn test_cfe_harness_preserves_file_system_access_diagnostic() {
+        let code = r#"#Область ПрограммныйИнтерфейс
+// Описание
+Процедура Тест() Экспорт
+    Если Новый File(ИмяФайла) = Неопределено Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
+#КонецОбласти"#;
+        let mut builder = CfeFixtureBuilder::new("");
+        builder.add_extension("SecurityExt", "").add_extension_module(
+            "SecurityExt",
+            "РасширениеБезопасность",
+            "Процедура Заглушка() Экспорт\nКонецПроцедуры",
+        );
+
+        check_snapshot_with_cfe(
+            code,
+            builder.build(),
+            expect![[r#"
+                FileSystemAccess @ 4:10..4:30
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -138,11 +210,33 @@ mod tests {
     СоздатьКаталог("C:\Temp");
     УдалитьФайлы("C:\temp\Works");
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
         // 7 global methods (Массив and its method are not file system)
-        assert_eq!(fs_diags.len(), 7, "All 7 global file methods detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 2:5..2:18
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 3:5..3:19
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 6:5..6:20
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 7:5..7:20
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 8:5..8:18
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 9:5..9:19
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 10:5..10:17
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -157,10 +251,17 @@ mod tests {
 Процедура Метод3()
     Значение = Новый xBase;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 2, "Annotations do not suppress FileSystemAccess");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 3:16..3:42
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 8:16..8:27
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -170,10 +271,14 @@ mod tests {
     Ф = Новый Файл("test.txt");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 3:9..3:31
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -183,10 +288,14 @@ Procedure Test()
     F = New File("test.txt");
 EndProcedure
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 3:9..3:29
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -196,10 +305,14 @@ EndProcedure
     КопироватьФайл("src", "dest");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 3:5..3:19
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -209,10 +322,14 @@ Procedure Test()
     FileCopy("src", "dest");
 EndProcedure
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 3:5..3:13
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -224,10 +341,20 @@ EndProcedure
     КОПИРОВАТЬФАЙЛ("src", "dest");    // uppercase method
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 3);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 3:10..3:32
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 4:10..4:32
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 5:5..5:19
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -239,10 +366,7 @@ EndProcedure
     Т = Новый ТаблицаЗначений();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 0, "Standard types should be ignored");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
     }
 
     #[test]
@@ -253,10 +377,14 @@ EndProcedure
     ФайловаяСистема.КопироватьФайл("src", "dest");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 1, "Qualified calls should also be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 4:21..4:35
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -278,10 +406,50 @@ EndProcedure
     Дв2 = Новый BinaryData();
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 13, "All constructor types detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 3:10..3:22
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 4:10..4:22
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 5:9..5:22
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 6:12..6:30
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 7:12..7:30
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 8:11..8:29
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 9:11..9:29
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 10:12..10:32
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 11:12..11:30
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 12:11..12:31
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 13:11..13:29
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 14:11..14:33
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 15:11..15:29
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -295,9 +463,22 @@ EndProcedure
     СоздатьКаталог("dir");
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let fs_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FileSystemAccess).collect();
-        assert_eq!(fs_diags.len(), 4);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 4:9..4:31
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 5:5..5:13
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 6:9..6:27
+                  message: File system access detected (security review required)
+                  severity: Major
+                FileSystemAccess @ 7:5..7:19
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 }

@@ -8,6 +8,7 @@ pub mod type_facade;
 
 pub use definition::Definition;
 pub use hir_ty::coerce_this_object_to_metadata_ref;
+pub use hir_ty::TyLoweringContext;
 pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
 pub use name_classify::{classify_token, NameClass};
@@ -22,7 +23,9 @@ pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
 
 // Re-export HIR body types for diagnostics
-pub use hir_def::body::{DeprecatedKind8312, ExternalRef, MagicNumberContext, ManagerType};
+pub use hir_def::body::{
+    DeprecatedKind8312, ExistingBindingKind, ExternalRef, MagicNumberContext, ManagerType,
+};
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
 
 // Re-export HIR expression/statement types
@@ -33,30 +36,33 @@ pub use hir_def::item_tree::{Annotation, AnnotationKind, Function, ModItem, Para
 
 // Re-export tree types
 pub use hir_def::is_bsl_source;
+pub use hir_def::module_structure;
 pub use hir_def::region_tree::{RegionIdx, RegionTree};
 pub use hir_def::symbol_tree::MethodSymbol;
 pub use hir_def::{ConditionalTree, ItemTree, ModuleIndex, SymbolTree, WorkspaceSymbols};
 
 // Re-export database and resolution
-pub use hir_def::resolver::Resolver;
+pub use hir_def::resolver::{AssignmentResolution, Resolver};
 pub use hir_def::scope::{ExprScopes, ScopeDef};
 pub use hir_def::DefDatabase;
 
 // Re-export documentation types
 pub use hir_def::call_graph;
 pub use hir_def::call_graph::ModuleCallSummary;
-pub use hir_def::docs::{is_dotted_type_reference, MethodDocs, ParameterDoc};
+pub use hir_def::docs::{
+    is_dotted_type_reference, MethodDocs, ParameterDoc, TypeDoc, VariableDocs,
+};
 
 // Re-export analysis modules
-pub use hir_def::cognitive_complexity;
-pub use hir_def::cyclomatic_complexity;
+pub use hir_def::catch_class;
+pub use hir_def::metrics;
 
 /// CFG analysis — stable public API
 pub mod cfg {
     pub use ::cfg::{
-        BasicBlockVertex, CfgBuilder, CfgEdgeType, CfgVertex, ConditionalVertex, ControlFlowGraph,
-        ForEachLoopVertex, ForLoopVertex, LabelVertex, ModuleCfgs, NodeIndex,
-        PreprocConditionVertex, TryExceptVertex, WhileLoopVertex,
+        cyclomatic_complexity, BasicBlockVertex, CfgBuilder, CfgEdgeType, CfgVertex,
+        ConditionalVertex, ControlFlowGraph, ForEachLoopVertex, ForLoopVertex, LabelVertex,
+        ModuleCfgs, NodeIndex, PreprocConditionVertex, TryExceptVertex, WhileLoopVertex,
     };
 }
 
@@ -70,10 +76,41 @@ pub mod dataflow {
         };
     }
 
+    pub mod path_terminates {
+        pub use ::dataflow::path_terminates::{
+            analyze_path_terminates, analyze_path_terminates_default, MayFallthrough,
+            ModulePathTerminates, PathTerminatesConfig, PathTerminatesResult,
+            PathTerminatesTransfer,
+        };
+    }
+
     pub mod reaching_defs {
         pub use ::dataflow::reaching_defs::{
             DefSite, Definition, DefinitionIndex, ModuleReachingDefs, ReachingDefs,
             ReachingDefsResult, ReachingDefsTransfer,
+        };
+    }
+
+    pub mod temp_resource {
+        pub use ::dataflow::temp_resource::{
+            analyze_open_resources, OpenResourcesResult, OpenSet, ResourceEvent, ResourceProvider,
+        };
+    }
+
+    pub mod effect_summary {
+        pub use ::dataflow::effect_summary::{analyze_method_effects, CalleeKey, EffectSummary};
+    }
+
+    pub mod security_state {
+        pub use ::dataflow::security_state::{
+            analyze, open_events, Category, OpenEvent, PrivilegeCounter, SaturatingCount,
+            SecurityCounters, SecurityModeState, SecurityStateProvider, K_MAX,
+        };
+    }
+
+    pub mod guard_predicates {
+        pub use ::dataflow::guard_predicates::{
+            default_registry, is_stmt_guarded, GuardPredicate, GuardRegistry, GuardSemantics,
         };
     }
 }
@@ -99,6 +136,7 @@ pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
 pub use hir_ty::infer::{infer_query, type_of_expr_query};
 pub use hir_ty::narrow::{narrow_or_base, narrow_query, narrowed_type_at, NarrowState};
+pub use hir_ty::proc_signature;
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
     form_element_kind_sort_band, CallArgBinding, FormDataBinding, FormDataTarget, FormElementKind,

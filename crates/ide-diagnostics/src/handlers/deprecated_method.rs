@@ -211,7 +211,8 @@ fn get_message(method_name: &str, replacement: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_hir_diagnostic, format_diags};
+    use expect_test::expect;
     #[test]
     fn test_deprecated_8310_russian() {
         let code = r#"
@@ -221,12 +222,15 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedMethods8310)
             .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("КлиентскоеПриложение"));
+        expect![[r#"
+            DeprecatedMethods8310 @ 3:5..3:54
+              message: Метод "УстановитьКраткийЗаголовокПриложения" устарел. Следует использовать "КлиентскоеПриложение.УстановитьКраткийЗаголовок".
+              severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("КлиентскоеПриложение")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -238,12 +242,15 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedMethods8310)
             .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("ClientApplication"));
+        expect![[r#"
+            DeprecatedMethods8310 @ 3:15..3:43
+              message: Method "GetShortApplicationCaption" is deprecated. You should use "ClientApplication.GetShortCaption".
+              severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
+        assert!(deprecated_diags[0].message.contains("ClientApplication")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -255,12 +262,16 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedMethods8317)
             .collect();
 
-        assert_eq!(deprecated_diags.len(), 1);
-        assert!(deprecated_diags[0].message.contains("МенеджерОбработкиОшибок"));
+        expect![[r#"
+            DeprecatedMethods8317 @ 3:16..3:64
+              message: Метод "КраткоеПредставлениеОшибки" устарел. Следует использовать "МенеджерОбработкиОшибок.КраткоеПредставлениеОшибки".
+              severity: Hint"#]].assert_eq(&format_diags(code, &deprecated_diags));
+        let message = &deprecated_diags[0].message;
+        assert!(message.contains("МенеджерОбработкиОшибок")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -273,13 +284,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| {
                 d.code == DiagnosticCode::DeprecatedMethods8310
                     || d.code == DiagnosticCode::DeprecatedMethods8317
             })
             .collect();
 
-        assert_eq!(deprecated_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &deprecated_diags));
     }
 }

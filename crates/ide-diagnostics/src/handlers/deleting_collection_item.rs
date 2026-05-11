@@ -99,7 +99,8 @@ pub fn from_hir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_hir_diagnostic, format_diags};
+    use expect_test::expect;
     #[test]
     fn test_simple_deletion() {
         let code = r#"
@@ -111,10 +112,13 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Should detect deletion in ForEach");
+        expect![[r#"
+            DeletingCollectionItem @ 4:5..4:31
+              message: Удаление элемента из коллекции 'Коллекция ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -128,10 +132,10 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 0, "Different collection should be OK");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -145,10 +149,10 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 0, "Global Удалить() should be OK");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -162,10 +166,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Should detect English delete");
+        expect![[r#"
+            DeletingCollectionItem @ 4:5..4:22
+              message: Удаление элемента из коллекции 'mass ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -179,10 +186,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Should match case-insensitively");
+        expect![[r#"
+            DeletingCollectionItem @ 4:5..4:40
+              message: Удаление элемента из коллекции 'Mass().mass1.mass2() ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -199,10 +209,10 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 0, "Deleting from different collection should be OK");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -219,10 +229,10 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 0, "Global Удалить() should be OK");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -239,10 +249,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Deleting from chained field collection should error");
+        expect![[r#"
+            DeletingCollectionItem @ 5:9..5:48
+              message: Удаление элемента из коллекции 'Коллекция.ЕщеКоллекция ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -257,10 +270,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Simple English delete should error");
+        expect![[r#"
+            DeletingCollectionItem @ 4:5..4:22
+              message: Удаление элемента из коллекции 'mass ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -275,10 +291,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Parenthesized arg should still error");
+        expect![[r#"
+            DeletingCollectionItem @ 4:5..4:26
+              message: Удаление элемента из коллекции 'mass ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -293,10 +312,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Direct delete in loop body should error");
+        expect![[r#"
+            DeletingCollectionItem @ 4:5..4:31
+              message: Удаление элемента из коллекции 'Коллекция ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -313,10 +335,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Delete inside If in loop should error");
+        expect![[r#"
+            DeletingCollectionItem @ 5:9..5:35
+              message: Удаление элемента из коллекции 'Коллекция ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -331,10 +356,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Delete with expression arg should error");
+        expect![[r#"
+            DeletingCollectionItem @ 4:5..4:24
+              message: Удаление элемента из коллекции 'mass ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -349,10 +377,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 1, "Chained method call collection should error");
+        expect![[r#"
+            DeletingCollectionItem @ 4:5..4:38
+              message: Удаление элемента из коллекции 'mass.mass1().mass2 ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -369,10 +400,10 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
-        assert_eq!(diags.len(), 0, "Коллекция1 != Коллекция, should be OK");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -391,11 +422,11 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
 
-        assert_eq!(diags.len(), 0, "Delete + Break should be safe");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -419,11 +450,11 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
 
-        assert_eq!(diags.len(), 0, "Delete + Break in nested loops should be safe");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -442,11 +473,11 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
 
-        assert_eq!(diags.len(), 0, "Delete + Return should be safe");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -465,10 +496,13 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
 
-        assert_eq!(diags.len(), 1, "Delete without Break should trigger error");
+        expect![[r#"
+            DeletingCollectionItem @ 5:13..5:39
+              message: Удаление элемента из коллекции 'Коллекция ' во время итерации по ней может привести к пропуску элементов или ошибкам. Используйте обратный цикл по индексу или соберите элементы для удаления отдельно
+              severity: Major"#]].assert_eq(&format_diags(code, &diags));
     }
 }

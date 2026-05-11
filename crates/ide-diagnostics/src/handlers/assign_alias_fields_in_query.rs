@@ -26,10 +26,12 @@
 //! ```
 //!
 //! ## Rules
-//! - Only subqueries are checked (not main queries)
-//! - Asterisk fields (`*`, `Table.*`) don't require aliases
-//! - AS/КАК keyword must be explicit (implicit aliases are forbidden)
-//! - UNION: only first query in UNION is checked
+//! - Result-shaping SELECT clauses are checked: standalone queries, first
+//!   UNION branches, and nested subqueries.
+//! - Secondary UNION branches are skipped because result column names are
+//!   defined by the first SELECT in the UNION chain.
+//! - Asterisk fields (`*`, `Table.*`) don't require aliases.
+//! - AS/КАК keyword must be explicit (implicit aliases are forbidden).
 //!
 //! ## Implementation
 //!
@@ -131,42 +133,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
+    use crate::test_utils::{check_diagnostics_snapshot_for, format_diags};
+    use crate::{Diagnostic, DiagnosticCode, Severity};
+    use expect_test::expect;
     use parser::parse_sdbl;
-
-    /// Helper for debug tests that need to return file content along with diagnostics.
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-        use ide_db::RootDatabaseImpl;
-        use std::rc::Rc;
-        use test_fixture::Fixture;
-        use vfs::VfsPath;
-
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_set = vfs::FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let config = Rc::new(config);
-        let provider = ide_db::SalsaProvider::new(&db, None);
-        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
-
-        (super::check(&ctx), file_content)
-    }
 
     /// Helper to check a standalone SDBL query using HIR (for testing).
     ///
@@ -208,73 +178,87 @@ mod tests {
             .collect()
     }
 
+    fn check_standalone_query_snapshot(query_text: &str, expected: expect_test::Expect) {
+        let diagnostics = check_standalone_query(query_text);
+        expected.assert_eq(&format_diags(query_text, &diagnostics));
+    }
+
     #[test]
     fn test_field_with_explicit_as() {
         // Should pass - has AS keyword
         let query = "SELECT Name AS ProductName FROM Products";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 0);
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_field_without_as_keyword() {
         // Should fail - implicit alias (no AS keyword)
         let query = "SELECT Name ProductName FROM Products";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("AS/КАК"));
+        check_standalone_query_snapshot(
+            query,
+            expect![[r#"
+            AssignAliasFieldsInQuery @ 1:8..1:24
+              message: Поле 'ProductName' должно иметь явный псевдоним с ключевым словом AS/КАК
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_field_without_alias() {
         // Should fail - no alias at all
         let query = "SELECT Name FROM Products";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("псевдоним"));
+        check_standalone_query_snapshot(
+            query,
+            expect![[r#"
+            AssignAliasFieldsInQuery @ 1:8..1:12
+              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_asterisk_field() {
         // Should pass - asterisk doesn't need alias
         let query = "SELECT * FROM Products";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 0);
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_table_asterisk() {
         // Should pass - Table.* doesn't need alias
         let query = "SELECT Products.* FROM Products";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 0);
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_multiple_fields_mixed() {
         // Mixed: some with AS, some without
         let query = "SELECT Name AS ProductName, Code ProductCode, Price FROM Products";
-        let diagnostics = check_standalone_query(query);
-        // Should have 2 errors: Code (implicit) and Price (no alias)
-        assert_eq!(diagnostics.len(), 2);
+        check_standalone_query_snapshot(
+            query,
+            expect![[r#"
+            AssignAliasFieldsInQuery @ 1:29..1:45
+              message: Поле 'ProductCode' должно иметь явный псевдоним с ключевым словом AS/КАК
+              severity: Warning
+            AssignAliasFieldsInQuery @ 1:47..1:52
+              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_russian_kak_keyword() {
         // Russian КАК keyword should work
         let query = "ВЫБРАТЬ Имя КАК ИмяПродукта ИЗ Товары";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 0);
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_union_query() {
-        // UNION query - first query checked, UNION parts not checked
+        // UNION result column names are defined by the first SELECT.
+        // Secondary UNION branches do not need field aliases.
         let query = "SELECT Name AS N FROM Products UNION SELECT Title FROM Services";
-        let diagnostics = check_standalone_query(query);
-        // First query OK (Name AS N), second query (Title without alias) not checked
-        // Because we only check main query, not UNION queries
-        assert_eq!(diagnostics.len(), 0);
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
@@ -282,9 +266,13 @@ mod tests {
         // Test that SDBL parser handles Russian queries
         let query = "ВЫБРАТЬ Артикул, Наименование КАК ИмяТовара ИЗ Справочник.Номенклатура";
 
-        let diagnostics = check_standalone_query(query);
-        // Should have 1 error: Артикул without alias
-        assert_eq!(diagnostics.len(), 1);
+        check_standalone_query_snapshot(
+            query,
+            expect![[r#"
+            AssignAliasFieldsInQuery @ 1:9..1:16
+              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -306,16 +294,15 @@ mod tests {
 ИЗ
 	Справочник.Услуги КАК Услуги"#;
 
-        let diagnostics = check_standalone_query(query);
-
-        // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
-        // - Товары.Артикул without alias
-        // - Товары.Цена ЦенаПродажи without AS keyword
-        // UNION queries are skipped
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Expected 2 diagnostics from first SELECT (UNION queries skipped)"
+        check_standalone_query_snapshot(
+            query,
+            expect![[r#"
+            AssignAliasFieldsInQuery @ 2:2..2:16
+              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+              severity: Warning
+            AssignAliasFieldsInQuery @ 4:2..4:25
+              message: Поле 'ЦенаПродажи' должно иметь явный псевдоним с ключевым словом AS/КАК
+              severity: Warning"#]],
         );
     }
 
@@ -347,8 +334,10 @@ mod tests {
 
         let sdbl_hirs = db.sdbl_hir_in_file(file_id);
 
+        // snapshot-skip: HIR extraction plumbing assertion, not diagnostic shape.
         assert_eq!(sdbl_hirs.len(), 1);
         // Should have at least 1 diagnostic (field without alias)
+        // snapshot-skip: HIR extraction plumbing assertion, not diagnostic shape.
         assert!(
             !sdbl_hirs[0].1.queries()[0].hir.diagnostics.is_empty(),
             "Expected diagnostics for fields without AS keyword"
@@ -403,12 +392,14 @@ mod tests {
         let sdbl_hirs_unwrapped = db.sdbl_hir_in_file(file_id);
 
         // Both should work
+        // snapshot-skip: HIR extraction plumbing assertion, not diagnostic shape.
         assert!(!sdbl_hirs_wrapped.is_empty() || !sdbl_hirs_unwrapped.is_empty());
     }
 
     #[test]
     fn test_union_with_diagnostics() {
-        // Test UNION query - only first SELECT is checked, UNION queries are skipped
+        // Alias check covers the first SELECT in a UNION chain. Secondary
+        // branches are matched by position and do not define result names.
         let query = r#"ВЫБРАТЬ
 	Товары.Артикул,
 	Товары.Артикул КАК АртикулТовара,
@@ -425,16 +416,15 @@ mod tests {
 ИЗ
 	Справочник.Услуги КАК Услуги"#;
 
-        let diagnostics = check_standalone_query(query);
-
-        // Should have 2 diagnostics from first SELECT (before UNION):
-        // - Товары.Артикул without alias
-        // - Товары.Цена ЦенаПродажи without AS keyword
-        // UNION queries are skipped
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Expected 2 diagnostics from first SELECT (UNION queries skipped)"
+        check_standalone_query_snapshot(
+            query,
+            expect![[r#"
+            AssignAliasFieldsInQuery @ 2:2..2:16
+              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+              severity: Warning
+            AssignAliasFieldsInQuery @ 4:2..4:25
+              message: Поле 'ЦенаПродажи' должно иметь явный псевдоним с ключевым словом AS/КАК
+              severity: Warning"#]],
         );
     }
 
@@ -447,12 +437,7 @@ mod tests {
 ИЗ
 Справочник.Номенклатура КАК Спр"#;
 
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "ПЕРВЫЕ clause with explicit alias should not trigger diagnostic"
-        );
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
@@ -464,11 +449,11 @@ mod tests {
 Справочник.Номенклатура КАК Спр"#;
 
         let parse = parser::parse_sdbl(query);
+        // snapshot-skip: SDBL parser-internal assertion, not diagnostic shape.
         assert!(!parse.has_errors(), "Parse should not have errors");
 
         // Field has explicit alias with КАК - no diagnostics expected
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 0, "Explicit alias should not trigger diagnostic");
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
@@ -479,11 +464,12 @@ mod tests {
 ИЗ
 Справочник.Номенклатура КАК Спр"#;
 
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "ПЕРВЫЕ clause with missing alias should trigger diagnostic"
+        check_standalone_query_snapshot(
+            query,
+            expect![[r#"
+            AssignAliasFieldsInQuery @ 2:1..2:17
+              message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+              severity: Warning"#]],
         );
     }
 
@@ -495,11 +481,12 @@ mod tests {
 ИЗ
 Справочник.Номенклатура КАК Спр"#;
 
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "ПЕРВЫЕ clause with implicit alias (no КАК) should trigger diagnostic"
+        check_standalone_query_snapshot(
+            query,
+            expect![[r#"
+            AssignAliasFieldsInQuery @ 2:1..2:30
+              message: Поле 'Номенклатура' должно иметь явный псевдоним с ключевым словом AS/КАК
+              severity: Warning"#]],
         );
     }
 
@@ -507,30 +494,28 @@ mod tests {
     fn test_distinct_clause() {
         // Test DISTINCT keyword
         let query = "SELECT DISTINCT Name AS ProductName FROM Products";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 0, "DISTINCT with explicit alias should pass");
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_distinct_top_combination() {
         // Test DISTINCT TOP combination
         let query = "ВЫБРАТЬ РАЗЛИЧНЫЕ ПЕРВЫЕ 10 Код КАК К ИЗ Товары";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 0, "DISTINCT TOP with explicit alias should pass");
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
     #[test]
     fn test_top_distinct_order() {
         // Test TOP DISTINCT order (also valid)
         let query = "SELECT TOP 50 DISTINCT Name AS N FROM Products";
-        let diagnostics = check_standalone_query(query);
-        assert_eq!(diagnostics.len(), 0, "TOP DISTINCT with explicit alias should pass");
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
     }
 
-    /// Two queries with UNION - each query has fields without AS keyword.
+    /// A query with UNION checks aliases only in the first SELECT.
     ///
-    /// Expected 2 diagnostics per query (before UNION only): Валюты.Ссылка and Валюты.Код Код.
-    /// UNION queries are skipped.
+    /// Expected 2 diagnostics: Валюты.Ссылка has no alias and Валюты.Код uses
+    /// an implicit alias. The secondary UNION SELECT is ignored because it does
+    /// not define result column names.
     #[test]
     fn test_query_with_union_two_diagnostics() {
         let code = r#"Запрос = Новый Запрос;
@@ -551,13 +536,16 @@ mod tests {
 	|ИЗ
 	|	Справочник.Валюты КАК Валюты";"#;
 
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
-
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Expected 2 diagnostics from first SELECT (UNION skipped)"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#"
+                AssignAliasFieldsInQuery @ 4:4..4:17
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning
+                AssignAliasFieldsInQuery @ 6:4..6:18
+                  message: Поле 'Код' должно иметь явный псевдоним с ключевым словом AS/КАК
+                  severity: Warning"#]],
         );
     }
 
@@ -600,10 +588,23 @@ mod tests {
 	|ИЗ
 	|	Справочник.Валюты КАК Валюты";"#;
 
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
-
-        assert_eq!(diagnostics.len(), 4, "Expected 4 diagnostics (2 per query)");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#"
+                AssignAliasFieldsInQuery @ 4:4..4:17
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning
+                AssignAliasFieldsInQuery @ 6:4..6:18
+                  message: Поле 'Код' должно иметь явный псевдоним с ключевым словом AS/КАК
+                  severity: Warning
+                AssignAliasFieldsInQuery @ 22:4..22:17
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning
+                AssignAliasFieldsInQuery @ 24:4..24:18
+                  message: Поле 'Код' должно иметь явный псевдоним с ключевым словом AS/КАК
+                  severity: Warning"#]],
+        );
     }
 
     /// Nested subquery - field inside subquery without alias triggers diagnostic.
@@ -619,10 +620,50 @@ mod tests {
 	|	ИЗ
 	|		Справочник.Валюты КАК Валюты) КАК ВложенныйЗапрос";"#;
 
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#"
+                AssignAliasFieldsInQuery @ 7:5..7:18
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning"#]],
+        );
+    }
 
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic: Валюты.Ссылка in subquery");
+    /// Regression guard for UNION field aliases.
+    ///
+    /// Main SELECT is fully aliased; UNION part has a missing alias. This is OK:
+    /// secondary UNION branches do not define result column names.
+    #[test]
+    fn test_union_part_does_not_emit_when_alias_missing() {
+        let query = "SELECT Name AS Name FROM Products UNION ALL SELECT Title FROM Services";
+        check_standalone_query_snapshot(query, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_union_part_uses_first_query_aliases_regression() {
+        let code = r#"Запрос = Новый Запрос;
+Запрос.Текст =
+	"ВЫБРАТЬ
+	|	ДополнительныеРеквизиты.Ссылка КАК Набор,
+	|	ДополнительныеРеквизиты.Свойство КАК Свойство
+	|ПОМЕСТИТЬ ВТ_ВсеНаборы
+	|ИЗ
+	|	Справочник.НаборыДополнительныхРеквизитовИСведений.ДополнительныеРеквизиты КАК ДополнительныеРеквизиты
+	|
+	|ОБЪЕДИНИТЬ ВСЕ
+	|
+	|ВЫБРАТЬ
+	|	ДополнительныеСведения.Ссылка,
+	|	ДополнительныеСведения.Свойство
+	|ИЗ
+	|	Справочник.НаборыДополнительныхРеквизитовИСведений.ДополнительныеСведения КАК ДополнительныеСведения";"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#""#]],
+        );
     }
 
     /// Query with leading newline and field without alias.
@@ -630,9 +671,59 @@ mod tests {
     fn test_query_with_leading_newline_field_without_alias() {
         let code = "ТекстЗапроса = \"\n\t|ВЫБРАТЬ\n\t|\tВТ_ТЧ.НомерСтроки\n\t|ИЗ\n\t|\t&ВТ_Цены КАК ВТ_Цены\n\t|;\n\t|\n\t|ВЫБРАТЬ\n\t|\t\" + ПоляТЧДокумента + \"\n\t|ИЗ\n\t|\t&ВТ_ТЧ КАК Товары\";";
 
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#"
+                AssignAliasFieldsInQuery @ 3:4..3:21
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning"#]],
+        );
+    }
 
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic: ВТ_ТЧ.НомерСтроки without alias");
+    #[test]
+    fn track3_function_aggregate_and_case_fields_require_explicit_aliases_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ
+        |   ЕСТЬNULL(Товары.Артикул, """"),
+        |   СУММА(Товары.Количество),
+        |   ВЫБОР
+        |       КОГДА Товары.ПометкаУдаления ТОГДА 1
+        |       ИНАЧЕ 0
+        |   КОНЕЦ
+        |ИЗ
+        |   Справочник.Номенклатура КАК Товары";
+КонецПроцедуры"#,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#"
+                AssignAliasFieldsInQuery @ 5:13..5:43
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning
+                AssignAliasFieldsInQuery @ 6:13..6:37
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning
+                AssignAliasFieldsInQuery @ 7:13..10:18
+                  message: Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn track3_split_concatenated_query_is_not_reconstructed_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+        "ВЫБРАТЬ
+        |   " + ИмяПоля + "
+        |ИЗ
+        |   Справочник.Номенклатура КАК Товары";
+КонецПроцедуры"#,
+            DiagnosticCode::AssignAliasFieldsInQuery,
+            expect![[r#""#]],
+        );
     }
 }

@@ -9,7 +9,9 @@ use bsl_platform::{
     manager_methods_query, type_methods_query, type_properties_query, PlatformDataInner,
     PlatformMethod, PlatformProperty, TypeNameInput,
 };
-use hir::{Field, HirFieldOrigin, MethodSymbol, Name, Semantics, Ty, Type as HirType};
+use hir::{
+    Field, HirFieldOrigin, MethodSymbol, Name, Semantics, Ty, TyLoweringContext, Type as HirType,
+};
 use ide_db::RootDatabase;
 use symbol_info::{
     build_signature, from_platform_method, render_completion_detail, CalleeKind, CompletionDetail,
@@ -75,11 +77,12 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 
     // Fallback: a bare identifier that HIR couldn't resolve — typically
     // a literal type name (`Строка.`) or a platform constructor name
-    // (`Запрос.`) without a variable binding. `Ty::from_type_name`
-    // catches primitives / collections; anything else becomes a
-    // `PlatformObject(name)` so `platform_type_name()` below can ask
-    // `type_methods_query` for matching methods (empty result is safe
-    // — completion just shows nothing).
+    // (`Запрос.`) without a variable binding. The shared
+    // `TyLoweringContext::lower_bare_name` cascade catches primitives /
+    // collections / metadata-prefix guards and falls back to
+    // `Ty::PlatformObject(name)` so `platform_type_name()` below can
+    // ask `type_methods_query` for matching methods (empty result is
+    // safe — completion just shows nothing).
     if receiver_ty.is_unknown() {
         if let Some(name) = extract_receiver_ident(&receiver_expr) {
             // If the receiver is a real workspace CommonModule, the fast
@@ -137,10 +140,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
                 }
             }
             if receiver_ty.is_unknown() {
-                receiver_ty = Ty::from_type_name(&name);
-            }
-            if receiver_ty.is_unknown() {
-                receiver_ty = Ty::PlatformObject(Name::new(&name));
+                receiver_ty = TyLoweringContext::new().lower_bare_name(&Name::new(&name));
             }
         }
     }
@@ -252,18 +252,25 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     file_id: FileId,
     locale: ide_db::base_db::Locale,
 ) -> Option<Vec<CompletionItem>> {
-    // Fast path: ObjectManager / ManagerCollection have no MDO fields.
-    if matches!(receiver_ty, Ty::ObjectManager { .. } | Ty::ManagerCollection(_)) {
-        return collect_platform_items_or_none(db, receiver_ty, locale);
-    }
-
     // Coerce `ЭтотОбъект` so a catalog/document object module surfaces
-    // attributes + tabular sections on `ЭтотОбъект.|`. Both `Type::fields`
-    // and `enumerate_fields` would coerce internally, but the dispatch
-    // gate below also needs the effective ty for Union recognition, so
-    // we coerce once here.
+    // attributes + tabular sections on `ЭтотОбъект.|`, and a manager
+    // module surfaces platform manager methods (`СоздатьЭлемент()`,
+    // `НайтиПоКоду()`, …). Both `Type::fields` and `enumerate_fields`
+    // would coerce internally, but the dispatch gates below also need
+    // the effective ty for fast-path / Union recognition, so we coerce
+    // once here. `ThisObject` lands as `MetadataRef { *Object, .. }`,
+    // `ThisManager` as `ObjectManager { kind, name }` — both then route
+    // through their existing branches with no extra special-casing.
     let coerced = hir::coerce_this_object_to_metadata_ref(receiver_ty);
     let effective_ty = coerced.as_ref().unwrap_or(receiver_ty);
+
+    // Fast path: ObjectManager / ManagerCollection have no MDO fields.
+    // After coercion this also catches `Ty::ThisManager` → `ObjectManager`,
+    // which is what makes `ЭтотОбъект.|` in a ManagerModule offer the
+    // same platform manager-method set as `Справочники.<X>.|`.
+    if matches!(effective_ty, Ty::ObjectManager { .. } | Ty::ManagerCollection(_)) {
+        return collect_platform_items_or_none(db, effective_ty, locale);
+    }
 
     // MDO-field branch fires for direct `MetadataRef` receivers and for
     // unions containing at least one `MetadataRef` arm (typical shape:

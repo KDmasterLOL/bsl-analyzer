@@ -25,7 +25,7 @@
 //!    (`"РегистрСведенийЗапись.<Имя регистра сведений>"`) flow through
 //!    [`crate::platform_manager_lookup::map_generic_metadata_return_type`]
 //!    using the receiver's MDO name; scalar templates flow through
-//!    [`crate::method_lookup::resolve_platform_type_name`].
+//!    [`crate::method_lookup::lower_platform_type_name`].
 //! 4. Single template → `Some(ty)`; multi-template page (e.g.
 //!    `ПоляКолонкиСхемыЗапроса` lists three admissible element types)
 //!    → `Some(Ty::union([…]))`.
@@ -44,7 +44,7 @@ use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 use smol_str::SmolStr;
 
-use crate::method_lookup::resolve_platform_type_name;
+use crate::lower::type_string::lower_platform_type_name;
 use crate::platform_manager_lookup::{
     map_generic_metadata_return_type, metadata_kind_to_prefix_and_mdo,
 };
@@ -159,7 +159,7 @@ fn resolve_one_template(template: &str, context: Option<(MdoType, &Name)>) -> Op
     // Scalar shape: pass straight through the platform-name resolver
     // (handles `Произвольный` → `Ty::Unknown` and the
     // `Ty::PlatformObject` fallback for everything else).
-    Some(resolve_platform_type_name(template))
+    Some(lower_platform_type_name(template))
 }
 
 #[cfg(test)]
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn array_yields_unknown_per_platform_arbitrary() {
         // Per HBK, `Массив` iterates `Произвольный`, which lowers to
-        // `Ty::Unknown` via `resolve_platform_type_name`.
+        // `Ty::Unknown` via `lower_platform_type_name`.
         let elem = resolve_iter_element_ty(&Ty::Array);
         assert_eq!(elem, Some(Ty::Unknown));
     }

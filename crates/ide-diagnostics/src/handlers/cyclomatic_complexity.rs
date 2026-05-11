@@ -12,17 +12,19 @@
 //! - Hard to understand and maintain
 //!
 //! ## Algorithm
-//! Based on McCabe's Cyclomatic Complexity:
-//!
-//! **Base complexity:** 1 per method
+//! Track 2 Phase B §6.5 — SonarQube-style cyclomatic complexity:
+//! `V(G) + boolean_ops + ternary` where `V(G) = E - N + 2*P` is the
+//! textbook McCabe count from the cached CFG, and the boolean / ternary
+//! extras come from the §6.1 HIR visitor (BSL `И` / `ИЛИ` and
+//! `?(...)` evaluate inside basic blocks and don't add CFG edges, so
+//! the textbook formula misses them).
 //!
 //! **Decision points** (+1 each, no nesting penalty):
-//! - if, elsif, else
+//! - if, elsif (NOT else — SonarQube parity)
 //! - for, while, foreach
-//! - ternary operator (?)
+//! - ternary operator `?(...)`
 //! - except clause (try-except)
-//! - goto
-//! - AND/OR operators in expressions
+//! - AND / OR (`И`/`ИЛИ`) operators in expressions
 //!
 //! ## Bad practice
 //! Many decision points regardless of nesting:
@@ -81,60 +83,73 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::CyclomaticComplexity` is encountered.
-/// Applies configuration filtering (complexityThreshold).
-pub fn from_hir(
-    method_name: &str,
-    complexity: u32,
-    is_function: bool,
-    range: ide_db::TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
+/// CFG-based [`hir::cfg::cyclomatic_complexity`] via
+/// `ctx.module_cyclomatic()`. Replaces the legacy `from_hir` adapter
+/// (BodyDiagnostic-fed) and the per-method HIR-walk approximation
+/// in `hir-def/cyclomatic_complexity.rs`.
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    use hir::ModItem;
+
     let code = DiagnosticCode::CyclomaticComplexity;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
-    let complexity_threshold = ctx.config_int(code, "complexityThreshold", 20) as u32;
-    if complexity <= complexity_threshold {
-        return None;
+    let threshold = ctx.config_int(code, "complexityThreshold", 20) as u32;
+    let module_cyclomatic = ctx.module_cyclomatic();
+    if module_cyclomatic.is_empty() {
+        return Vec::new();
     }
+    let module_bodies = ctx.module_bodies();
+    let item_tree = ctx.item_tree();
 
-    let method_type = if is_function { "Функция" } else { "Процедура" };
-    Some(Diagnostic {
-        code,
-        message: format!(
-            "{} '{}' имеет цикломатическую сложность {} (максимум: {}). \
-             Рассмотрите возможность упрощения или разбиения на более мелкие функции",
-            method_type, method_name, complexity, complexity_threshold
-        ),
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
-}
+    // Sort by `local_id` for deterministic output ordering — matches
+    // the §6.4 cohort follow-up applied to method_size etc. (the
+    // underlying `FxHashMap` walk in `iter_bodies()` is non-deterministic).
+    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
+    local_ids.sort_unstable();
 
-/// Calculate cyclomatic complexity for a method body (HIR-based).
-///
-/// This is a PUBLIC function that can be reused for:
-/// - Code lenses (showing complexity in editor)
-/// - Metrics collection
-/// - Other diagnostics
-///
-/// Uses the HIR-based implementation from `hir_def::cyclomatic_complexity`.
-pub fn calculate_complexity(body: &hir::Body) -> u32 {
-    hir::cyclomatic_complexity::calculate_complexity(body)
+    let mut out = Vec::new();
+    for local_id in local_ids {
+        let complexity = module_cyclomatic.get(local_id);
+        if complexity <= threshold {
+            continue;
+        }
+        let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
+        let (name, name_range, is_function) = match item {
+            ModItem::Procedure(idx) => {
+                let p = item_tree.procedure(*idx);
+                (p.name.as_str().to_string(), p.name_range, false)
+            }
+            ModItem::Function(idx) => {
+                let f = item_tree.function(*idx);
+                (f.name.as_str().to_string(), f.name_range, true)
+            }
+            ModItem::Variable(_) => continue,
+        };
+        let method_type = if is_function { "Функция" } else { "Процедура" };
+        out.push(Diagnostic {
+            code,
+            message: format!(
+                "{} '{}' имеет цикломатическую сложность {} (максимум: {}). \
+                 Рассмотрите возможность упрощения или разбиения на более мелкие функции",
+                method_type, name, complexity, threshold
+            ),
+            severity: ctx.severity(code),
+            range: name_range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
-    use crate::Severity;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     use hir::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};
@@ -147,10 +162,11 @@ mod tests {
     Возврат Параметр + 1;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
-        assert_eq!(diagnostics.len(), 0, "Complexity 1 should not trigger (threshold 20)");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CyclomaticComplexity,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -163,15 +179,27 @@ mod tests {
     КонецЕсли;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
-        assert_eq!(diagnostics.len(), 0, "Complexity 3 should not trigger (threshold 20)");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CyclomaticComplexity,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
     fn test_high_complexity_triggers_diagnostic() {
-        // Function with complexity 22 (threshold 20) — should trigger
+        // Track 2 Phase B §6.5: SonarQube-style formula gives
+        // `cyclomatic = 23` for this extended fixture (CFG-based 14 +
+        // 7 boolean-op + 2 ternary). The fixture was enlarged here to
+        // cross the default threshold (20) naturally, removing the
+        // §6.4 "lower threshold to 10" compromise. The textbook
+        // McCabe value the §6.4 commit pinned was 13 against the
+        // smaller fixture; the SonarQube extras add `И`/`ИЛИ` and
+        // ternary as decision points the CFG can't see (they evaluate
+        // inside basic blocks). The legacy HIR-walk approximation
+        // additionally counted each `Else` clause as a separate
+        // decision; SonarQube does not, so the alignment intentionally
+        // drops that contribution.
         let code = r#"Функция РассчитатьМаршрут(Сумма, ТипКлиента, Режим, ЕстьСкидка)
     Результат = 0;
     Если Сумма > 100 Тогда
@@ -215,34 +243,23 @@ mod tests {
     КонецЕсли;
     Условие = Сумма > 0 И ТипКлиента <> "";
     Условие2 = Режим = "A" ИЛИ Режим = "B";
+    Условие3 = ЕстьСкидка И Сумма > 50 ИЛИ Режим = "C" И ТипКлиента <> "";
     Если Условие И Условие2 Тогда
         Результат = Результат + 1;
+    КонецЕсли;
+    Если Условие3 ИЛИ ЕстьСкидка Тогда
+        Результат = Результат + 2;
     КонецЕсли;
     Возврат Результат;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
-
-        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostic for high-complexity function");
-
-        // Diagnostic points at function name "РассчитатьМаршрут" (col 8-25 on line 0)
-        assert_diagnostic_range(code, diagnostics[0], 0, 8, 25);
-
-        assert_eq!(diagnostics[0].code, DiagnosticCode::CyclomaticComplexity);
-        // CodeSmell + Critical → Warning (per metadata mapping)
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
-
-        assert!(
-            diagnostics[0].message.contains("22"),
-            "Message should contain complexity 22, got: {}",
-            diagnostics[0].message
-        );
-        assert!(
-            diagnostics[0].message.contains("20"),
-            "Message should contain threshold 20, got: {}",
-            diagnostics[0].message
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CyclomaticComplexity,
+            expect![[r#"
+                CyclomaticComplexity @ 1:9..1:26
+                  message: Функция 'РассчитатьМаршрут' имеет цикломатическую сложность 23 (максимум: 20). Рассмотрите возможность упрощения или разбиения на более мелкие функции
+                  severity: Warning"#]],
         );
     }
 
@@ -291,8 +308,12 @@ mod tests {
     КонецЕсли;
     Условие = Сумма > 0 И ТипКлиента <> "";
     Условие2 = Режим = "A" ИЛИ Режим = "B";
+    Условие3 = ЕстьСкидка И Сумма > 50 ИЛИ Режим = "C" И ТипКлиента <> "";
     Если Условие И Условие2 Тогда
         Результат = Результат + 1;
+    КонецЕсли;
+    Если Условие3 ИЛИ ЕстьСкидка Тогда
+        Результат = Результат + 2;
     КонецЕсли;
     Возврат Результат;
 КонецФункции"#;
@@ -319,8 +340,31 @@ mod tests {
         let module_bodies = db.module_bodies(module_id);
 
         let body = module_bodies.body(0).expect("Should have first method body");
-        let complexity = calculate_complexity(body);
 
-        assert_eq!(complexity, 22, "РассчитатьМаршрут should have complexity 22");
+        // Track 2 Phase B §6.5 — pin both the textbook CFG value and
+        // the SonarQube extension separately. `V(G) = E - N + 2*P`
+        // counts only structural decisions that produce CFG edges
+        // (If/Elsif, While, For, ForEach, Try/Except). BSL `И` / `ИЛИ`
+        // and ternary `?(...)` evaluate inside basic blocks and don't
+        // add edges, so the SonarQube definition adds them back as
+        // per-occurrence increments. The §6.4 commit asserted the
+        // textbook value (13 for the smaller fixture); after §6.5 the
+        // diagnostic reports `cfg + boolean_ops + ternary`, so this
+        // test now pins all three components against the extended
+        // fixture.
+        let cfg =
+            hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
+        let complexity = hir::cfg::cyclomatic_complexity(&cfg);
+        assert_eq!(complexity, 14, "РассчитатьМаршрут CFG-based cyclomatic should be 14");
+
+        let metrics = hir::metrics::compute_hir_metrics(body);
+        assert_eq!(
+            metrics.boolean_ops_count, 7,
+            "boolean ops contribute +7 to SonarQube cyclomatic"
+        );
+        assert_eq!(metrics.ternary_count, 2, "ternary expressions contribute +2");
+        // The §6.5 SonarQube-aligned cyclomatic the diagnostic reports
+        // is the sum: 14 (CFG) + 7 (boolean) + 2 (ternary) = 23.
+        assert_eq!(complexity + metrics.boolean_ops_count + metrics.ternary_count, 23);
     }
 }

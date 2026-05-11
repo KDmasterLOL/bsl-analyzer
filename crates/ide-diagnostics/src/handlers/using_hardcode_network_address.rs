@@ -279,10 +279,9 @@ fn check_body(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic_with_config, check_diagnostics_snapshot_for};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"
@@ -359,20 +358,41 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 ДНС = "8.8.8.8"; // <- ошибка
 ПроизвольнаяВерсияСВосьмеркиИТройки = "8.3.10.1";
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics");
-
-        assert_diagnostic_range(code, &diagnostics[0], 2, 15, 31);
-        assert_diagnostic_range(code, &diagnostics[1], 6, 23, 39);
-        assert_diagnostic_range(code, &diagnostics[2], 9, 23, 64);
-        assert_diagnostic_range(code, &diagnostics[3], 10, 23, 64);
-        assert_diagnostic_range(code, &diagnostics[4], 12, 44, 85);
-        assert_diagnostic_range(code, &diagnostics[5], 20, 18, 29);
-        assert_diagnostic_range(code, &diagnostics[6], 23, 7, 119);
-        assert_diagnostic_range(code, &diagnostics[7], 57, 104, 114);
-        assert_diagnostic_range(code, &diagnostics[8], 65, 9, 22);
-        assert_diagnostic_range(code, &diagnostics[9], 71, 6, 15);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#"
+                UsingHardcodeNetworkAddress @ 3:16..3:32
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 7:24..7:40
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 10:24..10:65
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 11:24..11:65
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 13:45..13:86
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 21:19..21:30
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 24:8..24:120
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 58:105..58:115
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 66:10..66:23
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical
+                UsingHardcodeNetworkAddress @ 72:7..72:16
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -461,6 +481,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics with reduced exclusion");
+        // snapshot-skip: custom configuration assertion intentionally retained.
     }
 
     #[test]
@@ -549,6 +570,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics without 2.* exclusion");
+        // snapshot-skip: custom configuration assertion intentionally retained.
     }
 
     #[test]
@@ -558,9 +580,14 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     IP = "192.168.1.1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::UsingHardcodeNetworkAddress);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#"
+                UsingHardcodeNetworkAddress @ 3:10..3:23
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -570,8 +597,14 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     IP = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#"
+                UsingHardcodeNetworkAddress @ 3:10..3:51
+                  message: Используется хранение в коде ip-адреса
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -581,8 +614,11 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     IP = "127.0.0.1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Localhost addresses should be excluded");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -592,8 +628,11 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     IP = "::1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "IPv6 loopback should be excluded");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -603,8 +642,11 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     URL = "http://192.168.1.1/api";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "URLs should be excluded");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -614,8 +656,11 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     Версия = "1.2.3.4";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Popular versions should be excluded");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -625,8 +670,11 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     ЗапуститьПриложение("ping -n 60 127.0.0.1 >nul", , Истина);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "RunApp context should be excluded");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -637,8 +685,11 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
         "Драйвер", "AddIn.VFCD220E", "1.0.1.1");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Driver context should be excluded");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -648,8 +699,11 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     НеIP = "300.300.300.300";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Invalid IPs should not be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -659,7 +713,10 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     Возврат "2.9.4.0";
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Version function return should be excluded");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodeNetworkAddress,
+            expect![[r#""#]],
+        );
     }
 }

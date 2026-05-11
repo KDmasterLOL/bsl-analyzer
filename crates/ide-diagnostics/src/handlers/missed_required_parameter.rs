@@ -340,12 +340,10 @@ fn check_missing_params(method: &MethodSymbol, provided_args: &[bool]) -> Vec<St
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_hir_diagnostic};
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_snapshot_with_cfe};
     use crate::DiagnosticCode;
-
-    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
-        diagnostics.iter().filter(|d| d.code == DiagnosticCode::MissedRequiredParameter).collect()
-    }
+    use expect_test::expect;
+    use test_fixture::CfeFixtureBuilder;
 
     #[test]
     fn test_missed_required_parameter_simple() {
@@ -358,10 +356,47 @@ mod tests {
     Возврат Левый + Правый;
 КонецФункции
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 1, "Expected 1 diagnostic");
-        assert!(diags[0].message.contains("Левый"));
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissedRequiredParameter,
+            expect![[r#"
+                MissedRequiredParameter @ 3:17..3:30
+                  message: Укажите обязательный параметр 'Левый'
+                  severity: Major"#]],
+        );
+    }
+
+    #[test]
+    fn test_cfe_exported_common_module_signature_is_visible() {
+        let code = r#"
+#Область ПрограммныйИнтерфейс
+// Описание
+Процедура Тест() Экспорт
+    РасширениеApi.Требует();
+КонецПроцедуры
+#КонецОбласти
+"#;
+        let mut builder = CfeFixtureBuilder::new("");
+        builder.add_extension("ApiExt", "").add_extension_module(
+            "ApiExt",
+            "РасширениеApi",
+            r#"
+Процедура Требует(Значение) Экспорт
+КонецПроцедуры
+"#,
+        );
+
+        check_snapshot_with_cfe(
+            code,
+            builder.build(),
+            expect![[r#"
+                MissedRequiredParameter @ 5:5..5:26
+                  message: Укажите обязательный параметр 'Значение'
+                  severity: Major
+                MismatchedArgCount @ 5:5..5:26
+                  message: Неверное количество аргументов: ожидалось 1, передано 0
+                  severity: Major"#]],
+        );
     }
 
     #[test]
@@ -415,53 +450,28 @@ mod tests {
     Возврат Новый(Тип(ИмяТипа));
 КонецФункции"#;
 
-        let all = check_hir_diagnostic(code);
-        let mut diags = filter(&all);
-        diags.sort_by_key(|d| d.range.start());
-
-        // Expected diagnostics:
-        //   Line 2:  Сложение(, 2)           → missing 'Левый'     (local call)
-        //   Line 8:  Сложение(5)             → missing 'Правый'    (local call)
-        //   Line 14: Сложение()              → missing 'Левый', 'Правый' (local call)
-        //   Line 17: Сложение(,)             → missing 'Левый', 'Правый' (local call)
-        //   Line 18: Менеджер("Справочник")  → missing 'Вид'       (local call)
-        //   Line 29: ЭтотОбъект.Сложение(,2) → missing 'Левый'     (ThisObject = local-call)
-        //
-        // Qualified calls on a CommonModule (`ПервыйОбщийМодуль.*`) and a metadata
-        // manager (`Документы.ПКО.*`, `Справочники.Справочник1.*`) do produce HIR
-        // `BodyDiagnostic::MissedRequiredParameter`, but `from_hir()` needs
-        // `ctx.load_configuration()` to resolve them — `check_hir_diagnostic` runs
-        // without metadata so those handlers return `None` (see the dedicated
-        // qualified-call test below that uses a fake configuration).
-        assert_eq!(
-            diags.len(),
-            6,
-            "Expected 6 diagnostics, got {}.\nMessages: {:?}",
-            diags.len(),
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
-        );
-
-        // Verify positions (0-indexed lines)
-        assert_diagnostic_range_multiline(code, diags[0], 2, 16, 2, 29);
-        assert!(diags[0].message.contains("Левый"));
-
-        assert_diagnostic_range_multiline(code, diags[1], 8, 16, 8, 27);
-        assert!(diags[1].message.contains("Правый"));
-
-        assert_diagnostic_range_multiline(code, diags[2], 14, 16, 14, 26);
-        assert!(diags[2].message.contains("Левый") && diags[2].message.contains("Правый"));
-
-        assert_diagnostic_range_multiline(code, diags[3], 17, 13, 17, 24);
-        assert!(diags[3].message.contains("Левый") && diags[3].message.contains("Правый"));
-
-        assert_diagnostic_range_multiline(code, diags[4], 18, 13, 18, 35);
-        assert!(diags[4].message.contains("Вид"));
-
-        assert_diagnostic_range_multiline(code, diags[5], 29, 16, 29, 40);
-        assert!(
-            diags[5].message.contains("Левый"),
-            "ЭтотОбъект.Сложение(, 2) expected missing 'Левый', got: {}",
-            diags[5].message
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissedRequiredParameter,
+            expect![[r#"
+                MissedRequiredParameter @ 3:17..3:30
+                  message: Укажите обязательный параметр 'Левый'
+                  severity: Major
+                MissedRequiredParameter @ 9:17..9:28
+                  message: Укажите обязательный параметр 'Правый'
+                  severity: Major
+                MissedRequiredParameter @ 15:17..15:27
+                  message: Укажите обязательный параметр 'Левый', 'Правый'
+                  severity: Major
+                MissedRequiredParameter @ 18:14..18:25
+                  message: Укажите обязательный параметр 'Левый', 'Правый'
+                  severity: Major
+                MissedRequiredParameter @ 19:14..19:36
+                  message: Укажите обязательный параметр 'Вид'
+                  severity: Major
+                MissedRequiredParameter @ 30:17..30:41
+                  message: Укажите обязательный параметр 'Левый'
+                  severity: Major"#]],
         );
     }
 
@@ -476,9 +486,11 @@ mod tests {
     Возврат Значение + Приращение;
 КонецФункции
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0, "Optional parameters should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissedRequiredParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -492,9 +504,11 @@ mod tests {
     Возврат A + B;
 КонецФункции
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0, "Extra parameters should be allowed");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissedRequiredParameter,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -509,8 +523,10 @@ mod tests {
     Возврат A + B;
 КонецФункции
 "#;
-        let all = check_hir_diagnostic(code);
-        let diags = filter(&all);
-        assert_eq!(diags.len(), 0, "Qualified calls should not trigger without metadata");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissedRequiredParameter,
+            expect![[r#""#]],
+        );
     }
 }

@@ -1014,6 +1014,23 @@ impl<'db> InferenceContext<'db> {
                     // them authoritative once the method surface on
                     // `ObjectManager` lands too.
                     if matches!(base_ty, Ty::MetadataRef { .. } | Ty::ThisObject { .. }) {
+                        // `Ty::ThisManager` is intentionally **not**
+                        // authoritative here: it coerces to
+                        // `Ty::ObjectManager`, and `lookup_field` /
+                        // `enumerate_fields` do not yet resolve manager
+                        // predefined-item / enum-value access through
+                        // that channel. Until predefined-item resolution
+                        // for `Ty::ObjectManager` lands (separate slice
+                        // — see `field_lookup.rs` doc-block above the
+                        // coercion call), promoting `ThisManager` to
+                        // authoritative would emit spurious
+                        // `UnresolvedField` for valid
+                        // `ЭтотОбъект.<PredefinedName>` /
+                        // `ЭтотОбъект.<EnumValue>` access inside a
+                        // ManagerModule. This mirrors the equally
+                        // non-authoritative posture for
+                        // `Справочники.<MDO>.<NotAField>` — the same
+                        // shape after qualified-manager indexing.
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
                             expr: expr_id,
                             receiver_ty: base_ty,
@@ -1182,6 +1199,16 @@ impl<'db> InferenceContext<'db> {
                 trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
                 return Ty::ThisObject { owner };
             }
+            // Manager-module: same identifier, different receiver shape.
+            // `ЭтотОбъект` inside `<MDO>/Ext/ManagerModule.bsl` names the
+            // manager itself (`Справочники.Номенклатура`). The adapter
+            // chain then coerces `Ty::ThisManager` to
+            // `Ty::ObjectManager` — see Step J in plan
+            // `linear-tumbling-noodle.md` §2.5.
+            if let Some(owner) = resolver.resolve_this_manager(self.db) {
+                trace!("resolved {} as ThisManager {{ owner: {:?} }}", name, owner);
+                return Ty::ThisManager { owner };
+            }
             // Managed-form fallback: `ЭтотОбъект` in a managed form module
             // names the form itself. There is no `MdoType` companion (forms
             // are outside the catalog/document/exchange-plan/CoA axis), so
@@ -1194,7 +1221,7 @@ impl<'db> InferenceContext<'db> {
                 return Ty::PlatformObject(hir_def::Name::new(crate::form_self::FORM_TYPE_NAME));
             }
             // Fall through: record-set / ordinary-form / common-module
-            // `ЭтотОбъект` stays Unknown for now (M4 Task 5 follow-up).
+            // `ЭтотОбъект` stays Unknown.
         }
 
         let resolved = resolver.resolve_name(self.db, name);
@@ -1722,7 +1749,23 @@ impl<'db> InferenceContext<'db> {
             // exported workspace method takes precedence over a same-
             // named platform method (a platform shadow on a real
             // workspace symbol would otherwise be silently chosen).
-            if let Ty::ObjectManager { kind: mdo_type, name: mdo_name } = &receiver_ty {
+            //
+            // `Ty::ThisManager` is coerced to `Ty::ObjectManager` here
+            // so `ЭтотОбъект.МойМетодМенеджера()` enters the workspace
+            // resolver via the same `(MdoType, name)` pair the platform
+            // path would see — symmetric with Phase B's
+            // `Ty::ThisObject` → `Ty::MetadataRef { *Object, .. }`
+            // upfront-coercion just above.
+            //
+            // Bound at outer scope (not inside the `if let`) because
+            // the value is consumed both by Phase A workspace lookup
+            // and by the constant-arg-refinement check below. Pre-Step-J
+            // both checked the original `receiver_ty`; without coercion
+            // a future `Ty::ThisManager { kind: Constant, .. }` would
+            // skip both refinement and Phase A.
+            let manager_receiver_ty = crate::this_object::coerce_to_metadata_ref(&receiver_ty)
+                .unwrap_or_else(|| receiver_ty.clone());
+            if let Ty::ObjectManager { kind: mdo_type, name: mdo_name } = &manager_receiver_ty {
                 let resolver = self.get_resolver();
                 match crate::method_resolution::resolve_aliased_manager_call(
                     self.db,
@@ -1798,10 +1841,16 @@ impl<'db> InferenceContext<'db> {
                     // count and arg-type diagnostics. Emit the type
                     // check here — count-check stays deferred so this
                     // patch stays scoped to the TypeMismatch emitter.
+                    // Use the post-coercion shape so a future
+                    // `Ty::ThisManager { kind: Constant, .. }` (lands
+                    // when ValueManagerModule support is added — see
+                    // `Resolver::resolve_this_manager`) routes through
+                    // the same refinement as the qualified-path
+                    // `Константы.X.Имя()` shape.
                     if let Ty::ObjectManager {
                         kind: bsl_metadata::MdoType::Constant,
                         name: mdo_name,
-                    } = &receiver_ty
+                    } = &manager_receiver_ty
                     {
                         self.refine_constant_method(
                             mdo_name,
@@ -2716,7 +2765,11 @@ impl<'db> InferenceContext<'db> {
 /// `ManagerModule.bsl` resolver first (Phase A) and only reaches the
 /// `lookup_method` miss path when that workspace lookup also failed,
 /// so by the time `receiver_display_name` is queried both layers
-/// agree.
+/// agree. `Ty::ThisManager` is included for completeness — `infer_call`
+/// only reaches `receiver_display_name` after the Phase A coerce-and-
+/// match has already produced a workspace verdict, but the
+/// `ThisObject | ThisManager` arm here means a direct caller (e.g. a
+/// non-coerced fall-through path) still gets a sensible display name.
 ///
 /// The user-visible form matches the 3-segment path's `<Plural>.<MDO>`
 /// convention rendered by `unresolved_method_call::from_hir`.
@@ -2726,7 +2779,8 @@ fn receiver_display_name(receiver_ty: &Ty) -> Option<hir_def::Name> {
             let plural = mdo_kind_to_plural(*kind)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
-        Ty::ThisObject { owner: (mdo_type, name) } => {
+        Ty::ThisObject { owner: (mdo_type, name) }
+        | Ty::ThisManager { owner: (mdo_type, name) } => {
             let plural = mdo_type_to_plural(*mdo_type)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }

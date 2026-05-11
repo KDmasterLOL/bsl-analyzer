@@ -8,8 +8,22 @@ use crate::graph::ControlFlowGraph;
 use crate::vertex::{BasicBlockVertex, CfgVertex};
 use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 use hir_def::hir::StmtIdx;
-use hir_def::{Body, BodySourceMap, Stmt};
+use hir_def::{Body, BodySourceMap, Name, Stmt};
 use petgraph::graph::NodeIndex;
+use rustc_hash::FxHashMap;
+
+/// One frame of the loop-context stack used to wire `Прервать` and
+/// `Продолжить` to live targets.
+///
+/// `header` is the loop's condition vertex (the `WhileLoop` /
+/// `ForLoop` / `ForEachLoop`); `exit` is the merge `BasicBlock` that
+/// `walk_*_statement_hir` creates to receive the false branch from
+/// the header. Nested loops push frames in source order — the
+/// innermost frame is `loop_stack.last()`.
+struct LoopFrame {
+    header: NodeIndex,
+    exit: NodeIndex,
+}
 
 /// CFG Builder for BSL functions/procedures
 ///
@@ -29,6 +43,31 @@ pub struct CfgBuilder {
     /// When Raise is encountered inside a Try block, control transfers
     /// to the corresponding except block instead of the function exit.
     except_stack: Vec<NodeIndex>,
+
+    /// Stack of `(loop_header, after_loop)` pairs for the enclosing
+    /// loops. `walk_break_statement_hir` reads `last().exit` to point
+    /// the live `LoopBreak` edge at the after-loop merge; the matching
+    /// `walk_continue_statement_hir` reads `last().header` for the
+    /// `LoopContinue` back-edge. Empty outside any loop — `Прервать` /
+    /// `Продолжить` outside a loop is a parser/lowering error and is
+    /// not the CFG's responsibility to diagnose.
+    loop_stack: Vec<LoopFrame>,
+
+    /// Resolved labels visited so far. `walk_goto_statement_hir`
+    /// consults this map for backward jumps; forward jumps that haven't
+    /// seen the matching `walk_label_statement_hir` yet land in
+    /// `pending_gotos` and get patched when the label arrives.
+    label_table: FxHashMap<Name, NodeIndex>,
+
+    /// Forward `goto`s waiting for their label to be declared. Each
+    /// entry is `(source_block, label_name)`. `walk_label_statement_hir`
+    /// drains every entry that names the new label and adds a `Direct`
+    /// edge from `source_block` to the freshly-created label vertex.
+    /// Entries that are still pending after the body finishes name
+    /// labels that never appear — Track 6 owns the diagnostic; the
+    /// CFG simply leaves those source blocks with no outgoing
+    /// `Direct` edge for the goto.
+    pending_gotos: Vec<(NodeIndex, Name)>,
 }
 
 impl CfgBuilder {
@@ -39,6 +78,9 @@ impl CfgBuilder {
             current_block: None,
             produce_loop_iterations: true,
             except_stack: Vec::new(),
+            loop_stack: Vec::new(),
+            label_table: FxHashMap::default(),
+            pending_gotos: Vec::new(),
         }
     }
 
@@ -209,13 +251,27 @@ impl CfgBuilder {
         }
     }
 
-    /// Walk a HIR break statement (Phase 6.2)
+    /// Walk a HIR `Прервать` statement.
+    ///
+    /// Wires two outgoing edges from the block ending in `Прервать`:
+    /// - **Live**: `LoopBreak` to the innermost loop's after-loop merge
+    ///   (`loop_stack.last().exit`). Skipped when the stack is empty —
+    ///   `Прервать` outside a loop is a parser/lowering error, not the
+    ///   CFG's concern.
+    /// - **Dead-fallthrough**: `AdjacentCode` to a fresh dead block, so
+    ///   any source code that textually follows still has a successor
+    ///   that reachability analysis can flag as unreachable. The doc on
+    ///   [`crate::edge::CfgEdgeType::AdjacentCode`] explains the dual
+    ///   semantics.
     fn walk_break_statement_hir(&mut self, stmt_id: StmtIdx) {
-        // Add break to current block
         self.add_to_current_block_hir(stmt_id);
 
-        // TODO(Phase 6.2): Connect to loop exit point (requires loop context tracking)
-        // For now, create dead block
+        if let Some(block_idx) = self.current_block {
+            if let Some(frame) = self.loop_stack.last() {
+                let _ = self.cfg.add_edge(block_idx, frame.exit, CfgEdgeType::LoopBreak);
+            }
+        }
+
         let dead_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
         if let Some(block_idx) = self.current_block {
             let _ = self.cfg.add_edge(block_idx, dead_block, CfgEdgeType::AdjacentCode);
@@ -223,13 +279,21 @@ impl CfgBuilder {
         self.current_block = Some(dead_block);
     }
 
-    /// Walk a HIR continue statement (Phase 6.2)
+    /// Walk a HIR `Продолжить` statement.
+    ///
+    /// Symmetrical to [`Self::walk_break_statement_hir`]: live
+    /// `LoopContinue` edge back to the innermost loop's header
+    /// (`loop_stack.last().header`) plus an `AdjacentCode`
+    /// dead-fallthrough for any code that textually follows.
     fn walk_continue_statement_hir(&mut self, stmt_id: StmtIdx) {
-        // Add continue to current block
         self.add_to_current_block_hir(stmt_id);
 
-        // TODO(Phase 6.2): Connect to loop header (requires loop context tracking)
-        // For now, create dead block
+        if let Some(block_idx) = self.current_block {
+            if let Some(frame) = self.loop_stack.last() {
+                let _ = self.cfg.add_edge(block_idx, frame.header, CfgEdgeType::LoopContinue);
+            }
+        }
+
         let dead_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
         if let Some(block_idx) = self.current_block {
             let _ = self.cfg.add_edge(block_idx, dead_block, CfgEdgeType::AdjacentCode);
@@ -237,13 +301,27 @@ impl CfgBuilder {
         self.current_block = Some(dead_block);
     }
 
-    /// Walk a HIR goto statement (Phase 6.2)
-    fn walk_goto_statement_hir(&mut self, stmt_id: StmtIdx, _body: &Body) {
-        // Add goto to current block
+    /// Walk a HIR `Перейти ~Label` statement.
+    ///
+    /// Backward jumps (target already declared) get a live `Direct`
+    /// edge straight to the existing label vertex. Forward jumps
+    /// (target not yet seen) park in `pending_gotos` and the matching
+    /// label walker drains them when it arrives. Either way the source
+    /// block also gets an `AdjacentCode` dead-fallthrough successor.
+    /// Unresolved labels at body end leave the source block without a
+    /// live outgoing `Direct` for the goto — Track 6 owns the
+    /// `UnresolvedLabel` diagnostic.
+    fn walk_goto_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         self.add_to_current_block_hir(stmt_id);
 
-        // TODO(Phase 6.2): Connect to label vertex (requires label tracking)
-        // For now, create dead block
+        if let (Some(block_idx), Stmt::Goto(name)) = (self.current_block, body.stmt_idx(stmt_id)) {
+            if let Some(&label_vertex) = self.label_table.get(name) {
+                let _ = self.cfg.add_edge(block_idx, label_vertex, CfgEdgeType::Direct);
+            } else {
+                self.pending_gotos.push((block_idx, name.clone()));
+            }
+        }
+
         let dead_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
         if let Some(block_idx) = self.current_block {
             let _ = self.cfg.add_edge(block_idx, dead_block, CfgEdgeType::AdjacentCode);
@@ -251,13 +329,18 @@ impl CfgBuilder {
         self.current_block = Some(dead_block);
     }
 
-    /// Walk a HIR label statement (Phase 6.2)
+    /// Walk a HIR `~Label:` statement.
+    ///
+    /// In addition to creating the label vertex and the post-label
+    /// `BasicBlock`, the walker now also (a) registers the label in
+    /// `label_table` so subsequent backward jumps resolve through
+    /// [`Self::walk_goto_statement_hir`], and (b) drains
+    /// `pending_gotos` for any forward jumps that named this label,
+    /// patching them with the live `Direct` edge they were waiting for.
     fn walk_label_statement_hir(&mut self, _stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::LabelVertex;
 
-        // Extract label name from statement
         if let Stmt::Label(name) = body.stmt_idx(_stmt_id) {
-            // Create label vertex
             let label_vertex =
                 self.cfg.add_vertex(CfgVertex::Label(LabelVertex::new(name.clone())));
 
@@ -265,6 +348,18 @@ impl CfgBuilder {
             if let Some(current) = self.current_block {
                 let _ = self.cfg.add_edge(current, label_vertex, CfgEdgeType::Direct);
             }
+
+            // Patch forward jumps that named this label.
+            let pending = std::mem::take(&mut self.pending_gotos);
+            let (matched, leftover): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|(_, n)| n == name);
+            for (source, _) in matched {
+                let _ = self.cfg.add_edge(source, label_vertex, CfgEdgeType::Direct);
+            }
+            self.pending_gotos = leftover;
+
+            // Register for backward jumps.
+            self.label_table.insert(name.clone(), label_vertex);
 
             // Create new block after label
             let after_label = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
@@ -569,6 +664,11 @@ impl CfgBuilder {
             // Connect loop → body (true branch - condition is true)
             let _ = self.cfg.add_edge(loop_vertex, body_block, CfgEdgeType::TrueBranch);
 
+            // After-loop merge block created up-front so `Прервать` inside
+            // the body can target it through the `loop_stack` frame.
+            let after_loop = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+            self.loop_stack.push(LoopFrame { header: loop_vertex, exit: after_loop });
+
             // Set current block to body
             self.current_block = Some(body_block);
 
@@ -576,6 +676,10 @@ impl CfgBuilder {
             for &loop_stmt_id in loop_body.iter() {
                 self.walk_statement_hir(loop_stmt_id, body);
             }
+
+            // Pop the loop frame: nested-loop breaks/continues from
+            // unrelated outer loops must not target this one.
+            self.loop_stack.pop();
 
             // Get body exit block
             let body_exit = self.current_block;
@@ -588,9 +692,6 @@ impl CfgBuilder {
                     }
                 }
             }
-
-            // Create after-loop block (for when condition is false)
-            let after_loop = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
 
             // Connect loop → after_loop (false branch - exit loop)
             let _ = self.cfg.add_edge(loop_vertex, after_loop, CfgEdgeType::FalseBranch);
@@ -628,12 +729,19 @@ impl CfgBuilder {
             // Connect loop → body (true branch)
             let _ = self.cfg.add_edge(loop_vertex, body_block, CfgEdgeType::TrueBranch);
 
+            // After-loop merge block created up-front so `Прервать` inside
+            // the body can target it through the `loop_stack` frame.
+            let after_loop = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+            self.loop_stack.push(LoopFrame { header: loop_vertex, exit: after_loop });
+
             self.current_block = Some(body_block);
 
             // Walk loop body (loop_body is Box<[StmtId]> - no searching!)
             for &loop_stmt_id in loop_body.iter() {
                 self.walk_statement_hir(loop_stmt_id, body);
             }
+
+            self.loop_stack.pop();
 
             let body_exit = self.current_block;
 
@@ -645,9 +753,6 @@ impl CfgBuilder {
                     }
                 }
             }
-
-            // Create after-loop block
-            let after_loop = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
 
             let _ = self.cfg.add_edge(loop_vertex, after_loop, CfgEdgeType::FalseBranch);
 
@@ -684,12 +789,19 @@ impl CfgBuilder {
             // Connect loop → body (true branch)
             let _ = self.cfg.add_edge(loop_vertex, body_block, CfgEdgeType::TrueBranch);
 
+            // After-loop merge block created up-front so `Прервать` inside
+            // the body can target it through the `loop_stack` frame.
+            let after_loop = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+            self.loop_stack.push(LoopFrame { header: loop_vertex, exit: after_loop });
+
             self.current_block = Some(body_block);
 
             // Walk loop body (loop_body is Box<[StmtId]> - no searching!)
             for &loop_stmt_id in loop_body.iter() {
                 self.walk_statement_hir(loop_stmt_id, body);
             }
+
+            self.loop_stack.pop();
 
             let body_exit = self.current_block;
 
@@ -701,9 +813,6 @@ impl CfgBuilder {
                     }
                 }
             }
-
-            // Create after-loop block
-            let after_loop = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
 
             let _ = self.cfg.add_edge(loop_vertex, after_loop, CfgEdgeType::FalseBranch);
 
@@ -907,5 +1016,195 @@ mod tests {
         assert!(has_conditional, "CFG should contain conditional vertex for if statement");
     }
 
-    // TODO: Add more integration tests with real BSL code after parser integration
+    /// Walk the graph for any edge of the given kind and return all
+    /// `(source, target, source_vertex_kind, target_vertex_kind)` tuples.
+    /// Used by the loop-context tests below to assert wiring without
+    /// having to keep node indices around — pattern-matching on vertex
+    /// shapes (`WhileLoop`, `Label`, `BasicBlock`) is more robust than
+    /// recording specific allocation order.
+    fn edges_of_kind(cfg: &ControlFlowGraph, kind: CfgEdgeType) -> Vec<(NodeIndex, NodeIndex)> {
+        cfg.graph()
+            .edge_indices()
+            .filter_map(|e| {
+                let (src, dst) = cfg.graph().edge_endpoints(e)?;
+                let edge_kind = *cfg.graph().edge_weight(e)?;
+                (edge_kind == kind).then_some((src, dst))
+            })
+            .collect()
+    }
+
+    fn vertex_is(
+        cfg: &ControlFlowGraph,
+        idx: NodeIndex,
+        predicate: impl Fn(&CfgVertex) -> bool,
+    ) -> bool {
+        cfg.vertex(idx).is_some_and(predicate)
+    }
+
+    #[test]
+    fn break_in_while_wires_live_loop_break_edge_to_after_loop() {
+        // Пока Истина Цикл
+        //     Прервать;
+        // КонецЦикла;
+        use hir_def::{Body, Expr, Literal, Stmt};
+
+        let mut body = Body::default();
+        let true_lit = body.exprs_mut().alloc(Expr::Literal(Literal::Bool(true)));
+        let break_stmt = body.stmts_mut().alloc(Stmt::Break);
+        let while_stmt = body
+            .stmts_mut()
+            .alloc(Stmt::While { condition: true_lit, body: vec![break_stmt].into() });
+        body.set_body_stmts(vec![while_stmt].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        // The WhileLoop vertex must exist and have exactly one
+        // FalseBranch successor — the after-loop merge block. The
+        // LoopBreak edge from break-source must land on that same
+        // merge block, not on a fresh dead block.
+        let while_vertex = cfg
+            .graph()
+            .node_indices()
+            .find(|&idx| vertex_is(&cfg, idx, |v| matches!(v, CfgVertex::WhileLoop(_))))
+            .expect("WhileLoop vertex must exist");
+        let after_loop = cfg
+            .outgoing_edges(while_vertex)
+            .find(|(_, e)| **e == CfgEdgeType::FalseBranch)
+            .map(|(target, _)| target)
+            .expect("WhileLoop must have a FalseBranch successor");
+
+        let breaks = edges_of_kind(&cfg, CfgEdgeType::LoopBreak);
+        assert!(!breaks.is_empty(), "LoopBreak edge missing for `Прервать`");
+        assert!(
+            breaks.iter().any(|(_, dst)| *dst == after_loop),
+            "LoopBreak must target the after-loop merge block, got {breaks:?}",
+        );
+    }
+
+    #[test]
+    fn continue_in_while_wires_live_loop_continue_edge_to_header() {
+        // Пока Истина Цикл
+        //     Продолжить;
+        // КонецЦикла;
+        use hir_def::{Body, Expr, Literal, Stmt};
+
+        let mut body = Body::default();
+        let true_lit = body.exprs_mut().alloc(Expr::Literal(Literal::Bool(true)));
+        let cont_stmt = body.stmts_mut().alloc(Stmt::Continue);
+        let while_stmt = body
+            .stmts_mut()
+            .alloc(Stmt::While { condition: true_lit, body: vec![cont_stmt].into() });
+        body.set_body_stmts(vec![while_stmt].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        let while_vertex = cfg
+            .graph()
+            .node_indices()
+            .find(|&idx| vertex_is(&cfg, idx, |v| matches!(v, CfgVertex::WhileLoop(_))))
+            .expect("WhileLoop vertex must exist");
+
+        let continues = edges_of_kind(&cfg, CfgEdgeType::LoopContinue);
+        assert!(!continues.is_empty(), "LoopContinue edge missing for `Продолжить`");
+        assert!(
+            continues.iter().any(|(_, dst)| *dst == while_vertex),
+            "LoopContinue must target the loop header, got {continues:?}",
+        );
+    }
+
+    #[test]
+    fn break_outside_loop_emits_no_loop_break_edge() {
+        // Прервать; — at module level. Parser/lowering territory; the
+        // CFG must NOT fabricate a LoopBreak edge that targets nothing.
+        use hir_def::{Body, Stmt};
+
+        let mut body = Body::default();
+        let break_stmt = body.stmts_mut().alloc(Stmt::Break);
+        body.set_body_stmts(vec![break_stmt].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        assert!(
+            edges_of_kind(&cfg, CfgEdgeType::LoopBreak).is_empty(),
+            "Bare `Прервать` outside a loop must not produce a LoopBreak edge",
+        );
+    }
+
+    #[test]
+    fn goto_backward_resolves_to_existing_label() {
+        // ~М: Перейти ~М;
+        use hir_def::{Body, Name, Stmt};
+
+        let mut body = Body::default();
+        let label = body.stmts_mut().alloc(Stmt::Label(Name::new("М")));
+        let goto = body.stmts_mut().alloc(Stmt::Goto(Name::new("М")));
+        body.set_body_stmts(vec![label, goto].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        let label_vertex = cfg
+            .graph()
+            .node_indices()
+            .find(|&idx| vertex_is(&cfg, idx, |v| matches!(v, CfgVertex::Label(_))))
+            .expect("Label vertex must exist");
+        let direct: Vec<_> = edges_of_kind(&cfg, CfgEdgeType::Direct)
+            .into_iter()
+            .filter(|(_, dst)| *dst == label_vertex)
+            .collect();
+        // Two Direct edges into the label vertex: one from the entry
+        // block (sequential fall-in) and one from the goto-source.
+        assert!(
+            direct.len() >= 2,
+            "Backward `Перейти` must add a Direct edge to the existing label, got {direct:?}",
+        );
+    }
+
+    #[test]
+    fn goto_forward_resolves_when_label_arrives() {
+        // Перейти ~М; ~М:
+        use hir_def::{Body, Name, Stmt};
+
+        let mut body = Body::default();
+        let goto = body.stmts_mut().alloc(Stmt::Goto(Name::new("М")));
+        let label = body.stmts_mut().alloc(Stmt::Label(Name::new("М")));
+        body.set_body_stmts(vec![goto, label].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        let label_vertex = cfg
+            .graph()
+            .node_indices()
+            .find(|&idx| vertex_is(&cfg, idx, |v| matches!(v, CfgVertex::Label(_))))
+            .expect("Label vertex must exist");
+        let direct_into_label: Vec<_> = edges_of_kind(&cfg, CfgEdgeType::Direct)
+            .into_iter()
+            .filter(|(_, dst)| *dst == label_vertex)
+            .collect();
+        assert!(
+            !direct_into_label.is_empty(),
+            "Forward `Перейти` must be patched with a Direct edge once the label arrives",
+        );
+    }
+
+    #[test]
+    fn unresolved_goto_leaves_no_live_edge_to_label() {
+        // Перейти ~Нет;  — no matching label.
+        use hir_def::{Body, Name, Stmt};
+
+        let mut body = Body::default();
+        let goto = body.stmts_mut().alloc(Stmt::Goto(Name::new("Нет")));
+        body.set_body_stmts(vec![goto].into());
+
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+
+        // No Label vertex was ever created — ergo no Direct edge can
+        // target one. The goto block keeps only its dead-fallthrough
+        // `AdjacentCode` successor; Track 6 owns the
+        // `UnresolvedLabel` diagnostic.
+        let label_vertex_exists = cfg
+            .graph()
+            .node_indices()
+            .any(|idx| vertex_is(&cfg, idx, |v| matches!(v, CfgVertex::Label(_))));
+        assert!(!label_vertex_exists, "Unresolved goto must NOT fabricate a Label vertex");
+    }
 }

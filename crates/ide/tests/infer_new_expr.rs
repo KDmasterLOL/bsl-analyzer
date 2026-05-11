@@ -2,7 +2,7 @@
 //! [`hir_ty::TyLoweringContext::lower_bare_name`].
 //!
 //! The cascade must still produce the same observable types as the legacy
-//! `Ty::from_type_name` / `PlatformObject` fallback path: builtin collections
+//! `ty_from_bare_name` / `PlatformObject` fallback path: builtin collections
 //! collapse to their `Ty` counterpart, unknown platform types land on
 //! `Ty::PlatformObject(name)`, and `MdoType::from_plural` is honoured as a
 //! higher-priority branch for `Новый Документы` (even though that is
@@ -48,7 +48,7 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty>
 
 #[test]
 fn new_array_gives_array_ty() {
-    // `Новый Массив` used to go through `Ty::from_type_name("Массив") →
+    // `Новый Массив` used to go through `ty_from_bare_name("Массив") →
     // Ty::Array`. After Task 4 the same result must come out of the
     // TyLoweringContext cascade (`from_bare_name` → builtin collection).
     let fixture = r#"//- /test.bsl

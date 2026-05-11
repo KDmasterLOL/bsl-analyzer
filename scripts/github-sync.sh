@@ -25,6 +25,7 @@ EXCLUDE_PATTERNS=(
     ".gitlab-ci.yml"
     ".cargo/config.toml"
     "scripts/ci-status.sh"
+    "docs/diagnostics-audit/"
     "docs/legal/"
     ".omc/"
     ".claude/"

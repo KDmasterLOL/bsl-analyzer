@@ -8,7 +8,9 @@ Explicit aliases make query results more stable and easier to read. If a field i
 
 This is especially important for composite expressions such as `Items.Supplier.Name`, where the generated name may not match the developer's intention.
 
-The diagnostic also reports implicit aliases without `AS`, for example `Items.Price SalePrice`. Asterisk fields (`*`, `Table.*`) are ignored. Fields from secondary `UNION` parts are not checked.
+The diagnostic also reports implicit aliases without `AS`, for example `Items.Price SalePrice`. Asterisk fields (`*`, `Table.*`) are ignored.
+
+In `UNION` queries, result column names are defined by the first `SELECT`, so secondary `UNION` branches do not require selected-field aliases.
 
 ## Examples
 
@@ -25,9 +27,9 @@ Query.Text =
 |UNION ALL
 |
 |SELECT
-|   Services.Article, // Ignored
-|   Services.Article, // Ignored
-|   Services.Price // Ignored
+|   Services.Article, // Correct: name is defined by the first branch
+|   Services.Article, // Correct: name is defined by the first branch
+|   Services.Price // Correct: name is defined by the first branch
 |FROM
 |   Catalog.Services AS Services";
 

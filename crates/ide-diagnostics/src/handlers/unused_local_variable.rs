@@ -506,8 +506,9 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_unused_var_in_procedure() {
@@ -516,13 +517,14 @@ mod tests {
     Сообщить("Привет");
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(unused_diags.len(), 1, "Expected 1 UnusedLocalVariable diagnostic");
-        // Check position: variable name "НеИспользуется" on line 1
-        assert_diagnostic_range(code, unused_diags[0], 1, 10, 24);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 2:11..2:25
+              message: Удалите неиспользуемую переменную НеИспользуется
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -533,11 +535,7 @@ mod tests {
     Сообщить(Сообщение);
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
-            "Used variable should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -548,13 +546,14 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(unused_diags.len(), 1, "Unused loop variable should trigger diagnostic");
-        // "Индекс" on line 1, col 8-14 (after "    Для ")
-        assert_diagnostic_range(code, unused_diags[0], 1, 8, 14);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 2:9..2:15
+              message: Удалите неиспользуемую переменную Индекс
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -565,11 +564,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
-            "Used loop variable should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -580,13 +575,14 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(unused_diags.len(), 1, "Unused foreach variable should trigger diagnostic");
-        // "Элемент" on line 1, col 16-23 (after "    Для Каждого ")
-        assert_diagnostic_range(code, unused_diags[0], 1, 16, 23);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 2:17..2:24
+              message: Удалите неиспользуемую переменную Элемент
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -596,20 +592,16 @@ mod tests {
     Сообщить(Б);
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        // А and В are unused, Б is used
-        assert_eq!(unused_diags.len(), 2, "Expected 2 unused variables (А and В)");
-        // Check positions: "А" at col 10-11, "В" at col 16-17 on line 1
-        assert!(
-            unused_diags.iter().any(|d| d.message.contains("А")),
-            "Should detect unused variable А"
-        );
-        assert!(
-            unused_diags.iter().any(|d| d.message.contains("В")),
-            "Should detect unused variable В"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 2:11..2:12
+              message: Удалите неиспользуемую переменную А
+              severity: Warning
+            UnusedLocalVariable @ 2:17..2:18
+              message: Удалите неиспользуемую переменную В
+              severity: Warning"#]],
         );
     }
 
@@ -621,11 +613,7 @@ mod tests {
     Сообщить(переменная);
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
-            "Case-insensitive usage should count as used"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -636,17 +624,14 @@ mod tests {
     ТолькоПрисвоение = 10;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(
-            unused_diags.len(),
-            1,
-            "Variable assigned but never read should trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 2:11..2:27
+              message: Удалите неиспользуемую переменную ТолькоПрисвоение
+              severity: Warning"#]],
         );
-        // "ТолькоПрисвоение" on line 1, col 10-26 (after "    Перем ")
-        assert_diagnostic_range(code, unused_diags[0], 1, 10, 26);
     }
 
     #[test]
@@ -658,11 +643,7 @@ mod tests {
     Сообщить(Значение);
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
-            "Variable that is read should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -674,13 +655,14 @@ mod tests {
     Результат = ВтороеДействие();
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(unused_diags.len(), 1, "Variable never read should trigger diagnostic");
-        // "Результат" on line 1, col 10-19 (after "    Перем ")
-        assert_diagnostic_range(code, unused_diags[0], 1, 10, 19);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 2:11..2:20
+              message: Удалите неиспользуемую переменную Результат
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -692,11 +674,7 @@ mod tests {
     Структура.Поле = 10;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
-            "Variable used as base for field assignment should count as read"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -708,11 +686,7 @@ mod tests {
     Массив[0] = 10;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
-            "Variable used as base for index assignment should count as read"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     /// Test based on test fixture content (UnusedLocalVariableDiagnostic.bsl)
@@ -750,22 +724,19 @@ mod tests {
 
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        // Expected diagnostics for local variables within this function:
-        // 1. ЛокальнаяБезИспользования - declared but never used
-        // 2. ТолькоСПрисвоениемЗначения - assigned but never read
-        // 3. ВПроцедуреНеИспользуемая - assigned but never read
-        //
-        // Note: Variables without Перем (implicit) are currently tracked the same way
-        assert_eq!(
-            unused_diags.len(),
-            3,
-            "Expected 3 unused local variables, got {}. Diagnostics: {:?}",
-            unused_diags.len(),
-            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 2:11..2:36
+              message: Удалите неиспользуемую переменную ЛокальнаяБезИспользования
+              severity: Warning
+            UnusedLocalVariable @ 2:38..2:64
+              message: Удалите неиспользуемую переменную ТолькоСПрисвоениемЗначения
+              severity: Warning
+            UnusedLocalVariable @ 7:5..7:29
+              message: Удалите неиспользуемую переменную ВПроцедуреНеИспользуемая
+              severity: Warning"#]],
         );
     }
 
@@ -781,13 +752,14 @@ mod tests {
     Сообщить("Привет");
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(unused_diags.len(), 1, "Unused module variable should trigger diagnostic");
-        // "НеИспользуемая" on line 0, col 6-20 (after "Перем ")
-        assert_diagnostic_range(code, unused_diags[0], 0, 6, 20);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 1:7..1:21
+              message: Удалите неиспользуемую переменную НеИспользуемая
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -799,11 +771,7 @@ mod tests {
     Сообщить("Привет");
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
-            "Exported variable should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -815,11 +783,7 @@ mod tests {
     Сообщить(ИспользуемаяПеременная);
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
-            "Used module variable should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -829,17 +793,14 @@ mod tests {
 ИспользуемаяВМодуле = 40;
 Сообщить(ИспользуемаяВМодуле);"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(
-            unused_diags.len(),
-            1,
-            "Module-level code should detect unused implicit variable"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 1:1..1:22
+              message: Удалите неиспользуемую переменную НеИспользуемаяВМодуле
+              severity: Warning"#]],
         );
-        // "НеИспользуемаяВМодуле" on line 0, col 0-21
-        assert_diagnostic_range(code, unused_diags[0], 0, 0, 21);
     }
 
     #[test]
@@ -854,16 +815,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(
-            unused_diags.len(),
-            0,
-            "Variable used in While condition should not trigger diagnostic, got: {:?}",
-            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     /// Full test fixture test.
@@ -982,67 +934,26 @@ mod tests {
 Сообщить(Комментарий);
 "#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        // Check that all key unused-variable cases are detected
-        let messages: Vec<&str> = unused_diags.iter().map(|d| d.message.as_str()).collect();
-
-        // These should be detected :
-        assert!(
-            messages.iter().any(|m| m.contains("ЛокальнаяБезИспользования")),
-            "Should detect ЛокальнаяБезИспользования"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedLocalVariable,
+            expect![[r#"
+            UnusedLocalVariable @ 2:7..2:37
+              message: Удалите неиспользуемую переменную ПеременнаяМодуляНеИспользуемая
+              severity: Warning
+            UnusedLocalVariable @ 20:11..20:36
+              message: Удалите неиспользуемую переменную ЛокальнаяБезИспользования
+              severity: Warning
+            UnusedLocalVariable @ 20:38..20:64
+              message: Удалите неиспользуемую переменную ТолькоСПрисвоениемЗначения
+              severity: Warning
+            UnusedLocalVariable @ 25:5..25:29
+              message: Удалите неиспользуемую переменную ВПроцедуреНеИспользуемая
+              severity: Warning
+            UnusedLocalVariable @ 84:1..84:26
+              message: Удалите неиспользуемую переменную ВнеПроцедурНеИспользуемая
+              severity: Warning"#]],
         );
-        assert!(
-            messages.iter().any(|m| m.contains("ТолькоСПрисвоениемЗначения")),
-            "Should detect ТолькоСПрисвоениемЗначения"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("ВПроцедуреНеИспользуемая")),
-            "Should detect ВПроцедуреНеИспользуемая"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("ВнеПроцедурНеИспользуемая")),
-            "Should detect ВнеПроцедурНеИспользуемая"
-        );
-        assert!(
-            messages.iter().any(|m| m.contains("ПеременнаяМодуляНеИспользуемая")),
-            "Should detect ПеременнаяМодуляНеИспользуемая"
-        );
-
-        // Expected exactly 5 diagnostics.
-        // Note: ПеременнаяМодуляНеИспользуемая appears twice in fixture:
-        // - Line 2: &НаКлиенте Перем ПеременнаяМодуляНеИспользуемая; // Error (first declaration)
-        // - Line 5: &НаСервере Перем ПеременнаяМодуляНеИспользуемая; // Ignored (duplicate name)
-        //
-        // Duplicate module variable declarations are skipped (handled in SymbolTreeBuilder.add_variable).
-        assert_eq!(unused_diags.len(), 5, "Should detect 5 unused variables ");
-
-        // Verify exact diagnostic positions
-        // Sort diagnostics by line number for consistent comparison
-        use crate::test_utils::{assert_diagnostic_range, range_to_line_col};
-        let mut sorted_diags = unused_diags.clone();
-        sorted_diags.sort_by_key(|d| {
-            let (line, col, _, _) = range_to_line_col(code, d.range);
-            (line, col)
-        });
-
-        // Expected values (sorted by line):
-        // 1. hasRange(1, 6, 36): Line 1, `ПеременнаяМодуляНеИспользуемая` with `&НаКлиенте`
-        assert_diagnostic_range(code, sorted_diags[0], 1, 6, 36);
-
-        // 2. hasRange(19, 10, 35): Line 19, `ЛокальнаяБезИспользования`
-        assert_diagnostic_range(code, sorted_diags[1], 19, 10, 35);
-
-        // 3. hasRange(19, 37, 63): Line 19, `ТолькоСПрисвоениемЗначения`
-        assert_diagnostic_range(code, sorted_diags[2], 19, 37, 63);
-
-        // 4. hasRange(24, 4, 28): Line 24, `ВПроцедуреНеИспользуемая`
-        assert_diagnostic_range(code, sorted_diags[3], 24, 4, 28);
-
-        // 5. hasRange(83, 0, 25): Line 83, `ВнеПроцедурНеИспользуемая`
-        assert_diagnostic_range(code, sorted_diags[4], 83, 0, 25);
     }
 
     #[test]
@@ -1063,18 +974,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        // НайденныеФоновыеЗадания is used in ForEach loop - should NOT trigger diagnostic
-        assert!(
-            !unused_diags.iter().any(|d| d.message.contains("НайденныеФоновыеЗадания")),
-            "НайденныеФоновыеЗадания is used in ForEach loop and should not be flagged as unused"
-        );
-
-        // All other implicit variables (Отбор, ФоновоеЗадание) are also used
-        assert_eq!(unused_diags.len(), 0, "No variables should be flagged as unused in this code");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -1088,14 +988,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert!(
-            !unused_diags.iter().any(|d| d.message.contains("КоличествоКолонок")),
-            "КоличествоКолонок is used in For loop bound and should not be flagged as unused"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     #[test]
@@ -1108,14 +1001,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert!(
-            !unused_diags.iter().any(|d| d.message.contains("Начало")),
-            "Начало is used in For loop from-bound and should not be flagged as unused"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 
     /// Helper to create ObjectModule metadata with given MDO.
@@ -1160,6 +1046,7 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
+        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             0,
@@ -1189,6 +1076,7 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
+        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             0,
@@ -1214,12 +1102,13 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
+        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             1,
             "True unused variable should still be flagged in ObjectModule"
         );
-        assert!(unused_diags[0].message.contains("НеАтрибутОбъекта"));
+        assert!(unused_diags[0].message.contains("НеАтрибутОбъекта")); // snapshot-skip: metadata-backed message assertion intentionally retained.
     }
 
     /// Helper to create FormModule metadata with given form attributes.
@@ -1264,6 +1153,7 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
+        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             0,
@@ -1288,6 +1178,7 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
+        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             0,
@@ -1312,12 +1203,13 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
+        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             1,
             "True unused variable should still be flagged in FormModule"
         );
-        assert!(unused_diags[0].message.contains("НеРеквизитФормы"));
+        assert!(unused_diags[0].message.contains("НеРеквизитФормы")); // snapshot-skip: metadata-backed message assertion intentionally retained.
     }
 
     #[test]
@@ -1334,12 +1226,13 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
+        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             1,
             "Form attribute name should be flagged in CommonModule (not a form context)"
         );
-        assert!(unused_diags[0].message.contains("Замечание"));
+        assert!(unused_diags[0].message.contains("Замечание")); // snapshot-skip: metadata-backed message assertion intentionally retained.
     }
 
     #[test]
@@ -1356,12 +1249,13 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
+        // snapshot-skip: metadata-backed diagnostic assertion intentionally retained.
         assert_eq!(
             unused_diags.len(),
             1,
             "Same name should be flagged in CommonModule (not an object attribute)"
         );
-        assert!(unused_diags[0].message.contains("Дата"));
+        assert!(unused_diags[0].message.contains("Дата")); // snapshot-skip: metadata-backed message assertion intentionally retained.
     }
 
     /// Variable declared with Перем and used inside/after TryExcept should not be flagged.
@@ -1382,14 +1276,6 @@ mod tests {
     Возврат Результат;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let unused_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        assert_eq!(
-            unused_diags.len(),
-            0,
-            "Variable used inside TryExcept should not be flagged as unused"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedLocalVariable, expect![[r#""#]]);
     }
 }

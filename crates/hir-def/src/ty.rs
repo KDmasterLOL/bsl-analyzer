@@ -138,6 +138,39 @@ pub enum Ty {
         owner: (MdoType, crate::Name),
     },
 
+    /// Implicit receiver bound to `ЭтотОбъект` / `ThisObject` **inside a
+    /// ManagerModule** (`<Folder>/<Name>/Ext/ManagerModule.bsl`).
+    ///
+    /// Sibling of [`Self::ThisObject`] for the manager axis. Inside an
+    /// ObjectModule `ЭтотОбъект` denotes the per-record object and
+    /// coerces to `Ty::MetadataRef { *Object, name }`; inside a
+    /// ManagerModule the same identifier denotes the *manager* itself
+    /// (`Справочники.Номенклатура`) and must coerce to
+    /// [`Self::ObjectManager`] so subsequent method dispatch lands on
+    /// the workspace `ManagerModule.bsl` exports / `CatalogManager`
+    /// platform table — **not** the per-record `*Object` table.
+    ///
+    /// A separate variant rather than a discriminator on
+    /// [`Self::ThisObject`] is the safe choice: existing pattern matches
+    /// like `Ty::ThisObject { .. } | Ty::MetadataRef { .. }` (the
+    /// authoritative-receiver predicate in `unresolved_field`,
+    /// `unresolved_method_call`, …) keep meaning exactly "ObjectModule
+    /// receiver" and don't silently widen to also accept ManagerModule
+    /// receivers — the compiler now flags every site that needs an
+    /// explicit decision about manager handling.
+    ///
+    /// Coercion target is [`Self::ObjectManager { kind, name }`]
+    /// (`Ty::MetadataRef { CatalogManager, … }` is *not* a thing in
+    /// this codebase — manager dispatch goes through `ObjectManager`
+    /// keyed on `MdoType` directly, see
+    /// [`hir_ty::this_object::coerce_to_metadata_ref`]). The plan
+    /// (`linear-tumbling-noodle.md` §2.5) had drift here.
+    ThisManager {
+        /// `(kind, name)` of the MDO whose `ManagerModule.bsl` encloses
+        /// the inferred `ЭтотОбъект`.
+        owner: (MdoType, crate::Name),
+    },
+
     /// Managed-form attribute receiver — the platform wrapper that exposes
     /// a form attribute (`Объект`, `Замечание`, `ТаблицаРасходов`) to
     /// FormModule code.
@@ -911,56 +944,6 @@ impl Ty {
         }
     }
 
-    /// Infer type from a NewExpr (e.g., "Новый Массив").
-    ///
-    /// Returns the type based on the type name, or Unknown if not recognized.
-    pub fn from_new_expr(new_expr: &ast::NewExpr) -> Self {
-        // Find the type name token (IDENT after Новый/New)
-        if let Some(type_name_token) = new_expr
-            .syntax()
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .find(|token| token.kind() == SyntaxKind::IDENT)
-        {
-            Self::from_type_name(type_name_token.text())
-        } else {
-            Ty::Unknown
-        }
-    }
-
-    /// Infer type from a type name (e.g., "Массив", "Структура").
-    ///
-    /// Returns the corresponding type, or Unknown if not recognized.
-    pub fn from_type_name(name: &str) -> Self {
-        let name_lower = name.to_lowercase();
-        match name_lower.as_str() {
-            // Collection types
-            "массив" | "array" => Ty::Array,
-            "структура" | "structure" => Ty::Structure,
-            "соответствие" | "map" => Ty::Map,
-
-            // Primitive types
-            "число" | "number" => Ty::Number,
-            "строка" | "string" => Ty::String,
-            "булево" | "boolean" => Ty::Boolean,
-            "дата" | "date" => Ty::Date,
-
-            // Platform types (NEW in Phase 1)
-            "тип" | "type" => Ty::Type,
-            "таблицазначений" | "valuetable" => Ty::ValueTable,
-            "списокзначений" | "valuelist" => Ty::ValueList,
-
-            // Bottom-ish markers that appear in platform return-type union
-            // strings (e.g. "РезультатЗапроса, Неопределено"). Recognising
-            // them as their canonical `Ty` lets `Ty::union(...)` dedup and
-            // lets `lookup_method` strip them before chained dispatch.
-            "неопределено" | "undefined" => Ty::Undefined,
-            "null" => Ty::Null,
-
-            _ => Ty::Unknown,
-        }
-    }
-
     /// Check if this type is Unknown.
     pub fn is_unknown(&self) -> bool {
         matches!(self, Ty::Unknown)
@@ -1083,6 +1066,11 @@ impl Ty {
             (Ty::ObjectManager { .. }, Locale::En) => "ObjectManager",
             (Ty::ThisObject { .. }, Locale::Ru) => "ЭтотОбъект",
             (Ty::ThisObject { .. }, Locale::En) => "ThisObject",
+            // `ThisManager` renders identically to `ThisObject` from the
+            // user's perspective — both surface as `ЭтотОбъект` in source.
+            // The variants are distinct only for inference-side dispatch.
+            (Ty::ThisManager { .. }, Locale::Ru) => "ЭтотОбъект",
+            (Ty::ThisManager { .. }, Locale::En) => "ThisObject",
             // FormData wrapper names live in `bsl-platform` (already locale-
             // agnostic; both `ДанныеФормыСтруктура` and the EN-named
             // `FormDataStructure` are valid platform identifiers, but
@@ -1156,7 +1144,14 @@ impl Ty {
             // matching `Ty::MetadataRef { *Object, name }`. Returning
             // `None` here keeps the platform fallback from surfacing
             // bogus methods before the coercion step runs.
-            Ty::ThisObject { .. } => None,
+            //
+            // Same story for `ThisManager`: it coerces to
+            // [`Ty::ObjectManager { kind, name }`] which is itself
+            // platform-method-less (`Ty::ObjectManager` arm above already
+            // returns `None`); the dispatch goes through
+            // `bsl_platform::get_manager_methods` keyed on `MdoType`, not
+            // through the platform-type table.
+            Ty::ThisObject { .. } | Ty::ThisManager { .. } => None,
             // Form data wraps the platform `ДанныеФормыСтруктура` /
             // `ДанныеФормыКоллекция` / `ДанныеФормыСтруктураСКоллекцией`
             // method tables. Method lookup goes through these names; field
@@ -1399,44 +1394,6 @@ impl FunctionSignature {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_type_name_inference_russian() {
-        assert_eq!(Ty::from_type_name("Массив"), Ty::Array);
-        assert_eq!(Ty::from_type_name("Структура"), Ty::Structure);
-        assert_eq!(Ty::from_type_name("Соответствие"), Ty::Map);
-        assert_eq!(Ty::from_type_name("Число"), Ty::Number);
-        assert_eq!(Ty::from_type_name("Строка"), Ty::String);
-        assert_eq!(Ty::from_type_name("Булево"), Ty::Boolean);
-        assert_eq!(Ty::from_type_name("Дата"), Ty::Date);
-    }
-
-    #[test]
-    fn test_type_name_inference_english() {
-        assert_eq!(Ty::from_type_name("Array"), Ty::Array);
-        assert_eq!(Ty::from_type_name("Structure"), Ty::Structure);
-        assert_eq!(Ty::from_type_name("Map"), Ty::Map);
-        assert_eq!(Ty::from_type_name("Number"), Ty::Number);
-        assert_eq!(Ty::from_type_name("String"), Ty::String);
-        assert_eq!(Ty::from_type_name("Boolean"), Ty::Boolean);
-        assert_eq!(Ty::from_type_name("Date"), Ty::Date);
-    }
-
-    #[test]
-    fn test_type_name_case_insensitive() {
-        assert_eq!(Ty::from_type_name("МАССИВ"), Ty::Array);
-        assert_eq!(Ty::from_type_name("массив"), Ty::Array);
-        assert_eq!(Ty::from_type_name("МаССиВ"), Ty::Array);
-        assert_eq!(Ty::from_type_name("array"), Ty::Array);
-        assert_eq!(Ty::from_type_name("ARRAY"), Ty::Array);
-    }
-
-    #[test]
-    fn test_type_name_unknown() {
-        assert_eq!(Ty::from_type_name("UnknownType"), Ty::Unknown);
-        assert_eq!(Ty::from_type_name("НеизвестныйТип"), Ty::Unknown);
-        assert_eq!(Ty::from_type_name(""), Ty::Unknown);
-    }
 
     #[test]
     fn test_display_name() {

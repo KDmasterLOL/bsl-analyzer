@@ -31,22 +31,23 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_self_assign() {
         let code = r#"Процедура Тест()
     А = А;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let self_assign_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfAssign).collect();
-        assert_eq!(self_assign_diags.len(), 1, "Expected 1 SelfAssign diagnostic");
-
-        // Check position: "А = А" on line 1 (semicolon excluded from range)
-        // Columns 4-9 (0-indexed: 4 spaces indent, then "А = А")
-        assert_diagnostic_range(code, self_assign_diags[0], 1, 4, 9);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfAssign,
+            expect![[r#"
+            SelfAssign @ 2:5..2:10
+              message: Присваивание переменной самой себе
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -56,10 +57,14 @@ mod tests {
     А = а;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let self_assign_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfAssign).collect();
-        assert_eq!(self_assign_diags.len(), 1, "Case-insensitive self-assign should be detected");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfAssign,
+            expect![[r#"
+            SelfAssign @ 2:5..2:10
+              message: Присваивание переменной самой себе
+              severity: Major"#]],
+        );
     }
 
     #[test]
@@ -68,11 +73,7 @@ mod tests {
     А = Б;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::SelfAssign),
-            "Normal assignment should not trigger SelfAssign"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SelfAssign, expect![[r#""#]]);
     }
 
     /// Test based on test fixture content
@@ -97,26 +98,16 @@ mod tests {
     НовыйУникальныйИдентификатор = Новый УникальныйИдентификатор;
 КонецПроцедуры"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let self_assign_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfAssign).collect();
-
-        // Expected 2 diagnostics (our lines are +1 due to procedure wrapper):
-        // Line 5 (line 4, 1-indexed): А = а; - simple path self-assign
-        // Line 8 (line 7, 1-indexed): Структура.Чтото = СтруКтура.ЧТото; - property self-assign
-        //
-        // Line 7: Структура.Чтото = Структура.ЧтотоДругое; - NOT self-assign (different props)
-        assert_eq!(
-            self_assign_diags.len(),
-            2,
-            "Should detect exactly 2 SelfAssign diagnostics , got {}",
-            self_assign_diags.len()
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfAssign,
+            expect![[r#"
+            SelfAssign @ 6:5..6:10
+              message: Присваивание переменной самой себе
+              severity: Major
+            SelfAssign @ 9:5..9:38
+              message: Присваивание переменной самой себе
+              severity: Major"#]],
         );
-
-        // Check first diagnostic: line 5, "А = а"
-        assert_diagnostic_range(code, self_assign_diags[0], 5, 4, 9);
-
-        // Check second diagnostic: line 8, "Структура.Чтото = СтруКтура.ЧТото"
-        assert_diagnostic_range(code, self_assign_diags[1], 8, 4, 37);
     }
 }

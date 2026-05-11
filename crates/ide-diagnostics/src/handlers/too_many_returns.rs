@@ -60,7 +60,8 @@ pub fn from_hir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
 
     const FIXTURE: &str = r#"Процедура ТриВозврата()
     Если Условие Тогда
@@ -93,52 +94,39 @@ mod tests {
     #[test]
     fn test_too_many_returns_default() {
         let code = FIXTURE;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TooManyReturns).collect();
-
-        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got {}", diags.len());
-
-        assert_diagnostic_range(code, diags[0], 11, 8, 21);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TooManyReturns,
+            expect![[r#"
+            TooManyReturns @ 12:9..12:22
+              message: Метод "ПятьВозвратов" содержит 5 возвратов при максимально допустимом 3
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_three_returns_ok() {
         let code = FIXTURE;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let three_returns_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| {
-                d.code == DiagnosticCode::TooManyReturns && d.message.contains("ТриВозврата")
-            })
-            .collect();
-
-        assert_eq!(
-            three_returns_diags.len(),
-            0,
-            "ТриВозврата should not trigger diagnostic (3 returns is OK)"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TooManyReturns,
+            expect![[r#"
+            TooManyReturns @ 12:9..12:22
+              message: Метод "ПятьВозвратов" содержит 5 возвратов при максимально допустимом 3
+              severity: Information"#]],
         );
     }
 
     #[test]
     fn test_five_returns() {
         let code = FIXTURE;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let five_returns_diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| {
-                d.code == DiagnosticCode::TooManyReturns && d.message.contains("ПятьВозвратов")
-            })
-            .collect();
-
-        assert_eq!(
-            five_returns_diags.len(),
-            1,
-            "ПятьВозвратов should trigger diagnostic (5 returns)"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::TooManyReturns,
+            expect![[r#"
+            TooManyReturns @ 12:9..12:22
+              message: Метод "ПятьВозвратов" содержит 5 возвратов при максимально допустимом 3
+              severity: Information"#]],
         );
-        assert_diagnostic_range(code, five_returns_diags[0], 11, 8, 21);
     }
 }

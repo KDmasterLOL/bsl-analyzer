@@ -48,11 +48,46 @@ impl<'a> DiagnosticsContext<'a> {
         self.config.locale
     }
 
-    /// Load configuration metadata via provider.
+    /// Load **main** configuration metadata.
     ///
-    /// Returns `None` if no configuration is available.
-    pub fn load_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
-        self.provider.configuration()
+    /// Returns the main configuration only — extension (CFE) configurations
+    /// are NOT included. Use this for diagnostics whose contract is
+    /// expressed against the main configuration's own metadata: project-level
+    /// flags (`use_managed_form_in_ordinary_application`,
+    /// `use_ordinary_form_in_managed_application`), `roles()` (CFE roles do
+    /// not participate in the main role table), and any other property that
+    /// has no extension counterpart.
+    ///
+    /// For "does this name resolve to a CommonModule somewhere visible from
+    /// this file?" — use [`Self::is_common_module_anywhere`] /
+    /// [`Self::find_common_module_anywhere`] instead, which honour CFE
+    /// union semantics (Track 1 §3, plan `linear-tumbling-noodle.md`).
+    ///
+    /// ## How "main" is identified
+    ///
+    /// The main configuration is sourced from
+    /// [`Self::visible_configurations`] — the **first entry whose
+    /// `VisibleConfig.name` is `None`**. This matches the invariant set up
+    /// in `bsl-analyzer/src/workspace.rs::set_workspace_root`, which always
+    /// pushes the main config as `(None, path)` ahead of any extensions.
+    /// We do not blindly trust the provider's own configured path: that
+    /// field is opaque (`configuration_path_input` may be set to any single
+    /// configuration in test setups), so falling back to the
+    /// `visible_configurations` registry — which carries an explicit main
+    /// marker — keeps the "main" semantic load-bearing rather than
+    /// implementation-defined.
+    ///
+    /// When no configuration carries the `name: None` marker (single-config
+    /// providers that fall through `visible_configurations`'s
+    /// `all_config_paths`-empty branch synthesise such an entry from
+    /// `configuration_path_input`), the result is the synthesised entry,
+    /// preserving single-config behaviour. If neither path is registered,
+    /// returns `None`.
+    pub fn main_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
+        self.visible_configurations()
+            .into_iter()
+            .find(|vc| vc.name.is_none())
+            .map(|vc| vc.configuration)
     }
 
     /// Get all visible configurations for the current file: main + extensions.
@@ -62,7 +97,7 @@ impl<'a> DiagnosticsContext<'a> {
     /// unioned across all defining files. Callers that need to resolve
     /// cross-configuration references (e.g. a file in an extension calling a
     /// CommonModule defined in the main configuration) should iterate the
-    /// returned list rather than relying on [`load_configuration`].
+    /// returned list rather than relying on [`Self::main_configuration`].
     pub fn visible_configurations(&self) -> Vec<ide_db::provider::VisibleConfig> {
         self.provider.visible_configurations(self.file_id)
     }
@@ -119,6 +154,60 @@ impl<'a> DiagnosticsContext<'a> {
             }
         }
         out
+    }
+
+    /// Find a CommonModule by name across every visible configuration
+    /// (main + extensions).
+    ///
+    /// Returns `(VisibleConfig, CommonModule)` for the **first** matching
+    /// configuration in `visible_configurations()` order. Order matches
+    /// `find_common_module_files_anywhere`: main first, then extensions
+    /// in registration order. Diagnostics that need exists-in-any
+    /// semantics (CommonModuleAssign, ProtectedModule,
+    /// PrivilegedModuleMethodCall, …) should consume this helper rather
+    /// than reaching into [`Self::main_configuration`], which only sees the
+    /// main config and misses CFE-defined modules.
+    pub fn find_common_module_anywhere(
+        &self,
+        name: &str,
+    ) -> Option<(ide_db::provider::VisibleConfig, bsl_metadata::CommonModule)> {
+        for visible in self.visible_configurations() {
+            if let Some(common_module) = visible.configuration.find_common_module(name) {
+                let module = common_module.clone();
+                return Some((visible, module));
+            }
+        }
+        None
+    }
+
+    /// `true` when a CommonModule with this name is visible from the current
+    /// file under main + extensions, regardless of which configuration
+    /// declared it. Cheap predicate for handlers whose only question is
+    /// "does this name resolve to a CommonModule somewhere?".
+    pub fn is_common_module_anywhere(&self, name: &str) -> bool {
+        self.visible_configurations()
+            .iter()
+            .any(|visible| visible.configuration.find_common_module(name).is_some())
+    }
+
+    /// Classify the assignment target `Name = …` for the current file.
+    ///
+    /// Companion to [`Self::is_common_module_anywhere`] for diagnostics
+    /// that need to suppress on shadowing rather than just check
+    /// CommonModule visibility (Track 1 §4.6 — `CommonModuleAssign`).
+    /// Resolution priority follows `Resolver::resolve_assignment_target`:
+    /// `Local` > `Param` > `ModuleVariable` > `CommonModule` >
+    /// `Unknown`.
+    ///
+    /// Local/Param shadowing should be caught upstream by Step L's
+    /// `BodyDiagnostic::CommonModuleAssign::existing_binding_kind`
+    /// fast-path; this accessor exists for the cases that payload
+    /// doesn't cover (module-level `Перем` shadow, name not visible
+    /// anywhere). Streaming providers that don't have a resolver
+    /// available return [`hir::AssignmentResolution::Unknown`] by
+    /// default, conservatively suppressing the diagnostic.
+    pub fn assignment_target_kind(&self, name: &str) -> hir::AssignmentResolution {
+        self.provider.assignment_target_kind(self.file_id, name)
     }
 
     /// Get the file path for the current file via provider.
@@ -225,19 +314,70 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_liveness_analysis(self.file_id))
     }
 
+    /// Get module privileged/safe-mode lifetime state (§1.2 saturating
+    /// counter lattice batched per method).
+    ///
+    /// Consumed by the §1.6 Group C `SetPrivilegedMode` / `DisableSafeMode`
+    /// handlers; the per-method `DataflowResult<SecurityModeState>` is fed
+    /// through [`hir::dataflow::security_state::open_events`] to surface
+    /// frame-open call sites.
+    pub fn module_security_state(&self) -> Arc<ide_db::effects::ModuleSecurityState> {
+        self.query(|p| p.module_security_state(self.file_id))
+    }
+
+    /// Per-method effect summary (Track 2 Phase A §1.4).
+    ///
+    /// Returned by [`AnalysisProvider::method_effect_summary`]. The
+    /// §6.5 cognitive recursion penalty consumes
+    /// [`dataflow::effect_summary::EffectSummary::is_recursive`] to
+    /// add a +1 increment for self/mutually-recursive methods,
+    /// matching the SonarSource Cognitive Complexity v1.4 spec
+    /// section "fundamental increment — recursion".
+    pub fn method_effect_summary(
+        &self,
+        method: hir::MethodId,
+    ) -> std::sync::Arc<hir::dataflow::effect_summary::EffectSummary> {
+        self.query(|p| p.method_effect_summary(method))
+    }
+
+    /// Per-module HIR-structural metrics batch (Track 2 Phase B §6.3).
+    ///
+    /// Consumed by the §6.4-migrated `CognitiveComplexity` /
+    /// `NestedStatements` / `IfConditionComplexity` handlers; each
+    /// reads its specific field of [`hir::metrics::HirMethodMetrics`]
+    /// per method.
+    pub fn module_hir_metrics(&self) -> Arc<ide_db::queries::ModuleHirMetrics> {
+        self.query(|p| p.module_hir_metrics(self.file_id))
+    }
+
+    /// Per-module cyclomatic complexity batch (Track 2 Phase B §6.3).
+    ///
+    /// Consumed by the §6.4-migrated `CyclomaticComplexity` handler;
+    /// values come from [`hir::cfg::cyclomatic_complexity`] applied to
+    /// each method's CFG.
+    pub fn module_cyclomatic(&self) -> Arc<ide_db::queries::ModuleCyclomatic> {
+        self.query(|p| p.module_cyclomatic(self.file_id))
+    }
+
     /// Get module reaching definitions (batch).
     pub fn module_reaching_defs(&self) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         self.query(|p| p.module_reaching_definitions(self.file_id))
     }
 
+    /// Get module path-terminates analysis (batch).
+    ///
+    /// Backward dataflow that answers "may execution from this block reach
+    /// the function's exit without crossing `Возврат` / `ВызватьИсключение`?".
+    /// Consumed by `AllFunctionPathMustHaveReturn` (Track 1 §1.6).
+    pub fn module_path_terminates(
+        &self,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        self.query(|p| p.module_path_terminates(self.file_id))
+    }
+
     /// Get region tree for current file.
     pub fn region_tree(&self) -> Arc<hir::RegionTree> {
         self.query(|p| p.region_tree(self.file_id))
-    }
-
-    /// Get module-level regions for current file.
-    pub fn module_level_regions(&self) -> Arc<Vec<base_db::RegionInfo>> {
-        self.query(|p| p.module_level_regions(self.file_id))
     }
 
     /// Get SDBL HIR for all queries in current file.
@@ -259,6 +399,11 @@ impl<'a> DiagnosticsContext<'a> {
     /// Get parsed documentation for a method.
     pub fn method_docs(&self, method_id: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
         self.query(|p| p.method_docs(method_id))
+    }
+
+    /// Get parsed documentation for a module-level variable.
+    pub fn variable_docs(&self, variable_id: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
+        self.query(|p| p.variable_docs(variable_id))
     }
 
     /// Get external references (qualified calls) from current module.

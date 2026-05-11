@@ -40,12 +40,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let configuration = match ctx.load_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
-
-    let module = match common_module_helpers::find_common_module_for_file(ctx, &configuration) {
+    // CFE-aware "is *this file* a CommonModule with executable scope?":
+    // we don't care which configuration declares it, only that the file is
+    // a CommonModule whose flags match `should_check_module`.
+    let module = match common_module_helpers::find_common_module_for_file_anywhere(ctx) {
         Some(m) => m,
         None => return Vec::new(),
     };
@@ -117,8 +115,15 @@ fn is_global_eval_call(node: &syntax::SyntaxNode) -> bool {
         }
     }
 
-    let name = first_token.text().to_lowercase();
-    name == "eval" || name == "вычислить"
+    // Track 2 §1.6: registry-driven recognition (`Category::ExecuteExternalCode`,
+    // `EntryKind::GlobalMethod`). The curated registry covers `Eval` /
+    // `Вычислить` and any future bilingual aliases as a single source of
+    // truth, replacing the hardcoded `name == "eval" || name == "вычислить"`
+    // pair. The `EXECUTE_STMT` (`Выполнить`) match in `detect_violations`
+    // stays a SyntaxKind branch — it's not a name-based match.
+    bsl_platform::security::registry().lookup_global(first_token.text()).is_some_and(|e| {
+        matches!(e.category, bsl_platform::security::Category::ExecuteExternalCode)
+    })
 }
 
 #[cfg(test)]
@@ -126,6 +131,7 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
@@ -166,11 +172,13 @@ mod tests {
 
 "#;
         let diagnostics = check_violations_directly(code);
-
-        assert_eq!(diagnostics.len(), 2, "Expected 2 violations: Execute and Eval");
-
-        assert_diagnostic_range(code, &diagnostics[0], 2, 4, 22);
-        assert_diagnostic_range(code, &diagnostics[1], 6, 12, 29);
+        expect![[r#"
+            ExecuteExternalCodeInCommonModule @ 3:5..3:23
+              message: Execution of external code in a common module on a server is a potential vulnerability
+              severity: Warning
+            ExecuteExternalCodeInCommonModule @ 7:13..7:30
+              message: Execution of external code in a common module on a server is a potential vulnerability
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -180,8 +188,11 @@ mod tests {
     Выполнить(Строка);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "No configuration should return empty");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::ExecuteExternalCodeInCommonModule,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -192,7 +203,7 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_violations_directly(code);
-        assert_eq!(diagnostics.len(), 0, "Qualified Eval calls should be ignored");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -203,7 +214,7 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_violations_directly(code);
-        assert_eq!(diagnostics.len(), 0, "Similar method names should be ignored");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -281,6 +292,6 @@ mod tests {
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
-        assert!(diagnostics.is_empty(), "Disabled config should return empty diagnostics");
+        expect![[r#""#]].assert_eq(&format_diags("", &diagnostics));
     }
 }

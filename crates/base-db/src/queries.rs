@@ -7,17 +7,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use syntax::{Parse, SyntaxNode, TextRange, TextSize};
+use syntax::{Parse, SyntaxNode, TextRange};
 use vfs::{FileId, VfsPath};
 
 use crate::input::{FileTextInput, SourceRootInput};
-
-/// Information about a region (name and source range).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegionInfo {
-    pub name: String,
-    pub range: TextRange,
-}
 
 /// Salsa tracked query for parsing.
 ///
@@ -131,72 +124,6 @@ fn is_api_region(name: &str) -> bool {
     const API_REGIONS: &[&str] =
         &["программныйинтерфейс", "public", "служебныйпрограммныйинтерфейс", "internal"];
     API_REGIONS.contains(&name.to_lowercase().as_str())
-}
-
-/// Extract all module-level region names and their text ranges.
-///
-/// This query collects information about all top-level regions in a BSL file.
-/// Only module-level regions are collected (nested regions inside methods are excluded).
-///
-/// # Performance
-/// - LRU cache: 256 files (region collection is inexpensive)
-/// - Depends on: parse_query (automatic invalidation via Salsa)
-/// - Recomputed only when file content changes
-/// - Shared by ALL region-based diagnostics (NonStandardRegion, DuplicateRegion, EmptyRegion, etc.)
-///
-/// # Returns
-/// Vector of RegionInfo containing region names and their text ranges (first line only).
-/// Ranges point to the #Область/#Region directive line.
-#[salsa::tracked(lru = 256)]
-pub fn module_level_regions_query(
-    db: &dyn salsa::Database,
-    input: FileTextInput,
-) -> Arc<Vec<RegionInfo>> {
-    let _span = tracing::info_span!("module_level_regions").entered();
-
-    let parse = parse_query(db, input);
-    let root = parse.syntax_node();
-
-    let regions = collect_module_level_regions(&root);
-
-    tracing::debug!(count = regions.len(), "Collected module-level regions");
-
-    Arc::new(regions)
-}
-
-/// Collect module-level regions (not nested inside methods).
-///
-/// Walks root.children() (not descendants) to get only top-level regions.
-/// For each region start directive, extracts name and range of first line.
-fn collect_module_level_regions(root: &SyntaxNode) -> Vec<RegionInfo> {
-    use syntax::{
-        ast::{self, AstNode},
-        SyntaxKind,
-    };
-
-    let mut regions = Vec::new();
-
-    for child in root.children() {
-        if child.kind() == SyntaxKind::PRE_REGION_DIR {
-            if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
-                if region.is_start() {
-                    if let Some(name) = region.name() {
-                        let text = child.text().to_string();
-                        let first_line = text.lines().next().unwrap_or(&text);
-                        let first_line_len = first_line.len();
-
-                        let start = child.text_range().start();
-                        let end = start + TextSize::from(first_line_len as u32);
-                        let range = TextRange::new(start, end);
-
-                        regions.push(RegionInfo { name, range });
-                    }
-                }
-            }
-        }
-    }
-
-    regions
 }
 
 /// Resolve a VfsPath to FileId within a SourceRoot.

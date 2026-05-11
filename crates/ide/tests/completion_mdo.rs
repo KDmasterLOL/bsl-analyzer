@@ -20,7 +20,7 @@
 use ide::{Analysis, CompletionItem, CompletionItemKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use test_fixture::Fixture;
 use vfs::{FileId, FileSet};
 
@@ -32,6 +32,10 @@ fn designer_fixture_path() -> PathBuf {
 /// from `fixture_text`. The `$0` cursor convention is handled by
 /// `extract_cursor` (identical to `completion_baseline.rs`).
 fn setup_with_config(fixture_text: &str) -> (Analysis, FileId, u32) {
+    setup_with_config_path(fixture_text, &designer_fixture_path())
+}
+
+fn setup_with_config_path(fixture_text: &str, config_path: &Path) -> (Analysis, FileId, u32) {
     let (fixture_text, test_path, cursor_offset) = extract_cursor(fixture_text);
     let fixture = Fixture::parse(&fixture_text);
 
@@ -50,7 +54,7 @@ fn setup_with_config(fixture_text: &str) -> (Analysis, FileId, u32) {
     }
 
     // Wire up the designer metadata fixture so MDO attributes are visible.
-    db.set_all_config_paths(vec![(None, designer_fixture_path())]);
+    db.set_all_config_paths(vec![(None, config_path.to_path_buf())]);
 
     let test_file = fixture
         .files
@@ -81,12 +85,85 @@ fn complete(fixture: &str) -> Vec<CompletionItem> {
     analysis.completions(file_id, offset, None, ide::Locale::Ru)
 }
 
+fn complete_with_config_path(fixture: &str, config_path: &Path) -> Vec<CompletionItem> {
+    let (analysis, file_id, offset) = setup_with_config_path(fixture, config_path);
+    analysis.completions(file_id, offset, None, ide::Locale::Ru)
+}
+
 fn has_label(items: &[CompletionItem], label: &str) -> bool {
     items.iter().any(|i| i.label == label)
 }
 
 fn item_with_label<'a>(items: &'a [CompletionItem], label: &str) -> Option<&'a CompletionItem> {
     items.iter().find(|i| i.label == label)
+}
+
+fn write_collision_catalog_fixture(root: &Path) {
+    std::fs::create_dir_all(root.join("Catalogs")).expect("create Catalogs directory");
+    std::fs::create_dir_all(root.join("CommonModules")).expect("create CommonModules directory");
+    std::fs::write(
+        root.join("Configuration.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="11111111-1111-1111-1111-111111111111">
+        <Properties>
+            <Name>CollisionConfig</Name>
+        </Properties>
+        <ChildObjects>
+            <CommonModule>ПервыйОбщийМодуль</CommonModule>
+            <Catalog>КоллизияМетодов</Catalog>
+        </ChildObjects>
+    </Configuration>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic Configuration.xml");
+    std::fs::write(
+        root.join("CommonModules/ПервыйОбщийМодуль.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="44444444-4444-4444-4444-444444444444">
+        <Properties>
+            <Name>ПервыйОбщийМодуль</Name>
+            <Global>false</Global>
+            <Server>true</Server>
+            <ClientManagedApplication>false</ClientManagedApplication>
+            <ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+            <ExternalConnection>false</ExternalConnection>
+            <ServerCall>false</ServerCall>
+            <Privileged>false</Privileged>
+            <ReturnValuesReuse>DontUse</ReturnValuesReuse>
+        </Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic CommonModule XML");
+    std::fs::write(
+        root.join("Catalogs/КоллизияМетодов.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <Catalog uuid="22222222-2222-2222-2222-222222222222">
+        <Properties>
+            <Name>КоллизияМетодов</Name>
+            <CodeLength>9</CodeLength>
+            <DescriptionLength>25</DescriptionLength>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="33333333-3333-3333-3333-333333333333">
+                <Properties>
+                    <Name>Записать</Name>
+                    <Type>
+                        <v8:Type>xs:string</v8:Type>
+                        <v8:StringQualifiers>
+                            <v8:Length>10</v8:Length>
+                        </v8:StringQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic catalog XML");
 }
 
 /// JSDoc-annotated CommonModule function that returns a CatalogRef.
@@ -277,13 +354,34 @@ fn completion_after_add_returns_row_shows_columns_and_line_number() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "requires synthetic fixture with attribute named like platform method; low priority"]
 fn completion_dedup_user_attribute_collides_with_platform_method() {
     // If the MDO has a custom attribute with the same name as a platform method
-    // (e.g. `Записать`), the merged list must show only one item with
-    // kind == Field (MDO field wins over platform method in dedup).
-    // TODO: create a synthetic designer fixture or temp-XML approach.
-    let _ = complete;
+    // (`Записать` on CatalogObject), the merged list must show only one item
+    // with kind == Field (MDO field wins over platform method in dedup).
+    let temp_dir = tempfile::tempdir().expect("create synthetic config tempdir");
+    write_collision_catalog_fixture(temp_dir.path());
+    let object_module_path = temp_dir.path().join("Catalogs/КоллизияМетодов/Ext/ObjectModule.bsl");
+
+    let items = complete_with_config_path(
+        &format!(
+            r#"//- {}
+Функция Тест()
+    ЭтотОбъект.$0
+КонецФункции
+"#,
+            object_module_path.display()
+        ),
+        temp_dir.path(),
+    );
+
+    let matching: Vec<_> = items.iter().filter(|item| item.label == "Записать").collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "MDO field must deduplicate platform method label; labels: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(matching[0].kind, CompletionItemKind::Field);
 }
 
 // ---------------------------------------------------------------------------

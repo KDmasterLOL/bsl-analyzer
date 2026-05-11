@@ -87,6 +87,13 @@ pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<Fiel
     let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
     let ty = coerced.as_ref().unwrap_or(receiver_ty);
 
+    // `Ty::ThisManager` coerces to `Ty::ObjectManager`, which has no
+    // enumerable attribute table here (managers only expose predefined
+    // items via the `ManagerCollection` indexing path, not via field
+    // lookup). The match below short-circuits non-MetadataRef receivers
+    // to an empty Vec — same shape `Документы.ПКО` enumeration returned
+    // pre-Step-J. Predefined-item enumeration is a separate enhancement.
+
     if let Ty::Union(arms) = ty {
         let mut out: Vec<FieldInfo> = Vec::new();
         let mut seen: std::collections::HashSet<Name> = std::collections::HashSet::new();

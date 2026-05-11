@@ -116,8 +116,9 @@ fn make_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range;
+    use crate::test_utils::format_diags;
     use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
@@ -184,25 +185,30 @@ mod tests {
 "#;
         let diagnostics = check_as_form_module(code);
 
-        assert_eq!(diagnostics.len(), 1, "Should find exactly 1 diagnostic");
+        expect![[r#"
+            CompilationDirectiveLost @ 10:9..10:23
+              message: Пропущена директива компиляции для 'НужнаДиректива'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
 
         // Line 10 (1-indexed) = line 9 (0-indexed)
         // "Функция НужнаДиректива()" - name "НужнаДиректива" at columns 8-22
-        assert_diagnostic_range(code, &diagnostics[0], 9, 8, 22);
     }
 
     #[test]
     fn test_with_directive() {
         let code = "&НаСервере\nПроцедура А()\nКонецПроцедуры";
         let diagnostics = check_as_form_module(code);
-        assert_eq!(diagnostics.len(), 0, "Should not report methods with directives");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_without_directive() {
         let code = "Процедура БезДирективы()\nКонецПроцедуры";
         let diagnostics = check_as_form_module(code);
-        assert_eq!(diagnostics.len(), 1, "Should report methods without directives");
+        expect![[r#"
+            CompilationDirectiveLost @ 1:11..1:23
+              message: Пропущена директива компиляции для 'БезДирективы'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -220,7 +226,10 @@ mod tests {
 КонецФункции
 "#;
         let diagnostics = check_as_form_module(code);
-        assert_eq!(diagnostics.len(), 1, "Should report only methods without directives");
+        expect![[r#"
+            CompilationDirectiveLost @ 10:9..10:21
+              message: Пропущена директива компиляции для 'БезДирективы'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -234,7 +243,10 @@ Function MissingDirective()
 EndFunction
 "#;
         let diagnostics = check_as_form_module(code);
-        assert_eq!(diagnostics.len(), 1, "Should work with English keywords");
+        expect![[r#"
+            CompilationDirectiveLost @ 6:10..6:26
+              message: Пропущена директива компиляции для 'MissingDirective'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -254,7 +266,16 @@ EndFunction
 КонецПроцедуры
 "#;
         let diagnostics = check_as_form_module(code);
-        assert_eq!(diagnostics.len(), 3, "Should report all methods without directives");
+        expect![[r#"
+            CompilationDirectiveLost @ 2:11..2:17
+              message: Пропущена директива компиляции для 'Первая'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning
+            CompilationDirectiveLost @ 5:9..5:15
+              message: Пропущена директива компиляции для 'Вторая'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning
+            CompilationDirectiveLost @ 12:11..12:20
+              message: Пропущена директива компиляции для 'Четвёртая'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -262,6 +283,6 @@ EndFunction
         // Methods without directives in regular module should NOT trigger this diagnostic
         let code = "Процедура БезДирективы()\nКонецПроцедуры";
         let diagnostics = check_as_regular_module(code);
-        assert_eq!(diagnostics.len(), 0, "Regular modules should not be checked");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

@@ -552,8 +552,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         // Inline fixture: covers all 8 identifier categories with known mixed-script identifiers.
@@ -600,34 +601,56 @@ mod tests {
             "    Перем XПириенс;         // <- ошибка, т.к. должно быть минимум 2 в начале\n",
             "КонецПроцедуры",
         );
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        // Expected 15 diagnostics
-        assert_eq!(diagnostics.len(), 15, "Expected 15 diagnostics");
-
-        // Verify all positions
-        // Methods
-        assert_diagnostic_range(code, &diagnostics[8], 30, 17, 26); // ПараметрY
-        assert_diagnostic_range(code, &diagnostics[9], 30, 33, 39); // ParamЫ
-        assert_diagnostic_range(code, &diagnostics[11], 34, 10, 19); // Tутошибка
-
-        // Variables
-        assert_diagnostic_range(code, &diagnostics[0], 0, 6, 10); // Namе
-        assert_diagnostic_range(code, &diagnostics[1], 5, 20, 23); // сcс
-        assert_diagnostic_range(code, &diagnostics[2], 12, 10, 12); // Аg
-        assert_diagnostic_range(code, &diagnostics[3], 13, 10, 15); // _Аg09
-        assert_diagnostic_range(code, &diagnostics[4], 16, 4, 23); // _3C_omRRRО_5__бъект
-        assert_diagnostic_range(code, &diagnostics[12], 35, 10, 21); // ПеременнаяA
-        assert_diagnostic_range(code, &diagnostics[13], 36, 10, 22); // ПеременнаяAМ
-        assert_diagnostic_range(code, &diagnostics[14], 37, 10, 18); // XПириенс
-
-        // Annotations
-        assert_diagnostic_range(code, &diagnostics[5], 19, 1, 10); // Аnotation
-        assert_diagnostic_range(code, &diagnostics[6], 23, 11, 19); // Парaметр
-
-        // Other (region, goto)
-        assert_diagnostic_range(code, &diagnostics[7], 27, 9, 15); // Regiоn
-        assert_diagnostic_range(code, &diagnostics[10], 31, 13, 19); // Lаbell
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            expect![[r#"
+                LatinAndCyrillicSymbolInWord @ 1:7..1:11
+                  message: Identifier 'Namе' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 6:21..6:24
+                  message: Identifier 'сcс' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 13:11..13:13
+                  message: Identifier 'Аg' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 14:11..14:16
+                  message: Identifier '_Аg09' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 17:5..17:24
+                  message: Identifier '_3C_omRRRО_5__бъект' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 20:2..20:11
+                  message: Identifier 'Аnotation' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 24:12..24:20
+                  message: Identifier 'Парaметр' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 28:10..28:16
+                  message: Identifier 'Regiоn' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 31:18..31:27
+                  message: Identifier 'ПараметрY' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 31:34..31:40
+                  message: Identifier 'ParamЫ' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 32:14..32:20
+                  message: Identifier 'Lаbell' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 35:11..35:20
+                  message: Identifier 'Tутошибка' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 36:11..36:22
+                  message: Identifier 'ПеременнаяA' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 37:11..37:23
+                  message: Identifier 'ПеременнаяAМ' contains mixed Latin and Cyrillic characters
+                  severity: Information
+                LatinAndCyrillicSymbolInWord @ 38:11..38:19
+                  message: Identifier 'XПириенс' contains mixed Latin and Cyrillic characters
+                  severity: Information"#]],
+        );
     }
 
     #[test]
@@ -637,8 +660,11 @@ ComОбъект = 1;
 HTTPСоединение = 2;
 ЧтениеXML = 3;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Default exclusion list should work");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -647,8 +673,11 @@ HTTPСоединение = 2;
 Перем А;
 Перем a;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Single-character identifiers should be skipped");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -658,8 +687,11 @@ HTTPСоединение = 2;
 Процедура ПроцедураРусская()
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Pure Cyrillic should not be flagged");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -669,8 +701,11 @@ HTTPСоединение = 2;
 Процедура ProcedureEnglish()
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Pure Latin should not be flagged");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -682,7 +717,10 @@ HTTPСоединение = 2;
 Функция InNameРусский()
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Trailing pattern should be allowed by default");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            expect![[r#""#]],
+        );
     }
 }

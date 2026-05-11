@@ -26,7 +26,7 @@
 //! name. Inference has to re-bind it to the current `(mdo_type, mdo_name)`
 //! context so chained calls like `Спр.Записать()` keep resolving. The
 //! rewrite table lives in [`map_generic_metadata_return_type`]; anything
-//! it doesn't recognise falls through to [`crate::method_lookup::resolve_platform_type_name`]
+//! it doesn't recognise falls through to [`crate::method_lookup::lower_platform_type_name`]
 //! (primitives, `ValueTable`, opaque `Ty::PlatformObject`).
 //!
 //! ## Workspace > platform priority
@@ -41,7 +41,8 @@ use bsl_platform::{find_prefixed_method, PlatformMethod};
 use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 use hir_def::Name;
 
-use crate::method_lookup::{lower_overloads, lower_param_type, resolve_platform_type_name};
+use crate::lower::type_string::{lower_param_type_string, lower_platform_type_name};
+use crate::method_lookup::lower_overloads;
 
 /// Outcome of a successful platform-method lookup.
 ///
@@ -111,7 +112,7 @@ pub fn resolve_platform_metadata_ref_method(
 /// the context of `(mdo_type, mdo_name)`.
 ///
 /// Parameter types and the return type lower through
-/// [`resolve_platform_type_name`] for the scalar cases and
+/// [`lower_platform_type_name`] for the scalar cases and
 /// [`map_generic_metadata_return_type`] for the manager-relative
 /// generics (`"СправочникОбъект"` → `Ty::MetadataRef { CatalogObject, mdo_name }`).
 pub(crate) fn build_resolution(
@@ -122,7 +123,7 @@ pub(crate) fn build_resolution(
     let params: Vec<Ty> = method
         .parameters
         .iter()
-        .map(|p| p.param_type.as_ref().map(|t| lower_param_type(t)).unwrap_or(Ty::Unknown))
+        .map(|p| p.param_type.as_ref().map(|t| lower_param_type_string(t)).unwrap_or(Ty::Unknown))
         .collect();
     let defaults: Vec<bool> = method.parameters.iter().map(|p| p.is_optional).collect();
 
@@ -131,7 +132,7 @@ pub(crate) fn build_resolution(
         .as_ref()
         .map(|raw| {
             map_generic_metadata_return_type(raw, mdo_type, mdo_name)
-                .unwrap_or_else(|| resolve_platform_type_name(raw))
+                .unwrap_or_else(|| lower_platform_type_name(raw))
         })
         .unwrap_or(Ty::Undefined);
 
@@ -212,7 +213,7 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
 ///
 /// Returns `None` when `raw` is not a recognised manager-relative
 /// generic; the caller then falls through to
-/// [`resolve_platform_type_name`] (primitives, value-types,
+/// [`lower_platform_type_name`] (primitives, value-types,
 /// `Ty::PlatformObject`).
 ///
 /// The table mirrors [`MetadataKind::object_kind_for`] plus the
@@ -360,7 +361,7 @@ mod tests {
     fn manager_find_by_code_param_lowers_to_union() {
         // `НайтиПоКоду`'s first param is `param_type = "Число, Строка"` in
         // platform_data. The bug: `build_resolution` used to lower this
-        // through `resolve_platform_type_name` directly, which doesn't
+        // through `lower_platform_type_name` directly, which doesn't
         // split on `,` — the whole string became `Ty::PlatformObject(
         // "Число, Строка")` and `String → that` failed structural equality.
         // Pin that comma-joined param_type lowers to a `Ty::Union` so

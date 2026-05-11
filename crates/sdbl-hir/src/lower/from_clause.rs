@@ -35,8 +35,11 @@ impl LoweringContext {
     fn lower_data_source_in_from(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
         // Check if this FROM data source has JOINs after subquery
         // Example: FROM (SELECT ...) AS Sub LEFT JOIN T2 ...
+        // Track 2 §4 Slice 3: subqueries that aggregate (GROUP BY or aggregate
+        // function in SELECT list) are exempted — they are doing something the
+        // underlying table cannot, so the rule does not apply.
         if let Some(subquery) = ds.subquery() {
-            if ds.join_clauses().next().is_some() {
+            if ds.join_clauses().next().is_some() && !subquery_has_aggregation(&subquery) {
                 self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
                     range: subquery.syntax().text_range(),
                 });
@@ -90,7 +93,7 @@ impl LoweringContext {
             let queries: Vec<_> = subquery.queries().collect();
             let has_union_siblings = queries.len() > 1;
 
-            for (idx, query) in queries.into_iter().enumerate() {
+            for (query_index, query) in queries.into_iter().enumerate() {
                 // NOTE: Diagnostic for JOINs inside subquery is handled by lower_query()
                 // which calls lower_from_clause() -> lower_data_source_in_from()
                 // No need to check here to avoid duplication
@@ -99,8 +102,7 @@ impl LoweringContext {
                 self.scope.push_frame();
 
                 // Lower the nested query to HIR
-                // First query (idx=0) is the main query, rest are UNION queries
-                let nested_hir = self.lower_query(&query, idx > 0, has_union_siblings);
+                let nested_hir = self.lower_query(&query, has_union_siblings, query_index == 0);
 
                 // Pop scope frame
                 self.scope.pop_frame();
@@ -791,12 +793,16 @@ impl LoweringContext {
         // Continue with existing logic for non-register main objects
         // (Registers are handled by build_register_resolved() in resolve_table())
         match mdo_type {
-            // For catalogs, documents, business processes, tasks, exchange plans - add attributes
+            // For object-like metadata tables, add attributes collected by metadata loading,
+            // including platform standard attributes such as Ссылка/Ref.
             MdoType::Catalog
             | MdoType::Document
             | MdoType::BusinessProcess
             | MdoType::Task
-            | MdoType::ExchangePlan => {
+            | MdoType::ExchangePlan
+            | MdoType::ChartOfCharacteristicTypes
+            | MdoType::ChartOfAccounts
+            | MdoType::ChartOfCalculationTypes => {
                 tracing::debug!(
                     full_name = %full_name,
                     mdo_type = ?mdo_type,
@@ -1189,4 +1195,65 @@ impl LoweringContext {
         }
         // Single param is OK for СрезПоследних(&Период)
     }
+}
+
+/// Returns true if any query (main or UNION part) inside the subquery contains
+/// aggregation — a `GROUP BY` (`СГРУППИРОВАТЬ ПО`) clause or a call to an
+/// aggregate function (`СУММА`/`SUM`, `СРЕДНЕЕ`/`AVG`, `МИНИМУМ`/`MIN`,
+/// `МАКСИМУМ`/`MAX`, `КОЛИЧЕСТВО`/`COUNT`) in its direct SELECT list.
+///
+/// Used to exempt aggregating subqueries from `JoinWithSubQuery` — a subquery
+/// that aggregates is doing something the underlying table cannot, so the
+/// «no joins on subqueries» rule does not apply.
+///
+/// The aggregate-call scan inspects only `SDBL_FUNCTION_CALL` nodes and
+/// matches the first direct `IDENT` child token (the function-name position).
+/// Column references and aliases that happen to be named `Сумма`/`Sum` are
+/// not in function-call position and therefore do not suppress the
+/// diagnostic.
+pub(super) fn subquery_has_aggregation(subquery: &syntax::ast::SdblSubquery) -> bool {
+    subquery.queries().any(|q| {
+        if q.group_by_clause().is_some() {
+            return true;
+        }
+        let Some(field_list) = q.field_list() else {
+            return false;
+        };
+        let has_aggregate = field_list.fields().any(|field| field_contains_aggregate_call(&field));
+        has_aggregate
+    })
+}
+
+fn field_contains_aggregate_call(field: &syntax::ast::SdblSelectedField) -> bool {
+    let Some(expr) = field.expression() else {
+        return false;
+    };
+    expr.descendants()
+        .filter(|n| n.kind() == syntax::SyntaxKind::SDBL_FUNCTION_CALL)
+        .any(|call| function_call_is_aggregate(&call))
+}
+
+fn function_call_is_aggregate(call: &syntax::SyntaxNode) -> bool {
+    // First direct IDENT child of an `SDBL_FUNCTION_CALL` is the function
+    // name (matches the dispatch in `lower_function_call`).
+    call.children_with_tokens()
+        .filter_map(|nt| nt.into_token())
+        .find(|t| t.kind() == syntax::SyntaxKind::IDENT)
+        .is_some_and(|t| is_aggregate_name(t.text()))
+}
+
+fn is_aggregate_name(name: &str) -> bool {
+    matches!(
+        name.to_uppercase().as_str(),
+        "СУММА"
+            | "SUM"
+            | "СРЕДНЕЕ"
+            | "AVG"
+            | "МИНИМУМ"
+            | "MIN"
+            | "МАКСИМУМ"
+            | "MAX"
+            | "КОЛИЧЕСТВО"
+            | "COUNT"
+    )
 }

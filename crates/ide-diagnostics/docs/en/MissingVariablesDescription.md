@@ -9,7 +9,14 @@ The current implementation is narrower than a generic "all variables" rule:
 - it checks only top-level module variable declarations (`Var` / `Перем`);
 - local variables inside procedures and functions are ignored;
 - a description may be written on the same line or in a header comment above the declaration;
-- annotated variables are also supported, including comments placed around annotations.
+- annotated variables are also supported, including comments placed around annotations;
+- a comment that contains only `//` with no text is **not** treated as a
+  description (whitespace-only doc strings emit the same diagnostic as the
+  no-doc case);
+- a hyperlink-style comment (`См. ОбщегоНазначения.<имя>` /
+  `See Common.<name>`) is treated as delegated documentation and does not
+  trigger the diagnostic, mirroring how `MissingParameterDescription` and
+  `MissingReturnedValueDescription` handle hyperlinks.
 
 ## Examples
 

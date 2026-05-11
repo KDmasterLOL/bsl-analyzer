@@ -14,12 +14,12 @@
 //!   Ty` via [`ty_difference`] (Task 6.3).
 //! - `X = Неопределено` / `X <> Неопределено` — flips between
 //!   `Ty::Undefined` and its `Union \ Undefined` complement.
-//! - `ЗначениеЗаполнено(X)` — recognised syntactically, but narrowing
-//!   is **not yet implemented**: both branches produce `Ty::Unknown`
-//!   and leave the overlay untouched (see
-//!   [`NarrowingTransfer::apply_guard`]). Precise narrowing needs
-//!   `Union \ {Undefined, Null, "", 0, …}`, which requires value-
-//!   level reasoning — a follow-up after Task 6.3.
+//! - `ЗначениеЗаполнено(X)` — true-branch narrows the variable's union
+//!   by removing the type-level "unfilled" witnesses `Ty::Undefined`
+//!   and `Ty::Null` (Track 1 Step K). The false branch is a no-op
+//!   because it admits value-level "empty" shapes (`""`, `0`,
+//!   empty `Date`) that `Ty` cannot represent. See
+//!   [`NarrowingTransfer::apply_guard`] for the contract.
 //! - Symmetric orientations — `Тип("…") = ТипЗнч(X)`,
 //!   `Неопределено <> X` — are accepted verbatim (BSL's `=` is not
 //!   orientation-sensitive and authors routinely flip the sides).
@@ -57,6 +57,8 @@ use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt};
 use hir_def::ty::Ty;
 use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId, Name};
+
+use crate::lower::builtin_names::ty_from_bare_name;
 use la_arena::{Idx, RawIdx};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -83,7 +85,7 @@ pub enum Guard {
     /// union, else `Unknown`.
     ///
     /// `type_name` is kept as the raw string literal — the caller maps
-    /// it through [`hir_def::ty::Ty::from_type_name`].
+    /// it through [`hir_def::ty::ty_from_bare_name`].
     TypeCheck { var: Name, type_name: String },
 
     /// `X = Неопределено` (or `Неопределено = X`).
@@ -99,10 +101,12 @@ pub enum Guard {
 
     /// `ЗначениеЗаполнено(X)`.
     ///
-    /// Recognised purely so hover / analyses can see the guard shape,
-    /// but no narrowing is applied: [`NarrowingTransfer::apply_guard`]
-    /// treats this guard as a no-op on both branches (see the module
-    /// header for why). Precise narrowing is a post-Task-6.3 follow-up.
+    /// True-branch narrows by removing `Ty::Undefined` and `Ty::Null`
+    /// from the variable's `Ty::Union` base — the type-level half of
+    /// `ЗначениеЗаполнено`. False-branch is a no-op because it also
+    /// admits value-level "empty" shapes (`""`, `0`, empty `Date`)
+    /// that `Ty` cannot witness. See
+    /// [`NarrowingTransfer::apply_guard`] for the precise contract.
     ValueFilled { var: Name },
 }
 
@@ -412,7 +416,7 @@ impl NarrowingTransfer {
     /// Apply a recognized guard to the overlay on the given branch.
     ///
     /// True-branch narrowing is always precise:
-    /// - `Guard::TypeCheck { var, type_name }` → `Ty::from_type_name`.
+    /// - `Guard::TypeCheck { var, type_name }` → `ty_from_bare_name`.
     /// - `Guard::IsUndefined { var }` → `Ty::Undefined`.
     /// - `Guard::IsNotUndefined { var }` → `base \ Undefined`.
     ///
@@ -431,21 +435,25 @@ impl NarrowingTransfer {
     /// precisely and an inner guard lacks base-type context to refine
     /// further.
     ///
-    /// `Guard::ValueFilled` has no Task 6.3 refinement: precise
-    /// narrowing requires `Union \ {Undefined, Null, "", 0, …}` which
-    /// needs value-level reasoning. It therefore always produces
-    /// `Ty::Unknown` and so never perturbs the overlay — same no-op
-    /// behaviour as any imprecise result.
+    /// `Guard::ValueFilled` (`ЗначениеЗаполнено(X)`) narrows the **true**
+    /// branch by removing `Ty::Undefined` and `Ty::Null` from the
+    /// variable's base — a precise type-level refinement, distinct
+    /// from the value-level claims (`= ""`, `= 0`, etc.) that
+    /// `ЗначениеЗаполнено` also makes at runtime. The **false** branch
+    /// is left untouched: claiming "definitely Undefined or Null" on
+    /// the false branch would discard `Ty::String`/`Ty::Number` arms
+    /// that could legitimately be empty / zero, contradicting the
+    /// guard's runtime semantics.
     fn apply_guard(&self, state: &mut NarrowState, guard: &Guard, on_true: bool) {
         match guard {
             Guard::TypeCheck { var, type_name } => {
-                let matched = Ty::from_type_name(type_name);
+                let matched = ty_from_bare_name(type_name);
                 let narrowed = if on_true {
                     // True branch: take the matched type, but refine it
                     // with the base when the base is strictly more
                     // precise. Today the only such pair is
                     // `matched = Ty::Array` ↔ `base = Ty::TypedArray(_)`:
-                    // `Ty::from_type_name("Массив")` cannot reconstruct
+                    // `ty_from_bare_name("Массив")` cannot reconstruct
                     // an element witness from the surface name, so a
                     // direct write would clobber `TypedArray(String)`
                     // back to bare `Array`. Promoting the base preserves
@@ -466,10 +474,30 @@ impl NarrowingTransfer {
                     if on_true { self.complement_of(var, &Ty::Undefined) } else { Ty::Undefined };
                 insert_if_informative(state, var, narrowed);
             }
-            Guard::ValueFilled { var: _ } => {
-                // Task 6.3 computes no refinement for ValueFilled →
-                // `Ty::Unknown` is the only available answer, which by
-                // the overlay invariant means "no change".
+            Guard::ValueFilled { var } => {
+                if on_true {
+                    let Some(base) = self.base_types.get(&fold_name(var)) else {
+                        return;
+                    };
+                    let narrowed = ty_difference_unfilled_witnesses(base);
+                    // Skip the write when the residual equals the base
+                    // — the guard didn't actually narrow anything (no
+                    // `Undefined` / `Null` to remove). Storing the
+                    // unchanged base would clobber a prior precise
+                    // overlay entry on the same variable; the overlay
+                    // contract says "no entry means no narrowing", so
+                    // leaving it alone preserves earlier precision.
+                    if &narrowed != base {
+                        insert_if_informative(state, var, narrowed);
+                    }
+                }
+                // False branch: `ЗначениеЗаполнено(X) = false` admits
+                // `Undefined`, `Null`, **and** value-level "empty"
+                // shapes (`""`, `0`, empty `Date`, …). Type-level
+                // narrowing can't represent those, and dropping
+                // non-witness arms from the base would unsoundly
+                // claim more than the guard establishes — leave the
+                // overlay alone.
             }
         }
     }
@@ -477,7 +505,7 @@ impl NarrowingTransfer {
     /// Refine the matched guard type with the variable's recorded base
     /// when the base is strictly more precise.
     ///
-    /// `Ty::from_type_name` resolves surface names like `"Массив"` /
+    /// `ty_from_bare_name` resolves surface names like `"Массив"` /
     /// `"Array"` to bare [`Ty::Array`] — it has no element witness to
     /// reconstruct. If the base for `var` is a [`Ty::TypedArray`], the
     /// guard `Если ТипЗнч(М) = Тип("Массив") Тогда …` should narrow to
@@ -681,6 +709,36 @@ fn ty_difference(base: &Ty, matched: &Ty) -> Ty {
         }
         _ => Ty::Unknown,
     }
+}
+
+/// `base \ {Ty::Undefined, Ty::Null}` — the type-level half of
+/// `ЗначениеЗаполнено(X)` true-branch narrowing.
+///
+/// `is_unfilled_witness` is intentionally narrow: only `Ty::Undefined`
+/// and `Ty::Null` qualify. Value-level "unfilled" shapes (empty
+/// `Ty::String`, zero `Ty::Number`, empty `Ty::Date`) are NOT removed —
+/// `Ty` carries no value witness for them, and pretending we did would
+/// surface `String` / `Number` arms as "definitely non-empty" when the
+/// runtime can still observe an empty string / zero. Non-union bases
+/// collapse to `Ty::Unknown` (overlay no-op), matching the structural
+/// fallback in [`ty_difference`] / [`ty_difference_array_aware`].
+fn ty_difference_unfilled_witnesses(base: &Ty) -> Ty {
+    match base {
+        Ty::Union(members) => {
+            let remaining: Vec<Ty> =
+                members.iter().filter(|m| !is_unfilled_witness(m)).cloned().collect();
+            Ty::union(remaining)
+        }
+        _ => Ty::Unknown,
+    }
+}
+
+/// `Ty::Undefined` and `Ty::Null` are the only type-level shapes
+/// `ЗначениеЗаполнено` can rule out from a static `Ty::Union`. Anything
+/// else — primitives that may be empty at runtime, structural types,
+/// metadata refs — stays in the residual.
+fn is_unfilled_witness(ty: &Ty) -> bool {
+    matches!(ty, Ty::Undefined | Ty::Null)
 }
 
 /// `base \ Ty::Array` with the Array ↔ TypedArray subtype relation
@@ -1717,7 +1775,7 @@ mod tests {
     #[test]
     fn apply_guard_type_check_true_maps_to_named_ty() {
         // `ТипЗнч(Х) = Тип("Строка")` on the true branch maps Х to
-        // Ty::String (lowered via `Ty::from_type_name`). This is the
+        // Ty::String (lowered via `ty_from_bare_name`). This is the
         // path users will actually observe in hover.
         let tr = transfer_no_bases();
         let mut s = NarrowState::new();
@@ -1733,7 +1791,7 @@ mod tests {
     fn apply_guard_type_check_true_promotes_array_to_typed_array_base() {
         // Phase 0 regression guard: `Если ТипЗнч(М) = Тип("Массив")`
         // must NOT downgrade a `TypedArray(String)` base to bare
-        // `Ty::Array`. The matched type from `Ty::from_type_name`
+        // `Ty::Array`. The matched type from `ty_from_bare_name`
         // ("Массив") is `Ty::Array` (no element witness), so without
         // the refinement the overlay would clobber the element type
         // and iteration inside the branch would lose `String`.
@@ -1966,6 +2024,70 @@ mod tests {
         assert_eq!(s.get(&Name::new("Х")), Some(&Ty::String));
     }
 
+    #[test]
+    fn apply_guard_value_filled_true_strips_undefined_and_null() {
+        // `ЗначениеЗаполнено(Х)` true-branch removes both Undefined and
+        // Null from the base union. `String` and other arms survive —
+        // value-level "empty" shapes (`""`) are not type-level.
+        let tr =
+            transfer_with_bases(&[("Х", Ty::union(vec![Ty::String, Ty::Undefined, Ty::Null]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
+        assert_eq!(s.get(&Name::new("Х")), Some(&Ty::String));
+    }
+
+    #[test]
+    fn apply_guard_value_filled_true_strips_only_null() {
+        // Base without `Undefined` — `Null` alone is also an unfilled
+        // witness and must be removed.
+        let tr = transfer_with_bases(&[("Х", Ty::union(vec![Ty::Number, Ty::Null]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
+        assert_eq!(s.get(&Name::new("Х")), Some(&Ty::Number));
+    }
+
+    #[test]
+    fn apply_guard_value_filled_false_leaves_overlay_untouched() {
+        // False branch admits `Undefined`, `Null`, AND value-level
+        // empty shapes (`""`, `0`, …). Type-level narrowing can't
+        // represent the latter, so dropping non-witness arms from the
+        // base would be unsound. Overlay stays empty.
+        let tr =
+            transfer_with_bases(&[("Х", Ty::union(vec![Ty::String, Ty::Undefined, Ty::Null]))]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, false);
+        assert_eq!(s.get(&Name::new("Х")), None);
+    }
+
+    #[test]
+    fn apply_guard_value_filled_true_no_witness_in_base_is_noop() {
+        // Base has no Undefined / Null members → nothing to remove.
+        // The arm short-circuits when the residual equals the base
+        // (Codex pair-mode MEDIUM): writing the unchanged base would
+        // clobber any prior precise narrowing on the same variable.
+        // No overlay entry is the canonical "no claim" shape.
+        let base = Ty::union(vec![Ty::Number, Ty::String]);
+        let tr = transfer_with_bases(&[("Х", base.clone())]);
+        let mut s = NarrowState::new();
+        tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
+        assert_eq!(s.get(&Name::new("Х")), None);
+    }
+
+    #[test]
+    fn apply_guard_value_filled_true_preserves_prior_overlay_when_no_witness() {
+        // Headline of the MEDIUM fix: a prior precise narrowing must
+        // survive a `ЗначениеЗаполнено` true branch when the base has
+        // no `Undefined` / `Null` to strip. Without the equality
+        // short-circuit the unchanged base would clobber the prior
+        // String into the broader Union, widening the overlay.
+        let base = Ty::union(vec![Ty::Number, Ty::String]);
+        let tr = transfer_with_bases(&[("Х", base)]);
+        let mut s = NarrowState::new();
+        s.narrowed.insert(fold_name(&Name::new("Х")), Ty::String);
+        tr.apply_guard(&mut s, &Guard::ValueFilled { var: Name::new("Х") }, true);
+        assert_eq!(s.get(&Name::new("Х")), Some(&Ty::String));
+    }
+
     // --- ty_difference pure unit tests --------------------------------------
 
     #[test]
@@ -1998,6 +2120,40 @@ mod tests {
         // base type via fall-through.
         assert_eq!(ty_difference(&Ty::String, &Ty::String), Ty::Unknown);
         assert_eq!(ty_difference(&Ty::String, &Ty::Number), Ty::Unknown);
+    }
+
+    #[test]
+    fn ty_difference_unfilled_witnesses_strips_both_undefined_and_null() {
+        let base = Ty::union(vec![Ty::String, Ty::Undefined, Ty::Null]);
+        assert_eq!(ty_difference_unfilled_witnesses(&base), Ty::String);
+    }
+
+    #[test]
+    fn ty_difference_unfilled_witnesses_keeps_other_arms_untouched() {
+        // String and Number stay in the residual; only `Undefined`
+        // and `Null` are dropped.
+        let base = Ty::union(vec![Ty::Number, Ty::String, Ty::Undefined, Ty::Null]);
+        let expected = Ty::union(vec![Ty::Number, Ty::String]);
+        assert_eq!(ty_difference_unfilled_witnesses(&base), expected);
+    }
+
+    #[test]
+    fn ty_difference_unfilled_witnesses_non_union_collapses_to_unknown() {
+        // Same conservative answer as `ty_difference` for non-union
+        // bases — the caller's `apply_guard` short-circuit reads the
+        // base type via fall-through.
+        assert_eq!(ty_difference_unfilled_witnesses(&Ty::String), Ty::Unknown);
+        assert_eq!(ty_difference_unfilled_witnesses(&Ty::Undefined), Ty::Unknown);
+    }
+
+    #[test]
+    fn is_unfilled_witness_recognizes_only_undefined_and_null() {
+        assert!(is_unfilled_witness(&Ty::Undefined));
+        assert!(is_unfilled_witness(&Ty::Null));
+        // Value-level "empty" shapes are NOT type-level witnesses.
+        assert!(!is_unfilled_witness(&Ty::String));
+        assert!(!is_unfilled_witness(&Ty::Number));
+        assert!(!is_unfilled_witness(&Ty::Date));
     }
 
     #[test]

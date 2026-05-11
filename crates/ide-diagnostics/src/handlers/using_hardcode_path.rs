@@ -159,10 +159,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic_with_config, check_diagnostics_snapshot_for};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"// Пути к файлам и каталогам
@@ -217,29 +216,68 @@ mod tests {
 	)
 );
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 19, "Expected 19 diagnostics");
-
-        assert_diagnostic_range(code, &diagnostics[0], 5, 16, 38);
-        assert_diagnostic_range(code, &diagnostics[1], 6, 16, 50);
-        assert_diagnostic_range(code, &diagnostics[2], 7, 16, 43);
-        assert_diagnostic_range(code, &diagnostics[3], 8, 16, 59);
-        assert_diagnostic_range(code, &diagnostics[4], 9, 16, 38);
-        assert_diagnostic_range(code, &diagnostics[5], 10, 16, 50);
-        assert_diagnostic_range(code, &diagnostics[6], 11, 16, 27);
-        assert_diagnostic_range(code, &diagnostics[7], 12, 16, 27);
-        assert_diagnostic_range(code, &diagnostics[8], 13, 16, 28);
-        assert_diagnostic_range(code, &diagnostics[9], 15, 16, 41);
-        assert_diagnostic_range(code, &diagnostics[10], 16, 16, 44);
-        assert_diagnostic_range(code, &diagnostics[11], 18, 16, 27);
-        assert_diagnostic_range(code, &diagnostics[12], 19, 16, 36);
-        assert_diagnostic_range(code, &diagnostics[13], 20, 16, 37);
-        assert_diagnostic_range(code, &diagnostics[14], 21, 16, 38);
-        assert_diagnostic_range(code, &diagnostics[15], 32, 10, 27);
-        assert_diagnostic_range(code, &diagnostics[16], 33, 23, 60);
-        assert_diagnostic_range(code, &diagnostics[17], 37, 15, 30);
-        assert_diagnostic_range(code, &diagnostics[18], 39, 22, 48);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodePath,
+            expect![[r#"
+            UsingHardcodePath @ 6:17..6:39
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 7:17..7:51
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 8:17..8:44
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 9:17..9:60
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 10:17..10:39
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 11:17..11:51
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 12:17..12:28
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 13:17..13:28
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 14:17..14:29
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 16:17..16:42
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 17:17..17:45
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 19:17..19:28
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 20:17..20:37
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 21:17..21:38
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 22:17..22:39
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 33:11..33:28
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 34:24..34:61
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 38:16..38:31
+              message: Используется хранение в коде пути к файлу
+              severity: Critical
+            UsingHardcodePath @ 40:23..40:49
+              message: Используется хранение в коде пути к файлу
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -306,6 +344,7 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 16, "Expected 16 diagnostics with reduced Unix paths");
+        // snapshot-skip: custom configuration assertion intentionally retained.
     }
 
     #[test]
@@ -315,9 +354,14 @@ mod tests {
     Путь = "C:\folder\file.txt";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::UsingHardcodePath);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodePath,
+            expect![[r#"
+            UsingHardcodePath @ 3:12..3:32
+              message: Используется хранение в коде пути к файлу
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -327,8 +371,14 @@ mod tests {
     Путь = "/home/user/file.txt";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodePath,
+            expect![[r#"
+            UsingHardcodePath @ 3:12..3:33
+              message: Используется хранение в коде пути к файлу
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -338,8 +388,14 @@ mod tests {
     Путь = "\\server\share\folder";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodePath,
+            expect![[r#"
+            UsingHardcodePath @ 3:12..3:35
+              message: Используется хранение в коде пути к файлу
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -349,8 +405,14 @@ mod tests {
     Путь = "~/Documents/file.txt";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodePath,
+            expect![[r#"
+            UsingHardcodePath @ 3:12..3:34
+              message: Используется хранение в коде пути к файлу
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -360,8 +422,14 @@ mod tests {
     Путь = "%UserProfile%/Documents/file.txt";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UsingHardcodePath,
+            expect![[r#"
+            UsingHardcodePath @ 3:12..3:46
+              message: Используется хранение в коде пути к файлу
+              severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -371,8 +439,7 @@ mod tests {
     URL = "http://www.1c.ru/path/to/resource";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "URLs should be excluded");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingHardcodePath, expect![[r#""#]]);
     }
 
     #[test]
@@ -382,8 +449,7 @@ mod tests {
     Путь = "./catalog";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Relative paths should be excluded");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingHardcodePath, expect![[r#""#]]);
     }
 
     #[test]
@@ -393,12 +459,7 @@ mod tests {
     Путь = "/catalog";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Single path component without standard root should be excluded"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingHardcodePath, expect![[r#""#]]);
     }
 
     #[test]
@@ -408,7 +469,6 @@ mod tests {
     Путь = "/less/test";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Non-standard Unix root should be excluded");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsingHardcodePath, expect![[r#""#]]);
     }
 }

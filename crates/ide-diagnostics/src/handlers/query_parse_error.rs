@@ -101,9 +101,10 @@ fn has_trailing_dot_in_refs(node: &syntax::SyntaxNode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_sdbl_diagnostic};
-    use crate::{DiagnosticCode, Severity};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
+
     #[test]
     fn test_detects_parse_errors_in_query_texts() {
         let code = r#"ТекстЗапроса =
@@ -147,18 +148,20 @@ mod tests {
 "ВЫБРАТЬ ПОЛЕ
 |ИЗ РегистрНакопления.Регистр2.Остатки(Дата1, Дата2, (Измерение1, Измерение2) В
 | (Выбрать Поле1, Поле2 Из Справочник.Справочник1))";"#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        // Expected 3 diagnostics:
-        // - Lines 10-11: incomplete JOIN (first part of concatenated string)
-        // - Lines 15-20: incomplete WHERE (Условие >)
-        // - Lines 28-29: incomplete FROM in batch (we detect whole batch 23-30)
-        assert_eq!(diagnostics.len(), 3, "Expected 3 parse error diagnostics");
-
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::QueryParseError);
-            assert_eq!(diag.severity, Severity::Warning);
-        }
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 10:1..11:62
+                  message: Текст запроса содержит ошибки
+                  severity: Warning
+                QueryParseError @ 15:1..20:13
+                  message: Текст запроса содержит ошибки
+                  severity: Warning
+                QueryParseError @ 23:1..30:3
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -168,8 +171,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ Поле ИЗ Справочник.Контрагенты";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Valid query should not trigger diagnostic");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -179,9 +181,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ Поле ИЗ Таблица ГДЕ Условие >";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Incomplete WHERE should trigger diagnostic");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::QueryParseError);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 3:14..3:53
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -191,8 +198,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ Поле ИЗ  ";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Incomplete FROM should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 3:14..3:33
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -203,8 +216,14 @@ mod tests {
     Запрос = "ВЫБРАТЬ Поле ИЗ   ";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Incomplete FROM should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 3:14..3:34
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -216,10 +235,14 @@ mod tests {
              |ГДЕ Условие >";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Incomplete WHERE in multiline should trigger diagnostic");
-        // Lines are 0-indexed: line 2 = "    Запрос = ..."
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 13, 4, 28);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 3:14..5:29
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -230,8 +253,14 @@ mod tests {
              |ВЫБРАТЬ Поле2 ИЗ";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Batch with partial error should trigger one diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 3:14..4:32
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -242,12 +271,7 @@ mod tests {
     ТекстЗапроса = "Выбрать 1 КАК ЧисловаяКонстанта, 2, ""Строка""";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "SELECT without FROM is valid SDBL, should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -271,23 +295,13 @@ mod tests {
              |    &ВМС_Остатки КАК ВМС_Остатки";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Parameter as FROM data source should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
     fn test_false_positive_complex_query_with_comments() {
         let code = include_str!("fixtures/query_parse_error_complex_valid.bsl");
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Complex query with BSL comments and &Parameter should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -303,8 +317,7 @@ mod tests {
              |        ПО Товары.ID = ПланПродаж.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Valid complex query should not trigger diagnostic");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -315,9 +328,14 @@ mod tests {
     Запрос.Текст = "ВЫБРАТЬ Поле ИЗ Т ГДЕ Поле ССЫЛКА Документ.";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Trailing dot in REFS should trigger diagnostic");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::QueryParseError);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 3:20..3:65
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -328,8 +346,7 @@ mod tests {
     Запрос.Текст = "ВЫБРАТЬ Поле ИЗ Т ГДЕ Поле ССЫЛКА Документ.ПриходныйОрдер";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Valid REFS should not trigger diagnostic");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -345,11 +362,13 @@ mod tests {
                    |    Задания.Источник ССЫЛКА Документ."+ИмяДокумента+"";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Dynamic query with trailing dot should trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 3:20..8:59
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
         );
     }
 
@@ -372,13 +391,14 @@ mod tests {
                    |    И ЗаданияДляПроцессаОбработкиВходногоКонтроля.Источник ССЫЛКА Документ."+ИмяДокумента+"";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Original user query with 'ССЫЛКА Документ.' should trigger diagnostic"
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::QueryParseError,
+            expect![[r#"
+                QueryParseError @ 3:20..14:97
+                  message: Текст запроса содержит ошибки
+                  severity: Warning"#]],
         );
-        assert_eq!(diagnostics[0].code, DiagnosticCode::QueryParseError);
     }
 
     #[test]
@@ -393,8 +413,7 @@ mod tests {
                    |    Т.Статус В (ЗНАЧЕНИЕ(Перечисление.Статусы.Новый), ЗНАЧЕНИЕ(Перечисление.Статусы.Ошибка))";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "IN with multiple VALUE() should not trigger diagnostic");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -425,12 +444,7 @@ mod tests {
                    |    Таймштамп";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Complex query with IN (VALUE(), VALUE()) should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -440,8 +454,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ КОЛИЧЕСТВО(РАЗЛИЧНЫЕ Т.Поле) КАК Кол ИЗ Таблица КАК Т";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "COUNT(DISTINCT expr) is valid SDBL");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -518,12 +531,7 @@ mod tests {
     |УНИЧТОЖИТЬ ДвиженияТоварыКОформлениюВнутреннихПотребленийПередЗаписью";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Valid complex query with subquery, UNION ALL, batch, HAVING, DROP should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -568,12 +576,7 @@ mod tests {
     |    Набор.Склад";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Valid query with BSL comment between continuation lines should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 
     #[test]
@@ -614,11 +617,6 @@ mod tests {
         |    И БлокиНавигации.ПометкаУдаления = ЛОЖЬ");
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Query with tabular part field list Obj.TabPart.(Field1, Field2) should not trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::QueryParseError, expect![[r#""#]]);
     }
 }

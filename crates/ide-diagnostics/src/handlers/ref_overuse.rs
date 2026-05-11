@@ -46,8 +46,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
+
     #[test]
     fn test_ref_overuse_field_ref_in_middle() {
         // T.Ссылка.Field - accessing field through .Ссылка
@@ -62,13 +64,7 @@ mod tests {
     |   Справочник.Контрагенты КАК Контрагенты";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Without metadata, type cannot be resolved → no diagnostic emitted"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -85,13 +81,7 @@ mod tests {
     |   РегистрСведений.СлужебныеФайлы КАК СлужебныеФайлы";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Without metadata, type cannot be resolved → no diagnostic emitted"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -108,13 +98,7 @@ mod tests {
     |   &Таблица КАК Таблица";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Without metadata, type cannot be resolved → no diagnostic emitted"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -129,9 +113,7 @@ mod tests {
     |   Справочник.Контрагенты КАК Контрагенты";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert!(diagnostics.is_empty(), "Simple T.Ссылка should not trigger diagnostic");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -146,9 +128,7 @@ mod tests {
     |   Документ.Документ1.ТабличнаяЧасть1 КАК Таблица";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert!(diagnostics.is_empty(), "Tabular section's .Ссылка should not trigger diagnostic");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -162,13 +142,7 @@ mod tests {
     Запрос.Текст = "ВЫБРАТЬ Документ.Документ1.Файл.Ссылка КАК п1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Without metadata, type cannot be resolved → no diagnostic emitted"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -187,13 +161,7 @@ mod tests {
     |   Контрагенты.Ссылка.ИНН = &ИНН";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Without metadata, type cannot be resolved → no diagnostic emitted"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -218,13 +186,7 @@ mod tests {
     |   Справочник.Пользователи.ДополнительныеРеквизиты КАК Пользователи";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Without metadata, type cannot be resolved → no diagnostic emitted"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -242,12 +204,7 @@ mod tests {
     |   БизнесПроцесс.Согласование.Исполнители КАК Исполнители";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        assert!(
-            diagnostics.is_empty(),
-            "Tabular section .Ссылка.Field (owner's field) should NOT trigger diagnostic"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 
     #[test]
@@ -263,15 +220,6 @@ mod tests {
     |   Документ.Заказ.Товары КАК Товары";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        // Здесь .Ссылка.Организация - ок (владелец), но .Организация.ИНН - уже JOIN
-        // Но наша диагностика RefOveruse ловит только .Ссылка, а не вложенные разыменования.
-        // QueryNestedFieldsByDot должна поймать это.
-        // RefOveruse здесь НЕ должна срабатывать, т.к. .Ссылка для ТЧ - это ок.
-        assert!(
-            diagnostics.is_empty(),
-            "RefOveruse should not trigger for ТЧ.Ссылка.Field pattern (but QueryNestedFieldsByDot should)"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RefOveruse, expect![[r#""#]]);
     }
 }

@@ -281,10 +281,9 @@ fn has_return_anywhere(body: &Body, stmt_id: StmtId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic, check_ast_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_basic_missing_guard() {
         let code = r#"
@@ -293,7 +292,10 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect missing guard in event handler");
+        expect![[r#"
+            DataExchangeLoading @ 2:11..2:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]].assert_eq(&format_diags(code, &diagnostics));
         assert_eq!(diagnostics[0].code, DiagnosticCode::DataExchangeLoading);
         assert_eq!(diagnostics[0].severity, crate::Severity::Critical);
     }
@@ -309,7 +311,7 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Valid guard should not report");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -323,7 +325,7 @@ Procedure BeforeWrite(Cancel)
 EndProcedure
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Valid English guard should not report");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -335,7 +337,10 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Guard without return should report");
+        expect![[r#"
+            DataExchangeLoading @ 2:11..2:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -346,7 +351,7 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should ignore non-monitored procedures");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -359,7 +364,7 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should handle case-insensitive keywords");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -372,11 +377,7 @@ EndProcedure
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Complex condition with DataExchange.Load should be valid"
-        );
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -388,8 +389,10 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 0, 10, 22);
+        expect![[r#"
+            DataExchangeLoading @ 1:11..1:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -402,8 +405,10 @@ EndProcedure
     EndIf;
 EndProcedure"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 0, 10, 17);
+        expect![[r#"
+            DataExchangeLoading @ 1:11..1:18
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -416,8 +421,10 @@ EndProcedure"#;
 
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 0, 10, 22);
+        expect![[r#"
+            DataExchangeLoading @ 1:11..1:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -437,7 +444,10 @@ EndProcedure"#;
             .parameters
             .insert(DiagnosticCode::DataExchangeLoading, serde_json::json!({"findFirst": true}));
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 1, "findFirst=true: ForEach as first stmt triggers");
+        expect![[r#"
+            DataExchangeLoading @ 1:11..1:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -453,7 +463,7 @@ EndProcedure"#;
     EndIf;
 EndProcedure"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "findFirst=false: guard anywhere in body is valid");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -469,7 +479,7 @@ EndProcedure"#;
     КонецЕсли;
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Guard with nested logic and Return should be valid");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -484,6 +494,6 @@ EndProcedure"#;
 
 КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Negated guard with Return should be valid");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

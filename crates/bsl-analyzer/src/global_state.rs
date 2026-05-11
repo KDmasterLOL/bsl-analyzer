@@ -35,9 +35,14 @@ pub enum Task {
     /// Dependency preloading completed for a file.
     DependenciesPreloaded { file_id: vfs::FileId, count: usize },
     /// Diagnostics computed in background thread.
-    DiagnosticsReady { uri: Url, diagnostics: Vec<lsp_types::Diagnostic>, generation: u64 },
+    DiagnosticsReady {
+        uri: Url,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+        generation: u64,
+        completed_at: std::time::Instant,
+    },
     /// Diagnostics cancelled (Salsa query was interrupted).
-    DiagnosticsCancelled { generation: u64 },
+    DiagnosticsCancelled { generation: u64, completed_at: std::time::Instant },
     /// Request to preload external files discovered during semantic highlighting.
     PreloadExternalFiles { files: Vec<vfs::FileId> },
     /// Response from an async `on_latency` request handler, ready for the main

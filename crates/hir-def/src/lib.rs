@@ -26,14 +26,15 @@
 
 pub mod body;
 pub mod call_graph;
-pub mod cognitive_complexity;
+pub mod catch_class;
 pub mod conditional_tree;
 pub mod configs;
-pub mod cyclomatic_complexity;
 pub mod docs;
 pub mod hir;
 pub mod item_tree;
+pub mod metrics;
 pub mod module_index;
+pub mod module_structure;
 pub mod name;
 pub mod path;
 pub mod queries;
@@ -53,7 +54,7 @@ use vfs::FileId;
 
 pub use body::{
     lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, DeprecatedKind8312,
-    ExternalRef, LowerResult, ManagerType, RedundantAccessKind,
+    ExistingBindingKind, ExternalRef, LowerResult, ManagerType, RedundantAccessKind,
 };
 pub use hir::{BinaryOp, Binding, Expr, IfStmt, Literal, Stmt, UnaryOp};
 
@@ -278,6 +279,14 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// }
     /// ```
     fn method_docs(&self, method: MethodId) -> Option<Arc<crate::docs::MethodDocs>>;
+
+    /// Get parsed documentation for a module-level variable.
+    ///
+    /// Pre-computed during `SymbolTree` construction and read from
+    /// `VariableSymbol.docs` (cached via `symbol_tree_query` LRU=512).
+    /// Returns `None` when the variable carries no description anywhere
+    /// (no leading, inter-annotation, or trailing comment).
+    fn variable_docs(&self, variable: VariableId) -> Option<Arc<crate::docs::VariableDocs>>;
 
     /// Get workspace-wide symbol index for CommonModules.
     ///

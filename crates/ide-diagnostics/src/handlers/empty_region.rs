@@ -32,15 +32,16 @@
 //! - Reports only inner if outer has code
 //!
 //! ## Implementation
-//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
-//!
-//! Preprocessor regions ARE processed by HIR lowering for control flow analysis.
-//! The diagnostic is emitted in `hir-def/body/lower/preproc.rs` during region processing.
+//! Track 2 Phase C §3.4 — handler reads the cached
+//! `RegionTree::is_region_empty` bit (computed at AST→`RegionTree`
+//! lowering time). The legacy `BodyDiagnostic::EmptyRegion` emit in
+//! `body/lower/preproc.rs` was retired in this slice; the
+//! single-source classification lives next to the rest of the region
+//! data on `RegionData`.
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -56,30 +57,66 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::EmptyRegion` is encountered.
-pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+/// Track 2 Phase C §3.4 — handler-side detection consuming the
+/// cached `RegionTree::is_region_empty` bit via `ctx.region_tree()`.
+/// Replaces the legacy `from_hir` adapter (BodyDiagnostic-fed) and
+/// the AST walks in `body/lower/preproc::is_empty_region`.
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::EmptyRegion;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
-    Some(Diagnostic {
-        code,
-        message: format!("Область '{}' пуста", name),
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+    let region_tree = ctx.region_tree();
+    let mut out = Vec::new();
+    for (idx, region) in region_tree.regions() {
+        if !region_tree.is_region_empty(idx) {
+            continue;
+        }
+        out.push(Diagnostic {
+            code,
+            message: format!("Область '{}' пуста", region.name.as_str()),
+            severity: ctx.severity(code),
+            range: region.range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+    // Sort by source position for deterministic output (the
+    // `Arena::iter` order isn't position-sorted by construction).
+    out.sort_by_key(|d| d.range.start());
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_hir_diagnostic, format_diags};
+    use crate::DiagnosticCode;
+    use expect_test::expect;
+    /// Codex round-A regression guard for the §3.4 migration: the
+    /// retired `lower_region_stmts` emit ran inside method lowering
+    /// for method-local regions. Without recursing into method
+    /// bodies in `RegionTreeBuilder::collect_regions`, the migrated
+    /// handler would silently miss them.
+    #[test]
+    fn test_method_local_empty_region_is_detected() {
+        let code = r#"Процедура Тест()
+    #Область ВнутриМетода
+    // комментарий
+    #КонецОбласти
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        expect![[r#"
+            EmptyRegion @ 2:5..4:18
+              message: Область 'ВнутриМетода' пуста
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diags));
+        // snapshot-skip: message-substring assertion intentionally retained.
+        assert!(diags[0].message.contains("ВнутриМетода"));
+    }
+
     #[test]
     fn test_comment_only_region_is_empty() {
         let code = r#"#Область Тест
@@ -87,9 +124,13 @@ mod tests {
 #КонецОбласти"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range_multiline(code, diags[0], 0, 0, 2, 13);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        expect![[r#"
+            EmptyRegion @ 1:1..3:14
+              message: Область 'Тест' пуста
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diags));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags[0].message.contains("Тест"));
     }
 
@@ -104,9 +145,18 @@ mod tests {
 #КонецОбласти"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(diags.len(), 2);
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        expect![[r#"
+            EmptyRegion @ 1:1..6:14
+              message: Область 'ВнешняяОбласть' пуста
+              severity: Hint
+            EmptyRegion @ 3:1..5:14
+              message: Область 'ВнутренняяОбласть' пуста
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &diags));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags.iter().any(|d| d.message.contains("ВнешняяОбласть")));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(diags.iter().any(|d| d.message.contains("ВнутренняяОбласть")));
     }
 
@@ -117,10 +167,7 @@ mod tests {
 Перем А;
 #КонецОбласти
         "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 0, "Region with variable is not empty");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::EmptyRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -131,10 +178,7 @@ mod tests {
 КонецФункции
 #КонецОбласти
         "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 0, "Region with function is not empty");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::EmptyRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -145,10 +189,17 @@ mod tests {
     #КонецОбласти
 #КонецОбласти
         "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 2, "Both nested empty regions reported");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::EmptyRegion,
+            expect![[r#"
+                EmptyRegion @ 2:1..5:14
+                  message: Область 'Внешняя' пуста
+                  severity: Hint
+                EmptyRegion @ 3:5..4:18
+                  message: Область 'Внутренняя' пуста
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -162,8 +213,13 @@ mod tests {
         "#;
         let diagnostics = check_hir_diagnostic(code);
         let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 1, "Only inner empty region reported");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        expect![[r#"
+            EmptyRegion @ 4:5..5:18
+              message: Область 'Внутренняя' пуста
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &empty_region_diags));
+        // snapshot-skip: message-substring assertion intentionally retained.
         assert!(empty_region_diags[0].message.contains("Внутренняя"));
     }
 
@@ -178,9 +234,16 @@ mod tests {
 // comment only
 #КонецОбласти
         "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let empty_region_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
-        assert_eq!(empty_region_diags.len(), 2, "Both English and Russian empty regions reported");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::EmptyRegion,
+            expect![[r#"
+                EmptyRegion @ 2:1..4:11
+                  message: Область 'Test' пуста
+                  severity: Hint
+                EmptyRegion @ 6:1..8:14
+                  message: Область 'Тест' пуста
+                  severity: Hint"#]],
+        );
     }
 }

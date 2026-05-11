@@ -47,6 +47,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use expect_test::expect;
     #[test]
     fn test_semicolon_presence() {
         let code = r#"А = 0;
@@ -69,18 +70,17 @@ mod tests {
     КонецЦикла;  // Здесь ошибки не будет, т.к. ошибка разбора
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SemicolonPresence).collect();
-
-        assert_eq!(diags.len(), 2, "Expected 2 diagnostics");
-
-        // "А = 0" - last token is "0" at position 6-7
-        assert_diagnostic_range(code, diags[0], 3, 6, 7);
-
-        // "КонецЕсли" is 9 characters
-        assert_diagnostic_range(code, diags[1], 4, 0, 9);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SemicolonPresence,
+            expect![[r#"
+            SemicolonPresence @ 4:7..4:8
+              message: Пропущена точка с запятой в конце выражения
+              severity: Information
+            SemicolonPresence @ 5:1..5:10
+              message: Пропущена точка с запятой в конце выражения
+              severity: Information"#]],
+        );
     }
 
     #[test]
@@ -91,10 +91,7 @@ mod tests {
     Б = 2;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SemicolonPresence).collect();
-        assert_eq!(diags.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SemicolonPresence, expect![[r#""#]]);
     }
 
     #[test]
@@ -105,10 +102,7 @@ mod tests {
     А = 1;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SemicolonPresence).collect();
-        assert_eq!(diags.len(), 0, "Labels should not require semicolons");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SemicolonPresence, expect![[r#""#]]);
     }
 
     #[test]
@@ -120,11 +114,13 @@ mod tests {
         Возврат
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SemicolonPresence).collect();
-        assert_eq!(diags.len(), 1, "Should detect missing semicolon after Возврат");
-        // Возврат is on line 2 (0-indexed), columns 8-15 (Возврат = 7 chars)
-        assert_diagnostic_range(code, diags[0], 2, 8, 15);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SemicolonPresence,
+            expect![[r#"
+            SemicolonPresence @ 3:9..3:16
+              message: Пропущена точка с запятой в конце выражения
+              severity: Information"#]],
+        );
     }
 }

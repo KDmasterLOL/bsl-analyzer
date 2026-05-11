@@ -164,8 +164,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic_with_config};
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_extract_language_keys() {
         let keys = extract_language_keys("ru='Привет'; en='Hello'");
@@ -240,13 +241,17 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expected 3 diagnostics with default config (declaredLanguages = "ru")
-        assert_eq!(diagnostics.len(), 3, "Should find 3 diagnostics for ru only");
-
-        // Verify exact positions (0-indexed)
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 12, 16, 12, 22);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 13, 30, 13, 86);
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 16, 30, 16, 66);
+        expect![[r#"
+            MultilingualStringHasAllDeclaredLanguages @ 13:17..13:23
+              message: Добавьте строки для языков: [ru]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 14:31..14:87
+              message: Добавьте строки для языков: [ru]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 17:31..17:67
+              message: Добавьте строки для языков: [ru]
+              severity: Error"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -314,8 +319,33 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Expected 8 diagnostics with declaredLanguages = "ru,en"
-        assert_eq!(diagnostics.len(), 8, "Should find 8 diagnostics for ru,en");
+        let snapshot = format_diags(code, &diagnostics).replace("[ru, en]", "[en, ru]");
+        expect![[r#"
+            MultilingualStringHasAllDeclaredLanguages @ 13:17..13:23
+              message: Добавьте строки для языков: [en, ru]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 14:31..14:87
+              message: Добавьте строки для языков: [en, ru]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 16:28..16:66
+              message: Добавьте строки для языков: [en]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 17:31..17:67
+              message: Добавьте строки для языков: [ru]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 28:38..28:76
+              message: Добавьте строки для языков: [en]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 32:68..32:87
+              message: Добавьте строки для языков: [en]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 34:70..34:98
+              message: Добавьте строки для языков: [en]
+              severity: Error
+            MultilingualStringHasAllDeclaredLanguages @ 43:9..43:90
+              message: Добавьте строки для языков: [en]
+              severity: Error"#]]
+        .assert_eq(&snapshot);
     }
 
     #[test]
@@ -334,7 +364,7 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0, "Should not detect when all languages present");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -353,6 +383,6 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0, "Should skip NStr inside StrTemplate");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

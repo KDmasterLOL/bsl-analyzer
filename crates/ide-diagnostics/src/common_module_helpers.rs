@@ -70,6 +70,51 @@ pub fn find_common_module_for_file(
         .cloned()
 }
 
+/// CFE-aware variant of [`find_common_module_for_file`].
+///
+/// Returns the CommonModule whose source file matches the current
+/// file's path, searched across **every** visible configuration (main +
+/// extensions) rather than only the main one. Order is the same as
+/// `DiagnosticsContext::visible_configurations()` — main first, then
+/// extensions in registration order — so the first match is
+/// deterministic.
+///
+/// CommonModule URIs in metadata are stored config-relative
+/// (`CommonModules/{Name}/Ext/Module.bsl`); each candidate URI is
+/// resolved against its `VisibleConfig.root` before comparison so the
+/// match works under multi-root CFE setups. Providers that don't
+/// supply a meaningful root (streaming/test providers) fall through to
+/// the legacy raw-URI comparison so single-config behaviour is
+/// preserved.
+///
+/// Handlers that key off "is *this file* a CommonModule?" without
+/// caring whether it lives in the main configuration or in an
+/// extension (`ProtectedModule`, `PrivilegedModuleMethodCall`,
+/// `ExecuteExternalCodeInCommonModule`) should prefer this over the
+/// main-only [`find_common_module_for_file`].
+pub fn find_common_module_for_file_anywhere(
+    ctx: &crate::DiagnosticsContext,
+) -> Option<bsl_metadata::CommonModule> {
+    let file_path = ctx.file_path()?;
+    let file_path_lower = file_path.to_lowercase();
+
+    for visible in ctx.visible_configurations() {
+        let module = visible.configuration.common_modules().iter().find(|m| {
+            let Some(uri) = m.uri() else { return false };
+            if visible.root.as_os_str().is_empty() {
+                // Single-config provider: legacy raw-URI comparison.
+                uri.to_lowercase() == file_path_lower
+            } else {
+                visible.root.join(uri).to_string_lossy().to_lowercase() == file_path_lower
+            }
+        });
+        if let Some(module) = module {
+            return Some(module.clone());
+        }
+    }
+    None
+}
+
 /// Reusable check for CommonModuleName* diagnostics.
 ///
 /// `name_should_contain` = true  — error if name does NOT contain keyword

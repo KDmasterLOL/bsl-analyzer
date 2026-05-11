@@ -367,12 +367,6 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         callee_node.clone()
     };
 
-    // Track safe mode method name for later diagnostic check
-    let mut safe_mode_name: Option<String> = None;
-
-    // Track privileged mode method name for later diagnostic check
-    let mut privileged_mode_name: Option<String> = None;
-
     // Track if this is a SafeMode() query call for UnsafeSafeModeMethodCall
     let mut is_safe_mode_query_call = false;
 
@@ -383,22 +377,15 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     if actual_callee.kind() == SyntaxKind::IDENT {
         let name = actual_callee.text().to_string();
 
-        // Check for safe mode methods FIRST (before name is moved)
-        use super::diagnostics::is_safe_mode_method;
-        if is_safe_mode_method(&name) {
-            safe_mode_name = Some(name.clone());
-        }
-
         // Check for SafeMode() query (the getter)
+        // Track 2 §1.6 Group C: SetPrivilegedMode and DisableSafeMode
+        // detection moved to ide-diagnostics handlers (lattice-driven
+        // through `module_security_state`). Only the SafeMode() query
+        // (the *getter*, used by `UnsafeSafeModeMethodCall`) stays here
+        // because it has no const-prop / counter dependency.
         use super::diagnostics::is_safe_mode_query;
         if is_safe_mode_query(&name) {
             is_safe_mode_query_call = true;
-        }
-
-        // Check for privileged mode methods
-        use super::diagnostics::is_set_privileged_mode;
-        if is_set_privileged_mode(&name) {
-            privileged_mode_name = Some(name.clone());
         }
 
         // Check for deprecated global methods (8.3.12)
@@ -690,65 +677,11 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     let args =
         arg_list_node.as_ref().map(|arg_list| lower_arg_list(ctx, arg_list)).unwrap_or_default();
 
-    // Check for DisableSafeMode diagnostic after args are lowered
-    if let Some(method_name) = safe_mode_name {
-        // Check if this is a safe call by examining first argument
-        let is_safe = if !args.is_empty() {
-            match &ctx.body.exprs[args[0]] {
-                Expr::Literal(Literal::Bool(true)) => {
-                    // SetSafeMode(True) is safe
-                    method_name.to_lowercase() == "установитьбезопасныйрежим"
-                        || method_name.to_lowercase() == "setsafemode"
-                }
-                Expr::Literal(Literal::Bool(false)) => {
-                    // SetSafeModeDisabled(False) is safe
-                    method_name.to_lowercase() == "установитьотключениебезопасногорежима"
-                        || method_name.to_lowercase() == "setsafemodedisabled"
-                }
-                _ => false, // Variable or other expression - unsafe
-            }
-        } else {
-            false // No argument - unsafe
-        };
-
-        if !is_safe {
-            // Find the method name token for the range
-            let method_token = callee_node
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind() == SyntaxKind::IDENT);
-
-            if let Some(token) = method_token {
-                ctx.diagnostics.push(BodyDiagnostic::DisableSafeMode {
-                    method_name,
-                    range: token.text_range(),
-                });
-            }
-        }
-    }
-
-    // Check for SetPrivilegedMode diagnostic after args are lowered
-    if privileged_mode_name.is_some() {
-        // Safe only if argument is literal False (disabling privileged mode)
-        let is_safe = if !args.is_empty() {
-            matches!(&ctx.body.exprs[args[0]], Expr::Literal(Literal::Bool(false)))
-        } else {
-            false // No argument - not safe
-        };
-
-        if !is_safe {
-            // Find the method name token for the range
-            let method_token = callee_node
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind() == SyntaxKind::IDENT);
-
-            if let Some(token) = method_token {
-                ctx.diagnostics
-                    .push(BodyDiagnostic::SetPrivilegedModeCall { range: token.text_range() });
-            }
-        }
-    }
+    // Track 2 §1.6 Group C: SetPrivilegedMode + DisableSafeMode
+    // detection lives in `ide-diagnostics` and consumes the §1.2
+    // saturating-counter lattice via `open_events`. The literal-arg
+    // check that used to live here is replaced by a const-prop overlay
+    // that handles `Перем = Истина; Установить(Перем)` correctly.
 
     // Check for UnsafeSafeModeMethodCall: SafeMode() used without explicit comparison
     if is_safe_mode_query_call && is_unsafe_safe_mode_context(node) {
@@ -1661,8 +1594,14 @@ pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprIdx, rhs: ExprIdx) -> bool {
 /// - Information disclosure
 /// - May violate security policies
 fn is_os_users_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "пользователиос" | "osusers")
+    // Track 2 §1.6: registry-driven lookup. The legacy hardcoded
+    // pattern (kept in the parity test
+    // `bsl-platform/tests/security_registry.rs::legacy_recognizer_parity`)
+    // remains the contractual baseline; this body just consults the
+    // single-source-of-truth registry for the same name set.
+    bsl_platform::security::registry()
+        .lookup_global(name)
+        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::OsUsers))
 }
 
 /// Check if method name is an external application starting method.
@@ -1677,23 +1616,12 @@ fn is_os_users_method(name: &str) -> bool {
 /// - ОткрытьПроводник
 /// - ОткрытьФайл
 fn is_external_app_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "командасистемы"
-            | "system"
-            | "запуститьсистему"
-            | "runsystem"
-            | "запуститьприложение"
-            | "runapp"
-            | "начатьзапускприложения"
-            | "beginrunningapplication"
-            | "запуститьприложениеасинх"
-            | "runappasync"
-            | "запуститьпрограмму"
-            | "открытьпроводник"
-            | "открытьфайл"
-    )
+    // Track 2 §1.6: registry-driven (single source of truth in
+    // `bsl-platform::security::registry`). Legacy name list kept under
+    // contract by the registry parity test (see `is_os_users_method`).
+    bsl_platform::security::registry()
+        .lookup_global(name)
+        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::ExternalApp))
 }
 
 /// Check if type name indicates file system access (NEW expression).
@@ -1712,43 +1640,13 @@ fn is_external_app_method(name: &str) -> bool {
 /// - FileStreamsManager - file stream management
 /// - DataWriter/Reader - data file operations
 fn is_file_system_type(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "file"
-            | "файл"
-            | "xbase"
-            | "htmlwriter"
-            | "записьhtml"
-            | "htmlreader"
-            | "чтениеhtml"
-            | "fastinfosetreader"
-            | "чтениеfastinfoset"
-            | "fastinfosetwriter"
-            | "записьfastinfoset"
-            | "xsltransform"
-            | "преобразованиеxsl"
-            | "zipfilewriter"
-            | "записьzipфайла"
-            | "zipfilereader"
-            | "чтениеzipфайла"
-            | "textreader"
-            | "чтениетекста"
-            | "textwriter"
-            | "записьтекста"
-            | "textextraction"
-            | "извлечениетекста"
-            | "binarydata"
-            | "двоичныеданные"
-            | "filestream"
-            | "файловыйпоток"
-            | "filestreamsmanager"
-            | "менеджерфайловыхпотоков"
-            | "datawriter"
-            | "записьданных"
-            | "datareader"
-            | "чтениеданных"
-    )
+    // Track 2 §1.6: constructor side — registry-driven lookup against
+    // `EntryKind::Constructor` (e.g. `Новый Файл(...)` → file system).
+    // Parity with the legacy hardcoded list is asserted by the
+    // registry parity test in `bsl-platform/tests/security_registry.rs`.
+    bsl_platform::security::registry()
+        .lookup_constructor(name)
+        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::FileSystem))
 }
 
 /// Check if type name is a style element (Цвет/Color, Шрифт/Font, Рамка/Border).
@@ -1947,83 +1845,13 @@ fn extract_type_name_from_first_arg(node: &SyntaxNode) -> Option<String> {
 /// - Extension operations: УстановитьРасширениеРаботыСФайлами, etc.
 /// - Async operations: КопироватьФайлАсинх, СоздатьКаталогАсинх, etc.
 fn is_file_system_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        // File operations
-        "значениевфайл"
-            | "valuetofile"
-            | "копироватьфайл"
-            | "filecopy"
-            | "объединитьфайлы"
-            | "mergefiles"
-            | "переместитьфайл"
-            | "movefile"
-            | "разделитьфайл"
-            | "splitfile"
-            | "создатькаталог"
-            | "createdirectory"
-            | "удалитьфайлы"
-            | "deletefiles"
-            // Directory operations
-            | "каталогпрограммы"
-            | "bindir"
-            | "каталогвременныхфайлов"
-            | "tempfilesdir"
-            | "каталогдокументов"
-            | "documentsdir"
-            | "рабочийкаталогданныхпользователя"
-            | "userdataworkdir"
-            // Extension operations
-            | "начатьподключениерасширенияработысфайлами"
-            | "beginattachingfilesystemextension"
-            | "начатьустановкурасширенияработысфайлами"
-            | "begininstallfilesystemextension"
-            | "установитьрасширениеработысфайлами"
-            | "installfilesystemextension"
-            | "установитьрасширениеработысфайламиасинх"
-            | "installfilesystemextensionasync"
-            | "подключитьрасширениеработысфайламиасинх"
-            | "attachfilesystemextensionasync"
-            // Async directory operations
-            | "каталогвременныхфайловасинх"
-            | "tempfilesdirasync"
-            | "каталогдокументовасинх"
-            | "documentsdirasync"
-            | "рабочийкаталогданныхпользователяасинч"
-            | "userdataworkdirasync"
-            | "начатьполучениякаталогавременныхфайлов"
-            | "begingettingtempfilesdir"
-            | "начатьполучениякаталогадокументов"
-            | "begingettingdocumentsdir"
-            | "начатьполучениярабочегокаталогаданныхпользователя"
-            | "begingettinguserdataworkdir"
-            // Async file operations
-            | "копироватьфайласинх"
-            | "copyfileasync"
-            | "найтифайлыасинч"
-            | "findfilesasync"
-            | "начатькопированияфайла"
-            | "begincopyingfile"
-            | "начатьперемещенияфайла"
-            | "beginmovingfile"
-            | "начатьпоискфайлов"
-            | "beginfindingfiles"
-            | "начатьсозданиядвоичныхданныхизфайла"
-            | "begincreatebinarydatafromfile"
-            | "начатьсозданиякаталога"
-            | "begincreatingdirectory"
-            | "начатьудаленияфайлов"
-            | "begindeletingfiles"
-            | "переместитьфайласинч"
-            | "movefileasync"
-            | "создатьдвоичныеданныеизфайласинч"
-            | "createbinarydatafromfileasync"
-            | "создатькаталогасинч"
-            | "createdirectoryasync"
-            | "удалитьфайлыасинч"
-            | "deletefilesasync"
-    )
+    // Track 2 §1.6: registry-driven (`Category::FileSystem`,
+    // `EntryKind::GlobalMethod`). The legacy hardcoded list lives now
+    // in `bsl-platform::security::registry::ENTRIES` as the single
+    // source of truth; the registry parity test guards against drift.
+    bsl_platform::security::registry()
+        .lookup_global(name)
+        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::FileSystem))
 }
 
 /// Check if method name is FormDataToValue.

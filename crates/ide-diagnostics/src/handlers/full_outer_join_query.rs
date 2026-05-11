@@ -68,9 +68,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::check_sdbl_diagnostic;
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
+    use expect_test::expect;
+
     #[test]
     fn test_fixture_full_outer_join_detected_left_join_not() {
         // Fixture Тест1: has ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ -> 1 diagnostic
@@ -88,15 +89,13 @@ mod tests {
                    |            ПО ПланПродаж.Номенклатура = ФактическиеПродажи.Номенклатура
                    |        ПО Товары.Номенклатура = ПланПродаж.Номенклатура";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code_test1, check);
-        assert_eq!(diagnostics.len(), 1, "ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ should trigger");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::FullOuterJoinQuery);
-        assert!(diagnostics[0].message.contains("FULL OUTER JOIN"));
-        let range_text = &code_test1[diagnostics[0].range];
-        assert!(
-            range_text.contains("ПОЛНОЕ") || range_text.contains("FULL"),
-            "Diagnostic should highlight FULL JOIN keywords, got: '{}'",
-            range_text
+        check_diagnostics_snapshot_for(
+            code_test1,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+                FullOuterJoinQuery @ 10:33..12:29
+                  message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+                  severity: Warning"#]],
         );
 
         let code_test2 = r#"Процедура Тест2()
@@ -110,8 +109,11 @@ mod tests {
                    |            ПО ПланПродаж.Номенклатура = ФактическиеПродажи.Номенклатура
                    |        ПО Товары.Номенклатура = ПланПродаж.Номенклатура";
 КонецПроцедуры"#;
-        let diagnostics = check_sdbl_diagnostic(code_test2, check);
-        assert_eq!(diagnostics.len(), 0, "LEFT JOINs only should not trigger");
+        check_diagnostics_snapshot_for(
+            code_test2,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -121,8 +123,14 @@ Procedure Test()
     Query = "SELECT * FROM T1 FULL JOIN T2 ON T1.ID = T2.ID";
 EndProcedure
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "FULL JOIN should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+            FullOuterJoinQuery @ 3:31..3:60
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -132,8 +140,14 @@ EndProcedure
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ПОЛНОЕ СОЕДИНЕНИЕ Т2 ПО Т1.ID = Т2.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "ПОЛНОЕ СОЕДИНЕНИЕ should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+            FullOuterJoinQuery @ 3:31..3:68
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -148,8 +162,7 @@ EndProcedure
                    |        ЛЕВОЕ СОЕДИНЕНИЕ ПланПродаж";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "LEFT JOIN should not trigger");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::FullOuterJoinQuery, expect![[r#""#]]);
     }
 
     #[test]
@@ -159,8 +172,14 @@ EndProcedure
     Query = "SELECT * FROM T1 ПОЛНОЕ СОЕДИНЕНИЕ T2 ПО T1.ID = T2.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "FULL JOIN without OUTER should trigger");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+            FullOuterJoinQuery @ 3:31..3:68
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -170,8 +189,17 @@ EndProcedure
     Query = "SELECT * FROM T1 FULL OUTER JOIN T2 ON T1.A = T2.A FULL OUTER JOIN T3 ON T1.B = T3.B";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Should detect multiple FULL JOINs");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+            FullOuterJoinQuery @ 3:31..3:65
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning
+            FullOuterJoinQuery @ 3:65..3:98
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -184,8 +212,14 @@ EndProcedure
              |    ПО Товары.ID = Продажи.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect FULL JOIN in multiline query");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+            FullOuterJoinQuery @ 5:19..6:44
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -198,8 +232,14 @@ EndProcedure
              |    ПО Товары.ID = Продажи.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect FULL JOIN even with comment");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+            FullOuterJoinQuery @ 5:19..6:44
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -217,8 +257,14 @@ EndProcedure
                    |        ПО Товары.Номенклатура = ПланПродаж.Номенклатура";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect nested FULL JOIN");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+            FullOuterJoinQuery @ 9:33..11:29
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -235,7 +281,13 @@ EndProcedure
                    |        ПО Товары.ID = ПланПродаж.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect FULL JOIN with functions in SELECT");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FullOuterJoinQuery,
+            expect![[r#"
+            FullOuterJoinQuery @ 9:29..10:57
+              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+              severity: Warning"#]],
+        );
     }
 }

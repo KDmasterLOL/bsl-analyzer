@@ -58,8 +58,9 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{check_hir_diagnostic, format_diags};
     use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_simple_if_else_duplicate() {
         let code = r#"Процедура Тест()
@@ -74,10 +75,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 1, "Expected 1 diagnostic for duplicate if/else blocks");
+        expect![[r#"
+            IfElseDuplicatedCodeBlock @ 3:9..5:5
+              message: Ветки Если и Иначе содержат идентичный код
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -92,10 +97,10 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 0, "Should not report different blocks");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -112,10 +117,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 1, "Expected 1 diagnostic for duplicate if/elsif blocks");
+        expect![[r#"
+            IfElseDuplicatedCodeBlock @ 3:9..5:5
+              message: Ветки Если и Иначе содержат идентичный код
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 
     #[test]
@@ -129,10 +138,10 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 0, "Empty blocks should be ignored");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     /// Empty blocks across all branches should not trigger duplicate detection
@@ -147,10 +156,10 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 0, "Empty blocks should not trigger duplicate detection");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     /// If and Else with identical two-statement blocks should warn
@@ -168,10 +177,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 1, "Identical if/else two-statement blocks should warn");
+        expect![[r#"
+            IfElseDuplicatedCodeBlock @ 3:9..5:5
+              message: Ветки Если и Иначе содержат идентичный код
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 
     /// If block differs from Else block (different statement count) - should not warn
@@ -188,10 +201,10 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 0, "Different statement counts should not warn");
+        expect![[r#""#]].assert_eq(&format_diags(code, &diags));
     }
 
     /// If/ElseIf with identical blocks should warn
@@ -211,10 +224,14 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 1, "If/ElseIf with identical blocks should warn");
+        expect![[r#"
+            IfElseDuplicatedCodeBlock @ 3:9..5:5
+              message: Ветки Если и Иначе содержат идентичный код
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 
     /// Nested if with duplicates inside outer if and else branches (3 diagnostics total)
@@ -246,9 +263,19 @@ mod tests {
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
-        assert_eq!(diags.len(), 3, "Outer if/else and both inner if/elseif chains should warn");
+        expect![[r#"
+            IfElseDuplicatedCodeBlock @ 3:9..12:5
+              message: Ветки Если и Иначе содержат идентичный код
+              severity: Information
+            IfElseDuplicatedCodeBlock @ 4:13..6:9
+              message: Ветки Если и Иначе содержат идентичный код
+              severity: Information
+            IfElseDuplicatedCodeBlock @ 14:13..16:9
+              message: Ветки Если и Иначе содержат идентичный код
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diags));
     }
 }

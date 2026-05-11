@@ -1,7 +1,7 @@
 //! WHERE, GROUP BY, ORDER BY clause lowering.
 
 use crate::diagnostics::SdblDiagnostic;
-use crate::hir::ExprHir;
+use crate::hir::{ExprHir, SelectHir};
 use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
@@ -163,6 +163,76 @@ impl LoweringContext {
         crate::hir::OrderByHir { items, range: order_clause.syntax().text_range() }
     }
 
+    /// Record INDEX BY clause semantic tokens.
+    ///
+    /// INDEX BY references selected output columns. A simple one-part reference
+    /// that matches a SELECT alias/name is recorded as a field alias instead of
+    /// being resolved against FROM tables.
+    pub(super) fn lower_index_by_clause(
+        &mut self,
+        query_node: &syntax::SyntaxNode,
+        select: &SelectHir,
+    ) {
+        let Some(index_clause) =
+            query_node.children().find(|n| n.kind() == syntax::SyntaxKind::SDBL_INDEX_BY)
+        else {
+            return;
+        };
+
+        self.record_keyword_by_text(
+            &index_clause,
+            "INDEX",
+            "ИНДЕКСИРОВАТЬ",
+            crate::source_map::TokenCategory::ClauseKeyword,
+        );
+        self.record_keyword_by_text(
+            &index_clause,
+            "BY",
+            "ПО",
+            crate::source_map::TokenCategory::ClauseKeyword,
+        );
+
+        for child in index_clause.children() {
+            if let Some(column_ref) = simple_selected_output_ref(&child, select) {
+                if let Some(token) =
+                    column_ref.children_with_tokens().find_map(|it| it.into_token())
+                {
+                    self.record_token(&token, crate::source_map::TokenCategory::FieldAlias);
+                }
+            } else if matches!(
+                child.kind(),
+                syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                    | syntax::SyntaxKind::SDBL_COLUMN_REF
+                    | syntax::SyntaxKind::SDBL_FUNCTION_CALL
+            ) {
+                self.lower_expr(&child);
+            }
+        }
+    }
+
+    pub(super) fn lower_drop_query(&mut self, drop_query: &syntax::SyntaxNode) {
+        self.record_keyword_by_text(
+            drop_query,
+            "DROP",
+            "УНИЧТОЖИТЬ",
+            crate::source_map::TokenCategory::ClauseKeyword,
+        );
+
+        let table_token = drop_query
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| token.kind() == syntax::SyntaxKind::IDENT)
+            .find(|token| {
+                let text = token.text();
+                !text.eq_ignore_ascii_case("DROP") && !text.eq_ignore_ascii_case("УНИЧТОЖИТЬ")
+            });
+
+        if let Some(table_token) = table_token {
+            self.record_token(&table_token, crate::source_map::TokenCategory::TableName);
+            self.scope.remove_temp_table(table_token.text());
+        }
+    }
+
     /// Collect OR tokens from a node, excluding nested subqueries.
     ///
     /// Nested subqueries have their own WHERE clauses which will collect their OR tokens
@@ -190,4 +260,39 @@ impl LoweringContext {
             }
         }
     }
+}
+
+fn simple_selected_output_ref(
+    node: &syntax::SyntaxNode,
+    select: &SelectHir,
+) -> Option<syntax::SyntaxNode> {
+    let mut column_refs =
+        node.descendants().filter(|child| child.kind() == syntax::SyntaxKind::SDBL_COLUMN_REF);
+    let column_ref = column_refs.next()?;
+    if column_refs.next().is_some() {
+        return None;
+    }
+    if node.text().to_string().trim() != column_ref.text().to_string().trim() {
+        return None;
+    }
+
+    let mut idents = column_ref.children_with_tokens().filter_map(|it| match it {
+        syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+            Some(token.text().to_string())
+        }
+        _ => None,
+    });
+
+    let name = idents.next()?;
+    if idents.next().is_some() {
+        return None;
+    }
+
+    let matches_output = select
+        .fields
+        .iter()
+        .filter_map(|field| field.alias_or_name())
+        .any(|output_name| output_name.to_lowercase() == name.to_lowercase());
+
+    matches_output.then_some(column_ref)
 }

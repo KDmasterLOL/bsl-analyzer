@@ -7,6 +7,9 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use vfs::{FileId, Vfs, VfsPath};
 
+pub mod cfe;
+pub use cfe::{CfeFixture, CfeFixtureBuilder};
+
 /// A test fixture with multiple files.
 #[derive(Debug, Default)]
 pub struct Fixture {

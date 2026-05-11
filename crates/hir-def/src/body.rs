@@ -102,6 +102,32 @@ impl Body {
         }
     }
 
+    /// Allocate an expression and return its opaque [`ExprId`].
+    ///
+    /// **Test / programmatic-construction helper, not part of the
+    /// regular lowering surface.** Lowering populates a `Body` via
+    /// direct crate-internal arena access (and also records source-map
+    /// entries, top-level body stmts, etc.); this method only forwards
+    /// to the arena and does NOT update `body_stmts`, the source map,
+    /// or any other side-table. It is intended for downstream crates
+    /// that need to hand-roll a tiny `Body` for a unit test (e.g. the
+    /// `dataflow::path_terminates` tests build minimal `Stmt::Return` /
+    /// `Stmt::Raise` bodies wired into a hand-built CFG to exercise the
+    /// lattice transfer in isolation from the parser+lowering stack).
+    /// Production callers should not use this — go through lowering.
+    #[doc(hidden)]
+    pub fn alloc_expr(&mut self, expr: Expr) -> ExprId {
+        ExprId::from_idx(self.exprs.alloc(expr))
+    }
+
+    /// Allocate a statement and return its opaque [`StmtId`]. See
+    /// [`Body::alloc_expr`] for the rationale and the same caveats —
+    /// this does NOT update `body_stmts` or the source map.
+    #[doc(hidden)]
+    pub fn alloc_stmt(&mut self, stmt: Stmt) -> StmtId {
+        StmtId::from_idx(self.stmts.alloc(stmt))
+    }
+
     /// Get an expression by ID (opaque → typed conversion).
     pub fn expr(&self, id: ExprId) -> &Expr {
         let typed_id: ExprIdx = id.to_idx();
@@ -362,6 +388,37 @@ pub struct LowerResult {
     /// External module references collected during lowering.
     /// Used to build module dependency graph for lazy loading.
     pub external_refs: Vec<ExternalRef>,
+    /// Method body line span as the legacy
+    /// `emit_method_scoped_diagnostics::MethodSize` calculation
+    /// produced it: `(end_line - start_line) - 4`. `0` when no
+    /// `LineIndex` was supplied to lowering (e.g. module-level body
+    /// without line info, streaming-mode tests). The §6.4 `MethodSize`
+    /// migration consumes this through `HirMethodMetrics::size_lines`,
+    /// populated by the Salsa wrapper that has access to both the
+    /// `LowerResult` (this field) and `module_bodies`.
+    pub size_lines: u32,
+}
+
+/// Pre-existing binding kind captured by lowering for an assignment
+/// target whose name shadows a configuration-scope binding (e.g. a
+/// CommonModule).
+///
+/// Recorded **before** the implicit `register_local_var` runs so the
+/// downstream diagnostic handler (`CommonModuleAssign`,
+/// `ThisObjectAssign` future work) can fast-path-skip when a real
+/// local / param shadows the configuration name without rebuilding a
+/// `Resolver`. The enum stays intentionally narrow — extending it
+/// later (`ModuleVariable`, `ImportedAlias`) is non-breaking; the
+/// `Option<ExistingBindingKind>` payload uses `None` for "no
+/// shadowing tracked" rather than a placeholder variant, so absence
+/// has a single, unambiguous meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingBindingKind {
+    /// Identifier is already a local `Перем` declared earlier in the
+    /// body.
+    Local,
+    /// Identifier is a procedure / function parameter name.
+    Param,
 }
 
 /// Diagnostic collected during body lowering.
@@ -393,11 +450,6 @@ pub enum BodyDiagnostic {
     /// Deprecated Тип("УправляемаяФорма") / Type("ManagedForm") call.
     /// Detected when Type() is called with deprecated type name string.
     DeprecatedTypeManagedForm { type_name: String, range: TextRange },
-
-    /// Unsafe call to УстановитьБезопасныйРежим / SetSafeMode or
-    /// УстановитьОтключениеБезопасногоРежима / SetSafeModeDisabled.
-    /// Detected when safe mode methods are called with unsafe arguments.
-    DisableSafeMode { method_name: String, range: TextRange },
 
     /// Magic number literal (hardcoded number that should be a constant).
     /// Value is stored as string to allow Eq derivation.
@@ -462,7 +514,21 @@ pub enum BodyDiagnostic {
     /// Assignment to a potential CommonModule name.
     /// Emitted during lowering for simple identifier assignments.
     /// Validation against metadata happens in from_hir().
-    CommonModuleAssign { variable_name: String, range: TextRange },
+    ///
+    /// `existing_binding_kind` records whether the assignment target
+    /// already had a local / param binding **before** the implicit
+    /// `register_local_var` ran, so the diagnostic handler can fast-
+    /// path-skip on shadowing without rebuilding a `Resolver`. `None`
+    /// means "no shadowing — the name introduces a fresh implicit
+    /// binding (or is a re-assignment without an existing binding
+    /// kind we tracked)". The enum is intentionally not exhaustive
+    /// over all possible bindings (no `ModuleVariable`, no
+    /// `Builtin`); those land in the handler's resolver path.
+    CommonModuleAssign {
+        variable_name: String,
+        range: TextRange,
+        existing_binding_kind: Option<ExistingBindingKind>,
+    },
 
     /// Missing or non-export method call in CommonModule.
     ///
@@ -578,10 +644,6 @@ pub enum BodyDiagnostic {
     /// User-defined methods with these names will conflict with platform methods.
     GlobalContextMethodCollision8312 { method_name: String, range: TextRange },
 
-    /// Empty preprocessor region (#Область/#КонецОбласти).
-    /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
-    EmptyRegion { name: String, range: TextRange },
-
     /// Empty statement (standalone semicolon).
     /// Detected when EMPTY_STMT AST node is encountered without parser errors nearby.
     EmptyStatement { range: TextRange },
@@ -589,11 +651,6 @@ pub enum BodyDiagnostic {
     /// Statement without trailing semicolon.
     /// Detected when statement AST node has no SEMICOLON token.
     MissingSemicolon { range: TextRange },
-
-    /// Overly complex if condition with too many boolean operations.
-    /// Detected when if/elsif condition has more boolean operations (AND/OR) than maxComplexity.
-    /// Complexity = number of boolean operations + 1 (default max: 3).
-    IfConditionComplexity { complexity: usize, max_complexity: usize, range: TextRange },
 
     /// Duplicated condition in if/elsif chain.
     /// Detected when an elsif condition is identical to a previous if/elsif condition.
@@ -641,10 +698,6 @@ pub enum BodyDiagnostic {
     /// - `ЭтотОбъект["Поле"]` is NOT an error (INDEX_EXPR handled separately)
     /// - CommonModule with ReturnValueReuse != DontUse are NOT checked
     RedundantAccessToObject { kind: RedundantAccessKind, range: TextRange },
-
-    /// SetPrivilegedMode/УстановитьПривилегированныйРежим call that enables privileged mode.
-    /// Safe mode calls (with False argument) are not flagged.
-    SetPrivilegedModeCall { range: TextRange },
 
     /// Style element constructor (Цвет/Color, Шрифт/Font, Рамка/Border).
     /// Detected when New expression creates a style element type.
@@ -751,87 +804,6 @@ pub enum BodyDiagnostic {
     /// This is a read-only property and cannot be assigned.
     /// Validated in from_hir() to check if module type is CommonModule or FormModule.
     ThisObjectAssign { range: TextRange },
-
-    // ==========================================================================
-    // Phase 4: Method-scoped diagnostics (emitted at end of method lowering)
-    // ==========================================================================
-    /// Cognitive complexity exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by complexityThreshold in from_hir().
-    CognitiveComplexity {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Calculated cognitive complexity.
-        complexity: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
-
-    /// Cyclomatic complexity exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by complexityThreshold in from_hir().
-    CyclomaticComplexity {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Calculated cyclomatic complexity.
-        complexity: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
-
-    /// Method size (number of statements) exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by maxSize in from_hir().
-    MethodSize {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Calculated method size (number of statements).
-        size: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
-
-    /// Nested statements depth exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by maxAllowedLevel in from_hir().
-    NestedStatements {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Maximum nesting depth found.
-        depth: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the deepest nested statement for the diagnostic.
-        range: TextRange,
-    },
-
-    /// Number of parameters exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by maxParamsCount in from_hir().
-    NumberOfParams {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Number of parameters.
-        count: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
-
-    /// Number of optional parameters exceeds threshold.
-    /// Emitted at end of method lowering. Filtered by maxOptionalParamsCount in from_hir().
-    NumberOfOptionalParams {
-        /// Method name for the diagnostic message.
-        method_name: String,
-        /// Number of optional parameters.
-        count: u32,
-        /// Is this a function (vs procedure)?
-        is_function: bool,
-        /// Range of the method name for the diagnostic.
-        range: TextRange,
-    },
 
     /// Число()/Number() call inside try block body.
     /// Using exceptions for type casting is incorrect - use TypeDescription instead.
@@ -1092,7 +1064,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::DeprecatedFind { range, .. } => *range,
             BodyDiagnostic::DeprecatedMessage { range, .. } => *range,
             BodyDiagnostic::DeprecatedTypeManagedForm { range, .. } => *range,
-            BodyDiagnostic::DisableSafeMode { range, .. } => *range,
             BodyDiagnostic::MagicNumber { range, .. } => *range,
             BodyDiagnostic::SelfAssign { range } => *range,
             BodyDiagnostic::FunctionShouldHaveReturn { range } => *range,
@@ -1118,10 +1089,8 @@ impl BodyDiagnostic {
             BodyDiagnostic::FunctionReturnsSamePrimitive { range } => *range,
             BodyDiagnostic::GetFormMethod { range, .. } => *range,
             BodyDiagnostic::GlobalContextMethodCollision8312 { range, .. } => *range,
-            BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
             BodyDiagnostic::MissingSemicolon { range } => *range,
-            BodyDiagnostic::IfConditionComplexity { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCondition { range, .. } => *range,
             BodyDiagnostic::IfElseIfEndsWithElse { range } => *range,
             BodyDiagnostic::IncorrectUseOfStrTemplate { range } => *range,
@@ -1130,7 +1099,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::ProcedureReturnsValue { range } => *range,
             BodyDiagnostic::ReservedWordAsMethodName { range, .. } => *range,
             BodyDiagnostic::RedundantAccessToObject { range, .. } => *range,
-            BodyDiagnostic::SetPrivilegedModeCall { range } => *range,
             BodyDiagnostic::StyleElementConstructors { range, .. } => *range,
             BodyDiagnostic::TempFilesDir { range, .. } => *range,
             BodyDiagnostic::TernaryOperatorUsage { range } => *range,
@@ -1148,13 +1116,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => *range,
             BodyDiagnostic::DeprecatedMethodCall { range, .. } => *range,
             BodyDiagnostic::ThisObjectAssign { range } => *range,
-            // Phase 4: Method-scoped diagnostics
-            BodyDiagnostic::CognitiveComplexity { range, .. } => *range,
-            BodyDiagnostic::CyclomaticComplexity { range, .. } => *range,
-            BodyDiagnostic::MethodSize { range, .. } => *range,
-            BodyDiagnostic::NestedStatements { range, .. } => *range,
-            BodyDiagnostic::NumberOfParams { range, .. } => *range,
-            BodyDiagnostic::NumberOfOptionalParams { range, .. } => *range,
             BodyDiagnostic::TryNumber { range } => *range,
             BodyDiagnostic::UsingObjectNotAvailableUnix { range, .. } => *range,
             BodyDiagnostic::UnsafeSafeModeMethodCall { range } => *range,
@@ -1174,8 +1135,10 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
 
 /// Lower a method AST node to HIR Body with line index for additional diagnostics.
 ///
-/// When `line_index` is provided, additional diagnostics are emitted:
-/// OneStatementPerLine, TooManyReturns, MethodSize, and method-scoped metrics.
+/// When `line_index` is provided, the `OneStatementPerLine` and
+/// `TooManyReturns` diagnostics are emitted, and `LowerResult::size_lines`
+/// is populated (consumed by the §6.4 `MethodSize` handler through
+/// `HirMethodMetrics::size_lines`).
 pub fn lower_method_with_externals(
     method_node: &SyntaxNode,
     is_function: bool,
@@ -1296,7 +1259,11 @@ mod tests {
             BodyDiagnostic::FunctionShouldHaveReturn { range },
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range },
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range },
-            BodyDiagnostic::CommonModuleAssign { variable_name: "Test".to_string(), range },
+            BodyDiagnostic::CommonModuleAssign {
+                variable_name: "Test".to_string(),
+                range,
+                existing_binding_kind: None,
+            },
         ];
 
         for diag in diagnostics {

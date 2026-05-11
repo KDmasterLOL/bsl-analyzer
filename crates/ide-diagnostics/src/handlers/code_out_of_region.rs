@@ -38,6 +38,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::module_structure::significant::is_significant_for_code_out_of_region;
 use hir::RegionTree;
 use syntax::{ast, ast::AstNode, SyntaxKind, SyntaxNode};
 
@@ -111,7 +112,7 @@ fn check_node(
         }
 
         if is_module_level_element(&child)
-            && is_significant_element(&child)
+            && is_significant_for_code_out_of_region(&child)
             && !region_tree.is_range_inside_region(child.text_range())
         {
             let (element_type, range) = match child.kind() {
@@ -198,56 +199,11 @@ fn has_preceding_definition(parent: &SyntaxNode, node: &SyntaxNode) -> bool {
     false
 }
 
-fn is_significant_element(node: &SyntaxNode) -> bool {
-    match node.kind() {
-        SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF | SyntaxKind::VAR_DEF => true,
-
-        SyntaxKind::ASSIGN_STMT
-        | SyntaxKind::CALL_STMT
-        | SyntaxKind::IF_STMT
-        | SyntaxKind::WHILE_STMT
-        | SyntaxKind::FOR_STMT
-        | SyntaxKind::FOR_EACH_STMT
-        | SyntaxKind::TRY_STMT
-        | SyntaxKind::RETURN_STMT
-        | SyntaxKind::BREAK_STMT
-        | SyntaxKind::CONTINUE_STMT
-        | SyntaxKind::GOTO_STMT
-        | SyntaxKind::EXECUTE_STMT
-        | SyntaxKind::ADD_HANDLER_STMT
-        | SyntaxKind::REMOVE_HANDLER_STMT => true,
-
-        SyntaxKind::RAISE_STMT => false,
-
-        SyntaxKind::PRE_REGION_DIR => contains_executable_code(node),
-
-        _ => false,
-    }
-}
-
-fn contains_executable_code(node: &SyntaxNode) -> bool {
-    node.descendants().any(|n| match n.kind() {
-        SyntaxKind::CALL_STMT
-        | SyntaxKind::ASSIGN_STMT
-        | SyntaxKind::IF_STMT
-        | SyntaxKind::WHILE_STMT
-        | SyntaxKind::FOR_STMT
-        | SyntaxKind::FOR_EACH_STMT
-        | SyntaxKind::TRY_STMT
-        | SyntaxKind::RETURN_STMT
-        | SyntaxKind::BREAK_STMT
-        | SyntaxKind::CONTINUE_STMT => true,
-        SyntaxKind::RAISE_STMT => false,
-        _ => false,
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, assert_diagnostic_range_multiline, check_ast_diagnostic,
-    };
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::DiagnosticCode;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = "//////////////////////////////////////////////\n\
@@ -320,37 +276,38 @@ mod tests {
 #КонецОбласти\n\
 #КонецЕсли\n\
 КонецЕсли";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 7, "Expected 7 diagnostics");
-
-        // Diagnostic 0: Перем Кэш; (line 5, whole declaration)
-        assert_diagnostic_range(code, &diagnostics[0], 4, 0, 10);
-
-        // Diagnostic 1: Перем Контекст; (line 10, whole declaration)
-        assert_diagnostic_range(code, &diagnostics[1], 9, 0, 15);
-
-        // Diagnostic 2: Процедура Временная() (line 18, procedure name only)
-        assert_diagnostic_range(code, &diagnostics[2], 17, 10, 19);
-
-        // Diagnostic 3: Процедура Подготовить() (line 25, procedure name only)
-        assert_diagnostic_range(code, &diagnostics[3], 24, 10, 21);
-
-        // Diagnostic 4: Настройки = ПолучитьИмя() + Кэш; (line 47, statement including semicolon)
-        assert_diagnostic_range(code, &diagnostics[4], 46, 0, 32);
-
-        // Diagnostic 5: Значение = Контекст; (line 58, statement including semicolon)
-        assert_diagnostic_range(code, &diagnostics[5], 57, 0, 20);
-
-        // Diagnostic 6: Если Условие Тогда (lines 60-70, if block)
-        assert_diagnostic_range_multiline(code, &diagnostics[6], 59, 0, 69, 9);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 5:1..5:11
+                  message: Переменная находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 10:1..10:16
+                  message: Переменная находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 18:11..18:20
+                  message: Процедура находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 25:11..25:22
+                  message: Процедура находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 47:1..47:33
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 58:1..58:21
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 60:1..70:10
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_empty_file() {
         let code = "\n";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeOutOfRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -377,28 +334,29 @@ mod tests {
 Кэш = 78;\n\
 \n\
 Контекст = ПолучитьИмя() + Кэш;";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        // Returns individual diagnostics for each element when no regions exist
-        assert_eq!(diagnostics.len(), 6);
-
-        // Diagnostic 0: Перем Кэш; (line 5)
-        assert_diagnostic_range(code, &diagnostics[0], 4, 0, 10);
-
-        // Diagnostic 1: Перем Контекст; (line 6)
-        assert_diagnostic_range(code, &diagnostics[1], 5, 0, 15);
-
-        // Diagnostic 2: Функция ПолучитьИмя() (line 8, function name)
-        assert_diagnostic_range(code, &diagnostics[2], 7, 8, 19);
-
-        // Diagnostic 3: Процедура Подготовить() (line 12, procedure name)
-        assert_diagnostic_range(code, &diagnostics[3], 11, 10, 21);
-
-        // Diagnostic 4: Кэш = 78; (line 20, including semicolon)
-        assert_diagnostic_range(code, &diagnostics[4], 19, 0, 9);
-
-        // Diagnostic 5: Контекст = ПолучитьИмя() + Кэш; (line 22, including semicolon)
-        assert_diagnostic_range(code, &diagnostics[5], 21, 0, 31);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 5:1..5:11
+                  message: Переменная находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 6:1..6:16
+                  message: Переменная находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 8:9..8:20
+                  message: Функция находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 12:11..12:22
+                  message: Процедура находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 20:1..20:10
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint
+                CodeOutOfRegion @ 22:1..22:32
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -409,30 +367,33 @@ mod tests {
 #Иначе\n\
   ВызватьИсключение НСтр(\"ru = 'Недопустимый вызов на клиенте.'\");\n\
 #КонецЕсли";
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeOutOfRegion, expect![[r#""#]]);
     }
 
     #[test]
     fn test_execute() {
         let code = "\nПроцедура Запустить()\n\nКонецПроцедуры\n";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 1);
-
-        // Diagnostic 0: Процедура Запустить() (line 2, procedure name only)
-        assert_diagnostic_range(code, &diagnostics[0], 1, 10, 19);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 2:11..2:20
+                  message: Процедура находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_code_block() {
         let code = "Сообщить(\"Сегодня\");";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 1);
-
-        // Diagnostic 0: Сообщить("Сегодня"); (line 1, including semicolon)
-        assert_diagnostic_range(code, &diagnostics[0], 0, 0, 20);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:21
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
     }
 
     #[test]
@@ -447,8 +408,7 @@ mod tests {
 #КонецОбласти
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeOutOfRegion, expect![[r#""#]]);
     }
 
     #[test]
@@ -459,10 +419,95 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 2:11..2:15
+                  message: Процедура находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
 
-        // Diagnostic 0: Процедура Тест() (line 2, procedure name only)
-        assert_diagnostic_range(code, &diagnostics[0], 1, 10, 14);
+    #[test]
+    fn test_goto_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Перейти ~Метка;"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:16
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_label_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"~Метка:"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_execute_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"Выполнить("код");"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:18
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_add_handler_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"ДобавитьОбработчик ИмяСобытия, ОбработчикСобытия;"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:50
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_remove_handler_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"УдалитьОбработчик ИмяСобытия, ОбработчикСобытия;"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 1:1..1:49
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_standalone_raise_stmt_outside_region_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"ВызватьИсключение;"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_pre_region_dir_covers_inner_code_but_not_following_stmt_snapshot() {
+        check_diagnostics_snapshot_for(
+            r#"#Область Инициализация
+Сообщить("Внутри");
+#КонецОбласти
+
+Сообщить("Снаружи");"#,
+            DiagnosticCode::CodeOutOfRegion,
+            expect![[r#"
+                CodeOutOfRegion @ 5:1..5:21
+                  message: Элемент кода находится вне области (#Область/#Region). Весь код модуля должен быть организован в области для лучшей структуры.
+                  severity: Hint"#]],
+        );
     }
 }

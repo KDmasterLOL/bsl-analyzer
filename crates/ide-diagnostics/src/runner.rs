@@ -79,6 +79,7 @@ const SYNTAX_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CodeOutOfRegion,
     DiagnosticCode::DuplicateRegion,
     DiagnosticCode::DuplicateStringLiteral,
+    DiagnosticCode::EmptyRegion,
     DiagnosticCode::ExcessiveAutoTestCheck,
     DiagnosticCode::MultilingualStringHasAllDeclaredLanguages,
     DiagnosticCode::MultilingualStringUsingWithTemplate,
@@ -164,6 +165,17 @@ const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnusedParameters,
     DiagnosticCode::MissingTemporaryFileDeletion,
     DiagnosticCode::MissingTempStorageDeletion,
+    // Track 2 §1.6 Group C: lattice-driven (security_state).
+    DiagnosticCode::SetPrivilegedMode,
+    DiagnosticCode::DisableSafeMode,
+    // Track 2 Phase B §6.4: HirMethodMetrics-driven.
+    DiagnosticCode::CognitiveComplexity,
+    DiagnosticCode::CyclomaticComplexity,
+    DiagnosticCode::NestedStatements,
+    DiagnosticCode::IfConditionComplexity,
+    DiagnosticCode::MethodSize,
+    DiagnosticCode::NumberOfParams,
+    DiagnosticCode::NumberOfOptionalParams,
 ];
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
@@ -182,7 +194,7 @@ where
 
     let elapsed = start.elapsed();
     if elapsed.as_millis() > 80 {
-        tracing::debug!(
+        tracing::info!(
             diagnostic = name,
             elapsed_ms = elapsed.as_millis(),
             count = result.len(),
@@ -255,6 +267,7 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::duplicate_string_literal::check,
     ));
+    diagnostics.extend(run_diagnostic("EmptyRegion", ctx, handlers::empty_region::check));
     diagnostics.extend(run_diagnostic(
         "ExcessiveAutoTestCheck",
         ctx,
@@ -532,8 +545,9 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 
 /// Collect diagnostics that require Configuration XML metadata.
 ///
-/// These diagnostics use `ctx.load_configuration()` which loads the full
-/// Configuration.xml metadata. They only run for SessionModule files.
+/// These diagnostics use `ctx.main_configuration()` (and CFE-aware
+/// helpers like `find_common_module_anywhere` / `is_common_module_anywhere`)
+/// to resolve metadata. They only run for SessionModule files.
 ///
 /// Data source: Configuration XML (ScheduledJobs, EventSubscriptions, CommonModules)
 pub fn collect_configuration_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -691,6 +705,39 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         "MissingTempStorageDeletion",
         ctx,
         handlers::missing_temp_storage_deletion::check,
+    ));
+    // Track 2 §1.6 Group C — lattice-driven security-mode handlers
+    // (read `module_security_state` through `open_events`).
+    diagnostics.extend(run_diagnostic(
+        "SetPrivilegedMode",
+        ctx,
+        handlers::set_privileged_mode::check,
+    ));
+    diagnostics.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
+    // Track 2 Phase B §6.4 — handler-side reads cached
+    // `module_hir_metrics_query` / `module_cyclomatic_query`.
+    diagnostics.extend(run_diagnostic(
+        "CognitiveComplexity",
+        ctx,
+        handlers::cognitive_complexity::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "CyclomaticComplexity",
+        ctx,
+        handlers::cyclomatic_complexity::check,
+    ));
+    diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
+    diagnostics.extend(run_diagnostic(
+        "IfConditionComplexity",
+        ctx,
+        handlers::if_condition_complexity::check,
+    ));
+    diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
+    diagnostics.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
+    diagnostics.extend(run_diagnostic(
+        "NumberOfOptionalParams",
+        ctx,
+        handlers::number_of_optional_params::check,
     ));
 
     diagnostics

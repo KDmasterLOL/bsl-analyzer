@@ -22,7 +22,7 @@
 //! **Line Index:**
 //! - [`line_index_query`] - Convert byte offsets to line/column positions (LRU: 256)
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use base_db::FileIdInput;
 use hir::ModuleId;
@@ -398,6 +398,61 @@ pub fn module_reaching_definitions_query<'db>(
     Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
 }
 
+/// Compute path-terminates analysis for all methods in a module (batch processing).
+///
+/// Per Track 1 §1.5: backward dataflow on a 2-element `MayFallthrough`
+/// lattice that answers "may execution starting at this block reach the
+/// function's exit without an intervening `Return` / `Raise`?". Intended
+/// consumer: the `AllFunctionPathMustHaveReturn` diagnostic
+/// (Track 1 §1.6 — migrated in Step I, this query is the foundation).
+///
+/// # Salsa caching
+/// - LRU: 128 (mirrors `module_cfgs` / `module_reaching_definitions` so
+///   the cache cascade has matching granularity).
+/// - Invalidation: cascades automatically via `module_bodies` →
+///   `module_cfgs` → `module_path_terminates`.
+///
+/// # Performance
+/// - Reuses CFGs from `module_cfgs` (zero rebuild overhead).
+/// - The lattice has 2 elements → worklist converges in one full RPO pass
+///   for any DAG and in O(loop-nest depth) on graphs with cycles, so the
+///   per-method work is dominated by the basic-block sweep.
+#[salsa::tracked(lru = 128)]
+pub fn module_path_terminates_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+    let file_id = file_id_input.file_id(db);
+    let module_id = hir::ModuleId::new(file_id);
+    let _span = tracing::info_span!("module_path_terminates", ?module_id).entered();
+
+    let module_cfgs = db.module_cfgs(file_id_input);
+    let module_bodies = db.module_bodies(module_id);
+
+    let mut results = rustc_hash::FxHashMap::default();
+
+    for (local_id, body) in module_bodies.iter_bodies() {
+        db.unwind_if_revision_cancelled();
+
+        let cfg = match module_cfgs.get(local_id) {
+            Some(cfg) => cfg,
+            None => continue,
+        };
+
+        if let Some(result) = hir::dataflow::path_terminates::analyze_path_terminates(
+            body,
+            cfg,
+            hir::dataflow::path_terminates::PathTerminatesConfig::default(),
+            hir::dataflow::DEFAULT_MAX_ITERATIONS,
+        ) {
+            results.insert(local_id, Arc::new(result));
+        }
+    }
+
+    tracing::debug!(count = results.len(), "Analyzed module path-terminates");
+    Arc::new(hir::dataflow::path_terminates::ModulePathTerminates::new(results))
+}
+
 /// Get reaching definitions for a single method (backward compatible accessor).
 ///
 /// **Note:** This is now a thin wrapper around module_reaching_definitions_query.
@@ -455,6 +510,7 @@ pub fn module_liveness_analysis_query<'db>(
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_liveness", ?module_id).entered();
+    let total_start = Instant::now();
 
     // Get shared CFGs (Salsa cached!)
     let module_cfgs = db.module_cfgs(file_id_input);
@@ -470,6 +526,9 @@ pub fn module_liveness_analysis_query<'db>(
             Some(cfg) => cfg,
             None => continue,
         };
+        let method_start = Instant::now();
+        let block_count = cfg.vertices().count();
+        let stmt_count = body.stmt_count();
 
         // Build variable index
         let var_index = hir::dataflow::liveness::VariableIndex::from_body(body);
@@ -483,9 +542,24 @@ pub fn module_liveness_analysis_query<'db>(
         ) {
             results.insert(local_id, Arc::new(liveness_result));
         }
+
+        let elapsed_ms = method_start.elapsed().as_millis();
+        if elapsed_ms >= 100 {
+            tracing::info!(
+                local_id,
+                block_count,
+                stmt_count,
+                elapsed_ms,
+                "Slow module liveness method"
+            );
+        }
     }
 
-    tracing::debug!(count = results.len(), "Analyzed liveness");
+    tracing::info!(
+        count = results.len(),
+        elapsed_ms = total_start.elapsed().as_millis(),
+        "Module liveness batch complete"
+    );
     Arc::new(hir::dataflow::liveness::ModuleLiveness::new(results))
 }
 
@@ -665,4 +739,222 @@ pub fn line_index_query<'db>(
     let file_text = file_text_input.text(db);
 
     Arc::new(line_index::LineIndex::new(file_text.as_ref()))
+}
+
+// ============================================================================
+// Track 2 Phase B §6.3 — complexity-metric Salsa wrappers
+// ============================================================================
+
+/// Per-method [`hir::metrics::HirMethodMetrics`] results for one module.
+///
+/// Returned by [`module_hir_metrics_query`]. The §6.4 cognitive /
+/// nested-statements / if-condition handlers iterate the per-method
+/// shim [`method_hir_metrics_query`] which reads from this batch via a
+/// cheap HashMap lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleHirMetrics {
+    methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
+    /// Metrics for the module-level code body (statements outside any
+    /// method). `None` when the module has no top-level code. Required
+    /// by §6.4 `NestedStatements` whose legacy lowering-time emit ran
+    /// for module-level Если/Пока/Для/Попытка the same way it ran for
+    /// method bodies.
+    module_code: Option<Arc<hir::metrics::HirMethodMetrics>>,
+}
+
+impl ModuleHirMetrics {
+    /// Streaming-mode constructor (no Salsa). Mirrors
+    /// [`crate::effects::ModuleSecurityState::from_methods_with_module_level`]
+    /// — `pub(crate)` so the private fields stay opaque to downstream
+    /// consumers.
+    pub(crate) fn from_methods(
+        methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
+        module_code: Option<Arc<hir::metrics::HirMethodMetrics>>,
+    ) -> Self {
+        Self { methods, module_code }
+    }
+
+    /// Look up a method's metrics. Returns `None` for methods absent
+    /// from the module's body collection (synthetic / orphan ItemTree
+    /// entries) — matches the contract of every other module-batch
+    /// query.
+    pub fn get(&self, local_id: u32) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
+        self.methods.get(&local_id).cloned()
+    }
+
+    /// Metrics for module-level code (top-level statements outside any
+    /// method). `None` when the module has no top-level code. Returned
+    /// as the same `HirMethodMetrics` shape so handlers can reuse the
+    /// per-method analysis path with a synthetic "module body" entry.
+    pub fn module_code(&self) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
+        self.module_code.clone()
+    }
+
+    /// Number of methods with computed metrics.
+    pub fn len(&self) -> usize {
+        self.methods.len()
+    }
+
+    /// `true` when no method or module-level code produced metrics
+    /// (typically: an empty module).
+    pub fn is_empty(&self) -> bool {
+        self.methods.is_empty() && self.module_code.is_none()
+    }
+}
+
+/// Per-method cyclomatic complexity values for one module.
+///
+/// Stored as `u32` directly (no `Arc` — values fit in a register).
+/// Returned by [`module_cyclomatic_query`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleCyclomatic {
+    methods: rustc_hash::FxHashMap<u32, u32>,
+}
+
+impl ModuleCyclomatic {
+    /// Streaming-mode constructor (no Salsa).
+    pub(crate) fn from_methods(methods: rustc_hash::FxHashMap<u32, u32>) -> Self {
+        Self { methods }
+    }
+
+    /// Look up a method's cyclomatic complexity. Returns `1` (the
+    /// conventional base) for methods absent from the module batch.
+    pub fn get(&self, local_id: u32) -> u32 {
+        self.methods.get(&local_id).copied().unwrap_or(1)
+    }
+
+    /// Number of methods with computed values.
+    pub fn len(&self) -> usize {
+        self.methods.len()
+    }
+
+    /// `true` when no method produced a value.
+    pub fn is_empty(&self) -> bool {
+        self.methods.is_empty()
+    }
+}
+
+/// Compute HIR-structural metrics for every method in a module.
+///
+/// Per master plan §6.3: module-level batch matches the actual
+/// invalidation granularity of `module_bodies` (any method change
+/// invalidates the whole module), so per-method queries would burn
+/// cache for no benefit. Each method's `HirMethodMetrics` is shared as
+/// `Arc` so the per-method shim is a cheap pointer copy.
+///
+/// LRU = 128 (matches `module_cfgs_query`).
+#[salsa::tracked(lru = 128)]
+pub fn module_hir_metrics_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<ModuleHirMetrics> {
+    let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
+    let _span = tracing::info_span!("module_hir_metrics", ?module_id).entered();
+
+    let module_bodies = db.module_bodies(module_id);
+    let mut methods = rustc_hash::FxHashMap::default();
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let mut metrics = hir::metrics::compute_hir_metrics(body);
+        // `size_lines` is a syntax-level metric (depends on
+        // `LineIndex`, not the HIR `Body`), so it lives in the
+        // `LowerResult` next to the body. Stamp it onto the metrics
+        // here — the visitor cannot compute it.
+        if let Some(lower_result) = module_bodies.lower_result(local_id) {
+            metrics.size_lines = lower_result.size_lines;
+        }
+        methods.insert(local_id, Arc::new(metrics));
+    }
+    // Codex round-A fix: `ModuleBodies::module_code()` is always `Some`
+    // after lowering, even for modules with zero top-level statements.
+    // Drop the entry when its metrics are default (every counter at
+    // zero, every list empty) so `ModuleHirMetrics::is_empty()` stays a
+    // meaningful fast-path gate for handlers.
+    let module_code = module_bodies
+        .module_code()
+        .map(hir::metrics::compute_hir_metrics)
+        .filter(|m| *m != hir::metrics::HirMethodMetrics::default())
+        .map(Arc::new);
+    tracing::debug!(
+        count = methods.len(),
+        has_module_code = module_code.is_some(),
+        "Built module HIR metrics",
+    );
+    Arc::new(ModuleHirMetrics { methods, module_code })
+}
+
+/// Per-method shim over [`module_hir_metrics_query`]. LRU = 256 to
+/// match the `method_cfg_query` precedent — the hot path is a
+/// per-method `HashMap` lookup against the module batch.
+#[salsa::tracked(lru = 256)]
+pub fn method_hir_metrics_query<'db>(
+    db: &'db dyn RootDatabase,
+    method_id_input: hir::MethodIdInput<'db>,
+) -> Arc<hir::metrics::HirMethodMetrics> {
+    let _span = tracing::info_span!("method_hir_metrics", ?method_id_input).entered();
+    let method_id = method_id_input.method_id(db);
+    let file_id_input = FileIdInput::new(db, method_id.module.file_id);
+    let module_metrics = module_hir_metrics_query(db, file_id_input);
+    module_metrics
+        .get(method_id.local_id)
+        .unwrap_or_else(|| Arc::new(hir::metrics::HirMethodMetrics::default()))
+}
+
+/// Compute cyclomatic complexity for every method in a module.
+///
+/// Reuses the CFGs already cached by `module_cfgs_query` — each
+/// method's CFG is a single `Arc` clone, then a graph traversal via
+/// [`hir::cfg::cyclomatic_complexity`].
+///
+/// Track 2 Phase B §6.5 alignment: the textbook McCabe formula
+/// `V(G) = E - N + 2*P` only counts decision points that introduce
+/// CFG edges. BSL short-circuit `И`/`ИЛИ` and ternary `?(...)` evaluate
+/// inside basic blocks (no extra edges), so the textbook formula
+/// under-counts compared to SonarQube cyclomatic. We add the
+/// per-occurrence boolean and ternary counts (sourced from the §6.1
+/// HIR visitor through `module_hir_metrics_query`) on top of the
+/// graph value to match the SonarQube definition. The legacy
+/// `hir-def::cyclomatic_complexity::calculate_complexity` (retired in
+/// 71c22eab) also counted `Else` clauses as separate decisions; we
+/// intentionally drop that — SonarQube doesn't, and `Else` doesn't
+/// add a new outgoing edge in McCabe's textbook formulation.
+///
+/// LRU = 128.
+#[salsa::tracked(lru = 128)]
+pub fn module_cyclomatic_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<ModuleCyclomatic> {
+    let file_id = file_id_input.file_id(db);
+    let _span = tracing::info_span!("module_cyclomatic", ?file_id).entered();
+
+    let module_cfgs = db.module_cfgs(file_id_input);
+    let module_id = ModuleId::new(file_id);
+    let module_bodies = db.module_bodies(module_id);
+    let module_metrics = module_hir_metrics_query(db, file_id_input);
+    let mut methods = rustc_hash::FxHashMap::default();
+    for (local_id, _body) in module_bodies.iter_bodies() {
+        let Some(cfg) = module_cfgs.get(local_id) else { continue };
+        let base = hir::cfg::cyclomatic_complexity(cfg.as_ref());
+        let extras = module_metrics
+            .get(local_id)
+            .map(|m| m.boolean_ops_count + m.ternary_count)
+            .unwrap_or(0);
+        methods.insert(local_id, base + extras);
+    }
+    tracing::debug!(count = methods.len(), "Built module cyclomatic metrics");
+    Arc::new(ModuleCyclomatic { methods })
+}
+
+/// Per-method shim over [`module_cyclomatic_query`]. LRU = 256.
+#[salsa::tracked(lru = 256)]
+pub fn method_cyclomatic_query<'db>(
+    db: &'db dyn RootDatabase,
+    method_id_input: hir::MethodIdInput<'db>,
+) -> u32 {
+    let _span = tracing::info_span!("method_cyclomatic", ?method_id_input).entered();
+    let method_id = method_id_input.method_id(db);
+    let file_id_input = FileIdInput::new(db, method_id.module.file_id);
+    let module_metrics = module_cyclomatic_query(db, file_id_input);
+    module_metrics.get(method_id.local_id)
 }

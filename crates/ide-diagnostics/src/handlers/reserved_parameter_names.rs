@@ -90,19 +90,28 @@ fn check_params(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic_with_config};
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
+
+    fn check_reserved_parameter_names_snapshot(
+        code: &str,
+        diagnostics: Vec<crate::Diagnostic>,
+        expected: expect_test::Expect,
+    ) {
+        let diagnostics = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::ReservedParameterNames)
+            .collect::<Vec<_>>();
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
     #[test]
     fn test_empty_list_no_diagnostics() {
         let code = r#"Процедура Тест(ВидГруппыФормы)
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ReservedParameterNames)
-            .collect();
-        assert_eq!(diags.len(), 0);
+        check_reserved_parameter_names_snapshot(code, diagnostics, expect![[r#""#]]);
     }
 
     #[test]
@@ -115,12 +124,14 @@ mod tests {
             serde_json::json!({ "reservedWords": ["ВидГруппыФормы"] }),
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        let diags: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::ReservedParameterNames)
-            .collect();
-        assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 0, 15, 29);
+        check_reserved_parameter_names_snapshot(
+            code,
+            diagnostics,
+            expect![[r#"
+            ReservedParameterNames @ 1:16..1:30
+              message: Переименуйте параметр 'ВидГруппыФормы' так, чтобы он не совпадал с зарезервированным словом.
+              severity: Warning"#]],
+        );
     }
 
     #[test]
@@ -133,9 +144,13 @@ mod tests {
             serde_json::json!({ "reservedWords": ["ВидГруппыФормы"] }),
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ReservedParameterNames).count(),
-            1
+        check_reserved_parameter_names_snapshot(
+            code,
+            diagnostics,
+            expect![[r#"
+            ReservedParameterNames @ 1:16..1:30
+              message: Переименуйте параметр 'видгруппыформы' так, чтобы он не совпадал с зарезервированным словом.
+              severity: Warning"#]],
         );
     }
 
@@ -149,9 +164,16 @@ mod tests {
             serde_json::json!({ "reservedWords": ["ВидГруппыФормы", "СтрокаТаблицы"] }),
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ReservedParameterNames).count(),
-            2
+        check_reserved_parameter_names_snapshot(
+            code,
+            diagnostics,
+            expect![[r#"
+            ReservedParameterNames @ 1:16..1:30
+              message: Переименуйте параметр 'ВидГруппыФормы' так, чтобы он не совпадал с зарезервированным словом.
+              severity: Warning
+            ReservedParameterNames @ 1:32..1:45
+              message: Переименуйте параметр 'СтрокаТаблицы' так, чтобы он не совпадал с зарезервированным словом.
+              severity: Warning"#]],
         );
     }
 
@@ -165,10 +187,7 @@ mod tests {
             serde_json::json!({ "reservedWords": ["ВидГруппыФормы"] }),
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ReservedParameterNames).count(),
-            0
-        );
+        check_reserved_parameter_names_snapshot(code, diagnostics, expect![[r#""#]]);
     }
 
     #[test]
@@ -182,9 +201,13 @@ mod tests {
             serde_json::json!({ "reservedWords": ["ВидГруппыФормы"] }),
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ReservedParameterNames).count(),
-            1
+        check_reserved_parameter_names_snapshot(
+            code,
+            diagnostics,
+            expect![[r#"
+            ReservedParameterNames @ 1:14..1:28
+              message: Переименуйте параметр 'ВидГруппыФормы' так, чтобы он не совпадал с зарезервированным словом.
+              severity: Warning"#]],
         );
     }
 }

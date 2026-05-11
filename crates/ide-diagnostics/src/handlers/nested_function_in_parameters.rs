@@ -578,15 +578,14 @@ fn has_multiline_param_hir(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic, check_ast_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
     #[test]
     fn test_no_diagnostic_single_line() {
         let code = r#"Сообщить(СуммаСтрокой("7"), СуммаСтрокой(СуммаНДС(Перечисление.Сумма)));"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -596,7 +595,7 @@ mod tests {
         let code = r#"Сообщить(СуммаСтрокой("77"),
     СуммаСтрокой(СуммаНДС(Перечисление.ВтораяСумма)));"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -607,7 +606,11 @@ mod tests {
         Параметр
     ));"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            NestedFunctionInParameters @ 1:1..1:6
+              message: Убрать инициализацию параметров метода 'Метод' вложенными методами
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -620,7 +623,7 @@ mod tests {
     ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())
 );"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -634,8 +637,7 @@ mod tests {
             serde_json::json!({"allowOneliner": false}),
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        // Single-line call - no diagnostics even with allowOneliner=false
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -643,7 +645,7 @@ mod tests {
         let code = r#"А = Новый Массив;
 Сообщить();"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -653,7 +655,7 @@ mod tests {
         let code = r#"Структура = Новый Структура("Параметр1, Параметр2",
             Новый Структура(), Новый Структура("Параметр3", Новый Массив()));"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -664,7 +666,11 @@ mod tests {
                 "ВложенныйПараметр"
             ));"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        expect![[r#"
+            NestedFunctionInParameters @ 1:19..1:28
+              message: Убрать инициализацию параметров конструктора 'Структура' вложенными методами
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -672,7 +678,7 @@ mod tests {
         let code = r#"Структура = Новый Структура("Параметр1, Параметр2",
             Новый Структура, Новый Массив);"#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     const FIXTURE: &str = r#"Процедура Тест() // Все комментарии про allowOneliner=false
@@ -766,17 +772,17 @@ mod tests {
     fn test_comprehensive() {
         let diagnostics = check_ast_diagnostic(FIXTURE, check);
 
-        // With default config (allowOneliner=true), should find 3 diagnostics
-        // Expected diagnostics at lines 1, 3, 51 (0-indexed)
-        assert_eq!(diagnostics.len(), 3, "Should find exactly 3 diagnostics with default config");
-
-        // Verify exact diagnostic positions
-        // Line 1 (0-indexed), columns 22-30: Вставить
-        assert_diagnostic_range(FIXTURE, &diagnostics[0], 1, 22, 30);
-        // Line 3 (0-indexed), columns 11-19: Картинка
-        assert_diagnostic_range(FIXTURE, &diagnostics[1], 3, 11, 19);
-        // Line 51 (0-indexed), columns 72-94: ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(FIXTURE, &diagnostics[2], 51, 72, 94);
+        expect![[r#"
+            NestedFunctionInParameters @ 2:23..2:31
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 4:12..4:20
+              message: Убрать инициализацию параметров конструктора 'Картинка' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 52:73..52:95
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information"#]]
+        .assert_eq(&format_diags(FIXTURE, &diagnostics));
     }
 
     #[test]
@@ -788,22 +794,43 @@ mod tests {
         );
         let diagnostics = check_ast_diagnostic_with_config(FIXTURE, config, check);
 
-        // Expected 12 diagnostics with allowOneliner=false
-        assert_eq!(diagnostics.len(), 12, "Should find 12 diagnostics with allowOneliner=false ");
-
-        // Verify positions
-        assert_diagnostic_range(FIXTURE, &diagnostics[0], 1, 22, 30); // Вставить
-        assert_diagnostic_range(FIXTURE, &diagnostics[1], 3, 11, 19); // Картинка
-        assert_diagnostic_range(FIXTURE, &diagnostics[2], 3, 20, 49); // ПолучитьИзВременногоХранилища
-        assert_diagnostic_range(FIXTURE, &diagnostics[3], 8, 4, 12); // Сообщить
-        assert_diagnostic_range(FIXTURE, &diagnostics[4], 13, 35, 42); // Метод21
-        assert_diagnostic_range(FIXTURE, &diagnostics[5], 17, 22, 31); // Структура
-        assert_diagnostic_range(FIXTURE, &diagnostics[6], 36, 14, 19); // Новый (without type name)
-        assert_diagnostic_range(FIXTURE, &diagnostics[7], 47, 72, 94); // ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(FIXTURE, &diagnostics[8], 51, 72, 94); // ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(FIXTURE, &diagnostics[9], 56, 4, 28); // ЗаписьЖурналаРегистрации
-        assert_diagnostic_range(FIXTURE, &diagnostics[10], 69, 16, 21); // Метод
-        assert_diagnostic_range(FIXTURE, &diagnostics[11], 79, 24, 43); // RecalculateAccruals
+        expect![[r#"
+            NestedFunctionInParameters @ 2:23..2:31
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 4:12..4:20
+              message: Убрать инициализацию параметров конструктора 'Картинка' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 4:21..4:50
+              message: Убрать инициализацию параметров метода 'ПолучитьИзВременногоХранилища' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 9:5..9:13
+              message: Убрать инициализацию параметров метода 'Сообщить' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 14:36..14:43
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 18:23..18:32
+              message: Убрать инициализацию параметров конструктора 'Структура' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 37:15..37:20
+              message: Убрать инициализацию параметров конструктора 'Новый' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 48:73..48:95
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 52:73..52:95
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 57:5..57:29
+              message: Убрать инициализацию параметров метода 'ЗаписьЖурналаРегистрации' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 70:17..70:22
+              message: Убрать инициализацию параметров метода 'Метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 80:25..80:44
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information"#]].assert_eq(&format_diags(FIXTURE, &diagnostics));
     }
 
     #[test]
@@ -818,11 +845,45 @@ mod tests {
         );
         let diagnostics = check_ast_diagnostic_with_config(FIXTURE, config, check);
 
-        // Expected 13 diagnostics with custom allowed methods + allowOneliner=false
-        assert_eq!(
-            diagnostics.len(),
-            13,
-            "Should find 13 diagnostics with custom allowed methods "
-        );
+        expect![[r#"
+            NestedFunctionInParameters @ 2:23..2:31
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 4:12..4:20
+              message: Убрать инициализацию параметров конструктора 'Картинка' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 4:21..4:50
+              message: Убрать инициализацию параметров метода 'ПолучитьИзВременногоХранилища' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 9:5..9:13
+              message: Убрать инициализацию параметров метода 'Сообщить' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 14:36..14:43
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 18:23..18:32
+              message: Убрать инициализацию параметров конструктора 'Структура' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 37:15..37:20
+              message: Убрать инициализацию параметров конструктора 'Новый' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 48:73..48:95
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 52:73..52:95
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 57:5..57:29
+              message: Убрать инициализацию параметров метода 'ЗаписьЖурналаРегистрации' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 73:16..73:21
+              message: Убрать инициализацию параметров метода 'Метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 80:25..80:44
+              message: Убрать инициализацию параметров метода 'метод' вложенными методами
+              severity: Information
+            NestedFunctionInParameters @ 83:12..83:27
+              message: Убрать инициализацию параметров метода 'PredefinedValue' вложенными методами
+              severity: Information"#]].assert_eq(&format_diags(FIXTURE, &diagnostics));
     }
 }

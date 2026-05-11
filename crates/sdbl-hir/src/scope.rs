@@ -96,6 +96,17 @@ impl Scope {
         }
     }
 
+    /// Remove a temporary table by name from the nearest scope frame that contains it.
+    pub fn remove_temp_table(&mut self, name: &str) {
+        let name_lower = name.to_lowercase();
+        for frame in self.frames.iter_mut().rev() {
+            if frame.temp_tables.remove(&name_lower).is_some() {
+                tracing::debug!(name = %name, "Removed temporary table from scope");
+                return;
+            }
+        }
+    }
+
     /// Find temporary table by name (case-insensitive).
     ///
     /// Searches from innermost to outermost scope.

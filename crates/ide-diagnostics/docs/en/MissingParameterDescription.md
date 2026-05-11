@@ -16,6 +16,17 @@ Diagnostic detects typical errors:
 
 The current implementation also skips hyperlink-style documentation comments such as `See OtherMethod()`.
 
+### Strict mode
+
+Set the diagnostic parameter `allowShortDescriptionParameters` to
+`false` to additionally require prose description after the type for
+each parameter. With strict mode on, `Параметр1 - Строка` (type only)
+is flagged as missing the explanation; `Параметр1 - Строка - первое слагаемое`
+or a structured `Структура:` block with sub-fields is accepted. Default
+is `true` to preserve compatibility with the BSL idiom of type-only
+parameters. Mirrors `MissingReturnedValueDescription`'s
+`allowShortDescriptionReturnValues` knob.
+
 > **Behavioural change:** the `Параметры:` / `Parameters:` keywords are now recognised only at the start of a comment line. The previous parser also matched the keyword anywhere in free-form text, which occasionally produced false positives. If existing comments had `parameters:` occurring mid-sentence and implicitly opening a section, after the upgrade those cases must be rewritten as explicit section headers.
 
 ## Examples

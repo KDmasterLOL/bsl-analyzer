@@ -62,7 +62,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::check_diagnostics_snapshot_for;
+    use expect_test::expect;
     #[test]
     fn test_comprehensive() {
         let code = r#"#Если Нечто Тогда
@@ -84,12 +85,17 @@ mod tests {
 #Если НЕ МобильныйАвтономныйСервер Тогда
 
 #КонецЕсли"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 2, "Should find exactly 2 unknown symbols");
-
-        assert_diagnostic_range(code, &diagnostics[0], 0, 6, 11);
-        assert_diagnostic_range(code, &diagnostics[1], 4, 6, 7);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnknownPreprocessorSymbol,
+            expect![[r#"
+                UnknownPreprocessorSymbol @ 1:7..1:12
+                  message: Неизвестный символ препроцессора 'Нечто'
+                  severity: Critical
+                UnknownPreprocessorSymbol @ 5:7..5:8
+                  message: Неизвестный символ препроцессора '_'
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -101,8 +107,11 @@ mod tests {
 #Если НЕ МобильныйАвтономныйСервер Тогда
 #КонецЕсли
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Known symbols should not trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnknownPreprocessorSymbol,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -111,8 +120,14 @@ mod tests {
 #Если Нечто Тогда
 #КонецЕсли
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Unknown symbol should trigger diagnostic");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnknownPreprocessorSymbol,
+            expect![[r#"
+                UnknownPreprocessorSymbol @ 2:7..2:12
+                  message: Неизвестный символ препроцессора 'Нечто'
+                  severity: Critical"#]],
+        );
     }
 
     #[test]
@@ -124,8 +139,11 @@ mod tests {
 #Если НЕ Сервер И ТонкийКлиент Тогда
 #КонецЕсли
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Complex conditions with known symbols should be OK");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnknownPreprocessorSymbol,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -137,8 +155,11 @@ mod tests {
 #If Server Then
 #EndIf
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "English keywords should be recognized");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnknownPreprocessorSymbol,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -153,8 +174,11 @@ mod tests {
 #Если MacOS Тогда
 #КонецЕсли
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "OS symbols should be recognized");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnknownPreprocessorSymbol,
+            expect![[r#""#]],
+        );
     }
 
     #[test]
@@ -166,7 +190,13 @@ mod tests {
 #Если UnknownSymbol Тогда
 #КонецЕсли
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect only unknown symbol");
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnknownPreprocessorSymbol,
+            expect![[r#"
+                UnknownPreprocessorSymbol @ 5:7..5:20
+                  message: Неизвестный символ препроцессора 'UnknownSymbol'
+                  severity: Critical"#]],
+        );
     }
 }

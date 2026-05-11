@@ -86,6 +86,11 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::{
+    call_graph::{CallTarget, CallerId, EdgeKind, ModuleCallSummary},
+    ModItem, ModuleId,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -101,62 +106,113 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Creates diagnostic from HIR BodyDiagnostic.
-///
-/// Called from hir_dispatch when `BodyDiagnostic::CognitiveComplexity` is encountered.
-/// Applies configuration filtering (complexityThreshold).
-pub fn from_hir(
-    method_name: &str,
-    complexity: u32,
-    is_function: bool,
-    range: ide_db::TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+/// Track 2 Phase B §6.4 — handler-side detection consuming the cached
+/// [`hir::metrics::HirMethodMetrics::cognitive`] field via
+/// `ctx.module_hir_metrics()`. Replaces the legacy `from_hir` adapter
+/// (BodyDiagnostic-fed) and the per-method HIR walk in
+/// `hir-def/cognitive_complexity.rs`.
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CognitiveComplexity;
-
     if ctx.is_disabled_with_metadata(code) {
-        return None;
+        return Vec::new();
     }
 
-    let complexity_threshold = ctx.config_int(code, "complexityThreshold", 15) as u32;
-    if complexity <= complexity_threshold {
-        return None;
+    let threshold = ctx.config_int(code, "complexityThreshold", 15) as u32;
+    let module_metrics = ctx.module_hir_metrics();
+    if module_metrics.is_empty() {
+        return Vec::new();
     }
+    let module_bodies = ctx.module_bodies();
+    let item_tree = ctx.item_tree();
+    let module_id = ModuleId::new(ctx.file_id);
+    let recursive_methods = local_recursive_methods(&ctx.call_summary(module_id));
 
-    let method_type = if is_function { "Функция" } else { "Процедура" };
-    Some(Diagnostic {
-        code,
-        message: format!(
-            "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
-             Упростите логику или уменьшите вложенность",
-            method_type, method_name, complexity, complexity_threshold
-        ),
-        severity: ctx.severity(code),
-        range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+    // Sort by `local_id` for deterministic output ordering — matches
+    // the §6.4 cohort follow-up applied to method_size etc.
+    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
+    local_ids.sort_unstable();
+
+    let mut out = Vec::new();
+    for local_id in local_ids {
+        let Some(metrics) = module_metrics.get(local_id) else { continue };
+        // SonarSource Cognitive Complexity v1.4 recursion penalty: +1
+        // when the method is self-recursive or part of a local recursive
+        // cycle. Keep this on the cheap call-summary path; pulling the
+        // security EffectSummary batch here triggers cross-module effect
+        // fixpoints for a diagnostic that only needs recursion.
+        let recursion_bonus = if recursive_methods.contains(&local_id) { 1 } else { 0 };
+        let total = metrics.cognitive + recursion_bonus;
+        if total <= threshold {
+            continue;
+        }
+        let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
+        let (name, name_range, is_function) = match item {
+            ModItem::Procedure(idx) => {
+                let p = item_tree.procedure(*idx);
+                (p.name.as_str().to_string(), p.name_range, false)
+            }
+            ModItem::Function(idx) => {
+                let f = item_tree.function(*idx);
+                (f.name.as_str().to_string(), f.name_range, true)
+            }
+            ModItem::Variable(_) => continue,
+        };
+        let method_type = if is_function { "Функция" } else { "Процедура" };
+        out.push(Diagnostic {
+            code,
+            message: format!(
+                "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
+                 Упростите логику или уменьшите вложенность",
+                method_type, name, total, threshold
+            ),
+            severity: ctx.severity(code),
+            range: name_range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+    out
 }
 
-/// Calculate cognitive complexity for a method body (HIR-based).
-///
-/// This is a PUBLIC function that can be reused for:
-/// - Code lenses (showing complexity in editor)
-/// - Metrics collection
-/// - Other diagnostics
-///
-/// Uses the HIR-based implementation from `hir_def::cognitive_complexity`.
-pub fn calculate_complexity(body: &hir::Body) -> u32 {
-    hir::cognitive_complexity::calculate_complexity(body)
+fn local_recursive_methods(summary: &ModuleCallSummary) -> FxHashSet<u32> {
+    let mut graph: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+    for edge in &summary.call_edges {
+        if !matches!(edge.kind, EdgeKind::DirectLocal) {
+            continue;
+        }
+        let CallerId::Method(caller_id) = edge.caller else { continue };
+        let CallTarget::Local { callee_local_id } = edge.target else { continue };
+        graph.entry(caller_id).or_default().push(callee_local_id);
+    }
+
+    let mut recursive = FxHashSet::default();
+    for &start in graph.keys() {
+        let mut stack = graph.get(&start).cloned().unwrap_or_default();
+        let mut visited = FxHashSet::default();
+        while let Some(node) = stack.pop() {
+            if node == start {
+                recursive.insert(start);
+                break;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            if let Some(next) = graph.get(&node) {
+                stack.extend(next.iter().copied());
+            }
+        }
+    }
+    recursive
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::{
-        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
+        check_diagnostics_snapshot_for, check_hir_diagnostic_with_config, format_diags,
     };
-    use crate::{DiagnosticsConfig, Severity};
+    use crate::DiagnosticsConfig;
+    use expect_test::expect;
     use hir::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};
@@ -169,10 +225,7 @@ mod tests {
     Возврат Параметр + 1;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(diagnostics.len(), 0, "Simple function should have complexity 0");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
     }
 
     #[test]
@@ -186,10 +239,7 @@ mod tests {
     Возврат 0;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(diagnostics.len(), 0, "Complexity should be 1 + 2 = 3, below default threshold");
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
     }
 
     #[test]
@@ -207,14 +257,7 @@ mod tests {
     Возврат 0;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Complexity should be 1 + 2 + 3 + 4 = 10, below default threshold of 15"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
     }
 
     #[test]
@@ -231,14 +274,7 @@ mod tests {
     КонецЕсли;
 КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Complexity should be 4 (if + 3 elseif/else), below threshold"
-        );
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
     }
 
     #[test]
@@ -259,9 +295,14 @@ mod tests {
             .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
 
         let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-        assert_eq!(diagnostics.len(), 1, "Complexity is 3 (1 + 2), should exceed threshold of 2");
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
+        expect![[r#"
+            CognitiveComplexity @ 1:9..1:13
+              message: Функция 'Тест' имеет когнитивную сложность 3 (максимум: 2). Упростите логику или уменьшите вложенность
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     const COMPLEX_FUNCTION: &str = r#"Функция ОбработатьКоллекцию(Данные, Флаг)
@@ -304,35 +345,58 @@ mod tests {
     #[test]
     fn test_comprehensive() {
         let code = COMPLEX_FUNCTION;
-        let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
-
-        // Expected 1 diagnostic for function ОбработатьКоллекцию
-        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostic");
-
-        // Expected diagnostic on function name
-        assert_diagnostic_range(code, diagnostics[0], 0, 8, 27);
-
-        // Verify diagnostic details
-        assert_eq!(diagnostics[0].code, DiagnosticCode::CognitiveComplexity);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
-
-        // Verify the actual cognitive complexity value is mentioned in the message
-        assert!(
-            diagnostics[0].message.contains("25"),
-            "Message should contain complexity value 25, got: {}",
-            diagnostics[0].message
-        );
-        assert!(
-            diagnostics[0].message.contains("15"),
-            "Message should contain threshold 15, got: {}",
-            diagnostics[0].message
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::CognitiveComplexity,
+            expect![[r#"
+            CognitiveComplexity @ 1:9..1:28
+              message: Функция 'ОбработатьКоллекцию' имеет когнитивную сложность 25 (максимум: 15). Упростите логику или уменьшите вложенность
+              severity: Warning"#]],
         );
     }
 
+    /// Track 2 Phase B §6.5 — recursion penalty regression guard.
+    /// SonarSource Cognitive Complexity v1.4 spec adds `+1` for any
+    /// recursive call (self or mutual). The §6.4 visitor's HIR-walk
+    /// can't see call edges, so the handler sources the penalty from
+    /// the module call summary. This test pins the +1 increment against
+    /// a tight fixture: a self-recursive function with cognitive=1
+    /// (one `Если` increment) plus the recursion bonus = 2, fires when
+    /// `complexityThreshold = 1`.
     #[test]
-    fn test_calculate_complexity_directly() {
+    fn test_recursion_penalty_self_call() {
+        let code = r#"Функция Факториал(N)
+    Если N <= 1 Тогда
+        Возврат 1;
+    КонецЕсли;
+    Возврат N * Факториал(N - 1);
+КонецФункции"#;
+
+        let mut config = DiagnosticsConfig::default();
+        let mut params = serde_json::Map::new();
+        params.insert("complexityThreshold".to_string(), serde_json::Value::Number(1.into()));
+        config
+            .parameters
+            .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
+
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
+        expect![[r#"
+            CognitiveComplexity @ 1:9..1:18
+              message: Функция 'Факториал' имеет когнитивную сложность 2 (максимум: 1). Упростите логику или уменьшите вложенность
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// Track 2 Phase B §6.4 — pin the cognitive value the §6.1 visitor
+    /// produces against the same fixture the legacy
+    /// `calculate_complexity` test asserted on. The migration path runs
+    /// through `hir::metrics::compute_hir_metrics` instead of the
+    /// retired wrapper; the expected number is unchanged.
+    #[test]
+    fn test_compute_hir_metrics_cognitive_value() {
         let code = COMPLEX_FUNCTION;
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
@@ -356,8 +420,8 @@ mod tests {
         let module_bodies = db.module_bodies(module_id);
 
         let body = module_bodies.body(0).expect("Should have first method body");
-        let complexity = calculate_complexity(body);
+        let metrics = hir::metrics::compute_hir_metrics(body);
 
-        assert_eq!(complexity, 25, "ОбработатьКоллекцию should have complexity 25");
+        assert_eq!(metrics.cognitive, 25, "ОбработатьКоллекцию should have cognitive 25");
     }
 }

@@ -4,15 +4,23 @@
 //! textDocument/definition, textDocument/references, etc.
 
 use anyhow::Result;
-use ide::Location as IdeLocation;
-use line_index::LineIndex;
+use ide::{
+    DocumentHighlightKind as IdeDocumentHighlightKind, FoldingRangeKind as IdeFoldingRangeKind,
+    Location as IdeLocation,
+};
+use line_index::{LineIndex, TextSize};
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem, CompletionItemKind,
-    CompletionParams, CompletionResponse, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
-    MarkupContent, MarkupKind, ReferenceParams, SemanticTokens, SemanticTokensParams,
-    SemanticTokensResult, SignatureHelpParams,
+    CompletionParams, CompletionResponse, DocumentHighlight as LspDocumentHighlight,
+    DocumentHighlightKind as LspDocumentHighlightKind, DocumentHighlightParams,
+    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange as LspFoldingRange,
+    FoldingRangeKind as LspFoldingRangeKind, FoldingRangeParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupContent, MarkupKind,
+    ReferenceParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
+    SignatureHelpParams,
 };
+use rustc_hash::FxHashMap;
+use vfs::FileId;
 
 use crate::frozen_context::LatencyRequestContext;
 use crate::global_state::GlobalStateSnapshot;
@@ -120,15 +128,109 @@ pub fn handle_find_references(
         return Ok(None);
     }
 
-    let lsp_locations: Vec<Location> = locations
-        .into_iter()
-        .filter_map(|loc| convert_location(line_index, text, &uri, loc))
-        .collect();
+    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let lsp_locations: Vec<Location> =
+        locations.into_iter().map(|loc| converter.convert(loc)).collect::<Result<Vec<_>>>()?;
 
     if lsp_locations.is_empty() {
         Ok(None)
     } else {
         Ok(Some(lsp_locations))
+    }
+}
+
+/// Handles textDocument/documentHighlight request.
+///
+/// Returns same-document highlights for the symbol at the cursor position.
+pub fn handle_document_highlight(
+    ctx: LatencyRequestContext,
+    params: DocumentHighlightParams,
+) -> Result<Option<Vec<LspDocumentHighlight>>> {
+    let _p = tracing::info_span!(
+        "handle_document_highlight",
+        uri = %params.text_document_position_params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let text = doc.text();
+    let line_index = doc.line_index();
+
+    let offset = crate::lsp::offset(line_index, text, position)?;
+
+    let highlights = ctx.analysis.document_highlights(file_id, offset.into());
+    if highlights.is_empty() {
+        return Ok(None);
+    }
+
+    let lsp_highlights: Vec<LspDocumentHighlight> = highlights
+        .into_iter()
+        .filter_map(|highlight| {
+            let range = crate::lsp::range(line_index, text, highlight.range)?;
+            Some(LspDocumentHighlight {
+                range,
+                kind: Some(convert_document_highlight_kind(highlight.kind)),
+            })
+        })
+        .collect();
+
+    if lsp_highlights.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(lsp_highlights))
+    }
+}
+
+/// Handles textDocument/foldingRange request.
+///
+/// Returns all foldable ranges in the document.
+pub fn handle_folding_range(
+    ctx: LatencyRequestContext,
+    params: FoldingRangeParams,
+) -> Result<Option<Vec<LspFoldingRange>>> {
+    let _p = tracing::info_span!("handle_folding_range", uri = %params.text_document.uri).entered();
+
+    let uri = params.text_document.uri;
+    let file_id = ctx.file_id_for_url(&uri)?;
+
+    let doc = ctx
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let line_index = doc.line_index();
+
+    let ranges = ctx.analysis.folding_ranges(file_id);
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+
+    let lsp_ranges: Vec<LspFoldingRange> = ranges
+        .into_iter()
+        .filter_map(|folding_range| {
+            let (start_line, end_line) = folding_range_lines(line_index, folding_range.range)?;
+            Some(LspFoldingRange {
+                start_line,
+                start_character: None,
+                end_line,
+                end_character: None,
+                kind: folding_range.kind.map(convert_folding_range_kind),
+                collapsed_text: None,
+            })
+        })
+        .collect();
+
+    if lsp_ranges.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(lsp_ranges))
     }
 }
 
@@ -512,18 +614,80 @@ fn convert_document_symbol(
     })
 }
 
-/// Convert IDE Location to LSP Location.
-///
-/// For now, assumes all locations are in the same file.
-/// TODO: Support cross-file references when we have FileId → URL mapping.
-fn convert_location(
-    line_index: &LineIndex,
-    text: &str,
-    uri: &lsp_types::Url,
-    ide_loc: IdeLocation,
-) -> Option<Location> {
-    let range = crate::lsp::range(line_index, text, ide_loc.range)?;
-    Some(Location { uri: uri.clone(), range })
+struct ReferenceLocationConverter<'ctx> {
+    ctx: &'ctx LatencyRequestContext,
+    source_file_id: FileId,
+    source_text: String,
+    target_files: FxHashMap<FileId, ReferenceTargetFile>,
+}
+
+struct ReferenceTargetFile {
+    uri: lsp_types::Url,
+    text: String,
+    line_index: LineIndex,
+}
+
+impl<'ctx> ReferenceLocationConverter<'ctx> {
+    fn new(ctx: &'ctx LatencyRequestContext, source_file_id: FileId, source_text: &str) -> Self {
+        Self {
+            ctx,
+            source_file_id,
+            source_text: source_text.to_string(),
+            target_files: FxHashMap::default(),
+        }
+    }
+
+    fn convert(&mut self, ide_loc: IdeLocation) -> Result<Location> {
+        let target = self.target_file(ide_loc.file_id)?;
+        let range = crate::lsp::range(&target.line_index, &target.text, ide_loc.range)
+            .ok_or_else(|| anyhow::anyhow!("Failed to convert reference range"))?;
+        Ok(Location { uri: target.uri.clone(), range })
+    }
+
+    fn target_file(&mut self, file_id: FileId) -> Result<&ReferenceTargetFile> {
+        if !self.target_files.contains_key(&file_id) {
+            let uri = self.ctx.url_for_file_id(file_id)?;
+            let text = if file_id == self.source_file_id {
+                self.source_text.clone()
+            } else if let Some(doc) = self.ctx.mem_docs.get(&uri) {
+                doc.text().to_string()
+            } else {
+                self.ctx.analysis.file_text(file_id)
+            };
+            let line_index = LineIndex::new(&text);
+            self.target_files.insert(file_id, ReferenceTargetFile { uri, text, line_index });
+        }
+
+        Ok(self
+            .target_files
+            .get(&file_id)
+            .expect("reference target file must be cached after insertion"))
+    }
+}
+
+fn convert_document_highlight_kind(kind: IdeDocumentHighlightKind) -> LspDocumentHighlightKind {
+    match kind {
+        IdeDocumentHighlightKind::Text => LspDocumentHighlightKind::TEXT,
+        IdeDocumentHighlightKind::Read => LspDocumentHighlightKind::READ,
+        IdeDocumentHighlightKind::Write => LspDocumentHighlightKind::WRITE,
+    }
+}
+
+fn convert_folding_range_kind(kind: IdeFoldingRangeKind) -> LspFoldingRangeKind {
+    match kind {
+        IdeFoldingRangeKind::Region => LspFoldingRangeKind::Region,
+    }
+}
+
+fn folding_range_lines(line_index: &LineIndex, range: ide::TextRange) -> Option<(u32, u32)> {
+    if range.is_empty() {
+        return None;
+    }
+
+    let start_line = line_index.try_line_col(range.start())?.line;
+    let end_offset = range.end() - TextSize::from(1);
+    let end_line = line_index.try_line_col(end_offset)?.line;
+    (end_line > start_line).then_some((start_line, end_line))
 }
 
 /// Convert IDE CompletionItem to LSP CompletionItem.
@@ -795,6 +959,8 @@ mod tests {
     use super::*;
     use crossbeam_channel::unbounded;
     use lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams};
+    use std::sync::Arc;
+    use vfs::VfsPath;
 
     use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
     use crate::global_state::GlobalState;
@@ -900,6 +1066,137 @@ mod tests {
         let result = handle_find_references(ctx, params);
         // File not in VFS is expected to fail in tests
         assert!(result.is_err() || result.unwrap().is_none());
+    }
+
+    #[test]
+    fn document_highlight_returns_ranges_and_kinds() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///highlight.bsl").unwrap();
+        let source = r#"
+Процедура Тест()
+    Перем МояПеременная;
+
+    МояПеременная = 10;
+    Сообщить(МояПеременная);
+КонецПроцедуры
+"#;
+
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        state.vfs_file_for_url(&uri).unwrap();
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+
+        let ctx = latency_ctx(&state);
+        let params = DocumentHighlightParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line: 2, character: 10 },
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = handle_document_highlight(ctx, params).unwrap().unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].kind, Some(LspDocumentHighlightKind::TEXT));
+        assert_eq!(result[0].range.start, Position { line: 2, character: 10 });
+        assert_eq!(result[1].kind, Some(LspDocumentHighlightKind::WRITE));
+        assert_eq!(result[1].range.start, Position { line: 4, character: 4 });
+        assert_eq!(result[2].kind, Some(LspDocumentHighlightKind::READ));
+        assert_eq!(result[2].range.start, Position { line: 5, character: 13 });
+    }
+
+    #[test]
+    fn folding_range_returns_lines_and_region_kind() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///folding.bsl").unwrap();
+        let source = "#Область Public\nПроцедура Тест()\n    Если Истина Тогда\n        Сообщить(1);\n    КонецЕсли;\nКонецПроцедуры\n#КонецОбласти";
+
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        state.vfs_file_for_url(&uri).unwrap();
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+
+        let ctx = latency_ctx(&state);
+        let params = FoldingRangeParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = handle_folding_range(ctx, params).unwrap().unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].start_line, 0);
+        assert_eq!(result[0].end_line, 6);
+        assert_eq!(result[0].kind, Some(LspFoldingRangeKind::Region));
+        assert_eq!(result[1].start_line, 1);
+        assert_eq!(result[1].end_line, 5);
+        assert_eq!(result[1].kind, None);
+        assert_eq!(result[2].start_line, 2);
+        assert_eq!(result[2].end_line, 4);
+        assert_eq!(result[2].kind, None);
+    }
+
+    #[test]
+    fn reference_location_converter_uses_target_file_uri_and_text() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let source_uri = lsp_types::Url::parse("file:///source.bsl").unwrap();
+        let target_uri = lsp_types::Url::parse("file:///target.bsl").unwrap();
+        let source_text = "Процедура Источник()\nКонецПроцедуры";
+        let target_text = "ПерваяСтрока\n    Цель();\n";
+
+        let source_file_id = state.vfs_file_for_url(&source_uri).unwrap();
+        let target_file_id = state.vfs_file_for_url(&target_uri).unwrap();
+        state.mem_docs.insert(source_uri.clone(), source_text.to_string(), 1);
+
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(source_uri.to_file_path().unwrap()),
+                Some(Arc::from(source_text)),
+            );
+            vfs.set_file_contents(
+                VfsPath::new(target_uri.to_file_path().unwrap()),
+                Some(Arc::from(target_text)),
+            );
+        }
+
+        state.process_changes(false);
+        let ctx = latency_ctx(&state);
+
+        let start = target_text.find("Цель").unwrap() as u32;
+        let end = start + "Цель".len() as u32;
+        let ide_loc = IdeLocation {
+            file_id: target_file_id,
+            range: ide::TextRange::new(start.into(), end.into()),
+        };
+
+        let mut converter = ReferenceLocationConverter::new(&ctx, source_file_id, source_text);
+        let lsp_loc = converter.convert(ide_loc).unwrap();
+
+        assert_eq!(lsp_loc.uri, target_uri);
+        assert_eq!(lsp_loc.range.start, Position { line: 1, character: 4 });
+        assert_eq!(lsp_loc.range.end, Position { line: 1, character: 8 });
     }
 
     #[test]

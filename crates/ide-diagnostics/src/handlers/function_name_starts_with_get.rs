@@ -70,6 +70,7 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    use expect_test::expect;
 
     #[test]
     fn test_function_name_starts_with_get() {
@@ -108,16 +109,19 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
 
         // Only the first function "ПолучитьИмяПоКоду" should trigger
-        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic");
+        expect![[r#"
+            FunctionNameStartsWithGet @ 2:9..2:26
+              message: Имя функции 'ПолучитьИмяПоКоду' не должно начинаться с 'Получить'
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &func_diags));
 
         // Line 1 (0-indexed), cols 8-25
-        assert_diagnostic_range(code, func_diags[0], 1, 8, 25);
-        assert!(func_diags[0].message.contains("ПолучитьИмяПоКоду"));
+        assert!(func_diags[0].message.contains("ПолучитьИмяПоКоду")); // snapshot-skip: message-substring assertion intentionally retained.
     }
 
     #[test]
@@ -129,10 +133,10 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Should not detect functions without 'Получить' prefix");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -148,10 +152,17 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
-        assert_eq!(func_diags.len(), 2, "Should detect case-insensitive 'Получить' variations");
+        expect![[r#"
+            FunctionNameStartsWithGet @ 2:9..2:23
+              message: Имя функции 'ПОЛУЧИТЬДАННЫЕ' не должно начинаться с 'Получить'
+              severity: Hint
+            FunctionNameStartsWithGet @ 6:9..6:25
+              message: Имя функции 'получитьзначение' не должно начинаться с 'Получить'
+              severity: Hint"#]]
+        .assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -163,10 +174,10 @@ EndProcedure
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Should NOT detect procedures");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -178,14 +189,10 @@ EndFunction
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
-        assert_eq!(
-            func_diags.len(),
-            0,
-            "Should NOT detect English 'Get' prefix (only Russian 'Получить')"
-        );
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 
     #[test]
@@ -197,9 +204,9 @@ EndFunction
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
-            .iter()
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
-        assert_eq!(func_diags.len(), 0, "Should NOT detect names that don't START with 'Получить'");
+        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
     }
 }

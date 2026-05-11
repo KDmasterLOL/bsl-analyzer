@@ -37,8 +37,14 @@
 //! let result = solver.solve();
 //! ```
 
+pub mod effect_summary;
+pub mod guard_predicates;
 pub mod liveness;
+pub mod path_terminates;
 pub mod reaching_defs;
+pub mod security_state;
+pub mod temp_resource;
+pub mod value_state;
 
 use cfg::{CfgEdgeType, ControlFlowGraph};
 use hir_def::body::Body;
@@ -236,6 +242,32 @@ pub trait Transfer<L: Lattice> {
     fn transfer_edge(&self, _edge_kind: CfgEdgeType, state: &L) -> L {
         state.clone()
     }
+
+    /// Hook fired by the solver when it enters a `ForLoop` or
+    /// `ForEachLoop` vertex, **after** the from/to/collection
+    /// expressions are processed (those expressions still see the old
+    /// binding value, since BSL evaluates them in the surrounding
+    /// scope before the rebind). The solver passes the loop's binding
+    /// so that per-variable lattices (constant propagation, narrowing,
+    /// …) can invalidate any fact attached to it — the loop rebinds
+    /// the binding to a fresh per-iteration value (counter / collection
+    /// element) that no statement-level transfer would otherwise model.
+    ///
+    /// Default implementation is a no-op: lattices that do not track
+    /// per-binding facts (reaching definitions, liveness, …) get the
+    /// correct behaviour for free.
+    ///
+    /// ## Why a dedicated hook
+    ///
+    /// The CFG models `Стмт::For` / `Стмт::ForEach` as their own
+    /// `ForLoopVertex` / `ForEachLoopVertex` (not as a statement inside
+    /// any `BasicBlockVertex`), so `transfer_stmt` is never invoked for
+    /// them. `transfer_expr` is invoked for `from` / `to` / `collection`
+    /// but receives only an `ExprId`, with no view of the loop binding.
+    /// Without this hook, a value-state lattice that knew `x` to be a
+    /// boolean before the loop would silently keep that fact across the
+    /// rebind — a real bug surfaced by Track 2 §1.3 stop-time review.
+    fn transfer_loop_var_bind(&self, _loop_var: hir_def::BindingId, _state: &mut L, _body: &Body) {}
 }
 
 /// Dataflow solver using worklist algorithm.
@@ -341,6 +373,51 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         if let Some(entry) = self.cfg.entry_point() {
             self.block_in.insert(entry, initial);
         }
+    }
+
+    /// Seed the exit block's OUT state.
+    ///
+    /// Symmetric counterpart of [`set_initial_state`] for backward analyses.
+    /// The backward solver iterates from the exit point: when the exit has
+    /// no successors it preserves whatever lives in `block_out[exit]`
+    /// (see `solve_backward`'s `is_exit && !has_successors` branch). The
+    /// default initialisation from [`set_bottom_factory`] makes this `⊥`,
+    /// which is correct for analyses whose boundary fact is bottom
+    /// (liveness — nothing is live after a function returns) but wrong for
+    /// analyses whose boundary fact is non-bottom.
+    ///
+    /// Example: PathTerminates seeds `OUT[exit] = MayFallthrough(true)` so
+    /// "execution can reach the end without `Return`" propagates backwards
+    /// through every block until a `Return` / `Raise` transfer kills it.
+    /// Without this seed every block sees `false`, the join is a fixed
+    /// point, and the analysis returns the trivial answer.
+    ///
+    /// Call **after** [`set_bottom_factory`] (the factory wipes
+    /// `block_out` for every vertex including the exit).
+    ///
+    /// For forward analyses this is effectively a no-op on the result —
+    /// the forward solver consults `block_out[exit]` only as initial state
+    /// when computing OUT for the exit, which has no out-edges, so seeding
+    /// it does not influence any other block.
+    ///
+    /// Panics in debug builds if called before
+    /// [`set_bottom_factory`] (or any other initialiser that populates
+    /// `block_out` for every vertex). Without that prior call the
+    /// solver's pre-loop assertion would fire later anyway, but the
+    /// failure mode there is opaque ("All blocks must be initialized");
+    /// the assert here makes the ordering bug immediately legible.
+    pub fn set_initial_state_at_exit(&mut self, initial: L) {
+        let exit = self.cfg.exit_point();
+        debug_assert!(
+            self.cfg
+                .vertices()
+                .all(|(idx, _)| self.block_in.contains_key(&idx)
+                    && self.block_out.contains_key(&idx)),
+            "set_initial_state_at_exit must be called *after* set_bottom_factory \
+             (or another initialiser that seeds block_in/block_out for every vertex) — \
+             otherwise the factory called later will overwrite the seeded exit OUT state",
+        );
+        self.block_out.insert(exit, initial);
     }
 
     /// Initialize all blocks with a custom bottom element factory.
@@ -719,19 +796,34 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             }
 
             CfgVertex::ForLoop(for_vertex) => {
-                // For loop: process from/to bound expressions
+                // `Для var = from По to Цикл …` evaluates `from` and
+                // `to` in the surrounding scope first (where `var` may
+                // still hold a useful value), and only then rebinds
+                // `var` to the integer counter. The rebind hook MUST
+                // fire AFTER the bound expressions, so an analysis
+                // whose `transfer_expr` consults the value-state of
+                // names that appear in `from` / `to` still sees the
+                // pre-loop fact.
                 let mut state = in_state.clone();
                 self.transfer.transfer_expr_in_place(for_vertex.from, &mut state, &self.body);
                 self.transfer.transfer_expr_in_place(for_vertex.to, &mut state, &self.body);
+                self.transfer.transfer_loop_var_bind(for_vertex.loop_var, &mut state, &self.body);
                 state
             }
 
             CfgVertex::ForEachLoop(foreach_vertex) => {
-                // ForEach loop: process the collection expression
-                // Clone once, then modify in-place
+                // `Для Каждого var Из collection Цикл` evaluates
+                // `collection` in the surrounding scope first, then
+                // rebinds `var` to the per-iteration element. Same
+                // ordering rationale as `ForLoop` above.
                 let mut state = in_state.clone();
                 self.transfer.transfer_expr_in_place(
                     foreach_vertex.collection,
+                    &mut state,
+                    &self.body,
+                );
+                self.transfer.transfer_loop_var_bind(
+                    foreach_vertex.loop_var,
                     &mut state,
                     &self.body,
                 );

@@ -276,11 +276,6 @@ impl RootQueryDb for RootDatabaseImpl {
         let input = self.file_text_input(file_id);
         base_db::method_regions_query(self, input)
     }
-
-    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
-        let input = self.file_text_input(file_id);
-        base_db::module_level_regions_query(self, input)
-    }
 }
 
 #[salsa::db]
@@ -329,6 +324,12 @@ impl DefDatabase for RootDatabaseImpl {
         let symbol_tree = self.symbol_tree(method.module);
         let method_symbol = symbol_tree.find_method_by_id(method)?;
         method_symbol.docs.clone()
+    }
+
+    fn variable_docs(&self, variable: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
+        let symbol_tree = self.symbol_tree(variable.module);
+        let variable_symbol = symbol_tree.find_variable_by_id(variable)?;
+        variable_symbol.docs.clone()
     }
 
     fn workspace_symbols(
@@ -404,6 +405,13 @@ impl hir::HirDatabase for RootDatabaseImpl {
     fn type_narrowing_enabled(&self) -> bool {
         RootDatabaseImpl::type_narrowing_enabled(self)
     }
+
+    fn proc_signature(
+        &self,
+        method_input: hir::MethodIdInput<'_>,
+    ) -> Arc<hir::proc_signature::ProcSignature> {
+        hir::proc_signature::proc_signature_query(self, method_input)
+    }
 }
 
 #[salsa::db]
@@ -467,6 +475,13 @@ impl RootDatabase for RootDatabaseImpl {
         file_id_input: FileIdInput,
     ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         queries::module_reaching_definitions_query(self, file_id_input)
+    }
+
+    fn module_path_terminates(
+        &self,
+        file_id_input: FileIdInput,
+    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
+        queries::module_path_terminates_query(self, file_id_input)
     }
 
     fn module_liveness_analysis(

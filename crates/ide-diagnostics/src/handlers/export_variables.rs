@@ -73,6 +73,7 @@ pub fn from_hir(_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Opti
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use expect_test::expect;
     #[test]
     fn test_no_export() {
         let code = r#"
@@ -84,8 +85,8 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let export_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
-        assert_eq!(export_diags.len(), 0, "Private variable should not trigger diagnostic");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &export_diags));
     }
 
     #[test]
@@ -93,8 +94,11 @@ mod tests {
         let code = r#"Перем МояПеременная Экспорт;"#;
         let diagnostics = check_hir_diagnostic(code);
         let export_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
-        assert_eq!(export_diags.len(), 1, "Exported variable should trigger diagnostic");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
+        expect![[r#"
+            ExportVariables @ 1:7..1:20
+              message: Не рекомендуется использовать глобальные переменные. Они могут приводить к трудноуловимым ошибкам
+              severity: Warning"#]].assert_eq(&format_diags(code, &export_diags));
     }
 
     #[test]
@@ -106,24 +110,34 @@ mod tests {
 "#;
         let diagnostics = check_hir_diagnostic(code);
         let export_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
         // Variables inside procedures cannot be exported
-        assert_eq!(export_diags.len(), 0);
+        expect![[r#""#]].assert_eq(&format_diags(code, &export_diags));
     }
 
     #[test]
     fn test_bilingual() {
         let code_ru = r#"Перем МояПеременная Экспорт;"#;
         let diagnostics_ru = check_hir_diagnostic(code_ru);
-        let export_diags_ru: Vec<_> =
-            diagnostics_ru.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
-        assert_eq!(export_diags_ru.len(), 1, "Russian keyword should work");
+        let export_diags_ru: Vec<_> = diagnostics_ru
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::ExportVariables)
+            .collect();
+        expect![[r#"
+            ExportVariables @ 1:7..1:20
+              message: Не рекомендуется использовать глобальные переменные. Они могут приводить к трудноуловимым ошибкам
+              severity: Warning"#]].assert_eq(&format_diags(code_ru, &export_diags_ru));
 
         let code_en = r#"Var MyVariable Export;"#;
         let diagnostics_en = check_hir_diagnostic(code_en);
-        let export_diags_en: Vec<_> =
-            diagnostics_en.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
-        assert_eq!(export_diags_en.len(), 1, "English keyword should work");
+        let export_diags_en: Vec<_> = diagnostics_en
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::ExportVariables)
+            .collect();
+        expect![[r#"
+            ExportVariables @ 1:5..1:15
+              message: Не рекомендуется использовать глобальные переменные. Они могут приводить к трудноуловимым ошибкам
+              severity: Warning"#]].assert_eq(&format_diags(code_en, &export_diags_en));
     }
 
     #[test]
@@ -132,12 +146,16 @@ mod tests {
         let code = "Перем Перем1 Экспорт;\nПерем Перем2;\nПерем Перем53 Экспорт;\n\nПроцедура МетодСодержащийПеременную()\n    Перем ПеременнаяМодуля, ПеременнаяЭкспорт;\nКонецПроцедуры";
         let diagnostics = check_hir_diagnostic(code);
         let export_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
-        assert_eq!(export_diags.len(), 2, "Expected 2 exported variables");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
+        expect![[r#"
+            ExportVariables @ 1:7..1:13
+              message: Не рекомендуется использовать глобальные переменные. Они могут приводить к трудноуловимым ошибкам
+              severity: Warning
+            ExportVariables @ 3:7..3:14
+              message: Не рекомендуется использовать глобальные переменные. Они могут приводить к трудноуловимым ошибкам
+              severity: Warning"#]].assert_eq(&format_diags(code, &export_diags));
         // Line 0: "Перем Перем1 Экспорт;" — name span cols 6-12
-        assert_diagnostic_range(code, export_diags[0], 0, 6, 12);
         // Line 2: "Перем Перем53 Экспорт;" — name span cols 6-13
-        assert_diagnostic_range(code, export_diags[1], 2, 6, 13);
     }
 
     #[test]
@@ -146,7 +164,7 @@ mod tests {
         let code = "// Перем Закомментированная Экспорт;";
         let diagnostics = check_hir_diagnostic(code);
         let export_diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
-        assert_eq!(export_diags.len(), 0, "Commented export should not trigger diagnostic");
+            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &export_diags));
     }
 }
