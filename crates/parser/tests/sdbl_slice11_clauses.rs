@@ -394,6 +394,22 @@ fn test_slice11_totals_overall_fallthrough_ru() {
     );
 }
 
+/// TOTALS BY group modifiers stay attached to the totals clause as flat
+/// sibling tokens, so HIR/source-map lowering can highlight them.
+#[test]
+fn test_slice11_totals_only_hierarchy_consumed_ru() {
+    let root = assert_clean("ВЫБРАТЬ Группа ИЗ Т ИТОГИ ПО Группа ТОЛЬКО ИЕРАРХИЯ");
+    let totals = find_kind(&root, SyntaxKind::SDBL_TOTALS_BY);
+    let token_texts: Vec<_> = totals
+        .children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .map(|t| t.text().to_string())
+        .collect();
+
+    assert!(token_texts.iter().any(|text| text == "ТОЛЬКО"));
+    assert!(token_texts.iter().any(|text| text == "ИЕРАРХИЯ"));
+}
+
 /// §IDE-recovery allowance #3 (TOTALS variant): missing-BY
 /// recovery — pre-BY aggregate-expression loop runs FIRST, so
 /// `ИТОГИ A` produces SdblTotalsBy with TOTALS+A expression child.

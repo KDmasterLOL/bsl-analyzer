@@ -150,6 +150,43 @@ fn test_source_map_collects_union_keywords() {
 }
 
 #[test]
+fn test_totals_by_only_hierarchy_source_map() {
+    let result = lower_query_with_source_map(
+        "ВЫБРАТЬ Группа КАК Группа ИЗ Товары ИТОГИ ПО Группа ТОЛЬКО ИЕРАРХИЯ",
+    );
+    let sm = &result.source_map;
+
+    for keyword in ["ИТОГИ", "ПО"] {
+        assert!(
+            sm.clause_keywords.iter().any(|token| token.text == keyword),
+            "Expected TOTALS BY clause keyword `{keyword}` in source map"
+        );
+    }
+
+    for modifier in ["ТОЛЬКО", "ИЕРАРХИЯ"] {
+        assert!(
+            sm.modifiers.iter().any(|token| token.text == modifier),
+            "Expected TOTALS BY modifier `{modifier}` in source map"
+        );
+    }
+
+    let totals_start = sm
+        .clause_keywords
+        .iter()
+        .find(|token| token.text == "ИТОГИ")
+        .expect("Expected TOTALS BY keyword")
+        .range
+        .start();
+
+    assert!(
+        sm.field_aliases
+            .iter()
+            .any(|token| token.text == "Группа" && token.range.start() > totals_start),
+        "Expected TOTALS BY output reference `Группа` to be recorded as a field alias"
+    );
+}
+
+#[test]
 fn test_aliased_table() {
     // Note: Parser may not handle AS alias correctly - just verify FROM clause exists
     let hir = lower_query("SELECT Код FROM Справочник.Валюты");
@@ -977,6 +1014,96 @@ fn test_tabular_section_task_ref_type_parsing() {
         }
         other => panic!("Expected Ref type, got: {:?}", other),
     }
+}
+
+#[test]
+fn hierarchical_catalog_parent_field_is_resolved() {
+    let catalog_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>Номенклатура</Name>
+            <Hierarchical>true</Hierarchical>
+            <CodeLength>9</CodeLength>
+            <DescriptionLength>25</DescriptionLength>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let catalog = bsl_metadata::xml_parser::parse_catalog_xml(catalog_xml).unwrap();
+    config.add_metadata_object(catalog);
+
+    let code = "ВЫБРАТЬ Номенклатура.Родитель ИЗ Справочник.Номенклатура КАК Номенклатура";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let hir = single_query_hir(&package);
+
+    let fields = hir.from[0].metadata.as_ref().expect("catalog must resolve").fields();
+    let parent = fields.iter().find(|field| field.name == "Родитель").expect("Родитель field");
+    assert_eq!(parent.name_en.as_deref(), Some("Parent"));
+    assert!(parent.is_standard, "Родитель must remain marked as a standard field");
+
+    let unknown_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|diag| {
+            matches!(
+                diag,
+                crate::diagnostics::SdblDiagnostic::UnknownField { field_name, .. }
+                    if field_name == "Родитель"
+            )
+        })
+        .collect();
+    assert!(unknown_diags.is_empty(), "Родитель must not be UnknownField: {unknown_diags:?}");
+
+    let unresolved: Vec<_> =
+        package.source_map.unresolved_field_names.iter().map(|t| t.text.as_str()).collect();
+    assert!(
+        !unresolved.contains(&"Родитель"),
+        "Родитель must not be highlighted as unresolved: {unresolved:?}"
+    );
+}
+
+#[test]
+fn hierarchical_catalog_parent_field_resolves_by_english_name() {
+    let catalog_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>Номенклатура</Name>
+            <Hierarchical>true</Hierarchical>
+            <CodeLength>9</CodeLength>
+            <DescriptionLength>25</DescriptionLength>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let catalog = bsl_metadata::xml_parser::parse_catalog_xml(catalog_xml).unwrap();
+    config.add_metadata_object(catalog);
+
+    let code = "SELECT N.Parent FROM Catalog.Номенклатура AS N";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let unknown_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|diag| {
+            matches!(
+                diag,
+                crate::diagnostics::SdblDiagnostic::UnknownField { field_name, .. }
+                    if field_name == "Parent"
+            )
+        })
+        .collect();
+    assert!(unknown_diags.is_empty(), "Parent must resolve by English standard name");
+
+    let resolved: Vec<_> = package.source_map.field_names.iter().map(|t| t.text.as_str()).collect();
+    let unresolved: Vec<_> =
+        package.source_map.unresolved_field_names.iter().map(|t| t.text.as_str()).collect();
+
+    assert!(resolved.contains(&"Parent"), "Parent should be a resolved field: {resolved:?}");
+    assert!(!unresolved.contains(&"Parent"), "Parent must not be unresolved: {unresolved:?}");
 }
 
 #[test]

@@ -22,9 +22,10 @@
 //! **Line Index:**
 //! - [`line_index_query`] - Convert byte offsets to line/column positions (LRU: 256)
 
-use std::{sync::Arc, time::Instant};
+use std::{path::Path, sync::Arc, time::Instant};
 
 use base_db::FileIdInput;
+use bsl_metadata::Configuration;
 use hir::ModuleId;
 
 use crate::{
@@ -46,6 +47,40 @@ pub fn configuration_path_for_file<'db>(
     let file_path = crate::vfs_helpers::get_file_path(db, file_id)?;
     let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path)?;
     Some(intern_configuration_path(db, &config_root.to_string_lossy(), db.metadata_version()))
+}
+
+fn load_configuration_at_path(db: &dyn RootDatabase, path: &Path) -> Arc<Configuration> {
+    let path_input = intern_configuration_path(db, &path.to_string_lossy(), db.metadata_version());
+    load_configuration(db, path_input)
+}
+
+fn visible_configuration_for_file(
+    db: &dyn RootDatabase,
+    file_path: &Path,
+) -> Option<Arc<Configuration>> {
+    let paths = db.all_config_paths();
+    if paths.is_empty() {
+        let config_root = crate::vfs_helpers::find_configuration_root(db, file_path)?;
+        return Some(load_configuration_at_path(db, &config_root));
+    }
+
+    let main_path = paths.iter().find_map(|(name, path)| name.is_none().then_some(path));
+    let extension_path = paths
+        .iter()
+        .filter(|(name, path)| name.is_some() && file_path.starts_with(path))
+        .max_by_key(|(_, path)| path.as_os_str().len())
+        .map(|(_, path)| path);
+
+    match (main_path, extension_path) {
+        (Some(main_path), Some(extension_path)) => {
+            let main = load_configuration_at_path(db, main_path);
+            let extension = load_configuration_at_path(db, extension_path);
+            Some(Arc::new(main.merged_with_extension(&extension)))
+        }
+        (Some(main_path), None) => Some(load_configuration_at_path(db, main_path)),
+        (None, Some(extension_path)) => Some(load_configuration_at_path(db, extension_path)),
+        (None, None) => None,
+    }
 }
 
 // Helper types for internal use
@@ -202,18 +237,9 @@ pub fn sdbl_hir_in_file_query<'db>(
     // Try to load configuration for metadata-based type inference
     let file_path_opt = crate::vfs_helpers::get_file_path(db, file_id);
 
-    let configuration = file_path_opt.and_then(|file_path| {
-        let config_root_opt = crate::vfs_helpers::find_configuration_root(db, &file_path);
-        config_root_opt.map(|config_root| {
-            let path_input = intern_configuration_path(
-                db,
-                &config_root.to_string_lossy(),
-                db.metadata_version(),
-            );
-            // Salsa dependency tracked automatically!
-            load_configuration(db, path_input)
-        })
-    });
+    let configuration = file_path_opt
+        .as_deref()
+        .and_then(|file_path| visible_configuration_for_file(db, file_path));
 
     // Lower each SDBL query to HIR
     // Pass Arc<Configuration> directly to avoid cloning the large structure

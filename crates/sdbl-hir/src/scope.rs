@@ -653,7 +653,7 @@ impl Scope {
 }
 
 /// Returns `true` if `name` matches a known standard attribute name (case-insensitive, bilingual).
-fn is_standard_attribute_name(name: &str) -> bool {
+pub(crate) fn is_standard_attribute_name(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
         "ссылка"

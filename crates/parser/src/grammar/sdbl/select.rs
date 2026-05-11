@@ -1407,7 +1407,7 @@ fn autoorder_clause(p: &mut Parser) {
 
 /// Parse TOTALS BY clause as a flat-list of pre-BY aggregate
 /// expressions, the BY token, and a flat list of post-BY group
-/// expressions.
+/// expressions with optional group modifiers.
 ///
 /// Grammar (Slice 11 narrowed scope per plan §IDE-recovery split,
 /// codex Round-1 finding 3):
@@ -1417,7 +1417,7 @@ fn autoorder_clause(p: &mut Parser) {
 ///   (BY|ПО) totals-group-list
 /// totals-aggregate-list := expression (',' expression)*
 /// totals-group-list     := totals-group (',' totals-group)*
-/// totals-group          := expression
+/// totals-group          := expression [ONLY|ТОЛЬКО] [HIERARCHY|ИЕРАРХИЯ]
 /// ```
 ///
 /// Provenance:
@@ -1426,10 +1426,10 @@ fn autoorder_clause(p: &mut Parser) {
 ///   39 line 51 explicitly notes that ИТОГИ may have no aggregate
 ///   list when the SELECT field list already contains aggregate
 ///   functions).
-/// - SELECT mini-spec §TOTALS BY (narrowed flat-list shape per Slice
-///   11 plan codex Round-1 finding 3: structured ONLY/HIERARCHY-in-
-///   TOTALS/PERIODS modifier forms are NOT supported under Slice 11;
-///   their promotion is deferred to Slice 12).
+/// - SELECT mini-spec §TOTALS BY (flat-list shape per Slice 11). The
+///   group item consumes the standard `ONLY HIERARCHY` modifiers as
+///   flat sibling tokens, matching ORDER BY's modifier attachment
+///   contract and keeping HIR/source-map consumers simple.
 /// - Bilingual TOTALS/ИТОГИ via Slice 2 attestation; OVERALL/ОБЩИЕ via
 ///   lexer Slice 2 LEGACY block (KwOverall variant).
 /// - Local IDE-recovery allowance #1: OVERALL falls through
@@ -1491,18 +1491,33 @@ fn totals_by_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "BY", "ПО");
     p.skip_trivia();
 
-    // Post-BY group list — comma-separated expressions. OVERALL/ОБЩИЕ
+    // Post-BY group list — comma-separated group items. OVERALL/ОБЩИЕ
     // is consumed here as a flat Ident expression per §IDE-recovery
     // allowance #1.
-    super::expressions::expression(p);
+    totals_group_item(p);
 
     while p.eat(TokenKind::Comma) {
         p.check_iteration_limit();
         p.skip_trivia();
-        super::expressions::expression(p);
+        totals_group_item(p);
     }
 
     m.complete(p, NodeKind::SdblTotalsBy);
+}
+
+fn totals_group_item(p: &mut Parser) {
+    super::expressions::expression(p);
+    p.skip_trivia();
+
+    if p.at_keyword("ONLY") || p.at_keyword("ТОЛЬКО") {
+        p.bump();
+        p.skip_trivia();
+    }
+
+    if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИЯ") {
+        p.bump();
+        p.skip_trivia();
+    }
 }
 
 // ============================================================================

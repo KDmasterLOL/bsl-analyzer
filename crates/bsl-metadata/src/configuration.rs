@@ -351,6 +351,45 @@ impl Configuration {
         self.metadata_objects.push(object);
     }
 
+    /// Merge an extension configuration over this configuration.
+    ///
+    /// Designer extension dumps often contain only the changed part of an
+    /// adopted object. The base object still owns platform-derived properties
+    /// such as `Hierarchical`, while the extension object contributes extra
+    /// attributes/tabular sections. Query analysis needs the effective object
+    /// shape, so duplicate objects are merged instead of letting the partial
+    /// extension object shadow the base one.
+    pub fn merge_extension_overlay(&mut self, extension: &Configuration) {
+        for ext_obj in &extension.metadata_objects {
+            if let Some(base_obj) = self.metadata_objects.iter_mut().find(|obj| {
+                obj.mdo_type == ext_obj.mdo_type && obj.name.eq_ignore_ascii_case(&ext_obj.name)
+            }) {
+                merge_metadata_object_overlay(base_obj, ext_obj);
+            } else {
+                self.add_metadata_object(ext_obj.clone());
+            }
+        }
+
+        for ext_reg in &extension.registers {
+            if self.find_register_by_type_and_name(ext_reg.mdo_type(), ext_reg.name()).is_none() {
+                self.add_register(ext_reg.clone());
+            }
+        }
+
+        for ext_defined_type in &extension.defined_types {
+            if self.find_defined_type(ext_defined_type.name()).is_none() {
+                self.add_defined_type(ext_defined_type.clone());
+            }
+        }
+    }
+
+    /// Return a new configuration with `extension` merged over `self`.
+    pub fn merged_with_extension(&self, extension: &Configuration) -> Self {
+        let mut merged = self.clone();
+        merged.merge_extension_overlay(extension);
+        merged
+    }
+
     /// Find metadata object by type and name (case-insensitive)
     ///
     /// Returns true if object exists
@@ -543,6 +582,47 @@ impl Configuration {
     }
 }
 
+fn merge_metadata_object_overlay(base: &mut MetadataObject, overlay: &MetadataObject) {
+    if overlay.name_en.is_some() {
+        base.name_en = overlay.name_en.clone();
+    }
+    if overlay.constant_type.is_some() {
+        base.constant_type = overlay.constant_type.clone();
+    }
+
+    for attr in &overlay.attributes {
+        base.attributes.retain(|existing| !existing.name.eq_ignore_ascii_case(&attr.name));
+        base.attributes.push(attr.clone());
+    }
+
+    for tabular_section in &overlay.tabular_sections {
+        base.tabular_sections
+            .retain(|existing| !existing.name().eq_ignore_ascii_case(tabular_section.name()));
+        base.tabular_sections.push(tabular_section.clone());
+    }
+
+    for child in &overlay.children {
+        if let Some(base_child) = base.children.iter_mut().find(|existing| {
+            existing.mdo_type == child.mdo_type && existing.name.eq_ignore_ascii_case(&child.name)
+        }) {
+            merge_metadata_object_overlay(base_child, child);
+        } else {
+            base.children.push(child.clone());
+        }
+    }
+
+    for enum_value in &overlay.enum_values {
+        base.enum_values.retain(|existing| !existing.name.eq_ignore_ascii_case(&enum_value.name));
+        base.enum_values.push(enum_value.clone());
+    }
+
+    for predefined_item in &overlay.predefined_items {
+        base.predefined_items
+            .retain(|existing| !existing.name.eq_ignore_ascii_case(&predefined_item.name));
+        base.predefined_items.push(predefined_item.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +694,37 @@ mod tests {
         let found = config.find_metadata_object(MdoType::Catalog, "номенклатура");
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, "Номенклатура");
+    }
+
+    #[test]
+    fn merge_extension_overlay_preserves_base_and_adds_extension_attributes() {
+        let mut base = Configuration::new("Base");
+        let mut base_catalog = MetadataObject::new(MdoType::Catalog, "Номенклатура");
+        base_catalog.add_attribute(crate::metadata_object::Attribute {
+            name: "Родитель".to_string(),
+            name_en: Some("Parent".to_string()),
+            attr_type: AttributeType::Ref {
+                mdo_type: MdoType::Catalog,
+                name: "Номенклатура".to_string(),
+            },
+        });
+        base.add_metadata_object(base_catalog);
+
+        let mut extension = Configuration::new("Extension");
+        let mut extension_catalog = MetadataObject::new(MdoType::Catalog, "Номенклатура");
+        extension_catalog.add_attribute(crate::metadata_object::Attribute {
+            name: "БУС_Артикул".to_string(),
+            name_en: None,
+            attr_type: AttributeType::String { length: Some(25) },
+        });
+        extension.add_metadata_object(extension_catalog);
+
+        let merged = base.merged_with_extension(&extension);
+        let catalog =
+            merged.find_metadata_object(MdoType::Catalog, "Номенклатура").expect("merged catalog");
+
+        assert!(catalog.find_attribute("Родитель").is_some());
+        assert!(catalog.find_attribute("БУС_Артикул").is_some());
     }
 
     #[test]
