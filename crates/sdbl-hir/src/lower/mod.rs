@@ -16,7 +16,7 @@ mod select_fields;
 mod tests;
 mod union;
 
-use syntax::ast::{AstNode, SdblQueryPackage};
+use syntax::ast::{AstNode, SdblQueryPackage, SdblSelectQuery};
 use syntax::Parse;
 
 use crate::hir::SdblHir;
@@ -90,23 +90,31 @@ pub fn lower_sdbl_to_hir(
     // Create lowering context (Arc avoids cloning the large Configuration)
     let mut ctx = LoweringContext::new(metadata);
 
-    // Lower ALL SELECT queries in the package
-    let all_queries: Vec<_> = package.queries().collect();
-
-    if all_queries.is_empty() {
-        tracing::debug!("No queries in package");
-        return crate::hir::SdblPackage::empty();
-    }
-
-    tracing::debug!(query_count = all_queries.len(), "lower_sdbl_to_hir: found queries in package");
-
-    // Lower ALL queries and track their ranges
-    // Each SdblSelectQuery may contain multiple queries (main + UNION)
     let mut sdbl_queries = Vec::new();
-    for (select_index, select_query) in all_queries.iter().enumerate() {
+    let mut select_index = 0;
+    let mut has_query_item = false;
+
+    for query_item in package.syntax().children() {
+        match query_item.kind() {
+            syntax::SyntaxKind::SDBL_SELECT_QUERY => {
+                has_query_item = true;
+            }
+            syntax::SyntaxKind::SDBL_DROP_QUERY => {
+                has_query_item = true;
+                ctx.lower_drop_query(&query_item);
+                continue;
+            }
+            _ => continue,
+        }
+
+        let Some(select_query) = SdblSelectQuery::cast(query_item) else {
+            continue;
+        };
+
         // Get subquery which contains main query + UNION queries
         let Some(subquery) = select_query.subquery() else {
             tracing::debug!(select_index, "No subquery in SdblSelectQuery");
+            select_index += 1;
             continue;
         };
 
@@ -246,6 +254,13 @@ pub fn lower_sdbl_to_hir(
                 sdbl_queries.push(crate::hir::SdblQuery { hir: query_hir, range });
             }
         }
+
+        select_index += 1;
+    }
+
+    if !has_query_item {
+        tracing::debug!("No queries in package");
+        return crate::hir::SdblPackage::empty();
     }
 
     // Finalize source map (sort token lists)
@@ -314,10 +329,13 @@ impl LoweringContext {
         // 8. Lower ORDER BY clause
         let order_by = query.order_by_clause().map(|o| self.lower_order_by(&o));
 
-        // 9. Lower INTO clause (temporary table)
+        // 9. Record INDEX BY clause tokens and selected output references.
+        self.lower_index_by_clause(query.syntax(), &select);
+
+        // 10. Lower INTO clause (temporary table)
         let into_table = self.lower_into_clause(query.syntax());
 
-        // 10. Check SELECT TOP without ORDER BY
+        // 11. Check SELECT TOP without ORDER BY
         if let (Some(top_value), Some(range)) = (top, top_range) {
             let has_order_by = order_by.is_some();
             let has_where = where_clause.is_some();
@@ -355,18 +373,18 @@ impl LoweringContext {
             range,
         };
 
-        // 11. Check JOINs for unprotected fields (after complete HIR built)
+        // 12. Check JOINs for unprotected fields (after complete HIR built)
         self.check_joins_for_unprotected_fields(&hir);
 
-        // 12. Check SELECT fields for missing AS keyword (after complete HIR built)
+        // 13. Check SELECT fields for missing AS keyword (after complete HIR built)
         if check_field_aliases {
             self.check_alias_without_as_keyword(&hir);
         }
 
-        // 13. Check for nested field dereference by dot (N+1 query problem)
+        // 14. Check for nested field dereference by dot (N+1 query problem)
         self.check_nested_fields_by_dot(&hir);
 
-        // 14. Check for redundant .Ссылка (Reference) field access
+        // 15. Check for redundant .Ссылка (Reference) field access
         self.check_ref_overuse(&hir);
 
         // Merge diagnostics collected during post-lowering checks

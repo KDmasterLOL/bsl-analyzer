@@ -793,12 +793,16 @@ impl LoweringContext {
         // Continue with existing logic for non-register main objects
         // (Registers are handled by build_register_resolved() in resolve_table())
         match mdo_type {
-            // For catalogs, documents, business processes, tasks, exchange plans - add attributes
+            // For object-like metadata tables, add attributes collected by metadata loading,
+            // including platform standard attributes such as Ссылка/Ref.
             MdoType::Catalog
             | MdoType::Document
             | MdoType::BusinessProcess
             | MdoType::Task
-            | MdoType::ExchangePlan => {
+            | MdoType::ExchangePlan
+            | MdoType::ChartOfCharacteristicTypes
+            | MdoType::ChartOfAccounts
+            | MdoType::ChartOfCalculationTypes => {
                 tracing::debug!(
                     full_name = %full_name,
                     mdo_type = ?mdo_type,

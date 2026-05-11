@@ -144,7 +144,18 @@ impl LoweringContext {
                 // (type may be Unknown for untyped fields, but the field itself is valid)
                 let field_exists =
                     self.scope.find_field_def(table_alias_str, column_name_str).is_some();
-                let category = if (ty != SdblType::Unknown && ty != SdblType::Error) || field_exists
+                let can_validate_field = self.metadata.is_some()
+                    && match table_alias_str {
+                        Some(alias) => self
+                            .scope
+                            .find_table(alias)
+                            .map(|table| table.metadata.is_some())
+                            .unwrap_or(false),
+                        None => self.scope.all_tables().any(|table| table.metadata.is_some()),
+                    };
+                let category = if (ty != SdblType::Unknown && ty != SdblType::Error)
+                    || field_exists
+                    || !can_validate_field
                 {
                     crate::source_map::TokenCategory::FieldName
                 } else {
