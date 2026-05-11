@@ -140,6 +140,7 @@ impl RequestDispatcher<'_> {
             workspace_root: self.global_state.workspace_root.clone(),
             project: self.global_state.project.clone(),
             diagnostics_config: self.global_state.diagnostics_config().clone(),
+            position_encoding: self.global_state.position_encoding,
             vfs_done: self.global_state.vfs_done,
             task_sender: self.global_state.task_pool.pool.sender.clone(),
             mem_docs: self.global_state.mem_docs.freeze(),

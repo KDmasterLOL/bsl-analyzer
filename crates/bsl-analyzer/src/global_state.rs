@@ -25,7 +25,7 @@ use vfs::loader::Handle;
 use vfs::{loader, Vfs};
 
 use crate::analysis_host::AnalysisHost;
-use crate::lsp::Progress;
+use crate::lsp::{PositionEncoding, Progress};
 use crate::mem_docs::MemDocs;
 use crate::task_pool;
 
@@ -123,6 +123,9 @@ pub struct GlobalState {
     /// fallback after the project's `[output] display_language` setting.
     pub(crate) lsp_locale: Option<Locale>,
 
+    /// Negotiated LSP position encoding.
+    pub position_encoding: PositionEncoding,
+
     /// Monotonically increasing generation counter for background diagnostics.
     pub diagnostics_generation: u64,
 
@@ -184,6 +187,7 @@ impl GlobalState {
             next_request_id: AtomicI32::new(1),
             diagnostics_config: DiagnosticsConfigInput::new(),
             lsp_locale: None,
+            position_encoding: PositionEncoding::default(),
             diagnostics_generation: 0,
             pending_diagnostics_uri: None,
             diagnostics_tokens: HashMap::new(),
@@ -287,6 +291,7 @@ impl GlobalState {
             workspace_root: self.workspace_root.clone(),
             project: self.project.clone(),
             diagnostics_config: self.diagnostics_config.clone(),
+            position_encoding: self.position_encoding,
             vfs_done: self.vfs_done,
             task_sender: self.task_pool.pool.sender.clone(),
         }
@@ -312,6 +317,9 @@ pub struct GlobalStateSnapshot {
 
     /// Current diagnostics configuration (for code action handler).
     pub diagnostics_config: DiagnosticsConfigInput,
+
+    /// Negotiated LSP position encoding.
+    pub position_encoding: PositionEncoding,
 
     /// Whether VFS loading has completed.
     pub vfs_done: bool,

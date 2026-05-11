@@ -99,6 +99,15 @@ pub struct InferenceResult {
     /// [`InferenceResult::expr_types_by_body`].
     pub binding_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<BindingId, Ty>>,
 
+    /// Per-body implicit locals introduced by simple assignments.
+    ///
+    /// BSL allows `X = ...` without a preceding `Перем X`. Lowering keeps that
+    /// distinction out of `ExprScopes`, while inference is the layer that knows
+    /// whether the assignment target really behaves as a local variable rather
+    /// than a managed-form self property. IDE features use this map to give
+    /// implicit locals the same symbol identity as declared locals.
+    pub implicit_locals_by_body: FxHashMap<DefWithBodyId, FxHashMap<String, ImplicitLocalInfo>>,
+
     /// Diagnostics collected during type inference, paired with the body that
     /// produced them.
     ///
@@ -127,6 +136,33 @@ pub struct InferenceResult {
     /// receiver method calls (single + multi-overload), platform global
     /// builtins, and `Ty::Function` callees.
     pub call_arg_bindings: Vec<CallArgBinding>,
+}
+
+/// Symbol data for an implicit local introduced by assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplicitLocalInfo {
+    /// Original spelling from the first assignment target.
+    pub name: Name,
+    /// HIR expression id of the first assignment target.
+    pub first_assignment: ExprId,
+    /// Best inferred type observed for the local in this body.
+    pub ty: Ty,
+    /// All simple-name assignment sites for this implicit local.
+    ///
+    /// A single BSL body may reuse the same implicit variable name for
+    /// unrelated runtime values in disjoint branches. IDE symbol identity needs
+    /// the assignment sites, not only the lowercase name, to split references by
+    /// the inferred value type at each occurrence.
+    pub assignments: Vec<ImplicitLocalAssignment>,
+}
+
+/// One simple-name assignment that contributes to an implicit local.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplicitLocalAssignment {
+    /// HIR expression id of the assignment target.
+    pub target: ExprId,
+    /// Inferred type of the assignment value.
+    pub ty: Ty,
 }
 
 impl InferenceResult {
@@ -399,6 +435,9 @@ pub struct InferenceContext<'db> {
     /// whether we have a useful type for it.
     var_types: FxHashMap<String, Ty>,
 
+    /// Implicit locals introduced by simple assignments in this body.
+    implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
+
     /// Lowercase names of every implicit local seen on the LHS of a
     /// `Stmt::Assign`, regardless of the RHS's inferred type.
     ///
@@ -448,6 +487,8 @@ pub struct BodyInferenceResult {
     pub owner: DefWithBodyId,
     /// Variable types discovered during inference (lowercase name → Ty).
     pub var_types: FxHashMap<String, Ty>,
+    /// Implicit locals introduced by simple assignments in this body.
+    pub implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
     /// Per-binding inferred types (declaration-site arms). Folded into
     /// [`InferenceResult::binding_types_by_body`] keyed by `owner`.
     pub binding_types: FxHashMap<BindingId, Ty>,
@@ -478,6 +519,7 @@ impl<'db> InferenceContext<'db> {
             owner,
             body: Arc::clone(body),
             var_types: FxHashMap::default(),
+            implicit_locals: FxHashMap::default(),
             assigned_var_names: rustc_hash::FxHashSet::default(),
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
@@ -522,6 +564,7 @@ impl<'db> InferenceContext<'db> {
         BodyInferenceResult {
             owner: self.owner,
             var_types: self.var_types,
+            implicit_locals: self.implicit_locals,
             binding_types: self.binding_types,
             expr_types: self.expr_types,
             diagnostics: self.diagnostics,
@@ -649,8 +692,13 @@ impl<'db> InferenceContext<'db> {
                         // by `Resolver::resolve_name` (no ExprScope) and
                         // `var_types` (no entry until first assign).
                         let resolver = self.get_resolver();
+                        let resolved_name = resolver.resolve_name(self.db, name);
+                        let existing_module_variable = matches!(
+                            resolved_name,
+                            Some(hir_def::resolver::Resolution::Variable(_))
+                        );
                         let user_shadows = matches!(
-                            resolver.resolve_name(self.db, name),
+                            resolved_name,
                             Some(hir_def::resolver::Resolution::Method(_))
                                 | Some(hir_def::resolver::Resolution::Variable(_))
                         ) || self.body_declares_binding(name);
@@ -674,12 +722,34 @@ impl<'db> InferenceContext<'db> {
                                     );
                                 }
                             }
+                            None if existing_module_variable => {}
                             None => {
                                 let key = name.as_str().to_lowercase();
                                 // Always remember the name as a body-local
                                 // (cascade-gate gate 2 needs this even when
                                 // the RHS yields no useful type info).
                                 self.assigned_var_names.insert(key.clone());
+                                let target_id = ExprId::from_idx(*target);
+                                self.implicit_locals
+                                    .entry(key.clone())
+                                    .and_modify(|info| {
+                                        info.assignments.push(ImplicitLocalAssignment {
+                                            target: target_id,
+                                            ty: value_ty.clone(),
+                                        });
+                                        if info.ty.is_unknown() && !value_ty.is_unknown() {
+                                            info.ty = value_ty.clone();
+                                        }
+                                    })
+                                    .or_insert_with(|| ImplicitLocalInfo {
+                                        name: name.clone(),
+                                        first_assignment: target_id,
+                                        ty: value_ty.clone(),
+                                        assignments: vec![ImplicitLocalAssignment {
+                                            target: target_id,
+                                            ty: value_ty.clone(),
+                                        }],
+                                    });
                                 if !value_ty.is_unknown() {
                                     self.var_types.insert(key, value_ty);
                                 }
@@ -2958,6 +3028,7 @@ pub fn infer_query<'db>(
         // paired with its `DefWithBodyId` owner so ide-diagnostics can resolve
         // the body-local `ExprId` through the correct `BodySourceMap`.
         result.var_types.extend(body_result.var_types);
+        result.implicit_locals_by_body.insert(body_result.owner, body_result.implicit_locals);
         let owner = body_result.owner;
         result.diagnostics.extend(body_result.diagnostics.into_iter().map(|d| (owner, d)));
         // Call-site arg bindings carry their own owner field, so we just

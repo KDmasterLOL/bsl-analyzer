@@ -4,6 +4,7 @@
 
 mod definition;
 pub mod name_classify;
+mod semantic_symbol;
 pub mod type_facade;
 
 pub use definition::Definition;
@@ -12,6 +13,9 @@ pub use hir_ty::TyLoweringContext;
 pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
 pub use name_classify::{classify_token, NameClass};
+pub use semantic_symbol::{
+    SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
+};
 pub use type_facade::{Field, HirFieldOrigin, Type};
 
 // Re-export core types

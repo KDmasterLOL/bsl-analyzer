@@ -20,7 +20,7 @@ use crate::{
     global_state::GlobalState,
     handlers::{NotificationDispatcher, RequestDispatcher},
     locale::parse_lsp_locale,
-    lsp::Progress,
+    lsp::{PositionEncoding, Progress},
 };
 
 /// Runs the main LSP server loop.
@@ -45,8 +45,10 @@ pub fn main_loop(connection: Connection) -> Result<()> {
         initialize_params.client_info.as_ref().map(|info| &info.name)
     );
 
+    let position_encoding = PositionEncoding::negotiate(&initialize_params.capabilities);
+
     // Build server capabilities
-    let server_capabilities = server_capabilities();
+    let server_capabilities = server_capabilities(position_encoding);
 
     let initialize_result = lsp_types::InitializeResult {
         capabilities: server_capabilities,
@@ -56,14 +58,23 @@ pub fn main_loop(connection: Connection) -> Result<()> {
         }),
     };
 
+    let mut initialize_value = serde_json::to_value(initialize_result)?;
+    if let Some(object) = initialize_value.as_object_mut() {
+        object.insert(
+            "offsetEncoding".to_string(),
+            serde_json::json!([position_encoding.as_offset_encoding()]),
+        );
+    }
+
     connection
-        .initialize_finish(initialize_id, serde_json::to_value(initialize_result)?)
+        .initialize_finish(initialize_id, initialize_value)
         .context("Failed to finish initialization")?;
 
     tracing::info!("LSP server initialized");
 
     // Create global state
     let mut state = GlobalState::new(connection.sender);
+    state.position_encoding = position_encoding;
 
     // Initialize empty SourceRoot(0) to prevent race condition where files
     // are opened via LSP before VFS loader finishes
@@ -558,10 +569,15 @@ fn handle_notification(state: &mut GlobalState, not: Notification) -> Result<()>
 /// Returns the server capabilities.
 ///
 /// This tells the client what features the server supports.
-fn server_capabilities() -> ServerCapabilities {
+fn server_capabilities(position_encoding: PositionEncoding) -> ServerCapabilities {
     let legend = crate::lsp::semantic_tokens_legend();
 
     ServerCapabilities {
+        // The server converts every LSP Position/Range and semantic token
+        // coordinate through UTF-16. Make that explicit for clients whose
+        // default differs from the spec, notably around Cyrillic identifiers.
+        position_encoding: Some(position_encoding.as_lsp_kind()),
+
         // Text document synchronization
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
             TextDocumentSyncKind::INCREMENTAL,
@@ -634,7 +650,9 @@ mod tests {
 
     #[test]
     fn test_server_capabilities() {
-        let caps = server_capabilities();
+        let caps = server_capabilities(PositionEncoding::Utf8);
+
+        assert_eq!(caps.position_encoding, Some(PositionEncoding::Utf8.as_lsp_kind()));
 
         // Text sync should be incremental
         match caps.text_document_sync {
@@ -646,5 +664,21 @@ mod tests {
 
         assert_eq!(caps.document_highlight_provider, Some(lsp_types::OneOf::Left(true)));
         assert_eq!(caps.folding_range_provider, Some(FoldingRangeProviderCapability::Simple(true)));
+    }
+
+    #[test]
+    fn test_position_encoding_prefers_utf8_when_client_supports_it() {
+        let caps = lsp_types::ClientCapabilities {
+            general: Some(lsp_types::GeneralClientCapabilities {
+                position_encodings: Some(vec![
+                    lsp_types::PositionEncodingKind::UTF8,
+                    lsp_types::PositionEncodingKind::UTF16,
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(PositionEncoding::negotiate(&caps), PositionEncoding::Utf8);
     }
 }

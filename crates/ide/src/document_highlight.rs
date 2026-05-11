@@ -219,6 +219,27 @@ mod tests {
     }
 
     #[test]
+    fn implicit_local_highlights_write_and_read() {
+        let source = r#"
+Процедура Тест()
+    НаборЗаписей = 10;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(source);
+
+        let kinds = highlight_kinds(&db, file_id, source, "НаборЗаписей");
+
+        assert_eq!(
+            kinds,
+            vec![
+                ("НаборЗаписей".to_string(), DocumentHighlightKind::Write),
+                ("НаборЗаписей".to_string(), DocumentHighlightKind::Read),
+            ]
+        );
+    }
+
+    #[test]
     fn indexed_assignment_does_not_mark_index_operands_as_write() {
         let source = r#"
 Процедура Тест()

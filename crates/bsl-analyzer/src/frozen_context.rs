@@ -17,6 +17,7 @@ use rustc_hash::FxHashMap;
 use vfs::{FileId, Vfs};
 
 use crate::global_state::Task;
+use crate::lsp::PositionEncoding;
 use crate::mem_docs::FrozenMemDocs;
 
 /// Frozen bidirectional mapping of FileId <-> PathBuf captured at dispatch time.
@@ -96,6 +97,7 @@ pub struct LatencyRequestContext {
     pub workspace_root: Option<PathBuf>,
     pub project: Option<Project>,
     pub diagnostics_config: DiagnosticsConfigInput,
+    pub position_encoding: PositionEncoding,
     pub vfs_done: bool,
     /// Lets handlers queue follow-up work (e.g., external file preload).
     pub task_sender: Sender<Task>,

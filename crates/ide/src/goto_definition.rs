@@ -5,7 +5,7 @@
 //!
 //! Uses the unified Definition enum for resolution.
 
-use hir::{classify_token, Definition, NameClass, Semantics};
+use hir::{Definition, SemanticSymbol, SemanticSymbolKind, Semantics};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -36,41 +36,43 @@ pub fn goto_definition<DB: RootDatabase>(
     let _span =
         tracing::info_span!("goto_definition", ?file_id, offset = u32::from(offset)).entered();
 
-    let parse = db.parse(file_id);
-    let root = parse.syntax_node();
-    let token = root.token_at_offset(offset).right_biased()?;
-
     let sema = Semantics::new(db);
+    let symbol = sema.symbol_at(file_id, offset)?;
+    semantic_symbol_to_navigation_target(db, &symbol)
+}
 
-    let definition = match classify_token(&token) {
-        NameClass::FieldName { token, .. } => {
-            // Platform-method dispatch is authoritative when it
-            // matches: a hit means we resolved the field tail through
-            // the type-aware platform index, and that target is final
-            // — even if it has no source to navigate to (`BuiltinMethod`
-            // for `Запрос.Выполнить`). Falling back to qualified-name
-            // resolution in that case would let the workspace path
-            // resolver match `[Запрос, Выполнить]` against an unrelated
-            // CommonModule that happens to share the receiver name and
-            // export a same-name method, jumping the user to an
-            // unrelated definition.
-            if let Some(d) = sema.resolve_method_call_to_definition(file_id, &token) {
-                return definition_to_navigation_target(db, &d);
-            }
-            // Platform-method dispatch missed entirely. Try the
-            // qualified-name path for cross-module
-            // (`ОбщегоНазначения.МойМетод`), MDO objects
-            // (`Документы.ПКО`), and manager-module methods.
-            sema.resolve_name_to_definition(file_id, &token)?
+fn semantic_symbol_to_navigation_target<DB: RootDatabase>(
+    db: &DB,
+    symbol: &SemanticSymbol,
+) -> Option<NavigationTarget> {
+    if let Some(definition) = &symbol.definition {
+        if matches!(definition, Definition::Method(_) | Definition::Variable(_)) {
+            return definition_to_navigation_target(db, definition);
         }
-        NameClass::FreeName { token } => sema.resolve_name_to_definition(file_id, &token)?,
-        NameClass::TypeRef { .. }
-        | NameClass::Literal { .. }
-        | NameClass::Keyword { .. }
-        | NameClass::Other => return None,
-    };
+    }
 
-    definition_to_navigation_target(db, &definition)
+    if let Some(declaration) = &symbol.declaration {
+        return Some(NavigationTarget {
+            file_id: declaration.file_id,
+            range: declaration.range,
+            name: declaration.name.as_str().to_string(),
+            kind: symbol_kind_for_semantic(declaration.kind),
+        });
+    }
+
+    let definition = symbol.definition.as_ref()?;
+    definition_to_navigation_target(db, definition)
+}
+
+fn symbol_kind_for_semantic(kind: SemanticSymbolKind) -> SymbolKind {
+    match kind {
+        SemanticSymbolKind::Function | SemanticSymbolKind::Method => SymbolKind::Function,
+        SemanticSymbolKind::Parameter | SemanticSymbolKind::Variable => SymbolKind::Variable,
+        SemanticSymbolKind::Property
+        | SemanticSymbolKind::Type
+        | SemanticSymbolKind::Class
+        | SemanticSymbolKind::Namespace => SymbolKind::Variable,
+    }
 }
 
 /// Convert a Definition to a NavigationTarget.
@@ -296,6 +298,31 @@ mod tests {
         let target = target.unwrap();
         assert_eq!(target.name, "МодульнаяПеременная");
         assert_eq!(target.kind, SymbolKind::Variable);
+    }
+
+    #[test]
+    fn test_goto_definition_implicit_local_goes_to_first_assignment() {
+        let source = r#"
+Процедура Тест()
+    НаборЗаписей = 10;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+        "#;
+
+        let (db, file_id) = create_db_with_file(source);
+
+        let usage_offset = source.rfind("НаборЗаписей").unwrap();
+        let target = goto_definition(&db, file_id, TextSize::from(usage_offset as u32))
+            .expect("implicit local should have a navigation target");
+
+        let def_offset = source.find("НаборЗаписей").unwrap() as u32;
+        assert_eq!(target.file_id, file_id);
+        assert_eq!(target.name, "НаборЗаписей");
+        assert_eq!(target.kind, SymbolKind::Variable);
+        assert_eq!(u32::from(target.range.start()), def_offset);
+        let range_start: usize = target.range.start().into();
+        let range_end: usize = target.range.end().into();
+        assert_eq!(&source[range_start..range_end], "НаборЗаписей");
     }
 
     #[test]

@@ -10,6 +10,7 @@ use lsp_types::{Position, Url};
 use vfs::FileId;
 
 use crate::global_state::{GlobalState, GlobalStateSnapshot};
+use crate::lsp::PositionEncoding;
 
 /// Converts a URL to a FileId.
 ///
@@ -42,6 +43,22 @@ pub fn file_id_snapshot(snapshot: &GlobalStateSnapshot, url: &Url) -> Result<Fil
 /// # Errors
 /// Returns an error if the position is out of bounds.
 pub fn offset(line_index: &LineIndex, text: &str, position: Position) -> Result<TextSize> {
+    offset_with_encoding(line_index, text, position, PositionEncoding::Utf16)
+}
+
+pub fn offset_with_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    position: Position,
+    encoding: PositionEncoding,
+) -> Result<TextSize> {
+    if encoding == PositionEncoding::Utf8 {
+        let line_col = LineCol { line: position.line, col: position.character };
+        return line_index
+            .offset(line_col)
+            .ok_or_else(|| anyhow!("Position out of bounds: {:?}", position));
+    }
+
     // LSP Position.character is UTF-16 code units, but LineCol.col is byte offset.
     // We need to convert UTF-16 → UTF-8 bytes first.
     let byte_col = line_index
@@ -84,8 +101,17 @@ pub fn text_range(
     text: &str,
     range: lsp_types::Range,
 ) -> Result<TextRange> {
-    let start = offset(line_index, text, range.start)?;
-    let end = offset(line_index, text, range.end)?;
+    text_range_with_encoding(line_index, text, range, PositionEncoding::Utf16)
+}
+
+pub fn text_range_with_encoding(
+    line_index: &LineIndex,
+    text: &str,
+    range: lsp_types::Range,
+    encoding: PositionEncoding,
+) -> Result<TextRange> {
+    let start = offset_with_encoding(line_index, text, range.start, encoding)?;
+    let end = offset_with_encoding(line_index, text, range.end, encoding)?;
 
     Ok(TextRange::new(start, end))
 }

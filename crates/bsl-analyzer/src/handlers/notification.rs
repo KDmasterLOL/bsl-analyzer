@@ -55,6 +55,7 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     let db = state.analysis_host.raw_database().clone();
     state.diagnostics_tokens.insert(uri.clone(), db.cancellation_token());
     let config = state.diagnostics_config().clone();
+    let position_encoding = state.position_encoding;
     let uri = uri.clone();
     let queued_at = Instant::now();
     tracing::info!(%uri, generation, vfs_done = state.vfs_done, "diagnostics scheduled");
@@ -68,7 +69,12 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
             let config_id = base_db::DiagnosticsConfigId::new(&db, config);
             let ide_diagnostics = file_diagnostics_query(&db, file_id_input, config_id);
             let line_index = LineIndex::new(&text);
-            crate::lsp::diagnostics(&line_index, &text, &ide_diagnostics)
+            crate::lsp::diagnostics_with_encoding(
+                &line_index,
+                &text,
+                &ide_diagnostics,
+                position_encoding,
+            )
         }));
         let compute_ms = started_at.elapsed().as_millis() as u64;
 
