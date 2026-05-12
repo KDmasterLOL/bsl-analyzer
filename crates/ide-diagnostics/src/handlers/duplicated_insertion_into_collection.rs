@@ -899,48 +899,13 @@ fn check_stmt(
         }
 
         Stmt::PreprocIf(preproc) => {
-            // Check then branch
-            let then_stmts: Vec<StmtId> =
-                preproc.then_branch.iter().map(|&idx| StmtId::from_idx(idx)).collect();
-            check_stmt_list(
-                body,
-                source_map,
-                &then_stmts,
-                tracker,
-                diagnostics,
-                scope_depth + 1,
-                allow_add,
-                code,
-                ctx,
-            );
-            tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
-
-            // Check elsif branches
-            for (_range, _directive_range, elsif_body) in preproc.elsif_branches.iter() {
-                let elsif_stmts: Vec<StmtId> =
-                    elsif_body.iter().map(|&idx| StmtId::from_idx(idx)).collect();
+            for branch in preproc.branches() {
+                let stmts: Vec<StmtId> =
+                    branch.stmts.iter().map(|&idx| StmtId::from_idx(idx)).collect();
                 check_stmt_list(
                     body,
                     source_map,
-                    &elsif_stmts,
-                    tracker,
-                    diagnostics,
-                    scope_depth + 1,
-                    allow_add,
-                    code,
-                    ctx,
-                );
-                tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
-            }
-
-            // Check else branch
-            if let Some(ref else_body) = preproc.else_branch {
-                let else_stmts: Vec<StmtId> =
-                    else_body.iter().map(|&idx| StmtId::from_idx(idx)).collect();
-                check_stmt_list(
-                    body,
-                    source_map,
-                    &else_stmts,
+                    &stmts,
                     tracker,
                     diagnostics,
                     scope_depth + 1,
@@ -1167,10 +1132,8 @@ mod tests {
 
     #[test]
     fn test_preprocessor_duplicate() {
-        // NOTE: HIR currently does not lower statements inside preprocessor directives.
-        // This is a known limitation. Code inside #Если/#Иначе is not included in body.body_stmts.
-        // Duplicates across preprocessor branches are not yet detected;
-        // this requires HIR to be extended to support preprocessor directives.
+        // Preprocessor branches are checked independently through
+        // PreprocIfStmt::branches(), so duplicates are not reported across branches.
         let code = r#"
 Процедура Тест()
     #Если ТолстыйКлиентОбычноеПриложение Тогда
@@ -1181,8 +1144,6 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        // Current HIR limitation: 0 diagnostics (code inside preprocessor not analyzed)
-        // Expected: 1 diagnostic (duplicate key across branches)
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
