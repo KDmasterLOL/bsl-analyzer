@@ -336,6 +336,16 @@ pub(super) fn lower_stmt_list_with_unreachable(
             continue;
         }
 
+        if emit_diagnostics {
+            if child.kind() == SyntaxKind::BREAK_STMT && !ctx.in_loop() {
+                let range = extend_range_with_semicolon(&child, child.text_range());
+                ctx.emit(BodyDiagnostic::MisplacedLoopControl { range, is_continue: false });
+            } else if child.kind() == SyntaxKind::CONTINUE_STMT && !ctx.in_loop() {
+                let range = extend_range_with_semicolon(&child, child.text_range());
+                ctx.emit(BodyDiagnostic::MisplacedLoopControl { range, is_continue: true });
+            }
+        }
+
         // BeginTransactionBeforeTryCatch: Check for Try statement (consumes pending BeginTransaction)
         if emit_diagnostics && child.kind() == SyntaxKind::TRY_STMT {
             pending_begin_transaction = None;

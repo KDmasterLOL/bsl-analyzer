@@ -469,6 +469,9 @@ pub enum BodyDiagnostic {
     /// 3. BeginTransaction without subsequent Try
     BeginTransactionBeforeTryCatch { range: TextRange },
 
+    /// Break/Continue statement outside a loop body.
+    MisplacedLoopControl { range: TextRange, is_continue: bool },
+
     /// Method call that may have missing required parameters.
     /// Emitted during lowering for all calls - validation happens in from_hir().
     ///
@@ -1068,6 +1071,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::SelfAssign { range } => *range,
             BodyDiagnostic::FunctionShouldHaveReturn { range } => *range,
             BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => *range,
+            BodyDiagnostic::MisplacedLoopControl { range, .. } => *range,
             BodyDiagnostic::MissedRequiredParameter { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => *range,
             BodyDiagnostic::CodeAfterAsyncCall { range, .. } => *range,

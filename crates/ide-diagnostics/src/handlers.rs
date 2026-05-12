@@ -88,6 +88,7 @@ pub mod magic_number;
 pub mod metadata_object_name_length;
 pub mod method_size;
 pub mod mismatched_arg_count;
+pub mod misplaced_loop_control;
 pub mod missed_required_parameter;
 pub mod missing_code_try_catch_ex;
 pub mod missing_common_module_method;
@@ -312,6 +313,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::MissingTemporaryFileDeletion => {
             Some(&missing_temporary_file_deletion::METADATA)
         }
+        DiagnosticCode::MisplacedLoopControl => Some(&misplaced_loop_control::METADATA),
         DiagnosticCode::UseLessForEach => Some(&useless_for_each::METADATA),
         DiagnosticCode::UsingGoto => Some(&using_goto::METADATA),
         DiagnosticCode::BeginTransactionBeforeTryCatch => {

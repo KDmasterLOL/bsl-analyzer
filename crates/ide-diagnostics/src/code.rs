@@ -86,6 +86,7 @@ pub enum DiagnosticCode {
     MissingCodeTryCatchEx,
     MissingTempStorageDeletion,
     MissingTemporaryFileDeletion,
+    MisplacedLoopControl,
     UseLessForEach,
     UsingGoto,
     BeginTransactionBeforeTryCatch,
