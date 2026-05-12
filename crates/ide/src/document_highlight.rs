@@ -1,5 +1,6 @@
 //! Document highlights implementation.
 
+use hir::Semantics;
 use ide_db::RootDatabase;
 use syntax::ast_utils::field_tail_name_token;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize};
@@ -23,6 +24,11 @@ pub enum DocumentHighlightKind {
 }
 
 /// Returns same-document highlights for the symbol at the given position.
+///
+/// LSP `textDocument/documentHighlight` is defined as same-document only, so this
+/// function never crosses file boundaries — no workspace fan-out, no `find_references`
+/// orchestration. The per-file traversal lives in
+/// [`crate::references::find_references_in_file`] and is shared with `find_references`.
 pub fn document_highlights<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -30,17 +36,22 @@ pub fn document_highlights<DB: RootDatabase>(
 ) -> Vec<DocumentHighlight> {
     let _span = tracing::info_span!("document_highlights", ?file_id).entered();
 
-    let references = references::find_references(db, file_id, offset);
-    if references.is_empty() {
-        return Vec::new();
-    }
-
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    references
+    let token = match root.token_at_offset(offset).right_biased() {
+        Some(t) if t.kind().is_name_token() => t,
+        _ => return Vec::new(),
+    };
+
+    let sema = Semantics::new(db);
+    let symbol = match sema.symbol_for_token(file_id, &token) {
+        Some(symbol) => symbol,
+        None => return Vec::new(),
+    };
+
+    references::find_references_in_file(db, file_id, &symbol)
         .into_iter()
-        .filter(|loc| loc.file_id == file_id)
         .filter_map(|loc| {
             let token = token_for_range(&root, loc.range)?;
             let kind = classify_highlight_token(&token);
@@ -285,5 +296,113 @@ mod tests {
         let highlights = document_highlights(&db, file_id, offset);
 
         assert!(highlights.is_empty());
+    }
+
+    fn create_db_with_two_files(
+        source_a: &str,
+        path_a: &str,
+        source_b: &str,
+        path_b: &str,
+    ) -> (RootDatabaseImpl, FileId, FileId) {
+        let mut db = RootDatabaseImpl::default();
+        let file_a = FileId(0);
+        let file_b = FileId(1);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(file_a, VfsPath::new(path_a));
+        file_set.insert(file_b, VfsPath::new(path_b));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_a, SourceRootId(0));
+        db.set_file_source_root(file_b, SourceRootId(0));
+        db.set_file_text(file_a, source_a);
+        db.set_file_text(file_b, source_b);
+
+        (db, file_a, file_b)
+    }
+
+    #[test]
+    fn document_highlights_do_not_cross_file_boundaries() {
+        // Same-named export procedure in both files. Cursor on the definition in A.
+        // documentHighlight is same-document by LSP spec — must not return ranges
+        // that belong to file B's source text.
+        let source_a = r#"
+Процедура ОбщийМетод() Экспорт
+    ОбщийМетод();
+КонецПроцедуры
+"#;
+        let source_b = r#"
+Процедура ОбщийМетод() Экспорт
+    ОбщийМетод();
+КонецПроцедуры
+"#;
+        let (db, file_a, _file_b) =
+            create_db_with_two_files(source_a, "/a.bsl", source_b, "/b.bsl");
+
+        let offset = TextSize::from(source_a.find("ОбщийМетод").unwrap() as u32);
+        let highlights = document_highlights(&db, file_a, offset);
+
+        assert_eq!(
+            highlights.len(),
+            2,
+            "expected definition + 1 call in file A, got {} highlights",
+            highlights.len()
+        );
+
+        let source_len = source_a.len() as u32;
+        for highlight in &highlights {
+            let start: u32 = highlight.range.start().into();
+            let end: u32 = highlight.range.end().into();
+            assert!(
+                end <= source_len,
+                "highlight range {start}..{end} exceeds file A source length {source_len} — \
+                 file-B range leaked into result"
+            );
+            assert_eq!(&source_a[start as usize..end as usize], "ОбщийМетод");
+        }
+    }
+
+    #[test]
+    fn document_highlights_on_call_site_stay_file_local() {
+        // Cursor on a call site (not the definition). Same name exists in a neighbour
+        // module — must not surface in highlights for the current document.
+        let source_a = r#"
+Процедура Вызов() Экспорт
+    Помощник();
+    Помощник();
+КонецПроцедуры
+
+Процедура Помощник() Экспорт
+КонецПроцедуры
+"#;
+        let source_b = r#"
+Процедура Помощник() Экспорт
+    Помощник();
+КонецПроцедуры
+"#;
+        let (db, file_a, _file_b) =
+            create_db_with_two_files(source_a, "/caller.bsl", source_b, "/other.bsl");
+
+        let first_call = source_a.find("Помощник();").unwrap();
+        let offset = TextSize::from(first_call as u32);
+        let highlights = document_highlights(&db, file_a, offset);
+
+        assert_eq!(
+            highlights.len(),
+            3,
+            "expected 2 calls + 1 definition in file A, got {} highlights",
+            highlights.len()
+        );
+
+        let source_len = source_a.len() as u32;
+        for highlight in &highlights {
+            let start: u32 = highlight.range.start().into();
+            let end: u32 = highlight.range.end().into();
+            assert!(
+                end <= source_len,
+                "highlight range {start}..{end} exceeds file A source length {source_len}"
+            );
+            assert_eq!(&source_a[start as usize..end as usize], "Помощник");
+        }
     }
 }

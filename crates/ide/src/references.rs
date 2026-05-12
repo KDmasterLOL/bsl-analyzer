@@ -74,7 +74,7 @@ pub fn find_references<DB: RootDatabase>(
     // Find references across all candidate files
     let mut all_references = Vec::new();
     for &search_file_id in &files_to_search {
-        let references = find_symbol_references(db, search_file_id, &symbol);
+        let references = find_references_in_file(db, search_file_id, &symbol);
         all_references.extend(references);
     }
 
@@ -170,22 +170,23 @@ fn get_search_scope<DB: RootDatabase>(
     }
 }
 
-/// Find all references to a given Definition within a file.
+/// Find all references to a given symbol within a single file.
 ///
-/// Walks the syntax tree and finds all IDENT tokens that resolve to the same Definition.
+/// Walks the syntax tree and finds all name-token occurrences that resolve to the
+/// same `SemanticSymbol`. Pure per-file traversal: no scope decision, no cross-file
+/// fan-out — the caller decides which files to feed in.
 ///
 /// ## Algorithm
 ///
-/// 1. Extract name from Definition
-/// 2. Walk syntax tree, find all IDENT tokens with matching name (case-insensitive)
-/// 3. For each candidate, resolve to Definition and compare
-/// 4. Return matching locations
-fn find_symbol_references<DB: RootDatabase>(
+/// 1. Walk syntax tree, find all name-token candidates with matching name (case-insensitive)
+/// 2. For each candidate, resolve to `SemanticSymbol` and compare by `SemanticSymbolKey`
+/// 3. Return matching locations
+pub(crate) fn find_references_in_file<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     target_symbol: &SemanticSymbol,
 ) -> Vec<Location> {
-    let _span = tracing::debug_span!("find_symbol_references", ?file_id).entered();
+    let _span = tracing::debug_span!("find_references_in_file", ?file_id).entered();
 
     let target_name = target_symbol.name.clone();
 
