@@ -861,6 +861,72 @@ impl PreRegionDir {
     }
 }
 
+/// Preprocessor symbol reference inside a #Если expression (e.g. Клиент, Сервер, НаКлиенте).
+#[derive(Debug, Clone)]
+pub struct PreSymbol(SyntaxNode);
+
+impl AstNode for PreSymbol {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::PRE_SYMBOL
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl PreSymbol {
+    /// Get lowercase symbol text.
+    pub fn text(&self) -> Option<String> {
+        self.name_token().map(|token| token.text().to_lowercase())
+    }
+
+    /// Get the first identifier token inside the symbol node.
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        self.0
+            .descendants_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|token| token.kind() == SyntaxKind::IDENT)
+    }
+}
+
+/// Preprocessor condition expression — root of the #Если <expr> Тогда AST. Wraps PRE_EXPR.
+#[derive(Debug, Clone)]
+pub struct PreExpr(SyntaxNode);
+
+impl AstNode for PreExpr {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::PRE_EXPR
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl PreExpr {
+    /// Iterate over all preprocessor symbols in source order.
+    pub fn symbols(&self) -> impl Iterator<Item = PreSymbol> + '_ {
+        self.0.descendants().filter_map(PreSymbol::cast)
+    }
+}
+
 /// Statement list (body of a procedure/function or block).
 #[derive(Debug, Clone)]
 pub struct StmtList(SyntaxNode);
@@ -1509,5 +1575,93 @@ impl AstNode for SdblOrderClause {
 
     fn syntax(&self) -> &SyntaxNode {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod preproc_wrappers_tests {
+    use super::*;
+    use crate::SyntaxTreeBuilder;
+
+    fn parse(input: &str) -> SyntaxNode {
+        let condition =
+            input.strip_prefix("#Если ").and_then(|rest| rest.split_once(" Тогда")).unwrap().0;
+        let mut builder = SyntaxTreeBuilder::new();
+
+        builder.start_node(SyntaxKind::SOURCE_FILE);
+        builder.start_node(SyntaxKind::PRE_IF_DIR);
+        builder.token(SyntaxKind::PRE_IF, "#Если");
+        builder.token(SyntaxKind::WHITESPACE, " ");
+        builder.start_node(SyntaxKind::PRE_EXPR);
+        builder.start_node(SyntaxKind::PRE_LOGICAL_EXPR);
+
+        let mut pending_not = false;
+        for part in condition.split_whitespace() {
+            match part {
+                "И" => {
+                    builder.token(SyntaxKind::WHITESPACE, " ");
+                    builder.start_node(SyntaxKind::PRE_BOOL_OP);
+                    builder.token(SyntaxKind::KW_AND, "И");
+                    builder.finish_node();
+                    builder.token(SyntaxKind::WHITESPACE, " ");
+                }
+                "НЕ" => {
+                    pending_not = true;
+                }
+                symbol => {
+                    builder.start_node(SyntaxKind::PRE_LOGICAL_OPERAND);
+                    if pending_not {
+                        builder.token(SyntaxKind::KW_NOT, "НЕ");
+                        builder.token(SyntaxKind::WHITESPACE, " ");
+                        pending_not = false;
+                    }
+                    builder.start_node(SyntaxKind::PRE_SYMBOL);
+                    builder.token(SyntaxKind::IDENT, symbol);
+                    builder.finish_node();
+                    builder.finish_node();
+                }
+            }
+        }
+
+        builder.finish_node();
+        builder.finish_node();
+        builder.token(SyntaxKind::WHITESPACE, " ");
+        builder.token(SyntaxKind::KW_THEN, "Тогда");
+        builder.token(SyntaxKind::WHITESPACE, " ");
+        builder.token(SyntaxKind::IDENT, "X");
+        builder.token(SyntaxKind::L_PAREN, "(");
+        builder.token(SyntaxKind::R_PAREN, ")");
+        builder.token(SyntaxKind::SEMICOLON, ";");
+        builder.token(SyntaxKind::WHITESPACE, " ");
+        builder.token(SyntaxKind::PRE_END_IF, "#КонецЕсли");
+        builder.finish_node();
+        builder.finish_node();
+        builder.finish().syntax_node()
+    }
+
+    #[test]
+    fn parse_pre_symbol_lowercases() {
+        let root = parse("#Если Клиент Тогда X(); #КонецЕсли");
+        let symbol = root.descendants().find_map(PreSymbol::cast).expect("pre symbol");
+
+        assert_eq!(symbol.text(), Some("клиент".into()));
+    }
+
+    #[test]
+    fn parse_pre_expr_collects_symbols_in_order() {
+        let root = parse("#Если Клиент И НЕ Сервер Тогда X(); #КонецЕсли");
+        let expr = root.descendants().find_map(PreExpr::cast).expect("pre expr");
+        let symbols = expr.symbols().filter_map(|symbol| symbol.text()).collect::<Vec<_>>();
+
+        assert_eq!(symbols, vec!["клиент", "сервер"]);
+    }
+
+    #[test]
+    fn pre_symbol_can_cast_rejects_wrong_kind() {
+        let root = parse("#Если Клиент Тогда X(); #КонецЕсли");
+        let other_node =
+            root.descendants().find(|node| node.kind() != SyntaxKind::PRE_SYMBOL).expect("node");
+
+        assert!(PreSymbol::cast(other_node).is_none());
     }
 }
