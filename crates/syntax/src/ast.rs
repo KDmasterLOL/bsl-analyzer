@@ -1901,4 +1901,42 @@ mod preproc_wrappers_tests {
         assert_eq!(elsif_body.len(), 1);
         assert_eq!(elsif_body[0].kind(), SyntaxKind::CALL_STMT);
     }
+
+    #[test]
+    fn pre_if_dir_nested_does_not_leak_branches() {
+        // Outer #Если A Тогда #Если B Тогда C(); #Иначе D(); #КонецЕсли #КонецЕсли
+        // The inner directive's else-clause must not be reachable from the
+        // outer directive's else_clause(), and the outer's then_body_nodes()
+        // must surface exactly one child — the inner PRE_IF_DIR.
+        let mut builder = SyntaxTreeBuilder::new();
+        builder.start_node(SyntaxKind::SOURCE_FILE);
+        builder.start_node(SyntaxKind::PRE_IF_DIR);
+        add_pre_expr(&mut builder, "A");
+        builder.start_node(SyntaxKind::PRE_IF_DIR);
+        add_pre_expr(&mut builder, "B");
+        add_body_node(&mut builder, "C");
+        builder.start_node(SyntaxKind::PRE_ELSE_CLAUSE);
+        add_body_node(&mut builder, "D");
+        builder.finish_node();
+        builder.finish_node();
+        builder.finish_node();
+        builder.finish_node();
+        let root = builder.finish().syntax_node();
+
+        let mut pre_ifs = root.descendants().filter_map(PreIfDir::cast);
+        let outer = pre_ifs.next().expect("outer pre if");
+        let inner = pre_ifs.next().expect("inner pre if");
+
+        assert!(outer.else_clause().is_none(), "inner #Иначе must not leak as outer's else");
+        assert_eq!(outer.elsif_clauses().count(), 0);
+
+        let outer_then: Vec<_> = outer.then_body_nodes().collect();
+        assert_eq!(outer_then.len(), 1);
+        assert_eq!(outer_then[0].kind(), SyntaxKind::PRE_IF_DIR);
+
+        let inner_then: Vec<_> = inner.then_body_nodes().collect();
+        assert_eq!(inner_then.len(), 1);
+        assert_eq!(inner_then[0].kind(), SyntaxKind::CALL_STMT);
+        assert!(inner.else_clause().is_some());
+    }
 }
