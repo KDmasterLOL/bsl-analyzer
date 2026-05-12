@@ -182,3 +182,33 @@ gap (BSL-safe both-branches `#Если/#Иначе` форма) задокуме
 `begin_in_preproc_then_try_outside` в handler-модуле. Detection и
 эмиссия диагностики Track 2 не трогает; правило остаётся локальной
 statement-order проверкой.
+
+## Закрыто Track 6.3
+
+**Phase C §4.3 (commit `bccbb3c7`, 2026-05-12):** preprocessor-aware
+Begin/Try matching реализован в lowering walker'е через помощник
+`pre_if_all_branches_open_with_try` в
+`crates/hir-def/src/body/lower/stmt.rs`. Помощник использует
+Phase A typed AST wrappers (`PreIfDir` / `PreElsIfClause` /
+`PreElseClause`) — для каждой ветки находит first non-trivial statement
+и проверяет `kind() == SyntaxKind::TRY_STMT`. Если **все** ветки
+compliant — pending `НачатьТранзакцию` потребляется без диагностики;
+если **любая** ветка не открывается с `Попытка` — диагностика эмитится
+немедленно на range `НачатьТранзакцию`, чтобы emission point был точный.
+
+Регрессионный тест `begin_in_preproc_then_try_outside` re-enabled
+(`#[ignore]` снят). Добавлены 2 edge-case fixture'а:
+
+- `begin_in_preproc_asymmetric_then_try_else_missing` — Then-ветка
+  открывается с `Попытка`, Else-ветка содержит plain statement.
+  Активная компиляция Else выполнит `Begin;` без `Try` — реальный
+  bug → 1 диагностика.
+- `begin_inside_preproc_unchanged_behavior` — `НачатьТранзакцию()`
+  внутри одной препроцессорной ветки, сразу после неё `Попытка` в той
+  же ветке. Препроцессор лишь оборачивает блок, не разрывает
+  detection → 0 диагностик.
+
+Single-branch форма (`#Если ... Попытка ... #КонецЕсли` без `#Иначе`)
+по-прежнему flag'ается — на неактивной (else) ветке после
+`НачатьТранзакцию()` нет `Попытка`. Соответствует target semantics
+плана Track 6.3 §4.3.

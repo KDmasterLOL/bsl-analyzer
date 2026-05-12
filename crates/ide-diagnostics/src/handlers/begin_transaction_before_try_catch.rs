@@ -311,6 +311,34 @@ EndProcedure"#;
         );
     }
 
+    /// `#Если` without `#Иначе`: on the inactive branch there's no `Попытка`
+    /// after `НачатьТранзакцию` — a real violation that must stay flagged
+    /// even after Track 6.3 preproc-aware pattern detection landed.
+    #[test]
+    fn begin_in_preproc_no_else_branch_still_flagged() {
+        let code = r#"Процедура Тест()
+    НачатьТранзакцию();
+    #Если Сервер Тогда
+        Попытка
+            ЗаписатьДанные();
+            ЗафиксироватьТранзакцию();
+        Исключение
+            ОтменитьТранзакцию();
+            ВызватьИсключение;
+        КонецПопытки;
+    #КонецЕсли
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#"
+                BeginTransactionBeforeTryCatch @ 2:5..2:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major"#]],
+        );
+    }
+
     /// Local integration fixture with several independent violations in one file.
     #[test]
     fn test_multiple_violations_in_one_module() {
