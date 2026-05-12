@@ -83,13 +83,14 @@ breakdown and acceptance gate evidence.
 
 ## Track 6 — Парсер, препроцессор, cascade suppression
 
-- **Parser UX:** structured expected-token errors, ranges → **`parser`** + **`syntax`** — `ParseError`, `QueryParseError`
-- **Misplaced loop control:** `Прервать` / `Продолжить` вне цикла. Сейчас ни parser, ни lowering, ни ide-diagnostics не флагают этот случай — Track 1 Step C сознательно делегирует диагностику этому слою и не порождает фиктивные CFG-рёбра. Слой: **`parser`** (синтаксический контекст) или **`hir-def`** (если решение опираться на enclosing-loop в lowering)
-- **Preprocessor source-of-truth:**
-  - surface (символы и ветки) → **`parser`** / **`syntax`**
-  - активность веток (отдельная препроцессорная модель, читающая активные символы из `project-model`) → **`hir-def`** (вне `body/lower` — там нет `db`)
-  - правила: `UnknownPreprocessorSymbol` + сквозные preprocessor-gaps в CFG/region карточках
-- **Cascade suppression** (фильтрация чужих диагностик после построения) → **`ide-diagnostics::dispatch`** (фильтрация в `hir-ty/infer` нарушила бы слой):
+- **6.1 Parser UX:** structured expected-token errors, ranges → **`parser`** + **`syntax`** — `ParseError`, `QueryParseError`
+- **6.2 Misplaced loop control:** `Прервать` / `Продолжить` вне цикла. Сейчас ни parser, ни lowering, ни ide-diagnostics не флагают этот случай — Track 1 Step C сознательно делегирует диагностику этому слою и не порождает фиктивные CFG-рёбра. Слой: **`parser`** (синтаксический контекст) или **`hir-def`** (если решение опираться на enclosing-loop в lowering)
+- **6.3 Preprocessor source-of-truth — CLOSED 2026-05-12, см. [TRACK_6_3_CLOSURE.md](TRACK_6_3_CLOSURE.md):**
+  - surface (символы и ветки) → **`parser`** / **`syntax`** — typed AST wrappers (`PreSymbol`, `PreExpr`, `PreIfDir`, `PreElsIfClause`, `PreElseClause`) на месте.
+  - per-branch анализ → **`hir-def`** через shared `PreprocIfStmt::branches()` iterator (`crates/hir-def/src/hir.rs`); CFG builder и DuplicatedInsertion handler refactored на этот iterator.
+  - 3 priority cards закрыты: `AllFunctionPathMustHaveReturn` (CFG/dataflow validation), `DuplicatedInsertionIntoCollection` (intra-branch fixtures), `BeginTransactionBeforeTryCatch` (preproc-aware Begin/Try pattern + regtest re-enable).
+  - **Active-symbol pruning evaluated and rejected**: BSL модули типа multi-context CommonModule компилируются дважды, обе ветки реально исполняются; in-process server invocation (толстый клиент в файловом режиме, мобильное приложение, внешнее соединение) делает active-symbol matrix многомерной. bsl-language-server reference impl за 5+ лет production не реализовал pruning — мы тоже не реализуем. Per-branch analysis discipline — правильная семантика.
+- **6.4 Cascade suppression** (фильтрация чужих диагностик после построения) → **`ide-diagnostics::dispatch`** (фильтрация в `hir-ty/infer` нарушила бы слой):
   - дедуп `TypeMismatch` ↔ `Unresolved*`
   - дублирующие эмиссии в `BadWords`
 
