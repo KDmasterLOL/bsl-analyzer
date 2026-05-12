@@ -345,6 +345,14 @@ impl DefDatabase for RootDatabaseImpl {
         hir::workspace_index_query(self, source_root_input)
     }
 
+    fn name_usage_index(
+        &self,
+        source_root_id: base_db::SourceRootId,
+    ) -> Arc<hir::SourceRootNameUsage> {
+        let source_root_input = self.source_root_input(source_root_id);
+        hir::source_root_name_usage_query(self, source_root_input)
+    }
+
     fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir::ExternalRef>> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         hir::file_external_refs_query(self, file_id_input)

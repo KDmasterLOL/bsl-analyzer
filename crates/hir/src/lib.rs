@@ -121,6 +121,9 @@ pub mod dataflow {
 
 // Re-export additional types needed by ide-db
 pub use hir_def::compute_execution_context;
+pub use hir_def::name_usage_index::{
+    normalize_name as normalize_usage_name, FileNameUsage, SourceRootNameUsage,
+};
 pub use hir_def::region_tree::lower_regions;
 pub use hir_def::resolver::Resolution;
 pub use hir_def::workspace_index::WorkspaceIndex;
@@ -128,9 +131,10 @@ pub use hir_def::MethodIdInput;
 
 // Re-export Salsa query functions
 pub use hir_def::{
-    conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
-    module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
-    region_tree_query, symbol_tree_query, workspace_index_query, workspace_symbols_query,
+    conditional_tree_query, file_dependencies_query, file_external_refs_query,
+    file_name_usage_query, item_tree_query, module_bodies_query, module_call_summary_query,
+    module_data_query, module_index_query, region_tree_query, source_root_name_usage_query,
+    symbol_tree_query, workspace_index_query, workspace_symbols_query,
 };
 
 // Re-export hir-ty types and queries
@@ -1161,5 +1165,47 @@ mod tests {
         assert_eq!(mdo.reference_scope(&db), ReferenceScope::Unknown);
         assert_eq!(virt.reference_scope(&db), ReferenceScope::Unknown);
         assert_eq!(Definition::Unresolved.reference_scope(&db), ReferenceScope::Unknown);
+    }
+
+    #[test]
+    fn name_usage_index_aggregates_files_and_normalizes_case() {
+        use crate::DefDatabase;
+        use base_db::SourceRootId;
+
+        let mut db = RootDatabaseImpl::default();
+        let file_a = FileId(0);
+        let file_b = FileId(1);
+        let file_c = FileId(2);
+
+        let mut file_set = vfs::file_set::FileSet::new();
+        file_set.insert(file_a, vfs::VfsPath::new("/a.bsl"));
+        file_set.insert(file_b, vfs::VfsPath::new("/b.bsl"));
+        file_set.insert(file_c, vfs::VfsPath::new("/c.bsl"));
+        let source_root = base_db::SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_a, SourceRootId(0));
+        db.set_file_source_root(file_b, SourceRootId(0));
+        db.set_file_source_root(file_c, SourceRootId(0));
+        db.set_file_text(
+            file_a,
+            "Процедура ОбщийМетод() Экспорт\n    ОбщийМетод();\nКонецПроцедуры\n",
+        );
+        // File B references the same name through different case — must fold into
+        // a single bucket alongside file A.
+        db.set_file_text(file_b, "Процедура B_метод()\n    общийметод();\nКонецПроцедуры\n");
+        // File C does NOT mention the name — must NOT appear in the bucket.
+        db.set_file_text(file_c, "Процедура C_метод()\nКонецПроцедуры\n");
+
+        let aggregator = db.name_usage_index(SourceRootId(0));
+        let lookup = normalize_usage_name(&Name::new("ОбщийМетод"));
+
+        let mut files = aggregator.files_with(&lookup).to_vec();
+        files.sort_unstable();
+        assert_eq!(files, vec![file_a, file_b], "file C must be excluded from the bucket");
+
+        // Names that nobody mentions return an explicit empty slice.
+        assert!(aggregator
+            .files_with(&normalize_usage_name(&Name::new("НеУпоминается")))
+            .is_empty());
     }
 }

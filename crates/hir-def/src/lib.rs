@@ -36,6 +36,7 @@ pub mod metrics;
 pub mod module_index;
 pub mod module_structure;
 pub mod name;
+pub mod name_usage_index;
 pub mod path;
 pub mod queries;
 pub mod region_tree;
@@ -68,6 +69,10 @@ pub use configs::{ConfigsDatabase, VisibleConfig};
 pub use item_tree::ItemTree;
 pub use module_index::ModuleIndex;
 pub use name::Name;
+pub use name_usage_index::{
+    file_name_usage_query, normalize_name, source_root_name_usage_query, FileNameUsage,
+    SourceRootNameUsage,
+};
 pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
@@ -347,6 +352,27 @@ pub trait DefDatabase: base_db::RootQueryDb {
         &self,
         source_root_id: SourceRootId,
     ) -> Arc<crate::workspace_index::WorkspaceIndex>;
+
+    /// Get the per-source-root name-usage index.
+    ///
+    /// Maps lowercase-normalized names to the BSL files that mention them as
+    /// name-tokens. Used by `find_references` to narrow workspace-scoped
+    /// searches from "every file" down to "files that even contain this name".
+    ///
+    /// # Performance
+    /// - **LRU cache:** 4 (one per source root)
+    /// - **Per-file caching:** Each file's contribution is itself a Salsa-tracked
+    ///   query ([`file_name_usage_query`]), so a single edit only re-runs the
+    ///   aggregator over cached per-file results.
+    /// - **Memory:** ~5-25 MB for `FileNameUsage` results + ~10-30 MB aggregator
+    ///   on a 25k-file workspace.
+    ///
+    /// # Implementation
+    /// Should delegate to [`source_root_name_usage_query`].
+    fn name_usage_index(
+        &self,
+        source_root_id: SourceRootId,
+    ) -> Arc<crate::name_usage_index::SourceRootNameUsage>;
 
     /// Get external module references from a file.
     ///

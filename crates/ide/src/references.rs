@@ -6,10 +6,10 @@
 //! [`SemanticSymbol::reference_scope`] where to search:
 //!
 //! - [`ReferenceScope::FileLocal`] → only the current file.
-//! - [`ReferenceScope::ModuleSymbolWorkspace`] → every BSL file in the source root.
-//!   A name-usage index (planned, see `name_usage_index`) will narrow this to a
-//!   handful of files in a follow-up; the current implementation iterates the
-//!   source root directly.
+//! - [`ReferenceScope::ModuleSymbolWorkspace`] → BSL files whose
+//!   [`hir::SourceRootNameUsage`] entry mentions the target name. The index is
+//!   Salsa-tracked per source root, so a single edit invalidates only the
+//!   touched file's contribution.
 //! - [`ReferenceScope::Unknown`] → empty result (builtins / MDO / virtual SDBL fields /
 //!   modules / unresolved). These either have no source ranges or live in
 //!   metadata, not in BSL text.
@@ -17,7 +17,7 @@
 //! Per-file traversal is delegated to [`find_references_in_file`], which is also
 //! reused by `document_highlight`.
 
-use hir::{is_bsl_source, Name, ReferenceScope, SemanticSymbol, Semantics};
+use hir::{normalize_usage_name, Name, ReferenceScope, SemanticSymbol, Semantics};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -59,7 +59,9 @@ pub fn find_references<DB: RootDatabase>(
     let files_to_search: Vec<FileId> = match scope {
         ReferenceScope::FileLocal => vec![file_id],
         ReferenceScope::Unknown => return Vec::new(),
-        ReferenceScope::ModuleSymbolWorkspace => collect_workspace_bsl_files(db, file_id),
+        ReferenceScope::ModuleSymbolWorkspace => {
+            workspace_candidate_files(db, file_id, &symbol.name)
+        }
     };
 
     // Find references across all candidate files. The Salsa cancellation
@@ -82,19 +84,23 @@ pub fn find_references<DB: RootDatabase>(
     all_references
 }
 
-/// Collect every BSL file in the source root containing `current_file`.
+/// BSL files in the source root that even mention `target_name`.
 ///
-/// Non-BSL entries (XML metadata, manifests) have no Salsa `file_text` after
-/// `process_changes` skips them, so handing them to `db.parse` would panic
-/// in `Files::file_text`. The filter mirrors what the rest of the crate uses
-/// when walking source roots.
-fn collect_workspace_bsl_files<DB: RootDatabase>(db: &DB, current_file: FileId) -> Vec<FileId> {
+/// Pulls `hir::SourceRootNameUsage` (Salsa-tracked, two-tier) and looks up the
+/// lowercase-normalized name. Files outside the bucket cannot contain a
+/// matching name-token, so skipping them avoids parsing modules that play no
+/// role in the search — the difference between scanning all 25k files in a
+/// workspace and a handful of candidates.
+fn workspace_candidate_files<DB: RootDatabase>(
+    db: &DB,
+    current_file: FileId,
+    target_name: &Name,
+) -> Vec<FileId> {
     let source_root_input = db.file_source_root_input(current_file);
     let source_root_id = source_root_input.source_root_id(db);
-    let source_root_input = db.source_root_input(source_root_id);
-    let source_root = source_root_input.root(db);
-    let file_set = source_root.file_set();
-    source_root.iter().filter(|&file_id| is_bsl_source(file_set, file_id)).collect()
+    let aggregator = db.name_usage_index(source_root_id);
+    let normalized = normalize_usage_name(target_name);
+    aggregator.files_with(&normalized).to_vec()
 }
 
 /// Find all references to a given symbol within a single file.
@@ -697,6 +703,57 @@ mod tests {
                 loc.file_id, file1_id,
                 "Local variable references should not cross file boundaries"
             );
+        }
+    }
+
+    #[test]
+    fn export_method_uses_name_usage_index_to_narrow_scope() {
+        // 3 files. File C does not contain the target name as a name-token,
+        // so the `name_usage_index` aggregator must exclude it from the
+        // candidate set — that is the entire point of the index. File A and
+        // file B remain candidates but their `МояПроцедура` definitions are
+        // distinct `MethodId`s, so cross-file matches are filtered out by
+        // `SemanticSymbolKey` equality.
+        let mut db = RootDatabaseImpl::default();
+        let file_a = FileId(0);
+        let file_b = FileId(1);
+        let file_c = FileId(2);
+
+        let file_a_src = r#"
+Процедура МояПроцедура() Экспорт
+    МояПроцедура();
+КонецПроцедуры
+"#;
+        let file_b_src = r#"
+Процедура МояПроцедура()
+    МояПроцедура();
+КонецПроцедуры
+"#;
+        let file_c_src = r#"
+Процедура НеПохожийМетод()
+КонецПроцедуры
+"#;
+
+        let mut file_set = FileSet::new();
+        file_set.insert(file_a, VfsPath::new("/a.bsl"));
+        file_set.insert(file_b, VfsPath::new("/b.bsl"));
+        file_set.insert(file_c, VfsPath::new("/c.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_a, SourceRootId(0));
+        db.set_file_source_root(file_b, SourceRootId(0));
+        db.set_file_source_root(file_c, SourceRootId(0));
+        db.set_file_text(file_a, file_a_src);
+        db.set_file_text(file_b, file_b_src);
+        db.set_file_text(file_c, file_c_src);
+
+        let def_offset = file_a_src.find("МояПроцедура").unwrap();
+        let references = find_references(&db, file_a, TextSize::from(def_offset as u32));
+
+        // file A's def + 1 call = 2 references.
+        assert_eq!(references.len(), 2, "expected definition + 1 call in file A");
+        for loc in &references {
+            assert_eq!(loc.file_id, file_a);
         }
     }
 
