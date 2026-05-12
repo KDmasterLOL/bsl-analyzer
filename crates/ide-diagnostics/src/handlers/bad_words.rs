@@ -92,28 +92,32 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
         Err(_) => return, // Invalid pattern, skip
     };
 
-    // Get node text
-    let text = node.text().to_string();
+    // Scan only direct tokens. The single-pass dispatcher calls this handler
+    // for every descendant node, so scanning node.text() would rescan child text
+    // through each ancestor and emit duplicates.
+    for token in node.children_with_tokens().filter_map(|element| element.into_token()) {
+        let text = token.text();
 
-    // Skip comments if findInComments is false
-    if !config.find_in_comments && text.trim_start().starts_with("//") {
-        return;
-    }
+        // Skip comments if findInComments is false
+        if !config.find_in_comments && text.trim_start().starts_with("//") {
+            continue;
+        }
 
-    // Find all matches in the node text
-    for mat in re.find_iter(&text) {
-        let start: u32 = node.text_range().start().into();
-        let match_start = start + mat.start() as u32;
-        let match_end = start + mat.end() as u32;
+        // Find all matches in the token text
+        for mat in re.find_iter(text) {
+            let start: u32 = token.text_range().start().into();
+            let match_start = start + mat.start() as u32;
+            let match_end = start + mat.end() as u32;
 
-        acc.push(Diagnostic {
-            code: DiagnosticCode::BadWords,
-            message: format!("Использование запрещённого слова '{}'", mat.as_str()),
-            severity: ctx.severity(code),
-            range: TextRange::new(match_start.into(), match_end.into()),
-            tags: ctx.tags(code),
-            fixes: vec![],
-        });
+            acc.push(Diagnostic {
+                code: DiagnosticCode::BadWords,
+                message: format!("Использование запрещённого слова '{}'", mat.as_str()),
+                severity: ctx.severity(code),
+                range: TextRange::new(match_start.into(), match_end.into()),
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
+        }
     }
 }
 
@@ -173,6 +177,42 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     diagnostics
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_no_duplicates_per_occurrence() {
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    let code = r#"Процедура Тест()
+    Значение = 1;
+    // TODO comment
+    Значение = Значение + 1;
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": "TODO",
+            "findInComments": true
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected one BadWords diagnostic for one TODO occurrence, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
 }
 
 #[cfg(test)]

@@ -144,3 +144,17 @@
 
 **Phase C §4 audit pass (task #84, 2026-05):** Track A — без изменений.
 Правило стабильно, контекст выдаваемый `SdblDiagnostic` уже точный.
+
+## Закрыто Track 6.4
+
+Исходный пробел:
+
+> - `check_node()` сканирует `node.text()` каждого AST-узла. Одно и то же слово
+>   может попасть в несколько ancestor-узлов, что создает риск дублей в реальном
+>   запуске. Глобальная дедупликация сейчас применяется только к `UnreachableCode`.
+
+Выбран fix option 1: `check_node()` сканирует только direct tokens через
+`children_with_tokens()`, потому что каждый token принадлежит одному parent-узлу
+и не переизлучается через ancestor `node.text()`.
+
+Покрытие: `integration_bad_words_no_duplicates_per_occurrence`.
