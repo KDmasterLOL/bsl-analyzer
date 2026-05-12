@@ -417,6 +417,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_no_diagnostic_preproc_both_branches_return() {
+        let code = r#"Функция F()
+    #Если Сервер Тогда
+        Возврат 1;
+    #Иначе
+        Возврат 2;
+    #КонецЕсли
+КонецФункции"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let count = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+            .count();
+
+        assert_eq!(count, 0, "Expected 0 diagnostics: both preprocessor branches return");
+    }
+
+    #[test]
+    fn test_missing_return_preproc_else_no_return() {
+        let code = r#"Функция F()
+    #Если Сервер Тогда
+        Возврат 1;
+    #Иначе
+        // no return
+    #КонецЕсли
+КонецФункции"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let count = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+            .count();
+
+        assert_eq!(count, 1, "Expected 1 diagnostic: preprocessor else branch has no return");
+    }
+
+    #[test]
+    fn test_missing_return_preproc_no_else() {
+        let code = r#"Функция F()
+    #Если Сервер Тогда
+        Возврат 1;
+    #КонецЕсли
+КонецФункции"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let count = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+            .count();
+
+        assert_eq!(count, 1, "Expected 1 diagnostic: preprocessor condition can fall through");
+    }
+
+    #[test]
+    fn test_no_diagnostic_preproc_nested_in_semantic_if() {
+        let code = r#"Функция F(Cond)
+    Если Cond Тогда
+        #Если Сервер Тогда
+            Возврат 1;
+        #Иначе
+            Возврат 2;
+        #КонецЕсли
+    Иначе
+        Возврат 3;
+    КонецЕсли
+КонецФункции"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let count = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+            .count();
+
+        assert_eq!(
+            count, 0,
+            "Expected 0 diagnostics: all semantic and preprocessor branches return"
+        );
+    }
+
     /// Test that raise exception counts as exit
     #[test]
     fn test_raise_counts_as_exit() {
