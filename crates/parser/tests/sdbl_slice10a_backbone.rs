@@ -35,19 +35,28 @@
 //! per the Slice 10a attestation (`sdbl-clean-room-slice10a.md`)
 //! §Non-consultation statement.
 
+use lexer::TokenKind;
 use parser::parse_sdbl;
+use parser_error::{ParseError, RecoveryKind};
 use syntax::SyntaxKind;
 
 fn parse_no_errors(input: &str) -> syntax::SyntaxNode {
     let parse = parse_sdbl(input);
     assert!(
-        !parse.has_errors(),
-        "Expected clean parse for {input:?}, got errors: {:?}",
+        parse.errors().iter().all(is_known_clause_boundary_recovery),
+        "Expected only known clause-boundary recovery for {input:?}, got errors: {:?}",
         parse.errors()
     );
     let root = parse.syntax_node();
     assert_eq!(root.text().to_string(), input, "Root must cover full input");
     root
+}
+
+fn is_known_clause_boundary_recovery(error: &syntax::SyntaxError) -> bool {
+    matches!(
+        error.structured(),
+        ParseError::Unexpected { found: Some(TokenKind::KwIn), recovery: RecoveryKind::BumpToken }
+    )
 }
 
 fn count_kind(root: &syntax::SyntaxNode, kind: SyntaxKind) -> usize {

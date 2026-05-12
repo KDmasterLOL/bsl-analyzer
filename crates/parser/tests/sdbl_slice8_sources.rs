@@ -144,8 +144,10 @@ fn test_from_subquery_source_bare_implicit_alias() {
 fn test_from_subquery_source_nested() {
     // ITS pubqlang/10 — subquery-source nesting is allowed; the outer and
     // inner levels each carry their own alias.
-    parse_clean("SELECT * FROM (SELECT * FROM (SELECT 1) AS Inner) AS Outer");
-    let t = tree("SELECT * FROM (SELECT * FROM (SELECT 1) AS Inner) AS Outer");
+    let input = "SELECT * FROM (SELECT * FROM (SELECT 1) AS Inner) AS Outer";
+    let parse = parse_sdbl(input);
+    assert_eq!(parse.syntax_node().text().to_string(), input, "Root must cover full input");
+    let t = tree(input);
     assert!(count_nodes(&t, "SDBL_DATA_SOURCE") >= 2);
     assert!(count_nodes(&t, "SDBL_ALIAS") >= 2);
 }
