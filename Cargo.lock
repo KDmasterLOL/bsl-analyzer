@@ -2607,6 +2607,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "parser-error"
+version = "0.1.181"
+dependencies = [
+ "lexer",
+ "smallvec",
+ "text-size",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
