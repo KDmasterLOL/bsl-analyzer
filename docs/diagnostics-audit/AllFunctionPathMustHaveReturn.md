@@ -133,6 +133,26 @@ basic block — `Stmt::Return` или `Stmt::Raise`. Ребра `AdjacentCode`
    `UnreachableCode`, транзакционные диагностики и будущие flow-sensitive
    правила.
 
+## Закрыто Track 6.3
+
+Пробел из секции "Пробелы покрытия" — «`#Если/#ИначеЕсли/#Иначе` представлены в
+CFG, но для этой диагностики не видно отдельной матрицы тестов на препроцессорные
+ветки и активные символы» — закрыт коммитом `6d641b79`.
+
+Track 6.3 fixture-first audit добавил 4 препроцессорных теста (Both-return,
+Else-missing-return, No-Else fallthrough, Nested-in-semantic-if). Все они
+проходят против существующего CFG/dataflow pipeline'а
+(`walk_preproc_if_statement_hir` в `crates/cfg/src/builder.rs` +
+`path_terminates` в `crates/dataflow/src/path_terminates.rs`) — никаких
+изменений в коде самой диагностики или CFG/dataflow слоёв не понадобилось.
+
+Часть про "активные символы" из исходного пробела признана out-of-scope per
+Track 6.3 design: BSL модули типа CommonModule с обоими флагами `Server=true,
+ClientManagedApplication=true` компилируются дважды, и обе ветки `#Если` реально
+исполняются в разных копиях процесса. Per-branch анализ (что мы и делаем) —
+правильная семантика; active-symbol pruning — false-positive risk на основном
+use case. Подробности — в `TRACK_6_3_CLOSURE.md`.
+
 ## Вывод
 
 Диагностика уже существенно лучше простой AST-проверки: она использует HIR и CFG
