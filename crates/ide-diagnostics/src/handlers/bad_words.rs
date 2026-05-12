@@ -116,7 +116,7 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
         let match_end = root_start + mat.end() as u32;
         let match_range = TextRange::new(match_start.into(), match_end.into());
 
-        if comment_ranges.iter().any(|c| c.contains_range(match_range)) {
+        if comment_ranges.iter().any(|c| c.intersect(match_range).is_some()) {
             continue;
         }
 
@@ -220,6 +220,44 @@ fn integration_bad_words_no_duplicates_per_occurrence() {
         diagnostics.len(),
         1,
         "expected one BadWords diagnostic for one TODO occurrence, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_skips_match_straddling_comment_boundary() {
+    // A regex match can begin in code and extend INTO an inline `// ...`
+    // comment (or vice versa). `contains_range`-style filtering would
+    // miss this because the match is not fully inside the comment.
+    // `intersect`-based exclusion drops any match that overlaps a comment
+    // range at all when findInComments=false.
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    let code = r#"Процедура Тест()
+    valueA // commentB
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": r"value.*comment",
+            "findInComments": false
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert!(
+        diagnostics.is_empty(),
+        "regex match that straddles the // boundary must be skipped with findInComments=false, got {}:\n{}",
         diagnostics.len(),
         format_diags(code, &diagnostics)
     );
