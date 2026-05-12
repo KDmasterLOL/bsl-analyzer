@@ -116,7 +116,15 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
         let match_end = root_start + mat.end() as u32;
         let match_range = TextRange::new(match_start.into(), match_end.into());
 
-        if comment_ranges.iter().any(|c| c.intersect(match_range).is_some()) {
+        // Strict overlap: drop the match only when its range and the comment
+        // range share at least one byte. Pure boundary contact (e.g. `code//cmt`
+        // where the match ends exactly where the comment starts) leaves the
+        // code-side match emitted, which `intersect` alone would suppress
+        // because it returns Some(empty) on touching ranges.
+        if comment_ranges
+            .iter()
+            .any(|c| c.start() < match_range.end() && match_range.start() < c.end())
+        {
             continue;
         }
 
@@ -220,6 +228,46 @@ fn integration_bad_words_no_duplicates_per_occurrence() {
         diagnostics.len(),
         1,
         "expected one BadWords diagnostic for one TODO occurrence, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_keeps_match_touching_comment_at_boundary() {
+    // A match whose end touches the start of an inline comment (zero bytes
+    // overlap) is pure code and must STAY flagged. `TextRange::intersect`
+    // returns Some(empty) for touching ranges, so the predicate needs to
+    // require strict overlap rather than relying on `intersect(..).is_some()`.
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    // No space between identifier and `//`: the comment token starts exactly
+    // where the identifier ends.
+    let code = r#"Процедура Тест()
+    forbiddenIdent//tail
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": "forbiddenIdent",
+            "findInComments": false
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "pure code match that ends at the comment boundary must remain emitted, got {}:\n{}",
         diagnostics.len(),
         format_diags(code, &diagnostics)
     );
