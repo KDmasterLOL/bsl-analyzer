@@ -4,8 +4,8 @@
 //! IDE crates should ask for a `SemanticSymbol` and project it to their own
 //! wire shape instead of duplicating name-resolution and type-dispatch rules.
 
-use crate::{Definition, Name, NameClass, Semantics};
-use hir_def::{DefWithBodyId, ExprId, MethodId, ModuleId};
+use crate::{Definition, Name, NameClass, ReferenceScope, Semantics};
+use hir_def::{DefDatabase, DefWithBodyId, ExprId, MethodId, ModuleId};
 use hir_ty::{db::HirDatabase, ImplicitLocalInfo, Ty};
 use syntax::{TextRange, TextSize};
 use vfs::FileId;
@@ -41,6 +41,28 @@ pub struct SemanticSymbol {
     pub definition: Option<Definition>,
     pub declaration: Option<SymbolDeclaration>,
     pub ty: Option<Ty>,
+}
+
+impl SemanticSymbol {
+    /// Determine where references to this occurrence can live.
+    ///
+    /// Delegates to [`Definition::reference_scope`] when the symbol carries one,
+    /// otherwise projects the `SemanticSymbolKey` shape: body-scoped locals are
+    /// `FileLocal`, typed-member occurrences map to `Unknown` (they are field
+    /// accesses on a typed receiver, not standalone name bindings).
+    pub fn reference_scope(&self, db: &dyn DefDatabase) -> ReferenceScope {
+        if let Some(def) = self.definition.as_ref() {
+            return def.reference_scope(db);
+        }
+        match &self.key {
+            SemanticSymbolKey::BodyLocal { .. } | SemanticSymbolKey::ImplicitLocal { .. } => {
+                ReferenceScope::FileLocal
+            }
+            SemanticSymbolKey::TypedMember { .. } | SemanticSymbolKey::Definition(_) => {
+                ReferenceScope::Unknown
+            }
+        }
+    }
 }
 
 /// Source-backed declaration target for a symbol.

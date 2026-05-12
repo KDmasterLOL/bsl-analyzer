@@ -147,6 +147,29 @@ pub enum Definition {
     Unresolved,
 }
 
+/// Where references to a [`Definition`] can live.
+///
+/// IDE features (`find_references`, rename, `documentHighlight`) consult this
+/// before choosing a search strategy. `Unknown` is an explicit "scope not
+/// modeled" value — the caller must observe it and produce an empty result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReferenceScope {
+    /// Symbol can only be referenced inside its declaring file.
+    ///
+    /// Examples: parameters, locals, non-export module members.
+    FileLocal,
+    /// Symbol can be referenced from any file in the same source root.
+    ///
+    /// Examples: export procedures, export variables.
+    ModuleSymbolWorkspace,
+    /// Scope is not modeled by this enum — the caller is expected to return
+    /// an empty result.
+    ///
+    /// Examples: builtins, MDO types/objects, modules themselves,
+    /// virtual SDBL fields, unresolved references.
+    Unknown,
+}
+
 impl Definition {
     /// Get the module containing this definition (if applicable).
     ///
@@ -201,6 +224,34 @@ impl Definition {
                 crate::get_variable_info(id, db).is_some_and(|i| i.is_export)
             }
             _ => false,
+        }
+    }
+
+    /// Determine where references to this definition can live.
+    ///
+    /// Decided purely from `Definition` shape plus the existing `is_export`
+    /// resolution — no name walks, no usage scans. IDE features ([`find_references`],
+    /// rename, etc.) use this to pick a search strategy.
+    ///
+    /// [`find_references`]: ../../ide/src/references.rs
+    pub fn reference_scope(&self, db: &dyn DefDatabase) -> ReferenceScope {
+        match self {
+            Definition::Parameter { .. } | Definition::Local { .. } => ReferenceScope::FileLocal,
+            Definition::Method(_) | Definition::Variable(_) => {
+                if self.is_export(db) {
+                    ReferenceScope::ModuleSymbolWorkspace
+                } else {
+                    ReferenceScope::FileLocal
+                }
+            }
+            Definition::BuiltinFunction(_)
+            | Definition::BuiltinMethodHandle { .. }
+            | Definition::MdoCollectionType(_)
+            | Definition::MdoObject { .. }
+            | Definition::MdoManagerModule { .. }
+            | Definition::Module(_)
+            | Definition::VirtualTableField { .. }
+            | Definition::Unresolved => ReferenceScope::Unknown,
         }
     }
 
