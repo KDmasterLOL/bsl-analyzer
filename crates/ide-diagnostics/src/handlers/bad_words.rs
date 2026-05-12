@@ -72,16 +72,63 @@ impl Config {
 ///
 /// This is called from collect_syntax_single_pass() for each node in single AST pass.
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
-    // The single-pass dispatcher invokes this handler on EVERY descendant.
-    // Run the scan exactly once at the file root and delegate to the
-    // line-based `check()`. Scanning per-descendant via `node.text()` would
-    // emit duplicates per ancestor (the Track 6.4b bug). Scanning
-    // per-token would break regex patterns that span tokens (e.g. patterns
-    // matching across whitespace or punctuation).
+    // Run exactly once per file. Three correctness properties:
+    //   1. Single pass → no duplicate emissions across ancestor nodes.
+    //   2. Whole-file regex scan → cross-token patterns keep working
+    //      (e.g. `not\s+recommended`, `client[_\s]*facing`).
+    //   3. Comment ranges collected from the syntax tree → inline `// ...`
+    //      tails are skipped when findInComments=false, not just full
+    //      comment lines.
     if node.kind() != SyntaxKind::SOURCE_FILE {
         return;
     }
-    acc.extend(check(ctx));
+
+    let code = DiagnosticCode::BadWords;
+    if ctx.is_disabled_with_metadata(code) {
+        return;
+    }
+
+    let config = Config::from_context(ctx);
+    if config.bad_words_pattern.is_empty() {
+        return;
+    }
+
+    let re = match RegexBuilder::new(&config.bad_words_pattern).case_insensitive(true).build() {
+        Ok(regex) => regex,
+        Err(_) => return,
+    };
+
+    let comment_ranges: Vec<TextRange> = if config.find_in_comments {
+        Vec::new()
+    } else {
+        node.descendants_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::COMMENT)
+            .map(|tok| tok.text_range())
+            .collect()
+    };
+
+    let file_text = node.text().to_string();
+    let root_start: u32 = node.text_range().start().into();
+
+    for mat in re.find_iter(&file_text) {
+        let match_start = root_start + mat.start() as u32;
+        let match_end = root_start + mat.end() as u32;
+        let match_range = TextRange::new(match_start.into(), match_end.into());
+
+        if comment_ranges.iter().any(|c| c.contains_range(match_range)) {
+            continue;
+        }
+
+        acc.push(Diagnostic {
+            code,
+            message: format!("Использование запрещённого слова '{}'", mat.as_str()),
+            severity: ctx.severity(code),
+            range: match_range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
 }
 
 /// Main entry point for BadWords diagnostic
@@ -173,6 +220,43 @@ fn integration_bad_words_no_duplicates_per_occurrence() {
         diagnostics.len(),
         1,
         "expected one BadWords diagnostic for one TODO occurrence, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_skips_inline_comment_tail() {
+    // findInComments=false must skip BOTH comment-only lines AND inline
+    // `// ...` tails. Line-based comment detection (the previous
+    // delegate path) caught only the former; this regression test pins
+    // the syntax-tree-aware comment range exclusion.
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    let code = r#"Процедура Тест()
+    Значение = 1; // TODO inline
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": "TODO",
+            "findInComments": false
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert!(
+        diagnostics.is_empty(),
+        "inline `// TODO inline` must be skipped with findInComments=false, got {}:\n{}",
         diagnostics.len(),
         format_diags(code, &diagnostics)
     );
