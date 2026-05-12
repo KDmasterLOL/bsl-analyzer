@@ -1148,6 +1148,70 @@ mod tests {
     }
 
     #[test]
+    fn test_preprocessor_intra_branch_dup() {
+        // Real duplicate INSIDE one preprocessor branch — must be flagged.
+        let code = r#"
+Процедура Тест()
+    #Если Сервер Тогда
+        Массив.Добавить(Значение);
+        Массив.Добавить(Значение);
+    #КонецЕсли
+КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 5:9..5:34
+              message: Проверьте повторную вставку Значение в коллекцию Массив
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_preprocessor_mixed_intra_dup_with_cross_branch_same() {
+        // dup inside the #Если branch + the same call repeated in #Иначе — only
+        // the intra-then-branch pair is a duplicate; cross-branch repetition
+        // is parallel compilations, not a bug.
+        let code = r#"
+Процедура Тест()
+    #Если Сервер Тогда
+        Массив.Добавить(Значение);
+        Массив.Добавить(Значение);
+    #Иначе
+        Массив.Добавить(Значение);
+    #КонецЕсли
+КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 5:9..5:34
+              message: Проверьте повторную вставку Значение в коллекцию Массив
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_preprocessor_nested_intra_branch_dup() {
+        // Duplicate inside the innermost branch of a nested preproc — still
+        // a real bug.
+        let code = r#"
+Процедура Тест()
+    #Если Сервер Тогда
+        #Если ВнешнееСоединение Тогда
+            Массив.Добавить(Значение);
+            Массив.Добавить(Значение);
+        #КонецЕсли
+    #КонецЕсли
+КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            DuplicatedInsertionIntoCollection @ 6:13..6:38
+              message: Проверьте повторную вставку Значение в коллекцию Массив
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
     fn test_break_in_loop() {
         let code = r#"
 Процедура Тест(Коллекция, Коллекция2)
