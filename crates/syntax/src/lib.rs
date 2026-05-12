@@ -17,6 +17,7 @@ mod syntax_node;
 
 use std::marker::PhantomData;
 
+use parser_error::ParseError;
 use rowan::GreenNode;
 
 pub use crate::{
@@ -81,17 +82,13 @@ impl Parse<SyntaxNode> {
 pub struct SyntaxError {
     message: String,
     range: TextRange,
+    error: ParseError,
 }
 
 impl SyntaxError {
     /// Create a new syntax error.
-    pub fn new(message: impl Into<String>, range: TextRange) -> Self {
-        Self { message: message.into(), range }
-    }
-
-    /// Create a syntax error at a specific offset.
-    pub fn new_at_offset(message: impl Into<String>, offset: TextSize) -> Self {
-        Self::new(message, TextRange::empty(offset))
+    pub fn new(range: TextRange, err: ParseError) -> Self {
+        Self { message: err.format_ru(), range, error: err }
     }
 
     /// Get the error message.
@@ -103,6 +100,11 @@ impl SyntaxError {
     pub fn range(&self) -> TextRange {
         self.range
     }
+
+    /// Get the structured parse error payload.
+    pub fn structured(&self) -> &ParseError {
+        &self.error
+    }
 }
 
 impl std::fmt::Display for SyntaxError {
@@ -112,3 +114,21 @@ impl std::fmt::Display for SyntaxError {
 }
 
 impl std::error::Error for SyntaxError {}
+
+#[cfg(test)]
+mod tests {
+    use parser_error::{ParseError, RecoveryKind};
+
+    use super::*;
+
+    #[test]
+    fn syntax_error_carries_structured_payload() {
+        let range = TextRange::new(0.into(), 5.into());
+        let err = ParseError::Unexpected { found: None, recovery: RecoveryKind::MissingToken };
+        let syntax_err = SyntaxError::new(range, err.clone());
+
+        assert_eq!(syntax_err.range(), range);
+        assert_eq!(syntax_err.structured(), &err);
+        assert!(syntax_err.message().contains("конец файла"));
+    }
+}

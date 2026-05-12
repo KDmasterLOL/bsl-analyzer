@@ -2598,6 +2598,7 @@ version = "0.1.181"
 dependencies = [
  "expect-test",
  "lexer",
+ "parser-error",
  "rayon",
  "stdx",
  "syntax",
@@ -3864,6 +3865,7 @@ version = "0.1.181"
 dependencies = [
  "expect-test",
  "parser",
+ "parser-error",
  "rowan",
  "smol_str",
  "text-size",

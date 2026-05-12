@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 
+use parser_error::ParseError;
 use rowan::{GreenNode, GreenNodeBuilder, Language, NodeCache};
 
 use crate::{Parse, SyntaxError, SyntaxKind};
@@ -175,9 +176,9 @@ impl<'cache> SyntaxTreeBuilder<'cache> {
         self.inner.finish_node();
     }
 
-    /// Add an error at a specific text position.
-    pub fn error(&mut self, message: impl Into<String>, offset: rowan::TextSize) {
-        self.errors.push(SyntaxError::new_at_offset(message, offset));
+    /// Add an error for a specific text range.
+    pub fn error(&mut self, range: rowan::TextRange, err: ParseError) {
+        self.errors.push(SyntaxError::new(range, err));
     }
 
     /// Finish building and return the green node and errors.
@@ -217,16 +218,21 @@ mod tests {
 
     #[test]
     fn test_build_with_error() {
+        use parser_error::{ParseError, RecoveryKind};
+
         let mut builder = SyntaxTreeBuilder::new();
 
         builder.start_node(SyntaxKind::SOURCE_FILE);
-        builder.error("unexpected token", rowan::TextSize::from(0));
+        builder.error(
+            rowan::TextRange::empty(rowan::TextSize::from(0)),
+            ParseError::Custom { message: "unexpected token", recovery: RecoveryKind::Custom },
+        );
         builder.finish_node();
 
         let parse = builder.finish();
         assert!(parse.has_errors());
         assert_eq!(parse.errors().len(), 1);
-        assert_eq!(parse.errors()[0].message(), "unexpected token");
+        assert_eq!(parse.errors()[0].message(), "Unexpected token");
     }
 
     #[test]

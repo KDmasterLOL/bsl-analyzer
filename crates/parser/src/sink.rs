@@ -2,7 +2,8 @@
 //!
 //! This module builds a SyntaxTreeBuilder from the events produced by the parser.
 
-use syntax::{SyntaxTreeBuilder, TextSize};
+use parser_error::ParseError;
+use syntax::{SyntaxTreeBuilder, TextRange};
 
 use crate::{
     event::Event,
@@ -20,7 +21,7 @@ pub struct Sink<'t, 'cache> {
     builder: SyntaxTreeBuilder<'cache>,
     tokens: &'t [lexer::Token],
     token_pos: usize,
-    errors: Vec<String>,
+    errors: Vec<(TextRange, ParseError)>,
 }
 
 impl<'t> Sink<'t, 'static> {
@@ -115,14 +116,9 @@ impl<'t, 'cache> Sink<'t, 'cache> {
             }
         }
 
-        // Add any remaining errors
-        for (idx, error) in self.errors.iter().enumerate() {
-            let offset = if idx < self.tokens.len() {
-                self.tokens[idx].offset
-            } else {
-                self.tokens.last().map(|t| t.offset + t.text.len()).unwrap_or(0)
-            };
-            self.builder.error(error.clone(), TextSize::from(offset as u32));
+        // Add any remaining errors.
+        for (range, err) in self.errors.drain(..) {
+            self.builder.error(range, err);
         }
 
         self.builder
