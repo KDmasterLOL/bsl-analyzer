@@ -7,8 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 lexer.workspace = true
-syntax.workspace = true
+parser-error.workspace = true
 stdx.workspace = true
+syntax.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

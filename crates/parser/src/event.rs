@@ -2,6 +2,8 @@
 //!
 //! The parser produces events that are later processed to build the syntax tree.
 
+use parser_error::ParseError;
+
 /// Parsing events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -13,6 +15,10 @@ pub enum Event {
     Token { kind: lexer::TokenKind },
     /// Placeholder for nodes that will be replaced.
     Placeholder,
+    /// Parser error without explicit marker span (`Event::Error(...)`).
+    Error(ParseError),
+    /// Parser error with explicit token marker span (`Event::ErrorWithSpan`).
+    ErrorWithSpan { start_token: usize, err: ParseError },
 }
 
 /// Node kinds for the syntax tree.

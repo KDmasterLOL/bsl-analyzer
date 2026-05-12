@@ -104,6 +104,14 @@ impl<'t, 'cache> Sink<'t, 'cache> {
                 Event::Placeholder => {
                     // Placeholders should have been replaced during event processing
                 }
+
+                Event::Error(_) => {
+                    // Deferred to Slice B.2: range computation + push to self.errors.
+                }
+
+                Event::ErrorWithSpan { .. } => {
+                    // Deferred to Slice B.2: range computation with marker start + push.
+                }
             }
         }
 
