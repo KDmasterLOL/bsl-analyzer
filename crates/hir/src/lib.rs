@@ -7,7 +7,7 @@ pub mod name_classify;
 mod semantic_symbol;
 pub mod type_facade;
 
-pub use definition::Definition;
+pub use definition::{Definition, ReferenceScope};
 pub use hir_ty::coerce_this_object_to_metadata_ref;
 pub use hir_ty::TyLoweringContext;
 pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
@@ -1069,5 +1069,97 @@ mod tests {
         assert_eq!(module.procedures().len(), 0);
         assert_eq!(module.functions().len(), 0);
         assert_eq!(module.variables().len(), 0);
+    }
+
+    #[test]
+    fn reference_scope_distinguishes_export_methods() {
+        let source = r#"
+Процедура НеЭкспорт()
+КонецПроцедуры
+
+Процедура Экспортная() Экспорт
+КонецПроцедуры
+        "#;
+
+        let (db, file_id) = create_db_with_file(source);
+        let sema = Semantics::new(&db);
+
+        let private = sema.find_method(file_id, "НеЭкспорт").unwrap();
+        let exported = sema.find_method(file_id, "Экспортная").unwrap();
+
+        assert_eq!(
+            Definition::Method(private.id()).reference_scope(&db),
+            ReferenceScope::FileLocal,
+            "non-export procedure must stay file-local"
+        );
+        assert_eq!(
+            Definition::Method(exported.id()).reference_scope(&db),
+            ReferenceScope::ModuleSymbolWorkspace,
+            "Экспорт procedure must reach the whole source root"
+        );
+    }
+
+    #[test]
+    fn reference_scope_distinguishes_export_variables() {
+        let source = r#"
+Перем НеЭкспорт;
+Перем Экспортная Экспорт;
+        "#;
+
+        let (db, file_id) = create_db_with_file(source);
+        let sema = Semantics::new(&db);
+        let module = sema.module_from_file(file_id);
+        let variables = module.variables();
+
+        let private = variables.iter().find(|v| v.name().as_str() == "НеЭкспорт").unwrap();
+        let exported = variables.iter().find(|v| v.name().as_str() == "Экспортная").unwrap();
+
+        assert_eq!(
+            Definition::Variable(private.id()).reference_scope(&db),
+            ReferenceScope::FileLocal,
+        );
+        assert_eq!(
+            Definition::Variable(exported.id()).reference_scope(&db),
+            ReferenceScope::ModuleSymbolWorkspace,
+        );
+    }
+
+    #[test]
+    fn reference_scope_keeps_parameters_and_locals_file_local() {
+        let source = r#"
+Процедура Контейнер()
+КонецПроцедуры
+        "#;
+        let (db, file_id) = create_db_with_file(source);
+        let sema = Semantics::new(&db);
+        let method = sema.find_method(file_id, "Контейнер").unwrap();
+
+        let parameter = Definition::Parameter {
+            method_id: method.id(),
+            param_name: Name::new("Параметр"),
+            param_index: 0,
+        };
+        let local =
+            Definition::Local { method_id: method.id(), var_name: Name::new("Локальная") };
+
+        assert_eq!(parameter.reference_scope(&db), ReferenceScope::FileLocal);
+        assert_eq!(local.reference_scope(&db), ReferenceScope::FileLocal);
+    }
+
+    #[test]
+    fn reference_scope_returns_unknown_for_non_source_definitions() {
+        let (db, _file_id) = create_db_with_file("");
+
+        let builtin = Definition::BuiltinFunction(Name::new("Сообщить"));
+        let mdo = Definition::MdoCollectionType(bsl_metadata::MdoType::Catalog);
+        let virt = Definition::VirtualTableField {
+            table_name: Name::new("Документ"),
+            field_name: Name::new("Поле"),
+        };
+
+        assert_eq!(builtin.reference_scope(&db), ReferenceScope::Unknown);
+        assert_eq!(mdo.reference_scope(&db), ReferenceScope::Unknown);
+        assert_eq!(virt.reference_scope(&db), ReferenceScope::Unknown);
+        assert_eq!(Definition::Unresolved.reference_scope(&db), ReferenceScope::Unknown);
     }
 }

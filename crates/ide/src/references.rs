@@ -1,23 +1,23 @@
 //! Find References implementation.
 //!
-//! This module implements "Find References" functionality through Definition API,
-//! finding all usages of a symbol.
+//! ## Strategy
 //!
-//! ## Architecture (Phase 3.3)
+//! `find_references` resolves the symbol under the cursor and asks
+//! [`SemanticSymbol::reference_scope`] where to search:
 //!
-//! Uses WorkspaceIndex for O(C×M) instead of naive O(N×M):
-//! - resolve_name_to_definition() → Definition
-//! - workspace_index.candidate_files() → get relevant files (~10-100)
-//! - find_definition_references() → walks AST for each candidate
-//! - Validates matches by re-resolving each candidate token
+//! - [`ReferenceScope::FileLocal`] → only the current file.
+//! - [`ReferenceScope::ModuleSymbolWorkspace`] → every BSL file in the source root.
+//!   A name-usage index (planned, see `name_usage_index`) will narrow this to a
+//!   handful of files in a follow-up; the current implementation iterates the
+//!   source root directly.
+//! - [`ReferenceScope::Unknown`] → empty result (builtins / MDO / virtual SDBL fields /
+//!   modules / unresolved). These either have no source ranges or live in
+//!   metadata, not in BSL text.
 //!
-//! ## Performance
-//!
-//! - **Without WorkspaceIndex**: O(N×M) where N=6,540 files → ~30 seconds
-//! - **With WorkspaceIndex**: O(C×M) where C=10-100 files → ~3 seconds
-//! - **Speedup**: ~10-30x for large projects
+//! Per-file traversal is delegated to [`find_references_in_file`], which is also
+//! reused by `document_highlight`.
 
-use hir::{Name, SemanticSymbol, SemanticSymbolKey, Semantics};
+use hir::{is_bsl_source, Name, ReferenceScope, SemanticSymbol, Semantics};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -28,18 +28,6 @@ use crate::Location;
 ///
 /// Returns a vector of locations pointing to all references of the symbol,
 /// or an empty vector if no symbol is found at the position.
-///
-/// ## Phase 3.3 Changes
-///
-/// - Uses WorkspaceIndex for O(C×M) performance (C=candidate files, M=tokens/file)
-/// - Cross-file search for module-level symbols (Method, Variable)
-/// - Single-file search for local symbols (Parameter, Local)
-/// - Validates matches by re-resolving each candidate token
-///
-/// ## Performance
-///
-/// - Local symbols (Parameter, Local): < 50ms (single file)
-/// - Module symbols (Method, Variable): ~3 seconds for 6,540 files (10-30x speedup)
 pub fn find_references<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -60,20 +48,27 @@ pub fn find_references<DB: RootDatabase>(
         Some(symbol) => symbol,
         None => return Vec::new(),
     };
-    let target_name = symbol.name.clone();
 
-    // Determine search scope based on Definition type
-    let files_to_search = get_search_scope(db, file_id, &symbol, &target_name);
-
+    let scope = symbol.reference_scope(db);
     tracing::debug!(
-        file_count = files_to_search.len(),
-        target_name = %target_name.as_str(),
-        "Search scope determined"
+        ?scope,
+        target_name = %symbol.name.as_str(),
+        "Reference scope determined"
     );
 
-    // Find references across all candidate files
+    let files_to_search: Vec<FileId> = match scope {
+        ReferenceScope::FileLocal => vec![file_id],
+        ReferenceScope::Unknown => return Vec::new(),
+        ReferenceScope::ModuleSymbolWorkspace => collect_workspace_bsl_files(db, file_id),
+    };
+
+    // Find references across all candidate files. The Salsa cancellation
+    // check inside the loop lets a freshly-arrived edit (or a superseding
+    // request, once the coalescer lands) abort the scan instead of holding
+    // a snapshot until completion.
     let mut all_references = Vec::new();
     for &search_file_id in &files_to_search {
+        db.unwind_if_revision_cancelled();
         let references = find_references_in_file(db, search_file_id, &symbol);
         all_references.extend(references);
     }
@@ -87,87 +82,19 @@ pub fn find_references<DB: RootDatabase>(
     all_references
 }
 
-/// Determine which files to search based on Definition type.
+/// Collect every BSL file in the source root containing `current_file`.
 ///
-/// ## Strategy
-///
-/// - **Local symbols** (Parameter, Local): Search only current file
-/// - **Module symbols** (Method, Variable): Search all files in SourceRoot
-///   (WorkspaceIndex optimization will be added in future when we have usage tracking)
-/// - **Builtin/MDO**: No search (no references)
-///
-/// ## Note on WorkspaceIndex
-///
-/// WorkspaceIndex currently indexes only DEFINITIONS (where symbols are declared).
-/// To optimize find_references, we need to index USAGES (where symbols are referenced).
-/// For now, we search all files in the source root to find all usages.
-///
-/// Future optimization: Build a UsageIndex that maps symbol names → files that use them.
-fn get_search_scope<DB: RootDatabase>(
-    db: &DB,
-    current_file: FileId,
-    symbol: &SemanticSymbol,
-    _target_name: &Name,
-) -> Vec<FileId> {
-    use hir::Definition;
-
-    match &symbol.key {
-        SemanticSymbolKey::BodyLocal { .. } | SemanticSymbolKey::ImplicitLocal { .. } => {
-            return vec![current_file];
-        }
-        SemanticSymbolKey::TypedMember { .. } => return vec![],
-        SemanticSymbolKey::Definition(_) => {}
-    }
-
-    let Some(definition) = symbol.definition.as_ref() else {
-        return vec![];
-    };
-
-    match definition {
-        // Local symbols - only in current file
-        Definition::Parameter { .. } | Definition::Local { .. } => {
-            vec![current_file]
-        }
-
-        // Module-level symbols - search all files in SourceRoot
-        // TODO: Use WorkspaceIndex with usage tracking for O(C×M) optimization
-        Definition::Method(_) | Definition::Variable(_) => {
-            // Get SourceRoot for current file
-            let source_root_input = db.file_source_root_input(current_file);
-            let source_root_id = source_root_input.source_root_id(db);
-            let source_root_input = db.source_root_input(source_root_id);
-            let source_root = source_root_input.root(db);
-
-            // Collect BSL files in source root. Non-BSL entries (XML metadata,
-            // manifests) have no Salsa file_text after `process_changes` skips
-            // them, so feeding them to `db.parse` below would panic in
-            // `Files::file_text`.
-            let file_set = source_root.file_set();
-            let all_files: Vec<FileId> = source_root
-                .iter()
-                .filter(|&file_id| hir::is_bsl_source(file_set, file_id))
-                .collect();
-
-            tracing::debug!(
-                file_count = all_files.len(),
-                "Searching BSL files in source root (WorkspaceIndex usage tracking not yet implemented)"
-            );
-
-            all_files
-        }
-
-        // Builtin/MDO/Module - no file-based references
-        Definition::BuiltinFunction(_)
-        | Definition::BuiltinMethodHandle { .. }
-        | Definition::MdoCollectionType(_)
-        | Definition::MdoObject { .. }
-        | Definition::MdoManagerModule { .. }
-        | Definition::Module(_)
-        | Definition::VirtualTableField { .. }
-        | Definition::Unresolved => {
-            vec![]
-        }
-    }
+/// Non-BSL entries (XML metadata, manifests) have no Salsa `file_text` after
+/// `process_changes` skips them, so handing them to `db.parse` would panic
+/// in `Files::file_text`. The filter mirrors what the rest of the crate uses
+/// when walking source roots.
+fn collect_workspace_bsl_files<DB: RootDatabase>(db: &DB, current_file: FileId) -> Vec<FileId> {
+    let source_root_input = db.file_source_root_input(current_file);
+    let source_root_id = source_root_input.source_root_id(db);
+    let source_root_input = db.source_root_input(source_root_id);
+    let source_root = source_root_input.root(db);
+    let file_set = source_root.file_set();
+    source_root.iter().filter(|&file_id| is_bsl_source(file_set, file_id)).collect()
 }
 
 /// Find all references to a given symbol within a single file.
@@ -769,6 +696,54 @@ mod tests {
             assert_eq!(
                 loc.file_id, file1_id,
                 "Local variable references should not cross file boundaries"
+            );
+        }
+    }
+
+    #[test]
+    fn non_export_method_stays_file_local() {
+        // Non-export procedure is invisible to other modules. Find References
+        // must reflect that: never reach into file 2 even though it declares a
+        // same-named procedure.
+        let mut db = RootDatabaseImpl::default();
+
+        let file1_id = FileId(0);
+        let file1_source = r#"
+Процедура Помощник()
+КонецПроцедуры
+
+Процедура Тест1()
+    Помощник();
+КонецПроцедуры
+"#;
+        let file2_id = FileId(1);
+        let file2_source = r#"
+Процедура Помощник()
+КонецПроцедуры
+
+Процедура Тест2()
+    Помощник();
+КонецПроцедуры
+"#;
+
+        let mut file_set = FileSet::new();
+        file_set.insert(file1_id, VfsPath::new("/a.bsl"));
+        file_set.insert(file2_id, VfsPath::new("/b.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file1_id, SourceRootId(0));
+        db.set_file_source_root(file2_id, SourceRootId(0));
+        db.set_file_text(file1_id, file1_source);
+        db.set_file_text(file2_id, file2_source);
+
+        let def_offset = file1_source.find("Помощник").unwrap();
+        let references = find_references(&db, file1_id, TextSize::from(def_offset as u32));
+
+        assert_eq!(references.len(), 2, "definition + 1 call in file 1");
+        for loc in &references {
+            assert_eq!(
+                loc.file_id, file1_id,
+                "non-export procedure references must not cross file boundaries"
             );
         }
     }
