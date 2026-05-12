@@ -927,6 +927,115 @@ impl PreExpr {
     }
 }
 
+/// Preprocessor conditional directive (#Если/#If).
+#[derive(Debug, Clone)]
+pub struct PreIfDir(SyntaxNode);
+
+impl AstNode for PreIfDir {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::PRE_IF_DIR
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl PreIfDir {
+    /// Get the condition expression.
+    pub fn condition(&self) -> Option<PreExpr> {
+        self.0.children().find_map(PreExpr::cast)
+    }
+
+    /// Iterate over direct then-branch body nodes.
+    pub fn then_body_nodes(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
+        self.0.children().filter(|node| node.kind() != SyntaxKind::PRE_EXPR).take_while(|node| {
+            !matches!(node.kind(), SyntaxKind::PRE_ELSIF_CLAUSE | SyntaxKind::PRE_ELSE_CLAUSE)
+        })
+    }
+
+    /// Iterate over #ИначеЕсли/#ElsIf clauses in source order.
+    pub fn elsif_clauses(&self) -> impl Iterator<Item = PreElsIfClause> + '_ {
+        self.0.children().filter_map(PreElsIfClause::cast)
+    }
+
+    /// Get the #Иначе/#Else clause.
+    pub fn else_clause(&self) -> Option<PreElseClause> {
+        self.0.children().find_map(PreElseClause::cast)
+    }
+}
+
+/// Preprocessor conditional #ИначеЕсли/#ElsIf clause.
+#[derive(Debug, Clone)]
+pub struct PreElsIfClause(SyntaxNode);
+
+impl AstNode for PreElsIfClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::PRE_ELSIF_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl PreElsIfClause {
+    /// Get the condition expression.
+    pub fn condition(&self) -> Option<PreExpr> {
+        self.0.children().find_map(PreExpr::cast)
+    }
+
+    /// Iterate over direct clause body nodes.
+    pub fn body_nodes(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
+        self.0.children().filter(|node| node.kind() != SyntaxKind::PRE_EXPR)
+    }
+}
+
+/// Preprocessor conditional #Иначе/#Else clause.
+#[derive(Debug, Clone)]
+pub struct PreElseClause(SyntaxNode);
+
+impl AstNode for PreElseClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::PRE_ELSE_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl PreElseClause {
+    /// Iterate over direct else-clause body nodes.
+    pub fn body_nodes(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
+        self.0.children()
+    }
+}
+
 /// Statement list (body of a procedure/function or block).
 #[derive(Debug, Clone)]
 pub struct StmtList(SyntaxNode);
@@ -1583,6 +1692,27 @@ mod preproc_wrappers_tests {
     use super::*;
     use crate::SyntaxTreeBuilder;
 
+    fn add_pre_expr(builder: &mut SyntaxTreeBuilder<'_>, symbol: &str) {
+        builder.start_node(SyntaxKind::PRE_EXPR);
+        builder.start_node(SyntaxKind::PRE_LOGICAL_EXPR);
+        builder.start_node(SyntaxKind::PRE_LOGICAL_OPERAND);
+        builder.start_node(SyntaxKind::PRE_SYMBOL);
+        builder.token(SyntaxKind::IDENT, symbol);
+        builder.finish_node();
+        builder.finish_node();
+        builder.finish_node();
+        builder.finish_node();
+    }
+
+    fn add_body_node(builder: &mut SyntaxTreeBuilder<'_>, name: &str) {
+        builder.start_node(SyntaxKind::CALL_STMT);
+        builder.token(SyntaxKind::IDENT, name);
+        builder.token(SyntaxKind::L_PAREN, "(");
+        builder.token(SyntaxKind::R_PAREN, ")");
+        builder.token(SyntaxKind::SEMICOLON, ";");
+        builder.finish_node();
+    }
+
     fn parse(input: &str) -> SyntaxNode {
         let condition =
             input.strip_prefix("#Если ").and_then(|rest| rest.split_once(" Тогда")).unwrap().0;
@@ -1663,5 +1793,112 @@ mod preproc_wrappers_tests {
             root.descendants().find(|node| node.kind() != SyntaxKind::PRE_SYMBOL).expect("node");
 
         assert!(PreSymbol::cast(other_node).is_none());
+    }
+
+    #[test]
+    fn pre_if_dir_extracts_condition_and_then_body() {
+        let mut builder = SyntaxTreeBuilder::new();
+        builder.start_node(SyntaxKind::SOURCE_FILE);
+        builder.start_node(SyntaxKind::PRE_IF_DIR);
+        add_pre_expr(&mut builder, "A");
+        add_body_node(&mut builder, "X");
+        add_body_node(&mut builder, "Y");
+        builder.finish_node();
+        builder.finish_node();
+        let root = builder.finish().syntax_node();
+
+        let pre_if = root.descendants().find_map(PreIfDir::cast).expect("pre if");
+        let condition = pre_if.condition().expect("condition");
+
+        assert_eq!(condition.symbols().count(), 1);
+        assert_eq!(pre_if.then_body_nodes().count(), 2);
+    }
+
+    #[test]
+    fn pre_if_dir_collects_elsif_clauses_in_order() {
+        let mut builder = SyntaxTreeBuilder::new();
+        builder.start_node(SyntaxKind::SOURCE_FILE);
+        builder.start_node(SyntaxKind::PRE_IF_DIR);
+        add_pre_expr(&mut builder, "A");
+        add_body_node(&mut builder, "X");
+        builder.start_node(SyntaxKind::PRE_ELSIF_CLAUSE);
+        add_pre_expr(&mut builder, "B");
+        add_body_node(&mut builder, "Y");
+        builder.finish_node();
+        builder.start_node(SyntaxKind::PRE_ELSIF_CLAUSE);
+        add_pre_expr(&mut builder, "C");
+        add_body_node(&mut builder, "Z");
+        builder.finish_node();
+        builder.start_node(SyntaxKind::PRE_ELSE_CLAUSE);
+        add_body_node(&mut builder, "W");
+        builder.finish_node();
+        builder.finish_node();
+        builder.finish_node();
+        let root = builder.finish().syntax_node();
+
+        let pre_if = root.descendants().find_map(PreIfDir::cast).expect("pre if");
+        let clauses = pre_if.elsif_clauses().collect::<Vec<_>>();
+
+        assert_eq!(clauses.len(), 2);
+        assert!(pre_if.else_clause().is_some());
+        assert_eq!(
+            clauses[0]
+                .condition()
+                .and_then(|expr| expr.symbols().next())
+                .and_then(|symbol| symbol.name_token())
+                .map(|token| token.text().to_string()),
+            Some("B".into())
+        );
+        assert_eq!(
+            clauses[1]
+                .condition()
+                .and_then(|expr| expr.symbols().next())
+                .and_then(|symbol| symbol.name_token())
+                .map(|token| token.text().to_string()),
+            Some("C".into())
+        );
+    }
+
+    #[test]
+    fn pre_if_dir_without_else() {
+        let mut builder = SyntaxTreeBuilder::new();
+        builder.start_node(SyntaxKind::SOURCE_FILE);
+        builder.start_node(SyntaxKind::PRE_IF_DIR);
+        add_pre_expr(&mut builder, "A");
+        add_body_node(&mut builder, "X");
+        builder.finish_node();
+        builder.finish_node();
+        let root = builder.finish().syntax_node();
+
+        let pre_if = root.descendants().find_map(PreIfDir::cast).expect("pre if");
+
+        assert!(pre_if.else_clause().is_none());
+        assert_eq!(pre_if.elsif_clauses().count(), 0);
+    }
+
+    #[test]
+    fn pre_if_dir_then_body_stops_at_elsif() {
+        let mut builder = SyntaxTreeBuilder::new();
+        builder.start_node(SyntaxKind::SOURCE_FILE);
+        builder.start_node(SyntaxKind::PRE_IF_DIR);
+        add_pre_expr(&mut builder, "A");
+        add_body_node(&mut builder, "X");
+        builder.start_node(SyntaxKind::PRE_ELSIF_CLAUSE);
+        add_pre_expr(&mut builder, "B");
+        add_body_node(&mut builder, "Y");
+        builder.finish_node();
+        builder.finish_node();
+        builder.finish_node();
+        let root = builder.finish().syntax_node();
+
+        let pre_if = root.descendants().find_map(PreIfDir::cast).expect("pre if");
+        let then_body = pre_if.then_body_nodes().collect::<Vec<_>>();
+        let elsif = pre_if.elsif_clauses().next().expect("elsif");
+        let elsif_body = elsif.body_nodes().collect::<Vec<_>>();
+
+        assert_eq!(then_body.len(), 1);
+        assert_eq!(then_body[0].kind(), SyntaxKind::CALL_STMT);
+        assert_eq!(elsif_body.len(), 1);
+        assert_eq!(elsif_body[0].kind(), SyntaxKind::CALL_STMT);
     }
 }
