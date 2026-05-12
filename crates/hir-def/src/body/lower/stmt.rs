@@ -336,16 +336,6 @@ pub(super) fn lower_stmt_list_with_unreachable(
             continue;
         }
 
-        if emit_diagnostics {
-            if child.kind() == SyntaxKind::BREAK_STMT && !ctx.in_loop() {
-                let range = extend_range_with_semicolon(&child, child.text_range());
-                ctx.emit(BodyDiagnostic::MisplacedLoopControl { range, is_continue: false });
-            } else if child.kind() == SyntaxKind::CONTINUE_STMT && !ctx.in_loop() {
-                let range = extend_range_with_semicolon(&child, child.text_range());
-                ctx.emit(BodyDiagnostic::MisplacedLoopControl { range, is_continue: true });
-            }
-        }
-
         // BeginTransactionBeforeTryCatch: Check for Try statement (consumes pending BeginTransaction)
         if emit_diagnostics && child.kind() == SyntaxKind::TRY_STMT {
             pending_begin_transaction = None;
@@ -482,8 +472,26 @@ pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stm
         SyntaxKind::TRY_STMT => lower_try_stmt(ctx, node),
         SyntaxKind::VAR_DEF => lower_var_decl(ctx, node),
         SyntaxKind::RAISE_STMT => lower_raise_stmt(ctx, node),
-        SyntaxKind::BREAK_STMT => Some(Stmt::Break),
-        SyntaxKind::CONTINUE_STMT => Some(Stmt::Continue),
+        SyntaxKind::BREAK_STMT => {
+            if !ctx.in_loop() {
+                let extended = extend_range_with_semicolon(node, range);
+                ctx.emit(BodyDiagnostic::MisplacedLoopControl {
+                    range: extended,
+                    is_continue: false,
+                });
+            }
+            Some(Stmt::Break)
+        }
+        SyntaxKind::CONTINUE_STMT => {
+            if !ctx.in_loop() {
+                let extended = extend_range_with_semicolon(node, range);
+                ctx.emit(BodyDiagnostic::MisplacedLoopControl {
+                    range: extended,
+                    is_continue: true,
+                });
+            }
+            Some(Stmt::Continue)
+        }
         SyntaxKind::GOTO_STMT => lower_goto_stmt(ctx, node),
         SyntaxKind::LABEL_STMT => lower_label_stmt(node),
         SyntaxKind::EXECUTE_STMT => lower_execute_stmt(ctx, node),

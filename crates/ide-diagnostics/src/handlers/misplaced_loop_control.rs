@@ -166,4 +166,74 @@ mod tests {
                   severity: Warning"#]],
         );
     }
+
+    #[test]
+    fn test_break_in_preproc_inside_loop_is_ok() {
+        let code = r#"Процедура Тест(К)
+    Пока К > 0 Цикл
+        #Если Сервер Тогда
+            Прервать;
+        #КонецЕсли
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MisplacedLoopControl,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_break_in_preproc_outside_loop_is_flagged() {
+        let code = r#"Процедура Тест()
+    #Если Сервер Тогда
+        Прервать;
+    #КонецЕсли
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MisplacedLoopControl,
+            expect![[r#"
+                MisplacedLoopControl @ 3:9..3:18
+                  message: Оператор 'Прервать' используется вне цикла
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_continue_in_region_inside_loop_is_ok() {
+        let code = r#"Процедура Тест(К)
+    Для И = 1 По К Цикл
+        #Область ВнутренняяЛогика
+            Продолжить;
+        #КонецОбласти
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MisplacedLoopControl,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_break_in_region_outside_loop_is_flagged() {
+        let code = r#"Процедура Тест()
+    #Область ВнутренняяЛогика
+        Прервать;
+    #КонецОбласти
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MisplacedLoopControl,
+            expect![[r#"
+                MisplacedLoopControl @ 3:9..3:18
+                  message: Оператор 'Прервать' используется вне цикла
+                  severity: Warning"#]],
+        );
+    }
 }
