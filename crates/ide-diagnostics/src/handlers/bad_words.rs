@@ -35,7 +35,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use regex::RegexBuilder;
-use syntax::SyntaxNode;
+use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -72,53 +72,16 @@ impl Config {
 ///
 /// This is called from collect_syntax_single_pass() for each node in single AST pass.
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
-    let code = DiagnosticCode::BadWords;
-    // Check if disabled
-    if ctx.is_disabled_with_metadata(code) {
+    // The single-pass dispatcher invokes this handler on EVERY descendant.
+    // Run the scan exactly once at the file root and delegate to the
+    // line-based `check()`. Scanning per-descendant via `node.text()` would
+    // emit duplicates per ancestor (the Track 6.4b bug). Scanning
+    // per-token would break regex patterns that span tokens (e.g. patterns
+    // matching across whitespace or punctuation).
+    if node.kind() != SyntaxKind::SOURCE_FILE {
         return;
     }
-
-    // Load configuration
-    let config = Config::from_context(ctx);
-
-    // If pattern is empty, diagnostic is disabled
-    if config.bad_words_pattern.is_empty() {
-        return;
-    }
-
-    // Build case-insensitive regex
-    let re = match RegexBuilder::new(&config.bad_words_pattern).case_insensitive(true).build() {
-        Ok(regex) => regex,
-        Err(_) => return, // Invalid pattern, skip
-    };
-
-    // Scan only direct tokens. The single-pass dispatcher calls this handler
-    // for every descendant node, so scanning node.text() would rescan child text
-    // through each ancestor and emit duplicates.
-    for token in node.children_with_tokens().filter_map(|element| element.into_token()) {
-        let text = token.text();
-
-        // Skip comments if findInComments is false
-        if !config.find_in_comments && text.trim_start().starts_with("//") {
-            continue;
-        }
-
-        // Find all matches in the token text
-        for mat in re.find_iter(text) {
-            let start: u32 = token.text_range().start().into();
-            let match_start = start + mat.start() as u32;
-            let match_end = start + mat.end() as u32;
-
-            acc.push(Diagnostic {
-                code: DiagnosticCode::BadWords,
-                message: format!("Использование запрещённого слова '{}'", mat.as_str()),
-                severity: ctx.severity(code),
-                range: TextRange::new(match_start.into(), match_end.into()),
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
-        }
-    }
+    acc.extend(check(ctx));
 }
 
 /// Main entry point for BadWords diagnostic
@@ -210,6 +173,43 @@ fn integration_bad_words_no_duplicates_per_occurrence() {
         diagnostics.len(),
         1,
         "expected one BadWords diagnostic for one TODO occurrence, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_matches_pattern_across_tokens() {
+    // Regex patterns may match across token boundaries (e.g. whitespace,
+    // punctuation). The handler must scan whole-line text — not per-token —
+    // so cross-token patterns keep working.
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    let code = r#"// not recommended pattern
+Процедура Тест()
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": r"not\s+recommended",
+            "findInComments": true
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "cross-token pattern `not\\s+recommended` must match the comment text, got {}:\n{}",
         diagnostics.len(),
         format_diags(code, &diagnostics)
     );
