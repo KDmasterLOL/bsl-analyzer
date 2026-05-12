@@ -90,9 +90,9 @@ breakdown and acceptance gate evidence.
   - per-branch анализ → **`hir-def`** через shared `PreprocIfStmt::branches()` iterator (`crates/hir-def/src/hir.rs`); CFG builder и DuplicatedInsertion handler refactored на этот iterator.
   - 3 priority cards закрыты: `AllFunctionPathMustHaveReturn` (CFG/dataflow validation), `DuplicatedInsertionIntoCollection` (intra-branch fixtures), `BeginTransactionBeforeTryCatch` (preproc-aware Begin/Try pattern + regtest re-enable).
   - **Active-symbol pruning evaluated and rejected**: BSL модули типа multi-context CommonModule компилируются дважды, обе ветки реально исполняются; in-process server invocation (толстый клиент в файловом режиме, мобильное приложение, внешнее соединение) делает active-symbol matrix многомерной. bsl-language-server reference impl за 5+ лет production не реализовал pruning — мы тоже не реализуем. Per-branch analysis discipline — правильная семантика.
-- **6.4 Cascade suppression** (фильтрация чужих диагностик после построения) → **`ide-diagnostics::dispatch`** (фильтрация в `hir-ty/infer` нарушила бы слой):
-  - дедуп `TypeMismatch` ↔ `Unresolved*`
-  - дублирующие эмиссии в `BadWords`
+- **6.4 Cascade suppression — CLOSED 2026-05-13:**
+  - **TypeMismatch ↔ Unresolved* dedup**: уже реализован через gradual-typing gate в `crates/hir-ty/src/subtype.rs::is_assignable` (если **любая** сторона = `Ty::Unknown`, возвращает `true` → silence). Когда имя не резолвится, inference возвращает `Ty::Unknown`, и TypeMismatch автоматически не эмитится. Существующее покрытие в `crates/ide/tests/infer_type_mismatch.rs` уже включает 11+ тестов на cascade prevention, см. комментарии *"Without the Unknown ≤ A gradual rule, a single unresolved call would cascade mismatches through every downstream"*. Никакого нового кода не понадобилось.
+  - **BadWords duplicate emissions**: исправлено коммитом `9ce81a45`. Root cause: `check_node()` сканировал `node.text()` каждого descendant'а через single-pass dispatcher, и текст ребёнка попадал в text родителя — то же слово эмитилось per-ancestor (≥3 дубликата на одно вхождение). Fix: `node.children_with_tokens()` filtered to tokens, каждый token принадлежит одному узлу. Regression test `integration_bad_words_no_duplicates_per_occurrence` ходит через production single-pass path.
 
 ---
 
