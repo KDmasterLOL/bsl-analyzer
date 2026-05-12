@@ -2600,6 +2600,7 @@ dependencies = [
  "lexer",
  "parser-error",
  "rayon",
+ "smallvec",
  "stdx",
  "syntax",
  "tracing",

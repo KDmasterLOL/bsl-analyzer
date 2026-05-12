@@ -1,6 +1,8 @@
 //! The parser state machine.
 
 use lexer::{Token, TokenKind};
+use parser_error::{ParseError, RecoveryKind};
+use smallvec::smallvec;
 
 use crate::event::{Event, NodeKind};
 
@@ -119,11 +121,21 @@ impl<'a> Parser<'a> {
     /// Expects the current token to be of the given kind.
     pub fn expect(&mut self, kind: TokenKind) -> bool {
         if self.eat(kind) {
-            true
-        } else {
-            self.error();
-            false
+            return true;
         }
+
+        let found = self.current();
+        let recovery =
+            if found.is_none() { RecoveryKind::MissingToken } else { RecoveryKind::BumpToken };
+        let err = ParseError::Expected { expected: smallvec![kind], found, recovery };
+
+        if recovery == RecoveryKind::MissingToken {
+            self.emit_missing(err);
+        } else {
+            self.emit_error(err);
+        }
+
+        false
     }
 
     /// Consumes the current token if it matches the keyword text (case-insensitive).
@@ -138,30 +150,57 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Consumes the current token and expects it to match the keyword text.
-    /// Returns true if successful, false if not (and adds an error).
-    pub fn expect_keyword(&mut self, text: &str) -> bool {
-        if self.eat_keyword(text) {
-            true
-        } else {
-            self.error();
-            false
-        }
-    }
-
     /// Starts a new node.
     pub fn start(&mut self) -> Marker {
         let pos = self.events.len();
+        let start_token_pos = self.pos;
         self.events.push(Event::Placeholder);
-        Marker { pos }
+        Marker { pos, start_token_pos }
     }
 
     /// Adds an error node.
     pub fn error(&mut self) {
+        let found = self.current();
+        let recovery =
+            if found.is_none() { RecoveryKind::MissingToken } else { RecoveryKind::BumpToken };
+        let err = ParseError::Unexpected { found, recovery };
+
+        if recovery == RecoveryKind::MissingToken {
+            self.emit_missing(err);
+        } else {
+            self.emit_error(err);
+        }
+    }
+
+    pub fn error_unexpected(&mut self) {
+        self.error();
+    }
+
+    pub fn error_custom(&mut self, msg: &'static str) {
+        self.emit_error(ParseError::Custom { message: msg, recovery: RecoveryKind::Custom });
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
+        debug_assert!(err.recovery() == RecoveryKind::RecoverySpan);
+        self.events.push(Event::ErrorWithSpan { start_token: m.start_token_pos, err });
+        m.complete(self, NodeKind::Error);
+    }
+
+    fn emit_error(&mut self, err: ParseError) {
+        debug_assert!(matches!(err.recovery(), RecoveryKind::BumpToken | RecoveryKind::Custom));
         let m = self.start();
         if !self.at_end() {
             self.bump();
         }
+        self.events.push(Event::Error(err));
+        m.complete(self, NodeKind::Error);
+    }
+
+    fn emit_missing(&mut self, err: ParseError) {
+        debug_assert!(err.recovery() == RecoveryKind::MissingToken);
+        let m = self.start();
+        self.events.push(Event::Error(err));
         m.complete(self, NodeKind::Error);
     }
 
@@ -229,17 +268,22 @@ impl<'a> Parser<'a> {
 }
 
 /// A marker for a started node.
-pub struct Marker {
+pub struct Marker /* RecoverySpan carrier */ {
     pos: usize,
+    start_token_pos: usize,
 }
 
 impl Marker {
+    fn at_event_pos(pos: usize, start_token_pos: usize) -> Self {
+        Self { pos, start_token_pos }
+    }
+
     /// Completes the node with the given kind.
     pub fn complete(self, p: &mut Parser, kind: NodeKind) -> CompletedMarker {
         let event = &mut p.events[self.pos];
         *event = Event::Start { kind, forward_parent: None };
         p.events.push(Event::Finish);
-        CompletedMarker { pos: self.pos }
+        CompletedMarker::at_event_pos(self.pos, self.start_token_pos)
     }
 
     /// Abandons this marker.
@@ -255,9 +299,14 @@ impl Marker {
 /// A completed marker that can be used for precede.
 pub struct CompletedMarker {
     pos: usize,
+    start_token_pos: usize,
 }
 
 impl CompletedMarker {
+    fn at_event_pos(pos: usize, start_token_pos: usize) -> Self {
+        Self { pos, start_token_pos }
+    }
+
     /// Wraps the completed node in a new parent.
     pub fn precede(self, p: &mut Parser) -> Marker {
         let new_pos = p.events.len();
@@ -267,6 +316,6 @@ impl CompletedMarker {
             *forward_parent = Some(new_pos - self.pos);
         }
 
-        Marker { pos: new_pos }
+        Marker::at_event_pos(new_pos, self.start_token_pos)
     }
 }
