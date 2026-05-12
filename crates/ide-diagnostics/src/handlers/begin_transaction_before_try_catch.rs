@@ -215,24 +215,19 @@ EndProcedure"#;
         );
     }
 
-    /// Track 2 Phase D §2.3 mini-fix (deferred): preprocessor-aware
+    /// Track 2 Phase D §2.3 mini-fix: preprocessor-aware
     /// recognition of `НачатьТранзакцию(); #Если ... Попытка ... #Иначе
     /// Попытка ... #КонецЕсли`. The fixture is BSL-safe — every active
     /// preprocessor branch starts with `Попытка` immediately after the
     /// shared outer `НачатьТранзакцию()`, so the runtime semantics are
-    /// always `Begin; Try`. The local pending-statement logic walks the
-    /// outer `STMT_LIST` and finalises pending when it sees the
-    /// `PRE_IF_DIR` (not a `TRY_STMT`), emitting a false positive even
-    /// though every expanded branch is well-formed. Recognising this
-    /// pattern requires per-branch preprocessor source-of-truth — owned
-    /// by Track 6 — so the test is `#[ignore]`'d and documents the gap
-    /// as a known-limitation. The single-branch form (`#Если ... Try
-    /// ... #КонецЕсли` without `#Иначе`) is intentionally NOT used here:
+    /// always `Begin; Try`. The false positive was closed by Track 6.3
+    /// with per-branch preprocessor source-of-truth. The single-branch
+    /// form (`#Если ... Try ... #КонецЕсли` without `#Иначе`) is
+    /// intentionally NOT used here:
     /// on the inactive branch there would be `Begin; КонецПроцедуры`
     /// without a `Try`, which is a genuine violation the diagnostic is
     /// meant to flag.
     #[test]
-    #[ignore = "Track 6 dep: preprocessor-aware Begin/Try matching"]
     fn begin_in_preproc_then_try_outside() {
         let code = r#"Процедура Тест()
     НачатьТранзакцию();
@@ -265,7 +260,54 @@ EndProcedure"#;
             0,
             "BeginTransaction immediately followed by a preprocessor block \
              where every active branch starts with `Попытка` should be valid \
-             once the preproc-aware path lands (Track 6)."
+             after the preproc-aware path lands."
+        );
+    }
+
+    #[test]
+    fn begin_in_preproc_asymmetric_then_try_else_missing() {
+        let code = r#"Процедура Тест()
+    НачатьТранзакцию();
+    #Если Сервер Тогда
+        Попытка
+            ЗаписатьДанные();
+            ЗафиксироватьТранзакцию();
+        Исключение
+            ОтменитьТранзакцию();
+            ВызватьИсключение;
+        КонецПопытки;
+    #Иначе
+        ЗаписатьБезТранзакции();
+    #КонецЕсли
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#"
+                BeginTransactionBeforeTryCatch @ 2:5..2:24
+                  message: Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'
+                  severity: Major"#]],
+        );
+    }
+
+    #[test]
+    fn begin_inside_preproc_unchanged_behavior() {
+        let code = r#"Процедура Тест()
+    #Если Сервер Тогда
+        НачатьТранзакцию();
+        Попытка
+            ЗаписатьДанные();
+        Исключение
+            ОтменитьТранзакцию();
+        КонецПопытки;
+    #КонецЕсли
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#""#]],
         );
     }
 

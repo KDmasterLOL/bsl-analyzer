@@ -2,7 +2,10 @@
 //!
 //! This module handles lowering of BSL statements from AST to HIR.
 
-use syntax::{SyntaxKind, SyntaxNode};
+use syntax::{
+    ast::{AstNode, PreIfDir},
+    SyntaxKind, SyntaxNode,
+};
 use text_size::TextRange;
 
 use crate::body::BodyDiagnostic;
@@ -302,6 +305,18 @@ pub(super) fn lower_stmt_list_with_unreachable(
     for child in stmt_list.children() {
         // Handle preprocessor directives - lower to Stmt::PreprocIf for CFG
         if child.kind() == SyntaxKind::PRE_IF_DIR {
+            if emit_diagnostics && pending_begin_transaction.is_some() {
+                if pre_if_all_branches_open_with_try(&child) {
+                    pending_begin_transaction = None;
+                } else if let Some(pending_node) = pending_begin_transaction.take() {
+                    let extended_range =
+                        extend_range_with_semicolon(&pending_node, pending_node.text_range());
+                    ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch {
+                        range: extended_range,
+                    });
+                }
+            }
+
             // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
             if let Some(stmt) = lower_preproc_if(ctx, &child) {
                 let stmt_id = ctx.alloc_stmt(stmt, child.text_range());
@@ -413,6 +428,32 @@ pub(super) fn lower_stmt_list_with_unreachable(
     }
 
     stmts
+}
+
+pub(crate) fn pre_if_all_branches_open_with_try(node: &SyntaxNode) -> bool {
+    let Some(pre_if) = PreIfDir::cast(node.clone()) else {
+        return false;
+    };
+
+    if !branch_opens_with_try(pre_if.then_body_nodes()) {
+        return false;
+    }
+
+    for elsif in pre_if.elsif_clauses() {
+        if !branch_opens_with_try(elsif.body_nodes()) {
+            return false;
+        }
+    }
+
+    let Some(else_clause) = pre_if.else_clause() else {
+        return false;
+    };
+
+    branch_opens_with_try(else_clause.body_nodes())
+}
+
+fn branch_opens_with_try(mut branch_nodes: impl Iterator<Item = SyntaxNode>) -> bool {
+    branch_nodes.find(is_statement_node).is_some_and(|node| node.kind() == SyntaxKind::TRY_STMT)
 }
 
 /// Lower a single statement.
