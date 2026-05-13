@@ -63,7 +63,7 @@ fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool 
         ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan } => {
             *message == "ожидался алиас источника, встречено ключевое слово"
         }
-        ParseError::Custom { message, recovery: RecoveryKind::Custom } => {
+        ParseError::Custom { message, recovery: RecoveryKind::BumpToken } => {
             *message == "ожидалось 'СОЕДИНЕНИЕ' / 'JOIN'"
         }
         _ => false,

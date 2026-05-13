@@ -1764,10 +1764,13 @@ fn top_clause(p: &mut Parser) {
 /// consumed by `expression(p)` / `predicate_expr` (Slice 10b).
 fn recover_to_delimiter_vt(p: &mut Parser) {
     // Open the Error sub-node *before* any tokens are consumed so the
-    // marker is always present in the tree even when the loop exits
-    // immediately (mini-spec §Preserved behaviour #3 — unconditional
-    // emit).
+    // structural marker boundary matches the recovery start point. If
+    // no tokens are consumed before we hit a stop boundary, the marker
+    // is abandoned — no empty-span Custom diagnostic emitted (mirrors
+    // the `consumed_any` guard in `selected_field_list_recovery` at
+    // `select.rs:154`).
     let recovery = p.start();
+    let mut consumed_any = false;
     let mut paren_depth: u32 = 0;
     // Track active nested subqueries (opening `(` immediately
     // followed by `SELECT`/`ВЫБРАТЬ`). While any marker is active,
@@ -1785,6 +1788,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
+            consumed_any = true;
             // Detect nested-subquery body for the Round-5b fix.
             p.skip_trivia();
             if is_query_starter_or_combiner_keyword(p) {
@@ -1806,6 +1810,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             }
             paren_depth -= 1;
             p.bump();
+            consumed_any = true;
             continue;
         }
 
@@ -1850,15 +1855,20 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
         }
 
         p.bump();
+        consumed_any = true;
     }
 
-    p.emit_error_at_marker(
-        recovery,
-        ParseError::Custom {
-            message: "пропуск некорректного фрагмента",
-            recovery: RecoveryKind::RecoverySpan,
-        },
-    );
+    if consumed_any {
+        p.emit_error_at_marker(
+            recovery,
+            ParseError::Custom {
+                message: "пропуск некорректного фрагмента",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    } else {
+        recovery.abandon(p);
+    }
 }
 
 /// Parse a virtual-table method-call argument list — the trailing

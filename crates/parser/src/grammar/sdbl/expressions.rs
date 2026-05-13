@@ -186,12 +186,17 @@ fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> b
 /// recover_to_delimiter(p);  // Consumes: КАК СТРОКА(200)
 /// // Current position: ) (outer rparen)
 /// ```
+/// Skip the offending tokens up to the next list delimiter or recovery
+/// boundary. Emits a single `Custom { RecoverySpan }` error covering the
+/// consumed tokens; if no tokens were consumed (recovery boundary already at
+/// current position), abandons the marker — no empty-span diagnostic.
 fn recover_to_delimiter(p: &mut Parser) {
     // local: paren-depth tracking recovery; mini-spec §Recovery —
     // nested-paren recovery preserves the inner `(...)` depth so that
     // `ВЫРАЗИТЬ(поле КАК СТРОКА(200))` recovery walks to the outer `)`,
     // not the inner one. Wraps the consumed run in one Error marker.
     let err = p.start();
+    let mut consumed_any = false;
     let mut paren_depth = 0i32; // Track nested parentheses
                                 // For each currently-active nested subquery (an open `(`
                                 // immediately followed by `SELECT`/`ВЫБРАТЬ`), the paren_depth at
@@ -209,6 +214,7 @@ fn recover_to_delimiter(p: &mut Parser) {
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
+            consumed_any = true;
             // Detect nested-subquery body: `( SELECT ...`. The
             // skip_trivia is safe — recovery is already a malformed
             // path, and skipping trivia mirrors the clean
@@ -231,6 +237,7 @@ fn recover_to_delimiter(p: &mut Parser) {
                 }
                 paren_depth -= 1;
                 p.bump();
+                consumed_any = true;
                 continue;
             } else {
                 // This is the closing paren for our function - stop here
@@ -290,15 +297,20 @@ fn recover_to_delimiter(p: &mut Parser) {
 
         // Consume one token
         p.bump();
+        consumed_any = true;
     }
 
-    p.emit_error_at_marker(
-        err,
-        ParseError::Custom {
-            message: "пропуск некорректного фрагмента",
-            recovery: RecoveryKind::RecoverySpan,
-        },
-    );
+    if consumed_any {
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "пропуск некорректного фрагмента",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    } else {
+        err.abandon(p);
+    }
 }
 
 /// Parse a delimited list of elements with error recovery.

@@ -177,7 +177,17 @@ impl<'a> Parser<'a> {
     }
 
     pub fn error_custom(&mut self, msg: &'static str) {
-        self.emit_error(ParseError::Custom { message: msg, recovery: RecoveryKind::Custom });
+        let recovery = if self.current().is_none() {
+            RecoveryKind::MissingToken
+        } else {
+            RecoveryKind::BumpToken
+        };
+        let err = ParseError::Custom { message: msg, recovery };
+        if recovery == RecoveryKind::MissingToken {
+            self.emit_missing(err);
+        } else {
+            self.emit_error(err);
+        }
     }
 
     pub(crate) fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
