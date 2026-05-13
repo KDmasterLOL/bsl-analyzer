@@ -83,7 +83,7 @@ breakdown and acceptance gate evidence.
 
 ## Track 6 — Парсер, препроцессор, cascade suppression
 
-- **6.1 Parser UX:** structured expected-token errors, ranges → **`parser`** + **`syntax`** — `ParseError`, `QueryParseError`
+- **6.1 Parser UX — CLOSED 2026-05-13, см. [TRACK_6_1_CLOSURE.md](TRACK_6_1_CLOSURE.md):** structured expected-token errors, ranges → **`parser`** + **`syntax`** — `ParseError`, `QueryParseError`
 - **6.2 Misplaced loop control — CLOSED 2026-05-13, commit `a3513071`:** `Прервать` / `Продолжить` вне цикла. Реализовано на `hir-def` слое через существующий `loop_depth` tracker в `LoweringCtx` (`crates/hir-def/src/body/lower/mod.rs:84-313`). `enter_loop` / `exit_loop` вызываются только While/For/ForEach lowerers — Try / Если внутри цикла корректно наследуют loop context. Новый `DiagnosticCode::MisplacedLoopControl` (CodeSmell/Major), `BodyDiagnostic::MisplacedLoopControl { range, is_continue }` для рендера правильного ключевого слова в сообщении. 7 тестов покрывают матрицу: break/continue вне цикла (flagged), внутри While/For/ForEach (clean), внутри nested `Если` (clean), внутри Try на top-level (flagged — Try не цикл). Audit card: `docs/diagnostics-audit/MisplacedLoopControl.md`.
 - **6.3 Preprocessor source-of-truth — CLOSED 2026-05-12, см. [TRACK_6_3_CLOSURE.md](TRACK_6_3_CLOSURE.md):**
   - surface (символы и ветки) → **`parser`** / **`syntax`** — typed AST wrappers (`PreSymbol`, `PreExpr`, `PreIfDir`, `PreElsIfClause`, `PreElseClause`) на месте.
