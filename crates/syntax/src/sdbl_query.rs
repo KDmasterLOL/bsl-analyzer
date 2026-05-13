@@ -222,6 +222,13 @@ pub fn extract_sdbl_with_corrections(node: &SyntaxNode) -> Option<(String, Vec<(
 /// prefixes, escaped double-quotes). query_range is a TextRange within the extracted SDBL query
 /// text (the string extract_query_text returns). Returns the corresponding TextRange relative to
 /// literal_text start. Caller adds bsl_literal_range.start() to lift into file coordinates.
+///
+/// Invariant: this byte-walker must mirror [`extract_sdbl_with_corrections`] for any input the
+/// lexer would accept as STRING / STRING_START / STRING_PART / STRING_TAIL. The two
+/// implementations operate on different inputs (this one on raw text, the canonical on
+/// SyntaxNode tokens) but must agree on the (bsl_byte ↔ sdbl_byte) correspondence. Integration
+/// parity coverage lives in `parser` / `ide-db` tests where SyntaxNode is available — `syntax`
+/// cannot dev-dep `parser` without a cycle.
 pub fn map_range_query_to_literal(literal_text: &str, query_range: TextRange) -> TextRange {
     let query_start: u32 = query_range.start().into();
     let query_end: u32 = query_range.end().into();
@@ -242,7 +249,9 @@ pub fn map_range_query_to_literal(literal_text: &str, query_range: TextRange) ->
     };
 
     let mut content_start = skip_leading_whitespace(literal_text, first_line.start, first_line.end);
-    while content_start < first_line.end && bytes[content_start] == b'"' {
+    // Skip exactly one opening quote — additional `"` bytes belong to an escape sequence
+    // (`""` → `"`) and must be processed by `process_content` to emit the literal `"` into SDBL.
+    if content_start < first_line.end && bytes[content_start] == b'"' {
         content_start += 1;
     }
     projection.record_boundary(0, content_start as u32, content_start as u32);
@@ -381,6 +390,8 @@ fn line_content_end(bytes: &[u8], line: LiteralLine) -> usize {
 }
 
 fn skip_leading_whitespace(text: &str, start: usize, end: usize) -> usize {
+    debug_assert!(text.is_char_boundary(start), "start must be on a UTF-8 char boundary");
+    debug_assert!(text.is_char_boundary(end), "end must be on a UTF-8 char boundary");
     let mut pos = start;
     while pos < end {
         let ch = text[pos..end].chars().next().expect("valid UTF-8 string slice");
@@ -399,6 +410,14 @@ fn process_content(
     sdbl_byte: &mut u32,
     projection: &mut RangeProjectionState,
 ) {
+    debug_assert!(
+        literal_text.is_char_boundary(start),
+        "process_content start must be on a UTF-8 char boundary"
+    );
+    debug_assert!(
+        literal_text.is_char_boundary(end),
+        "process_content end must be on a UTF-8 char boundary"
+    );
     let bytes = literal_text.as_bytes();
     let mut pos = start;
 
