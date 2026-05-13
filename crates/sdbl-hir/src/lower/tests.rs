@@ -2899,3 +2899,45 @@ fn defined_type_inside_composite_resolves_through_metadata() {
         defined_arm.expect("DefinedType('X') underlying must resolve through metadata");
     assert_eq!(*underlying, SdblType::Boolean);
 }
+
+// ============================================================================
+// PARSER-BUG-002b lowering follow-up — soft-keyword table-name parts.
+//
+// Parser-side `at_property_name` accepts SDBL retained-keyword tokens
+// (`KW_IN`/`KW_AND`/`KW_OR`/`KW_NOT`/`KW_TRUE`/`KW_FALSE`/`KW_UNDEFINED`)
+// as property-name slots after a `.`. Lowering's `parse_table_name`
+// must mirror that — otherwise a 2-part path like `Справочник.В`
+// collapses to `["Справочник"]` and silently fails metadata
+// resolution. Regression for the IDENT-only filter at the time of
+// Track 6.1 follow-up PARSER-BUG-002b.
+// ============================================================================
+
+#[test]
+fn test_parse_table_name_keeps_soft_keyword_part_kw_in() {
+    let hir = lower_query("ВЫБРАТЬ * ИЗ Справочник.В");
+    assert_eq!(hir.from.len(), 1, "Single FROM source");
+    let table = &hir.from[0];
+    assert_eq!(
+        table.parts.len(),
+        2,
+        "`Справочник.В` must lower as a 2-part path, not collapse the `В` (KW_IN) part. Got parts: {:?}",
+        table.parts
+    );
+    assert_eq!(table.parts[0].as_str(), "Справочник");
+    assert_eq!(table.parts[1].as_str(), "В");
+}
+
+#[test]
+fn test_parse_table_name_keeps_soft_keyword_part_literal_kw() {
+    // `Истина` is a `KW_TRUE` token; verify the literal-keyword arm of
+    // the retained set survives lowering too.
+    let hir = lower_query("ВЫБРАТЬ * ИЗ Справочник.Истина");
+    let table = &hir.from[0];
+    assert_eq!(
+        table.parts.len(),
+        2,
+        "`Справочник.Истина` must lower as a 2-part path. Got parts: {:?}",
+        table.parts
+    );
+    assert_eq!(table.parts[1].as_str(), "Истина");
+}

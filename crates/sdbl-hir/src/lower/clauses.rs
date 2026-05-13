@@ -348,8 +348,13 @@ fn simple_selected_output_ref(
         return None;
     }
 
+    // Direct property-name tokens of the column-ref (bare-column case).
+    // Uses `is_name_token` so single-letter soft-keyword names like `В`
+    // (KW_IN) parse as a bare column reference that can match a selected
+    // output alias. Multi-part refs (`Т.В`) bail through the
+    // `idents.next().is_some()` check below.
     let mut idents = column_ref.children_with_tokens().filter_map(|it| match it {
-        syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+        syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
             Some(token.text().to_string())
         }
         _ => None,

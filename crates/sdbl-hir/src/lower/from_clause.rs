@@ -54,9 +54,7 @@ impl LoweringContext {
                     .syntax()
                     .children_with_tokens()
                     .filter_map(|child| match child {
-                        syntax::NodeOrToken::Token(token)
-                            if token.kind() == syntax::SyntaxKind::IDENT =>
-                        {
+                        syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
                             Some(token.text().to_string())
                         }
                         _ => None,
@@ -183,12 +181,16 @@ impl LoweringContext {
             }
         }
 
-        // NEW: Extract IDENT token ranges for semantic highlighting
+        // NEW: Extract name-token ranges for semantic highlighting. Uses
+        // the same `is_name_token` filter as `parse_table_name` above so
+        // the ranges line up 1:1 with `parts` — without this, a soft-
+        // keyword MDO part (e.g. `Справочник.В`) would be present in
+        // `parts` but missing from `ident_ranges`, breaking the zip below.
         let ident_ranges: Vec<TextRange> = table_ref
             .syntax()
             .children_with_tokens()
             .filter_map(|child| match child {
-                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
                     Some(token.text_range())
                 }
                 _ => None,
@@ -379,16 +381,25 @@ impl LoweringContext {
 
     /// Parse table name into parts.
     ///
-    /// Uses IDENT tokens instead of text split to correctly handle virtual tables
-    /// with parameters like `Регистр.Расчеты.Обороты(&Начало, ..., (A.B) В ...)`.
+    /// Walks the direct token children and collects name-token text. Virtual
+    /// tables put their parameters in child *nodes* (not direct tokens), so
+    /// the token filter naturally skips them — `Регистр.Расчеты.Обороты(...)`
+    /// yields `["Регистр", "Расчеты", "Обороты"]`.
+    ///
+    /// Uses `SyntaxKind::is_name_token` so that SDBL soft keywords retained
+    /// by `sdbl_token_converter::convert_sdbl_token_kind` (e.g. `KW_IN` for
+    /// `В`, `KW_AND` for `И`, `KW_TRUE` for `Истина`, …) are accepted as
+    /// part names. Post-Dot the parser now treats them as property-name
+    /// slots (PARSER-BUG-002b in `docs/diagnostics-audit/PARSER_FOLLOWUPS.md`);
+    /// the lowering filter must match or 2-part inputs like
+    /// `Справочник.В` would collapse to `["Справочник"]` and silently fail
+    /// metadata resolution.
     fn parse_table_name(&self, table_ref: &syntax::ast::SdblTableRef) -> Vec<String> {
-        // Extract only IDENT tokens as table name parts
-        // This correctly handles virtual tables - parameters are child nodes, not IDENT tokens
         table_ref
             .syntax()
             .children_with_tokens()
             .filter_map(|child| match child {
-                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
                     Some(token.text().to_string())
                 }
                 _ => None,

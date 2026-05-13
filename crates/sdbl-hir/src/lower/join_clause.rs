@@ -239,11 +239,16 @@ impl LoweringContext {
         while i < tokens.len() {
             let token = &tokens[i];
 
-            if token.kind() == SyntaxKind::IDENT {
-                // Check for qualified name (Table.Field)
+            if token.kind().is_name_token() {
+                // Check for qualified name (Table.Field). Uses
+                // `is_name_token` so that soft-keyword tokens retained by
+                // `sdbl_token_converter` (e.g. `В` as KW_IN) survive as
+                // property-name slots; the text-level `is_sql_keyword`
+                // filter below still rejects words like `И`/`ИЛИ`/`НЕ`
+                // that would confuse join-condition parsing.
                 if i + 2 < tokens.len()
                     && tokens[i + 1].kind() == SyntaxKind::DOT
-                    && tokens[i + 2].kind() == SyntaxKind::IDENT
+                    && tokens[i + 2].kind().is_name_token()
                 {
                     let table = token.text();
                     let field = tokens[i + 2].text();
