@@ -129,9 +129,12 @@ pub enum Ty {
     /// scoped to MDO kinds that have an `*Object` companion
     /// ([`MetadataKind::CatalogObject`], [`MetadataKind::DocumentObject`],
     /// [`MetadataKind::ExchangePlanObject`],
-    /// [`MetadataKind::ChartOfAccountsObject`]); other module kinds (form
-    /// modules, record-set modules, common modules) fall through to
-    /// `Ty::Unknown` until follow-up PRs cover their receiver surfaces.
+    /// [`MetadataKind::ChartOfAccountsObject`]); manager modules surface
+    /// `ЭтотОбъект` through [`Self::ThisManager`], record-set modules
+    /// through [`Self::MetadataRef`] with the matching `*RecordSet` kind
+    /// (see [`MetadataKind::record_set_kind_for`]), and managed forms
+    /// through `Ty::PlatformObject(ФормаКлиентскогоПриложения)`. Common
+    /// / command modules remain `Ty::Unknown`.
     ThisObject {
         /// `(kind, name)` of the MDO that owns the module in which
         /// `ЭтотОбъект` appears.
@@ -732,6 +735,23 @@ impl MetadataKind {
             MdoType::BusinessProcess => Some(MetadataKind::BusinessProcessObject),
             MdoType::DataProcessor => Some(MetadataKind::DataProcessorObject),
             MdoType::Report => Some(MetadataKind::ReportObject),
+            _ => None,
+        }
+    }
+
+    /// Sibling of `object_kind_for` for register record-set modules.
+    ///
+    /// Returns the `*RecordSet` companion kind for the four register
+    /// `MdoType` flavours. `Resolver::resolve_this_record_set` gates on
+    /// `Some(...)` from here, so a new register flavour grows
+    /// `ЭтотОбъект` support automatically once it lands a `*RecordSet`
+    /// variant. Non-register flavours return `None`.
+    pub fn record_set_kind_for(mdo_type: MdoType) -> Option<Self> {
+        match mdo_type {
+            MdoType::InformationRegister => Some(MetadataKind::InformationRegisterRecordSet),
+            MdoType::AccumulationRegister => Some(MetadataKind::AccumulationRegisterRecordSet),
+            MdoType::AccountingRegister => Some(MetadataKind::AccountingRegisterRecordSet),
+            MdoType::CalculationRegister => Some(MetadataKind::CalculationRegisterRecordSet),
             _ => None,
         }
     }
@@ -1769,6 +1789,52 @@ mod tests {
         assert!(MetadataKind::object_kind_for(MdoType::CalculationRegister).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::Enum).is_none());
         assert!(MetadataKind::object_kind_for(MdoType::CommonModule).is_none());
+    }
+
+    #[test]
+    fn metadata_kind_record_set_kind_for_covers_register_flavours() {
+        use MdoType::*;
+        for (mdo, expected) in [
+            (InformationRegister, MetadataKind::InformationRegisterRecordSet),
+            (AccumulationRegister, MetadataKind::AccumulationRegisterRecordSet),
+            (AccountingRegister, MetadataKind::AccountingRegisterRecordSet),
+            (CalculationRegister, MetadataKind::CalculationRegisterRecordSet),
+        ] {
+            assert_eq!(
+                MetadataKind::record_set_kind_for(mdo),
+                Some(expected),
+                "record_set_kind_for({mdo:?}) must yield {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_kind_record_set_kind_for_rejects_non_register_mdo_kinds() {
+        use MdoType::*;
+        assert!(MetadataKind::record_set_kind_for(Catalog).is_none());
+        assert!(MetadataKind::record_set_kind_for(Document).is_none());
+        assert!(MetadataKind::record_set_kind_for(Enum).is_none());
+        assert!(MetadataKind::record_set_kind_for(CommonModule).is_none());
+    }
+
+    #[test]
+    fn platform_prefix_for_record_kinds_matches_hbk_composite_keys() {
+        assert_eq!(
+            MetadataKind::InformationRegisterRecord.platform_prefix(),
+            Some("InformationRegisterRecord")
+        );
+        assert_eq!(
+            MetadataKind::AccumulationRegisterRecord.platform_prefix(),
+            Some("AccumulationRegisterRecord")
+        );
+        assert_eq!(
+            MetadataKind::AccountingRegisterRecord.platform_prefix(),
+            Some("AccountingRegisterRecord")
+        );
+        assert_eq!(
+            MetadataKind::CalculationRegisterRecord.platform_prefix(),
+            Some("CalculationRegisterRecord")
+        );
     }
 
     // ---- Phase 3: Ty::FormControl ----
