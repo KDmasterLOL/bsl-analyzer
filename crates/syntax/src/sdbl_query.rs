@@ -48,6 +48,11 @@ pub struct SdblQueryInfo {
     /// Parsed SDBL AST (None if parse failed)
     pub query_ast: Option<Parse<SyntaxNode>>,
 
+    /// SDBL parse errors projected into BSL-literal-relative coordinates.
+    ///
+    /// Callers add `bsl_literal_range.start()` to lift these ranges into file coordinates.
+    pub error_ranges_in_bsl: Vec<(TextRange, String)>,
+
     /// Quote escape corrections: (sdbl_byte_offset, chars_added_in_bsl)
     /// Tracks ""→" replacements for accurate position mapping.
     /// When mapping SDBL position X to BSL column: bsl_col = sdbl_col + sum(chars for positions < X)
@@ -70,7 +75,13 @@ impl SdblQueryInfo {
         query_ast: Option<Parse<SyntaxNode>>,
         quote_corrections: Vec<(usize, usize)>,
     ) -> Self {
-        Self { bsl_literal_range, query_text, query_ast, quote_corrections }
+        Self {
+            bsl_literal_range,
+            query_text,
+            query_ast,
+            error_ranges_in_bsl: Vec::new(),
+            quote_corrections,
+        }
     }
 
     /// Check if SDBL parse was successful and has no errors.
@@ -417,6 +428,7 @@ mod tests {
 
         assert_eq!(info.bsl_literal_range, range);
         assert_eq!(info.query_text, query_text);
+        assert!(info.error_ranges_in_bsl.is_empty());
         assert!(!info.is_valid()); // No AST
         assert!(info.syntax_node().is_none()); // No AST
     }

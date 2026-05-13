@@ -177,12 +177,28 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 // - Valid queries: query_ast = Some(ast) with no errors
                 // - Invalid queries: query_ast = Some(ast) with errors
                 // QueryParseError diagnostic uses is_valid() to detect parse errors
-                let query_info = syntax::SdblQueryInfo::new(
+                let mut query_info = syntax::SdblQueryInfo::new(
                     node.text_range(),
                     sdbl_text,
                     Some(sdbl_ast),
                     quote_corrections,
                 );
+                if let Some(query_ast) = query_info.query_ast.as_ref() {
+                    let literal_text = node.text().to_string();
+                    query_info.error_ranges_in_bsl = query_ast
+                        .errors()
+                        .iter()
+                        .map(|error| {
+                            (
+                                syntax::sdbl_query::map_range_query_to_literal(
+                                    &literal_text,
+                                    error.range(),
+                                ),
+                                error.message().to_string(),
+                            )
+                        })
+                        .collect();
+                }
 
                 ctx.pending_sdbl.push((node.text_range(), query_info));
             }
