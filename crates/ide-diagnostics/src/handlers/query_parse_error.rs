@@ -3,7 +3,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -23,9 +22,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 /// Runs the QueryParseError diagnostic.
 ///
 /// Checks SDBL queries for parse errors using `all_sdbl_in_file()`.
-/// Detects errors by:
-/// 1. Looking for ERROR nodes in the SDBL AST (parser is error-tolerant)
-/// 2. Checking for trailing dots in REFS expressions (e.g., `ССЫЛКА Документ.`)
+/// Reports structured parse errors projected into BSL source coordinates.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::QueryParseError;
 
@@ -37,35 +34,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     for (_query_expr_id, query_info) in sdbl_queries.iter() {
-        let has_parse_error = query_info
-            .query_ast
-            .as_ref()
-            .map(|ast| {
-                let root = ast.syntax_node();
-
-                // Check 1: ERROR nodes in AST
-                let has_error_nodes = root.descendants().any(|n| n.kind() == SyntaxKind::ERROR);
-
-                // Check 2: Trailing dot in REFS expression (e.g., ССЫЛКА Документ.)
-                // This is a common error when dynamically constructing queries
-                let has_trailing_dot = root.descendants().any(|n| {
-                    if n.kind() == SyntaxKind::SDBL_REFS_EXPR {
-                        has_trailing_dot_in_refs(&n)
-                    } else {
-                        false
-                    }
-                });
-
-                has_error_nodes || has_trailing_dot
-            })
-            .unwrap_or(true); // No AST means parse failed completely
-
-        if has_parse_error {
+        let literal_start = query_info.bsl_literal_range.start();
+        for (range_in_literal, err) in &query_info.error_ranges_in_bsl {
             diagnostics.push(Diagnostic {
                 code,
-                message: "Текст запроса содержит ошибки".to_string(),
+                message: err.format_ru(),
                 severity: ctx.severity(code),
-                range: query_info.bsl_literal_range,
+                range: *range_in_literal + literal_start,
                 tags: ctx.tags(code),
                 fixes: vec![],
             });
@@ -73,30 +48,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     diagnostics
-}
-
-/// Check if SDBL_REFS_EXPR has a trailing dot without type name.
-///
-/// Valid: `ССЫЛКА Документ.ПриходныйОрдер` - has IDENT after DOT
-/// Invalid: `ССЫЛКА Документ.` - DOT is last significant child
-fn has_trailing_dot_in_refs(node: &syntax::SyntaxNode) -> bool {
-    let children: Vec<_> = node.children_with_tokens().collect();
-
-    // Find last DOT position
-    let last_dot_pos = children
-        .iter()
-        .rposition(|child| child.as_token().map(|t| t.kind() == SyntaxKind::DOT).unwrap_or(false));
-
-    let Some(dot_pos) = last_dot_pos else {
-        return false;
-    };
-
-    // Check if there's an IDENT after the DOT (ignoring whitespace)
-    let has_ident_after_dot = children[dot_pos + 1..]
-        .iter()
-        .any(|child| child.as_token().map(|t| t.kind() == SyntaxKind::IDENT).unwrap_or(false));
-
-    !has_ident_after_dot
 }
 
 #[cfg(test)]
@@ -152,14 +103,20 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 10:1..11:62
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 11:61..11:61
+                  message: Неожиданный конец файла
                   severity: Warning
-                QueryParseError @ 15:1..20:13
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 11:61..11:61
+                  message: Ожидалось 'ПО' / 'ON' в соединении
                   severity: Warning
-                QueryParseError @ 23:1..30:3
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 11:61..11:61
+                  message: Ожидалось 'идентификатор', встречено конец файла
+                  severity: Warning
+                QueryParseError @ 20:12..20:12
+                  message: Неожиданный конец файла
+                  severity: Warning
+                QueryParseError @ 29:4..29:4
+                  message: Ожидалось 'идентификатор', встречено конец файла
                   severity: Warning"#]],
         );
     }
@@ -185,8 +142,8 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 3:14..3:53
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 3:52..3:52
+                  message: Неожиданный конец файла
                   severity: Warning"#]],
         );
     }
@@ -202,8 +159,8 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 3:14..3:33
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 3:32..3:32
+                  message: Ожидалось 'идентификатор', встречено конец файла
                   severity: Warning"#]],
         );
     }
@@ -220,8 +177,8 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 3:14..3:34
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 3:33..3:33
+                  message: Ожидалось 'идентификатор', встречено конец файла
                   severity: Warning"#]],
         );
     }
@@ -239,8 +196,8 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 3:14..5:29
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 5:28..5:28
+                  message: Неожиданный конец файла
                   severity: Warning"#]],
         );
     }
@@ -257,8 +214,8 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 3:14..4:32
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 4:31..4:31
+                  message: Ожидалось 'идентификатор', встречено конец файла
                   severity: Warning"#]],
         );
     }
@@ -332,8 +289,8 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 3:20..3:65
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 3:63..3:64
+                  message: Незавершённый путь в ссылке
                   severity: Warning"#]],
         );
     }
@@ -366,8 +323,8 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 3:20..8:59
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 8:57..8:58
+                  message: Незавершённый путь в ссылке
                   severity: Warning"#]],
         );
     }
@@ -395,8 +352,8 @@ mod tests {
             code,
             DiagnosticCode::QueryParseError,
             expect![[r#"
-                QueryParseError @ 3:20..14:97
-                  message: Текст запроса содержит ошибки
+                QueryParseError @ 14:95..14:96
+                  message: Незавершённый путь в ссылке
                   severity: Warning"#]],
         );
     }

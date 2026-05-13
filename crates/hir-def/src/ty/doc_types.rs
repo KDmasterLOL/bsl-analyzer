@@ -312,6 +312,12 @@ fn parse_type_name(name: &str) -> TypeRef {
     // `Ty::PlatformObject("Структура:")`, fabricating a `TypeMismatch` against
     // any real `Ty::Structure` argument.
     let trimmed = name.trim().trim_end_matches(':').trim_end();
+    // BSP convention writes the first arm of a multi-line union as
+    // `Type -` — the trailing separator marks "empty description, more arms
+    // below". A bare BSL type never carries a trailing `-`, so stripping
+    // it lets the bare-name table classify `Массив -` as `TypeRef::Array`
+    // instead of degenerating into `TypeRef::Name([Массив -])`.
+    let trimmed = trimmed.strip_suffix('-').unwrap_or(trimmed).trim_end();
     if trimmed.is_empty() {
         return TypeRef::Unknown;
     }
@@ -845,6 +851,35 @@ mod tests {
         // lower to `Ty::PlatformObject("Структура:")` and fabricate a
         // `TypeMismatch` against any real `Ty::Structure` argument).
         assert_eq!(nested.unwrap().1, builtin(BuiltinTypeRef::Structure));
+    }
+
+    #[test]
+    fn bsp_trailing_dash_keeps_first_union_arm_as_array() {
+        // BSP convention: first-line union arm written as `Type -` with an
+        // empty description after the trailing separator. The continuation
+        // lines below carry the rest of the arms.
+        let doc = r#"
+// Параметры:
+//  КлючевыеРеквизитыТЧ - Массив -
+//                      - Строка - имена реквизитов
+//                      - Структура - Ключ это наименование
+"#;
+        let hints = parse_method_doc_types(doc).unwrap();
+        let (_, ty) = &hints.params[0];
+        match ty {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 3, "got {:#?}", parts);
+                assert_eq!(
+                    parts[0],
+                    TypeRef::Array(None),
+                    "first arm must be Array, got {:?}",
+                    parts[0]
+                );
+                assert_eq!(parts[1], TypeRef::Builtin(BuiltinTypeRef::String));
+                assert_eq!(parts[2], TypeRef::Builtin(BuiltinTypeRef::Structure));
+            }
+            other => panic!("expected Union, got {:?}", other),
+        }
     }
 
     #[test]

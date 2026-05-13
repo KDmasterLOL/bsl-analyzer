@@ -230,8 +230,8 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                     lhs = m.complete(p, NodeKind::FieldExpr);
                     is_valid_statement = false;
                 } else {
-                    p.error(); // Expected property name after dot
-                               // ERROR RECOVERY: Complete as FieldExpr anyway, exit loop
+                    p.error_custom("ожидалось имя свойства после '.'");
+                    // ERROR RECOVERY: Complete as FieldExpr anyway, exit loop
                     m.complete(p, NodeKind::FieldExpr);
                     break;
                 }
@@ -272,7 +272,7 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         Some(TokenKind::String) | Some(TokenKind::StringStart) => Some(string_literal(p)),
         Some(TokenKind::StringPart) | Some(TokenKind::StringTail) => {
             // These should only appear after StringStart
-            p.error(); // Unexpected string fragment
+            p.error_custom("неожиданный фрагмент строки");
             None
         }
         Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => {
@@ -304,7 +304,7 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         Some(TokenKind::Question) => Some(ternary_expr(p)),
         _ => {
             // Error recovery: consume unexpected token and create error node
-            p.error();
+            p.error_unexpected();
             None
         }
     }
@@ -360,11 +360,11 @@ fn string_continuation_tail(p: &mut Parser) {
                 p.bump();
             }
             None => {
-                p.error(); // Unclosed string (EOF)
+                p.error_custom("незакрытая многострочная строка");
                 break;
             }
             _ => {
-                p.error(); // Unexpected token in multiline string
+                p.error_custom("неожиданный токен в многострочной строке");
                 break;
             }
         }

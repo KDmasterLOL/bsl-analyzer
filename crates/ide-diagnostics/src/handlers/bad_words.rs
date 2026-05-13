@@ -35,7 +35,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use regex::RegexBuilder;
-use syntax::SyntaxNode;
+use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -72,45 +72,67 @@ impl Config {
 ///
 /// This is called from collect_syntax_single_pass() for each node in single AST pass.
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    // Run exactly once per file. Three correctness properties:
+    //   1. Single pass → no duplicate emissions across ancestor nodes.
+    //   2. Whole-file regex scan → cross-token patterns keep working
+    //      (e.g. `not\s+recommended`, `client[_\s]*facing`).
+    //   3. Comment ranges collected from the syntax tree → inline `// ...`
+    //      tails are skipped when findInComments=false, not just full
+    //      comment lines.
+    if node.kind() != SyntaxKind::SOURCE_FILE {
+        return;
+    }
+
     let code = DiagnosticCode::BadWords;
-    // Check if disabled
     if ctx.is_disabled_with_metadata(code) {
         return;
     }
 
-    // Load configuration
     let config = Config::from_context(ctx);
-
-    // If pattern is empty, diagnostic is disabled
     if config.bad_words_pattern.is_empty() {
         return;
     }
 
-    // Build case-insensitive regex
     let re = match RegexBuilder::new(&config.bad_words_pattern).case_insensitive(true).build() {
         Ok(regex) => regex,
-        Err(_) => return, // Invalid pattern, skip
+        Err(_) => return,
     };
 
-    // Get node text
-    let text = node.text().to_string();
+    let comment_ranges: Vec<TextRange> = if config.find_in_comments {
+        Vec::new()
+    } else {
+        node.descendants_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::COMMENT)
+            .map(|tok| tok.text_range())
+            .collect()
+    };
 
-    // Skip comments if findInComments is false
-    if !config.find_in_comments && text.trim_start().starts_with("//") {
-        return;
-    }
+    let file_text = node.text().to_string();
+    let root_start: u32 = node.text_range().start().into();
 
-    // Find all matches in the node text
-    for mat in re.find_iter(&text) {
-        let start: u32 = node.text_range().start().into();
-        let match_start = start + mat.start() as u32;
-        let match_end = start + mat.end() as u32;
+    for mat in re.find_iter(&file_text) {
+        let match_start = root_start + mat.start() as u32;
+        let match_end = root_start + mat.end() as u32;
+        let match_range = TextRange::new(match_start.into(), match_end.into());
+
+        // Strict overlap: drop the match only when its range and the comment
+        // range share at least one byte. Pure boundary contact (e.g. `code//cmt`
+        // where the match ends exactly where the comment starts) leaves the
+        // code-side match emitted, which `intersect` alone would suppress
+        // because it returns Some(empty) on touching ranges.
+        if comment_ranges
+            .iter()
+            .any(|c| c.start() < match_range.end() && match_range.start() < c.end())
+        {
+            continue;
+        }
 
         acc.push(Diagnostic {
-            code: DiagnosticCode::BadWords,
+            code,
             message: format!("Использование запрещённого слова '{}'", mat.as_str()),
             severity: ctx.severity(code),
-            range: TextRange::new(match_start.into(), match_end.into()),
+            range: match_range,
             tags: ctx.tags(code),
             fixes: vec![],
         });
@@ -173,6 +195,194 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     diagnostics
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_no_duplicates_per_occurrence() {
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    let code = r#"Процедура Тест()
+    Значение = 1;
+    // TODO comment
+    Значение = Значение + 1;
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": "TODO",
+            "findInComments": true
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected one BadWords diagnostic for one TODO occurrence, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_keeps_match_touching_comment_at_boundary() {
+    // A match whose end touches the start of an inline comment (zero bytes
+    // overlap) is pure code and must STAY flagged. `TextRange::intersect`
+    // returns Some(empty) for touching ranges, so the predicate needs to
+    // require strict overlap rather than relying on `intersect(..).is_some()`.
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    // No space between identifier and `//`: the comment token starts exactly
+    // where the identifier ends.
+    let code = r#"Процедура Тест()
+    forbiddenIdent//tail
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": "forbiddenIdent",
+            "findInComments": false
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "pure code match that ends at the comment boundary must remain emitted, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_skips_match_straddling_comment_boundary() {
+    // A regex match can begin in code and extend INTO an inline `// ...`
+    // comment (or vice versa). `contains_range`-style filtering would
+    // miss this because the match is not fully inside the comment.
+    // `intersect`-based exclusion drops any match that overlaps a comment
+    // range at all when findInComments=false.
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    let code = r#"Процедура Тест()
+    valueA // commentB
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": r"value.*comment",
+            "findInComments": false
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert!(
+        diagnostics.is_empty(),
+        "regex match that straddles the // boundary must be skipped with findInComments=false, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_skips_inline_comment_tail() {
+    // findInComments=false must skip BOTH comment-only lines AND inline
+    // `// ...` tails. Line-based comment detection (the previous
+    // delegate path) caught only the former; this regression test pins
+    // the syntax-tree-aware comment range exclusion.
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    let code = r#"Процедура Тест()
+    Значение = 1; // TODO inline
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": "TODO",
+            "findInComments": false
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert!(
+        diagnostics.is_empty(),
+        "inline `// TODO inline` must be skipped with findInComments=false, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn integration_bad_words_matches_pattern_across_tokens() {
+    // Regex patterns may match across token boundaries (e.g. whitespace,
+    // punctuation). The handler must scan whole-line text — not per-token —
+    // so cross-token patterns keep working.
+    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::DiagnosticsConfig;
+
+    let code = r#"// not recommended pattern
+Процедура Тест()
+КонецПроцедуры"#;
+
+    let mut config = DiagnosticsConfig::all_enabled();
+    config.only_enabled = Some(vec![DiagnosticCode::BadWords]);
+    config.parameters.insert(
+        DiagnosticCode::BadWords,
+        serde_json::json!({
+            "badWords": r"not\s+recommended",
+            "findInComments": true
+        }),
+    );
+
+    let diagnostics = check_ast_diagnostic_with_config(code, config, crate::diagnostics)
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::BadWords)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "cross-token pattern `not\\s+recommended` must match the comment text, got {}:\n{}",
+        diagnostics.len(),
+        format_diags(code, &diagnostics)
+    );
 }
 
 #[cfg(test)]

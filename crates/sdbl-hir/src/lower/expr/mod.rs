@@ -72,11 +72,16 @@ impl LoweringContext {
             "lower_column_ref called"
         );
 
-        // Extract IDENT ranges from AST for semantic highlighting
+        // Extract property-name token ranges from AST for semantic
+        // highlighting. Accepts IDENT plus the SDBL retained-keyword set
+        // (KW_IN / KW_AND / … per `at_property_name` in
+        // `crates/parser/src/grammar/sdbl/expressions.rs`) so that column
+        // names like `Т.В` get the "В" part highlighted as a field,
+        // matching the parser-side property-name rule.
         let ident_ranges: Vec<TextRange> = node
             .children_with_tokens()
             .filter_map(|child| match child {
-                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
                     Some(token.text_range())
                 }
                 _ => None,
@@ -374,10 +379,12 @@ impl LoweringContext {
             let rparen_pos = tokens.iter().position(|t| t.kind() == syntax::SyntaxKind::R_PAREN);
 
             if let Some(pos) = rparen_pos {
-                // Collect IDENT tokens after RPAREN (these are member access fields)
+                // Collect name-tokens after RPAREN (these are member access
+                // fields). Uses `is_name_token` so soft-keyword field names
+                // like `ВЫРАЗИТЬ(...).В` survive lowering.
                 tokens[pos + 1..]
                     .iter()
-                    .filter(|t| t.kind() == syntax::SyntaxKind::IDENT)
+                    .filter(|t| t.kind().is_name_token())
                     .map(|t| Name::from(t.text()))
                     .collect()
             } else {
@@ -505,11 +512,13 @@ impl LoweringContext {
         let str_parts: Vec<&str> = text.split('.').collect();
         let parts: Vec<Name> = str_parts.iter().map(|s| Name::from(s.trim())).collect();
 
-        // Extract IDENT ranges for semantic highlighting
+        // Extract name-token ranges for semantic highlighting. Same
+        // widening as the column-ref highlighter above so soft-keyword
+        // MDO/path parts (e.g. `Справочник.В`) are recorded.
         let ident_ranges: Vec<(TextRange, String)> = col_ref
             .children_with_tokens()
             .filter_map(|child| match child {
-                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
                     Some((token.text_range(), token.text().to_string()))
                 }
                 _ => None,

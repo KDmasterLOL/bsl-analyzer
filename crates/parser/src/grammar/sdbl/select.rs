@@ -10,6 +10,8 @@
 use crate::event::NodeKind;
 use crate::parser::Parser;
 use lexer::TokenKind;
+use parser_error::{ParseError, RecoveryKind};
+use smallvec::smallvec;
 
 use super::expressions;
 
@@ -151,7 +153,13 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
 
     // Only create ERROR node if we actually consumed tokens
     if consumed_any {
-        err.complete(p, NodeKind::Error);
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "пропуск некорректного фрагмента",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
     } else {
         err.abandon(p);
     }
@@ -259,7 +267,7 @@ fn query(p: &mut Parser) {
     let m = p.start();
 
     if !eat_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") {
-        p.error();
+        p.error_custom("ожидалось 'ВЫБРАТЬ' / 'SELECT'");
         m.complete(p, NodeKind::SdblQuery);
         return;
     }
@@ -447,7 +455,13 @@ fn selected_field_alias(p: &mut Parser) {
 
     if is_clause_keyword(p) {
         let err = p.start();
-        err.complete(p, NodeKind::Error);
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "ожидался алиас, встречено ключевое слово",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
         m.complete(p, NodeKind::SdblAlias);
         return;
     }
@@ -479,7 +493,7 @@ fn into_clause(p: &mut Parser) {
         p.bump();
         table_m.complete(p, NodeKind::SdblTempTableName);
     } else {
-        p.error();
+        p.error_custom("ожидалось имя временной таблицы после 'ПОМЕСТИТЬ' / 'INTO'");
     }
 
     m.complete(p, NodeKind::SdblIntoClause);
@@ -631,15 +645,29 @@ fn table_ref(p: &mut Parser) {
         p.check_iteration_limit();
         p.skip_trivia();
 
-        if !p.at(TokenKind::Ident) {
+        if !super::expressions::at_property_name(p) {
             let err = p.start();
-            err.complete(p, NodeKind::Error);
+            let found = p.current();
+            p.emit_error_at_marker(
+                err,
+                ParseError::Expected {
+                    expected: smallvec![TokenKind::Ident],
+                    found,
+                    recovery: RecoveryKind::RecoverySpan,
+                },
+            );
             break;
         }
 
         if is_clause_keyword(p) || p.at_keyword("AS") || p.at_keyword("КАК") {
             let err = p.start();
-            err.complete(p, NodeKind::Error);
+            p.emit_error_at_marker(
+                err,
+                ParseError::Custom {
+                    message: "ожидалось имя объекта, встречено ключевое слово",
+                    recovery: RecoveryKind::RecoverySpan,
+                },
+            );
             break;
         }
 
@@ -677,7 +705,13 @@ fn source_alias(p: &mut Parser) {
 
     if is_clause_keyword(p) {
         let err = p.start();
-        err.complete(p, NodeKind::Error);
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "ожидался алиас источника, встречено ключевое слово",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
         m.complete(p, NodeKind::SdblAlias);
         return;
     }
@@ -832,11 +866,12 @@ fn join_clause(p: &mut Parser) {
     // Mandatory JOIN/СОЕДИНЕНИЕ keyword. Tier A1 anchors all
     // join forms on this keyword; chapter 44 standalone
     // `СОЕДИНЕНИЕ` is the bare-JOIN implicit-INNER form. On
-    // miss: Tier D allowance — `p.error()` bumps the offending
-    // token into an ERROR child and the marker still completes
-    // (audit-gate `test_slice9_missing_join_keyword_current_behavior`).
+    // miss: Tier D allowance — `p.error_custom` bumps the
+    // offending token into an ERROR child and the marker still
+    // completes (audit-gate
+    // `test_slice9_missing_join_keyword_current_behavior`).
     if !p.at_keyword("JOIN") && !p.at_keyword("СОЕДИНЕНИЕ") {
-        p.error();
+        p.error_custom("ожидалось 'СОЕДИНЕНИЕ' / 'JOIN'");
         m.complete(p, NodeKind::SdblJoinClause);
         return;
     }
@@ -850,14 +885,14 @@ fn join_clause(p: &mut Parser) {
 
     // Mandatory ON/ПО keyword. Tier A1 chapters 44–47 + 48 all
     // gate the join condition on this keyword. On miss: Tier D
-    // allowance — `p.error()` bumps the offending token into an
-    // ERROR child of SdblJoinClause and parsing falls through
-    // to the logical-expression body so the user's typed
-    // condition still lands inside the JOIN node (audit-gate
-    // `test_slice9_missing_on_current_behavior`; mini-spec
-    // §Recovery requirement #6).
+    // allowance — `p.error_custom` bumps the offending token
+    // into an ERROR child of SdblJoinClause and parsing falls
+    // through to the logical-expression body so the user's
+    // typed condition still lands inside the JOIN node
+    // (audit-gate `test_slice9_missing_on_current_behavior`;
+    // mini-spec §Recovery requirement #6).
     if !eat_sdbl_keyword(p, "ON", "ПО") {
-        p.error();
+        p.error_custom("ожидалось 'ПО' / 'ON' в соединении");
     }
     p.skip_trivia();
 
@@ -1324,7 +1359,7 @@ fn for_update_clause(p: &mut Parser) {
         while p.at(TokenKind::Dot) {
             p.check_iteration_limit();
             p.bump();
-            if p.at(TokenKind::Ident) {
+            if super::expressions::at_property_name(p) {
                 p.bump();
             } else {
                 break;
@@ -1729,10 +1764,13 @@ fn top_clause(p: &mut Parser) {
 /// consumed by `expression(p)` / `predicate_expr` (Slice 10b).
 fn recover_to_delimiter_vt(p: &mut Parser) {
     // Open the Error sub-node *before* any tokens are consumed so the
-    // marker is always present in the tree even when the loop exits
-    // immediately (mini-spec §Preserved behaviour #3 — unconditional
-    // emit).
+    // structural marker boundary matches the recovery start point. If
+    // no tokens are consumed before we hit a stop boundary, the marker
+    // is abandoned — no empty-span Custom diagnostic emitted (mirrors
+    // the `consumed_any` guard in `selected_field_list_recovery` at
+    // `select.rs:154`).
     let recovery = p.start();
+    let mut consumed_any = false;
     let mut paren_depth: u32 = 0;
     // Track active nested subqueries (opening `(` immediately
     // followed by `SELECT`/`ВЫБРАТЬ`). While any marker is active,
@@ -1750,6 +1788,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
+            consumed_any = true;
             // Detect nested-subquery body for the Round-5b fix.
             p.skip_trivia();
             if is_query_starter_or_combiner_keyword(p) {
@@ -1771,6 +1810,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             }
             paren_depth -= 1;
             p.bump();
+            consumed_any = true;
             continue;
         }
 
@@ -1815,9 +1855,20 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
         }
 
         p.bump();
+        consumed_any = true;
     }
 
-    recovery.complete(p, NodeKind::Error);
+    if consumed_any {
+        p.emit_error_at_marker(
+            recovery,
+            ParseError::Custom {
+                message: "пропуск некорректного фрагмента",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    } else {
+        recovery.abandon(p);
+    }
 }
 
 /// Parse a virtual-table method-call argument list — the trailing
@@ -1936,7 +1987,15 @@ fn virtual_table_args(p: &mut Parser) {
         // clause keyword" recovery. Slice 8-addendum §Behaviour
         // change.
         let err = p.start();
-        err.complete(p, NodeKind::Error);
+        let found = p.current();
+        p.emit_error_at_marker(
+            err,
+            ParseError::Expected {
+                expected: smallvec![TokenKind::RParen],
+                found,
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
     } else {
         p.expect(TokenKind::RParen);
     }

@@ -130,12 +130,15 @@ fn test_slice10a_precedence_not_binds_tighter_than_and() {
 }
 
 // ITS pubqlang/22: «затем операции И, в последнюю очередь – операции
-// ИЛИ». AND binds tighter than OR. `А ИЛИ Б И В` parses as
-// `А ИЛИ (Б И В)` — SdblLogicalOrExpr contains an SdblLogicalAndExpr
+// ИЛИ». AND binds tighter than OR. `А ИЛИ Б И Г` parses as
+// `А ИЛИ (Б И Г)` — SdblLogicalOrExpr contains an SdblLogicalAndExpr
 // at the right operand position.
+//
+// Operand letters intentionally avoid `В` because the SDBL lexer
+// tokenises a single `В` as the `KwIn` (IN-operator) keyword.
 #[test]
 fn test_slice10a_precedence_and_binds_tighter_than_or() {
-    let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ А ИЛИ Б И В");
+    let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ А ИЛИ Б И Г");
     let or_with_kw = first_with_token(&root, SyntaxKind::SDBL_LOGICAL_OR_EXPR, SyntaxKind::KW_OR);
     let and_under_or =
         or_with_kw.children().find(|n| n.kind() == SyntaxKind::SDBL_LOGICAL_AND_EXPR);
@@ -147,11 +150,11 @@ fn test_slice10a_precedence_and_binds_tighter_than_or() {
 
 // ITS pubqlang/40 §Арифметические операции — multiplicative tighter
 // than additive (standard SQL convention adopted by mini-spec).
-// `А + Б * В` parses as `А + (Б * В)` — SdblAdditiveExpr contains an
+// `А + Б * Г` parses as `А + (Б * Г)` — SdblAdditiveExpr contains an
 // SdblMultiplicativeExpr at the right operand position.
 #[test]
 fn test_slice10a_precedence_mul_binds_tighter_than_add() {
-    let root = parse_no_errors("ВЫБРАТЬ А + Б * В ИЗ Т");
+    let root = parse_no_errors("ВЫБРАТЬ А + Б * Г ИЗ Т");
     let add_with_plus = first_with_token(&root, SyntaxKind::SDBL_ADDITIVE_EXPR, SyntaxKind::PLUS);
     let mul_under_add =
         add_with_plus.children().find(|n| n.kind() == SyntaxKind::SDBL_MULTIPLICATIVE_EXPR);
@@ -204,13 +207,13 @@ fn test_slice10a_multi_unary_right_recursive() {
 // 3. FLAT operator wrapper invariant (mini-spec §AST-shape #1)
 // ============================================================================
 
-// `А + Б + В` produces a SINGLE SdblAdditiveExpr with 3 expression
+// `А + Б + Г` produces a SINGLE SdblAdditiveExpr with 3 expression
 // children + 2 PLUS direct token children — FLAT, not nested.
 // Consumer at sdbl-hir/src/lower/expr/ops.rs:42 collects all direct
 // children into a Vec.
 #[test]
 fn test_slice10a_flat_additive_three_operands() {
-    let root = parse_no_errors("ВЫБРАТЬ А + Б + В ИЗ Т");
+    let root = parse_no_errors("ВЫБРАТЬ А + Б + Г ИЗ Т");
     let additives: Vec<_> =
         root.descendants().filter(|n| n.kind() == SyntaxKind::SDBL_ADDITIVE_EXPR).collect();
     assert_eq!(additives.len(), 1, "Exactly one SdblAdditiveExpr — wrapper is FLAT not nested");
@@ -221,15 +224,15 @@ fn test_slice10a_flat_additive_three_operands() {
         .count();
     assert_eq!(
         plus_count, 2,
-        "FLAT SdblAdditiveExpr for `А + Б + В` must have exactly 2 PLUS direct token children",
+        "FLAT SdblAdditiveExpr for `А + Б + Г` must have exactly 2 PLUS direct token children",
     );
 }
 
-// `А ИЛИ Б ИЛИ В` produces a SINGLE SdblLogicalOrExpr with 3 expression
+// `А ИЛИ Б ИЛИ Г` produces a SINGLE SdblLogicalOrExpr with 3 expression
 // children + 2 KW_OR tokens — FLAT.
 #[test]
 fn test_slice10a_flat_logical_or_three_operands() {
-    let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ А ИЛИ Б ИЛИ В");
+    let root = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ А ИЛИ Б ИЛИ Г");
     // Find the OR wrapper that owns the operator (the one with direct
     // KW_OR tokens — empty single-child wrappers exist throughout the
     // chain).
@@ -241,7 +244,7 @@ fn test_slice10a_flat_logical_or_three_operands() {
         .count();
     assert_eq!(
         or_count, 2,
-        "FLAT SdblLogicalOrExpr for `А ИЛИ Б ИЛИ В` must have exactly 2 KW_OR direct token children",
+        "FLAT SdblLogicalOrExpr for `А ИЛИ Б ИЛИ Г` must have exactly 2 KW_OR direct token children",
     );
 }
 
@@ -479,7 +482,7 @@ fn test_slice10a_paren_parameter_routes_to_expression_branch() {
 #[test]
 fn test_slice10a_bilingual_or_and_not() {
     // English form
-    let root_en = parse_no_errors("SELECT * FROM Т WHERE NOT А AND Б OR В");
+    let root_en = parse_no_errors("SELECT * FROM Т WHERE NOT А AND Б OR Г");
     assert!(
         count_kind(&root_en, SyntaxKind::SDBL_LOGICAL_OR_EXPR) >= 1
             && count_kind(&root_en, SyntaxKind::SDBL_LOGICAL_AND_EXPR) >= 1
@@ -487,7 +490,7 @@ fn test_slice10a_bilingual_or_and_not() {
         "English NOT/AND/OR forms must produce all three operator wrapper kinds",
     );
     // Russian form
-    let root_ru = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ НЕ А И Б ИЛИ В");
+    let root_ru = parse_no_errors("ВЫБРАТЬ * ИЗ Т ГДЕ НЕ А И Б ИЛИ Г");
     assert!(
         count_kind(&root_ru, SyntaxKind::SDBL_LOGICAL_OR_EXPR) >= 1
             && count_kind(&root_ru, SyntaxKind::SDBL_LOGICAL_AND_EXPR) >= 1
@@ -743,4 +746,76 @@ fn test_slice10a_recover_to_delimiter_inner_from_misattribution_gate() {
         "Outer FROM clause must reference T, not the inner Y; got {outer_from_text:?}.\nTree: {:#?}",
         root
     );
+}
+
+// ============================================================================
+// 14. PARSER-BUG-002b regression — post-`Dot` accepts SDBL soft keywords.
+//
+// SDBL retains a small set of operator keywords as BSL keyword tokens
+// (`KwIn` / `KwAnd` / `KwOr` / `KwNot`) per
+// `sdbl_token_converter::convert_sdbl_token_kind`. In a post-`Dot`
+// property-name slot, those tokens must read as column / field names —
+// otherwise valid inputs like `Т.В` (column named "В") fail to parse.
+// ============================================================================
+
+#[test]
+fn test_slice10a_post_dot_accepts_kw_in_as_column_name() {
+    // `В` alone is the SDBL `KwIn` keyword (IN-operator). After a `.`
+    // it must read as a column name — `Т.В` is a valid field
+    // reference, not an unterminated IN predicate.
+    parse_no_errors("ВЫБРАТЬ Т.В ИЗ Т КАК Т");
+}
+
+#[test]
+fn test_slice10a_post_dot_accepts_soft_keywords_as_column_names() {
+    // Qualified arithmetic over single-letter columns named `А` /
+    // `Б` / `В`. Pre-fix the trailing `Т.В` triggered "expected
+    // identifier, got Из" because the lexer emitted KwIn for `В`.
+    parse_no_errors("ВЫБРАТЬ Т.А + Т.Б + Т.В ИЗ Т КАК Т");
+}
+
+#[test]
+fn test_slice10a_post_dot_accepts_kw_and_or_not_as_column_names() {
+    // Round out the soft-keyword set: `И` (AND) / `Или` (OR) / `Не`
+    // (NOT) are operator keyword tokens, but post-Dot they must read
+    // as column names.
+    parse_no_errors("ВЫБРАТЬ Т.И, Т.Или, Т.Не ИЗ Т КАК Т");
+}
+
+#[test]
+fn test_slice10a_post_dot_accepts_literal_keywords_as_column_names() {
+    // `Истина` / `Ложь` / `Неопределено` are retained as keyword
+    // tokens (`KwTrue` / `KwFalse` / `KwUndefined`) for literal
+    // parsing, but post-Dot they are valid column-name slots —
+    // technical edge case, real 1C tables rarely use these names.
+    parse_no_errors("ВЫБРАТЬ Т.Истина, Т.Ложь, Т.Неопределено ИЗ Т КАК Т");
+}
+
+#[test]
+fn test_slice10a_post_dot_accepts_soft_keywords_in_table_ref() {
+    // FROM-side MDO chains go through `select::table_ref`, a separate
+    // dotted-path loop. `Справочник.В` (a catalog literally named `В`)
+    // is unrealistic but the soft-keyword rule should apply
+    // consistently across all post-Dot property-name slots.
+    parse_no_errors("ВЫБРАТЬ * ИЗ Справочник.В");
+}
+
+#[test]
+fn test_slice10a_post_dot_accepts_soft_keywords_in_for_update_clause() {
+    // FOR UPDATE / ДЛЯ ИЗМЕНЕНИЯ dotted column paths share the same
+    // property-name rule.
+    parse_no_errors("ВЫБРАТЬ * ИЗ Т КАК Т ДЛЯ ИЗМЕНЕНИЯ Т.В");
+}
+
+#[test]
+fn test_slice10a_post_dot_accepts_soft_keywords_in_refs_predicate() {
+    // The `ССЫЛКА` / `REFS` predicate MDO path also dot-walks identifiers.
+    parse_no_errors("ВЫБРАТЬ * ИЗ Т КАК Т ГДЕ Т.Поле ССЫЛКА Справочник.В");
+}
+
+#[test]
+fn test_slice10a_post_dot_accepts_soft_keywords_after_cast_result() {
+    // `ВЫРАЗИТЬ(...)` result member access reuses the dotted-path
+    // helper; the soft-keyword rule must apply there too.
+    parse_no_errors("ВЫБРАТЬ ВЫРАЗИТЬ(Т.Поле КАК Справочник.Контрагенты).В ИЗ Т КАК Т");
 }

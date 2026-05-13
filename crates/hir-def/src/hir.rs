@@ -179,6 +179,44 @@ pub struct PreprocIfStmt {
     pub else_branch: Option<Box<[StmtIdx]>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirPreBranchKind {
+    Then,
+    ElsIf(usize),
+    Else,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirPreBranch<'a> {
+    pub kind: HirPreBranchKind,
+    pub condition_range: Option<text_size::TextRange>,
+    pub directive_range: Option<text_size::TextRange>,
+    pub stmts: &'a [StmtIdx],
+}
+
+impl PreprocIfStmt {
+    pub fn branches(&self) -> impl Iterator<Item = HirPreBranch<'_>> + '_ {
+        std::iter::once(HirPreBranch {
+            kind: HirPreBranchKind::Then,
+            condition_range: Some(self.condition_range),
+            directive_range: Some(self.directive_range),
+            stmts: self.then_branch.as_ref(),
+        })
+        .chain(self.elsif_branches.iter().enumerate().map(|(i, elsif)| HirPreBranch {
+            kind: HirPreBranchKind::ElsIf(i),
+            condition_range: Some(elsif.0),
+            directive_range: Some(elsif.1),
+            stmts: elsif.2.as_ref(),
+        }))
+        .chain(self.else_branch.iter().map(|_| HirPreBranch {
+            kind: HirPreBranchKind::Else,
+            condition_range: None,
+            directive_range: None,
+            stmts: self.else_branch.as_deref().unwrap(),
+        }))
+    }
+}
+
 /// HIR statement.
 ///
 /// Represents an executable construct in BSL code.
@@ -266,6 +304,111 @@ impl Binding {
     /// Create a binding for a regular variable (not a value parameter).
     pub fn var(name: Name) -> Self {
         Self::new(name, false)
+    }
+}
+
+#[cfg(test)]
+mod preproc_if_stmt_branches_tests {
+    use la_arena::{Idx, RawIdx};
+
+    use super::{HirPreBranchKind, PreprocIfStmt, Stmt, StmtIdx};
+
+    fn stmt_idx(raw: u32) -> StmtIdx {
+        Idx::<Stmt>::from_raw(RawIdx::from_u32(raw))
+    }
+
+    fn range(start: u32, end: u32) -> text_size::TextRange {
+        text_size::TextRange::new(start.into(), end.into())
+    }
+
+    #[test]
+    fn branches_then_only() {
+        let condition_range = range(0, 1);
+        let stmt = PreprocIfStmt {
+            condition_range,
+            directive_range: range(0, 1),
+            full_range: range(0, 1),
+            then_branch: Box::new([stmt_idx(0)]),
+            elsif_branches: Box::new([]),
+            else_branch: None,
+        };
+
+        let branches = stmt.branches().collect::<Vec<_>>();
+
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].kind, HirPreBranchKind::Then);
+        assert_eq!(branches[0].stmts.len(), 1);
+        assert_eq!(branches[0].condition_range, Some(condition_range));
+    }
+
+    #[test]
+    fn branches_then_and_else() {
+        let stmt = PreprocIfStmt {
+            condition_range: range(0, 1),
+            directive_range: range(0, 1),
+            full_range: range(0, 1),
+            then_branch: Box::new([stmt_idx(0)]),
+            elsif_branches: Box::new([]),
+            else_branch: Some(Box::new([stmt_idx(1)])),
+        };
+
+        let branches = stmt.branches().collect::<Vec<_>>();
+
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].kind, HirPreBranchKind::Then);
+        assert_eq!(branches[1].kind, HirPreBranchKind::Else);
+        assert_eq!(branches[1].condition_range, None);
+    }
+
+    #[test]
+    fn branches_full_chain() {
+        let elsif_1_condition = range(1, 2);
+        let elsif_1_directive = range(2, 3);
+        let elsif_2_condition = range(3, 4);
+        let elsif_2_directive = range(4, 5);
+        let stmt = PreprocIfStmt {
+            condition_range: range(0, 1),
+            directive_range: range(0, 1),
+            full_range: range(0, 1),
+            then_branch: Box::new([stmt_idx(0)]),
+            elsif_branches: Box::new([
+                (elsif_1_condition, elsif_1_directive, Box::new([stmt_idx(1)])),
+                (elsif_2_condition, elsif_2_directive, Box::new([stmt_idx(2)])),
+            ]),
+            else_branch: Some(Box::new([stmt_idx(3)])),
+        };
+
+        let branches = stmt.branches().collect::<Vec<_>>();
+
+        assert_eq!(branches.len(), 4);
+        assert_eq!(branches[0].kind, HirPreBranchKind::Then);
+        assert_eq!(branches[1].kind, HirPreBranchKind::ElsIf(0));
+        assert_eq!(branches[1].condition_range, Some(elsif_1_condition));
+        assert_eq!(branches[1].directive_range, Some(elsif_1_directive));
+        assert_eq!(branches[2].kind, HirPreBranchKind::ElsIf(1));
+        assert_eq!(branches[2].condition_range, Some(elsif_2_condition));
+        assert_eq!(branches[2].directive_range, Some(elsif_2_directive));
+        assert_eq!(branches[3].kind, HirPreBranchKind::Else);
+    }
+
+    #[test]
+    fn branches_elsif_no_else() {
+        let elsif_condition = range(1, 2);
+        let elsif_directive = range(2, 3);
+        let stmt = PreprocIfStmt {
+            condition_range: range(0, 1),
+            directive_range: range(0, 1),
+            full_range: range(0, 1),
+            then_branch: Box::new([stmt_idx(0)]),
+            elsif_branches: Box::new([(elsif_condition, elsif_directive, Box::new([stmt_idx(1)]))]),
+            else_branch: None,
+        };
+
+        let branches = stmt.branches().collect::<Vec<_>>();
+
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].kind, HirPreBranchKind::Then);
+        assert_eq!(branches[1].kind, HirPreBranchKind::ElsIf(0));
     }
 }
 

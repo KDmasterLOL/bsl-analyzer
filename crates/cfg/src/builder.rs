@@ -519,13 +519,14 @@ impl CfgBuilder {
     /// Algorithm:
     /// 1. Create PreprocConditionVertex for #Если condition
     /// 2. Connect current block → preprocessor conditional
-    /// 3. Walk then_branch (Box<[StmtIdx]>)
+    /// 3. Walk all branches through PreprocIfStmt::branches()
     /// 4. For each #ИначеЕсли: create another PreprocConditionVertex, chain it
     /// 5. Walk #Иначе branch if present
     /// 6. Create merge block
     /// 7. Connect all branch exits → merge
     fn walk_preproc_if_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::PreprocConditionVertex;
+        use hir_def::hir::HirPreBranchKind;
 
         if let Stmt::PreprocIf(preproc_if) = body.stmt_idx(stmt_id) {
             // Create preprocessor conditional vertex
@@ -545,91 +546,66 @@ impl CfgBuilder {
             // Create merge block (will be used after all branches)
             let merge_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
 
-            // Walk THEN branch
-            let then_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
-            let _ = self.cfg.add_edge(cond_vertex, then_block, CfgEdgeType::TrueBranch);
-            self.current_block = Some(then_block);
-
-            for &then_stmt_id in preproc_if.then_branch.iter() {
-                self.walk_statement_hir(then_stmt_id, body);
-            }
-
-            // Connect then branch to merge:
-            // - Direct if reachable, AdjacentCode (phantom) if terminated
-            let then_exit = self.current_block;
-            if let Some(exit) = then_exit {
-                if self.block_has_live_incoming(exit) {
-                    let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
-                } else {
-                    let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
-                }
-            }
-
-            // Process #ИначеЕсли clauses
             let mut current_cond = cond_vertex;
+            let mut saw_else = false;
 
-            for (elsif_condition_range, elsif_directive_range, elsif_body) in
-                preproc_if.elsif_branches.iter()
-            {
-                // Create elsif preprocessor conditional
-                let elsif_cond = self.cfg.add_vertex(CfgVertex::PreprocCondition(
-                    PreprocConditionVertex::with_directive_range(
-                        *elsif_condition_range,
-                        *elsif_directive_range,
-                    ),
-                ));
+            for branch in preproc_if.branches() {
+                match branch.kind {
+                    HirPreBranchKind::Then => {
+                        let then_block =
+                            self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+                        let _ = self.cfg.add_edge(cond_vertex, then_block, CfgEdgeType::TrueBranch);
+                        self.current_block = Some(then_block);
+                    }
+                    HirPreBranchKind::ElsIf(_) => {
+                        // Create elsif preprocessor conditional
+                        let elsif_cond = self.cfg.add_vertex(CfgVertex::PreprocCondition(
+                            PreprocConditionVertex::with_directive_range(
+                                branch.condition_range.expect("elsif branch has condition range"),
+                                branch.directive_range.expect("elsif branch has directive range"),
+                            ),
+                        ));
 
-                // Connect previous cond FALSE → this elsif cond
-                let _ = self.cfg.add_edge(current_cond, elsif_cond, CfgEdgeType::FalseBranch);
+                        // Connect previous cond FALSE → this elsif cond
+                        let _ =
+                            self.cfg.add_edge(current_cond, elsif_cond, CfgEdgeType::FalseBranch);
 
-                // Walk elsif body
-                let elsif_block =
-                    self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
-                let _ = self.cfg.add_edge(elsif_cond, elsif_block, CfgEdgeType::TrueBranch);
-                self.current_block = Some(elsif_block);
+                        // Walk elsif body
+                        let elsif_block =
+                            self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+                        let _ = self.cfg.add_edge(elsif_cond, elsif_block, CfgEdgeType::TrueBranch);
+                        self.current_block = Some(elsif_block);
 
-                for &elsif_stmt_id in elsif_body.iter() {
-                    self.walk_statement_hir(elsif_stmt_id, body);
+                        current_cond = elsif_cond;
+                    }
+                    HirPreBranchKind::Else => {
+                        // Create else block
+                        let else_block =
+                            self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+                        let _ =
+                            self.cfg.add_edge(current_cond, else_block, CfgEdgeType::FalseBranch);
+                        self.current_block = Some(else_block);
+                        saw_else = true;
+                    }
                 }
 
-                // Connect elsif branch to merge:
+                for &branch_stmt_id in branch.stmts.iter() {
+                    self.walk_statement_hir(branch_stmt_id, body);
+                }
+
+                // Connect branch to merge:
                 // - Direct if reachable, AdjacentCode (phantom) if terminated
-                let elsif_exit = self.current_block;
-                if let Some(exit) = elsif_exit {
+                let branch_exit = self.current_block;
+                if let Some(exit) = branch_exit {
                     if self.block_has_live_incoming(exit) {
                         let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
                     } else {
                         let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
                     }
                 }
-
-                current_cond = elsif_cond;
             }
 
-            // Process #Иначе clause if present
-            if let Some(ref else_stmts) = preproc_if.else_branch {
-                // Create else block
-                let else_block =
-                    self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
-                let _ = self.cfg.add_edge(current_cond, else_block, CfgEdgeType::FalseBranch);
-                self.current_block = Some(else_block);
-
-                // Walk else body
-                for &else_stmt_id in else_stmts.iter() {
-                    self.walk_statement_hir(else_stmt_id, body);
-                }
-
-                // Connect else exit to merge:
-                // - Direct if reachable, AdjacentCode (phantom) if terminated
-                let else_exit = self.current_block;
-                if let Some(exit) = else_exit {
-                    if self.block_has_live_incoming(exit) {
-                        let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
-                    } else {
-                        let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
-                    }
-                }
-            } else {
+            if !saw_else {
                 // No else - false branch of last conditional goes to merge
                 let _ = self.cfg.add_edge(current_cond, merge_block, CfgEdgeType::FalseBranch);
             }

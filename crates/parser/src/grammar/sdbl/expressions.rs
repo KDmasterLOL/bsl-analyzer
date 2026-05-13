@@ -47,6 +47,8 @@
 use crate::event::NodeKind;
 use crate::parser::Parser;
 use lexer::TokenKind;
+use parser_error::{ParseError, RecoveryKind};
+use smallvec::smallvec;
 
 // ============================================================================
 // CLEAN-ROOM Slice 10a — expression backbone
@@ -141,6 +143,36 @@ pub(super) fn is_expression_start(p: &Parser) -> bool {
     }
 }
 
+/// Check whether the current token can serve as a property-name slot
+/// after a dot (e.g. `Т.<name>`). Accepts `Ident` plus the SDBL
+/// retained-keyword set produced by
+/// `sdbl_token_converter::convert_sdbl_token_kind` — the tokens it
+/// keeps as BSL keyword variants for expression parsing rather than
+/// downgrading to `Ident`:
+///   * operator keywords: `KwIn` (`В`/`IN`), `KwAnd` (`И`), `KwOr`
+///     (`ИЛИ`), `KwNot` (`НЕ`);
+///   * literal keywords: `KwTrue` (`Истина`), `KwFalse` (`Ложь`),
+///     `KwUndefined` (`Неопределено`).
+///
+/// In a column-name slot these are valid SDBL identifiers — `Т.В`
+/// (column "В") or `Т.Истина` (column "Истина") must parse as a field
+/// reference, not as the `В` operator or the `Истина` literal.
+pub(super) fn at_property_name(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(
+            TokenKind::Ident
+                | TokenKind::KwIn
+                | TokenKind::KwAnd
+                | TokenKind::KwOr
+                | TokenKind::KwNot
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+                | TokenKind::KwUndefined
+        )
+    )
+}
+
 /// Check if current position is a recovery point for list parsing.
 ///
 /// Recovery points are positions where the list parser must stop the
@@ -184,12 +216,17 @@ fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> b
 /// recover_to_delimiter(p);  // Consumes: КАК СТРОКА(200)
 /// // Current position: ) (outer rparen)
 /// ```
+/// Skip the offending tokens up to the next list delimiter or recovery
+/// boundary. Emits a single `Custom { RecoverySpan }` error covering the
+/// consumed tokens; if no tokens were consumed (recovery boundary already at
+/// current position), abandons the marker — no empty-span diagnostic.
 fn recover_to_delimiter(p: &mut Parser) {
     // local: paren-depth tracking recovery; mini-spec §Recovery —
     // nested-paren recovery preserves the inner `(...)` depth so that
     // `ВЫРАЗИТЬ(поле КАК СТРОКА(200))` recovery walks to the outer `)`,
     // not the inner one. Wraps the consumed run in one Error marker.
     let err = p.start();
+    let mut consumed_any = false;
     let mut paren_depth = 0i32; // Track nested parentheses
                                 // For each currently-active nested subquery (an open `(`
                                 // immediately followed by `SELECT`/`ВЫБРАТЬ`), the paren_depth at
@@ -207,6 +244,7 @@ fn recover_to_delimiter(p: &mut Parser) {
         if p.at(TokenKind::LParen) {
             paren_depth += 1;
             p.bump();
+            consumed_any = true;
             // Detect nested-subquery body: `( SELECT ...`. The
             // skip_trivia is safe — recovery is already a malformed
             // path, and skipping trivia mirrors the clean
@@ -229,6 +267,7 @@ fn recover_to_delimiter(p: &mut Parser) {
                 }
                 paren_depth -= 1;
                 p.bump();
+                consumed_any = true;
                 continue;
             } else {
                 // This is the closing paren for our function - stop here
@@ -288,9 +327,20 @@ fn recover_to_delimiter(p: &mut Parser) {
 
         // Consume one token
         p.bump();
+        consumed_any = true;
     }
 
-    err.complete(p, NodeKind::Error);
+    if consumed_any {
+        p.emit_error_at_marker(
+            err,
+            ParseError::Custom {
+                message: "пропуск некорректного фрагмента",
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    } else {
+        err.abandon(p);
+    }
 }
 
 /// Parse a delimited list of elements with error recovery.
@@ -378,7 +428,13 @@ pub(super) fn parse_delimited_list<F>(
         if p.at(delimiter) || is_recovery_point(p, recovery_set) || !is_item_start(p) {
             // Create ERROR node for missing element
             let err = p.start();
-            err.complete(p, NodeKind::Error);
+            p.emit_error_at_marker(
+                err,
+                ParseError::Custom {
+                    message: "пропущен элемент списка",
+                    recovery: RecoveryKind::RecoverySpan,
+                },
+            );
 
             // If it was just another delimiter, continue to next iteration
             // Otherwise (recovery point or invalid token), break
@@ -674,7 +730,7 @@ fn primary_expr(p: &mut Parser) {
             // expression position. Emits SdblError (NOT generic
             // Error) so downstream consumers can filter on the kind.
             let m = p.start();
-            p.error();
+            p.error_unexpected();
             m.complete(p, NodeKind::SdblError);
         }
     }
@@ -1077,8 +1133,8 @@ fn predicate_expr(p: &mut Parser) {
             while p.eat(TokenKind::Dot) {
                 p.check_iteration_limit(); // Prevent infinite loops
                 p.skip_trivia();
-                if p.at(TokenKind::Ident) {
-                    p.bump(); // Next identifier
+                if at_property_name(p) {
+                    p.bump(); // Next identifier (or soft-keyword used as a name)
                     p.skip_trivia();
                 } else {
                     break;
@@ -1156,13 +1212,21 @@ fn parse_cast_type(p: &mut Parser) {
             p.bump(); // DOT
             p.skip_trivia();
 
-            if p.at(TokenKind::Ident) {
-                p.bump(); // Next part of MDO type
+            if at_property_name(p) {
+                p.bump(); // Next part of MDO type (or soft-keyword used as a name)
                 p.skip_trivia();
             } else {
                 // Incomplete MDO type (e.g., "Справочник." without object name)
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                let found = p.current();
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Expected {
+                        expected: smallvec![TokenKind::Ident],
+                        found,
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
                 break;
             }
         }
@@ -1226,12 +1290,21 @@ fn column_or_function(p: &mut Parser) {
                 break;
             }
 
-            // ERROR RECOVERY: After DOT, only Ident is valid for column/field name
-            // Whitelist approach: if NOT Ident, mark incomplete and stop
-            if !p.at(TokenKind::Ident) {
+            // ERROR RECOVERY: After DOT, only a property-name slot is valid.
+            // Accepts Ident plus the soft-keyword set (`Т.В`, `Т.И`, …) where
+            // single-letter SDBL operator keywords serve as field names.
+            if !at_property_name(p) {
                 // Incomplete: operators (=, AND), punctuation (,), EOF, etc.
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                let found = p.current();
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Expected {
+                        expected: smallvec![TokenKind::Ident],
+                        found,
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
                 break;
             }
 
@@ -1240,12 +1313,18 @@ fn column_or_function(p: &mut Parser) {
             if super::select::is_clause_keyword(p) {
                 // Incomplete: "Table.\nFROM" - don't consume FROM
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Custom {
+                        message: "ожидалось имя поля, встречено ключевое слово",
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
                 break;
             }
 
-            // Consume the identifier - it's a valid field name
-            p.bump(); // Ident
+            // Consume the field name (Ident or soft-keyword token).
+            p.bump();
             p.skip_trivia();
         }
         m.complete(p, NodeKind::SdblColumnRef);
@@ -1293,7 +1372,13 @@ fn column_or_function(p: &mut Parser) {
             } else if p.at(TokenKind::Comma) {
                 // Empty first argument: func(, value) - create ERROR node
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Custom {
+                        message: "пропущен первый аргумент",
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
             }
 
             // Parse remaining arguments with error recovery
@@ -1317,7 +1402,13 @@ fn column_or_function(p: &mut Parser) {
                 {
                     // Create ERROR node for missing/invalid argument
                     let err = p.start();
-                    err.complete(p, NodeKind::Error);
+                    p.emit_error_at_marker(
+                        err,
+                        ParseError::Custom {
+                            message: "пропущен аргумент функции",
+                            recovery: RecoveryKind::RecoverySpan,
+                        },
+                    );
 
                     // If next token is comma, continue to next argument.
                     // Otherwise (RParen, invalid, or clause keyword),
@@ -1353,7 +1444,15 @@ fn column_or_function(p: &mut Parser) {
         // `crates/parser/tests/sdbl_parser_tests.rs`.
         if super::select::is_clause_keyword(p) {
             let err = p.start();
-            err.complete(p, NodeKind::Error);
+            let found = p.current();
+            p.emit_error_at_marker(
+                err,
+                ParseError::Expected {
+                    expected: smallvec![TokenKind::RParen],
+                    found,
+                    recovery: RecoveryKind::RecoverySpan,
+                },
+            );
         } else {
             p.expect(TokenKind::RParen);
         }
@@ -1367,21 +1466,35 @@ fn column_or_function(p: &mut Parser) {
             p.bump(); // DOT
             p.skip_trivia();
 
-            if p.at(TokenKind::Ident) {
+            if at_property_name(p) {
                 // Check if this is actually a clause keyword (shouldn't be consumed as field)
                 if super::select::is_clause_keyword(p) {
                     // Incomplete: "CAST(...).\nFROM" - don't consume FROM
                     let err = p.start();
-                    err.complete(p, NodeKind::Error);
+                    p.emit_error_at_marker(
+                        err,
+                        ParseError::Custom {
+                            message: "ожидалось имя поля, встречено ключевое слово",
+                            recovery: RecoveryKind::RecoverySpan,
+                        },
+                    );
                     break;
                 }
 
-                p.bump(); // Field name
+                p.bump(); // Field name (Ident or soft-keyword token)
                 p.skip_trivia();
             } else {
                 // Incomplete: "CAST(...)." without field name
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                let found = p.current();
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Expected {
+                        expected: smallvec![TokenKind::Ident],
+                        found,
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
                 break;
             }
         }
@@ -1466,7 +1579,7 @@ fn case_expr(p: &mut Parser) {
 
     if !has_when {
         // Error recovery: CASE without WHEN clauses
-        p.error();
+        p.error_custom("в выражении CASE отсутствует 'КОГДА' / 'WHEN'");
     }
 
     // Optional ELSE clause
@@ -1480,7 +1593,7 @@ fn case_expr(p: &mut Parser) {
     // Required END keyword
     if !p.at_keyword("END") && !p.at_keyword("КОНЕЦ") {
         // Error recovery: expected END after CASE
-        p.error();
+        p.error_custom("ожидалось 'КОНЕЦ' / 'END' в выражении CASE");
     } else {
         p.bump(); // END / КОНЕЦ
     }

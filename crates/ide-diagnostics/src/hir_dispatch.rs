@@ -41,6 +41,7 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::IfElseIfEndsWithElse,
     DiagnosticCode::IncorrectUseOfStrTemplate,
     DiagnosticCode::MagicNumber,
+    DiagnosticCode::MisplacedLoopControl,
     DiagnosticCode::MissedRequiredParameter,
     DiagnosticCode::MissingCommonModuleMethod,
     DiagnosticCode::OneStatementPerLine,
@@ -145,6 +146,9 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
             handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::MisplacedLoopControl { range, is_continue } => {
+            handlers::misplaced_loop_control::from_hir(*range, *is_continue, ctx)
         }
         BodyDiagnostic::MissedRequiredParameter {
             callee,

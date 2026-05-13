@@ -181,15 +181,17 @@ impl LoweringContext {
         // Get type from expression
         let ty = expr.ty().clone();
 
-        // Extract raw field name from AST (last identifier in expression)
+        // Extract raw field name from AST (last name-token in expression)
         // For "Т.ИмяПоля" -> Some("ИмяПоля")
-        // For "COUNT(*)" -> None (not a simple field)
+        // For "Т.В"       -> Some("В")  — soft-keyword KW_IN as property name
+        // For "COUNT(*)"  -> None       — not a simple field
         let raw_name = field.expression().and_then(|expr_node| {
-            // Find last IDENT token in expression (skip DOT)
+            // Find last property-name token (skip DOT). Uses `is_name_token`
+            // so soft-keyword field names like `Т.В` extract correctly.
             let mut last_ident = None;
             for element in expr_node.descendants_with_tokens() {
                 if let Some(token) = element.as_token() {
-                    if token.kind() == syntax::SyntaxKind::IDENT {
+                    if token.kind().is_name_token() {
                         last_ident = Some(token.text().to_string());
                     }
                 }

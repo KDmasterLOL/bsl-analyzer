@@ -86,15 +86,20 @@ enum MdoContext {
 /// Walks the syntax tree to find if we're in a `ManagerCollection.` or
 /// `ManagerCollection.Object.` context.
 fn detect_mdo_context(token: &SyntaxToken) -> Option<MdoContext> {
-    match token.kind() {
+    if token.kind() == SyntaxKind::DOT {
         // Cursor right after DOT: `Справочники.|` or `Справочники.Валюты.|`
-        SyntaxKind::DOT => detect_from_dot(token),
-
-        // Cursor inside IDENT after DOT: `Справочники.Доп|` or `Справочники.Валюты.Найти|`
-        SyntaxKind::IDENT => detect_from_ident_after_dot(token),
-
-        _ => None,
+        return detect_from_dot(token);
     }
+
+    // Cursor inside a name-token after DOT: `Справочники.Доп|` or
+    // `Справочники.Валюты.Найти|`. Uses `is_name_token` so cursor
+    // positions inside soft-keyword names (e.g. `Справочники.Из|`,
+    // where `Из` lexes as KW_IN) still trigger MDO completion.
+    if token.kind().is_name_token() {
+        return detect_from_ident_after_dot(token);
+    }
+
+    None
 }
 
 /// Detect context when cursor is right after a DOT token.
@@ -208,10 +213,13 @@ fn get_field_expr_parts(node: &SyntaxNode) -> Option<(String, String)> {
     let base = node.children().next()?;
     let base_text = get_single_ident(&base)?;
 
+    // Last name-token of the field expression. Uses `is_name_token` so
+    // soft-keyword field names like `Справочники.Из` extract correctly
+    // instead of returning `None`.
     let field_token = node
         .children_with_tokens()
         .filter_map(|it| it.into_token())
-        .filter(|t| t.kind() == SyntaxKind::IDENT)
+        .filter(|t| t.kind().is_name_token())
         .last()?;
 
     Some((base_text, field_token.text().to_string()))

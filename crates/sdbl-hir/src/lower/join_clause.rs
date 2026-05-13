@@ -239,25 +239,46 @@ impl LoweringContext {
         while i < tokens.len() {
             let token = &tokens[i];
 
-            if token.kind() == SyntaxKind::IDENT {
-                // Check for qualified name (Table.Field)
-                if i + 2 < tokens.len()
-                    && tokens[i + 1].kind() == SyntaxKind::DOT
-                    && tokens[i + 2].kind() == SyntaxKind::IDENT
+            // Qualified name `Name.Name(.Name)*`. Both sides of each
+            // `.` accept any property-name token (`is_name_token`) so
+            // soft-keyword field names retained by `sdbl_token_converter`
+            // (e.g. `Т.В` where `В` is KW_IN) lower as qualified fields.
+            // Greedy chain consumption: a three-part reference like
+            // `Т.В.Поле` collapses to a single qualified field instead
+            // of leaking `Поле` into a second pseudo-field entry. The
+            // text-level `is_sql_keyword` filter still rejects words
+            // like `И`/`ИЛИ`/`НЕ`/`ИСТИНА`/`ЛОЖЬ` that would confuse
+            // join-condition parsing.
+            if token.kind().is_name_token()
+                && i + 2 < tokens.len()
+                && tokens[i + 1].kind() == SyntaxKind::DOT
+                && tokens[i + 2].kind().is_name_token()
+            {
+                let mut parts: Vec<String> = vec![token.text().to_string()];
+                parts.push(tokens[i + 2].text().to_string());
+                i += 3;
+
+                while i + 1 < tokens.len()
+                    && tokens[i].kind() == SyntaxKind::DOT
+                    && tokens[i + 1].kind().is_name_token()
                 {
-                    let table = token.text();
-                    let field = tokens[i + 2].text();
-                    let qualified = format!("{}.{}", table, field);
-
-                    if !self.is_sql_keyword(table) && !self.is_sql_keyword(field) {
-                        fields.insert(qualified);
-                    }
-
-                    i += 3;
-                    continue;
+                    parts.push(tokens[i + 1].text().to_string());
+                    i += 2;
                 }
 
-                // Unqualified identifier
+                if !parts.iter().any(|p| self.is_sql_keyword(p)) {
+                    fields.insert(parts.join("."));
+                }
+
+                continue;
+            }
+
+            // Unqualified identifier. Strict `IDENT` only — a bare
+            // soft-keyword token like `В` (KW_IN) or `Неопределено`
+            // (KW_UNDEFINED) is an operator or literal, not a field
+            // reference, even though it can appear as a property name
+            // after a `.` (qualified case handled above).
+            if token.kind() == SyntaxKind::IDENT {
                 let text = token.text();
                 if !self.is_sql_keyword(text) {
                     fields.insert(text.to_string());

@@ -15147,8 +15147,8 @@
     d = null;
     d = 1.2;
     execute("d = 0");
-    addHandler f();
-    removeHandler f();
+    addHandler f,h;
+    removeHandler f,h;
     d = неопределено;
 КонецФункции
 #КонецОбласти

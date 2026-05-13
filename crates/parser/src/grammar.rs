@@ -60,7 +60,7 @@ fn annotated_item(p: &mut Parser) {
             }
             _ => {
                 outer.abandon(p);
-                p.error();
+                p.error_unexpected();
             }
         },
         Some(TokenKind::KwProcedure) => {
@@ -77,7 +77,7 @@ fn annotated_item(p: &mut Parser) {
         }
         _ => {
             outer.abandon(p);
-            p.error();
+            p.error_unexpected();
         }
     }
 }
@@ -100,7 +100,7 @@ pub fn source_file(p: &mut Parser) {
                 match p.nth_non_trivia(0) {
                     Some(TokenKind::KwProcedure) => items::procedure_def(p),
                     Some(TokenKind::KwFunction) => items::function_def(p),
-                    _ => p.error(),
+                    _ => p.error_unexpected(),
                 }
             }
             Some(TokenKind::KwProcedure) => items::procedure_def(p),
@@ -161,7 +161,7 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
                 match p.nth_non_trivia(0) {
                     Some(TokenKind::KwProcedure) => items::procedure_def(p),
                     Some(TokenKind::KwFunction) => items::function_def(p),
-                    _ => p.error(),
+                    _ => p.error_unexpected(),
                 }
             }
             Some(TokenKind::KwProcedure) => items::procedure_def(p),
@@ -266,7 +266,7 @@ fn preproc_content(p: &mut Parser) {
             Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
                 Some(TokenKind::KwProcedure) => items::procedure_def(p),
                 Some(TokenKind::KwFunction) => items::function_def(p),
-                _ => p.error(),
+                _ => p.error_unexpected(),
             },
             Some(TokenKind::KwProcedure) => items::procedure_def(p),
             Some(TokenKind::KwFunction) => items::function_def(p),
@@ -400,7 +400,7 @@ fn preproc_symbol(p: &mut Parser) {
         }
         _ => {
             // Error: expected a preprocessor symbol (identifier)
-            p.error();
+            p.error_unexpected();
         }
     }
 

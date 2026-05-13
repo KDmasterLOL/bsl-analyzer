@@ -56,6 +56,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
     (DiagnosticCode::EmptyRegion, "region structure diagnostic"),
     (DiagnosticCode::EmptyStatement, "structural empty-statement diagnostic"),
     (DiagnosticCode::UnreachableCode, "control-flow diagnostic"),
+    (
+        DiagnosticCode::MisplacedLoopControl,
+        "structural keyword-context diagnostic (Прервать/Продолжить вне цикла); no platform identifier lookup",
+    ),
     (DiagnosticCode::CodeBlockBeforeSub, "module layout diagnostic"),
     (DiagnosticCode::CodeOutOfRegion, "region placement diagnostic"),
     (DiagnosticCode::MagicNumber, "literal-value diagnostic"),
@@ -575,7 +579,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 185, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 186, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]
