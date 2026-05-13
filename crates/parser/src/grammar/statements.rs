@@ -467,10 +467,12 @@ fn assignment_or_call(p: &mut Parser) {
     } else {
         // Bare identifier or field access without call/index - syntax error
         // e.g., "HHH" instead of "HHH()" or "HHH = value"
-        let found = p.current();
         p.emit_error_at_marker(
             m,
-            ParseError::Unexpected { found, recovery: RecoveryKind::RecoverySpan },
+            ParseError::Custom {
+                message: "ожидался вызов или присваивание",
+                recovery: RecoveryKind::RecoverySpan,
+            },
         );
         p.eat(TokenKind::Semicolon);
     }
