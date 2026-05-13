@@ -300,7 +300,7 @@ fn drop_table_query(p: &mut Parser) {
     if p.at(TokenKind::Ident) {
         p.bump();
     } else {
-        p.error();
+        p.error_custom("ожидалось имя таблицы после 'УНИЧТОЖИТЬ' / 'DROP'");
     }
     m.complete(p, NodeKind::SdblDropQuery);
 }

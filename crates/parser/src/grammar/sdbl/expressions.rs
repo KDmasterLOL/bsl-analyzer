@@ -47,6 +47,8 @@
 use crate::event::NodeKind;
 use crate::parser::Parser;
 use lexer::TokenKind;
+use parser_error::{ParseError, RecoveryKind};
+use smallvec::smallvec;
 
 // ============================================================================
 // CLEAN-ROOM Slice 10a — expression backbone
@@ -290,7 +292,13 @@ fn recover_to_delimiter(p: &mut Parser) {
         p.bump();
     }
 
-    err.complete(p, NodeKind::Error);
+    p.emit_error_at_marker(
+        err,
+        ParseError::Custom {
+            message: "пропуск некорректного фрагмента",
+            recovery: RecoveryKind::RecoverySpan,
+        },
+    );
 }
 
 /// Parse a delimited list of elements with error recovery.
@@ -378,7 +386,13 @@ pub(super) fn parse_delimited_list<F>(
         if p.at(delimiter) || is_recovery_point(p, recovery_set) || !is_item_start(p) {
             // Create ERROR node for missing element
             let err = p.start();
-            err.complete(p, NodeKind::Error);
+            p.emit_error_at_marker(
+                err,
+                ParseError::Custom {
+                    message: "пропущен элемент списка",
+                    recovery: RecoveryKind::RecoverySpan,
+                },
+            );
 
             // If it was just another delimiter, continue to next iteration
             // Otherwise (recovery point or invalid token), break
@@ -674,7 +688,7 @@ fn primary_expr(p: &mut Parser) {
             // expression position. Emits SdblError (NOT generic
             // Error) so downstream consumers can filter on the kind.
             let m = p.start();
-            p.error();
+            p.error_unexpected();
             m.complete(p, NodeKind::SdblError);
         }
     }
@@ -1162,7 +1176,15 @@ fn parse_cast_type(p: &mut Parser) {
             } else {
                 // Incomplete MDO type (e.g., "Справочник." without object name)
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                let found = p.current();
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Expected {
+                        expected: smallvec![TokenKind::Ident],
+                        found,
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
                 break;
             }
         }
@@ -1231,7 +1253,15 @@ fn column_or_function(p: &mut Parser) {
             if !p.at(TokenKind::Ident) {
                 // Incomplete: operators (=, AND), punctuation (,), EOF, etc.
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                let found = p.current();
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Expected {
+                        expected: smallvec![TokenKind::Ident],
+                        found,
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
                 break;
             }
 
@@ -1240,7 +1270,13 @@ fn column_or_function(p: &mut Parser) {
             if super::select::is_clause_keyword(p) {
                 // Incomplete: "Table.\nFROM" - don't consume FROM
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Custom {
+                        message: "ожидалось имя поля, встречено ключевое слово",
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
                 break;
             }
 
@@ -1293,7 +1329,13 @@ fn column_or_function(p: &mut Parser) {
             } else if p.at(TokenKind::Comma) {
                 // Empty first argument: func(, value) - create ERROR node
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Custom {
+                        message: "пропущен первый аргумент",
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
             }
 
             // Parse remaining arguments with error recovery
@@ -1317,7 +1359,13 @@ fn column_or_function(p: &mut Parser) {
                 {
                     // Create ERROR node for missing/invalid argument
                     let err = p.start();
-                    err.complete(p, NodeKind::Error);
+                    p.emit_error_at_marker(
+                        err,
+                        ParseError::Custom {
+                            message: "пропущен аргумент функции",
+                            recovery: RecoveryKind::RecoverySpan,
+                        },
+                    );
 
                     // If next token is comma, continue to next argument.
                     // Otherwise (RParen, invalid, or clause keyword),
@@ -1353,7 +1401,15 @@ fn column_or_function(p: &mut Parser) {
         // `crates/parser/tests/sdbl_parser_tests.rs`.
         if super::select::is_clause_keyword(p) {
             let err = p.start();
-            err.complete(p, NodeKind::Error);
+            let found = p.current();
+            p.emit_error_at_marker(
+                err,
+                ParseError::Expected {
+                    expected: smallvec![TokenKind::RParen],
+                    found,
+                    recovery: RecoveryKind::RecoverySpan,
+                },
+            );
         } else {
             p.expect(TokenKind::RParen);
         }
@@ -1372,7 +1428,13 @@ fn column_or_function(p: &mut Parser) {
                 if super::select::is_clause_keyword(p) {
                     // Incomplete: "CAST(...).\nFROM" - don't consume FROM
                     let err = p.start();
-                    err.complete(p, NodeKind::Error);
+                    p.emit_error_at_marker(
+                        err,
+                        ParseError::Custom {
+                            message: "ожидалось имя поля, встречено ключевое слово",
+                            recovery: RecoveryKind::RecoverySpan,
+                        },
+                    );
                     break;
                 }
 
@@ -1381,7 +1443,15 @@ fn column_or_function(p: &mut Parser) {
             } else {
                 // Incomplete: "CAST(...)." without field name
                 let err = p.start();
-                err.complete(p, NodeKind::Error);
+                let found = p.current();
+                p.emit_error_at_marker(
+                    err,
+                    ParseError::Expected {
+                        expected: smallvec![TokenKind::Ident],
+                        found,
+                        recovery: RecoveryKind::RecoverySpan,
+                    },
+                );
                 break;
             }
         }
@@ -1466,7 +1536,7 @@ fn case_expr(p: &mut Parser) {
 
     if !has_when {
         // Error recovery: CASE without WHEN clauses
-        p.error();
+        p.error_custom("в выражении CASE отсутствует 'КОГДА' / 'WHEN'");
     }
 
     // Optional ELSE clause
@@ -1480,7 +1550,7 @@ fn case_expr(p: &mut Parser) {
     // Required END keyword
     if !p.at_keyword("END") && !p.at_keyword("КОНЕЦ") {
         // Error recovery: expected END after CASE
-        p.error();
+        p.error_custom("ожидалось 'КОНЕЦ' / 'END' в выражении CASE");
     } else {
         p.bump(); // END / КОНЕЦ
     }

@@ -53,8 +53,11 @@ fn parse_clean(input: &str) {
 }
 
 /// Allows the nested subquery alias recovery surfaced by Track 6.1 structured
-/// errors: the parser closes the inner subquery, then emits `Unexpected RParen`
-/// and `Expected RParen` at the outer alias boundary.
+/// errors. After the inner subquery closes, the outer subquery's FROM source
+/// continues parsing past the inner `)`: the source-alias slot sees a clause
+/// keyword (Custom span), the join-clause slot fails on the missing JOIN
+/// keyword (Custom bump), and finally the outer `p.expect(RParen)` reports
+/// the missing close-paren (Expected bump).
 ///
 /// XXX: PARSER-BUG-001. See `docs/diagnostics-audit/PARSER_FOLLOWUPS.md`.
 fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool {
@@ -68,6 +71,12 @@ fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool 
             found: Some(TokenKind::Ident),
             recovery: RecoveryKind::BumpToken,
         } => expected.as_slice() == [TokenKind::RParen],
+        ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan } => {
+            *message == "ожидался алиас источника, встречено ключевое слово"
+        }
+        ParseError::Custom { message, recovery: RecoveryKind::Custom } => {
+            *message == "ожидалось 'СОЕДИНЕНИЕ' / 'JOIN'"
+        }
         _ => false,
     }
 }
