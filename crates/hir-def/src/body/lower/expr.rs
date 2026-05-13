@@ -2,6 +2,7 @@
 //!
 //! This module handles lowering of BSL expressions from AST to HIR.
 
+use parser_error::{ParseError, RecoveryKind};
 use syntax::ast_utils::field_tail_name_token;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -22,6 +23,24 @@ use super::LoweringCtx;
 /// — see the Layer B unification plan.
 fn field_name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     field_tail_name_token(node)
+}
+
+fn trailing_dot_range(refs: &SyntaxNode) -> Option<syntax::TextRange> {
+    let children: Vec<_> = refs.children_with_tokens().collect();
+    for child in children.into_iter().rev() {
+        let kind = child.kind();
+        if kind.is_trivia() {
+            continue;
+        }
+
+        return if kind == SyntaxKind::DOT {
+            child.as_token().map(|token| token.text_range())
+        } else {
+            None
+        };
+    }
+
+    None
 }
 
 /// Lower an expression node (handles EXPR wrapper).
@@ -172,6 +191,35 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     .unwrap_or_else(|| (value.clone(), vec![]));
 
                 let sdbl_ast = parser::parse_sdbl_with_shared_cache(&sdbl_text);
+                let literal_text = node.text().to_string();
+                let mut error_ranges_in_bsl = Vec::new();
+
+                for syntax_err in sdbl_ast.errors() {
+                    let bsl_range = syntax::sdbl_query::map_range_query_to_literal(
+                        &literal_text,
+                        syntax_err.range(),
+                    );
+                    error_ranges_in_bsl.push((bsl_range, syntax_err.structured().clone()));
+                }
+
+                let sdbl_root = sdbl_ast.syntax_node();
+                for refs in
+                    sdbl_root.descendants().filter(|node| node.kind() == SyntaxKind::SDBL_REFS_EXPR)
+                {
+                    if let Some(dot_range) = trailing_dot_range(&refs) {
+                        let bsl_range = syntax::sdbl_query::map_range_query_to_literal(
+                            &literal_text,
+                            dot_range,
+                        );
+                        error_ranges_in_bsl.push((
+                            bsl_range,
+                            ParseError::Custom {
+                                message: "незавершённый путь в ссылке",
+                                recovery: RecoveryKind::Custom,
+                            },
+                        ));
+                    }
+                }
 
                 // Store query info regardless of parse errors
                 // - Valid queries: query_ast = Some(ast) with no errors
@@ -182,6 +230,7 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     sdbl_text,
                     Some(sdbl_ast),
                     quote_corrections,
+                    error_ranges_in_bsl,
                 );
 
                 ctx.pending_sdbl.push((node.text_range(), query_info));

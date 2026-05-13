@@ -4,6 +4,8 @@
 //! along with their positions in BSL source files. Used by Salsa to avoid re-parsing
 //! SDBL queries when running multiple SDBL diagnostics.
 
+use parser_error::ParseError;
+
 use crate::{Parse, SyntaxKind, SyntaxNode, TextRange};
 
 /// Information about a single SDBL query found in BSL file.
@@ -53,6 +55,12 @@ pub struct SdblQueryInfo {
     /// When mapping SDBL position X to BSL column: bsl_col = sdbl_col + sum(chars for positions < X)
     /// NOTE: This stores CHARACTER count, not byte count, for correct UTF-8 handling.
     pub quote_corrections: Vec<(usize, usize)>,
+
+    /// SDBL parse errors projected into BSL-literal-relative coordinates.
+    /// Callers add bsl_literal_range.start() to lift these ranges into file
+    /// coordinates. Empty when the query parsed cleanly. Populated at
+    /// construction by hir-def/body/lower/expr.rs.
+    pub error_ranges_in_bsl: Vec<(TextRange, ParseError)>,
 }
 
 impl SdblQueryInfo {
@@ -64,13 +72,15 @@ impl SdblQueryInfo {
     /// - `query_text`: Extracted SDBL query text (multiline | prefixes already removed, "" unescaped)
     /// - `query_ast`: Parsed SDBL AST (or None if parsing failed)
     /// - `quote_corrections`: Quote escape corrections for position mapping
+    /// - `error_ranges_in_bsl`: SDBL parse errors projected into BSL-literal-relative ranges
     pub fn new(
         bsl_literal_range: TextRange,
         query_text: String,
         query_ast: Option<Parse<SyntaxNode>>,
         quote_corrections: Vec<(usize, usize)>,
+        error_ranges_in_bsl: Vec<(TextRange, ParseError)>,
     ) -> Self {
-        Self { bsl_literal_range, query_text, query_ast, quote_corrections }
+        Self { bsl_literal_range, query_text, query_ast, quote_corrections, error_ranges_in_bsl }
     }
 
     /// Check if SDBL parse was successful and has no errors.
@@ -432,10 +442,11 @@ mod tests {
         let range = TextRange::new(0u32.into(), 10u32.into());
         let query_text = "SELECT * FROM Table".to_string();
 
-        let info = SdblQueryInfo::new(range, query_text.clone(), None, vec![]);
+        let info = SdblQueryInfo::new(range, query_text.clone(), None, vec![], vec![]);
 
         assert_eq!(info.bsl_literal_range, range);
         assert_eq!(info.query_text, query_text);
+        assert!(info.error_ranges_in_bsl.is_empty());
         assert!(!info.is_valid()); // No AST
         assert!(info.syntax_node().is_none()); // No AST
     }
@@ -446,6 +457,7 @@ mod tests {
             TextRange::new(0u32.into(), 10u32.into()),
             "INVALID QUERY".to_string(),
             None,
+            vec![],
             vec![],
         );
         assert!(!info.is_valid());
@@ -461,6 +473,7 @@ mod tests {
             query.to_string(),
             None,
             vec![],
+            vec![],
         );
 
         let info2 = info1.clone();
@@ -468,6 +481,45 @@ mod tests {
         assert_eq!(info1, info2);
         assert_eq!(info1.bsl_literal_range, info2.bsl_literal_range);
         assert_eq!(info1.query_text, info2.query_text);
+    }
+
+    #[test]
+    fn test_error_ranges_in_bsl_empty_round_trip() {
+        let info = SdblQueryInfo::new(
+            TextRange::new(3u32.into(), 42u32.into()),
+            "SELECT * FROM Table".to_string(),
+            None,
+            vec![],
+            vec![],
+        );
+
+        assert!(info.error_ranges_in_bsl.is_empty());
+    }
+
+    #[test]
+    fn test_error_ranges_in_bsl_preserves_structured_parse_error() {
+        let range = TextRange::new(5u32.into(), 6u32.into());
+        let error = ParseError::Custom {
+            message: "незавершённый путь в ссылке",
+            recovery: parser_error::RecoveryKind::Custom,
+        };
+
+        let info = SdblQueryInfo::new(
+            TextRange::new(0u32.into(), 20u32.into()),
+            "SELECT * FROM Table".to_string(),
+            None,
+            vec![],
+            vec![(range, error.clone())],
+        );
+
+        assert_eq!(info.error_ranges_in_bsl, vec![(range, error)]);
+        assert!(matches!(
+            &info.error_ranges_in_bsl[0].1,
+            ParseError::Custom {
+                message: "незавершённый путь в ссылке",
+                recovery: parser_error::RecoveryKind::Custom,
+            }
+        ));
     }
 
     // Note: Tests with parsed AST are in base-db tests where parser is available
