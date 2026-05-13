@@ -269,7 +269,7 @@ fn test_all_expression_types() {
     З = Null;
 
     // Арифметические операции
-    И = А + Б;
+    И1 = А + Б;
     К = А - Б;
     Л = А * Б;
     М = А / Б;
@@ -312,7 +312,7 @@ fn test_all_expression_types() {
     Возврат Г1;
 КонецФункции"#;
     let result = parse(input);
-    assert_eq!(result.syntax_node().kind(), SyntaxKind::SOURCE_FILE);
+    assert!(!result.has_errors());
 }
 
 #[test]
@@ -670,7 +670,7 @@ fn benchmark_parser_performance() {
     let start = Instant::now();
 
     let result = parse(input);
-    assert_eq!(result.syntax_node().kind(), SyntaxKind::SOURCE_FILE);
+    assert!(!result.has_errors());
 
     let elapsed = start.elapsed();
     let throughput = file_size_mb / elapsed.as_secs_f64();
@@ -776,7 +776,7 @@ fn test_large_file_performance() {
     // Tree built successfully
     println!("Performance: {:.2} MB/s", (input.len() as f64 / 1_048_576.0) / elapsed.as_secs_f64());
 
-    assert_eq!(result.syntax_node().kind(), SyntaxKind::SOURCE_FILE);
+    assert!(!result.has_errors());
 }
 
 // ----------------------------------------------------------------------------

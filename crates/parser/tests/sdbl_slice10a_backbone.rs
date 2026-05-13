@@ -44,7 +44,7 @@ fn parse_no_errors(input: &str) -> syntax::SyntaxNode {
     let parse = parse_sdbl(input);
     assert!(
         parse.errors().iter().all(is_known_clause_boundary_recovery),
-        "Expected only known clause-boundary recovery for {input:?}, got errors: {:?}",
+        "Expected only PARSER-BUG-002 clause-boundary recovery for {input:?}, got errors: {:?}",
         parse.errors()
     );
     let root = parse.syntax_node();
@@ -52,6 +52,11 @@ fn parse_no_errors(input: &str) -> syntax::SyntaxNode {
     root
 }
 
+/// Allows the SDBL expression clause-boundary recovery surfaced by Track 6.1
+/// structured errors: after a valid expression body, the expression parser may
+/// emit `Unexpected KwIn` when it reaches a following `FROM` / `ИЗ` keyword.
+///
+/// XXX: PARSER-BUG-002. See `docs/diagnostics-audit/PARSER_FOLLOWUPS.md`.
 fn is_known_clause_boundary_recovery(error: &syntax::SyntaxError) -> bool {
     matches!(
         error.structured(),

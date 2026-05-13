@@ -26,7 +26,9 @@
 //! files. See `docs/legal/sdbl-clean-room-slices.md` for the full policy.
 
 use expect_test::{expect, Expect};
+use lexer::TokenKind;
 use parser::parse_sdbl;
+use parser_error::{ParseError, RecoveryKind};
 
 fn check(input: &str, expected: Expect) {
     let parse = parse_sdbl(input);
@@ -37,6 +39,38 @@ fn check(input: &str, expected: Expect) {
 fn check_no_errors(input: &str) {
     let parse = parse_sdbl(input);
     assert!(!parse.has_errors(), "Expected no errors, but got: {:#?}", parse.errors());
+}
+
+/// Allows the nested subquery alias recovery surfaced by Track 6.1 structured
+/// errors: the parser closes the inner subquery, then emits `Unexpected RParen`
+/// and `Expected RParen` at the outer alias boundary.
+///
+/// XXX: PARSER-BUG-001. See `docs/diagnostics-audit/PARSER_FOLLOWUPS.md`.
+fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool {
+    match error.structured() {
+        ParseError::Unexpected {
+            found: Some(TokenKind::RParen),
+            recovery: RecoveryKind::BumpToken,
+        } => true,
+        ParseError::Expected {
+            expected,
+            found: Some(TokenKind::Ident),
+            recovery: RecoveryKind::BumpToken,
+        } => expected.as_slice() == [TokenKind::RParen],
+        _ => false,
+    }
+}
+
+/// Allows the SDBL expression clause-boundary recovery surfaced by Track 6.1
+/// structured errors: after a valid expression body, the expression parser may
+/// emit `Unexpected KwIn` when it reaches a following `FROM` / `ИЗ` keyword.
+///
+/// XXX: PARSER-BUG-002. See `docs/diagnostics-audit/PARSER_FOLLOWUPS.md`.
+fn is_known_clause_boundary_recovery(error: &syntax::SyntaxError) -> bool {
+    matches!(
+        error.structured(),
+        ParseError::Unexpected { found: Some(TokenKind::KwIn), recovery: RecoveryKind::BumpToken }
+    )
 }
 
 // Bucket A.
@@ -208,6 +242,11 @@ fn test_subquery_in_from() {
 fn test_subquery_nested() {
     let input = "SELECT * FROM (SELECT * FROM (SELECT Name FROM Products) AS Inner) AS Outer";
     let parse = parse_sdbl(input);
+    assert!(
+        parse.errors().iter().all(is_known_nested_subquery_alias_recovery),
+        "Expected only PARSER-BUG-001 nested subquery alias recovery for {input:?}, got errors: {:?}",
+        parse.errors()
+    );
     let root = parse.syntax_node();
     assert_eq!(root.text().to_string(), input, "Root must cover full input");
     assert!(
@@ -2835,6 +2874,11 @@ fn test_slice10a_flat_additive_associativity() {
     use syntax::SyntaxKind;
     let input = "ВЫБРАТЬ А + Б + В ИЗ Т";
     let parse = parse_sdbl(input);
+    assert!(
+        parse.errors().iter().all(is_known_clause_boundary_recovery),
+        "Expected only PARSER-BUG-002 clause-boundary recovery for {input:?}, got errors: {:?}",
+        parse.errors()
+    );
     let root = parse.syntax_node();
     assert_eq!(root.text().to_string(), input, "Root must cover full input");
     let additives: Vec<_> =
