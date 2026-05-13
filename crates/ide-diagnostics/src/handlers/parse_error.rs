@@ -1,7 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -17,7 +16,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Reports non-empty parser error nodes produced by the BSL syntax parser.
+/// Reports parser errors produced by the BSL syntax parser.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::ParseError;
 
@@ -26,15 +25,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let parse = ctx.parse();
-    let root = parse.syntax_node();
 
-    root.descendants()
-        .filter(|node| node.kind() == SyntaxKind::ERROR && !node.text_range().is_empty())
-        .map(|node| Diagnostic {
+    parse
+        .errors()
+        .iter()
+        .map(|err| Diagnostic {
             code,
-            message: "Ошибка разбора исходного кода".to_string(),
+            message: err.structured().format_ru(),
             severity: ctx.severity(code),
-            range: node.text_range(),
+            range: err.range(),
             tags: ctx.tags(code),
             fixes: vec![],
         })
@@ -136,6 +135,49 @@ HHH"#;
         let parse_errors: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
         assert!(!parse_errors.is_empty(), "Expected parse error for EOF fixture with 'HHH'");
+    }
+
+    #[test]
+    fn test_parse_error_expected_then() {
+        let code = r#"
+Процедура Тест()
+    Если НЕ КонецЕсли
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(
+            parse_errors.iter().any(|d| d.message.contains("Ожидалось 'Тогда'")),
+            "Expected parse error message for missing 'Тогда', got: {:?}",
+            parse_errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_parse_error_expected_rparen() {
+        let code = "Процедура Тест(";
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(
+            parse_errors.iter().any(|d| d.message == "Ожидалось ')', встречено конец файла"),
+            "Expected parse error message for missing ')', got: {:?}",
+            parse_errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_parse_error_expected_end_procedure() {
+        let code = "Процедура Тест()";
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(
+            parse_errors.iter().any(|d| d.message.contains("Ожидалось 'КонецПроцедуры'")),
+            "Expected parse error message for missing 'КонецПроцедуры', got: {:?}",
+            parse_errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
