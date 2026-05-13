@@ -1,6 +1,7 @@
 //! Statement parsing.
 
 use lexer::TokenKind;
+use parser_error::{ParseError, RecoveryKind};
 
 use crate::event::NodeKind;
 use crate::parser::Parser;
@@ -466,7 +467,11 @@ fn assignment_or_call(p: &mut Parser) {
     } else {
         // Bare identifier or field access without call/index - syntax error
         // e.g., "HHH" instead of "HHH()" or "HHH = value"
-        m.complete(p, NodeKind::Error);
+        let found = p.current();
+        p.emit_error_at_marker(
+            m,
+            ParseError::Unexpected { found, recovery: RecoveryKind::RecoverySpan },
+        );
         p.eat(TokenKind::Semicolon);
     }
 }

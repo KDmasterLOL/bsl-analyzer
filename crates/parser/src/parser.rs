@@ -180,7 +180,6 @@ impl<'a> Parser<'a> {
         self.emit_error(ParseError::Custom { message: msg, recovery: RecoveryKind::Custom });
     }
 
-    #[allow(dead_code)]
     pub(crate) fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
         debug_assert!(err.recovery() == RecoveryKind::RecoverySpan);
         self.events.push(Event::ErrorWithSpan { start_token: m.start_token_pos, err });

@@ -110,7 +110,7 @@ fn annotation_param_value(p: &mut Parser) {
             annotation(p);
         }
         _ => {
-            p.error();
+            p.error_unexpected();
         }
     }
 }
