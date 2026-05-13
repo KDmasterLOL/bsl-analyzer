@@ -54,6 +54,7 @@ pub mod proc_signature;
 pub mod proc_signature_lookup;
 pub mod subtype;
 pub mod this_object;
+pub mod this_object_attr;
 
 // Re-export main types for convenience
 pub use field_enum::{enumerate_fields, FieldInfo, FieldOrigin};

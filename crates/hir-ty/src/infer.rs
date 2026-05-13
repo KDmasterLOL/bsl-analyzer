@@ -1405,6 +1405,25 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
+        let workspace_owns_common_module = resolver.user_common_module_exists(self.db, name);
+
+        // 5c. ObjectModule implicit ЭтотОбъект.<name> — bare attribute,
+        //     standard attribute, or tabular section of the owning MDO.
+        //     Symmetric to 5b (form attribute) but gated on
+        //     Resolver::resolve_this_object, which is None outside an
+        //     ObjectModule of an MDO with an *Object companion
+        //     (MetadataKind::object_kind_for). Extra workspace_owns_common_module
+        //     guard so a user CommonModule with the same name wins (mirrors
+        //     call-form precedence in dispatch_bare_ident_field_call).
+        if !user_shadows && !body_binding_shadows && !workspace_owns_common_module {
+            if let Some(ty) =
+                crate::this_object_attr::resolve_this_object_member(self.db, &resolver, name)
+            {
+                trace!("resolved {} as implicit ЭтотОбъект.{} member", name, name);
+                return ty;
+            }
+        }
+
         // 6. Platform global-context properties — top-level identifiers
         //    declared on `Global context` in HBK whose declared type is the
         //    foreign key into the platform type/method catalogue
@@ -1433,7 +1452,6 @@ impl<'db> InferenceContext<'db> {
         // `dispatch_bare_ident_field_call` (gate 3 user-CM precedes gate
         // 4 platform) so both the bare-IDENT and the typed-receiver
         // paths agree on user-shadows-platform.
-        let workspace_owns_common_module = resolver.user_common_module_exists(self.db, name);
         if !user_shadows && !workspace_owns_common_module {
             if let Some(prop) =
                 bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
