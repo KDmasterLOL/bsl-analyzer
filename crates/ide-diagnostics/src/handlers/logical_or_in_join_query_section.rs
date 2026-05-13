@@ -225,4 +225,57 @@ EndProcedure
                   severity: Warning"#]],
         );
     }
+
+    #[test]
+    fn test_three_part_field_path_no_leak() {
+        // Regression for PARSER-BUG-002b lowering follow-up.
+        // `Т.В.Поле` is a single three-part qualified reference.
+        // Pre-fix, the qualified branch in `extract_field_names_from_expr`
+        // matched the leading `Т.В` pair and bumped `i += 3`, leaving
+        // the trailing `.Поле` segment unattached — `Поле` then fell to
+        // the unqualified-strict-IDENT branch and was inserted as a
+        // separate field, inflating the distinct-field count and
+        // producing a false-positive diagnostic for `T.В.Поле = 1 OR
+        // T.В.Поле = 2`. Greedy chain consumption now collapses the
+        // entire dotted path into one entry.
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ * ИЗ Т1
+             |ВНУТРЕННЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.ID = Т2.ID
+             |   И (Т1.Поле.SubField = 1 ИЛИ Т1.Поле.SubField = 2)";
+КонецПроцедуры
+"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_undefined_literal_in_or_is_not_field() {
+        // Regression for PARSER-BUG-002b lowering follow-up.
+        // `НЕОПРЕДЕЛЕНО` is a `KW_UNDEFINED` token. Pre-fix,
+        // `extract_field_names_from_expr`'s widened name-token walk
+        // treated bare `НЕОПРЕДЕЛЕНО` as a field, inflating the
+        // distinct-field count and producing a false-positive
+        // `LogicalOrInJoinQuerySection` diagnostic when the OR was
+        // actually on a single field. Post-fix, the unqualified
+        // branch requires strict `IDENT`, so bare soft-keyword
+        // literals are skipped.
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ * ИЗ Т1
+             |ВНУТРЕННЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.ID = Т2.ID
+             |   И (Т2.Статус = НЕОПРЕДЕЛЕНО ИЛИ Т2.Статус = 1)";
+КонецПроцедуры
+"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            expect![[r#""#]],
+        );
+    }
 }
