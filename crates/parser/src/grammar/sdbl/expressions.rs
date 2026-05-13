@@ -143,6 +143,36 @@ pub(super) fn is_expression_start(p: &Parser) -> bool {
     }
 }
 
+/// Check whether the current token can serve as a property-name slot
+/// after a dot (e.g. `Т.<name>`). Accepts `Ident` plus the SDBL
+/// retained-keyword set produced by
+/// `sdbl_token_converter::convert_sdbl_token_kind` — the tokens it
+/// keeps as BSL keyword variants for expression parsing rather than
+/// downgrading to `Ident`:
+///   * operator keywords: `KwIn` (`В`/`IN`), `KwAnd` (`И`), `KwOr`
+///     (`ИЛИ`), `KwNot` (`НЕ`);
+///   * literal keywords: `KwTrue` (`Истина`), `KwFalse` (`Ложь`),
+///     `KwUndefined` (`Неопределено`).
+///
+/// In a column-name slot these are valid SDBL identifiers — `Т.В`
+/// (column "В") or `Т.Истина` (column "Истина") must parse as a field
+/// reference, not as the `В` operator or the `Истина` literal.
+pub(super) fn at_property_name(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(
+            TokenKind::Ident
+                | TokenKind::KwIn
+                | TokenKind::KwAnd
+                | TokenKind::KwOr
+                | TokenKind::KwNot
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+                | TokenKind::KwUndefined
+        )
+    )
+}
+
 /// Check if current position is a recovery point for list parsing.
 ///
 /// Recovery points are positions where the list parser must stop the
@@ -1103,8 +1133,8 @@ fn predicate_expr(p: &mut Parser) {
             while p.eat(TokenKind::Dot) {
                 p.check_iteration_limit(); // Prevent infinite loops
                 p.skip_trivia();
-                if p.at(TokenKind::Ident) {
-                    p.bump(); // Next identifier
+                if at_property_name(p) {
+                    p.bump(); // Next identifier (or soft-keyword used as a name)
                     p.skip_trivia();
                 } else {
                     break;
@@ -1182,8 +1212,8 @@ fn parse_cast_type(p: &mut Parser) {
             p.bump(); // DOT
             p.skip_trivia();
 
-            if p.at(TokenKind::Ident) {
-                p.bump(); // Next part of MDO type
+            if at_property_name(p) {
+                p.bump(); // Next part of MDO type (or soft-keyword used as a name)
                 p.skip_trivia();
             } else {
                 // Incomplete MDO type (e.g., "Справочник." without object name)
@@ -1260,9 +1290,10 @@ fn column_or_function(p: &mut Parser) {
                 break;
             }
 
-            // ERROR RECOVERY: After DOT, only Ident is valid for column/field name
-            // Whitelist approach: if NOT Ident, mark incomplete and stop
-            if !p.at(TokenKind::Ident) {
+            // ERROR RECOVERY: After DOT, only a property-name slot is valid.
+            // Accepts Ident plus the soft-keyword set (`Т.В`, `Т.И`, …) where
+            // single-letter SDBL operator keywords serve as field names.
+            if !at_property_name(p) {
                 // Incomplete: operators (=, AND), punctuation (,), EOF, etc.
                 let err = p.start();
                 let found = p.current();
@@ -1292,8 +1323,8 @@ fn column_or_function(p: &mut Parser) {
                 break;
             }
 
-            // Consume the identifier - it's a valid field name
-            p.bump(); // Ident
+            // Consume the field name (Ident or soft-keyword token).
+            p.bump();
             p.skip_trivia();
         }
         m.complete(p, NodeKind::SdblColumnRef);
@@ -1435,7 +1466,7 @@ fn column_or_function(p: &mut Parser) {
             p.bump(); // DOT
             p.skip_trivia();
 
-            if p.at(TokenKind::Ident) {
+            if at_property_name(p) {
                 // Check if this is actually a clause keyword (shouldn't be consumed as field)
                 if super::select::is_clause_keyword(p) {
                     // Incomplete: "CAST(...).\nFROM" - don't consume FROM
@@ -1450,7 +1481,7 @@ fn column_or_function(p: &mut Parser) {
                     break;
                 }
 
-                p.bump(); // Field name
+                p.bump(); // Field name (Ident or soft-keyword token)
                 p.skip_trivia();
             } else {
                 // Incomplete: "CAST(...)." without field name

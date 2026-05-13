@@ -645,7 +645,7 @@ fn table_ref(p: &mut Parser) {
         p.check_iteration_limit();
         p.skip_trivia();
 
-        if !p.at(TokenKind::Ident) {
+        if !super::expressions::at_property_name(p) {
             let err = p.start();
             let found = p.current();
             p.emit_error_at_marker(
@@ -1359,7 +1359,7 @@ fn for_update_clause(p: &mut Parser) {
         while p.at(TokenKind::Dot) {
             p.check_iteration_limit();
             p.bump();
-            if p.at(TokenKind::Ident) {
+            if super::expressions::at_property_name(p) {
                 p.bump();
             } else {
                 break;

@@ -70,18 +70,6 @@ fn is_known_nested_subquery_alias_recovery(error: &syntax::SyntaxError) -> bool 
     }
 }
 
-/// Allows the SDBL expression clause-boundary recovery surfaced by Track 6.1
-/// structured errors: after a valid expression body, the expression parser may
-/// emit `Unexpected KwIn` when it reaches a following `FROM` / `ИЗ` keyword.
-///
-/// XXX: PARSER-BUG-002. See `docs/diagnostics-audit/PARSER_FOLLOWUPS.md`.
-fn is_known_clause_boundary_recovery(error: &syntax::SyntaxError) -> bool {
-    matches!(
-        error.structured(),
-        ParseError::Unexpected { found: Some(TokenKind::KwIn), recovery: RecoveryKind::BumpToken }
-    )
-}
-
 // Bucket A.
 #[test]
 fn test_select_asterisk() {
@@ -2873,19 +2861,22 @@ fn test_slice10a_precedence_with_newline_trivia() {
     );
 }
 
-// Bucket A: flat-associativity guard — `А + Б + В` parses as a SINGLE
+// Bucket A: flat-associativity guard — `А + Б + Г` parses as a SINGLE
 // SdblAdditiveExpr with 3 expression children + 2 `+` tokens, NOT a
 // nested left-associative tree. Mini-spec §AST-shape invariant #1
 // (FLAT operator wrappers) and §Operator-binding pin list item
 // "flat-wrapper rule".
+//
+// Operand letters intentionally avoid `В` because the SDBL lexer
+// tokenises a single `В` as the `KwIn` (IN-operator) keyword.
 #[test]
 fn test_slice10a_flat_additive_associativity() {
     use syntax::SyntaxKind;
-    let input = "ВЫБРАТЬ А + Б + В ИЗ Т";
+    let input = "ВЫБРАТЬ А + Б + Г ИЗ Т";
     let parse = parse_sdbl(input);
     assert!(
-        parse.errors().iter().all(is_known_clause_boundary_recovery),
-        "Expected only PARSER-BUG-002 clause-boundary recovery for {input:?}, got errors: {:?}",
+        !parse.has_errors(),
+        "Expected clean parse for {input:?}, got errors: {:?}",
         parse.errors()
     );
     let root = parse.syntax_node();
@@ -2901,7 +2892,7 @@ fn test_slice10a_flat_additive_associativity() {
         .count();
     assert_eq!(
         plus_tokens, 2,
-        "FLAT SdblAdditiveExpr must have exactly 2 `+` direct token children for `А + Б + В`",
+        "FLAT SdblAdditiveExpr must have exactly 2 `+` direct token children for `А + Б + Г`",
     );
 }
 
