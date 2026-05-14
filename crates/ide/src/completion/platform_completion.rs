@@ -868,11 +868,11 @@ fn render_form_element(
 /// - `sort_text` uses a short prefix (`"10_"`, `"20_"`, …) so MDO fields
 ///   sort before platform methods in the popup: user attributes first, then
 ///   tabular sections, then standard attributes, then register parts.
-fn render_mdo_field(field: &Field, locale: ide_db::base_db::Locale) -> CompletionItem {
+pub(super) fn render_mdo_field(field: &Field, locale: ide_db::base_db::Locale) -> CompletionItem {
     let filter_text = format!("{} {}", field.name, field.english_name);
     CompletionItem {
         label: field.name.to_string(),
-        detail: Some(render_field_detail(&field.ty, field.is_readonly, locale)),
+        detail: Some(render_field_detail(field, locale)),
         kind: CompletionItemKind::Field,
         insert_text: field.name.to_string(),
         documentation: None,
@@ -894,9 +894,27 @@ fn render_mdo_field(field: &Field, locale: ide_db::base_db::Locale) -> Completio
 ///   in the chosen locale.
 /// - Appends `" [Только чтение]"` / `" [Read-only]"` for read-only
 ///   fields, mirroring the marker [`render_platform_property`] uses.
-fn render_field_detail(ty: &Ty, is_readonly: bool, locale: ide_db::base_db::Locale) -> String {
+fn render_field_detail(field: &Field, locale: ide_db::base_db::Locale) -> String {
+    let mut body = if let Some(value_ty) = &field.value_ty {
+        format!("{} → {}", render_ty_detail(&field.ty, locale), render_ty_detail(value_ty, locale))
+    } else {
+        render_ty_detail(&field.ty, locale)
+    };
+    match field.origin {
+        HirFieldOrigin::FormAttribute => body.push_str(" (реквизит формы)"),
+        HirFieldOrigin::MainFormAttribute => body.push_str(" (основной реквизит формы)"),
+        _ => {}
+    }
+    if field.is_readonly {
+        format!("{body} {}", read_only_marker(locale))
+    } else {
+        body
+    }
+}
+
+fn render_ty_detail(ty: &Ty, locale: ide_db::base_db::Locale) -> String {
     use hir::MetadataKind;
-    let body = match ty {
+    match ty {
         Ty::MetadataRef { kind, name } => {
             if matches!(kind, MetadataKind::TabularSection { .. }) {
                 kind.display_label(locale).to_string()
@@ -904,12 +922,8 @@ fn render_field_detail(ty: &Ty, is_readonly: bool, locale: ide_db::base_db::Loca
                 format!("{}.{}", kind.display_label(locale), name.as_str())
             }
         }
+        Ty::Union(_) => ty.display(locale).to_string(),
         _ => ty.display_name(locale).to_string(),
-    };
-    if is_readonly {
-        format!("{body} {}", read_only_marker(locale))
-    } else {
-        body
     }
 }
 
@@ -934,6 +948,7 @@ fn read_only_marker(locale: ide_db::base_db::Locale) -> &'static str {
 fn sort_key_for_origin(origin: HirFieldOrigin) -> &'static str {
     match origin {
         HirFieldOrigin::UserAttribute => "10_",
+        HirFieldOrigin::FormAttribute | HirFieldOrigin::MainFormAttribute => "10_",
         HirFieldOrigin::TabularSection => "20_",
         HirFieldOrigin::StandardAttribute => "30_",
         HirFieldOrigin::TabularSectionRowColumn => "40_",

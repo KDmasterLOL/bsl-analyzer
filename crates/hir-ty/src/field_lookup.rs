@@ -86,6 +86,7 @@ fn lookup_form_data_tabular_section_field(
                 kind: FormDataKind::Collection,
                 underlying: Some((*mdo_type, qualified)),
             },
+            value_ty: None,
             is_readonly: false,
             origin: crate::field_enum::FieldOrigin::TabularSection,
         });
@@ -171,6 +172,7 @@ pub fn lookup_field(
             name: first.name.clone(),
             name_en: first.name_en.clone(),
             ty: merged_ty,
+            value_ty: None,
             is_readonly: merged_readonly,
             origin: first.origin,
         });
@@ -207,6 +209,7 @@ pub fn lookup_field(
             name: field_name.clone(),
             name_en: None,
             ty: res.return_ty,
+            value_ty: None,
             is_readonly: res.is_readonly,
             origin: FieldOrigin::PlatformProperty,
         }

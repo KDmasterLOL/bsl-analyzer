@@ -45,6 +45,7 @@ pub mod lower;
 pub mod manager_lookup;
 pub mod method_lookup;
 pub mod method_resolution;
+pub mod module_implicit;
 pub mod narrow;
 pub mod platform_global_lookup;
 pub mod platform_manager_lookup;
@@ -75,6 +76,7 @@ pub use lower::TyLoweringContext;
 pub use manager_lookup::{lookup_manager_field, ManagerMemberInfo};
 pub use method_lookup::{lookup_method, MethodInfo};
 pub use method_resolution::{resolve_qualified_call, MethodResolution};
+pub use module_implicit::module_implicit_fields;
 pub use platform_manager_lookup::{
     resolve_platform_manager_method, resolve_platform_metadata_ref_method, PlatformMethodResolution,
 };

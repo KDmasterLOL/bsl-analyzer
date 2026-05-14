@@ -10,7 +10,7 @@ use bsl_platform::{
     ContextAvailability, MethodLookupInput, PlatformDataInner, PlatformMethod, PlatformProperty,
     TypeNameInput,
 };
-use hir::{classify_token, NameClass, Semantics, Ty};
+use hir::{classify_token, Field, NameClass, Semantics, Ty, Type as HirType};
 use ide_db::base_db::Locale;
 use ide_db::RootDatabase;
 use symbol_info::{from_global_function, from_platform_method, render_hover_markdown, Lang};
@@ -108,6 +108,12 @@ fn hover_field<DB: RootDatabase>(
         }
     }
 
+    if let Some(field) = mdo_field_on_ty(db, file_id, &receiver_ty, name) {
+        if field.value_ty.is_some() {
+            return Some(render_mdo_field_hover(&field, name, range, locale));
+        }
+    }
+
     // Fallback to qualified-name resolution. `resolve_name_to_definition`
     // calls `try_resolve_qualified_name_for_token` first — that's how
     // `Документы.ПКО`, `ОбщегоНазначения.МойМетод` and `Метаданные.Х`
@@ -140,6 +146,49 @@ fn hover_field<DB: RootDatabase>(
     }
 
     None
+}
+
+fn mdo_field_on_ty<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    receiver_ty: &Ty,
+    field_name: &str,
+) -> Option<Field> {
+    let needle = field_name.to_lowercase();
+    HirType::new(db, file_id, receiver_ty.clone()).fields().into_iter().find(|field| {
+        field.name.as_str().to_lowercase() == needle
+            || field.english_name.as_str().to_lowercase() == needle
+    })
+}
+
+fn render_mdo_field_hover(
+    field: &Field,
+    name: &str,
+    range: TextRange,
+    locale: Locale,
+) -> HoverResult {
+    let mut markup = format!("**{}**\n\n", name);
+    let detail = if let Some(value_ty) = &field.value_ty {
+        format!(
+            "{} → {}",
+            render_hover_ty_detail(&field.ty, locale),
+            render_hover_ty_detail(value_ty, locale),
+        )
+    } else {
+        render_hover_ty_detail(&field.ty, locale)
+    };
+    markup.push_str(&format!("**Тип:** {detail}\n\n"));
+    HoverResult { markup, range: Some(range) }
+}
+
+fn render_hover_ty_detail(ty: &Ty, locale: Locale) -> String {
+    match ty {
+        Ty::MetadataRef { kind, name } => {
+            format!("{}.{}", kind.display_label(locale), name.as_str())
+        }
+        Ty::Union(_) => ty.display(locale).to_string(),
+        _ => ty.display_name(locale).to_string(),
+    }
 }
 
 /// Hover for a name in a `FreeName` slot.

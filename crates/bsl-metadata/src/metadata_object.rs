@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::OnceLock;
 
+/// Metadata object name as it appears in Designer XML.
+pub type Name = String;
+
 /// Metadata object type (MDO Type)
 ///
 /// Represents different types of 1C:Enterprise metadata objects
@@ -424,6 +427,12 @@ pub struct MetadataObject {
     /// element or the constant predates type extraction.
     #[serde(default)]
     pub constant_type: Option<AttributeType>,
+    /// Registers written by this document.
+    ///
+    /// Populated from `<RegisterRecords>` in Document XML as
+    /// `(register_type, register_name)` pairs.
+    #[serde(default)]
+    pub register_records: Vec<(MdoType, Name)>,
 }
 
 /// Metadata object attribute (custom field).
@@ -695,6 +704,7 @@ impl MetadataObject {
             check_unique: false,
             code_series: crate::enums::CodeSeries::default(),
             constant_type: None,
+            register_records: Vec::new(),
         }
     }
 
@@ -716,6 +726,7 @@ impl MetadataObject {
             check_unique: false,
             code_series: crate::enums::CodeSeries::default(),
             constant_type: None,
+            register_records: Vec::new(),
         }
     }
 
@@ -738,7 +749,18 @@ impl MetadataObject {
             check_unique: false,
             code_series: crate::enums::CodeSeries::default(),
             constant_type: None,
+            register_records: Vec::new(),
         }
+    }
+
+    /// Registers that this document can record into.
+    pub fn register_records(&self) -> &[(MdoType, Name)] {
+        &self.register_records
+    }
+
+    /// Replace the registers that this document can record into.
+    pub fn set_register_records(&mut self, records: Vec<(MdoType, Name)>) {
+        self.register_records = records;
     }
 
     /// Set the declared value type (for [`MdoType::Constant`]).

@@ -29,7 +29,7 @@ use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 use hir_ty::lower::type_string::{lower_param_type_string, lower_return_type_string};
 use hir_ty::{
-    enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldOrigin,
+    enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
 };
 use vfs::FileId;
 
@@ -62,6 +62,8 @@ pub struct MethodParam {
 pub enum HirFieldOrigin {
     StandardAttribute,
     UserAttribute,
+    FormAttribute,
+    MainFormAttribute,
     TabularSection,
     TabularSectionRowColumn,
     RegisterDimension,
@@ -75,6 +77,8 @@ impl From<FieldOrigin> for HirFieldOrigin {
         match o {
             FieldOrigin::StandardAttribute => Self::StandardAttribute,
             FieldOrigin::UserAttribute => Self::UserAttribute,
+            FieldOrigin::FormAttribute => Self::FormAttribute,
+            FieldOrigin::MainFormAttribute => Self::MainFormAttribute,
             FieldOrigin::TabularSection => Self::TabularSection,
             FieldOrigin::TabularSectionRowColumn => Self::TabularSectionRowColumn,
             FieldOrigin::RegisterDimension => Self::RegisterDimension,
@@ -96,6 +100,8 @@ pub struct Field {
     pub english_name: Name,
     /// Field type after lowering through [`TyLoweringContext`].
     pub ty: Ty,
+    /// Domain value type wrapped by a synthetic/platform accessor.
+    pub value_ty: Option<Ty>,
     /// Whether this field is read-only.
     pub is_readonly: bool,
     /// Where this field originated from.
@@ -353,13 +359,31 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
             .into_iter()
             .map(|info| Field {
                 name: info.name.clone(),
-                english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
+                english_name: info.name_en.clone().unwrap_or_else(|| info.name.clone()),
                 ty: info.ty,
+                value_ty: info.value_ty,
                 is_readonly: info.is_readonly,
                 origin: HirFieldOrigin::from(info.origin),
             })
             .collect()
     }
+}
+
+impl From<FieldInfo> for Field {
+    fn from(info: FieldInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
+            ty: info.ty,
+            value_ty: info.value_ty,
+            is_readonly: info.is_readonly,
+            origin: HirFieldOrigin::from(info.origin),
+        }
+    }
+}
+
+pub fn module_implicit_fields<DB: hir_ty::db::HirDatabase>(db: &DB, file_id: FileId) -> Vec<Field> {
+    hir_ty::module_implicit_fields(db, file_id).into_iter().map(Field::from).collect()
 }
 
 /// Pick the `PlatformData` key for a receiver, matching
@@ -449,6 +473,21 @@ mod tests {
         (db, file_id)
     }
 
+    fn db_at_with_configuration(
+        module_path: PathBuf,
+        config_path: PathBuf,
+    ) -> (RootDatabaseImpl, FileId) {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new(module_path.to_string_lossy().to_string()));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, "");
+        db.set_all_config_paths(vec![(None, config_path)]);
+        (db, file_id)
+    }
+
     fn copy_dir_all(src: &Path, dst: &Path) {
         fs::create_dir_all(dst).expect("create temp fixture dir");
         for entry in fs::read_dir(src).expect("read fixture dir") {
@@ -487,6 +526,37 @@ mod tests {
             let xml = fs::read_to_string(&catalog_path).expect("read copied catalog xml");
             let xml = xml.replacen("<Name>ТабличнаяЧасть1</Name>", "<Name>Реквизит2</Name>", 1);
             fs::write(&catalog_path, xml).expect("write copied catalog xml");
+
+            Self { path }
+        }
+
+        fn information_register_with_resource() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos();
+            let path = std::env::temp_dir()
+                .join(format!("bsl-analyzer-type-facade-{}-{unique}", std::process::id()));
+            copy_dir_all(&designer_fixture_path(), &path);
+
+            let register_path = path.join("InformationRegisters/РегистрСведений1.xml");
+            let xml = fs::read_to_string(&register_path).expect("read copied register xml");
+            let resource = r#"
+			<Resource uuid="11111111-2222-3333-4444-555555555555">
+				<Properties>
+					<Name>Количество</Name>
+					<Type>
+						<v8:Type>xs:decimal</v8:Type>
+						<v8:NumberQualifiers>
+							<v8:Digits>15</v8:Digits>
+							<v8:FractionDigits>3</v8:FractionDigits>
+						</v8:NumberQualifiers>
+					</Type>
+				</Properties>
+			</Resource>"#;
+            let xml =
+                xml.replacen("</ChildObjects>", &format!("{resource}\n\t\t</ChildObjects>"), 1);
+            fs::write(&register_path, xml).expect("write copied register xml");
 
             Self { path }
         }
@@ -747,6 +817,81 @@ mod tests {
             },
             "typed dimension must lower through TyLoweringContext, not fall back to symbolic",
         );
+    }
+
+    #[test]
+    fn module_implicit_fields_object_module_yields_mdo_attributes() {
+        let config_path = designer_fixture_path();
+        let module_path = config_path.join("DataProcessors/ТестоваяОбработка/Ext/ObjectModule.bsl");
+        let (db, file_id) = db_at_with_configuration(module_path, config_path);
+
+        let fields = module_implicit_fields(&db, file_id);
+        let attr = fields
+            .iter()
+            .find(|field| field.name == Name::new("АдресСайта"))
+            .expect("object module must expose owner MDO attributes as bare identifiers");
+
+        assert_eq!(attr.ty, Ty::String);
+    }
+
+    #[test]
+    fn module_implicit_fields_record_set_module_yields_dimensions_and_resources() {
+        let fixture = TempFixture::information_register_with_resource();
+        let config_path = fixture.path();
+        let module_path =
+            config_path.join("InformationRegisters/РегистрСведений1/Ext/RecordSetModule.bsl");
+        let (db, file_id) = db_at_with_configuration(module_path, config_path);
+
+        let fields = module_implicit_fields(&db, file_id);
+
+        assert!(
+            fields.iter().any(|field| {
+                field.name == Name::new("Справочник1")
+                    && field.origin == HirFieldOrigin::RegisterDimension
+            }),
+            "record-set module must expose register dimensions",
+        );
+        assert!(
+            fields.iter().any(|field| {
+                field.name == Name::new("Количество")
+                    && field.origin == HirFieldOrigin::RegisterResource
+            }),
+            "record-set module must expose register resources",
+        );
+    }
+
+    #[test]
+    fn module_implicit_fields_managed_form_yields_form_attributes_with_origin() {
+        let config_path = designer_fixture_path();
+        let main_module_path =
+            config_path.join("DataProcessors/ТестоваяОбработка/Forms/Форма/Ext/Form/Module.bsl");
+        let regular_module_path =
+            config_path.join("Catalogs/рдт_Рецептура/Forms/ФормаЭлемента/Ext/Form/Module.bsl");
+
+        let (db, file_id) = db_at_with_configuration(main_module_path, config_path.clone());
+        let fields = module_implicit_fields(&db, file_id);
+        let main = fields
+            .iter()
+            .find(|field| field.name == Name::new("Объект"))
+            .expect("managed form must expose main form attribute");
+        assert_eq!(main.origin, HirFieldOrigin::MainFormAttribute);
+
+        let (db, file_id) = db_at_with_configuration(regular_module_path, config_path);
+        let fields = module_implicit_fields(&db, file_id);
+        let plain = fields
+            .iter()
+            .find(|field| field.name == Name::new("Пересчитать"))
+            .expect("managed form must expose regular form attribute");
+        assert_eq!(plain.origin, HirFieldOrigin::FormAttribute);
+    }
+
+    #[test]
+    fn module_implicit_fields_manager_module_yields_empty() {
+        let config_path = designer_fixture_path();
+        let module_path = config_path.join("Catalogs/Справочник1/Ext/ManagerModule.bsl");
+        let (db, file_id) = db_at_with_configuration(module_path, config_path);
+
+        assert!(module_implicit_fields(&db, file_id).is_empty());
     }
 
     // --- is_assignable_to (Task 7) --------------------------------

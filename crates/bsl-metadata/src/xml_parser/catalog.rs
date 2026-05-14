@@ -8,6 +8,7 @@ use crate::enums::CodeSeries;
 use crate::error::{MetadataError, Result};
 use crate::metadata_object::{Attribute, MdoType, MetadataObject};
 use crate::tabular_section::{TabularSection, TabularSectionAttribute};
+use std::str::FromStr;
 
 use super::helpers::{child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 use super::standard_attributes::{
@@ -162,6 +163,9 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
     }
 
     let mut mdo = MetadataObject::new(mdo_type, properties.name.clone());
+    if mdo_type == MdoType::Document {
+        mdo.set_register_records(parse_register_records(props_node));
+    }
     for attr in attributes {
         mdo.add_attribute(attr);
     }
@@ -186,6 +190,33 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
     );
 
     Ok(mdo)
+}
+
+/// Parse Document `<RegisterRecords>` entries into register type/name pairs.
+fn parse_register_records(props_node: roxmltree::Node<'_, '_>) -> Vec<(MdoType, String)> {
+    let Some(records_node) = find_child(props_node, "RegisterRecords") else {
+        return Vec::new();
+    };
+
+    records_node
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "Item")
+        .filter_map(|item| {
+            let raw = item.text()?.trim();
+            let (prefix, name) = raw.split_once('.')?;
+            if name.is_empty() {
+                return None;
+            }
+            let mdo_type = MdoType::from_str(prefix).ok()?;
+            match mdo_type {
+                MdoType::InformationRegister
+                | MdoType::AccumulationRegister
+                | MdoType::AccountingRegister
+                | MdoType::CalculationRegister => Some((mdo_type, name.to_string())),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Parse CodeSeries string from XML into enum

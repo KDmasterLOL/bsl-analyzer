@@ -161,6 +161,7 @@ mod tests {
             check_unique: false,
             code_series: bsl_metadata::CodeSeries::default(),
             constant_type: None,
+            register_records: vec![],
         };
         config.add_metadata_object(catalog);
 

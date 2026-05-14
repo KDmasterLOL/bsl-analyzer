@@ -118,6 +118,7 @@ pub(crate) fn lookup_form_item_field(
         name: Name::new(&element.name),
         name_en: None,
         ty,
+        value_ty: None,
         is_readonly: true,
         origin: FieldOrigin::PlatformProperty,
     })
@@ -227,6 +228,7 @@ pub(crate) fn refine_form_control_property(receiver_ty: &Ty, field: &Name) -> Op
         name: canonical_ru,
         name_en: Some(canonical_en),
         ty,
+        value_ty: None,
         is_readonly,
         origin: FieldOrigin::PlatformProperty,
     })
