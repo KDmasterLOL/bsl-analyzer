@@ -13,6 +13,7 @@ use ide_db::{RootDatabase, TextRange};
 use syntax::{ast::AstNode, SyntaxKind};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
+use crate::completion::platform_completion::render_mdo_field;
 
 /// Attempts to provide BSL code completions.
 ///
@@ -143,7 +144,7 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
         let shadow_labels: std::collections::HashSet<String> =
             completions.iter().map(|c| c.label.to_lowercase()).collect();
         completions.extend(
-            complete_form_attributes(db, position.file_id, prefix)
+            complete_module_self_attributes(db, position.file_id, prefix, position.locale)
                 .into_iter()
                 .filter(|c| !shadow_labels.contains(&c.label.to_lowercase())),
         );
@@ -180,7 +181,7 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
         // produced so far.
         let shadow_labels: std::collections::HashSet<String> =
             completions.iter().map(|c| c.label.to_lowercase()).collect();
-        for mut item in complete_form_attributes(db, position.file_id, "")
+        for mut item in complete_module_self_attributes(db, position.file_id, "", position.locale)
             .into_iter()
             .filter(|c| !shadow_labels.contains(&c.label.to_lowercase()))
         {
@@ -207,52 +208,19 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
     None
 }
 
-/// Completes managed-form attributes declared in `Form.xml`.
-///
-/// Inside a managed form, bare identifiers like `Замечание`, `Объект`,
-/// `ТаблицаРасходов` resolve as реквизиты формы — type inference covers
-/// them via [`hir_ty::form_attr::resolve_form_attribute`]; this surface
-/// makes them visible in the unqualified completion list too.
-///
-/// Returns an empty list for non-form modules and ordinary forms (managed
-/// gate is symmetric with the type-system layer).
-fn complete_form_attributes<DB: RootDatabase>(
+fn complete_module_self_attributes<DB: RootDatabase>(
     db: &DB,
     file_id: vfs::FileId,
     prefix: &str,
+    locale: ide_db::base_db::Locale,
 ) -> Vec<CompletionItem> {
-    let _span = tracing::debug_span!("complete_form_attributes").entered();
-
-    let module_id = hir::ModuleId::new(file_id);
-    let metadata = db.module_metadata(module_id);
-    let Some(form) = metadata.form.as_ref() else { return Vec::new() };
-    if !form.is_managed() {
-        return Vec::new();
-    }
-
+    let _span = tracing::debug_span!("complete_module_self_attributes").entered();
     let prefix_lower = prefix.to_lowercase();
-    let mut items = Vec::with_capacity(form.attributes().len());
-    for attr in form.attributes() {
-        if !attr.name.to_lowercase().starts_with(&prefix_lower) {
-            continue;
-        }
-        let detail = if attr.is_main {
-            format!("{} (основной реквизит формы)", attr.attr_type)
-        } else {
-            format!("{} (реквизит формы)", attr.attr_type)
-        };
-        items.push(CompletionItem {
-            label: attr.name.clone(),
-            detail: Some(detail),
-            kind: CompletionItemKind::Field,
-            insert_text: attr.name.clone(),
-            documentation: None,
-            sort_text: None,
-            filter_text: None,
-            source: None,
-        });
-    }
-    items
+    hir::module_implicit_fields(db, file_id)
+        .into_iter()
+        .filter(|field| field.name.as_str().to_lowercase().starts_with(&prefix_lower))
+        .map(|field| render_mdo_field(&field, locale))
+        .collect()
 }
 
 /// Completes local symbols (parameters and local variables).
@@ -1214,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_form_attributes_skips_non_form_module() {
+    fn test_complete_module_self_attributes_skips_non_self_module() {
         use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
         use ide_db::RootDatabaseImpl;
         use vfs::{file_set::FileSet, VfsPath};
@@ -1233,7 +1201,7 @@ mod tests {
         db.set_file_source_root(file_id, SourceRootId(0));
         db.set_file_text(file_id, source);
 
-        let items = complete_form_attributes(&db, file_id, "");
-        assert!(items.is_empty(), "non-form file must not surface form attributes");
+        let items = complete_module_self_attributes(&db, file_id, "", ide_db::base_db::Locale::Ru);
+        assert!(items.is_empty(), "non-self file must not surface implicit attributes");
     }
 }

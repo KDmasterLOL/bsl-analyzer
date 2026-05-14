@@ -13,7 +13,7 @@
 //! `field_lookup.rs` and `type_facade.rs`. They now live here as
 //! `pub(crate)` so both modules use the single canonical copy.
 
-use bsl_metadata::{AttributeType, MdoType, MetadataObject};
+use bsl_metadata::{AttributeType, MdoType, MetadataObject, RegisterPeriodicity};
 use bsl_platform::{standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData};
 use hir_def::configs::VisibleConfig;
 use hir_def::ty::{MetadataKind, Ty};
@@ -31,6 +31,8 @@ use crate::lower::TyLoweringContext;
 pub enum FieldOrigin {
     StandardAttribute,
     UserAttribute,
+    FormAttribute,
+    MainFormAttribute,
     TabularSection,
     TabularSectionRowColumn,
     RegisterDimension,
@@ -49,6 +51,11 @@ pub struct FieldInfo {
     pub name_en: Option<Name>,
     /// Lowered type of the field.
     pub ty: Ty,
+    /// тип доменного значения, обёрнутого synthetic/platform wrapper'ом;
+    /// `ty` остаётся фактическим типом доступа. Сейчас заполняется только
+    /// для RegisterFilter-ключей. Когда появится второй wrapper-kind,
+    /// рефакторить в FieldWrapperInfo { kind, value_ty }.
+    pub value_ty: Option<Ty>,
     /// `true` when the field is read-only (platform property or intrinsically
     /// read-only standard attribute like `Ссылка`, `НомерСтроки`).
     pub is_readonly: bool,
@@ -146,6 +153,16 @@ fn is_record_set_kind(kind: MetadataKind) -> bool {
     )
 }
 
+fn is_record_kind(kind: MetadataKind) -> bool {
+    matches!(
+        kind,
+        MetadataKind::InformationRegisterRecord
+            | MetadataKind::AccumulationRegisterRecord
+            | MetadataKind::AccountingRegisterRecord
+            | MetadataKind::CalculationRegisterRecord
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Internal enumerators
 // ---------------------------------------------------------------------------
@@ -177,6 +194,7 @@ fn enumerate_mdo_fields(
                 name: Name::new(&attr.name),
                 name_en: attr.name_en.as_deref().filter(|s| !s.is_empty()).map(Name::new),
                 ty: attribute_type_to_ty(&attr.attr_type, configs),
+                value_ty: None,
                 is_readonly,
                 origin,
             };
@@ -192,6 +210,7 @@ fn enumerate_mdo_fields(
                     kind: MetadataKind::TabularSection { parent: mdo_type },
                     name: qualified,
                 },
+                value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::TabularSection,
             };
@@ -240,6 +259,7 @@ fn enumerate_register_fields(
                     kind: MetadataKind::RegisterFilter { parent },
                     name: register_name.clone(),
                 },
+                value_ty: None,
                 is_readonly: true,
                 origin: FieldOrigin::PlatformProperty,
             };
@@ -258,6 +278,7 @@ fn enumerate_register_fields(
                     dim.name(),
                     configs,
                 ),
+                value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::RegisterDimension,
             };
@@ -275,6 +296,7 @@ fn enumerate_register_fields(
                     res.name(),
                     configs,
                 ),
+                value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::RegisterResource,
             };
@@ -282,16 +304,23 @@ fn enumerate_register_fields(
         }
 
         for attr in register.attributes() {
+            let mut ty = register_part_ty(
+                attr.attr_type(),
+                MetadataKind::RegisterAttribute { parent },
+                register_name,
+                attr.name(),
+                configs,
+            );
+            if is_record_kind(kind) && is_recorder_name(attr.name()) {
+                if let Some(recorders_ty) = recorder_union_ty(configs, parent, register_name) {
+                    ty = recorders_ty;
+                }
+            }
             let info = FieldInfo {
                 name: Name::new(attr.name()),
                 name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
-                ty: register_part_ty(
-                    attr.attr_type(),
-                    MetadataKind::RegisterAttribute { parent },
-                    register_name,
-                    attr.name(),
-                    configs,
-                ),
+                ty,
+                value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::RegisterAttribute,
             };
@@ -309,6 +338,12 @@ fn enumerate_register_fields(
         if let Some(prefix) = kind.platform_prefix() {
             for prop in PlatformData::instance().get_manager_properties(prefix) {
                 let res = crate::platform_property_lookup::to_resolution(prop);
+                let mut ty = res.return_ty;
+                if is_record_kind(kind) && is_recorder_name(&prop.name) {
+                    if let Some(recorders_ty) = recorder_union_ty(configs, parent, register_name) {
+                        ty = recorders_ty;
+                    }
+                }
                 let info = FieldInfo {
                     name: Name::new(prop.name.as_str()),
                     name_en: Some(Name::new(
@@ -322,7 +357,8 @@ fn enumerate_register_fields(
                             .next()
                             .unwrap_or(prop.english_name.as_str()),
                     )),
-                    ty: res.return_ty,
+                    ty,
+                    value_ty: None,
                     is_readonly: res.is_readonly,
                     origin: FieldOrigin::PlatformProperty,
                 };
@@ -333,6 +369,37 @@ fn enumerate_register_fields(
         return out;
     }
     Vec::new()
+}
+
+fn is_recorder_name(name: &str) -> bool {
+    if name.eq_ignore_ascii_case("Recorder") {
+        return true;
+    }
+    !name.is_ascii() && name.to_lowercase() == "регистратор"
+}
+
+fn recorder_union_ty(
+    configs: &[VisibleConfig],
+    parent: MdoType,
+    register_name: &Name,
+) -> Option<Ty> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut docs: Vec<Ty> = Vec::new();
+    for cfg in configs {
+        for name in cfg.configuration.recorders_for_register(parent, register_name.as_str()) {
+            if seen.insert(name.to_lowercase()) {
+                docs.push(Ty::MetadataRef {
+                    kind: MetadataKind::DocumentRef,
+                    name: Name::new(name),
+                });
+            }
+        }
+    }
+    if docs.is_empty() {
+        None
+    } else {
+        Some(Ty::union(docs))
+    }
 }
 
 /// Enumerate the members of a record-set's `Отбор` (Filter) — one
@@ -363,17 +430,35 @@ fn enumerate_filter_fields(
             continue;
         };
 
-        let mut out = Vec::with_capacity(register.dimensions().len());
+        let standard_keys = standard_filter_keys(parent, register.periodicity());
+        let mut out = Vec::with_capacity(register.dimensions().len() + standard_keys.len());
         let mut seen: std::collections::HashSet<Name> =
-            std::collections::HashSet::with_capacity(register.dimensions().len() * 2);
+            std::collections::HashSet::with_capacity(out.capacity() * 2);
 
         for dim in register.dimensions() {
             let info = FieldInfo {
                 name: Name::new(dim.name()),
                 name_en: None,
                 ty: Ty::PlatformObject(Name::new("ЭлементОтбора")),
+                value_ty: Some(
+                    dim.attr_type()
+                        .map(|attr_type| attribute_type_to_ty(attr_type, configs))
+                        .unwrap_or(Ty::Unknown),
+                ),
                 is_readonly: false,
                 origin: FieldOrigin::RegisterDimension,
+            };
+            push_unique(&mut out, &mut seen, info);
+        }
+
+        for key in standard_keys {
+            let info = FieldInfo {
+                name: Name::new(key),
+                name_en: None,
+                ty: Ty::PlatformObject(Name::new("ЭлементОтбора")),
+                value_ty: Some(standard_filter_key_value_ty(configs, parent, register_name, key)),
+                is_readonly: false,
+                origin: FieldOrigin::PlatformProperty,
             };
             push_unique(&mut out, &mut seen, info);
         }
@@ -381,6 +466,60 @@ fn enumerate_filter_fields(
         return out;
     }
     Vec::new()
+}
+
+fn standard_filter_key_value_ty(
+    configs: &[VisibleConfig],
+    parent: MdoType,
+    register_name: &Name,
+    key: &str,
+) -> Ty {
+    match key {
+        "Регистратор" => {
+            recorder_union_ty(configs, parent, register_name).unwrap_or(Ty::Unknown)
+        }
+        "Период" | "ПериодРегистрации" => Ty::Date,
+        "Активность" => Ty::Boolean,
+        "НомерСтроки" => Ty::Number,
+        // CalcReg-specific, separate slice
+        "ВидРасчета" => Ty::Unknown,
+        _ => Ty::Unknown,
+    }
+}
+
+fn standard_filter_keys(
+    parent: MdoType,
+    periodicity: Option<RegisterPeriodicity>,
+) -> &'static [&'static str] {
+    match parent {
+        MdoType::AccumulationRegister | MdoType::AccountingRegister => {
+            &["Период", "Регистратор", "НомерСтроки", "Активность"]
+        }
+        // ITS dump index.json content/130 "Регистры расчета" (html/chapter_130.html)
+        // lists calculation-register fields Регистратор, НомерСтроки, Активность,
+        // ВидРасчета, ПериодРегистрации, and ПериодДействия only for registers
+        // with the "Период действия" property; plain `Период` is not listed.
+        //
+        // `Register::periodicity()` only captures `<InformationRegisterPeriodicity>`,
+        // so the `<ActionPeriod>` flag that gates `ПериодДействия` is not yet
+        // available on the parsed metadata. Until the XML parser is extended,
+        // emit the unconditional core (which covers the vast majority of real
+        // calculation registers, since they are recorder-driven by design); the
+        // optional `ПериодДействия` filter key is intentionally omitted to keep
+        // completion accurate rather than over-inclusive.
+        MdoType::CalculationRegister => {
+            let _ = periodicity;
+            &["Регистратор", "НомерСтроки", "Активность", "ВидРасчета", "ПериодРегистрации"]
+        }
+        MdoType::InformationRegister => match periodicity {
+            Some(RegisterPeriodicity::RecorderPosition) => &["Регистратор", "Активность", "Период"],
+            Some(
+                RegisterPeriodicity::Second | RegisterPeriodicity::Day | RegisterPeriodicity::Month,
+            ) => &["Период", "Активность"],
+            Some(RegisterPeriodicity::Nonperiodical) | None => &[],
+        },
+        _ => &[],
+    }
 }
 
 fn enumerate_tabular_row_fields(
@@ -404,6 +543,7 @@ fn enumerate_tabular_row_fields(
             name: Name::new(attr.name()),
             name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
             ty: attribute_type_to_ty(attr.attr_type(), configs),
+            value_ty: None,
             is_readonly: false,
             origin: FieldOrigin::TabularSectionRowColumn,
         })
@@ -428,6 +568,7 @@ fn enumerate_tabular_row_fields(
                 name: nr_name,
                 name_en: Some(nr_name_en),
                 ty: prop.return_ty,
+                value_ty: None,
                 is_readonly: prop.is_readonly,
                 origin: FieldOrigin::PlatformProperty,
             });
@@ -943,6 +1084,355 @@ mod tests {
             .expect("attribute must appear");
         assert_eq!(att.origin, FieldOrigin::RegisterAttribute);
         assert_eq!(att.ty, Ty::String);
+    }
+
+    #[test]
+    fn enumerate_register_record_recorder_uses_document_recorders_union() {
+        let mut config = Configuration::new("Test");
+        let mut doc1 = MetadataObject::new(MdoType::Document, "Документ1");
+        doc1.set_register_records(vec![(MdoType::InformationRegister, "РегистрСведений1".into())]);
+        let mut doc2 = MetadataObject::new(MdoType::Document, "Документ2");
+        doc2.set_register_records(vec![(MdoType::InformationRegister, "РегистрСведений1".into())]);
+        config.add_metadata_object(doc1);
+        config.add_metadata_object(doc2);
+        config.add_register(register_with(
+            "РегистрСведений1",
+            MdoType::InformationRegister,
+            vec![],
+            vec![],
+            vec![attribute_typed(
+                "Регистратор",
+                AttributeType::AnyObjectRef { mdo_type: MdoType::Document },
+            )],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRecord,
+            name: Name::new("РегистрСведений1"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+        let recorder = fields
+            .iter()
+            .find(|f| f.name.as_str() == "Регистратор")
+            .expect("Регистратор must appear on register record");
+
+        assert_eq!(
+            recorder.ty,
+            Ty::union(vec![
+                Ty::MetadataRef {
+                    kind: MetadataKind::DocumentRef, name: Name::new("Документ1")
+                },
+                Ty::MetadataRef {
+                    kind: MetadataKind::DocumentRef, name: Name::new("Документ2")
+                },
+            ]),
+        );
+    }
+
+    #[test]
+    fn enumerate_register_record_recorder_singleton_collapses_to_metadata_ref() {
+        let mut config = Configuration::new("Test");
+        let mut document = MetadataObject::new(MdoType::Document, "Документ1");
+        document
+            .set_register_records(vec![(MdoType::InformationRegister, "РегистрСведений1".into())]);
+        config.add_metadata_object(document);
+        config.add_register(register_with(
+            "РегистрСведений1",
+            MdoType::InformationRegister,
+            vec![],
+            vec![],
+            vec![attribute_typed(
+                "регистратор",
+                AttributeType::AnyObjectRef { mdo_type: MdoType::Document },
+            )],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRecord,
+            name: Name::new("РегистрСведений1"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+        let recorder = fields
+            .iter()
+            .find(|f| f.name.as_str() == "регистратор")
+            .expect("регистратор must appear on register record");
+
+        assert_eq!(
+            recorder.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::DocumentRef, name: Name::new("Документ1")
+            },
+        );
+    }
+
+    #[test]
+    fn enumerate_register_record_recorder_aggregates_across_visible_extensions() {
+        // Extension scenario: base configuration declares the register and
+        // one recorder; an extension configuration declares an additional
+        // document that records into the same register. The recorder union
+        // must contain documents from BOTH configurations.
+        let mut base = Configuration::new("Base");
+        let mut doc1 = MetadataObject::new(MdoType::Document, "Документ1");
+        doc1.set_register_records(vec![(MdoType::InformationRegister, "РегистрСведений1".into())]);
+        base.add_metadata_object(doc1);
+        base.add_register(register_with(
+            "РегистрСведений1",
+            MdoType::InformationRegister,
+            vec![],
+            vec![],
+            vec![attribute_typed(
+                "Регистратор",
+                AttributeType::AnyObjectRef { mdo_type: MdoType::Document },
+            )],
+        ));
+
+        let mut ext = Configuration::new("Extension");
+        let mut doc2 = MetadataObject::new(MdoType::Document, "Документ2");
+        doc2.set_register_records(vec![(MdoType::InformationRegister, "РегистрСведений1".into())]);
+        ext.add_metadata_object(doc2);
+
+        let configs = vec![
+            VisibleConfig { name: None, configuration: Arc::new(base) },
+            VisibleConfig { name: Some("Extension".to_string()), configuration: Arc::new(ext) },
+        ];
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::InformationRegisterRecord,
+            name: Name::new("РегистрСведений1"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+        let recorder = fields
+            .iter()
+            .find(|f| f.name.as_str() == "Регистратор")
+            .expect("Регистратор must appear on register record");
+
+        let Ty::Union(parts) = &recorder.ty else {
+            panic!("expected Ty::Union for cross-config recorders, got {:?}", recorder.ty);
+        };
+        let names: std::collections::HashSet<&str> = parts
+            .iter()
+            .filter_map(|t| match t {
+                Ty::MetadataRef { kind: MetadataKind::DocumentRef, name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains("Документ1"), "base recorder must be present, got {names:?}");
+        assert!(names.contains("Документ2"), "extension recorder must be present, got {names:?}");
+        assert_eq!(names.len(), 2, "exactly two recorders expected, got {names:?}");
+    }
+
+    #[test]
+    fn enumerate_filter_fields_adds_standard_accumulation_keys_after_dimensions() {
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "РегистрНакопления1",
+            MdoType::AccumulationRegister,
+            vec![dimension_typed("Регистратор", AttributeType::String { length: Some(10) })],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
+            name: Name::new("РегистрНакопления1"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+
+        for key in ["Период", "Регистратор", "НомерСтроки", "Активность"]
+        {
+            assert!(
+                fields.iter().any(|f| f.name.as_str() == key),
+                "{key} must be exposed on accumulation register filter",
+            );
+        }
+        let recorder = fields
+            .iter()
+            .find(|f| f.name.as_str() == "Регистратор")
+            .expect("Регистратор filter member");
+        assert_eq!(
+            recorder.origin,
+            FieldOrigin::RegisterDimension,
+            "dimension must win over the standard filter key with the same name",
+        );
+    }
+
+    #[test]
+    fn enumerate_filter_fields_value_ty_for_information_register() {
+        let register = bsl_metadata::Register::builder()
+            .name("Курсы")
+            .mdo_type(MdoType::InformationRegister)
+            .periodicity(Some(RegisterPeriodicity::Second))
+            .add_dimension(dimension_typed(
+                "Валюта",
+                AttributeType::Ref { mdo_type: MdoType::Catalog, name: "Валюты".into() },
+            ))
+            .add_dimension(dimension_typed(
+                "Цена",
+                AttributeType::Number { precision: 15, scale: 2 },
+            ))
+            .build();
+        let mut config = Configuration::new("Test");
+        config.add_register(register);
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("Курсы"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+
+        let period = fields.iter().find(|f| f.name.as_str() == "Период").expect("Период");
+        assert_eq!(period.value_ty, Some(Ty::Date));
+        let active = fields.iter().find(|f| f.name.as_str() == "Активность").expect("Активность");
+        assert_eq!(active.value_ty, Some(Ty::Boolean));
+        let currency = fields.iter().find(|f| f.name.as_str() == "Валюта").expect("Валюта");
+        assert_eq!(
+            currency.value_ty,
+            Some(Ty::MetadataRef {
+                kind: MetadataKind::CatalogRef, name: Name::new("Валюты")
+            }),
+        );
+        let price = fields.iter().find(|f| f.name.as_str() == "Цена").expect("Цена");
+        assert_eq!(price.value_ty, Some(Ty::Number));
+    }
+
+    #[test]
+    fn enumerate_filter_fields_value_ty_for_accumulation_register() {
+        let mut config = Configuration::new("Test");
+        let mut document = MetadataObject::new(MdoType::Document, "Поступление");
+        document.set_register_records(vec![(MdoType::AccumulationRegister, "Остатки".into())]);
+        config.add_metadata_object(document);
+        config.add_register(register_with(
+            "Остатки",
+            MdoType::AccumulationRegister,
+            vec![],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::AccumulationRegister },
+            name: Name::new("Остатки"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+
+        let recorder =
+            fields.iter().find(|f| f.name.as_str() == "Регистратор").expect("Регистратор");
+        assert_eq!(
+            recorder.value_ty,
+            Some(Ty::MetadataRef {
+                kind: MetadataKind::DocumentRef,
+                name: Name::new("Поступление"),
+            }),
+        );
+    }
+
+    #[test]
+    fn enumerate_filter_fields_dimension_named_period_wins_over_standard_key() {
+        let register = bsl_metadata::Register::builder()
+            .name("Срез")
+            .mdo_type(MdoType::InformationRegister)
+            .periodicity(Some(RegisterPeriodicity::Second))
+            .add_dimension(dimension_typed(
+                "Период",
+                AttributeType::Number { precision: 10, scale: 0 },
+            ))
+            .build();
+        let mut config = Configuration::new("Test");
+        config.add_register(register);
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("Срез"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+        let period = fields.iter().find(|f| f.name.as_str() == "Период").expect("Период");
+
+        assert_eq!(period.origin, FieldOrigin::RegisterDimension);
+        assert_eq!(period.value_ty, Some(Ty::Number));
+    }
+
+    #[test]
+    fn enumerate_filter_fields_calculation_register_uses_correct_standard_keys() {
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "РегистрРасчета1",
+            MdoType::CalculationRegister,
+            vec![],
+            vec![],
+            vec![],
+        ));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::CalculationRegister },
+            name: Name::new("РегистрРасчета1"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+
+        assert_eq!(
+            names,
+            vec!["Регистратор", "НомерСтроки", "Активность", "ВидРасчета", "ПериодРегистрации"],
+        );
+        // `Register::periodicity()` does not populate from `<ActionPeriod>` yet,
+        // so the CalcReg branch must ignore the periodicity argument to stay
+        // accurate on real parsed metadata.
+        assert_eq!(
+            standard_filter_keys(MdoType::CalculationRegister, Some(RegisterPeriodicity::Month)),
+            standard_filter_keys(MdoType::CalculationRegister, None),
+        );
+    }
+
+    #[test]
+    fn enumerate_filter_fields_recorder_position_information_register_uses_register_keys() {
+        let register = bsl_metadata::Register::builder()
+            .name("ПозицияРегистратора")
+            .mdo_type(MdoType::InformationRegister)
+            .periodicity(Some(RegisterPeriodicity::RecorderPosition))
+            .build();
+        let mut config = Configuration::new("Test");
+        config.add_register(register);
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("ПозицияРегистратора"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+
+        assert_eq!(names, vec!["Регистратор", "Активность", "Период"]);
+    }
+
+    #[test]
+    fn enumerate_filter_fields_adds_period_for_periodic_information_register() {
+        let config = {
+            let register = bsl_metadata::Register::builder()
+                .name("ПериодическийРегистр")
+                .mdo_type(MdoType::InformationRegister)
+                .periodicity(Some(RegisterPeriodicity::Second))
+                .build();
+            let mut config = Configuration::new("Test");
+            config.add_register(register);
+            config
+        };
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("ПериодическийРегистр"),
+        };
+        let fields = enumerate_fields(&configs, &receiver);
+
+        assert!(fields.iter().any(|f| f.name.as_str() == "Период"));
+        assert!(fields.iter().any(|f| f.name.as_str() == "Активность"));
+        assert!(!fields.iter().any(|f| f.name.as_str() == "Регистратор"));
     }
 
     #[test]

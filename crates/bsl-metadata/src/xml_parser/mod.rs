@@ -518,6 +518,75 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_document_xml_register_records() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.10">
+    <Document uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+        <Properties>
+            <Name>ДокументРегистратор</Name>
+            <RegisterRecords>
+                <xr:Item xsi:type="xr:MDObjectRef">AccumulationRegister.РегистрНакопления1</xr:Item>
+                <xr:Item xsi:type="xr:MDObjectRef">InformationRegister.РегистрСведений1</xr:Item>
+                <xr:Item xsi:type="xr:MDObjectRef">AccountingRegister.РегистрБухгалтерии1</xr:Item>
+                <xr:Item xsi:type="xr:MDObjectRef">CalculationRegister.РегистрРасчета1</xr:Item>
+            </RegisterRecords>
+        </Properties>
+    </Document>
+</MetaDataObject>"#;
+
+        let document = parse_document_xml(xml).unwrap();
+
+        assert_eq!(
+            document.register_records(),
+            &[
+                (MdoType::AccumulationRegister, "РегистрНакопления1".to_string()),
+                (MdoType::InformationRegister, "РегистрСведений1".to_string()),
+                (MdoType::AccountingRegister, "РегистрБухгалтерии1".to_string()),
+                (MdoType::CalculationRegister, "РегистрРасчета1".to_string()),
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_register_records_filters_invalid_prefix() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.10">
+    <Document uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+        <Properties>
+            <Name>ДокументРегистратор</Name>
+            <RegisterRecords>
+                <xr:Item xsi:type="xr:MDObjectRef">Catalog.X</xr:Item>
+                <xr:Item xsi:type="xr:MDObjectRef">BogusPrefix.Y</xr:Item>
+            </RegisterRecords>
+        </Properties>
+    </Document>
+</MetaDataObject>"#;
+
+        let document = parse_document_xml(xml).unwrap();
+
+        assert!(document.register_records().is_empty());
+    }
+
+    #[test]
+    fn test_designer_document_fixture_register_records() {
+        let xml = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/designer/Documents/Документ1.xml"
+        ));
+        let document = parse_document_xml(xml).unwrap();
+
+        assert_eq!(
+            document.register_records(),
+            &[
+                (MdoType::AccumulationRegister, "РегистрНакопления1".to_string()),
+                (MdoType::CalculationRegister, "РегистрРасчета1".to_string()),
+                (MdoType::InformationRegister, "РегистрСведений2".to_string()),
+                (MdoType::AccountingRegister, "РегистрБухгалтерии1".to_string()),
+            ],
+        );
+    }
+
+    #[test]
     fn test_parse_type_xml_date() {
         use crate::metadata_object::AttributeType;
 

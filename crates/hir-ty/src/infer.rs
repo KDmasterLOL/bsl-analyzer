@@ -1254,11 +1254,13 @@ impl<'db> InferenceContext<'db> {
         //    other scope because BSL treats the identifier like a
         //    platform global: not shadowable, resolved through module
         //    metadata (the enclosing MDO) rather than the scope chain.
-        //    `Resolver::resolve_this_object` returns `None` for module
-        //    kinds that have no `*Object` companion (forms, record
-        //    sets, manager / common / command modules) — those fall
-        //    through to the normal cascade and become `Ty::Unknown`,
-        //    matching the "best-effort" inference semantics.
+        //    Module kind dictates the receiver shape:
+        //      - ObjectModule with an `*Object` companion → `Ty::ThisObject`
+        //      - ManagerModule with a manager prefix → `Ty::ThisManager`
+        //      - RecordSetModule for a register flavour → `Ty::MetadataRef{*RecordSet}`
+        //      - Managed form → `Ty::PlatformObject(ФормаКлиентскогоПриложения)`
+        //    Common / command modules and other unsupported kinds fall
+        //    through to the normal cascade and become `Ty::Unknown`.
         let name_lower = name.as_str().to_lowercase();
         if name_lower == "этотобъект" || name_lower == "thisobject" {
             if let Some(owner) = resolver.resolve_this_object(self.db) {
@@ -1274,6 +1276,24 @@ impl<'db> InferenceContext<'db> {
             if let Some(owner) = resolver.resolve_this_manager(self.db) {
                 trace!("resolved {} as ThisManager {{ owner: {:?} }}", name, owner);
                 return Ty::ThisManager { owner };
+            }
+            // Record-set module: `ЭтотОбъект` is the record set itself
+            // (`MetadataRef{*RecordSet, name}`). One-to-one mapping per
+            // register flavour (4 MdoType -> 4 *RecordSet kind), so we emit
+            // the `MetadataRef` directly rather than going through a wrapper
+            // variant — `*RecordSet` has no sibling kind to disambiguate the
+            // way `Ty::ThisObject` disambiguates *Object from *Ref for
+            // catalog/document/etc. modules.
+            if let Some((mdo, name)) = resolver.resolve_this_record_set(self.db) {
+                if let Some(kind) = hir_def::ty::MetadataKind::record_set_kind_for(mdo) {
+                    trace!(
+                        "resolved {} as record-set MetadataRef {{ {:?}, {} }}",
+                        name.as_str(),
+                        kind,
+                        name
+                    );
+                    return Ty::MetadataRef { kind, name };
+                }
             }
             // Managed-form fallback: `ЭтотОбъект` in a managed form module
             // names the form itself. There is no `MdoType` companion (forms
@@ -1420,6 +1440,24 @@ impl<'db> InferenceContext<'db> {
                 crate::this_object_attr::resolve_this_object_member(self.db, &resolver, name)
             {
                 trace!("resolved {} as implicit ЭтотОбъект.{} member", name, name);
+                return ty;
+            }
+        }
+
+        // 5d. RecordSetModule implicit ЭтотОбъект.<name> — bare reference
+        //     to a platform property (`ДополнительныеСвойства`, `Отбор`,
+        //     `ОбменДанными`, …) or a register dimension/resource/attribute.
+        //     User methods are handled earlier as `Ty::Unknown` via the
+        //     `user_shadows` / `body_binding_shadows` gates (see step 2),
+        //     so we only reach here for field-shaped lookups.
+        //     Symmetric to 5c (ObjectModule) but gated on
+        //     Resolver::resolve_this_record_set, which is None outside a
+        //     RecordSetModule of one of the four register flavours.
+        if !user_shadows && !body_binding_shadows && !workspace_owns_common_module {
+            if let Some(ty) =
+                crate::this_object_attr::resolve_this_record_set_member(self.db, &resolver, name)
+            {
+                trace!("resolved {} as implicit record-set ЭтотОбъект.{} member", name, name);
                 return ty;
             }
         }

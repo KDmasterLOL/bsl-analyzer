@@ -16,7 +16,7 @@ pub use name_classify::{classify_token, NameClass};
 pub use semantic_symbol::{
     SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
 };
-pub use type_facade::{Field, HirFieldOrigin, Type};
+pub use type_facade::{module_implicit_fields, Field, HirFieldOrigin, Type};
 
 // Re-export core types
 pub use hir_def::{

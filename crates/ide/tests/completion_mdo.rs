@@ -166,6 +166,99 @@ fn write_collision_catalog_fixture(root: &Path) {
     .expect("write synthetic catalog XML");
 }
 
+fn write_accumulation_register_with_recorder_fixture(root: &Path) {
+    std::fs::create_dir_all(root.join("AccumulationRegisters"))
+        .expect("create AccumulationRegisters directory");
+    std::fs::create_dir_all(root.join("Documents")).expect("create Documents directory");
+    std::fs::create_dir_all(root.join("CommonModules")).expect("create CommonModules directory");
+    std::fs::write(
+        root.join("Configuration.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="11111111-1111-1111-1111-111111111111">
+        <Properties>
+            <Name>RegisterConfig</Name>
+        </Properties>
+        <ChildObjects>
+            <CommonModule>ПервыйОбщийМодуль</CommonModule>
+            <AccumulationRegister>Остатки</AccumulationRegister>
+            <Document>Поступление</Document>
+        </ChildObjects>
+    </Configuration>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic Configuration.xml");
+    std::fs::write(
+        root.join("CommonModules/ПервыйОбщийМодуль.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="44444444-4444-4444-4444-444444444444">
+        <Properties>
+            <Name>ПервыйОбщийМодуль</Name>
+            <Global>false</Global>
+            <Server>true</Server>
+            <ClientManagedApplication>false</ClientManagedApplication>
+            <ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+            <ExternalConnection>false</ExternalConnection>
+            <ServerCall>false</ServerCall>
+            <Privileged>false</Privileged>
+            <ReturnValuesReuse>DontUse</ReturnValuesReuse>
+        </Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic CommonModule XML");
+    std::fs::write(
+        root.join("AccumulationRegisters/Остатки.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <AccumulationRegister uuid="22222222-2222-2222-2222-222222222222">
+        <Properties>
+            <Name>Остатки</Name>
+        </Properties>
+        <ChildObjects>
+            <Dimension uuid="33333333-3333-3333-3333-333333333333">
+                <Properties>
+                    <Name>Номенклатура</Name>
+                    <Type>
+                        <v8:Type>xs:string</v8:Type>
+                    </Type>
+                </Properties>
+            </Dimension>
+            <Dimension uuid="33333333-3333-3333-3333-444444444444">
+                <Properties>
+                    <Name>Цена</Name>
+                    <Type>
+                        <v8:Type>xs:decimal</v8:Type>
+                        <v8:NumberQualifiers>
+                            <v8:Digits>15</v8:Digits>
+                            <v8:FractionDigits>2</v8:FractionDigits>
+                        </v8:NumberQualifiers>
+                    </Type>
+                </Properties>
+            </Dimension>
+        </ChildObjects>
+    </AccumulationRegister>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic accumulation register XML");
+    std::fs::write(
+        root.join("Documents/Поступление.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.10">
+    <Document uuid="55555555-5555-5555-5555-555555555555">
+        <Properties>
+            <Name>Поступление</Name>
+            <RegisterRecords>
+                <xr:Item xsi:type="xr:MDObjectRef">AccumulationRegister.Остатки</xr:Item>
+            </RegisterRecords>
+        </Properties>
+    </Document>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic document XML");
+}
+
 /// JSDoc-annotated CommonModule function that returns a CatalogRef.
 const CATALOG_REF_MODULE: &str = r#"//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl
 // Возвращаемое значение:
@@ -517,5 +610,88 @@ fn completion_after_dot_on_information_register_ref_shows_dimensions() {
         CompletionItemKind::Field,
         "register dimension must have kind Field, got {:?}",
         item.kind
+    );
+}
+
+#[test]
+fn completion_filter_recorder_detail_contains_wrapper_and_recorder_type() {
+    let temp_dir = tempfile::tempdir().expect("create synthetic register config tempdir");
+    write_accumulation_register_with_recorder_fixture(temp_dir.path());
+
+    let items = complete_with_config_path(
+        r#"//- /test.bsl
+Процедура Тест()
+    Н = РегистрыНакопления.Остатки.СоздатьНаборЗаписей();
+    Н.Отбор.$0
+КонецПроцедуры
+"#,
+        temp_dir.path(),
+    );
+
+    let recorder = item_with_label(&items, "Регистратор").expect("Регистратор must complete");
+    let detail = recorder.detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("ЭлементОтбора →") && detail.contains("ДокументСсылка.Поступление"),
+        "Регистратор detail must show wrapper and recorder type, got: {detail:?}",
+    );
+}
+
+#[test]
+fn completion_bare_ident_in_object_module_offers_mdo_attribute_with_real_type() {
+    let module_path =
+        designer_fixture_path().join("DataProcessors/ТестоваяОбработка/Ext/ObjectModule.bsl");
+    let items = complete(&format!(
+        r#"//- {}
+Процедура Тест()
+    Адр$0
+КонецПроцедуры
+"#,
+        module_path.display(),
+    ));
+
+    let attr = item_with_label(&items, "АдресСайта").expect("MDO attribute must complete");
+    assert_eq!(attr.detail.as_deref(), Some("Строка"));
+}
+
+#[test]
+fn completion_bare_ident_in_form_marks_regular_form_attribute() {
+    let module_path = designer_fixture_path()
+        .join("Catalogs/рдт_Рецептура/Forms/ФормаЭлемента/Ext/Form/Module.bsl");
+    let items = complete(&format!(
+        r#"//- {}
+Процедура Тест()
+    Перес$0
+КонецПроцедуры
+"#,
+        module_path.display(),
+    ));
+
+    let attr = item_with_label(&items, "Пересчитать").expect("form attribute must complete");
+    let detail = attr.detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("(реквизит формы)"),
+        "regular form attribute detail must carry marker, got: {detail:?}",
+    );
+}
+
+#[test]
+fn hover_filter_dimension_price_shows_wrapper_and_value_type() {
+    let temp_dir = tempfile::tempdir().expect("create synthetic register config tempdir");
+    write_accumulation_register_with_recorder_fixture(temp_dir.path());
+    let (analysis, file_id, offset) = setup_with_config_path(
+        r#"//- /test.bsl
+Процедура Тест()
+    Н = РегистрыНакопления.Остатки.СоздатьНаборЗаписей();
+    Э = Н.Отбор.Ц$0ена;
+КонецПроцедуры
+"#,
+        temp_dir.path(),
+    );
+
+    let hover = analysis.hover(file_id, offset, ide::Locale::Ru).expect("hover must resolve");
+    assert!(
+        hover.markup.contains("ЭлементОтбора → Число"),
+        "hover must show filter wrapper and value type, got:\n{}",
+        hover.markup,
     );
 }

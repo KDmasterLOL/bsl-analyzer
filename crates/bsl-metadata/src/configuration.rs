@@ -5,7 +5,7 @@ use crate::defined_type::DefinedType;
 use crate::error::Result;
 use crate::event_subscription::EventSubscription;
 use crate::http_service::HTTPService;
-use crate::metadata_object::{AttributeType, MdoType, MetadataObject};
+use crate::metadata_object::{AttributeType, MdoType, MetadataObject, Name};
 use crate::register::Register;
 use crate::role::Role;
 use crate::scheduled_job::ScheduledJob;
@@ -99,6 +99,10 @@ pub struct Configuration {
     #[serde(skip)]
     name_to_web_service: HashMap<String, usize>,
 
+    /// Cache: (Register type, register name) -> recording Document names (not serialized)
+    #[serde(skip)]
+    recorders_by_register: HashMap<(MdoType, Name), Vec<Name>>,
+
     /// Use managed forms in ordinary application
     #[serde(rename = "useManagedFormInOrdinaryApplication", default)]
     use_managed_form_in_ordinary_application: bool,
@@ -151,6 +155,7 @@ impl Configuration {
             name_to_role: HashMap::new(),
             name_to_http_service: HashMap::new(),
             name_to_web_service: HashMap::new(),
+            recorders_by_register: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
             http_services: Vec::new(),
@@ -233,6 +238,7 @@ impl Configuration {
         self.name_to_role.clear();
         self.name_to_http_service.clear();
         self.name_to_web_service.clear();
+        self.recorders_by_register.clear();
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
@@ -267,6 +273,10 @@ impl Configuration {
 
         for (idx, web_service) in self.web_services.iter().enumerate() {
             self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
+        }
+
+        for object in &self.metadata_objects {
+            index_document_recorders(&mut self.recorders_by_register, object);
         }
     }
 
@@ -348,6 +358,7 @@ impl Configuration {
 
     /// Add metadata object
     pub fn add_metadata_object(&mut self, object: MetadataObject) {
+        index_document_recorders(&mut self.recorders_by_register, &object);
         self.metadata_objects.push(object);
     }
 
@@ -381,6 +392,8 @@ impl Configuration {
                 self.add_defined_type(ext_defined_type.clone());
             }
         }
+
+        self.build_caches();
     }
 
     /// Return a new configuration with `extension` merged over `self`.
@@ -459,6 +472,12 @@ impl Configuration {
         self.name_to_register
             .get(&name_lower)
             .and_then(|&idx| self.registers.get(idx).filter(|r| r.mdo_type() == mdo_type))
+    }
+
+    /// Return document names that can record into the given register.
+    pub fn recorders_for_register(&self, parent: MdoType, name: &str) -> &[Name] {
+        let key = (parent, name.to_lowercase());
+        self.recorders_by_register.get(&key).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Add register
@@ -621,6 +640,27 @@ fn merge_metadata_object_overlay(base: &mut MetadataObject, overlay: &MetadataOb
             .retain(|existing| !existing.name.eq_ignore_ascii_case(&predefined_item.name));
         base.predefined_items.push(predefined_item.clone());
     }
+
+    if !overlay.register_records().is_empty() {
+        base.set_register_records(overlay.register_records().to_vec());
+    }
+}
+
+fn index_document_recorders(
+    recorders_by_register: &mut HashMap<(MdoType, Name), Vec<Name>>,
+    object: &MetadataObject,
+) {
+    if object.mdo_type != MdoType::Document {
+        return;
+    }
+
+    for (register_type, register_name) in object.register_records() {
+        let key = (*register_type, register_name.to_lowercase());
+        let documents = recorders_by_register.entry(key).or_default();
+        if !documents.iter().any(|name| name.eq_ignore_ascii_case(&object.name)) {
+            documents.push(object.name.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -760,6 +800,53 @@ mod tests {
         let not_found = config
             .find_register_by_type_and_name(MdoType::AccumulationRegister, "РегистрСведений1");
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn recorders_for_register_indexes_document_register_records() {
+        let mut config = Configuration::new("Test");
+        let mut document = MetadataObject::new(MdoType::Document, "Документ1");
+        document.set_register_records(vec![
+            (MdoType::InformationRegister, "РегистрСведений1".to_string()),
+            (MdoType::AccumulationRegister, "РегистрНакопления1".to_string()),
+        ]);
+
+        config.add_metadata_object(document);
+
+        assert_eq!(
+            config.recorders_for_register(MdoType::InformationRegister, "РегистрСведений1"),
+            &["Документ1".to_string()],
+        );
+        assert_eq!(
+            config.recorders_for_register(MdoType::AccumulationRegister, "регистрнакопления1"),
+            &["Документ1".to_string()],
+        );
+        assert!(config
+            .recorders_for_register(MdoType::AccountingRegister, "РегистрБухгалтерии1")
+            .is_empty());
+    }
+
+    #[test]
+    fn overlay_merge_rebuilds_recorder_cache() {
+        let doc_name = "Документ1";
+        let mut base = Configuration::new("Base");
+        let mut base_document = MetadataObject::new(MdoType::Document, doc_name);
+        base_document.set_register_records(vec![(MdoType::InformationRegister, "A".to_string())]);
+        base.add_metadata_object(base_document);
+
+        let mut extension = Configuration::new("Extension");
+        let mut overlay_document = MetadataObject::new(MdoType::Document, doc_name);
+        overlay_document
+            .set_register_records(vec![(MdoType::InformationRegister, "B".to_string())]);
+        extension.add_metadata_object(overlay_document);
+
+        let merged = base.merged_with_extension(&extension);
+
+        assert_eq!(
+            merged.recorders_for_register(MdoType::InformationRegister, "B"),
+            &[doc_name.to_string()],
+        );
+        assert!(merged.recorders_for_register(MdoType::InformationRegister, "A").is_empty());
     }
 
     #[test]

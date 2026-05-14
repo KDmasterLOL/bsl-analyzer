@@ -47,7 +47,7 @@ use crate::field_enum::attribute_type_to_ty;
 /// otherwise generic [`attribute_type_to_ty`]) can be unit-tested without
 /// spinning up a Salsa database. The full resolver path layers the
 /// managed-form gate and the metadata read on top of this function.
-pub(crate) fn lower_form_attribute_to_ty(attr: &FormAttribute, configs: &[VisibleConfig]) -> Ty {
+pub fn lower_form_attribute_to_ty(attr: &FormAttribute, configs: &[VisibleConfig]) -> Ty {
     let has_columns = !attr.columns.is_empty();
 
     if attr.is_main {

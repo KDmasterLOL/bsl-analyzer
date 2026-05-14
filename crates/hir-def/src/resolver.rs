@@ -318,6 +318,37 @@ impl Resolver {
         Some((mdo_type, name))
     }
 
+    /// Resolve `ЭтотОбъект` / `ThisObject` inside `<Register>/Ext/RecordSetModule.bsl`.
+    ///
+    /// Returns `Some((MdoType, Name))` only when the enclosing module is
+    /// `ModuleType::RecordSetModule` whose MDO is one of the four register
+    /// flavours — gated through `MetadataKind::record_set_kind_for` so the
+    /// downstream `*RecordSet` companion always exists.
+    ///
+    /// Two storage slots, same as [`Self::resolve_this_manager`]: register
+    /// flavours populate `metadata.register`, not `metadata.mdo`.
+    pub fn resolve_this_record_set(
+        &self,
+        db: &dyn DefDatabase,
+    ) -> Option<(bsl_metadata::MdoType, Name)> {
+        let module_id = self.module_id()?;
+        let metadata = db.module_metadata(module_id);
+
+        if metadata.module_type != bsl_metadata::ModuleType::RecordSetModule {
+            return None;
+        }
+
+        let (mdo_type, name) = match (metadata.mdo.as_ref(), metadata.register.as_ref()) {
+            (Some(mdo), _) => (mdo.mdo_type, Name::new(&mdo.name)),
+            (None, Some(reg)) => (reg.mdo_type(), Name::new(reg.name())),
+            (None, None) => return None,
+        };
+
+        crate::ty::MetadataKind::record_set_kind_for(mdo_type)?;
+
+        Some((mdo_type, name))
+    }
+
     /// Visibility-aware probe for "is `module_name` a user CommonModule?".
     ///
     /// Mirrors the two-stage gate inside [`Self::resolve_qualified_method`]:
