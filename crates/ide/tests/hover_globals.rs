@@ -84,11 +84,22 @@ fn hover_bare_metadata_shows_hbk_property_markup() {
 }
 
 // =====================================================================
-// 2. Bare MDO plural keeps ManagerCollection rendering (HBK doesn't downgrade it)
+// 2. Bare MDO plural combines workspace ManagerCollection + HBK enrichment (Phase D)
 // =====================================================================
+//
+// Pre-Phase-D this test asserted the negative: implicit-variable branch
+// rendered only the workspace shape, no HBK markup. Phase D enriches the
+// rendering with HBK metadata (readonly / description / availability)
+// while keeping the workspace-shape `Тип:` line authoritative. The pin is
+// now twofold: workspace shape (singular `ДокументМенеджер`) must NOT be
+// replaced by HBK's declared plural form (`ДокументыМенеджер`), AND HBK's
+// readonly marker must surface.
 
 #[test]
-fn hover_bare_mdo_plural_keeps_manager_collection() {
+fn hover_bare_mdo_plural_combines_workspace_shape_and_hbk() {
+    if !hbk_globals_available() {
+        return;
+    }
     let markup = hover_markup(
         r#"//- /test.bsl
 Процедура Тест()
@@ -97,13 +108,140 @@ fn hover_bare_mdo_plural_keeps_manager_collection() {
 "#,
     )
     .expect("hover should resolve for MDO plural");
-    // HBK shape is `ДокументыМенеджер`. The implicit-variable branch must
-    // render the workspace `ManagerCollection`-shape, NOT the HBK manager
-    // type. The gate `MdoType::from_plural("Документы").is_some()` short
-    // -circuits the HBK property branch.
+    // Workspace shape stays authoritative — singular manager prefix
+    // (`ДокументМенеджер`), not HBK's plural declared type (`ДокументыМенеджер`).
+    assert!(
+        markup.contains("ДокументМенеджер"),
+        "workspace ManagerCollection shape must surface; markup: {markup}"
+    );
+    assert!(
+        !markup.contains("ДокументыМенеджер"),
+        "HBK declared plural manager type must NOT replace workspace shape; markup: {markup}"
+    );
+    // HBK enrichment: readonly is set for all 17 HBK-shipped MDO plurals.
+    assert!(
+        markup.contains("Только чтение"),
+        "HBK readonly marker must surface for MDO plural; markup: {markup}"
+    );
+}
+
+// =====================================================================
+// 2b. HBK description surfaces on MDO plural hover (Phase D)
+// =====================================================================
+
+#[test]
+fn hover_mdo_plural_shows_hbk_description_when_present() {
+    if !hbk_globals_available() {
+        return;
+    }
+    let data = bsl_platform::PlatformDataInner::instance();
+    let prop = data.get_global_property("Документы").expect("HBK must list Документы");
+    let Some(docs) = data.get_property_docs(prop.id) else {
+        return;
+    };
+    if docs.description.trim().is_empty() {
+        return;
+    }
+    let markup = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    А = Доку$0менты;
+КонецПроцедуры
+"#,
+    )
+    .expect("hover should resolve");
+    let head: String = docs.description.trim().chars().take(20).collect();
+    assert!(
+        markup.contains(&head),
+        "HBK description prefix {head:?} must appear in hover markup; got: {markup}"
+    );
+}
+
+// =====================================================================
+// 2c. Implicit assignment rebind to a different MDO plural — HBK enrichment
+// suppressed, rebound workspace shape rendered (Phase D)
+// =====================================================================
+//
+// `Документы = Справочники;` rebinds the bareword to
+// `Ty::ManagerCollection(Catalog)`. `resolve_name_to_definition` still
+// returns `Definition::MdoCollectionType(Document)` (implicit locals are
+// invisible to the classifier). Without a gate, the hover would render
+// HBK `Документы` metadata on a binding that holds Catalog — misleading.
+// Pins the inferred-Ty disagreement gate inside the
+// `Definition::MdoCollectionType` arm of `definition_to_hover`.
+
+#[test]
+fn hover_mdo_plural_implicit_rebind_renders_rebound_shape() {
+    if !hbk_globals_available() {
+        return;
+    }
+    let markup = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    Документы = Справочники;
+    А = Доку$0менты;
+КонецПроцедуры
+"#,
+    )
+    .expect("hover should resolve at rebound site");
+    // Rebound to Catalog — workspace shape must surface as СправочникМенеджер.
+    assert!(
+        markup.contains("СправочникМенеджер"),
+        "rebound workspace shape must surface; markup: {markup}"
+    );
+    // HBK readonly marker is the Phase D enrichment signal — must NOT
+    // leak when the binding's authoritative type disagrees with the
+    // resolved MDO type.
     assert!(
         !markup.contains("Только чтение"),
-        "HBK property markup leaked for MDO plural; markup: {markup}"
+        "HBK readonly marker leaked despite rebind disagreement; markup: {markup}"
+    );
+    // Bilingual title `**Документы (Documents)**` is the HBK-path
+    // signature; rebind path must not emit it.
+    assert!(
+        !markup.contains("Документы (Documents)"),
+        "HBK bilingual title leaked despite rebind disagreement; markup: {markup}"
+    );
+}
+
+// =====================================================================
+// 2d. Primitive-typed implicit shadow suppresses HBK enrichment (Phase D)
+// =====================================================================
+//
+// `Документы = "x";` rebinds the bareword to `Ty::String` (an
+// inference-level implicit local). `resolve_name_to_definition` still
+// returns `Definition::MdoCollectionType(Document)`. The whitelist gate
+// must reject any non-`ManagerCollection(self)` non-`Unknown` Ty as
+// "rebind disagreement" so HBK Document metadata does not leak onto a
+// binding that holds a string. Primitive shadows are common in BSL
+// idioms (config loaders / migration scripts) and the wrong hover here
+// actively misleads.
+
+#[test]
+fn hover_mdo_plural_primitive_shadow_renders_rebound_shape() {
+    if !hbk_globals_available() {
+        return;
+    }
+    let markup = hover_markup(
+        r#"//- /test.bsl
+Процедура Тест()
+    Документы = "просто строка";
+    А = Доку$0менты;
+КонецПроцедуры
+"#,
+    )
+    .expect("hover should resolve at rebound site");
+    assert!(
+        !markup.contains("Только чтение"),
+        "HBK readonly marker leaked despite primitive shadow; markup: {markup}"
+    );
+    assert!(
+        !markup.contains("Документы (Documents)"),
+        "HBK bilingual title leaked despite primitive shadow; markup: {markup}"
+    );
+    assert!(
+        !markup.contains("Используется для доступа"),
+        "HBK description leaked despite primitive shadow; markup: {markup}"
     );
 }
 

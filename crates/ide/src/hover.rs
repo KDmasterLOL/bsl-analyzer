@@ -239,7 +239,7 @@ fn hover_free_name<DB: RootDatabase>(
             return Some(r);
         }
         if let Some(ty) = inferred_ty.as_ref() {
-            // Implicit variable (no `Перем`) or MDO plural — surface its inferred type.
+            // Implicit variable (no `Перем`) — surface its inferred type.
             let mut markup = format!("**{}**\n\n", token.text());
             if let Some(type_block) = ty_info_markup(db, ty, locale) {
                 markup.push_str(&type_block);
@@ -300,6 +300,40 @@ fn hover_for_global_property<DB: RootDatabase>(
         }
     }
     Some(render_property_hover(prop, range))
+}
+
+/// Append HBK-derived enrichment for an MDO plural to existing hover
+/// markup: readonly marker, free-prose description / notes, `min_version`,
+/// and availability context. Used by [`definition_to_hover`]'s
+/// [`hir::Definition::MdoCollectionType`] arm to surface HBK metadata on top
+/// of the workspace `ManagerCollection` shape.
+///
+/// No-op when [`bsl_metadata::MdoType::hbk_global_property`] returns `None`
+/// — the three non-bareword variants (`Cube` / `DimensionTable` /
+/// `CommonModule`) have no Global-context HBK entry, so the caller
+/// keeps its legacy minimal markup for those.
+fn append_hbk_mdo_plural_metadata(markup: &mut String, mdo_type: bsl_metadata::MdoType) {
+    let Some(prop) = mdo_type.hbk_global_property() else {
+        return;
+    };
+    if prop.is_readonly {
+        markup.push_str("*Только чтение*\n\n");
+    }
+    if let Some(docs) = PlatformDataInner::instance().get_property_docs(prop.id) {
+        if !docs.description.is_empty() {
+            markup.push_str(&docs.description);
+            markup.push_str("\n\n");
+        }
+        if let Some(notes) = docs.notes.filter(|n| !n.is_empty()) {
+            markup.push_str("**Примечание:** ");
+            markup.push_str(&notes);
+            markup.push_str("\n\n");
+        }
+    }
+    if let Some(ver) = prop.min_version.as_ref() {
+        markup.push_str(&format!("**Доступен с версии:** {ver}"));
+    }
+    append_availability(markup, prop.context.as_ref());
 }
 
 /// Look up a property on `receiver_ty` and render its hover markup.
@@ -526,8 +560,52 @@ fn definition_to_hover<DB: RootDatabase>(
         }
 
         hir::Definition::MdoCollectionType(mdo_type) => {
-            markup.push_str(&format!("**Тип метаданных:** {}\n\n", mdo_type.russian_name()));
-            markup.push_str("*Коллекция объектов метаданных*");
+            // HBK-enriched rendering for the 17 bareword-valid MDO plurals
+            // (Phase D). Title uses HBK's bilingual `name (english_name)`;
+            // `Тип:` uses the workspace `ManagerCollection` shape, kept
+            // authoritative through `ty_info_markup`. HBK metadata
+            // (readonly / description / min_version / availability) is
+            // appended via `append_hbk_mdo_plural_metadata`. For the 3
+            // non-bareword MdoType variants (`Cube` / `DimensionTable` /
+            // `CommonModule`), HBK has no Global-context entry and the
+            // helper is a no-op; falls back to the legacy minimal markup.
+            //
+            // Inferred-type whitelist gate. An implicit assignment
+            // (`Документы = Справочники`, `Документы = "x"`, …) rebinds the
+            // bareword while `resolve_name_to_definition` still surfaces
+            // `Definition::MdoCollectionType(Document)` — implicit locals
+            // are not visible to the name classifier. The binding's
+            // authoritative inferred type wins: HBK enrichment fires only
+            // when the inferred type either is unknown (no rebind signal)
+            // or matches `Ty::ManagerCollection(self)`. Anything else —
+            // foreign-MDO manager (`ManagerCollection(other)` /
+            // `ObjectManager { kind: other, .. }`) or a primitive shadow
+            // (`Ty::String`, `Ty::Number`, …) — falls through to render
+            // only the rebound shape via `ty_info_markup`.
+            let inferred_disagrees = match inferred_ty {
+                None => false,
+                Some(ty) if ty.is_unknown() => false,
+                Some(Ty::ManagerCollection(t)) if t == mdo_type => false,
+                Some(_) => true,
+            };
+            if inferred_disagrees {
+                if let Some(ty) = inferred_ty {
+                    if let Some(block) = ty_info_markup(db, ty, locale) {
+                        markup.push_str(&block);
+                    }
+                }
+            } else if let Some(prop) = mdo_type.hbk_global_property() {
+                markup.push_str(&format!("**{} ({})**\n\n", prop.name, prop.english_name));
+                if let Some(ty_block) =
+                    ty_info_markup(db, &Ty::ManagerCollection(*mdo_type), locale)
+                {
+                    markup.push_str(&ty_block);
+                }
+                append_hbk_mdo_plural_metadata(&mut markup, *mdo_type);
+            } else {
+                markup.push_str(&format!("**Тип метаданных:** {}\n\n", mdo_type.russian_name()));
+                markup.push_str("*Коллекция объектов метаданных*");
+            }
         }
 
         hir::Definition::MdoObject { mdo_type, object_name } => {
