@@ -2514,6 +2514,7 @@ fn test_join_paren_field_resolution() {
         code_series: bsl_metadata::CodeSeries::default(),
         constant_type: None,
         register_records: vec![],
+        uuid: None,
     };
     config.add_metadata_object(catalog);
 
