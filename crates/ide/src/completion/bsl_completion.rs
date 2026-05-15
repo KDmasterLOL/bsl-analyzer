@@ -453,96 +453,112 @@ fn is_expression_start_position(token: &syntax::SyntaxToken) -> bool {
     }
 }
 
-/// Helper: Get plural Russian form for MDO type.
-fn mdo_type_plural_ru(mdo_type: &bsl_metadata::MdoType) -> &'static str {
-    match mdo_type {
-        bsl_metadata::MdoType::Document => "Документы",
-        bsl_metadata::MdoType::Catalog => "Справочники",
-        bsl_metadata::MdoType::InformationRegister => "РегистрыСведений",
-        bsl_metadata::MdoType::AccumulationRegister => "РегистрыНакопления",
-        bsl_metadata::MdoType::AccountingRegister => "РегистрыБухгалтерии",
-        bsl_metadata::MdoType::CalculationRegister => "РегистрыРасчета",
-        bsl_metadata::MdoType::ChartOfCharacteristicTypes => "ПланыВидовХарактеристик",
-        bsl_metadata::MdoType::ChartOfAccounts => "ПланыСчетов",
-        bsl_metadata::MdoType::ChartOfCalculationTypes => "ПланыВидовРасчета",
-        bsl_metadata::MdoType::BusinessProcess => "БизнесПроцессы",
-        bsl_metadata::MdoType::Task => "Задачи",
-        bsl_metadata::MdoType::Enum => "Перечисления",
-        bsl_metadata::MdoType::ExchangePlan => "ПланыОбмена",
-        bsl_metadata::MdoType::ExternalDataSource => "ВнешниеИсточникиДанных",
-        bsl_metadata::MdoType::Cube => "Кубы",
-        bsl_metadata::MdoType::DimensionTable => "ТаблицыИзмерения",
-        bsl_metadata::MdoType::Constant => "Константы",
-        bsl_metadata::MdoType::DataProcessor => "Обработки",
-        bsl_metadata::MdoType::Report => "Отчеты",
-        bsl_metadata::MdoType::CommonModule => "ОбщиеМодули",
-    }
-}
-
-/// Helper: Get plural English form for MDO type.
-fn mdo_type_plural_en(mdo_type: &bsl_metadata::MdoType) -> &'static str {
-    match mdo_type {
-        bsl_metadata::MdoType::Document => "Documents",
-        bsl_metadata::MdoType::Catalog => "Catalogs",
-        bsl_metadata::MdoType::InformationRegister => "InformationRegisters",
-        bsl_metadata::MdoType::AccumulationRegister => "AccumulationRegisters",
-        bsl_metadata::MdoType::AccountingRegister => "AccountingRegisters",
-        bsl_metadata::MdoType::CalculationRegister => "CalculationRegisters",
-        bsl_metadata::MdoType::ChartOfCharacteristicTypes => "ChartsOfCharacteristicTypes",
-        bsl_metadata::MdoType::ChartOfAccounts => "ChartsOfAccounts",
-        bsl_metadata::MdoType::ChartOfCalculationTypes => "ChartsOfCalculationTypes",
-        bsl_metadata::MdoType::BusinessProcess => "BusinessProcesses",
-        bsl_metadata::MdoType::Task => "Tasks",
-        bsl_metadata::MdoType::Enum => "Enums",
-        bsl_metadata::MdoType::ExchangePlan => "ExchangePlans",
-        bsl_metadata::MdoType::ExternalDataSource => "ExternalDataSources",
-        bsl_metadata::MdoType::Cube => "Cubes",
-        bsl_metadata::MdoType::DimensionTable => "DimensionTables",
-        bsl_metadata::MdoType::Constant => "Constants",
-        bsl_metadata::MdoType::DataProcessor => "DataProcessors",
-        bsl_metadata::MdoType::Report => "Reports",
-        bsl_metadata::MdoType::CommonModule => "CommonModules",
-    }
-}
-
 /// MDO plural completion items (band 2). `Справочники`, `Документы`,
 /// `РегистрыСведений`, … rendered as `CompletionItemKind::MdoType` with detail
-/// "Коллекция метаданных (…)". HBK also declares these names as global
+/// `"Коллекция метаданных (…)"`. HBK also declares these names as global
 /// properties typed `<X>Менеджер`, but workspace shape `Ty::ManagerCollection`
 /// is strictly more specific, so this branch owns the rendering and
 /// `complete_hbk_globals` skips names matching `MdoType::from_plural`.
+///
+/// HBK-driven iteration (Phase C). The candidate set comes from
+/// `PlatformDataInner::all_global_properties()` partitioned by
+/// `MdoType::from_plural` on both Russian and English names. This makes HBK
+/// the registry-of-record for which MDO plurals are bareword-accessible:
+/// `Cube`, `DimensionTable`, `CommonModule` never appear here because HBK
+/// classifies them as nested type descriptors, not global-context
+/// properties. Display name, readonly, docs all sourced from HBK; only
+/// the `Ty::ManagerCollection` carrier still flows through `MdoType`.
 fn complete_mdo_plurals(prefix: &str) -> Vec<CompletionItem> {
     let _span = tracing::debug_span!("complete_mdo_plurals").entered();
 
-    let mut completions = Vec::new();
     let prefix_lower = prefix.to_lowercase();
+    let mut completions = Vec::new();
 
-    for mdo_type in MdoType::all() {
-        let plural_ru = mdo_type_plural_ru(mdo_type);
-        let plural_en = mdo_type_plural_en(mdo_type);
-
-        if !matches_prefix_bilingual(plural_ru, plural_en, &prefix_lower) {
+    for prop in PlatformDataInner::instance().all_global_properties() {
+        let Some(mdo_type) = MdoType::from_plural(prop.name.as_str())
+            .or_else(|| MdoType::from_plural(prop.english_name.as_str()))
+        else {
+            continue;
+        };
+        if !matches_prefix_bilingual(&prop.name, &prop.english_name, &prefix_lower) {
             continue;
         }
-
-        completions.push(CompletionItem {
-            label: plural_ru.to_string(),
-            detail: Some(format!("Коллекция метаданных ({})", mdo_type.russian_name())),
-            kind: CompletionItemKind::MdoType,
-            insert_text: plural_ru.to_string(),
-            documentation: Some(format!(
-                "{} / {}\n\nКоллекция объектов метаданных типа {}.",
-                plural_ru,
-                plural_en,
-                mdo_type.russian_name()
-            )),
-            sort_text: None,
-            filter_text: None,
-            source: None,
-        });
+        completions.push(render_mdo_plural_with_hbk(mdo_type, prop));
     }
 
     completions
+}
+
+/// Render an HBK-backed MDO plural property as a band-2 completion item.
+///
+/// - `label` / `insert_text` use HBK's Russian name (`prop.name`), which is
+///   the bareword form the user actually types.
+/// - `detail` keeps the legacy `"Коллекция метаданных (…)"` prefix pinned by
+///   `completion_globals.rs::completion_mdo_plural_not_duplicated`. When
+///   HBK marks the property `is_readonly`, `" [Только чтение]"` is appended
+///   so the readonly flag surfaces in the completion popup the same way
+///   non-MDO globals show it via `render_platform_property`.
+/// - `documentation` composes `PropertyDocs { description, notes, see_also }`
+///   from `get_property_docs(prop.id)`. When docs are absent the legacy
+///   "Коллекция объектов метаданных типа X." line is used so the doc panel
+///   is never empty.
+/// - `filter_text` mirrors `render_platform_property`'s bilingual filter
+///   shape so English prefixes (`Doc|`) still match.
+fn render_mdo_plural_with_hbk(
+    mdo_type: bsl_metadata::MdoType,
+    prop: &bsl_platform::PlatformProperty,
+) -> CompletionItem {
+    let label = prop.name.to_string();
+    let mut detail = format!("Коллекция метаданных ({})", mdo_type.russian_name());
+    if prop.is_readonly {
+        detail.push_str(" [Только чтение]");
+    }
+    let documentation = compose_mdo_plural_documentation(mdo_type, prop);
+    let filter_text = format!("{} {}", prop.name, prop.english_name);
+
+    CompletionItem {
+        label: label.clone(),
+        detail: Some(detail),
+        kind: CompletionItemKind::MdoType,
+        insert_text: label,
+        documentation: Some(documentation),
+        sort_text: None,
+        filter_text: Some(filter_text),
+        source: None,
+    }
+}
+
+/// Compose the documentation panel for an MDO-plural completion item from
+/// HBK's `PropertyDocs`. Falls back to the legacy generic line when HBK
+/// ships no description for this property.
+fn compose_mdo_plural_documentation(
+    mdo_type: bsl_metadata::MdoType,
+    prop: &bsl_platform::PlatformProperty,
+) -> String {
+    let mut out = format!("{} / {}\n\n", prop.name, prop.english_name);
+    let docs = PlatformDataInner::instance().get_property_docs(prop.id);
+    match docs {
+        Some(d) if !d.description.trim().is_empty() => {
+            out.push_str(d.description.trim());
+            if let Some(notes) = d.notes.as_ref().filter(|n| !n.trim().is_empty()) {
+                out.push_str("\n\n");
+                out.push_str(notes.trim());
+            }
+            if !d.see_also.is_empty() {
+                out.push_str("\n\nСм. также:");
+                for link in &d.see_also {
+                    out.push_str("\n- ");
+                    out.push_str(link);
+                }
+            }
+        }
+        _ => {
+            out.push_str("Коллекция объектов метаданных типа ");
+            out.push_str(mdo_type.russian_name());
+            out.push('.');
+        }
+    }
+    out
 }
 
 /// Workspace CommonModule completion items (band 3). Reads names from the
