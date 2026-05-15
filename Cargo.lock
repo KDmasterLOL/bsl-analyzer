@@ -261,6 +261,7 @@ dependencies = [
  "ide",
  "ide-db",
  "indicatif",
+ "lexer",
  "line-index",
  "lsp-server",
  "lsp-types",

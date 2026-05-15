@@ -237,8 +237,9 @@ enum Commands {
 
         /// Bench mode: skip BFS, time read+parse+item_tree+module_bodies
         /// for a single file and exit. Ignores `--sample`, `--depth`,
-        /// `--format`, `--bytes`. Mutually exclusive with `--multi-open`.
-        #[arg(long = "bench", conflicts_with = "multi_open")]
+        /// `--format`, `--bytes`. Mutually exclusive with `--multi-open`
+        /// and `--bench-index`.
+        #[arg(long = "bench", conflicts_with_all = ["multi_open", "bench_index"])]
         bench: Option<PathBuf>,
 
         /// Replace stride sampling with the listed files (comma-separated).
@@ -246,6 +247,19 @@ enum Commands {
         /// deduplicated union is reported in the stderr summary.
         #[arg(long = "multi-open", value_delimiter = ',')]
         multi_open: Vec<PathBuf>,
+
+        /// Bench the proposed persistent name-index build: lexer-only pass
+        /// over every BSL file (no parser, no HIR), collect identifier
+        /// tokens into a global `HashMap<Name, Vec<FileId>>`, report
+        /// wall-clock, unique names, (name,file) pairs, and estimated
+        /// index size. Mutually exclusive with `--bench` / `--multi-open`.
+        #[arg(long = "bench-index", conflicts_with_all = ["bench", "multi_open"])]
+        bench_index: bool,
+
+        /// Override rayon worker count for `--bench-index` parallelism.
+        /// Default = rayon's global pool (typically num_cpus).
+        #[arg(long = "index-workers")]
+        index_workers: Option<usize>,
     },
 }
 
@@ -707,9 +721,21 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             report_mem,
             bench,
             multi_open,
-        }) => {
-            run_deps(source_dir, depth, sample, format, quiet, bytes, report_mem, bench, multi_open)
-        }
+            bench_index,
+            index_workers,
+        }) => run_deps(
+            source_dir,
+            depth,
+            sample,
+            format,
+            quiet,
+            bytes,
+            report_mem,
+            bench,
+            multi_open,
+            bench_index,
+            index_workers,
+        ),
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
 }
@@ -2524,6 +2550,8 @@ fn run_deps(
     report_mem: bool,
     bench: Option<PathBuf>,
     multi_open: Vec<PathBuf>,
+    bench_index: bool,
+    index_workers: Option<usize>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use std::collections::{HashMap, HashSet};
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -2564,6 +2592,15 @@ fn run_deps(
     tracing::info!(total, "discovered .bsl files");
     if total == 0 {
         return Err(format!("no .bsl files under {}", source_dir.display()).into());
+    }
+
+    // `--bench-index` measures the cost of an alternative to lazy-text +
+    // `source_root_name_usage_query`: a parser-free, Salsa-free lexical
+    // identifier index built from `lexer::tokenize`. Short-circuit *before*
+    // the eager workspace-into-Salsa load so the timing reflects the real
+    // index build, not the eager-load baseline we'd be replacing.
+    if bench_index {
+        return run_deps_bench_index(bsl_entries, index_workers, rss_baseline, start);
     }
 
     let mut db = RootDatabaseImpl::default();
@@ -3078,6 +3115,116 @@ fn run_deps_bench(
         eprintln!("baseline (pre-load):   {}", fmt(rss_baseline));
         eprintln!("after workspace load:  {}", fmt(rss_after_load));
         eprintln!("after bench:           {}", fmt(read_vmrss_kb()));
+    }
+
+    Ok(())
+}
+
+/// Bench for `deps --bench-index`: lexer-only sweep over every `.bsl`
+/// file in `bsl_entries`, accumulate identifier tokens (lowercased) into
+/// a `HashMap<Name, Vec<FileId>>`, report wall-clock, unique-name count,
+/// (name,file) pair count, and a rough byte-size estimate. The point is
+/// to gate the lazy-text plan: a workspace-wide persistent name index
+/// is the precondition for replacing `source_root_name_usage_query`,
+/// and we need to know whether that index can be built eagerly on
+/// startup (cheap) or has to be lazy (more engineering).
+fn run_deps_bench_index(
+    bsl_entries: Vec<(PathBuf, u64)>,
+    index_workers: Option<usize>,
+    rss_baseline: Option<u64>,
+    walk_start: std::time::Instant,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+    use std::collections::{HashMap, HashSet};
+    use std::time::Instant;
+
+    let walk_elapsed = walk_start.elapsed();
+    let total = bsl_entries.len();
+    let total_bytes: u64 =
+        bsl_entries.iter().map(|(_, sz)| *sz).fold(0u64, |a, b| a.saturating_add(b));
+
+    eprintln!("=== Bench: persistent name-index build ===");
+    eprintln!("workspace files (.bsl):  {}", total);
+    eprintln!("total bytes on disk:     {:.1} MB", total_bytes as f64 / 1024.0 / 1024.0);
+    eprintln!("walk elapsed:            {:.1} ms", walk_elapsed.as_secs_f64() * 1000.0);
+
+    let pool = if let Some(n) = index_workers {
+        rayon::ThreadPoolBuilder::new().num_threads(n).build()?
+    } else {
+        rayon::ThreadPoolBuilder::new().build()?
+    };
+    let worker_count = pool.current_num_threads();
+    eprintln!("workers:                 {}", worker_count);
+
+    let build_start = Instant::now();
+
+    // Parallel phase: per-file lex → unique identifier set. No locking,
+    // no global state — each task is pure, results merged later.
+    let per_file: Vec<(u32, HashSet<String>)> = pool.install(|| {
+        bsl_entries
+            .par_iter()
+            .enumerate()
+            .map(|(idx, (path, _))| {
+                let content = std::fs::read_to_string(path).unwrap_or_default();
+                let tokens = lexer::tokenize(&content);
+                let mut names: HashSet<String> = HashSet::new();
+                for t in &tokens {
+                    if t.kind == lexer::TokenKind::Ident {
+                        names.insert(t.text.as_str().to_lowercase());
+                    }
+                }
+                (idx as u32, names)
+            })
+            .collect()
+    });
+    let lex_elapsed = build_start.elapsed();
+
+    // Serial merge into the final `by_name` map. Could be parallelized
+    // with a sharded reduce, but at 25k files this is sub-second and
+    // keeps the measurement honest about the canonical-merge step.
+    let mut by_name: HashMap<String, Vec<u32>> = HashMap::new();
+    for (file_id, names) in &per_file {
+        for n in names {
+            by_name.entry(n.clone()).or_default().push(*file_id);
+        }
+    }
+    let total_elapsed = build_start.elapsed();
+    let merge_elapsed = total_elapsed - lex_elapsed;
+
+    let unique_names = by_name.len();
+    let total_pairs: usize = by_name.values().map(|v| v.len()).sum();
+    // Rough lower bound on `by_name` memory: assume 24 B `String`
+    // overhead per key + key bytes, plus 24 B `Vec` overhead per value
+    // + 4 B per `FileId` entry. HashMap bucket overhead not counted.
+    let est_key_bytes: usize = by_name.keys().map(|k| k.len() + 24).sum();
+    let est_value_bytes: usize = by_name.values().map(|v| v.len() * 4 + 24).sum();
+    let est_total = est_key_bytes + est_value_bytes;
+
+    eprintln!();
+    eprintln!("---- build phases ----");
+    eprintln!("lex + per-file dedupe:   {:.2} s", lex_elapsed.as_secs_f64());
+    eprintln!("merge into HashMap:      {:.2} s", merge_elapsed.as_secs_f64());
+    eprintln!("total build:             {:.2} s", total_elapsed.as_secs_f64());
+    eprintln!();
+    eprintln!("---- index statistics ----");
+    eprintln!("unique names:            {}", unique_names);
+    eprintln!("(name, file) pairs:      {}", total_pairs);
+    eprintln!(
+        "avg names per file:      {:.1}",
+        if total > 0 { total_pairs as f64 / total as f64 } else { 0.0 },
+    );
+    eprintln!("est. key bytes:          {:.1} MB", est_key_bytes as f64 / 1024.0 / 1024.0);
+    eprintln!("est. value bytes:        {:.1} MB", est_value_bytes as f64 / 1024.0 / 1024.0);
+    eprintln!("est. total index size:   {:.1} MB", est_total as f64 / 1024.0 / 1024.0,);
+
+    if rss_baseline.is_some() {
+        let fmt = |kb: Option<u64>| {
+            kb.map(|k| format!("{:.1} MB", k as f64 / 1024.0)).unwrap_or_else(|| "n/a".to_string())
+        };
+        eprintln!();
+        eprintln!("=== RSS snapshots (VmRSS) ===");
+        eprintln!("baseline (pre-walk):     {}", fmt(rss_baseline));
+        eprintln!("after index build:       {}", fmt(read_vmrss_kb()));
     }
 
     Ok(())
