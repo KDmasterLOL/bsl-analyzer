@@ -104,11 +104,16 @@ pub(super) fn platform_completions<DB: RootDatabase>(
             // Both behaviours hide that the user's CommonModule is the
             // authoritative receiver here. Bail out instead.
             let name_node = Name::new(&name);
-            let workspace_module_shadows = {
-                let source_root_input = db.file_source_root_input(position.file_id);
-                let source_root_id = source_root_input.source_root_id(db);
-                db.module_index(source_root_id).resolve_common_module(&name_node).is_some()
-            };
+            // `Resolver::user_common_module_exists` mirrors the gate
+            // `infer.rs::infer_path_name` step 6 uses (`:1493`): it consults
+            // WorkspaceScope + the resolver's enclosing module's configs, so
+            // a module that's hidden by config visibility (extension /
+            // main-config gate) is NOT treated as a shadow here. A raw
+            // `module_index.resolve_common_module` would over-shadow HBK
+            // globals against modules the user can't actually invoke.
+            let workspace_module_shadows =
+                hir::Resolver::with_workspace_scope(hir::ModuleId::new(position.file_id))
+                    .user_common_module_exists(db, &name_node);
             // Same-file shadow: a module-level `Процедура ОбработкаОшибок()`
             // in the current file isn't in the cross-module `module_index`
             // but is still authoritative for `ОбработкаОшибок.|` here.
@@ -565,16 +570,25 @@ fn extract_receiver_ident(node: &SyntaxNode) -> Option<String> {
 ///
 /// Uses module_index for O(1) name lookup, then symbol_tree for the specific module.
 /// symbol_tree is typically already cached as a dependency of the open file.
+///
+/// Config visibility is honored via `Resolver::user_common_module_exists`
+/// — modules hidden by the active configuration (extension / main-config
+/// gate) yield no completion items here, mirroring the gate
+/// `infer.rs::infer_path_name` step 6 (`:1493`) applies to dispatch.
 fn complete_common_module_methods(
     db: &dyn RootDatabase,
     position: &CompletionPosition,
     module_name: &str,
 ) -> Option<Vec<CompletionItem>> {
+    let name = Name::new(module_name);
+    let resolver = hir::Resolver::with_workspace_scope(hir::ModuleId::new(position.file_id));
+    if !resolver.user_common_module_exists(db, &name) {
+        return None;
+    }
+
     let source_root_input = db.file_source_root_input(position.file_id);
     let source_root_id = source_root_input.source_root_id(db);
     let module_index = db.module_index(source_root_id);
-
-    let name = Name::new(module_name);
     let module_file_id = module_index.resolve_common_module(&name)?;
 
     tracing::debug!(
