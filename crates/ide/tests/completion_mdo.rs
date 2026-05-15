@@ -774,3 +774,151 @@ fn completion_catalog_object_offers_additional_properties() {
     );
     assert!(has_label(&items, "ВерсияДанных"), "CatalogObject completion must offer ВерсияДанных",);
 }
+
+// ---------------------------------------------------------------------------
+// Implicit ЭтотОбъект — bareword attribute at top of ObjectModule
+// ---------------------------------------------------------------------------
+
+#[test]
+fn completion_object_module_top_level_offers_implicit_attribute() {
+    // `Реквизит1` is declared on `Catalogs/Справочник1` in the designer
+    // fixture. Inside that catalog's ObjectModule, the bareword form
+    // `Реквизит1` resolves through `infer.rs::infer_path_name` step 5c
+    // (implicit `ЭтотОбъект.<member>`). Top-level completion must mirror
+    // that cascade via band 15 (`complete_module_self_attributes` →
+    // `hir::module_implicit_fields`), so the user typing `Рек` at the top
+    // of the module sees the attribute, not just platform globals.
+    let object_module_path =
+        designer_fixture_path().join("Catalogs/Справочник1/Ext/ObjectModule.bsl");
+    let items = complete_with_config_path(
+        &format!(
+            r#"//- {}
+Функция Тест()
+    Рек$0
+КонецФункции
+"#,
+            object_module_path.display()
+        ),
+        &designer_fixture_path(),
+    );
+    let req = items.iter().find(|i| i.label == "Реквизит1").unwrap_or_else(|| {
+        panic!(
+            "Реквизит1 (ObjectModule implicit attribute) must surface; labels: {:?}",
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        req.kind,
+        CompletionItemKind::Field,
+        "implicit ObjectModule attribute must render as Field, not as a platform shape"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HBK collision: workspace attribute named `Метаданные` shadows HBK global
+// ---------------------------------------------------------------------------
+
+fn write_catalog_with_metadata_attribute(root: &Path) {
+    // Synthetic catalog whose only user attribute is literally named
+    // `Метаданные`. Used to pin the cascade-mirror invariant: at top of
+    // ObjectModule the workspace attribute wins over the HBK Global-context
+    // property of the same name, just like `infer.rs::infer_path_name`
+    // resolves the bareword.
+    std::fs::create_dir_all(root.join("Catalogs")).expect("create Catalogs directory");
+    std::fs::write(
+        root.join("Configuration.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="11111111-1111-1111-1111-111111111111">
+        <Properties>
+            <Name>HbkCollisionConfig</Name>
+        </Properties>
+        <ChildObjects>
+            <Catalog>СправочникСМетаданными</Catalog>
+        </ChildObjects>
+    </Configuration>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic Configuration.xml");
+    std::fs::write(
+        root.join("Catalogs/СправочникСМетаданными.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <Catalog uuid="22222222-2222-2222-2222-222222222222">
+        <Properties>
+            <Name>СправочникСМетаданными</Name>
+            <CodeLength>9</CodeLength>
+            <DescriptionLength>25</DescriptionLength>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="33333333-3333-3333-3333-333333333333">
+                <Properties>
+                    <Name>Метаданные</Name>
+                    <Type>
+                        <v8:Type>xs:string</v8:Type>
+                        <v8:StringQualifiers>
+                            <v8:Length>20</v8:Length>
+                        </v8:StringQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic catalog XML");
+}
+
+#[test]
+fn completion_object_module_attribute_shadows_hbk_global() {
+    // HBK ships `Метаданные` as a `Global context` property typed
+    // `ОбъектМетаданныхКонфигурация` (band 25 in `complete_top_level`).
+    // Inside a catalog ObjectModule whose own attribute is also named
+    // `Метаданные`, the workspace shape must win — same first-wins gate
+    // that `push_band`'s lowercase-label dedup applies between band 15
+    // (workspace implicit fields) and band 25 (HBK).
+    let temp_dir = tempfile::tempdir().expect("create synthetic HBK-collision config tempdir");
+    write_catalog_with_metadata_attribute(temp_dir.path());
+    let object_module_path =
+        temp_dir.path().join("Catalogs/СправочникСМетаданными/Ext/ObjectModule.bsl");
+    let items = complete_with_config_path(
+        &format!(
+            r#"//- {}
+Функция Тест()
+    Мет$0
+КонецФункции
+"#,
+            object_module_path.display()
+        ),
+        temp_dir.path(),
+    );
+    let meta = items.iter().find(|i| i.label == "Метаданные").unwrap_or_else(|| {
+        panic!(
+            "Метаданные (workspace attribute) must surface at top of ObjectModule; labels: {:?}",
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        meta.kind,
+        CompletionItemKind::Field,
+        "workspace attribute must shadow HBK Global-context property; kind = {:?}",
+        meta.kind,
+    );
+    // HBK would render `Метаданные` with kind = Property and a detail
+    // referencing `ОбъектМетаданныхКонфигурация`. Pin against that
+    // specific shape leaking through.
+    let leaked_hbk = items.iter().any(|i| {
+        i.label == "Метаданные"
+            && i.kind == CompletionItemKind::Property
+            && i.detail.as_deref().is_some_and(|d| d.contains("ОбъектМетаданныхКонфигурация"))
+    });
+    assert!(
+        !leaked_hbk,
+        "HBK Метаданные property leaked despite workspace attribute shadow; labels/kinds: {:?}",
+        items
+            .iter()
+            .filter(|i| i.label == "Метаданные")
+            .map(|i| (i.label.clone(), i.kind))
+            .collect::<Vec<_>>()
+    );
+}
