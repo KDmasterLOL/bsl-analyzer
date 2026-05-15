@@ -257,6 +257,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "expect-test",
+ "hir",
  "ide",
  "ide-db",
  "indicatif",
