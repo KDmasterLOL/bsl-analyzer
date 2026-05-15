@@ -210,6 +210,14 @@ fn record_dimension_resolves() {
 
 #[test]
 fn record_standard_period_resolves() {
+    // `Период` is `PresenceCondition::IsPeriodic`-gated in
+    // `bsl_platform::standard_mdo_attributes`. The HBK cascade in
+    // `push_platform_prefix_properties` correctly defers to that gate
+    // (the spec is the sole arbiter of which standard attributes are
+    // visible on the configured register). So the test must use a
+    // *periodic* register — the designer-fixture `РегистрСведений1` is
+    // `Nonperiodical` and would not expose `Период`.
+    let config_path = temp_designer_config_with_register_recorders();
     let text = r#"
 Процедура Тест()
     Для Каждого З Из ЭтотОбъект Цикл
@@ -217,7 +225,8 @@ fn record_standard_period_resolves() {
     КонецЦикла;
 КонецПроцедуры
 "#;
-    let (db, file_id) = setup_at(register_recordset_module_path(), text);
+    let (db, file_id) =
+        setup_at_with_config(temp_register_recordset_module_path(&config_path), config_path, text);
     assert_eq!(var_ty(&db, file_id, "п"), Some(Ty::Date));
 }
 

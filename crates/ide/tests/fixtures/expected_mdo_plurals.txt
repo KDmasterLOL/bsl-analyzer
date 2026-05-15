@@ -1,0 +1,34 @@
+# Frozen baseline: Russian plural labels of all MDO collections that HBK
+# classifies as Global-context properties at the time of Phase C landing.
+#
+# This file is a regression pin only. It catches accidental removal or
+# rename of any of the 17 known MDO plurals in either:
+#   - the HBK extractor (`crates/bsl-platform/data/platform_data.json`); or
+#   - `MdoType::from_plural` (`crates/bsl-metadata/src/metadata_object.rs`).
+#
+# It does NOT auto-detect a new MDO plural added to HBK without a matching
+# `MdoType` variant. Sync-gap discovery is procedural: when
+# `platform_data.json` is regenerated, follow the workflow in
+# `crates/bsl-platform/data/PROVENANCE.md` to review new global-context
+# properties whose declared type ends in `<X>Менеджер` / `<X>Manager`. If
+# any are MDO collections, extend `MdoType::all()` and refresh this file
+# in the same commit.
+#
+# Empty lines and `#`-prefixed lines are ignored. One label per line.
+БизнесПроцессы
+ВнешниеИсточникиДанных
+Документы
+Задачи
+Константы
+Обработки
+Отчеты
+Перечисления
+ПланыВидовРасчета
+ПланыВидовХарактеристик
+ПланыОбмена
+ПланыСчетов
+РегистрыБухгалтерии
+РегистрыНакопления
+РегистрыРасчета
+РегистрыСведений
+Справочники

@@ -239,6 +239,43 @@ impl MdoType {
         }
     }
 
+    /// HBK global-context property matching this MDO type's plural form,
+    /// if any.
+    ///
+    /// Returns `Some(prop)` for the 17 MDO types whose plurals are listed
+    /// as global-context properties in HBK (`Документы` →
+    /// `ДокументыМенеджер`, `Справочники` → `СправочникиМенеджер`, …).
+    /// Returns `None` for `Cube`, `DimensionTable`, `CommonModule` — HBK
+    /// classifies those as nested type descriptors, not bareword globals.
+    ///
+    /// Lazily-built cache: iterates
+    /// `PlatformDataInner::all_global_properties()` on first call and keys
+    /// every property whose name (RU or EN) is recognised by
+    /// [`Self::from_plural`]. Subsequent calls hit the cache.
+    pub fn hbk_global_property(self) -> Option<&'static bsl_platform::PlatformProperty> {
+        static HBK_MAP: OnceLock<
+            rustc_hash::FxHashMap<MdoType, &'static bsl_platform::PlatformProperty>,
+        > = OnceLock::new();
+        HBK_MAP
+            .get_or_init(|| {
+                let mut m: rustc_hash::FxHashMap<MdoType, &'static bsl_platform::PlatformProperty> =
+                    rustc_hash::FxHashMap::default();
+                let data: &'static bsl_platform::PlatformDataInner =
+                    bsl_platform::PlatformDataInner::instance();
+                for prop in data.all_global_properties() {
+                    let Some(t) = MdoType::from_plural(prop.name.as_str())
+                        .or_else(|| MdoType::from_plural(prop.english_name.as_str()))
+                    else {
+                        continue;
+                    };
+                    m.insert(t, prop);
+                }
+                m
+            })
+            .get(&self)
+            .copied()
+    }
+
     /// Returns the platform manager type prefix for this MDO type.
     ///
     /// Used to look up manager methods in platform data.
