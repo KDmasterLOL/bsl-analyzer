@@ -96,7 +96,14 @@ pub fn normalize_name(name: &Name) -> Name {
 ///
 /// Re-runs only when `file_text(file_id)` changes, so an edit in one module
 /// does NOT invalidate the cache for any other module.
-#[salsa::tracked]
+///
+/// LRU = 4096: each memo is a small `FxHashSet<Name>` (~kilobytes),
+/// but `source_root_name_usage_query` fans out to every BSL file in the
+/// workspace, and without a bound the memo table accumulates one entry per
+/// file forever (~25k entries / ~150 MB on ERP-scale). 4096 caps the table
+/// at ~20 MB while still covering small-to-mid workspaces fully and giving
+/// partial reuse on repeated workspace-wide find_references at ERP scale.
+#[salsa::tracked(lru = 4096)]
 pub fn file_name_usage_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
