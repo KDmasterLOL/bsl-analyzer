@@ -31,6 +31,11 @@ pub struct ModuleIndex {
     /// CommonModules: lowercase name → FileId
     common_modules: FxHashMap<String, FileId>,
 
+    /// CommonModules: lowercase name → display-cased name (as extracted from
+    /// the file path). Mirrors [`Self::common_modules`] keys; used by IDE
+    /// completion / hover to render labels with their canonical casing.
+    common_modules_display: FxHashMap<String, String>,
+
     /// Manager objects: (ManagerType, lowercase object name) → FileId (manager module)
     managers: FxHashMap<(ManagerType, String), FileId>,
 
@@ -84,6 +89,7 @@ impl ModuleIndex {
 
             match file_kind {
                 ModuleFileKind::Common => {
+                    index.common_modules_display.insert(lower.clone(), name.to_string());
                     index.common_modules.insert(lower, file_id);
                 }
                 ModuleFileKind::Manager => {
@@ -164,7 +170,18 @@ impl ModuleIndex {
         self.record_set_modules.len()
     }
 
-    /// Iterate over all CommonModule names.
+    /// Iterate over all CommonModule display-cased names (preserving the
+    /// casing extracted from the file path). When the indexer fell back to
+    /// lowercase storage (legacy paths missing display info), yields the
+    /// lowercase form.
+    pub fn common_module_display_names(&self) -> impl Iterator<Item = &str> {
+        self.common_modules.keys().map(|lower| {
+            self.common_modules_display.get(lower).map(|s| s.as_str()).unwrap_or(lower)
+        })
+    }
+
+    /// Iterate over all CommonModule names (lowercase, as stored). Prefer
+    /// [`Self::common_module_display_names`] when rendering for the user.
     pub fn common_module_names(&self) -> impl Iterator<Item = &str> {
         self.common_modules.keys().map(|s| s.as_str())
     }

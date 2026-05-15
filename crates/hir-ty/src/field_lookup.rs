@@ -1152,4 +1152,393 @@ mod tests {
         let only_a = lookup_field(&configs, &receiver, &Name::new("OnlyInA"));
         assert!(only_a.is_none(), "field absent in B must not resolve under union");
     }
+
+    // -------------------------------------------------------------
+    // Phase A: HBK platform-property cascade on *Object / *Ref MDO
+    // receivers. Symmetric with
+    // `field_lookup_information_register_record_set_pulls_platform_properties`
+    // and pinned per `crates/hir-def/src/ty.rs::MetadataKind::platform_prefix`.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn field_lookup_document_object_pulls_platform_properties() {
+        // HBK lists 12 properties on `DocumentObject.<Имя>`. Pin the seven
+        // that were invisible before the cascade — they cannot come from
+        // `standard_mdo_attributes::DOCUMENT_OBJECT` (which only specs
+        // Ref/DeletionMark/Number/Date/Posted) and therefore exercise the
+        // new `push_platform_prefix_properties` path.
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(document("ПКО", vec![]));
+        let configs = wrap(config);
+
+        let receiver =
+            Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") };
+
+        let dop = lookup_field(&configs, &receiver, &Name::new("ДополнительныеСвойства"))
+            .expect("ДополнительныеСвойства must surface on DocumentObject via HBK");
+        assert_eq!(dop.ty, Ty::Structure, "HBK declares Структура");
+        assert!(dop.is_readonly, "DocumentObject.ДополнительныеСвойства is read-only per HBK");
+
+        for prop in [
+            "Движения",
+            "ОбменДанными",
+            "ВерсияДанных",
+            "ЗаписьИсторииДанных",
+            "ПринадлежностьПоследовательностям",
+            "ЭтотОбъект",
+        ] {
+            assert!(
+                lookup_field(&configs, &receiver, &Name::new(prop)).is_some(),
+                "platform property `{prop}` must surface on DocumentObject",
+            );
+        }
+
+        // Bilingual: English alias resolves via `rsplit('.').next()` on
+        // the composite `english_name` shape.
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("AdditionalProperties")).is_some(),
+            "English alias AdditionalProperties must resolve through bilingual rsplit",
+        );
+    }
+
+    #[test]
+    fn field_lookup_this_object_is_typed_metadata_ref_not_generic_platform_object() {
+        // HBK declares `DocumentObject.<Имя>.ЭтотОбъект` with property type
+        // `ДокументОбъект` (the base name, NOT the composite). Without
+        // specialization the cascade would return
+        // `Ty::PlatformObject("ДокументОбъект")` — chain typing through
+        // `<Doc>.ЭтотОбъект.Записать()` would then break because the
+        // receiver type lost its MDO anchor.
+        //
+        // `specialize_self_ref_ty` promotes the self-base name to a
+        // concrete `Ty::MetadataRef` pinned to this receiver's `mdo_name`.
+        // Pinned both for Document (Object self) and Catalog (Object self),
+        // and for `Ссылка` cascade-side typing (Ref of self).
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(document("ПКО", vec![]));
+        config.add_metadata_object(catalog("Номенклатура", vec![]));
+        let configs = wrap(config);
+
+        let doc = Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") };
+        let this_obj = lookup_field(&configs, &doc, &Name::new("ЭтотОбъект"))
+            .expect("ЭтотОбъект resolves on DocumentObject");
+        assert_eq!(
+            this_obj.ty,
+            Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") },
+            "ЭтотОбъект must be a typed MetadataRef (self), not a generic PlatformObject",
+        );
+
+        let cat = Ty::MetadataRef {
+            kind: MetadataKind::CatalogObject,
+            name: Name::new("Номенклатура"),
+        };
+        let cat_this_obj = lookup_field(&configs, &cat, &Name::new("ЭтотОбъект"))
+            .expect("ЭтотОбъект resolves on CatalogObject");
+        assert_eq!(
+            cat_this_obj.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::CatalogObject, name: Name::new("Номенклатура")
+            },
+            "CatalogObject.ЭтотОбъект must specialize to typed self",
+        );
+
+        // `Ссылка` on Object: HBK type `ДокументСсылка` → specialize to
+        // MetadataRef{DocumentRef, ПКО}. (Note: when xml_parser
+        // materialises `Ссылка` into mdo.attributes, that wins over
+        // cascade. Here `vec![]` means cascade is the source.)
+        let r#ref = lookup_field(&configs, &doc, &Name::new("Ссылка"))
+            .expect("Ссылка resolves on DocumentObject via cascade");
+        assert_eq!(
+            r#ref.ty,
+            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") },
+            "Ссылка must specialize to typed DocumentRef self",
+        );
+    }
+
+    #[test]
+    fn field_lookup_this_object_specializes_across_yo_spelling_difference() {
+        // HBK ships `ReportObject.<Имя>.ЭтотОбъект` with declared type
+        // `ОтчетОбъект` (no `ё`), while `MetadataKind::display_label`
+        // returns `ОтчётОбъект` (with `ё`). Exact-string comparison
+        // would silently fail and leave `ЭтотОбъект` as a generic
+        // `Ty::PlatformObject`. `eq_yo_insensitive` in
+        // `specialize_self_ref_ty` folds the spellings so the
+        // specialization fires.
+        //
+        // Also pin DataProcessor (no ё mismatch — `ОбработкаОбъект`
+        // matches both sides directly) to ensure the family coverage
+        // is symmetric.
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(mdo_of(MdoType::Report, "ОстаткиТоваров", vec![]));
+        config.add_metadata_object(mdo_of(MdoType::DataProcessor, "Обработка1", vec![]));
+        let configs = wrap(config);
+
+        let report = Ty::MetadataRef {
+            kind: MetadataKind::ReportObject,
+            name: Name::new("ОстаткиТоваров"),
+        };
+        let report_this = lookup_field(&configs, &report, &Name::new("ЭтотОбъект"))
+            .expect("ЭтотОбъект resolves on ReportObject");
+        assert_eq!(
+            report_this.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::ReportObject, name: Name::new("ОстаткиТоваров")
+            },
+            "ReportObject.ЭтотОбъект must specialize through ё↔е folding",
+        );
+
+        let dp = Ty::MetadataRef {
+            kind: MetadataKind::DataProcessorObject,
+            name: Name::new("Обработка1"),
+        };
+        let dp_this = lookup_field(&configs, &dp, &Name::new("ЭтотОбъект"))
+            .expect("ЭтотОбъект resolves on DataProcessorObject");
+        assert_eq!(
+            dp_this.ty,
+            Ty::MetadataRef {
+                kind: MetadataKind::DataProcessorObject,
+                name: Name::new("Обработка1"),
+            },
+            "DataProcessorObject.ЭтотОбъект must specialize to typed self",
+        );
+    }
+
+    #[test]
+    fn field_lookup_catalog_object_pulls_platform_properties() {
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(catalog("Номенклатура", vec![]));
+        let configs = wrap(config);
+
+        let receiver = Ty::MetadataRef {
+            kind: MetadataKind::CatalogObject,
+            name: Name::new("Номенклатура"),
+        };
+
+        let dop = lookup_field(&configs, &receiver, &Name::new("ДополнительныеСвойства"))
+            .expect("ДополнительныеСвойства must surface on CatalogObject via HBK");
+        assert_eq!(dop.ty, Ty::Structure);
+        assert!(dop.is_readonly);
+
+        assert!(lookup_field(&configs, &receiver, &Name::new("ВерсияДанных")).is_some());
+        assert!(lookup_field(&configs, &receiver, &Name::new("ЗаписьИсторииДанных")).is_some());
+        assert!(lookup_field(&configs, &receiver, &Name::new("ЭтотОбъект")).is_some());
+    }
+
+    /// Seed a `Document "ПКО"` with the standard attributes that
+    /// `bsl-metadata::xml_parser::standard_attributes` would materialise
+    /// for an Object-view spec at parse time. Direct `MetadataObject::new`
+    /// does not run that adapter, so tests that pin the
+    /// `mdo.attributes` → HBK cascade priority must seed manually.
+    fn document_with_standard_attrs(name: &str) -> MetadataObject {
+        document(
+            name,
+            vec![
+                attr(
+                    "Ссылка",
+                    Some("Ref"),
+                    AttributeType::Ref { mdo_type: MdoType::Document, name: name.to_string() },
+                ),
+                attr("ПометкаУдаления", Some("DeletionMark"), AttributeType::Boolean),
+                attr("Дата", Some("Date"), AttributeType::DateTime),
+                attr("Проведен", Some("Posted"), AttributeType::Boolean),
+            ],
+        )
+    }
+
+    #[test]
+    fn field_lookup_document_object_priority_pin_keeps_typed_standard_attrs() {
+        // Priority of `push_unique`: `mdo.attributes` (typed standard attrs
+        // from the spec) push first, HBK cascade pushes last. Where the spec
+        // materializes the attribute (`PresenceCondition::Always`), its type
+        // must win over the HBK fall-through.
+        //
+        // Regression guard: if the push order ever flips, `Дата` could
+        // surface as a `Ty::PlatformObject(...)` rather than `Ty::Date`.
+        //
+        // `Номер` is intentionally NOT pinned: it is `HasNumber`-gated, so
+        // a stripped-down test config leaves it unmaterialized and the
+        // HBK fall-through (declared as `Число|Строка`) wins — that's
+        // documented Phase A behavior, deferred to B1.
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(document_with_standard_attrs("ПКО"));
+        let configs = wrap(config);
+
+        let receiver =
+            Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") };
+
+        let date = lookup_field(&configs, &receiver, &Name::new("Дата"))
+            .expect("standard Дата resolves on DocumentObject");
+        assert_eq!(date.ty, Ty::Date, "spec-typed Дата must win over HBK cascade");
+        assert!(!date.is_readonly, "Дата on DocumentObject is writable per spec");
+
+        let r#ref = lookup_field(&configs, &receiver, &Name::new("Ссылка"))
+            .expect("standard Ссылка resolves on DocumentObject");
+        assert_eq!(
+            r#ref.ty,
+            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") },
+            "Ссылка must remain a typed self-ref, not a stringly-typed HBK entry",
+        );
+
+        let posted = lookup_field(&configs, &receiver, &Name::new("Проведен"))
+            .expect("standard Проведен resolves on DocumentObject");
+        assert_eq!(posted.ty, Ty::Boolean, "spec-typed Проведен must keep its Boolean type");
+    }
+
+    #[test]
+    fn field_lookup_document_ref_caveats_and_cascade() {
+        // DocumentRef has a separate HBK prefix (`DocumentRef.<Имя>`) and a
+        // smaller property surface — no `ДополнительныеСвойства`,
+        // no `Движения`, no `ЭтотОбъект`.
+        //
+        // Pins two invariants:
+        //   1. `platform_prefix()` keys differentiate Object vs Ref —
+        //      Object-only properties must NOT leak onto Ref.
+        //   2. B1 caveat: when the configuration's `mdo.attributes` seeds
+        //      `Дата` (Object-view spec, writable), that entry wins
+        //      `push_unique` even on a Ref receiver — so the HBK cascade
+        //      cannot uplift `Дата.is_readonly = true` on DocumentRef
+        //      until the spec gets a Ref-view variant (see B1).
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(document_with_standard_attrs("ПКО"));
+        let configs = wrap(config);
+
+        let receiver =
+            Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") };
+
+        // 1) Object-only HBK properties must NOT appear on Ref.
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("ДополнительныеСвойства")).is_none(),
+            "Object-only property must not leak into DocumentRef surface",
+        );
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("Движения")).is_none(),
+            "Движения is DocumentObject-only per HBK",
+        );
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("ЭтотОбъект")).is_none(),
+            "ЭтотОбъект is DocumentObject-only per HBK",
+        );
+
+        // 2) HBK property declared only on DocumentRef must surface
+        // via the cascade (no mdo.attributes collision).
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("ВерсияДанных")).is_some(),
+            "DocumentRef.ВерсияДанных must surface via HBK cascade",
+        );
+
+        // 3) B1 caveat: standard `Дата` collides with seeded Object-view
+        // mdo.attributes entry → mdo wins, so is_readonly is the
+        // Object-view value (writable). When B1 introduces Ref-view spec
+        // entries, this assertion flips to `is_readonly`.
+        let date = lookup_field(&configs, &receiver, &Name::new("Дата"))
+            .expect("standard Дата resolves on DocumentRef");
+        assert!(
+            !date.is_readonly,
+            "Phase A limitation: DocumentRef.Дата is_readonly is not uplifted from Object-view spec (see B1)",
+        );
+    }
+
+    #[test]
+    fn field_lookup_cascade_respects_presence_conditional_standard_attrs() {
+        // Codex stop-time review pin: the HBK cascade must NOT surface a
+        // standard attribute whose presence the spec gates on a
+        // configuration property (`HasCode`, `HasNumber`, `Hierarchical`,
+        // `HasOwners`, `IsPeriodic`).
+        //
+        // A `Document` with no `Номер` materialised in `mdo.attributes`
+        // (e.g. the config has no `NumberLength`) must NOT see `Номер`
+        // bleeding in from HBK's `DocumentObject.<Имя>.Номер` declaration
+        // — the spec is the sole arbiter of presence.
+        //
+        // Same for `Код` on a catalog without `CodeLength`, `ЭтоГруппа`
+        // / `Родитель` on a non-hierarchical catalog, `Владелец` on a
+        // catalog without owners.
+        let mut config = Configuration::new("Test");
+        // Intentionally NO standard attrs seeded: simulates a doc/catalog
+        // whose XML did not configure HasNumber/HasCode/Hierarchical/HasOwners.
+        config.add_metadata_object(document("ПКО", vec![]));
+        config.add_metadata_object(catalog("Номенклатура", vec![]));
+        let configs = wrap(config);
+
+        let doc = Ty::MetadataRef { kind: MetadataKind::DocumentObject, name: Name::new("ПКО") };
+        assert!(
+            lookup_field(&configs, &doc, &Name::new("Номер")).is_none(),
+            "Номер must NOT leak from HBK when the document has no NumberLength",
+        );
+
+        let cat = Ty::MetadataRef {
+            kind: MetadataKind::CatalogObject,
+            name: Name::new("Номенклатура"),
+        };
+        assert!(
+            lookup_field(&configs, &cat, &Name::new("Код")).is_none(),
+            "Код must NOT leak from HBK when the catalog has no CodeLength",
+        );
+        assert!(
+            lookup_field(&configs, &cat, &Name::new("ЭтоГруппа")).is_none(),
+            "ЭтоГруппа must NOT leak from HBK when the catalog is not Hierarchical",
+        );
+        assert!(
+            lookup_field(&configs, &cat, &Name::new("Родитель")).is_none(),
+            "Родитель must NOT leak from HBK when the catalog is not Hierarchical",
+        );
+        assert!(
+            lookup_field(&configs, &cat, &Name::new("Владелец")).is_none(),
+            "Владелец must NOT leak from HBK when the catalog has no Owners",
+        );
+
+        // Counter-pin: non-spec HBK properties still come through.
+        assert!(
+            lookup_field(&configs, &cat, &Name::new("ДополнительныеСвойства")).is_some(),
+            "non-spec HBK properties remain visible after the gate",
+        );
+    }
+
+    #[test]
+    fn field_lookup_non_mdo_receivers_unaffected_by_mdo_cascade() {
+        // Negative pin: `MetadataRef{RegisterFilter, ..}` and
+        // `MetadataRef{TabularSectionRow, ..}` dispatch to their own
+        // enumerators (`enumerate_filter_fields` / `enumerate_tabular_row_fields`,
+        // see field_enum.rs:127 and field_enum.rs:131) and never visit
+        // `enumerate_mdo_fields`. They must NOT surface object-flavoured
+        // HBK properties.
+        let mut config = Configuration::new("Test");
+        config.add_register(register_with(
+            "РегСвед",
+            MdoType::InformationRegister,
+            vec![dimension_typed("Валюта", AttributeType::String { length: Some(3) })],
+            vec![],
+            vec![],
+        ));
+        config.add_metadata_object({
+            let mut mdo = catalog("Товары", vec![]);
+            let mut ts = TabularSection::new(Uuid::new_v4(), "Цены");
+            ts.set_attributes(vec![TabularSectionAttribute::new(
+                Uuid::new_v4(),
+                "Цена",
+                AttributeType::Number { precision: 15, scale: 2 },
+            )]);
+            mdo.add_tabular_section(ts);
+            mdo
+        });
+        let configs = wrap(config);
+
+        let filter = Ty::MetadataRef {
+            kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
+            name: Name::new("РегСвед"),
+        };
+        assert!(
+            lookup_field(&configs, &filter, &Name::new("ДополнительныеСвойства")).is_none(),
+            "RegisterFilter must not pull DocumentObject/CatalogObject cascade",
+        );
+
+        let row = Ty::MetadataRef {
+            kind: MetadataKind::TabularSectionRow { parent: MdoType::Catalog },
+            name: Name::new("Товары.Цены"),
+        };
+        assert!(
+            lookup_field(&configs, &row, &Name::new("ДополнительныеСвойства")).is_none(),
+            "TabularSectionRow must not pull MDO cascade",
+        );
+    }
 }

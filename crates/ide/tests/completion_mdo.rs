@@ -695,3 +695,82 @@ fn hover_filter_dimension_price_shows_wrapper_and_value_type() {
         hover.markup,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase A — HBK platform-property cascade on *Object MDO receivers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn completion_document_object_offers_additional_properties_and_movements() {
+    // `Документы.Документ1.СоздатьДокумент()` returns
+    // `Ty::MetadataRef{DocumentObject, "Документ1"}`. The HBK declares
+    // ДополнительныеСвойства / Движения / ОбменДанными / etc. on
+    // `DocumentObject.<Имя>` — they must appear in the completion list
+    // after Phase A wires `enumerate_mdo_fields` to the platform-prefix
+    // cascade.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Док = Документы.Документ1.СоздатьДокумент();
+    Док.$0
+КонецФункции
+"#,
+    );
+
+    assert!(
+        has_label(&items, "ДополнительныеСвойства"),
+        "DocumentObject completion must offer ДополнительныеСвойства; labels: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        has_label(&items, "Движения"),
+        "DocumentObject completion must offer Движения; labels: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+    assert!(has_label(&items, "ОбменДанными"), "DocumentObject completion must offer ОбменДанными",);
+}
+
+#[test]
+fn completion_chain_through_additional_properties_offers_structure_methods() {
+    // Chain typing pin: with the cascade in place,
+    // `Док.ДополнительныеСвойства` resolves to `Ty::Structure`, so the
+    // next dot must surface Structure methods (`Вставить`, `Удалить`,
+    // `Получить`, …). Pre-cascade this chain would type as `Ty::Unknown`
+    // and the dot would offer nothing.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Док = Документы.Документ1.СоздатьДокумент();
+    Док.ДополнительныеСвойства.$0
+КонецФункции
+"#,
+    );
+
+    assert!(
+        has_label(&items, "Вставить"),
+        "Структура.Вставить must complete on ДополнительныеСвойства chain; labels: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn completion_catalog_object_offers_additional_properties() {
+    // Mirror of the document test for `CatalogObject`. HBK declares the
+    // same shared set (`ДополнительныеСвойства`, `ВерсияДанных`,
+    // `ЗаписьИсторииДанных`, `ОбменДанными`, …) under `CatalogObject.<Имя>`.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Эл = Справочники.Справочник1.СоздатьЭлемент();
+    Эл.$0
+КонецФункции
+"#,
+    );
+
+    assert!(
+        has_label(&items, "ДополнительныеСвойства"),
+        "CatalogObject completion must offer ДополнительныеСвойства; labels: {:?}",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+    assert!(has_label(&items, "ВерсияДанных"), "CatalogObject completion must offer ВерсияДанных",);
+}

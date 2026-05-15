@@ -220,12 +220,31 @@ fn hover_free_name<DB: RootDatabase>(
         {
             return Some(r);
         }
-    } else if let Some(ty) = inferred_ty.as_ref() {
-        // Implicit variable (no `Перем`) — surface its inferred type.
-        let mut markup = format!("**{}**\n\n", token.text());
-        if let Some(type_block) = ty_info_markup(db, ty, locale) {
-            markup.push_str(&type_block);
-            return Some(HoverResult { markup, range: Some(token.text_range()) });
+    } else {
+        // HBK global property hover for non-MDO names. Runs BEFORE the
+        // implicit-variable branch so bare `Метаданные` / `ОбработкаОшибок`
+        // surface the rich HBK markup (readonly / min_version / availability)
+        // rather than the coarser inferred-type rendering. Gates on
+        // `inferred_ty` matching the HBK property's declared platform type
+        // so an earlier `infer.rs` cascade step (var_types, form-self,
+        // form-attr, ThisObject, MDO plural) keeps its workspace-specific
+        // markup — see `hover_for_global_property` for the full rule.
+        if let Some(r) = hover_for_global_property(
+            db,
+            file_id,
+            token.text(),
+            token.text_range(),
+            inferred_ty.as_ref(),
+        ) {
+            return Some(r);
+        }
+        if let Some(ty) = inferred_ty.as_ref() {
+            // Implicit variable (no `Перем`) or MDO plural — surface its inferred type.
+            let mut markup = format!("**{}**\n\n", token.text());
+            if let Some(type_block) = ty_info_markup(db, ty, locale) {
+                markup.push_str(&type_block);
+                return Some(HoverResult { markup, range: Some(token.text_range()) });
+            }
         }
     }
 
@@ -234,6 +253,53 @@ fn hover_free_name<DB: RootDatabase>(
     }
 
     hover_for_platform_type(db, token.text(), token.text_range())
+}
+
+/// HBK global property hover for bare identifiers. Returns `None` when:
+///
+/// - the name is an MDO plural — band 4 of `infer.rs::infer_path_name`
+///   resolves it to `Ty::ManagerCollection` ahead of the HBK step;
+/// - a workspace CommonModule with the same literal label exists in the
+///   current source root — mirrors `Resolver::user_common_module_exists`,
+///   the same gate `infer.rs:1493` uses;
+/// - `inferred_ty` is present and does NOT match the HBK property's
+///   declared platform type. An earlier cascade step (`var_types`,
+///   form-self, form-attr, ThisObject, …) already claimed this name with
+///   a different `Ty`; rendering HBK markup would mask the authoritative
+///   resolution.
+fn hover_for_global_property<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    name: &str,
+    range: TextRange,
+    inferred_ty: Option<&Ty>,
+) -> Option<HoverResult> {
+    if bsl_metadata::MdoType::from_plural(name).is_some() {
+        return None;
+    }
+    let resolver = hir::Resolver::with_workspace_scope(hir::ModuleId::new(file_id));
+    if resolver.user_common_module_exists(db, &hir::Name::new(name)) {
+        return None;
+    }
+    let prop = PlatformDataInner::instance().get_global_property(name)?;
+    if let Some(ty) = inferred_ty {
+        // `infer.rs:1500` lowers `prop.property_types.first()` via
+        // `TyLoweringContext::lower_bare_name`. Replay the same lowering
+        // here and compare exactly — primitive declared types (`Число`,
+        // `Строка`, `Булево`) lift to `Ty::Number` / `Ty::String` /
+        // `Ty::Boolean`, none of which carry a `platform_type_name()`
+        // string matching `Число` directly. A string-equality gate would
+        // false-negative those; full `Ty` equality is what `infer.rs`
+        // step 6 actually produces, so it's the right comparison.
+        if let Some(declared) = prop.property_types.first() {
+            let expected =
+                hir::TyLoweringContext::new().lower_bare_name(&hir::Name::new(declared.as_str()));
+            if *ty != expected {
+                return None;
+            }
+        }
+    }
+    Some(render_property_hover(prop, range))
 }
 
 /// Look up a property on `receiver_ty` and render its hover markup.
@@ -522,6 +588,17 @@ fn render_property_hover(prop: &PlatformProperty, range: TextRange) -> HoverResu
             }
         }
     }
+    if let Some(ver) = prop.min_version.as_ref() {
+        if markup.ends_with("\n\n") {
+            // already padded
+        } else if markup.ends_with('\n') {
+            markup.push('\n');
+        } else {
+            markup.push_str("\n\n");
+        }
+        markup.push_str(&format!("**Доступен с версии:** {ver}"));
+    }
+    append_availability(&mut markup, prop.context.as_ref());
     HoverResult { markup, range: Some(range) }
 }
 

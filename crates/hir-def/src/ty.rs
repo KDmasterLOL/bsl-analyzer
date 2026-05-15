@@ -756,8 +756,9 @@ impl MetadataKind {
         }
     }
 
-    /// English prefix under which this kind's platform methods are
-    /// indexed in `bsl-platform` (`CatalogObject`, `CatalogRef`, …).
+    /// English prefix under which this kind's platform methods AND
+    /// properties are indexed in `bsl-platform` (`CatalogObject`,
+    /// `CatalogRef`, …).
     ///
     /// `None` for kinds without a platform surface today (register
     /// record-manager / record-set flavours, dimensions, resources,
@@ -765,6 +766,9 @@ impl MetadataKind {
     ///
     /// - `hir-ty::platform_manager_lookup::resolve_platform_metadata_ref_method`
     ///   (semantic method resolution);
+    /// - `hir-ty::field_enum::push_platform_prefix_properties`
+    ///   (property enumeration for `*Object`/`*Ref` and register
+    ///   record-set receivers);
     /// - `ide::completion::platform_completion` (dot-completion on
     ///   `Ty::MetadataRef` receivers).
     ///

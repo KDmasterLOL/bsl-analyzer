@@ -30,11 +30,23 @@
 //!   here keeps the "scalar key only" invariant of
 //!   [`crate::method_lookup::platform_type_key`] intact.
 //!
-//! `Ty::MetadataRef` is deliberately **not** routed through this adapter —
-//! metadata-ref property access walks the MDO's XML attributes in
-//! [`crate::field_lookup::lookup_metadata_ref`]. The dispatcher in
-//! `lookup_field` decides who owns a receiver; this module never sees a
-//! `MetadataRef` input.
+//! `Ty::MetadataRef` is deliberately **not** routed through
+//! [`lookup_platform_property`] — metadata-ref property access goes
+//! through [`crate::field_enum::enumerate_fields`], which composes the
+//! MDO's user/standard attributes, tabular sections, and the HBK
+//! platform-property cascade keyed by [`hir_def::ty::MetadataKind::platform_prefix`].
+//! The dispatcher in `lookup_field` decides who owns a receiver, and
+//! [`lookup_platform_property`] returns `None` for `MetadataRef` /
+//! `ObjectManager` inputs as defense-in-depth (see
+//! `metadata_ref_and_manager_receivers_return_none` test).
+//!
+//! What IS shared with the metadata-ref path is the small
+//! [`to_resolution`] helper: both [`crate::field_enum::enumerate_mdo_fields`]
+//! and [`crate::field_enum::enumerate_register_fields`] call it to convert
+//! a [`PlatformProperty`] into a `(Ty, is_readonly)` pair. That keeps the
+//! type-mapping logic (single-element list collapse, multi-element list
+//! union) in one place without re-exposing the full adapter to receivers
+//! it does not own.
 
 use bsl_platform::{PlatformData, PlatformProperty};
 use hir_def::ty::Ty;

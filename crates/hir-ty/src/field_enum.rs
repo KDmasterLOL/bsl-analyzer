@@ -14,7 +14,9 @@
 //! `pub(crate)` so both modules use the single canonical copy.
 
 use bsl_metadata::{AttributeType, MdoType, MetadataObject, RegisterPeriodicity};
-use bsl_platform::{standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData};
+use bsl_platform::{
+    standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData, StandardKind,
+};
 use hir_def::configs::VisibleConfig;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
@@ -117,7 +119,7 @@ pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<Fiel
     };
 
     if let Some(mdo_type) = mdo_type_for_kind(*kind) {
-        return enumerate_mdo_fields(configs, mdo_type, name);
+        return enumerate_mdo_fields(configs, *kind, mdo_type, name);
     }
 
     if let Some(parent) = register_parent_for_kind(*kind) {
@@ -163,12 +165,209 @@ fn is_record_kind(kind: MetadataKind) -> bool {
     )
 }
 
+/// Push every HBK-declared platform property indexed under
+/// `kind.platform_prefix()` into `out`, deduped by `seen`. Shared by
+/// [`enumerate_mdo_fields`] and [`enumerate_register_fields`] — single
+/// source of truth for the bilingual `rsplit('.').next()` alias rule and
+/// the `to_resolution → FieldInfo` mapping.
+///
+/// **Presence-condition gating.** Standard-attribute names that
+/// [`bsl_platform::standard_attributes_for`] knows about for this
+/// `mdo_type` (`Код`/`HasCode`, `Номер`/`HasNumber`, `ЭтоГруппа` /
+/// `Родитель` (`Hierarchical`), `Владелец`/`HasOwners`,
+/// `Период`/`IsPeriodic`, …) are skipped: their visibility is a
+/// configuration-dependent decision that lives in the spec and is
+/// materialised by `bsl-metadata::xml_parser::standard_attributes`. The
+/// HBK cascade must never push a presence-gated standard attribute,
+/// because HBK has no knowledge of the gate and would surface (e.g.)
+/// `Номер` on a document without a configured number length.
+///
+/// `ty_override` lets the caller override the platform-declared `Ty` for
+/// specific property names. The register caller uses it to widen the
+/// recorder property's type into a union of concrete document refs (see
+/// [`recorder_union_ty`]); MDO caller passes a closure that always
+/// returns `None`.
+///
+/// Pushed AFTER caller-specific entries so a real attribute / dimension
+/// / standard attribute always wins on a name collision (`push_unique`
+/// keeps the first push). This preserves the priority `mdo.attributes`
+/// → tabular sections → HBK platform properties.
+fn push_platform_prefix_properties(
+    kind: MetadataKind,
+    mdo_type: MdoType,
+    mdo_name: &Name,
+    out: &mut Vec<FieldInfo>,
+    seen: &mut std::collections::HashSet<Name>,
+    mut ty_override: impl FnMut(&str) -> Option<Ty>,
+) {
+    let Some(prefix) = kind.platform_prefix() else {
+        return;
+    };
+    let spec_names = standard_attribute_names_for(mdo_type);
+    for prop in PlatformData::instance().get_manager_properties(prefix) {
+        let en_tail =
+            prop.english_name.as_str().rsplit('.').next().unwrap_or(prop.english_name.as_str());
+        if name_in_spec(&spec_names, prop.name.as_str(), en_tail) {
+            // Spec owns this name's presence — defer to mdo.attributes
+            // (which `xml_parser/standard_attributes` populates per
+            // `PresenceCondition`). If the spec says "absent for this
+            // config", `mdo.attributes` is empty and the cascade must
+            // honour that absence, not paper over it from HBK.
+            continue;
+        }
+        let res = crate::platform_property_lookup::to_resolution(prop);
+        // HBK declares self-typed properties (`ЭтотОбъект` →
+        // `ДокументОбъект`, `Ссылка` → `ДокументСсылка`, …) with the
+        // base platform-type name, not the composite `<Prefix>.<MDO>`
+        // shape. `to_resolution` therefore yields a generic
+        // `Ty::PlatformObject(base)`, which kills chain typing:
+        // `Док.ЭтотОбъект.Записать()` would not see `Записать` because
+        // the receiver type lost its MDO anchor. Specialize the
+        // self-base name back to a concrete `MetadataRef` pinned to
+        // this receiver's `mdo_name` so the chain stays typed.
+        let specialized = specialize_self_ref_ty(mdo_type, mdo_name, &res.return_ty);
+        let ty = ty_override(prop.name.as_str()).or(specialized).unwrap_or(res.return_ty);
+        let info = FieldInfo {
+            name: Name::new(prop.name.as_str()),
+            // english_name shape: `<Type>.<Name>.<Property>` (composite).
+            // Take the rightmost segment so the bilingual lookup matches
+            // a bare `Filter` / `WriteDataHistory` / `AdditionalProperties`.
+            // A dot-free `english_name` returns itself via `rsplit`,
+            // matching the bilingual-key convention used elsewhere.
+            name_en: Some(Name::new(en_tail)),
+            ty,
+            value_ty: None,
+            is_readonly: res.is_readonly,
+            origin: FieldOrigin::PlatformProperty,
+        };
+        push_unique(out, seen, info);
+    }
+}
+
+/// Promote a HBK self-typed `Ty::PlatformObject(base)` to a concrete
+/// `Ty::MetadataRef { kind, name: receiver_mdo_name }` when `base`
+/// matches the receiver MDO's Object or Ref companion display label.
+///
+/// Covers every Object/Ref family pair (Document, Catalog, Task,
+/// BusinessProcess, ExchangePlan, ChartOfAccounts), the Object-only
+/// families (DataProcessor, Report), and the Ref-only Enum family —
+/// every entry where [`MetadataKind::object_kind_for`] or
+/// [`ref_kind_for_mdo`] returns `Some(_)`.
+///
+/// Comparison folds `ё ↔ е` via [`eq_yo_insensitive`]. The HBK dumps
+/// `ОтчетОбъект` (without `ё`) while [`MetadataKind::display_label`]
+/// returns `ОтчётОбъект`; without the fold, Report objects would silently
+/// stay generic.
+///
+/// Restores chain typing for `<receiver>.ЭтотОбъект.<…>` and any HBK
+/// property whose declared type is the receiver's own family base
+/// (`ДокументОбъект`, `СправочникСсылка`, `ЗадачаОбъект`, …). Returns
+/// `None` for cross-family bases (e.g. `Владелец: СправочникСсылка` on
+/// a Catalog points at the *owner* catalog, not self — those are
+/// configurator-conditional and handled by the spec's `HasOwners`
+/// path, not by this cascade).
+fn specialize_self_ref_ty(mdo_type: MdoType, mdo_name: &Name, ty: &Ty) -> Option<Ty> {
+    let Ty::PlatformObject(base) = ty else {
+        return None;
+    };
+    let base = base.as_str();
+    let candidates = [MetadataKind::object_kind_for(mdo_type), ref_kind_for_mdo(mdo_type)];
+    for candidate in candidates.into_iter().flatten() {
+        let ru = candidate.display_label(base_db::Locale::Ru);
+        let en = candidate.display_label(base_db::Locale::En);
+        if eq_yo_insensitive(base, ru) || base == en {
+            return Some(Ty::MetadataRef { kind: candidate, name: mdo_name.clone() });
+        }
+    }
+    None
+}
+
+/// Compare two Russian platform-type names ignoring the `ё` ↔ `е`
+/// spelling difference. HBK pages mix both spellings — `display_label`
+/// uses `ОтчётОбъект`, but `platform_data.json` ships `ОтчетОбъект`. The
+/// sibling normaliser in [`crate::platform_manager_lookup`] solves the
+/// same problem by listing both spellings; we fold them here once so
+/// future ё-bearing labels (e.g. CalcReg `РегистрРасчётаКлючЗаписи`)
+/// don't need per-call enumeration.
+fn eq_yo_insensitive(lhs: &str, rhs: &str) -> bool {
+    if lhs == rhs {
+        return true;
+    }
+    if lhs.len() != rhs.len() {
+        return false;
+    }
+    lhs.chars().map(fold_yo).eq(rhs.chars().map(fold_yo))
+}
+
+fn fold_yo(c: char) -> char {
+    match c {
+        'ё' => 'е',
+        'Ё' => 'Е',
+        _ => c,
+    }
+}
+
+fn ref_kind_for_mdo(mdo: MdoType) -> Option<MetadataKind> {
+    Some(match mdo {
+        MdoType::Catalog => MetadataKind::CatalogRef,
+        MdoType::Document => MetadataKind::DocumentRef,
+        MdoType::Task => MetadataKind::TaskRef,
+        MdoType::BusinessProcess => MetadataKind::BusinessProcessRef,
+        MdoType::ExchangePlan => MetadataKind::ExchangePlanRef,
+        MdoType::ChartOfAccounts => MetadataKind::ChartOfAccountsRef,
+        MdoType::Enum => MetadataKind::EnumRef,
+        _ => return None,
+    })
+}
+
+/// Lowercased set of standard-attribute names whose **presence is
+/// configurator-conditional** for `mdo_type` (`HasCode`, `HasNumber`,
+/// `Hierarchical`, `HasOwners`, `IsPeriodic`). These are the names the
+/// HBK cascade must NOT push, because HBK has no knowledge of the gate
+/// and would surface (e.g.) `Номер` on a document without a configured
+/// number length.
+///
+/// `Always`-condition spec entries (e.g. `Ссылка`, `Дата`, `Проведен`,
+/// `Активность`) are intentionally NOT included: the cascade is allowed
+/// to push them. When `xml_parser/standard_attributes` materialised
+/// them into `mdo.attributes` the cascade entry is shadowed by
+/// `push_unique`; when it didn't (synthesised test configs), the
+/// cascade provides a typed fall-through via [`specialize_self_ref_ty`].
+///
+/// Returns an empty set when the `MdoType` has no template in
+/// [`mdo_template_kind_for`] — the cascade then runs unfiltered.
+fn standard_attribute_names_for(mdo_type: MdoType) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let Some(template) = mdo_template_kind_for(mdo_type) else {
+        return names;
+    };
+    for view in [ObjectView::Object, ObjectView::Ref, ObjectView::RecordSet] {
+        for spec in standard_attributes_for(template, view) {
+            if matches!(spec.condition, bsl_platform::PresenceCondition::Always) {
+                continue;
+            }
+            insert_standard_kind_names(&mut names, spec.kind);
+        }
+    }
+    names
+}
+
+fn insert_standard_kind_names(set: &mut std::collections::HashSet<String>, kind: StandardKind) {
+    set.insert(kind.russian_name().to_lowercase());
+    set.insert(kind.english_name().to_lowercase());
+}
+
+fn name_in_spec(spec_names: &std::collections::HashSet<String>, ru: &str, en: &str) -> bool {
+    spec_names.contains(&ru.to_lowercase()) || spec_names.contains(&en.to_lowercase())
+}
+
 // ---------------------------------------------------------------------------
 // Internal enumerators
 // ---------------------------------------------------------------------------
 
 fn enumerate_mdo_fields(
     configs: &[VisibleConfig],
+    kind: MetadataKind,
     mdo_type: MdoType,
     mdo_name: &Name,
 ) -> Vec<FieldInfo> {
@@ -216,6 +415,23 @@ fn enumerate_mdo_fields(
             };
             push_unique(&mut out, &mut seen, info);
         }
+
+        // HBK platform-property cascade. Surfaces `ДополнительныеСвойства`,
+        // `Движения`, `ОбменДанными`, `ВерсияДанных`, `ЗаписьИсторииДанных`,
+        // `ПринадлежностьПоследовательностям`, `ЭтотОбъект`, etc., that the
+        // HBK declares per `<Prefix>.<MDO>` composite (Document/Catalog/
+        // Task/BusinessProcess/ExchangePlan/ChartOfAccounts, both Object
+        // and Ref views, plus DataProcessor/Report). Pushed last so user
+        // and standard attributes keep their typed entries on a name
+        // collision. MDO side has no recorder rebind — that's register-only.
+        // `mdo_type` is forwarded so the helper can gate out standard
+        // attribute names whose presence is config-conditional (the spec
+        // owns those — see `push_platform_prefix_properties` docs).
+        // `mdo_name` is forwarded so self-typed HBK properties
+        // (`ЭтотОбъект` → `ДокументОбъект`, `Ссылка` → `ДокументСсылка`,
+        // …) can be re-typed to a concrete `MetadataRef` anchored on
+        // this receiver, restoring chain typing.
+        push_platform_prefix_properties(kind, mdo_type, mdo_name, &mut out, &mut seen, |_| None);
 
         return out;
     }
@@ -328,43 +544,27 @@ fn enumerate_register_fields(
         }
 
         // Platform properties indexed under the composite type prefix
-        // (`InformationRegisterRecordSet.<Имя>` / `CatalogObject.<Имя>` / …).
-        // Surfaces `Записывать`, `ОбменДанными`, `ДополнительныеСвойства`,
-        // `БлокироватьДляИзменения` (Accounting only), etc., that the HBK
-        // declares per receiver flavour. Pushed AFTER user-defined parts
-        // so a real dimension/resource/attribute always wins on a name
-        // collision (`push_unique` keeps the first entry); the synthetic
-        // `.Отбор` pushed above already won over any platform `Filter`.
-        if let Some(prefix) = kind.platform_prefix() {
-            for prop in PlatformData::instance().get_manager_properties(prefix) {
-                let res = crate::platform_property_lookup::to_resolution(prop);
-                let mut ty = res.return_ty;
-                if is_record_kind(kind) && is_recorder_name(&prop.name) {
-                    if let Some(recorders_ty) = recorder_union_ty(configs, parent, register_name) {
-                        ty = recorders_ty;
-                    }
+        // (`InformationRegisterRecordSet.<Имя>` etc.). Surfaces `Записывать`,
+        // `ОбменДанными`, `ДополнительныеСвойства`, `БлокироватьДляИзменения`
+        // (Accounting only), etc. Pushed AFTER user-defined parts so a real
+        // dimension/resource/attribute wins on a name collision; the
+        // synthetic `.Отбор` pushed earlier already won over any platform
+        // `Filter`. Recorder override widens the platform-declared base
+        // ref into a union of concrete document refs for record kinds.
+        push_platform_prefix_properties(
+            kind,
+            parent,
+            register_name,
+            &mut out,
+            &mut seen,
+            |prop_name| {
+                if is_record_kind(kind) && is_recorder_name(prop_name) {
+                    recorder_union_ty(configs, parent, register_name)
+                } else {
+                    None
                 }
-                let info = FieldInfo {
-                    name: Name::new(prop.name.as_str()),
-                    name_en: Some(Name::new(
-                        // english_name shape: `<Type>.<Name>.<Property>`
-                        // (composite). Take the rightmost segment so the
-                        // bilingual lookup matches a bare `Filter` /
-                        // `WriteDataHistory` / etc.
-                        prop.english_name
-                            .as_str()
-                            .rsplit('.')
-                            .next()
-                            .unwrap_or(prop.english_name.as_str()),
-                    )),
-                    ty,
-                    value_ty: None,
-                    is_readonly: res.is_readonly,
-                    origin: FieldOrigin::PlatformProperty,
-                };
-                push_unique(&mut out, &mut seen, info);
-            }
-        }
+            },
+        );
 
         return out;
     }

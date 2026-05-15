@@ -6,14 +6,18 @@
 //! - User-defined symbols (module functions, variables)
 //! - Local symbols (parameters, local variables)
 
+use std::collections::HashSet;
+
+use bsl_metadata::MdoType;
 use bsl_platform::{GlobalFunction, PlatformDataInner};
 use either::Either;
 use hir::{DefWithBodyId, ExprScopes, ScopeDef};
+use ide_db::base_db::Locale;
 use ide_db::{RootDatabase, TextRange};
 use syntax::{ast::AstNode, SyntaxKind};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
-use crate::completion::platform_completion::render_mdo_field;
+use crate::completion::platform_completion::{render_mdo_field, render_platform_property};
 
 /// Attempts to provide BSL code completions.
 ///
@@ -130,30 +134,14 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
             completions.push(keyword_item);
         }
 
-        // Add local symbols (parameters, local variables) FIRST - they shadow everything
-        completions.extend(complete_local_symbols(db, position.file_id, position.offset, prefix));
-
-        // Add user-defined symbols (module methods, variables)
-        completions.extend(complete_user_defined_symbols(db, position.file_id, prefix));
-
-        // Managed-form attributes (Объект, Замечание, ТаблицаРасходов) come
-        // AFTER locals AND user-defined symbols — symmetric with the
-        // cascade in `infer_path_name`: parameters / `Перем` / module-level
-        // methods all shadow a same-named form attribute. Suppress
-        // collisions case-insensitively against everything we have so far.
-        let shadow_labels: std::collections::HashSet<String> =
-            completions.iter().map(|c| c.label.to_lowercase()).collect();
-        completions.extend(
-            complete_module_self_attributes(db, position.file_id, prefix, position.locale)
-                .into_iter()
-                .filter(|c| !shadow_labels.contains(&c.label.to_lowercase())),
-        );
-
-        // Add MDO types and objects from metadata
-        completions.extend(complete_mdo_symbols(db, position.file_id, prefix));
-
-        // Also add global functions that match the prefix
-        completions.extend(complete_global_functions(prefix));
+        completions.extend(complete_top_level(
+            db,
+            position.file_id,
+            position.offset,
+            prefix,
+            position.locale,
+            false,
+        ));
 
         tracing::info!(count = completions.len(), "Returning BSL completions");
         return Some(completions);
@@ -163,41 +151,8 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
     // but nothing is typed yet (e.g., inside parentheses, after comma, empty line)
     if is_expression_start_position(&token) {
         tracing::info!(token_kind = ?token.kind(), "Expression start position - completing with empty prefix");
-        let mut completions = Vec::new();
-
-        // Local symbols first (highest priority)
-        for mut item in complete_local_symbols(db, position.file_id, position.offset, "") {
-            item.sort_text = Some(format!("0_{}", item.label));
-            completions.push(item);
-        }
-        // User-defined methods
-        for mut item in complete_user_defined_symbols(db, position.file_id, "") {
-            item.sort_text = Some(format!("1_{}", item.label));
-            completions.push(item);
-        }
-        // Managed-form attributes — symmetric with `infer_path_name`
-        // cascade: parameters / `Перем` / module methods shadow same-named
-        // form attributes. Dedup case-insensitively against everything
-        // produced so far.
-        let shadow_labels: std::collections::HashSet<String> =
-            completions.iter().map(|c| c.label.to_lowercase()).collect();
-        for mut item in complete_module_self_attributes(db, position.file_id, "", position.locale)
-            .into_iter()
-            .filter(|c| !shadow_labels.contains(&c.label.to_lowercase()))
-        {
-            item.sort_text = Some(format!("1_5_{}", item.label));
-            completions.push(item);
-        }
-        // Global functions
-        for mut item in complete_global_functions("") {
-            item.sort_text = Some(format!("2_{}", item.label));
-            completions.push(item);
-        }
-        // MDO collections and common modules (lowest priority in argument context)
-        for mut item in complete_mdo_symbols(db, position.file_id, "") {
-            item.sort_text = Some(format!("3_{}", item.label));
-            completions.push(item);
-        }
+        let completions =
+            complete_top_level(db, position.file_id, position.offset, "", position.locale, true);
 
         tracing::info!(count = completions.len(), "Returning BSL completions (trigger position)");
         return Some(completions);
@@ -206,6 +161,104 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
     // No BSL completion context
     tracing::info!("No BSL completion context - returning None");
     None
+}
+
+/// Top-level completion accumulator. Iterates sources in the order that
+/// mirrors `infer.rs::infer_path_name` cascade (`crates/hir-ty/src/infer.rs:1315-1503`):
+///
+/// | Band   | Source                              | infer.rs step |
+/// |--------|-------------------------------------|---------------|
+/// | `00_`  | locals (parameters + Перем)         | 1             |
+/// | `10_`  | user-defined module symbols         | 2 (Resolution::Method/Variable) |
+/// | `15_`  | managed-form attributes             | 5b            |
+/// | `20_`  | MDO plurals                         | 4             |
+/// | `25_`  | HBK globals (properties + functions)| 6             |
+/// | `30_`  | workspace CommonModules             | (workspace_owns_common_module shadow gate) |
+///
+/// Two-digit zero-padded prefixes give correct lexicographic ordering across
+/// any label charset (ASCII identifiers vs Cyrillic). A single-digit `2_`
+/// would sort after `2_5_` for any non-digit label suffix, since `_` (0x5F)
+/// > `5` (0x35); the padded form `20_` < `25_` regardless of suffix.
+///
+/// First-wins dedup by lowercase label: once a name is emitted in an earlier
+/// band, later bands skip it. The HBK band additionally consults
+/// [`hir::Resolver::user_common_module_exists`] (same gate `infer.rs:1493`
+/// uses) so it does not emit a property shadowed by a workspace CommonModule
+/// that's about to render in band 30.
+fn complete_top_level<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    offset: syntax::TextSize,
+    prefix: &str,
+    locale: Locale,
+    with_sort_text: bool,
+) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_top_level").entered();
+
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    push_band(
+        &mut out,
+        &mut seen,
+        with_sort_text,
+        "00_",
+        complete_local_symbols(db, file_id, offset, prefix),
+    );
+    push_band(
+        &mut out,
+        &mut seen,
+        with_sort_text,
+        "10_",
+        complete_user_defined_symbols(db, file_id, prefix),
+    );
+    push_band(
+        &mut out,
+        &mut seen,
+        with_sort_text,
+        "15_",
+        complete_module_self_attributes(db, file_id, prefix, locale),
+    );
+    push_band(&mut out, &mut seen, with_sort_text, "20_", complete_mdo_plurals(prefix));
+    push_band(
+        &mut out,
+        &mut seen,
+        with_sort_text,
+        "25_",
+        complete_hbk_globals(db, file_id, prefix, locale),
+    );
+    push_band(
+        &mut out,
+        &mut seen,
+        with_sort_text,
+        "30_",
+        complete_user_common_modules(db, file_id, prefix),
+    );
+
+    out
+}
+
+/// Append `items` to `out`, dropping any whose lowercase label is already in
+/// `seen` (first-wins per cascade). When `with_sort_text` is set, stamps each
+/// item's `sort_text` with `<band_prefix><label>` for stable lexicographic
+/// banding in the LSP client.
+fn push_band(
+    out: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    with_sort_text: bool,
+    band_prefix: &str,
+    items: Vec<CompletionItem>,
+) {
+    for mut item in items {
+        let key = item.label.to_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        if with_sort_text {
+            item.sort_text = Some(format!("{band_prefix}{}", item.label));
+        }
+        out.push(item);
+    }
 }
 
 fn complete_module_self_attributes<DB: RootDatabase>(
@@ -452,87 +505,150 @@ fn mdo_type_plural_en(mdo_type: &bsl_metadata::MdoType) -> &'static str {
     }
 }
 
-/// Completes top-level MDO symbols (directly callable at statement start).
-///
-/// Returns completion items for:
-/// - MDO plural forms (Справочники, Документы, РегистрыСведений, etc.)
-/// - Common modules (callable directly: `МойМодуль.Функция()`)
-///
-/// Concrete metadata objects (Валюты, Номенклатура, etc.) are intentionally
-/// excluded: in BSL they are only reachable through their collection
-/// (`Справочники.Номенклатура`), and completion after the DOT is handled by
-/// `mdo_completion.rs`.
-///
-/// Symbols are filtered by prefix (case-insensitive).
-fn complete_mdo_symbols<DB: RootDatabase>(
-    db: &DB,
-    file_id: vfs::FileId,
-    prefix: &str,
-) -> Vec<CompletionItem> {
-    let _span = tracing::debug_span!("complete_mdo_symbols").entered();
+/// MDO plural completion items (band 2). `Справочники`, `Документы`,
+/// `РегистрыСведений`, … rendered as `CompletionItemKind::MdoType` with detail
+/// "Коллекция метаданных (…)". HBK also declares these names as global
+/// properties typed `<X>Менеджер`, but workspace shape `Ty::ManagerCollection`
+/// is strictly more specific, so this branch owns the rendering and
+/// `complete_hbk_globals` skips names matching `MdoType::from_plural`.
+fn complete_mdo_plurals(prefix: &str) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_mdo_plurals").entered();
 
     let mut completions = Vec::new();
     let prefix_lower = prefix.to_lowercase();
 
-    // 1. Add MDO plural forms (collection types)
-    for mdo_type in bsl_metadata::MdoType::all() {
+    for mdo_type in MdoType::all() {
         let plural_ru = mdo_type_plural_ru(mdo_type);
         let plural_en = mdo_type_plural_en(mdo_type);
 
-        // Check if matches prefix (case-insensitive)
-        if plural_ru.to_lowercase().starts_with(&prefix_lower)
-            || plural_en.to_lowercase().starts_with(&prefix_lower)
-        {
-            completions.push(CompletionItem {
-                label: plural_ru.to_string(),
-                detail: Some(format!("Коллекция метаданных ({})", mdo_type.russian_name())),
-                kind: CompletionItemKind::MdoType,
-                insert_text: plural_ru.to_string(),
-                documentation: Some(format!(
-                    "{} / {}\n\nКоллекция объектов метаданных типа {}.",
-                    plural_ru,
-                    plural_en,
-                    mdo_type.russian_name()
-                )),
-                sort_text: None,
-                filter_text: None,
-                source: None,
-            });
+        if !matches_prefix_bilingual(plural_ru, plural_en, &prefix_lower) {
+            continue;
         }
+
+        completions.push(CompletionItem {
+            label: plural_ru.to_string(),
+            detail: Some(format!("Коллекция метаданных ({})", mdo_type.russian_name())),
+            kind: CompletionItemKind::MdoType,
+            insert_text: plural_ru.to_string(),
+            documentation: Some(format!(
+                "{} / {}\n\nКоллекция объектов метаданных типа {}.",
+                plural_ru,
+                plural_en,
+                mdo_type.russian_name()
+            )),
+            sort_text: None,
+            filter_text: None,
+            source: None,
+        });
     }
-
-    // 2. Add common modules from all configurations (main + extensions).
-    //    Common modules are the only metadata objects callable directly by
-    //    name; other MDO objects must be accessed through their collection.
-    for (ext_name, config) in db.get_all_configurations(file_id) {
-        use bsl_metadata::traits::MdObject;
-        for module in config.common_modules() {
-            let name = module.name();
-
-            if !name.to_lowercase().starts_with(&prefix_lower) {
-                continue;
-            }
-
-            completions.push(CompletionItem {
-                label: name.to_string(),
-                detail: Some("Общий модуль".to_string()),
-                kind: CompletionItemKind::MdoObject,
-                insert_text: name.to_string(),
-                documentation: Some(format!("{name}\n\nОбщий модуль конфигурации.")),
-                sort_text: None,
-                filter_text: None,
-                source: ext_name.clone(),
-            });
-        }
-    }
-
-    tracing::debug!(
-        count = completions.len(),
-        prefix = ?prefix,
-        "Completed MDO symbols"
-    );
 
     completions
+}
+
+/// Workspace CommonModule completion items (band 3). Reads names from the
+/// authoritative `module_index` — the same source `Resolver::user_common_module_exists`
+/// consults at inference time — so completion stays in lockstep with
+/// resolution. Common modules are the only metadata objects callable
+/// directly by name; other MDO objects must be accessed through their
+/// collection, and dot-completion is handled by `mdo_completion.rs`.
+fn complete_user_common_modules<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_user_common_modules").entered();
+
+    let prefix_lower = prefix.to_lowercase();
+    let mut completions = Vec::new();
+
+    for name in module_index_for(db, file_id).common_module_display_names() {
+        if !name.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        completions.push(CompletionItem {
+            label: name.to_string(),
+            detail: Some("Общий модуль".to_string()),
+            kind: CompletionItemKind::MdoObject,
+            insert_text: name.to_string(),
+            documentation: Some(format!("{name}\n\nОбщий модуль конфигурации.")),
+            sort_text: None,
+            filter_text: None,
+            source: None,
+        });
+    }
+
+    completions
+}
+
+fn module_index_for<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+) -> std::sync::Arc<hir::ModuleIndex> {
+    let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
+    db.module_index(source_root_id)
+}
+
+/// HBK globals — global properties + global functions merged. Skips:
+///
+/// - MDO plurals (band 2 owns them with richer workspace shape; both RU and
+///   EN aliases are gated because each HBK property is emitted once and
+///   either alias would route through `band 2`).
+/// - HBK **properties** whose literal RU name resolves to a workspace
+///   CommonModule via [`Resolver::user_common_module_exists`] — same gate
+///   `infer.rs:1493` applies to platform-global property resolution. Uses
+///   the full Resolver (workspace scope + module id + configuration
+///   visibility), not a raw `module_index` probe, so extensions that hide
+///   a module in the active configuration don't over-shadow HBK.
+///
+/// HBK **global functions** are intentionally NOT shadowed: builtin platform
+/// functions have the highest resolution priority in BSL and are not
+/// preempted by user code (a workspace `CommonModule/НачатьТранзакцию` can
+/// only be invoked as `НачатьТранзакцию.Method()`; bareword call still
+/// binds to the platform function).
+fn complete_hbk_globals<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    prefix: &str,
+    locale: Locale,
+) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_hbk_globals").entered();
+
+    let data = PlatformDataInner::instance();
+    let module_id = hir::ModuleId::new(file_id);
+    let resolver = hir::Resolver::with_workspace_scope(module_id);
+
+    let mut items = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let prefix_lower = prefix.to_lowercase();
+
+    for prop in data.all_global_properties() {
+        let ru_lower = prop.name.to_lowercase();
+
+        if MdoType::from_plural(prop.name.as_str()).is_some()
+            || MdoType::from_plural(prop.english_name.as_str()).is_some()
+        {
+            continue;
+        }
+        if resolver.user_common_module_exists(db, &hir::Name::new(&prop.name)) {
+            continue;
+        }
+        if !matches_prefix_bilingual(&prop.name, &prop.english_name, &prefix_lower) {
+            continue;
+        }
+        if !seen.insert(ru_lower) {
+            continue;
+        }
+
+        items.push(render_platform_property(prop, locale));
+    }
+
+    items.extend(complete_global_functions(prefix));
+    items
+}
+
+/// Case-insensitive bilingual prefix match. `lower` is already lowercased.
+fn matches_prefix_bilingual(ru: &str, en: &str, lower: &str) -> bool {
+    ru.to_lowercase().starts_with(lower) || en.to_lowercase().starts_with(lower)
 }
 
 /// Completes user-defined symbols (module methods and variables).
@@ -935,7 +1051,8 @@ mod tests {
         db.set_file_text(file_id, source);
 
         // Test completion with prefix "Справ"
-        let items = complete_mdo_symbols(&db, file_id, "Справ");
+        let items = complete_mdo_plurals("Справ");
+        let _ = (&db, file_id); // silence unused locals retained for setup parity
 
         println!("Found {} MDO items for prefix 'Справ'", items.len());
         for item in &items {
@@ -977,7 +1094,8 @@ mod tests {
         db.set_file_text(file_id, source);
 
         // Test with English prefix "Docu"
-        let items = complete_mdo_symbols(&db, file_id, "Docu");
+        let items = complete_mdo_plurals("Docu");
+        let _ = (&db, file_id); // silence unused locals retained for setup parity
 
         println!("Found {} MDO items for prefix 'Docu'", items.len());
 
