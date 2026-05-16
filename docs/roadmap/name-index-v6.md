@@ -38,7 +38,7 @@ Spike branch `spike/name-index-salsa-partitioned` (commits 8abbd545,
 | Q2 `db.file_text` reads on lookup | **0 by construction** | = 0 | GO |
 | Q2 incremental edit cost | set: 16 μs · re-lookup: 2.6 ms (1 of 21 834 memos re-runs) | works | GO |
 | Q3 warm lookup, hottest name (10 187 hits) | 5.6 ms | ≤ 5 ms | borderline |
-| Q3 warm lookup, typical (≤ 5 k hits) | 1–3.5 ms | ≤ 5 ms | GO |
+| Q3 warm lookup, typical (≤ 5 k hits) | 1–3.5 ms (HashMap; FST projected same) | ≤ 5 ms | GO |
 
 **Q2 is enforced by the type system, not by discipline**: the spike
 `SpikeDatabase` has no `FileTextInput`, so `db.file_text` is literally
@@ -151,10 +151,23 @@ pub fn module_like_name_index(
     membership: ModuleLikeMembership,
 ) -> Arc<ModuleNameIndex>;
 
+/// Per-module-like name → files index. FST-backed, mirrors the RA
+/// `ImportMap` pattern at `rust-analyzer/crates/hir-def/src/import_map.rs:107`.
+///
+/// `fst::Map` keys are lowercase-normalised name bytes. Values pack
+/// `(start_offset << 32) | end_offset` into the side `files: Vec<FileId>`
+/// slab — multiple files per name share a contiguous range.
+pub struct ModuleNameIndex {
+    pub fst: fst::Map<Vec<u8>>,
+    pub files: Vec<FileId>,
+}
+
 /// Workspace-wide lookup. Plain function, NOT tracked: deliberate, so that
 /// editing one file does not invalidate the global aggregator (which would
-/// re-merge all ~10–20 k indices on every keystroke). Cost is dominated by
-/// hash lookups across cached per-module memos — 1–6 ms on ERP (spike Q3).
+/// re-merge all ~10–20 k indices on every keystroke). Cost dominated by
+/// per-mlid FST exact-match scans across cached memos — projected 1–6 ms
+/// on ERP (spike Q3 measured this on HashMap; FST exact-match has the
+/// same big-O and similar constant).
 pub fn lookup_workspace(db: &dyn DefDatabase, name: &Name) -> Vec<FileId>;
 ```
 
@@ -164,6 +177,51 @@ verified in the spike (`crates/bsl-analyzer/src/spike_name_index_salsa.rs`):
 cheap `Arc::clone()` on read, full replace on `set_names(db).to(new_arc)`
 when the file is re-lexed. `Arc<Vec<…>>` for membership lists is the same
 pattern.
+
+### 4.3a. Per-mlid FST build (inside `module_like_name_index`)
+
+```rust
+#[salsa::tracked]
+pub fn module_like_name_index(
+    db: &dyn DefDatabase,
+    membership: ModuleLikeMembership,
+) -> Arc<ModuleNameIndex> {
+    // Gather (lowercase name → file_id) pairs across all digests in this mlid.
+    let mut pairs: Vec<(Arc<str>, FileId)> = Vec::new();
+    for digest in membership.files(db).iter() {
+        let fid = digest.file_id(db);
+        for name in digest.names(db).iter() {
+            pairs.push((name.clone(), fid));
+        }
+    }
+    pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    // Walk sorted pairs, packing (start_offset << 32) | end_offset values
+    // referencing a side files slab. Same shape as RA's import_map.rs:107.
+    let mut builder = fst::MapBuilder::memory();
+    let mut files: Vec<FileId> = Vec::with_capacity(pairs.len());
+    let mut iter = pairs.iter().peekable();
+    while let Some((name, _)) = iter.peek() {
+        let name = name.clone();
+        let start = files.len();
+        while let Some((n, fid)) = iter.peek() {
+            if **n != *name { break; }
+            files.push(*fid);
+            iter.next();
+        }
+        let end = files.len();
+        let value = ((start as u64) << 32) | (end as u64);
+        builder.insert(name.as_bytes(), value).expect("sorted-input FST insert");
+    }
+    let fst = builder.into_map();
+    Arc::new(ModuleNameIndex { fst, files })
+}
+```
+
+Build cost on a typical per-mlid (~30–50 names): microseconds.
+On extreme outliers (large CommonModule with hundreds of utility names):
+still sub-millisecond. Significantly smaller memo size than HashMap
+(prefix-sharing — RA-measured 3–5× compactness for similar workloads).
 
 ### 4.4. Input handle storage — `NameIndexHandles`
 
@@ -292,11 +350,17 @@ fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
     let members_handle = ws.expect("primed implies workspace populated");
     drop(ws);
 
+    let lower = name.as_str().to_ascii_lowercase();
     let mut out: Vec<FileId> = Vec::new();
     for &m in members_handle.members(db).iter() {
         let idx = module_like_name_index(db, m);
-        if let Some(hits) = idx.get(name) {
-            out.extend_from_slice(hits);
+        // Exact-name FST lookup: O(name_len). For fuzzy/prefix (future
+        // `workspaceSymbol` LSP handler), swap for `fst::automaton::Subsequence`
+        // or `Str::new(...).starts_with()` on the same `idx.fst`.
+        if let Some(value) = idx.fst.get(lower.as_bytes()) {
+            let start = (value >> 32) as usize;
+            let end = (value & 0xFFFF_FFFF) as usize;
+            out.extend_from_slice(&idx.files[start..end]);
         }
     }
     LookupResult::Ready(out)
@@ -659,9 +723,14 @@ Spike measured (Q2+Q3 spike, on a STANDALONE database that does not hold
 
 **v6 ship state memory framing**: lazy-text is out of scope for v6 (§12).
 The existing eager BSL `file_text` residency (~1.44 GB resident text on
-ERP) remains. The name-index adds roughly **~70 MB of digest/index data**
-on top of that — `Σ |FileLexDigest| + Σ |module_like_name_index| ≈ 70 MB`
-based on spike measurement. The 640 / 500 MB spike RSS demonstrates the
+ERP) remains. The name-index adds roughly **~30–40 MB of digest/index
+data** on top of that:
+- `Σ |FileLexDigest|` (the `Arc<FxHashSet<Name>>` digest sets) ≈ 25 MB
+  on ERP (spike measurement: 532 k unique names × ~50 bytes interned).
+- `Σ |module_like_name_index|` (per-mlid FSTs + side `files` slabs) ≈
+  10–15 MB, projected from RA's reported FST compactness ratio for
+  similar workloads (3–5× smaller than HashMap form, which would be
+  ~50 MB). The 640 / 500 MB spike RSS demonstrates the
 future lazy-text target shape, NOT the v6 memory delta.
 
 ## 7. Snapshot coherence
@@ -771,7 +840,7 @@ real-world cost (~3.0 s on ERP at 12 workers, projected).
 | `is_name_token_parity` | predicate matches `find_references_in_file` | 1 |
 | `lookup_under_concurrent_edit_storm` | Salsa cancellation propagates correctly | 2 |
 | `lookup_hottest_name_under_budget` | warm `lookup_workspace("ОбщегоНазначения")` ≤ 10 ms on ERP perf fixture (Q3 budget = 2× spike worst-case) | 2 |
-| `name_index_memory_delta_under_budget` | post-prime RSS minus pre-prime RSS ≤ 100 MB on ERP perf fixture (covers digest + memo storage) | 2 |
+| `name_index_memory_delta_under_budget` | post-prime RSS minus pre-prime RSS ≤ 50 MB on ERP perf fixture (covers digest + per-mlid FST memo storage; FST prefix-sharing brings the per-mlid footprint to roughly 3× smaller than the HashMap form) | 2 |
 | `lookup_returns_pending_when_unprimed` | unprimed handles → `lookup` returns `Pending` immediately, NEVER blocks (regression guard against the deadlock-prone blocking design that earlier review attempts proposed). | 1 |
 | `name_index_primed_after_boot_completes` | full boot harness: drive `LoadingProgress::Finished` to completion, assert `is_primed(db) == true` and `WorkspaceNameIndex::lookup(_, _) ⇒ Ready(_)` for at least one fixture symbol. Pins the synchronous-prime-before-vfs_done ordering (§6.2). | 2 |
 | `find_references_never_observes_pending_after_boot` | integration test on ERP fixture: after boot completes, run 100 `find_references` requests concurrently; every result is `Ready`, none log the `tracing::error!("name-index lookup returned Pending after vfs_done")` line. | 2 |
@@ -789,7 +858,7 @@ configurations:
 |---|---|
 | Lex pass on cold start adds visible latency (spike: 2.4 s) | `prime_workspace_name_index` runs after `vfs_done` on a dedicated rayon scope; LSP traffic is unaffected. `$/progress` keeps client informed. Same pattern as RA `parallel_prime_caches`. |
 | Predicate divergence between `lex_to_digest` and `find_references_in_file` | Shared `is_name_token` helper in one module; parity test (§10). |
-| Salsa memory growth from per-mlid memos on a 20 k-mlid workspace | Memos are small (~3 KB avg = ~60 MB). No LRU needed; spike Q3 confirmed steady-state RSS. |
+| Salsa memory growth from per-mlid memos on a 20 k-mlid workspace | FST-backed memos are even smaller than the HashMap form measured by spike (~3 KB avg HashMap → ~1 KB avg FST per mlid = ~20 MB total). No LRU needed; verified by `name_index_memory_delta_under_budget` (§10). |
 | Worst-case warm lookup 5.6 ms on hottest name perceived as slow | `find_references` is user-triggered, 5 ms is imperceptible. If future telemetry shows a hot path, per-name LRU aggregator follow-up (§12). |
 | Future contributor adds a workspace-wide query that re-introduces `file_text` fan-out | Architecture doc + grep guard in CI (`grep -r 'source_root_name_usage_query' crates/` must return 0 hits after Landing 3). |
 | `find_references` returns false-empty result during the ~2.5 s prime window | Two layers: (a) handler at entry gates on `ctx.vfs_done`; if false, returns `Ok(None)` (LSP `null` — "no result available", NOT empty array), matching the existing `handle_semantic_tokens_full` precedent (`request.rs:389`); (b) §6.2 prime runs synchronously inside `LoadingProgress::Finished` BEFORE `vfs_done = true` flips, so `vfs_done ⇒ primed`. Net effect: LSP client sees `null` until the workspace is loaded (most clients show "still indexing" UX), then `Ready` results. Pinned by `find_references_returns_null_before_vfs_done` + `find_references_never_observes_pending_after_boot` (§10). |
@@ -803,7 +872,18 @@ configurations:
 - **CommonForms / CommonCommands**: like Commands above; UUIDs already in
   XML, just need accessors in `Configuration`.
 - **Workspace symbols** (`textDocument/workspaceSymbol`) on top of the
-  same index.
+  same FST per-mlid indexes. Implementation: an LSP handler that builds
+  a `fst::map::OpBuilder` union of every `module_like_name_index(mlid).fst`
+  and runs an automaton (`fst::automaton::Subsequence` for fuzzy,
+  `Str::new(...).starts_with()` for prefix) against the union stream.
+  Matches RA's `world_symbols` pattern at
+  `rust-analyzer/crates/ide-db/src/symbol_index.rs:225-282`. The
+  per-mlid storage shape v6 ships is exactly what this handler needs —
+  no migration required.
+- **Did-you-mean diagnostics** (`docs/roadmap/workspace-symbols.md`
+  §«Did-you-mean»): on `UnresolvedMethodCall` / `UnresolvedField` emit
+  top-N nearest names via the same FST fuzzy automaton. Free side-effect
+  once `workspaceSymbol` machinery exists.
 - **Lazy-text** itself — separate plan, runs after Landing 3 bake.
 - **`MdObjectId` promotion** in `bsl-metadata` — v6 keeps `ModuleLikeId` as
   a local enum in `hir-def`. Promoting to a first-class public type in
