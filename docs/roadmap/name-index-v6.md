@@ -100,7 +100,8 @@ crates/
 
   bsl-analyzer/src/
     workspace.rs  — process_changes calls populate API after set_file_text
-    server.rs     — boot: parallel_prime_caches_v6 after vfs_done
+    server.rs     — boot: prime_workspace_name_index inside
+                    LoadingProgress::Finished, BEFORE vfs_done = true
 ```
 
 The Salsa machinery sits in `hir-def` (the existing semantic-incremental
@@ -498,10 +499,19 @@ No worker can hold a snapshot at this point because:
 - VFS message handling (`handle_vfs_msg`) also runs on main thread.
 
 ```rust
-// crates/bsl-analyzer/src/server.rs, in the `vfs_done` handler
-// MUST run AFTER `warm_metadata_cache()` and `vfs_done = true` so that
-// Configuration XML is fully parsed at classification time (no need for
-// a second rebind pass).
+// crates/bsl-analyzer/src/server.rs, inside the LoadingProgress::Finished
+// branch. Ordering invariant:
+//
+//   process_changes(true)
+//   init_source_root()
+//   warm_metadata_cache()      ← Configuration XML parsed; required input
+//   prime_workspace_name_index ← NEW: must come AFTER warm_metadata_cache
+//                                 (needs Configuration) and BEFORE the
+//                                 `vfs_done = true` flip below
+//   state.vfs_done = true       ← only flip after prime completes
+//
+// This is THE invariant that makes `vfs_done ⇒ primed` hold and lets
+// the per-request hot path stay simple (§6.3).
 fn prime_workspace_name_index(global_state: &mut GlobalState) {
     let _span = tracing::info_span!("prime_workspace_name_index").entered();
 
@@ -712,7 +722,8 @@ real-world cost (~3.0 s on ERP at 12 workers, projected).
 - `set_bsl_file_text` helper in `GlobalState`; CI feature
   `name-index-strict` for direct `db.set_file_text` shim.
 - `process_changes` two-phase update per §6.1.
-- `prime_workspace_name_index` after `vfs_done` per §6.2.
+- `prime_workspace_name_index` inside `LoadingProgress::Finished`,
+  BEFORE the `vfs_done = true` flip — per §6.2 ordering invariant.
 - `find_references` route through `WorkspaceNameIndex::lookup`. The old
   `source_root_name_usage_query` REMAINS WIRED in parallel as a sanity
   comparator gated behind feature `name-index-compat`.
