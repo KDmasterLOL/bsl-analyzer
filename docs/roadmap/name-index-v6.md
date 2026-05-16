@@ -184,10 +184,18 @@ pub struct NameIndexHandles {
     workspace: Arc<RwLock<Option<WorkspaceMembers>>>,
     /// `false → true` once, when `prime_workspace_name_index` completes.
     /// Never flips back; subsequent edits are deltas through `refresh`.
+    /// **Read-only check from `lookup`** — `lookup` returns `Pending`
+    /// instantly if unprimed, never blocks. Blocking inside `lookup`
+    /// (which runs under a Salsa snapshot) would deadlock prime: prime
+    /// needs `raw_database_mut()` to commit `FileLexDigest` writes, and
+    /// Salsa blocks `mut` access until all live snapshots are dropped
+    /// (see `Files` doc-comment, `base-db/src/lib.rs:155-175`, ABBA).
     primed: Arc<AtomicBool>,
-    /// Signals the prime-complete transition. `lookup` waits on this with
-    /// a 500 ms timeout to avoid false-empty references during cold start.
-    prime_cv: Arc<(Mutex<()>, Condvar)>,
+    /// Signal channel for `wait_until_primed` (§5). Only callers that
+    /// have already dropped their snapshot may park here — typically the
+    /// `find_references` handler after observing `LookupResult::Pending`
+    /// (§6.3). `lookup` itself NEVER touches this condvar.
+    prime_signal: Arc<(Mutex<()>, Condvar)>,
 }
 ```
 
@@ -260,40 +268,25 @@ unreachable from any `ModuleLikeMembership` once `rebind` updates the
 membership lists. (Salsa GC reclaims it on the next revision bump.)
 
 `rebind` follows the same Arc-clone-then-get-copy-drop-set shape on
-`memberships`. `lookup` (full snippet) — blocks on the prime gate; the
-500 ms timeout idea was wrong (prime takes ~2.4 s on ERP, so the timeout
-would fire on every cold-start `find_references`). `find_references` is
-a user-initiated click; blocking on first call during boot is
-acceptable, no false-empty.
+`memberships`. `lookup` is **non-blocking**: it checks `primed` and
+either returns `Ready` (workspace iteration) or `Pending` (caller's
+responsibility to surface). The caller (find_references handler) holds
+a Salsa snapshot; blocking it on a condvar would prevent prime from
+acquiring `raw_database_mut()` to commit input writes — ABBA deadlock
+(see `Files` doc-comment, `base-db/src/lib.rs:155-175`).
 
 ```rust
 fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
 
     let handles = db.name_index().clone();
 
-    // Fast path: already primed.
     if !handles.primed.load(Ordering::Acquire) {
-        // Slow path: block until prime completes. 60 s is a failure-mode
-        // safety bound, NOT a UX timeout — healthy prime is ~3 s on ERP.
-        // Hitting this is a bug; emit an error log + return Pending so
-        // the LSP handler can surface a window/showMessage diagnostic
-        // and the user retries.
-        let (lock, cv) = &*handles.prime_cv;
-        let mut guard = lock.lock();
-        while !handles.primed.load(Ordering::Acquire) {
-            let timed_out = cv
-                .wait_for(&mut guard, Duration::from_secs(60))
-                .timed_out();
-            if timed_out {
-                tracing::error!(
-                    "name-index prime did not complete within 60 s; \
-                     check `prime_workspace_name_index` span for failure"
-                );
-                return LookupResult::Pending;
-            }
-        }
+        // Cold-start window. Returning Pending is the only correct
+        // option — caller holds a snapshot; blocking here would deadlock
+        // prime. find_references handler translates Pending to a
+        // window/showMessage "Indexing, retry" notification (§6.3).
+        return LookupResult::Pending;
     }
 
     // Primed: copy WorkspaceMembers handle under brief read guard,
@@ -313,17 +306,19 @@ fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
 }
 ```
 
-`prime_workspace_name_index` (§6.2) signals completion with:
+`prime_workspace_name_index` (§6.2) signals completion with one atomic
+store:
 
 ```rust
 handles.primed.store(true, Ordering::Release);
-let (_lock, cv) = &*handles.prime_cv;
-cv.notify_all();
 ```
 
-This is the ENTIRE state machine. `Pending` exists strictly for the
-unhealthy 60-second-timeout case; healthy flow always returns `Ready`.
-No generations, no replay log, no atomic swap.
+That is the ENTIRE state machine: one atomic bit. No condvar, no
+generations, no replay log, no atomic swap. The bit is a Release/Acquire
+pair so any subsequent `lookup` on a different thread observes all
+input writes from prime (Salsa input cells are themselves snapshot-
+revisioned, so the Acquire pairs cleanly with their internal
+release-on-commit).
 
 ### 4.5. Why no Salsa-tracked aggregator
 
@@ -366,6 +361,18 @@ impl WorkspaceNameIndex {
     /// `AtomicBool` only. Used by the live-fire comparator (§9 Landing 2)
     /// to skip comparison during the cold-start window.
     pub fn is_primed(db: &dyn DefDatabase) -> bool;
+}
+
+impl NameIndexHandles {
+    /// Block the current thread until `primed = true` or `timeout` elapses.
+    /// Returns `true` if primed within the window.
+    ///
+    /// **CONTRACT**: the caller MUST have dropped any Salsa snapshot
+    /// before invoking this. Holding a snapshot here would deadlock
+    /// `prime_workspace_name_index` (which needs `raw_database_mut()`).
+    /// Used by `find_references` handler (§6.3) after observing
+    /// `LookupResult::Pending`.
+    pub fn wait_until_primed(&self, timeout: Duration) -> bool;
 }
 
 pub enum LookupResult {
@@ -506,11 +513,15 @@ fn prime_workspace_name_index(global_state: &mut GlobalState) {
         WorkspaceNameIndex::register_module(db, mlid, files);
     }
 
-    // Step 4: flip the primed bit + wake any callers blocked in `lookup`.
+    // Step 4: flip the primed bit + wake `wait_until_primed` callers.
     // MUST happen last, after every input write above has been committed.
+    // Release pairs with Acquire in `lookup` so cross-thread visibility
+    // is guaranteed. The condvar notify is for any `find_references`
+    // handler currently parked in `wait_until_primed` after observing
+    // `LookupResult::Pending` (§6.3).
     let handles = db.name_index().clone();
     handles.primed.store(true, std::sync::atomic::Ordering::Release);
-    let (_lock, cv) = &*handles.prime_cv;
+    let (_lock, cv) = &*handles.prime_signal;
     cv.notify_all();
 }
 ```
@@ -521,54 +532,97 @@ progress reporting via `$/progress` (existing LSP plumbing) keeps the
 client informed; no new LSP message kind. Cancellation via the existing
 `Cancelled::catch` pattern from `rust-analyzer/crates/ide-db/src/prime_caches.rs`.
 
-### 6.3. `find_references` (ide/src/references.rs)
+### 6.3. `find_references` handler (bsl-analyzer/src/handlers/…)
+
+The handler — NOT the inner `workspace_candidate_files` — owns the
+Pending-recovery flow. The crucial discipline: a Salsa snapshot MUST be
+dropped before waiting, then a fresh snapshot taken for the retry.
 
 ```rust
-// Drop in `WorkspaceNameIndex::lookup`. Compare-and-swap with the old
-// `source_root_name_usage_query`-driven `workspace_candidate_files`.
-// Healthy flow always returns Ready; Pending is the 60 s timeout
-// escape hatch (§4.4) and indicates a broken prime.
-fn workspace_candidate_files(db: &dyn DefDatabase, name: &Name) -> Vec<FileId> {
-    match WorkspaceNameIndex::lookup(db, name) {
+// handler runs on a request thread.
+fn handle_references(
+    global_state: &mut GlobalState,
+    params: ReferenceParams,
+) -> Vec<Location> {
+    // First attempt under a snapshot.
+    let outcome = {
+        let db = global_state.analysis_host.snapshot();
+        WorkspaceNameIndex::lookup(&db, &name)
+    }; // snapshot dropped here.
+
+    let files = match outcome {
         LookupResult::Ready(files) => files,
         LookupResult::Pending => {
-            // Already logged at ERROR level inside `lookup` (§4.4).
-            // Emit a one-shot LSP `window/showMessage` so the user sees
-            // a visible "name-index unavailable, restart server" instead
-            // of a silent empty references list. Plain Vec<Location> is
-            // the LSP response type for `textDocument/references`;
-            // there is no spec-blessed "partial / indexing" tag for it.
-            global_state.show_message_once(
-                MessageType::ERROR,
-                "BSL name-index failed to prime; references may be incomplete. \
-                 Reload the workspace to retry."
-            );
-            Vec::new()
+            // Snapshot is already dropped (block above ended). Now it's
+            // safe for prime to acquire raw_database_mut() and commit
+            // input writes — no held snapshot blocking it.
+            let handles = global_state.analysis_host.raw_database().name_index().clone();
+            let primed = handles.wait_until_primed(Duration::from_secs(30));
+            if !primed {
+                // Prime took > 30 s — almost certainly a bug in prime
+                // scheduling or a stalled rayon scope. Surface to user.
+                global_state.show_message(
+                    MessageType::ERROR,
+                    "BSL name-index did not finish indexing within 30 s; \
+                     check server log and reload the workspace.",
+                );
+                return Vec::new();
+            }
+            // Retake a fresh snapshot post-prime, retry lookup.
+            let db = global_state.analysis_host.snapshot();
+            match WorkspaceNameIndex::lookup(&db, &name) {
+                LookupResult::Ready(files) => files,
+                LookupResult::Pending => {
+                    // Should not happen — we just observed primed=true.
+                    tracing::error!("name-index regressed from primed to Pending");
+                    return Vec::new();
+                }
+            }
         }
+    };
+    convert_to_locations(files)
+}
+```
+
+`NameIndexHandles::wait_until_primed(timeout)` is a thin helper:
+
+```rust
+impl NameIndexHandles {
+    /// Block the current thread until `primed = true` or `timeout` elapses.
+    /// Returns `true` if primed within the window. MUST be called with
+    /// NO Salsa snapshot held by the current thread (the caller is
+    /// expected to have dropped any snapshot before invoking this).
+    pub fn wait_until_primed(&self, timeout: Duration) -> bool {
+        // Implementation uses a condvar that prime_workspace_name_index
+        // signals at the end. Because no snapshot is held during this
+        // wait, prime can freely acquire raw_database_mut() and commit
+        // input writes.
+        // …
     }
 }
 ```
 
-Healthy `find_references` flow during boot:
+`workspace_candidate_files` (called by ide::references) stays
+non-blocking and snapshot-safe:
 
-| Boot phase | `lookup` outcome | User-visible behaviour |
+```rust
+fn workspace_candidate_files(db: &dyn DefDatabase, name: &Name) -> LookupResult {
+    WorkspaceNameIndex::lookup(db, name)
+}
+```
+
+User-visible behaviour during boot:
+
+| Boot phase | First call outcome | UX |
 |---|---|---|
-| `t < vfs_done` (before prime starts) | blocks on condvar | LSP request waits; client shows busy cursor |
-| `vfs_done < t < prime_complete` (~2.5 s window) | blocks on condvar | Same as above |
-| `t ≥ prime_complete`, name never looked up before | `Ready` after ≤ 600 ms (cold per-mlid populate, spike Q3) | Single sub-second delay on first hot-name lookup |
-| `t ≥ prime_complete`, name in warm path | `Ready` after 1–6 ms | Instant |
-| Prime stuck > 60 s | `Pending` + `window/showMessage` ERROR | User sees error, retries via workspace reload |
+| `t < prime_complete` (~2.5 s window) | Pending → drop snapshot → wait ~2.5 s → retake → Ready | Single ≤ 3 s delay on first cold-start call; client shows busy cursor |
+| `t ≥ prime_complete`, name never looked up | Ready after ≤ 600 ms (cold per-mlid populate, spike Q3) | Single sub-second delay |
+| `t ≥ prime_complete`, name warm | Ready after 1–6 ms | Instant |
+| Prime stalled > 30 s | window/showMessage ERROR + empty | User sees explicit error |
 
-The `window/showMessage` invocation is standard LSP (`MessageType::ERROR`).
-There is no LSP "partial result for references" mechanism that fits the
-request shape (`textDocument/references` returns `Location[] | null`).
-The 60-second `Pending` path is strictly a degraded-mode escape, not a
-UX state callers should expect to handle in steady state.
-
-Snapshot coherence is preserved: the primed condvar fires AFTER all
-input writes during prime are committed (§6.2 step 4), so once `lookup`
-proceeds past the gate, the per-mlid queries observe a consistent
-revision.
+The deadlock-avoidance rule (drop snapshot before wait, retake after) is
+the load-bearing pattern. Pinned by test `lookup_pending_drop_snapshot_wait_retake`
+(§10).
 
 ### 6.4. Memory & build characteristics
 
@@ -696,8 +750,9 @@ real-world cost (~3.0 s on ERP at 12 workers, projected).
 | `lookup_under_concurrent_edit_storm` | Salsa cancellation propagates correctly | 2 |
 | `lookup_hottest_name_under_budget` | warm `lookup_workspace("ОбщегоНазначения")` ≤ 10 ms on ERP perf fixture (Q3 budget = 2× spike worst-case) | 2 |
 | `name_index_memory_delta_under_budget` | post-prime RSS minus pre-prime RSS ≤ 100 MB on ERP perf fixture (covers digest + memo storage) | 2 |
-| `lookup_blocks_until_prime_completes` | spawn `lookup` thread on unprimed handles; assert it remains blocked while prime runs; complete prime; verify `lookup` returns `Ready(_)` within 50 ms of `cv.notify_all`. Regression guard against false-empty references during cold start. | 1 |
-| `lookup_returns_pending_after_safety_timeout` | construct unprimed handles, override safety timeout to 50 ms via `#[cfg(test)]` const; assert `lookup` returns `Pending` after timeout (failure-mode escape test only — never expected in steady state). | 1 |
+| `lookup_returns_pending_when_unprimed` | unprimed handles → `lookup` returns `Pending` immediately, NEVER blocks (regression guard against the deadlock-prone blocking design). | 1 |
+| `lookup_pending_drop_snapshot_wait_retake` | full handler flow: take snapshot, lookup → Pending, drop snapshot, `wait_until_primed`, spawn prime on second thread (needs raw_database_mut, MUST succeed because snapshot was dropped), retake snapshot, lookup → Ready. Pins the deadlock-avoidance discipline. | 1 |
+| `wait_until_primed_with_held_snapshot_deadlocks` | negative test (timeout-bounded): caller holds snapshot → `wait_until_primed(timeout=100ms)` returns `false`. Documents the contract failure mode. | 1 |
 
 Snapshot tests (`expect-test`) for at least three representative
 configurations:
@@ -714,7 +769,7 @@ configurations:
 | Salsa memory growth from per-mlid memos on a 20 k-mlid workspace | Memos are small (~3 KB avg = ~60 MB). No LRU needed; spike Q3 confirmed steady-state RSS. |
 | Worst-case warm lookup 5.6 ms on hottest name perceived as slow | `find_references` is user-triggered, 5 ms is imperceptible. If future telemetry shows a hot path, per-name LRU aggregator follow-up (§12). |
 | Future contributor adds a workspace-wide query that re-introduces `file_text` fan-out | Architecture doc + grep guard in CI (`grep -r 'source_root_name_usage_query' crates/` must return 0 hits after Landing 3). |
-| `find_references` returns false-empty result during the ~2.5 s prime window | `lookup` blocks on the prime condvar (§4.4); the user sees a busy cursor for ≤ 3 s on the first cold-start call, then `Ready`. Pinned by `lookup_blocks_until_prime_completes` (§10). Pending is reserved for the 60 s safety timeout. |
+| `find_references` returns false-empty result during the ~2.5 s prime window | `lookup` returns `Pending` immediately (non-blocking — blocking inside a Salsa snapshot would deadlock prime; see `Files` doc-comment on ABBA). The find_references handler (§6.3) drops the snapshot, calls `wait_until_primed(30s)`, retakes snapshot, retries → `Ready`. User-visible: single ≤ 3 s busy cursor on first cold-start call. Pinned by `lookup_pending_drop_snapshot_wait_retake` (§10). |
 
 ## 12. Out of scope follow-ups
 
