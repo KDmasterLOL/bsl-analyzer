@@ -162,7 +162,89 @@ derived by `#[salsa::input]` for the digest set as a whole; mutating
 individual entries requires the consumer to call `set_names(db).to(new)`
 with a fresh `FxHashSet`.
 
-### 4.4. Why no Salsa-tracked aggregator
+### 4.4. Input handle storage — `NameIndexHandles`
+
+`WorkspaceNameIndex::refresh(db, file_id, names)` mutates the **existing**
+`FileLexDigest` cell for `file_id`. Same for `rebind` on
+`ModuleLikeMembership`. To find those handles after populate, v6 needs a
+side map from key → `Copy` Salsa input handle. This is the **same pattern
+base-db already uses for `FileTextInput`** (`crates/base-db/src/lib.rs:176`,
+the `Files` struct), not a new architectural exception.
+
+```rust
+// crates/hir-def/src/name_index_v6/handles.rs
+#[derive(Debug, Default, Clone)]
+pub struct NameIndexHandles {
+    digests: Arc<DashMap<FileId, FileLexDigest<'static>, FxHasher>>,
+    memberships: Arc<DashMap<ModuleLikeId, ModuleLikeMembership<'static>, FxHasher>>,
+    workspace: Arc<RwLock<Option<WorkspaceMembers<'static>>>>,
+}
+```
+
+Held as a field on `RootDatabaseImpl` (in `ide-db`) alongside the existing
+`files: Files`:
+
+```rust
+// crates/ide-db/src/database.rs
+pub struct RootDatabaseImpl {
+    storage: salsa::Storage<Self>,
+    files: Files,                      // existing
+    name_index: NameIndexHandles,      // new — handle storage only
+    // …
+}
+```
+
+**This is NOT a v5 regression.** v5's footgun: the WHOLE INDEX (query
+results) lived outside Salsa, snapshot-incoherent. v6's `NameIndexHandles`
+holds ONLY input-cell HANDLES (8-byte `Copy` values). The actual digest
+data lives inside the Salsa `FileLexDigest` cells; query results live in
+`module_like_name_index` memos. Both are revisioned by Salsa. The handle
+map's role is purely "key → handle" lookup, identical to `Files::file_texts`
+for `FileTextInput`.
+
+**Locking invariant** (carried verbatim from `Files` doc, `lib.rs:155-175`):
+
+> Setters MUST NOT hold a DashMap shard guard across a Salsa setter call.
+> The generated `input.set_<field>(db)` acquires `zalsa_mut()` internally,
+> which blocks until every live database handle is dropped.
+> Fix: look up the existing handle under a short `get()` guard,
+> copy the handle (it is `Copy`), drop the guard, and only then invoke
+> the Salsa setter.
+
+Single-mutator invariant (only the LSP main loop writes) is enforced by
+`set_bsl_file_text` discipline + `name-index-strict` CI feature, matching
+the existing pattern for `set_file_text`. Pair with
+`AnalysisHost::request_cancellation()` at `process_changes` entry, also
+matching the existing pattern.
+
+`WorkspaceNameIndex::refresh` flow:
+
+```rust
+fn refresh(db: &mut dyn DefDatabase, file_id: FileId, names: FxHashSet<Name>) {
+    use salsa::Setter;
+    // Short-lock: get-copy-drop-set.
+    let existing = db.name_index().digests.get(&file_id).map(|e| *e.value());
+    match existing {
+        Some(digest) => digest.set_names(db).to(names),
+        None => {
+            let digest = FileLexDigest::new(db, file_id, names);
+            let prev = db.name_index().digests.insert(file_id, digest);
+            debug_assert!(prev.is_none(), "single-mutator violated");
+        }
+    }
+}
+```
+
+`remove` deletes from `digests`; the removed `FileLexDigest` becomes
+unreachable from any `ModuleLikeMembership` once `rebind` updates the
+membership lists. (Salsa GC reclaims it on the next revision bump.)
+
+`rebind` follows the same get-copy-drop-set shape on `memberships`.
+`lookup` reads `workspace` under a short read guard, copies the
+`WorkspaceMembers` handle, drops the guard, then iterates members via the
+Salsa query — no Salsa write call inside the guard, so no ABBA risk.
+
+### 4.5. Why no Salsa-tracked aggregator
 
 Q3 measured warm lookups at 1–5.6 ms iterating ~22 k per-module indices.
 A `#[salsa::tracked] workspace_name_index → Arc<HashMap<Name, Vec<FileId>>>`
