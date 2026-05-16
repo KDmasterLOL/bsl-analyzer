@@ -198,7 +198,12 @@ pub fn module_like_name_index(
     db: &dyn DefDatabase,
     membership: ModuleLikeMembership,
 ) -> Arc<ModuleNameIndex> {
-    // Gather (lowercase name → file_id) pairs across all digests in this mlid.
+    // Gather (case-folded name → file_id) pairs across all digests in
+    // this mlid. INVARIANT: every `Name` already passed through
+    // `case_fold` (§4.4) when inserted into `FileLexDigest` by
+    // `lex_to_digest` (§6.1). Lookup applies the same `case_fold` to
+    // the query, so FST keys at insert time and query time agree on a
+    // single bilingual case-folded byte representation.
     let mut pairs: Vec<(Arc<str>, FileId)> = Vec::new();
     for digest in membership.files(db).iter() {
         let fid = digest.file_id(db);
@@ -378,7 +383,15 @@ fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
         }
     };
 
-    let lower = name.as_str().to_ascii_lowercase();
+    // CRITICAL: use full Unicode `to_lowercase()`, NOT `to_ascii_lowercase()`.
+    // BSL identifiers are bilingual (RU/EN) and case-insensitive — ASCII
+    // case-fold leaves Cyrillic untouched, so a lookup for "ОбщегоНазначения"
+    // would miss the FST key "общегоназначения" stored at build time.
+    // The build side (§4.3a, populated by `lex_to_digest` in §6.1) MUST
+    // use the same casing pipeline. Shared helper `case_fold(name)` in
+    // `crates/hir-def/src/name_index_v6/` enforces this; both sides go
+    // through it.
+    let lower = case_fold(name.as_str());
     let mut out: Vec<FileId> = Vec::new();
     for &m in workspace_handle.members(db).iter() {
         let idx = module_like_name_index(db, m);
@@ -392,6 +405,16 @@ fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
         }
     }
     LookupResult::Ready(out)
+}
+
+/// Case-fold a BSL identifier for storage / lookup. Bilingual: must lowercase
+/// both ASCII and Cyrillic alphabets. Implementation: `s.to_lowercase()` (the
+/// full-Unicode method, NOT `to_ascii_lowercase`). Mirrors the casing side of
+/// `hir_def::Name::eq_ignore_case`. Both the FST builder (§4.3a) and `lookup`
+/// (§4.4) MUST route name strings through this helper before touching FST
+/// bytes, or Cyrillic identifiers silently miss the index.
+fn case_fold(name: &str) -> String {
+    name.to_lowercase()
 }
 ```
 
@@ -576,7 +599,11 @@ pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> (bool, bool) 
 `lex_to_digest` is the production version of the spike's `lex_file` — a
 tokenize-and-collect-name-tokens pass, ~600 μs per file at ERP scale.
 Predicate widens to `SyntaxKind::is_name_token` for `obj.Если()` parity
-(v5 §8 carries over verbatim).
+(v5 §8 carries over verbatim). Every name string MUST pass through the
+shared `case_fold` helper (§4.4) before being inserted into the
+`FxHashSet<Name>` — the FST keys at lookup time are also `case_fold`ed,
+and any divergence (notably `to_ascii_lowercase` vs full-Unicode
+`to_lowercase`) silently drops Cyrillic identifiers from the index.
 
 ### 6.2. Boot — synchronous prime inside `LoadingProgress::Finished`
 
@@ -909,6 +936,7 @@ real-world cost (~3.0 s on ERP at 12 workers, projected).
 | `find_references_e2e_vs_v5_baseline` | output equivalence on ERP fixtures | 2 |
 | `command_module_orphan_handling` | OrphanFile bucket isolation | 1 |
 | `is_name_token_parity` | predicate matches `find_references_in_file` | 1 |
+| `cyrillic_lookup_matches_indexed_names` | round-trip on a Cyrillic identifier (e.g. `ОбщегоНазначения`): build digest → FST → look up via `WorkspaceNameIndex::lookup(_, "общегоназначения")` AND `lookup(_, "ОБЩЕГОНАЗНАЧЕНИЯ")` AND `lookup(_, "ОбщегоНазначения")`. All three MUST return the same `Ready(files)`. Regression guard against the `to_ascii_lowercase` vs full-Unicode `to_lowercase` divergence that silently drops Cyrillic identifiers. | 1 |
 | `lookup_under_concurrent_edit_storm` | Salsa cancellation propagates correctly | 2 |
 | `lookup_hottest_name_under_budget` | warm `lookup_workspace("ОбщегоНазначения")` ≤ 10 ms on ERP perf fixture (Q3 budget = 2× spike worst-case) | 2 |
 | `name_index_memory_delta_under_budget` | post-prime RSS minus pre-prime RSS ≤ 50 MB on ERP perf fixture (covers digest + per-mlid FST memo storage; FST prefix-sharing brings the per-mlid footprint to roughly 3× smaller than the HashMap form) | 2 |
