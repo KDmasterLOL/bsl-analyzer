@@ -260,8 +260,11 @@ unreachable from any `ModuleLikeMembership` once `rebind` updates the
 membership lists. (Salsa GC reclaims it on the next revision bump.)
 
 `rebind` follows the same Arc-clone-then-get-copy-drop-set shape on
-`memberships`. `lookup` (full snippet) — implements the primed-gate +
-500 ms condvar wait:
+`memberships`. `lookup` (full snippet) — blocks on the prime gate; the
+500 ms timeout idea was wrong (prime takes ~2.4 s on ERP, so the timeout
+would fire on every cold-start `find_references`). `find_references` is
+a user-initiated click; blocking on first call during boot is
+acceptable, no false-empty.
 
 ```rust
 fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
@@ -272,14 +275,22 @@ fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
 
     // Fast path: already primed.
     if !handles.primed.load(Ordering::Acquire) {
-        // Slow path: wait up to 500 ms for prime to complete.
+        // Slow path: block until prime completes. 60 s is a failure-mode
+        // safety bound, NOT a UX timeout — healthy prime is ~3 s on ERP.
+        // Hitting this is a bug; emit an error log + return Pending so
+        // the LSP handler can surface a window/showMessage diagnostic
+        // and the user retries.
         let (lock, cv) = &*handles.prime_cv;
         let mut guard = lock.lock();
-        if !handles.primed.load(Ordering::Acquire) {
+        while !handles.primed.load(Ordering::Acquire) {
             let timed_out = cv
-                .wait_for(&mut guard, Duration::from_millis(500))
+                .wait_for(&mut guard, Duration::from_secs(60))
                 .timed_out();
             if timed_out {
+                tracing::error!(
+                    "name-index prime did not complete within 60 s; \
+                     check `prime_workspace_name_index` span for failure"
+                );
                 return LookupResult::Pending;
             }
         }
@@ -287,8 +298,8 @@ fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
 
     // Primed: copy WorkspaceMembers handle under brief read guard,
     // then iterate via Salsa query outside the guard.
-    let ws = handles.workspace.read().expect("primed implies populated");
-    let members_handle = ws.expect("primed implies Some");
+    let ws = handles.workspace.read();
+    let members_handle = ws.expect("primed implies workspace populated");
     drop(ws);
 
     let mut out: Vec<FileId> = Vec::new();
@@ -310,8 +321,9 @@ let (_lock, cv) = &*handles.prime_cv;
 cv.notify_all();
 ```
 
-This is the ENTIRE state machine. No generations, no replay log, no
-atomic swap.
+This is the ENTIRE state machine. `Pending` exists strictly for the
+unhealthy 60-second-timeout case; healthy flow always returns `Ready`.
+No generations, no replay log, no atomic swap.
 
 ### 4.5. Why no Salsa-tracked aggregator
 
@@ -514,42 +526,49 @@ client informed; no new LSP message kind. Cancellation via the existing
 ```rust
 // Drop in `WorkspaceNameIndex::lookup`. Compare-and-swap with the old
 // `source_root_name_usage_query`-driven `workspace_candidate_files`.
-fn workspace_candidate_files(db: &dyn DefDatabase, name: &Name) -> CandidateFiles {
+// Healthy flow always returns Ready; Pending is the 60 s timeout
+// escape hatch (§4.4) and indicates a broken prime.
+fn workspace_candidate_files(db: &dyn DefDatabase, name: &Name) -> Vec<FileId> {
     match WorkspaceNameIndex::lookup(db, name) {
-        LookupResult::Ready(files) => CandidateFiles::Ready(files),
-        LookupResult::Pending => CandidateFiles::Indexing,
+        LookupResult::Ready(files) => files,
+        LookupResult::Pending => {
+            // Already logged at ERROR level inside `lookup` (§4.4).
+            // Emit a one-shot LSP `window/showMessage` so the user sees
+            // a visible "name-index unavailable, restart server" instead
+            // of a silent empty references list. Plain Vec<Location> is
+            // the LSP response type for `textDocument/references`;
+            // there is no spec-blessed "partial / indexing" tag for it.
+            global_state.show_message_once(
+                MessageType::ERROR,
+                "BSL name-index failed to prime; references may be incomplete. \
+                 Reload the workspace to retry."
+            );
+            Vec::new()
+        }
     }
 }
 ```
 
-The caller (`ide::references::find_references`) maps `CandidateFiles::Indexing`
-to an LSP response that signals "still indexing, try again". Concrete
-LSP surface options for Landing 2:
+Healthy `find_references` flow during boot:
 
-- **Preferred**: respond with the standard `Vec<Location>` but tagged
-  with `partial: true` via the `WorkspaceFullEditRefactorings.partialResult`
-  extension (already used by RA). Client retries on next user action.
-- **Fallback** for clients that don't support partial results: send
-  `window/showMessage` `Info` "Indexing workspace…", then return the
-  best-effort partial list (which may be empty during cold start) — but
-  **never** return `Empty` silently. Empty + no message = false-negative.
+| Boot phase | `lookup` outcome | User-visible behaviour |
+|---|---|---|
+| `t < vfs_done` (before prime starts) | blocks on condvar | LSP request waits; client shows busy cursor |
+| `vfs_done < t < prime_complete` (~2.5 s window) | blocks on condvar | Same as above |
+| `t ≥ prime_complete`, name never looked up before | `Ready` after ≤ 600 ms (cold per-mlid populate, spike Q3) | Single sub-second delay on first hot-name lookup |
+| `t ≥ prime_complete`, name in warm path | `Ready` after 1–6 ms | Instant |
+| Prime stuck > 60 s | `Pending` + `window/showMessage` ERROR | User sees error, retries via workspace reload |
 
-The 500 ms condvar wait inside `lookup` is the upper bound. Spike Q3
-shows that after `prime_workspace_name_index` completes, the first
-real `lookup_workspace` call costs 580 ms (cold per-mlid populate);
-subsequent calls 1–5.6 ms. So in practice:
+The `window/showMessage` invocation is standard LSP (`MessageType::ERROR`).
+There is no LSP "partial result for references" mechanism that fits the
+request shape (`textDocument/references` returns `Location[] | null`).
+The 60-second `Pending` path is strictly a degraded-mode escape, not a
+UX state callers should expect to handle in steady state.
 
-| Boot phase | `lookup` outcome |
-|---|---|
-| `t < vfs_done` (before prime starts) | `Pending` after 500 ms |
-| `vfs_done < t < prime_complete` (~2.5 s window) | `Pending` after 500 ms |
-| `t ≥ prime_complete`, name never looked up before | `Ready` after ≤ 600 ms (one-shot cold per-mlid pass) |
-| `t ≥ prime_complete`, name in warm path | `Ready` after 1–6 ms |
-
-Snapshot coherence is preserved across all transitions: the primed
-condvar fires AFTER all input writes during prime are committed, so by
-the time `lookup` sees `primed = true` and proceeds, the per-mlid
-queries observe a consistent revision.
+Snapshot coherence is preserved: the primed condvar fires AFTER all
+input writes during prime are committed (§6.2 step 4), so once `lookup`
+proceeds past the gate, the per-mlid queries observe a consistent
+revision.
 
 ### 6.4. Memory & build characteristics
 
@@ -677,8 +696,8 @@ real-world cost (~3.0 s on ERP at 12 workers, projected).
 | `lookup_under_concurrent_edit_storm` | Salsa cancellation propagates correctly | 2 |
 | `lookup_hottest_name_under_budget` | warm `lookup_workspace("ОбщегоНазначения")` ≤ 10 ms on ERP perf fixture (Q3 budget = 2× spike worst-case) | 2 |
 | `name_index_memory_delta_under_budget` | post-prime RSS minus pre-prime RSS ≤ 100 MB on ERP perf fixture (covers digest + memo storage) | 2 |
-| `lookup_before_prime_returns_pending` | `lookup` called within first 100 ms of boot (prime not yet started) returns `LookupResult::Pending`, NOT `Ready(vec![])`. Regression guard against false-empty references during cold start. | 1 |
-| `lookup_pending_unblocks_after_prime` | spawn `lookup` thread; wait until it blocks on condvar; complete `prime_workspace_name_index`; verify `lookup` returns `Ready(_)` within 50 ms of `cv.notify_all`. | 1 |
+| `lookup_blocks_until_prime_completes` | spawn `lookup` thread on unprimed handles; assert it remains blocked while prime runs; complete prime; verify `lookup` returns `Ready(_)` within 50 ms of `cv.notify_all`. Regression guard against false-empty references during cold start. | 1 |
+| `lookup_returns_pending_after_safety_timeout` | construct unprimed handles, override safety timeout to 50 ms via `#[cfg(test)]` const; assert `lookup` returns `Pending` after timeout (failure-mode escape test only — never expected in steady state). | 1 |
 
 Snapshot tests (`expect-test`) for at least three representative
 configurations:
@@ -695,7 +714,7 @@ configurations:
 | Salsa memory growth from per-mlid memos on a 20 k-mlid workspace | Memos are small (~3 KB avg = ~60 MB). No LRU needed; spike Q3 confirmed steady-state RSS. |
 | Worst-case warm lookup 5.6 ms on hottest name perceived as slow | `find_references` is user-triggered, 5 ms is imperceptible. If future telemetry shows a hot path, per-name LRU aggregator follow-up (§12). |
 | Future contributor adds a workspace-wide query that re-introduces `file_text` fan-out | Architecture doc + grep guard in CI (`grep -r 'source_root_name_usage_query' crates/` must return 0 hits after Landing 3). |
-| `find_references` returns false-empty result during the ~2.5 s prime window | `lookup` returns `LookupResult::Pending` after a 500 ms condvar wait (§4.4 / §6.3). Caller MUST translate `Pending` to "indexing, retry" UX, NEVER to `ReferencesResult::Empty`. Pinned by tests `lookup_before_prime_returns_pending` + `lookup_pending_unblocks_after_prime` (§10). |
+| `find_references` returns false-empty result during the ~2.5 s prime window | `lookup` blocks on the prime condvar (§4.4); the user sees a busy cursor for ≤ 3 s on the first cold-start call, then `Ready`. Pinned by `lookup_blocks_until_prime_completes` (§10). Pending is reserved for the 60 s safety timeout. |
 
 ## 12. Out of scope follow-ups
 
