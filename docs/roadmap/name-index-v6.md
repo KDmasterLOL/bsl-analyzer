@@ -620,11 +620,19 @@ fn prime_workspace_name_index(global_state: &mut GlobalState) {
 }
 ```
 
-Runs after `vfs_done` on a dedicated rayon scope. Spike measured ~2.4 s
-parallel lex + ~10 ms Salsa populate for ERP. `parallel_prime_caches`-style
-progress reporting via `$/progress` (existing LSP plumbing) keeps the
-client informed; no new LSP message kind. Cancellation via the existing
-`Cancelled::catch` pattern from `rust-analyzer/crates/ide-db/src/prime_caches.rs`.
+Runs synchronously on the main thread inside `LoadingProgress::Finished`,
+BEFORE `state.vfs_done = true` (the invariant pinned in the comment
+above the function body). Spike measured ~2.4 s parallel lex (rayon
+inside the step-1 closure) + ~10 ms Salsa populate (serial main-thread
+writes) for ERP. The main `select!` loop is blocked for the duration —
+LSP requests queue in `lsp-server`'s `recv` channel and are dispatched
+only after `vfs_done = true` flips. No `$/progress` notifications are
+needed because no requests are being serviced during the window; the
+client just sees `null` for any request that did get dispatched before
+the handler entered (gated at handler entry per §6.3) and standard LSP
+"server initializing" UX otherwise. Cancellation is irrelevant on this
+path: prime is single-threaded main-thread work, not a long-running
+background task.
 
 ### 6.3. `find_references` handler (bsl-analyzer/src/handlers/request.rs)
 
@@ -856,7 +864,7 @@ configurations:
 
 | Risk | Mitigation |
 |---|---|
-| Lex pass on cold start adds visible latency (spike: 2.4 s) | `prime_workspace_name_index` runs after `vfs_done` on a dedicated rayon scope; LSP traffic is unaffected. `$/progress` keeps client informed. Same pattern as RA `parallel_prime_caches`. |
+| Lex pass on cold start adds visible latency (spike: 2.4 s) | `prime_workspace_name_index` runs synchronously on the main thread inside `LoadingProgress::Finished`, BEFORE `vfs_done = true`. The lex pass uses a rayon parallel iterator inside step 1 of the prime function (read-only file I/O + lexing — no DB borrow). Salsa input writes are serial main-thread work. LSP request handling is paused during the window; the `vfs_done` gate at handler entry (§6.3) prevents pre-prime requests from observing an empty index. |
 | Predicate divergence between `lex_to_digest` and `find_references_in_file` | Shared `is_name_token` helper in one module; parity test (§10). |
 | Salsa memory growth from per-mlid memos on a 20 k-mlid workspace | FST-backed memos are even smaller than the HashMap form measured by spike (~3 KB avg HashMap → ~1 KB avg FST per mlid = ~20 MB total). No LRU needed; verified by `name_index_memory_delta_under_budget` (§10). |
 | Worst-case warm lookup 5.6 ms on hottest name perceived as slow | `find_references` is user-triggered, 5 ms is imperceptible. If future telemetry shows a hot path, per-name LRU aggregator follow-up (§12). |
