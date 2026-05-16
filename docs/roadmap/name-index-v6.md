@@ -142,6 +142,18 @@ pub struct WorkspaceMembers {
     pub members: Arc<Vec<ModuleLikeMembership>>,
 }
 
+/// Top-level name-index state. INPUT — exactly one instance per
+/// `RootDatabaseImpl`, eagerly created at AnalysisHost initialisation
+/// (§6.2 step 0). `workspace = None` until prime sets it to `Some(...)`;
+/// because this is a Salsa input, both states are revision-coherent —
+/// a snapshot taken before prime sees `None` even after the main
+/// thread has flipped the atomic externally. This is the snapshot
+/// coherence guarantee v5 lacked.
+#[salsa::input(debug)]
+pub struct IndexState {
+    pub workspace: Option<WorkspaceMembers>,
+}
+
 /// Union of digests for one module-like. TRACKED — re-runs only when the
 /// membership's digest list changes or one of its referenced
 /// `FileLexDigest.names` changes.
@@ -235,24 +247,40 @@ the `Files` struct), not a new architectural exception.
 ```rust
 // crates/hir-def/src/name_index_v6/handles.rs
 use std::hash::BuildHasherDefault;
-use std::sync::atomic::AtomicBool;
+use std::sync::OnceLock;
 use rustc_hash::FxHasher;
 
 #[derive(Debug, Default, Clone)]
 pub struct NameIndexHandles {
     digests: Arc<DashMap<FileId, FileLexDigest, BuildHasherDefault<FxHasher>>>,
     memberships: Arc<DashMap<ModuleLikeId, ModuleLikeMembership, BuildHasherDefault<FxHasher>>>,
-    workspace: Arc<RwLock<Option<WorkspaceMembers>>>,
-    /// `false → true` once, when `prime_workspace_name_index` completes.
-    /// Never flips back; subsequent edits are deltas through `refresh`.
-    /// `lookup` reads it under `Acquire`; prime stores `Release` after
-    /// every input write is committed, so the bit-flip implies all
-    /// inputs are visible cross-thread. **No condvar needed**: prime
-    /// is synchronous on the main thread before `vfs_done = true` (§6.2),
-    /// so request handlers never see `primed = false` in healthy flow.
-    primed: Arc<AtomicBool>,
+    /// Salsa input handle for the workspace-level state. Set ONCE at
+    /// AnalysisHost initialisation (§6.2 step 0), before any worker can
+    /// take a snapshot. After that, every reader (`lookup`, prime,
+    /// process_changes) goes through `state.get().expect("init").workspace(db)`,
+    /// which is REVISION-BOUND by Salsa — a worker holding a snapshot
+    /// from before prime sees `workspace == None` even if a separate
+    /// thread has already finished prime. This is the snapshot
+    /// coherence v5 lacked: the "primed" bit is no longer a free
+    /// AtomicBool that drifts ahead of any specific snapshot.
+    state: Arc<OnceLock<IndexState>>,
+}
+
+impl NameIndexHandles {
+    /// Create the singleton `IndexState` input cell. Called once from
+    /// AnalysisHost startup (§6.2 step 0). Subsequent calls panic —
+    /// the cell must remain a singleton.
+    pub fn init(&self, db: &mut dyn DefDatabase) {
+        let cell = IndexState::new(db, None);
+        self.state.set(cell).expect("NameIndexHandles::init called twice");
+    }
 }
 ```
+
+The handles struct itself no longer carries primed/workspace state
+inline. Everything that needs to be revision-bound now lives inside
+the Salsa input cell `IndexState`. Cross-thread visibility is handled
+by Salsa's revision machinery, not by ad-hoc atomic ordering.
 
 Salsa input handles (`FileLexDigest`, `ModuleLikeMembership`, `WorkspaceMembers`)
 have NO lifetime parameter — `#[salsa::input]` produces a `Copy` newtype
@@ -332,27 +360,27 @@ acquiring `raw_database_mut()` to commit input writes — ABBA deadlock
 
 ```rust
 fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
-    use std::sync::atomic::Ordering;
-
     let handles = db.name_index().clone();
 
-    if !handles.primed.load(Ordering::Acquire) {
-        // Cold-start window. Returning Pending is the only correct
-        // option — caller holds a snapshot; blocking here would deadlock
-        // prime. find_references handler translates Pending to a
-        // window/showMessage "Indexing, retry" notification (§6.3).
-        return LookupResult::Pending;
-    }
-
-    // Primed: copy WorkspaceMembers handle under brief read guard,
-    // then iterate via Salsa query outside the guard.
-    let ws = handles.workspace.read();
-    let members_handle = ws.expect("primed implies workspace populated");
-    drop(ws);
+    // Read the workspace pointer through the snapshot-coherent Salsa
+    // input. A worker holding a snapshot from before prime sees
+    // `workspace == None` even if a separate main-thread flip has
+    // already happened in real time. That is the v6 fix for v5's
+    // snapshot-incoherent `Arc<WorkspaceNameIndex>`.
+    let state = handles.state.get().expect("NameIndexHandles::init must run before lookup");
+    let workspace_handle = match state.workspace(db) {
+        Some(w) => w,
+        None => {
+            // Snapshot is pre-prime. Caller (find_references handler)
+            // should also have gated on `ctx.vfs_done` at entry (§6.3);
+            // this Pending here is the inner safety net.
+            return LookupResult::Pending;
+        }
+    };
 
     let lower = name.as_str().to_ascii_lowercase();
     let mut out: Vec<FileId> = Vec::new();
-    for &m in members_handle.members(db).iter() {
+    for &m in workspace_handle.members(db).iter() {
         let idx = module_like_name_index(db, m);
         // Exact-name FST lookup: O(name_len). For fuzzy/prefix (future
         // `workspaceSymbol` LSP handler), swap for `fst::automaton::Subsequence`
@@ -367,17 +395,22 @@ fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
 }
 ```
 
-`prime_workspace_name_index` (§6.2) signals completion with one atomic
-store:
+`prime_workspace_name_index` (§6.2) signals completion with one Salsa
+input write:
 
 ```rust
-handles.primed.store(true, Ordering::Release);
+let state = handles.state.get().expect("init");
+state.set_workspace(db).to(Some(workspace_handle));
 ```
 
-`lookup` reads it under `Acquire`. That single bit-flip — paired with
-the synchronous-prime-on-main-thread ordering (§6.2) — is the entire
-state machine. No generations, no replay log, no atomic swap, no
-condvar.
+`lookup` reads `state.workspace(db)`. Salsa's revision machinery
+guarantees that a worker holding a snapshot from before this write
+observes `None`; a snapshot from after observes `Some(workspace_handle)`.
+No external atomic ordering — Salsa is the source of truth.
+
+That single revisioned input write — paired with the synchronous-prime-
+on-main-thread ordering (§6.2) — is the entire state machine. No
+generations, no replay log, no atomic swap, no condvar.
 
 ### 4.5. Why no Salsa-tracked aggregator
 
@@ -429,9 +462,12 @@ impl WorkspaceNameIndex {
     /// initial prime is still running, `Ready(files)` once available.
     pub fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult;
 
-    /// Fast read of the prime-complete bit. Non-blocking; consults the
-    /// `AtomicBool` only. Used by the live-fire comparator (§9 Landing 2)
-    /// to skip comparison during the cold-start window.
+    /// Snapshot-coherent check for "prime has populated the workspace
+    /// state". Implemented as `state.workspace(db).is_some()` — reads
+    /// the Salsa input at the current snapshot's revision, so two
+    /// concurrent threads observing different revisions get
+    /// per-revision-coherent answers. Used by the live-fire comparator
+    /// (§9 Landing 2) to skip comparison during the cold-start window.
     pub fn is_primed(db: &dyn DefDatabase) -> bool;
 }
 
@@ -447,8 +483,9 @@ pub enum LookupResult {
 
 Compared with v5's `IndexState::{Empty | Building | Ready | Failed}`
 machine plus generation counters plus replay log plus atomic swap, v6
-keeps **only one bit**: `primed: AtomicBool` on `NameIndexHandles`
-(§4.4). It flips `false → true` exactly once, at the end of the boot
+keeps **one Salsa input field**: `IndexState::workspace: Option<WorkspaceMembers>`
+(§4.4). It flips `None → Some(workspace_handle)` exactly once, at the
+end of the boot
 `prime_workspace_name_index`, and never flips back. Subsequent reloads
 update memberships incrementally through `process_changes`; the bit
 stays true. No replay log, no atomic swap, no generation, no Failed
@@ -562,6 +599,25 @@ No worker can hold a snapshot at this point because:
   ran for `initialize` only (no Salsa queries possible there yet).
 - VFS message handling (`handle_vfs_msg`) also runs on main thread.
 
+**Step 0 — `NameIndexHandles::init()` at AnalysisHost construction.**
+The singleton `IndexState` input cell must exist by the time the first
+snapshot is ever cloned (`raw_database().clone()` in
+`handlers/dispatch.rs:126`). Wire-up:
+```rust
+// crates/bsl-analyzer/src/analysis_host.rs
+impl AnalysisHost {
+    pub fn new() -> Self {
+        let mut host = Self { db: RootDatabaseImpl::default() };
+        host.db.name_index().init(&mut host.db);
+        host
+    }
+}
+```
+Replacing the existing `#[derive(Default)]` with explicit `new` is a
+one-line change. After this, every read of `state.workspace(db)` is
+revision-coherent for any snapshot — including snapshots taken before
+prime runs, which observe the initial `None`.
+
 ```rust
 // crates/bsl-analyzer/src/server.rs, inside the LoadingProgress::Finished
 // branch. Ordering invariant:
@@ -608,15 +664,22 @@ fn prime_workspace_name_index(global_state: &mut GlobalState) {
     for (fid, _path, names) in &lexed {
         WorkspaceNameIndex::refresh(db, *fid, Arc::clone(names));
     }
+    let mut all_memberships: Vec<ModuleLikeMembership> = Vec::with_capacity(groups.len());
     for (mlid, files) in groups {
-        WorkspaceNameIndex::register_module(db, mlid, files);
+        let handle = WorkspaceNameIndex::register_module(db, mlid, files);
+        all_memberships.push(handle);
     }
 
-    // Step 4: flip the primed bit. MUST happen last, after every input
-    // write above has been committed. Release pairs with Acquire in
-    // `lookup` so any future cross-thread read sees all populated inputs.
+    // Step 4: publish workspace via the singleton IndexState input cell.
+    // Salsa revisions this write; the same revision is observable by any
+    // snapshot taken after the corresponding `set_workspace` returns.
+    // This single line replaces v5's generation counter + atomic-swap
+    // protocol and v6-draft's external AtomicBool — the visibility
+    // contract is now revision-bound by Salsa.
     let handles = db.name_index().clone();
-    handles.primed.store(true, std::sync::atomic::Ordering::Release);
+    let state = handles.state.get().expect("NameIndexHandles::init must run at AnalysisHost::new");
+    let workspace_handle = WorkspaceMembers::new(db, Arc::new(all_memberships));
+    state.set_workspace(db).to(Some(workspace_handle));
 }
 ```
 
