@@ -552,13 +552,44 @@ progress reporting via `$/progress` (existing LSP plumbing) keeps the
 client informed; no new LSP message kind. Cancellation via the existing
 `Cancelled::catch` pattern from `rust-analyzer/crates/ide-db/src/prime_caches.rs`.
 
-### 6.3. `find_references` handler (bsl-analyzer/src/handlers/…)
+### 6.3. `find_references` handler (bsl-analyzer/src/handlers/request.rs)
 
-Because prime is synchronous on the main thread before `vfs_done = true`
-(§6.2), any LSP request dispatched after boot completion sees
-`primed = true`. The handler is therefore minimal and runs on a
-task_pool worker with an `Analysis` snapshot exactly like other
-read-only handlers in `crates/bsl-analyzer/src/handlers/`:
+Requests CAN be dispatched before `LoadingProgress::Finished` fires —
+the LSP client may send find_references between `initialized` and the
+end of the workspace load. The dispatcher passes `vfs_done` into
+`LatencyRequestContext` (`crates/bsl-analyzer/src/handlers/dispatch.rs:144`),
+so handlers can gate on it. The existing precedent is
+`handle_semantic_tokens_full` (`request.rs:389`), which returns empty
+when `vfs_done == false` with the comment "Client will re-request when
+ready."
+
+`handle_references` follows the same pattern:
+
+```rust
+// crates/bsl-analyzer/src/handlers/request.rs
+pub fn handle_references(
+    ctx: LatencyRequestContext,
+    params: ReferenceParams,
+) -> Result<Option<Vec<Location>>> {
+    // Pre-vfs_done window: name-index is not yet primed. Returning
+    // `Some(vec![])` is wrong — the client would treat it as
+    // "no references found" with no indication that the workspace is
+    // still loading. Return `None` instead; LSP spec lets the server
+    // signal "no result available" rather than "result is empty".
+    if !ctx.vfs_done {
+        tracing::debug!("vfs not ready, deferring textDocument/references");
+        return Ok(None);
+    }
+    // Post-vfs_done: prime has run synchronously inside
+    // LoadingProgress::Finished (§6.2), so primed == true. Proceed
+    // through the standard handler.
+    handle_references_post_prime(ctx, params)
+}
+```
+
+Inside the post-prime path, the lookup helper is dead-simple — `Pending`
+is unreachable in healthy flow because §6.2 guarantees
+`vfs_done == true ⇒ primed == true`:
 
 ```rust
 // crates/ide/src/references.rs
@@ -566,15 +597,11 @@ fn workspace_candidate_files(db: &dyn DefDatabase, name: &Name) -> Vec<FileId> {
     match WorkspaceNameIndex::lookup(db, name) {
         LookupResult::Ready(files) => files,
         LookupResult::Pending => {
-            // UNREACHABLE in healthy flow — prime is synchronous and
-            // completes before `vfs_done = true`, so by the time any
-            // worker dispatch can run, primed is true. Treat as a bug:
-            // log and return empty so the user sees no crash, just a
-            // missed lookup. Pinned by the `name_index_primed_after_boot`
-            // test (§10).
+            // Should be unreachable: caller already checked vfs_done.
             tracing::error!(
-                "name-index lookup returned Pending after vfs_done; \
-                 indicates prime did not run or panicked"
+                "name-index lookup returned Pending after vfs_done — \
+                 indicates prime did not run or panicked; see span \
+                 `prime_workspace_name_index` in server log"
             );
             Vec::new()
         }
@@ -583,21 +610,30 @@ fn workspace_candidate_files(db: &dyn DefDatabase, name: &Name) -> Vec<FileId> {
 ```
 
 No drop-snapshot-wait-retake dance, no `wait_until_primed`, no condvar.
-The complexity sits in §6.2's boot ordering, not in the per-request
-hot path.
+The complexity sits in §6.2's boot ordering and the `vfs_done` gate at
+handler entry, not in the per-request hot path.
+
+`textDocument/references` returns `Location[] | null`. Returning `null`
+(`Ok(None)`) during the pre-vfs_done window is the LSP-spec-blessed way
+to say "no result available yet" without misleading the client into
+treating it as "empty result". Standard LSP clients (vscode, nvim) treat
+`null` as "server has nothing for now; user retries"; an empty array
+would be displayed as "no references found".
 
 User-visible behaviour during boot:
 
-| Boot phase | What runs | UX |
+| Boot phase | Handler behaviour | UX |
 |---|---|---|
-| `t < LoadingProgress::Finished` | LSP `initialize` only; no requests dispatched | Standard LSP startup |
-| `LoadingProgress::Finished` handler in progress (~2.5 s on ERP) | Main thread runs `process_changes` + `warm_metadata_cache` + `prime_workspace_name_index` synchronously | Server appears momentarily "thinking"; LSP requests queue in lsp-server's `recv` channel |
-| `vfs_done = true` flips, main loop returns to `select!` | Queued requests are dispatched | Normal operation |
-| Any name-index lookup | Already primed | `Ready` instantly (typical 1–6 ms; worst 5.6 ms) |
+| `t < LoadingProgress::Finished`, find_references dispatched | `ctx.vfs_done == false` ⇒ return `Ok(None)` | Client sees `null`; standard LSP "no result yet" UX |
+| `LoadingProgress::Finished` handler in progress (~2.5 s on ERP) | Main thread runs `process_changes` + `warm_metadata_cache` + `prime_workspace_name_index` synchronously; main `select!` loop blocked → no new dispatches during this window | Server "initializing" period; new requests queue in lsp-server's `recv` channel |
+| `vfs_done = true` flips, main loop returns to `select!` | Queued requests dispatched, `primed = true` guaranteed | Normal operation |
+| Any post-boot lookup | `Ready` instantly | Typical 1–6 ms; worst 5.6 ms |
 
-The whole "Pending" path exists only as a failure-mode marker so the
-server doesn't silently return wrong results if prime panics. It is
-NOT a UX state in steady operation.
+The handler-level `vfs_done` gate (mirrors `handle_semantic_tokens_full`,
+`request.rs:389`) ensures the `null` response, not an empty array, for
+the pre-prime window. The `Pending` path exists only as a failure-mode
+marker so the server doesn't silently return wrong results if prime
+panics — NOT a UX state in steady operation.
 
 ### 6.4. Memory & build characteristics
 
@@ -728,6 +764,7 @@ real-world cost (~3.0 s on ERP at 12 workers, projected).
 | `lookup_returns_pending_when_unprimed` | unprimed handles → `lookup` returns `Pending` immediately, NEVER blocks (regression guard against the deadlock-prone blocking design that earlier review attempts proposed). | 1 |
 | `name_index_primed_after_boot_completes` | full boot harness: drive `LoadingProgress::Finished` to completion, assert `is_primed(db) == true` and `WorkspaceNameIndex::lookup(_, _) ⇒ Ready(_)` for at least one fixture symbol. Pins the synchronous-prime-before-vfs_done ordering (§6.2). | 2 |
 | `find_references_never_observes_pending_after_boot` | integration test on ERP fixture: after boot completes, run 100 `find_references` requests concurrently; every result is `Ready`, none log the `tracing::error!("name-index lookup returned Pending after vfs_done")` line. | 2 |
+| `find_references_returns_null_before_vfs_done` | integration test: send `textDocument/references` during the pre-vfs_done window; assert response is `null` (`Ok(None)`), NOT empty `[]`. Mirrors the established `handle_semantic_tokens_full` precedent (`request.rs:389`). Prevents the client UX from interpreting cold-start as "no references found". | 2 |
 
 Snapshot tests (`expect-test`) for at least three representative
 configurations:
@@ -744,7 +781,7 @@ configurations:
 | Salsa memory growth from per-mlid memos on a 20 k-mlid workspace | Memos are small (~3 KB avg = ~60 MB). No LRU needed; spike Q3 confirmed steady-state RSS. |
 | Worst-case warm lookup 5.6 ms on hottest name perceived as slow | `find_references` is user-triggered, 5 ms is imperceptible. If future telemetry shows a hot path, per-name LRU aggregator follow-up (§12). |
 | Future contributor adds a workspace-wide query that re-introduces `file_text` fan-out | Architecture doc + grep guard in CI (`grep -r 'source_root_name_usage_query' crates/` must return 0 hits after Landing 3). |
-| `find_references` returns false-empty result during the ~2.5 s prime window | Prime runs synchronously on the main thread INSIDE the `LoadingProgress::Finished` handler, BEFORE `vfs_done = true` flips (§6.2). Main loop processes events one at a time, so no LSP request can be dispatched against an unprimed index in healthy flow. User-visible: ~2.5 s of server "initializing" inside boot; requests arriving during that window queue in lsp-server's recv channel. Pinned by `name_index_primed_after_boot_completes` + `find_references_never_observes_pending_after_boot` (§10). |
+| `find_references` returns false-empty result during the ~2.5 s prime window | Two layers: (a) handler at entry gates on `ctx.vfs_done`; if false, returns `Ok(None)` (LSP `null` — "no result available", NOT empty array), matching the existing `handle_semantic_tokens_full` precedent (`request.rs:389`); (b) §6.2 prime runs synchronously inside `LoadingProgress::Finished` BEFORE `vfs_done = true` flips, so `vfs_done ⇒ primed`. Net effect: LSP client sees `null` until the workspace is loaded (most clients show "still indexing" UX), then `Ready` results. Pinned by `find_references_returns_null_before_vfs_done` + `find_references_never_observes_pending_after_boot` (§10). |
 
 ## 12. Out of scope follow-ups
 
