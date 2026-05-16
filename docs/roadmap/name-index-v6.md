@@ -92,8 +92,11 @@ crates/
 
   ide-db/src/
     name_index_classifier.rs
-                  — derive_module_like_id(config, file_path) — moved from
-                    spike, uses bsl-metadata accessors
+                  — pub fn derive_module_like_id(
+                        config: &bsl_metadata::Configuration,
+                        file_path: &str,
+                    ) -> Option<ModuleLikeId>;
+                    moved from spike, uses bsl-metadata accessors
 
   bsl-analyzer/src/
     workspace.rs  — process_changes calls populate API after set_file_text
@@ -346,6 +349,19 @@ impl WorkspaceNameIndex {
     /// `set_bsl_file_text` (§6) immediately after `set_file_text`.
     pub fn refresh(db: &mut dyn DefDatabase, file_id: FileId, names: Arc<FxHashSet<Name>>);
 
+    /// Register a module-like grouping. Called from
+    /// `prime_workspace_name_index` (§6.2) once per `(ModuleLikeId,
+    /// Vec<FileId>)` group derived by the classifier. Creates the
+    /// `ModuleLikeMembership` input cell and inserts it into
+    /// `WorkspaceMembers`. Idempotent: re-registering an existing
+    /// `ModuleLikeId` replaces its file list (used on MDO rename /
+    /// extension reload).
+    pub fn register_module(
+        db: &mut dyn DefDatabase,
+        mlid: ModuleLikeId,
+        files: Vec<FileId>,
+    );
+
     /// Drop a file from all module-likes that referenced it. Called on
     /// `Change::Delete`.
     pub fn remove(db: &mut dyn DefDatabase, file_id: FileId);
@@ -451,15 +467,19 @@ pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> (bool, bool) 
         }
     }
 
-    // After Phase 1 the mutable DB borrow is dropped. Phase 2 reacquires
-    // a READ snapshot through `workspace_config()` and classifies paths
-    // against the post-mutation revision. Phase 3 reacquires the MUTABLE
-    // borrow ONLY for the rebind writes. The two reacquires must not
-    // overlap with `workspace_config()`'s internal snapshot if it holds
-    // one (open question, §15.4).
+    // After Phase 1 the mutable DB borrow is dropped. Phase 2 classifies
+    // paths via the existing `RootDatabase::get_configuration(file_id)`
+    // accessor (`crates/ide-db/src/database.rs:427` — see §15.4): it's a
+    // `&self` method that internally runs a Salsa query and returns an
+    // `Arc<Configuration>`, no held snapshot. Phase 3 reacquires the
+    // MUTABLE borrow only for the rebind writes.
     {
-        let config = self.workspace_config();
+        let db = self.analysis_host.raw_database();
         for (file_id, path) in newly_classified_files {
+            let config = match db.get_configuration(file_id) {
+                Some(c) => c,
+                None => continue,
+            };
             if let Some(mlid) = derive_module_like_id(&config, &path) {
                 rebind_batch.push((file_id, mlid));
             }
@@ -501,14 +521,19 @@ fn prime_workspace_name_index(global_state: &mut GlobalState) {
             .collect();
 
     // Step 2: classify against the Configuration BEFORE taking the mut
-    // DB borrow. Classification is read-only on workspace_config.
-    let config = global_state.workspace_config();
+    // DB borrow. Classification is read-only on `RootDatabase::get_configuration`
+    // (`crates/ide-db/src/database.rs:427`, see §15.4) — a `&self` Salsa
+    // query that returns `Arc<Configuration>`.
+    let db = global_state.analysis_host.raw_database();
     let mut groups: FxHashMap<ModuleLikeId, Vec<FileId>> = Default::default();
     for (fid, path, _) in &lexed {
-        let mlid = derive_module_like_id(&config, path)
+        let mlid = db
+            .get_configuration(*fid)
+            .and_then(|config| derive_module_like_id(&config, path))
             .unwrap_or(ModuleLikeId::OrphanFile(*fid));
         groups.entry(mlid).or_default().push(*fid);
     }
+    drop(db); // explicit release of `&self` before next step takes `&mut`.
 
     // Step 3: serial Salsa input setup (Salsa db is not Sync for writes).
     let db = global_state.analysis_host.raw_database_mut();
@@ -841,14 +866,11 @@ It is a `&self` method that internally calls the Salsa query
 no held lock. The returned `Arc<Configuration>` outlives the immediate
 call cleanly.
 
-Implication for §6.1/§6.2 pseudocode: substitute `workspace_config()`
-with `db.get_configuration(any_file_in_root)` (or
-`db.get_all_configurations(any_file_id)` for multi-root workspaces).
+The §6.1 and §6.2 pseudocode use `db.get_configuration(file_id)` directly.
 Phase 2 reads `&self`; Phase 3 reacquires `&mut self`. No deadlock.
-
-If the API surface needs to evolve (e.g. for source-root-scoped indexing),
-the substitution is local to the call sites in §6.1/§6.2 and the
-classifier — not an architectural change.
+For multi-root workspaces, `db.get_all_configurations(file_id)` is the
+multi-config variant — wire-up is a one-line change at the classifier
+call site, not an architectural change.
 
 ---
 
