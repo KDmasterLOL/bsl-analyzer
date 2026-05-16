@@ -307,18 +307,20 @@ fn lookup(db: &dyn DefDatabase, name: &Name) -> LookupResult {
 ```
 
 `prime_workspace_name_index` (§6.2) signals completion with one atomic
-store:
+store plus a condvar wake:
 
 ```rust
 handles.primed.store(true, Ordering::Release);
+let (_lock, cv) = &*handles.prime_signal;
+cv.notify_all();
 ```
 
-That is the ENTIRE state machine: one atomic bit. No condvar, no
-generations, no replay log, no atomic swap. The bit is a Release/Acquire
-pair so any subsequent `lookup` on a different thread observes all
-input writes from prime (Salsa input cells are themselves snapshot-
-revisioned, so the Acquire pairs cleanly with their internal
-release-on-commit).
+`lookup` itself only consults the atomic (Release/Acquire so the bit-flip
+implies all input writes from prime are visible). The condvar is a
+separate channel used **only** by `wait_until_primed` callers, which
+park outside any Salsa snapshot (see §5 / §6.3 — the find_references
+handler drops its snapshot before parking). No generations, no replay
+log, no atomic swap.
 
 ### 4.5. Why no Salsa-tracked aggregator
 
@@ -395,11 +397,15 @@ stays true. No replay log, no atomic swap, no generation, no Failed
 state (a failed prime panics — same posture as Salsa-tracked queries
 themselves).
 
-`lookup` waits on a `Condvar` for up to 500 ms before returning
-`Pending`. Beyond that the caller sees "indexing"; no false-empty
-references. This is the v5 §6.4 Landing 3 contract, achieved with
-~30 lines of `parking_lot::{Condvar, Mutex}` rather than v5's full state
-machine.
+`lookup` is non-blocking: it consults `primed` and returns `Ready` or
+`Pending` immediately (§4.4 has the full snippet). Blocking inside
+`lookup` while holding a Salsa snapshot would deadlock prime — see the
+`Files`/ABBA discussion in §4.4. The find_references handler (§6.3)
+recovers from `Pending` by dropping its snapshot, calling
+`wait_until_primed`, and retaking a fresh snapshot for the retry.
+This keeps the v5-style "no false-empty references" guarantee with a
+single atomic bit plus a separate condvar used **only outside snapshot
+context**.
 
 The `name-index-strict` CI feature and `set_bsl_file_text` discipline carry
 over from v5 §6.1 — they remain useful as guard rails against a future
