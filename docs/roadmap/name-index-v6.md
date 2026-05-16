@@ -112,55 +112,54 @@ above). Integration sits in `bsl-analyzer`. No new crate.
 /// Per-file lexical digest. INPUT — populated by the lexer/walker, not
 /// derived from `FileTextInput`. Mutating one digest invalidates exactly
 /// the `module_like_name_index` memos that reference it.
+///
+/// `Arc<FxHashSet<Name>>` field type matches the spike (lifetime-free
+/// shape that compiles cleanly with salsa 0.26 — `#[salsa::input]` does
+/// NOT take a `'db` lifetime parameter, unlike `#[salsa::tracked]`).
 #[salsa::input(debug)]
-pub struct FileLexDigest<'db> {
+pub struct FileLexDigest {
     pub file_id: FileId,
-    #[return_ref]
-    pub names: FxHashSet<Name>,
+    pub names: Arc<FxHashSet<Name>>,
 }
 
 /// Per-ModuleLikeId membership list. INPUT — populated once per module.
 /// On membership change (file added/removed within a Form, MDO renamed,
 /// …) replace the whole input; Salsa invalidates dependents.
 #[salsa::input(debug)]
-pub struct ModuleLikeMembership<'db> {
+pub struct ModuleLikeMembership {
     pub id: ModuleLikeId,
-    #[return_ref]
-    pub files: Vec<FileLexDigest<'db>>,
+    pub files: Arc<Vec<FileLexDigest>>,
 }
 
 /// Workspace registry — list of all known module-likes. INPUT — updated on
 /// MDO add/remove events from `process_changes`.
 #[salsa::input(debug)]
-pub struct WorkspaceMembers<'db> {
-    #[return_ref]
-    pub members: Vec<ModuleLikeMembership<'db>>,
+pub struct WorkspaceMembers {
+    pub members: Arc<Vec<ModuleLikeMembership>>,
 }
 
 /// Union of digests for one module-like. TRACKED — re-runs only when the
 /// membership's digest list changes or one of its referenced
 /// `FileLexDigest.names` changes.
 #[salsa::tracked]
-pub fn module_like_name_index<'db>(
-    db: &'db dyn DefDatabase,
-    membership: ModuleLikeMembership<'db>,
+pub fn module_like_name_index(
+    db: &dyn DefDatabase,
+    membership: ModuleLikeMembership,
 ) -> Arc<ModuleNameIndex>;
 
 /// Workspace-wide lookup. Plain function, NOT tracked: deliberate, so that
 /// editing one file does not invalidate the global aggregator (which would
 /// re-merge all ~10–20 k indices on every keystroke). Cost is dominated by
 /// hash lookups across cached per-module memos — 1–6 ms on ERP (spike Q3).
-pub fn lookup_workspace<'db>(
-    db: &'db dyn DefDatabase,
-    name: &Name,
-) -> Vec<FileId>;
+pub fn lookup_workspace(db: &dyn DefDatabase, name: &Name) -> Vec<FileId>;
 ```
 
 `Name` is the existing `hir_def::Name` (already used in
-`name_usage_index.rs`). `FxHashSet`/`Arc<…>` traits-side: `Update` impl is
-derived by `#[salsa::input]` for the digest set as a whole; mutating
-individual entries requires the consumer to call `set_names(db).to(new)`
-with a fresh `FxHashSet`.
+`name_usage_index.rs`). `Arc<FxHashSet<Name>>` is the digest-storage shape
+verified in the spike (`crates/bsl-analyzer/src/spike_name_index_salsa.rs`):
+cheap `Arc::clone()` on read, full replace on `set_names(db).to(new_arc)`
+when the file is re-lexed. `Arc<Vec<…>>` for membership lists is the same
+pattern.
 
 ### 4.4. Input handle storage — `NameIndexHandles`
 
@@ -173,13 +172,21 @@ the `Files` struct), not a new architectural exception.
 
 ```rust
 // crates/hir-def/src/name_index_v6/handles.rs
+use std::hash::BuildHasherDefault;
+use rustc_hash::FxHasher;
+
 #[derive(Debug, Default, Clone)]
 pub struct NameIndexHandles {
-    digests: Arc<DashMap<FileId, FileLexDigest<'static>, FxHasher>>,
-    memberships: Arc<DashMap<ModuleLikeId, ModuleLikeMembership<'static>, FxHasher>>,
-    workspace: Arc<RwLock<Option<WorkspaceMembers<'static>>>>,
+    digests: Arc<DashMap<FileId, FileLexDigest, BuildHasherDefault<FxHasher>>>,
+    memberships: Arc<DashMap<ModuleLikeId, ModuleLikeMembership, BuildHasherDefault<FxHasher>>>,
+    workspace: Arc<RwLock<Option<WorkspaceMembers>>>,
 }
 ```
+
+Salsa input handles (`FileLexDigest`, `ModuleLikeMembership`, `WorkspaceMembers`)
+have NO lifetime parameter — `#[salsa::input]` produces a `Copy` newtype
+around an `Id`. The `BuildHasherDefault<FxHasher>` hasher type matches
+the canonical pattern in `crates/base-db/src/lib.rs:178`.
 
 Held as a field on `RootDatabaseImpl` (in `ide-db`) alongside the existing
 `files: Files`:
@@ -217,18 +224,23 @@ the existing pattern for `set_file_text`. Pair with
 `AnalysisHost::request_cancellation()` at `process_changes` entry, also
 matching the existing pattern.
 
-`WorkspaceNameIndex::refresh` flow:
+`WorkspaceNameIndex::refresh` flow (mirrors `Files::set_file_text` from
+`crates/base-db/src/lib.rs:213-233`):
 
 ```rust
-fn refresh(db: &mut dyn DefDatabase, file_id: FileId, names: FxHashSet<Name>) {
+fn refresh(db: &mut dyn DefDatabase, file_id: FileId, names: Arc<FxHashSet<Name>>) {
     use salsa::Setter;
-    // Short-lock: get-copy-drop-set.
-    let existing = db.name_index().digests.get(&file_id).map(|e| *e.value());
+    // Arc-clone the handle struct so we don't keep `db` borrowed while
+    // the Salsa setter takes `&mut self`. Same trick as `Files::set_file_text`:
+    //   `let files = self.files.clone(); files.set_file_text(self, …);`
+    let handles = db.name_index().clone();
+    // Short-lock: get under brief shard guard, copy the Copy handle, drop guard.
+    let existing = handles.digests.get(&file_id).map(|e| *e.value());
     match existing {
         Some(digest) => digest.set_names(db).to(names),
         None => {
             let digest = FileLexDigest::new(db, file_id, names);
-            let prev = db.name_index().digests.insert(file_id, digest);
+            let prev = handles.digests.insert(file_id, digest);
             debug_assert!(prev.is_none(), "single-mutator violated");
         }
     }
@@ -239,10 +251,11 @@ fn refresh(db: &mut dyn DefDatabase, file_id: FileId, names: FxHashSet<Name>) {
 unreachable from any `ModuleLikeMembership` once `rebind` updates the
 membership lists. (Salsa GC reclaims it on the next revision bump.)
 
-`rebind` follows the same get-copy-drop-set shape on `memberships`.
-`lookup` reads `workspace` under a short read guard, copies the
-`WorkspaceMembers` handle, drops the guard, then iterates members via the
-Salsa query — no Salsa write call inside the guard, so no ABBA risk.
+`rebind` follows the same Arc-clone-then-get-copy-drop-set shape on
+`memberships`. `lookup` reads `workspace` under a short read guard,
+copies the `WorkspaceMembers` handle, drops the guard, then iterates
+members via the Salsa query — no Salsa write call inside the guard, so
+no ABBA risk.
 
 ### 4.5. Why no Salsa-tracked aggregator
 
@@ -266,7 +279,7 @@ v6.
 impl WorkspaceNameIndex {
     /// Populate or refresh a single file's lexical digest. Called from
     /// `set_bsl_file_text` (§6) immediately after `set_file_text`.
-    pub fn refresh(db: &mut dyn DefDatabase, file_id: FileId, names: FxHashSet<Name>);
+    pub fn refresh(db: &mut dyn DefDatabase, file_id: FileId, names: Arc<FxHashSet<Name>>);
 
     /// Drop a file from all module-likes that referenced it. Called on
     /// `Change::Delete`.
@@ -300,7 +313,7 @@ to `FileTextInput`.
 ```rust
 pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> (bool, bool) {
     // Phase 1: Salsa mutations (file_text + name_index)
-    let mut digest_batch: Vec<(FileId, FxHashSet<Name>)> = Vec::new();
+    let mut digest_batch: Vec<(FileId, Arc<FxHashSet<Name>>)> = Vec::new();
     let mut remove_batch: Vec<FileId> = Vec::new();
     let mut rebind_batch: Vec<(FileId, ModuleLikeId)> = Vec::new();
     {
@@ -310,7 +323,7 @@ pub fn process_changes(&mut self, suppress_metadata_bump: bool) -> (bool, bool) 
                 Change::Create(text, _) | Change::Modify(text, _) => {
                     if is_bsl_source(&file_set, file_id) {
                         db.set_file_text(file_id, &text);
-                        let digest = lex_to_digest(&text);
+                        let digest = Arc::new(lex_to_digest(&text));
                         digest_batch.push((file_id, digest));
                     }
                 }
@@ -375,10 +388,10 @@ fn prime_workspace_name_index(global_state: &mut GlobalState) {
     // Step 1: parallel lex (rayon) — same pattern as
     // `crates/bsl-analyzer/src/bin/main.rs::run_deps_bench_index`.
     // No DB borrow held during the lex pass.
-    let lexed: Vec<(FileId, PathBuf, FxHashSet<Name>)> =
+    let lexed: Vec<(FileId, PathBuf, Arc<FxHashSet<Name>>)> =
         all_bsl_files(global_state)
             .into_par_iter()
-            .map(|(fid, path, text)| (fid, path, lex_to_digest(&text)))
+            .map(|(fid, path, text)| (fid, path, Arc::new(lex_to_digest(&text))))
             .collect();
 
     // Step 2: classify against the Configuration BEFORE taking the mut
@@ -394,7 +407,7 @@ fn prime_workspace_name_index(global_state: &mut GlobalState) {
     // Step 3: serial Salsa input setup (Salsa db is not Sync for writes).
     let db = global_state.analysis_host.raw_database_mut();
     for (fid, _path, names) in &lexed {
-        WorkspaceNameIndex::refresh(db, *fid, names.clone());
+        WorkspaceNameIndex::refresh(db, *fid, Arc::clone(names));
     }
     for (mlid, files) in groups {
         WorkspaceNameIndex::register_module(db, mlid, files);
