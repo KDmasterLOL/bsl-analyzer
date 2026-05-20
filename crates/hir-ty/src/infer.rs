@@ -32,7 +32,7 @@ use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::ty::Ty;
-use hir_def::{DefWithBodyId, ExprId, Name};
+use hir_def::{DefWithBodyId, ExprId, MethodIdInput, Name};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use tracing::{debug, info, trace};
@@ -526,6 +526,33 @@ impl<'db> InferenceContext<'db> {
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
         }
+    }
+
+    /// Phase O.7 — body-scoped factory anchored on a single method.
+    ///
+    /// Thin wrapper over [`Self::new`] that derives `file_id` and
+    /// `owner` from the salsa-interned [`MethodIdInput`]. The body is
+    /// supplied by the caller so the context can be built without
+    /// going through `infer_query` / `module_bodies_query`. This is
+    /// the per-method inference primitive that the upcoming method-graph
+    /// queries (O.8+) will drive.
+    ///
+    /// O.7 ships the constructor alone; cascade typing and production
+    /// callers land in later commits (O.8–O.11). Coverage here is
+    /// unit-test only.
+    ///
+    /// # Body type
+    ///
+    /// Takes `&Arc<Body>` to match [`Self::new`] and to avoid an extra
+    /// clone when the caller already holds the `Arc`. Callers that
+    /// only have a `&Body` can pass `&Arc::new(body.clone())`.
+    pub fn new_for_method(
+        db: &'db dyn HirDatabase,
+        method: MethodIdInput<'db>,
+        body: &Arc<Body>,
+    ) -> Self {
+        let mid = method.method_id(db);
+        Self::new(db, mid.module.file_id, DefWithBodyId::Method(mid.local_id), body)
     }
 
     /// Suppress inference diagnostics whose key expression was lowered
