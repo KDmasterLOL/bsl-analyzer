@@ -159,8 +159,9 @@ pub use hir_ty::proc_signature;
 // layer without going through `infer_query`.
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
-    form_element_kind_sort_band, CallArgBinding, FormDataBinding, FormDataTarget, FormElementKind,
-    InferenceContext, InferenceDiagnostic, InferenceResult, MetadataKind, ParamsShape, Ty,
+    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, FormDataBinding,
+    FormDataTarget, FormElementKind, InferOwnerResult, InferenceContext, InferenceDiagnostic,
+    InferenceResult, MetadataKind, ModuleCodeInferenceResult, ParamsShape, Ty,
     UnresolvedMethodKind,
 };
 

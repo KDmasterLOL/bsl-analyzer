@@ -442,6 +442,14 @@ impl hir::HirDatabase for RootDatabaseImpl {
     ) -> Arc<hir::proc_signature::ProcSignature> {
         hir::proc_signature::proc_signature_query(self, method_input)
     }
+
+    fn infer_method(&self, _method: hir::MethodIdInput<'_>) -> Arc<hir::BodyInferenceResult> {
+        todo!("Phase O.15 wires hir::infer_method_query (Lni.5)")
+    }
+
+    fn infer_module_code(&self, _file_id: FileId) -> Arc<hir::ModuleCodeInferenceResult> {
+        todo!("Phase O.14 wires hir::infer_module_code_query (Lni.4)")
+    }
 }
 
 #[salsa::db]

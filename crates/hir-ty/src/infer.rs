@@ -485,12 +485,21 @@ pub struct InferenceContext<'db> {
     call_arg_bindings: Vec<CallArgBinding>,
 }
 
-/// Single-body inference output.
+/// Per-method (or module-code) inference output.
 ///
-/// Intermediate record returned from [`InferenceContext::finish`]: keeps
-/// the body's expr-type map and diagnostics separate from the variable
-/// map so `infer_query` can fold them into the file-level
-/// [`InferenceResult`] without re-walking anything.
+/// Phase O.13 (Lni.1) promotes this from an `infer_query`-internal
+/// intermediate to the public per-method Salsa surface that
+/// `infer_method_query` (O.15) returns. `infer_query` keeps using
+/// `InferenceContext::finish` to fold per-body results into the
+/// file-level [`InferenceResult`], so this struct does double duty:
+/// the public per-method payload and the fold input.
+///
+/// All collection fields are `pub` so narrow callers (per-method hover,
+/// completion, narrow_query) can read them through
+/// [`InferOwnerResult::Method`]; `return_expr_ids` stays `pub(crate)`
+/// because its sole consumer is `method_return_type_query` inside this
+/// crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BodyInferenceResult {
     /// Owner of the body that produced this output.
     pub owner: DefWithBodyId,
@@ -515,6 +524,171 @@ pub struct BodyInferenceResult {
     /// crate). `infer_query` does not surface this — it is purely the
     /// per-method cascade query's view of the body.
     pub(crate) return_expr_ids: Vec<ExprId>,
+}
+
+impl BodyInferenceResult {
+    /// Phase O.13 — empty payload for an owner whose inference produced
+    /// no entries. Used by `infer_method_query` (O.15) to return a
+    /// well-typed default when the requested method does not exist in
+    /// the resolved module — cheaper than threading `Option` through
+    /// every narrow caller. All collection fields are default-empty;
+    /// the only meaningful slot is `owner`.
+    pub fn empty_for(owner: DefWithBodyId) -> Self {
+        Self {
+            owner,
+            var_types: FxHashMap::default(),
+            implicit_locals: FxHashMap::default(),
+            binding_types: FxHashMap::default(),
+            expr_types: FxHashMap::default(),
+            diagnostics: Vec::new(),
+            call_arg_bindings: Vec::new(),
+            return_expr_ids: Vec::new(),
+        }
+    }
+}
+
+/// Module-code inference output.
+///
+/// Phase O.13 (Lni.2) introduces this struct as the public Salsa
+/// surface that `infer_module_code_query` (O.14) returns. Mirrors
+/// [`BodyInferenceResult`] structurally — the two diverge only in that
+/// `ModuleCodeInferenceResult::owner` is always
+/// [`DefWithBodyId::ModuleCode`], and there is no `return_expr_ids`
+/// (module code has no return statements to track for the cascade
+/// query). `from_body` is the canonical conversion path: the underlying
+/// `InferenceContext::finish` always produces a `BodyInferenceResult`
+/// regardless of owner kind, so module-code inference reuses the same
+/// machinery and lifts the result into this dedicated type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleCodeInferenceResult {
+    /// Always [`DefWithBodyId::ModuleCode`]. Kept explicit so the
+    /// struct can be inspected uniformly with `BodyInferenceResult`.
+    pub owner: DefWithBodyId,
+    /// Variable types discovered during inference (lowercase name → Ty).
+    pub var_types: FxHashMap<String, Ty>,
+    /// Implicit locals introduced by simple assignments in module code.
+    pub implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
+    /// Per-binding inferred types (declaration-site arms).
+    pub binding_types: FxHashMap<BindingId, Ty>,
+    /// Expression types keyed by body-local `ExprId`.
+    pub expr_types: FxHashMap<ExprId, Ty>,
+    /// Diagnostics collected during inference.
+    pub diagnostics: Vec<InferenceDiagnostic>,
+    /// Call-site arg/param bindings collected during inference.
+    pub call_arg_bindings: Vec<CallArgBinding>,
+}
+
+impl Default for ModuleCodeInferenceResult {
+    fn default() -> Self {
+        Self {
+            owner: DefWithBodyId::ModuleCode,
+            var_types: FxHashMap::default(),
+            implicit_locals: FxHashMap::default(),
+            binding_types: FxHashMap::default(),
+            expr_types: FxHashMap::default(),
+            diagnostics: Vec::new(),
+            call_arg_bindings: Vec::new(),
+        }
+    }
+}
+
+impl ModuleCodeInferenceResult {
+    /// Lift a `BodyInferenceResult` produced from a module-code body
+    /// (`DefWithBodyId::ModuleCode`) into the dedicated module-code
+    /// type. Drops `return_expr_ids` (always empty for module code by
+    /// the parser: module-level statements never reach `Stmt::Return`).
+    ///
+    /// Debug-asserts the owner is `ModuleCode` to catch mis-routed
+    /// inference results during development; release builds trust the
+    /// caller.
+    pub fn from_body(body: BodyInferenceResult) -> Self {
+        debug_assert!(
+            matches!(body.owner, DefWithBodyId::ModuleCode),
+            "ModuleCodeInferenceResult::from_body requires DefWithBodyId::ModuleCode owner"
+        );
+        Self {
+            owner: body.owner,
+            var_types: body.var_types,
+            implicit_locals: body.implicit_locals,
+            binding_types: body.binding_types,
+            expr_types: body.expr_types,
+            diagnostics: body.diagnostics,
+            call_arg_bindings: body.call_arg_bindings,
+        }
+    }
+}
+
+/// Routing enum returned by `infer_owner` to unify per-method
+/// and module-code Salsa outputs behind a single accessor surface.
+///
+/// Phase O.13 (Lni.3) introduces this enum as the migration target for
+/// every narrow caller currently doing `db.infer(file_id)` followed by
+/// a body-keyed lookup. Once `infer_method_query` (O.15) and
+/// `infer_module_code_query` (O.14) land, narrow callers route
+/// `db.infer_method(...)` / `db.infer_module_code(...)` through this
+/// enum and read per-owner state without touching the file-wide
+/// aggregate.
+///
+/// Accessors mirror the per-owner slices of [`InferenceResult`]
+/// (`expr_types_by_body[owner]`, `implicit_locals_by_body[owner]`,
+/// `var_types`) so the call-site shape stays uniform between Method
+/// and ModuleCode variants.
+#[derive(Debug, Clone)]
+pub enum InferOwnerResult {
+    /// Result of `infer_method_query` for a specific method body.
+    Method(Arc<BodyInferenceResult>),
+    /// Result of `infer_module_code_query` for the file's module code.
+    ModuleCode(Arc<ModuleCodeInferenceResult>),
+}
+
+impl InferOwnerResult {
+    /// Owner of the body whose inference produced this result.
+    ///
+    /// `DefWithBodyId::Method(local_id)` for the `Method` variant,
+    /// always `DefWithBodyId::ModuleCode` for the `ModuleCode` variant.
+    pub fn owner(&self) -> DefWithBodyId {
+        match self {
+            InferOwnerResult::Method(r) => r.owner,
+            InferOwnerResult::ModuleCode(r) => r.owner,
+        }
+    }
+
+    /// Type of expression `expr` within this owner's body, if inference
+    /// recorded one. Equivalent to
+    /// `InferenceResult::type_of_expr_in(owner, expr)` but reads
+    /// directly from the per-owner payload.
+    pub fn type_of_expr(&self, expr: ExprId) -> Option<&Ty> {
+        match self {
+            InferOwnerResult::Method(r) => r.expr_types.get(&expr),
+            InferOwnerResult::ModuleCode(r) => r.expr_types.get(&expr),
+        }
+    }
+
+    /// Variable types map (lowercase name → Ty) for this owner.
+    pub fn var_types(&self) -> &FxHashMap<String, Ty> {
+        match self {
+            InferOwnerResult::Method(r) => &r.var_types,
+            InferOwnerResult::ModuleCode(r) => &r.var_types,
+        }
+    }
+
+    /// Implicit-locals map for this owner — completion uses this to
+    /// surface assignment-introduced locals at the cursor.
+    pub fn implicit_locals(&self) -> &FxHashMap<String, ImplicitLocalInfo> {
+        match self {
+            InferOwnerResult::Method(r) => &r.implicit_locals,
+            InferOwnerResult::ModuleCode(r) => &r.implicit_locals,
+        }
+    }
+
+    /// Per-binding inferred types for declaration-site identifiers
+    /// (loop variables, classic-for counters, parameters).
+    pub fn binding_types(&self) -> &FxHashMap<BindingId, Ty> {
+        match self {
+            InferOwnerResult::Method(r) => &r.binding_types,
+            InferOwnerResult::ModuleCode(r) => &r.binding_types,
+        }
+    }
 }
 
 impl<'db> InferenceContext<'db> {
@@ -3474,5 +3648,84 @@ mod tests {
         // ТипЗнч(Any) -> Type
         let type_of = first_sig(builtins, "типзнч");
         assert_eq!(*type_of.ret, Ty::Type);
+    }
+
+    // ----- Phase O.13 (Lni.1–Lni.3) type-lift unit tests -----
+
+    fn make_expr(idx: u32) -> ExprId {
+        ExprId::from_raw(la_arena::RawIdx::from_u32(idx))
+    }
+
+    #[test]
+    fn body_inference_result_empty_for_preserves_owner() {
+        let method_owner = DefWithBodyId::Method(7);
+        let method_empty = BodyInferenceResult::empty_for(method_owner);
+        assert_eq!(method_empty.owner, method_owner);
+        assert!(method_empty.var_types.is_empty());
+        assert!(method_empty.implicit_locals.is_empty());
+        assert!(method_empty.binding_types.is_empty());
+        assert!(method_empty.expr_types.is_empty());
+        assert!(method_empty.diagnostics.is_empty());
+        assert!(method_empty.call_arg_bindings.is_empty());
+        assert!(method_empty.return_expr_ids.is_empty());
+
+        let module_empty = BodyInferenceResult::empty_for(DefWithBodyId::ModuleCode);
+        assert_eq!(module_empty.owner, DefWithBodyId::ModuleCode);
+    }
+
+    #[test]
+    fn module_code_inference_result_default_is_module_owner() {
+        let result = ModuleCodeInferenceResult::default();
+        assert_eq!(result.owner, DefWithBodyId::ModuleCode);
+        assert!(result.var_types.is_empty());
+        assert!(result.expr_types.is_empty());
+    }
+
+    #[test]
+    fn module_code_inference_result_from_body_preserves_fields() {
+        let mut body = BodyInferenceResult::empty_for(DefWithBodyId::ModuleCode);
+        body.var_types.insert("х".to_string(), Ty::String);
+        body.expr_types.insert(make_expr(3), Ty::Boolean);
+        body.diagnostics.push(InferenceDiagnostic::TypeMismatch {
+            expr: make_expr(4),
+            expected: Ty::String,
+            actual: Ty::Number,
+        });
+
+        let lifted = ModuleCodeInferenceResult::from_body(body);
+
+        assert_eq!(lifted.owner, DefWithBodyId::ModuleCode);
+        assert_eq!(lifted.var_types.get("х"), Some(&Ty::String));
+        assert_eq!(lifted.expr_types.get(&make_expr(3)), Some(&Ty::Boolean));
+        assert_eq!(lifted.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn infer_owner_result_method_accessors_route_to_method_payload() {
+        let mut body = BodyInferenceResult::empty_for(DefWithBodyId::Method(2));
+        body.var_types.insert("х".to_string(), Ty::Number);
+        body.expr_types.insert(make_expr(5), Ty::String);
+
+        let routed = InferOwnerResult::Method(Arc::new(body));
+
+        assert_eq!(routed.owner(), DefWithBodyId::Method(2));
+        assert_eq!(routed.type_of_expr(make_expr(5)), Some(&Ty::String));
+        assert_eq!(routed.type_of_expr(make_expr(99)), None);
+        assert_eq!(routed.var_types().get("х"), Some(&Ty::Number));
+        assert!(routed.implicit_locals().is_empty());
+        assert!(routed.binding_types().is_empty());
+    }
+
+    #[test]
+    fn infer_owner_result_module_code_accessors_route_to_module_payload() {
+        let mut mc = ModuleCodeInferenceResult::default();
+        mc.var_types.insert("у".to_string(), Ty::Boolean);
+        mc.expr_types.insert(make_expr(1), Ty::Date);
+
+        let routed = InferOwnerResult::ModuleCode(Arc::new(mc));
+
+        assert_eq!(routed.owner(), DefWithBodyId::ModuleCode);
+        assert_eq!(routed.type_of_expr(make_expr(1)), Some(&Ty::Date));
+        assert_eq!(routed.var_types().get("у"), Some(&Ty::Boolean));
     }
 }
