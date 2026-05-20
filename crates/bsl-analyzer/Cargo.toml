@@ -19,6 +19,7 @@ ide-db.workspace = true
 base-db.workspace = true
 hir.workspace = true
 lexer.workspace = true
+syntax.workspace = true
 salsa.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true

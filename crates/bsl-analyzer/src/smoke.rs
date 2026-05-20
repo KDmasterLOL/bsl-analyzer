@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base_db::SourceDatabase;
+use base_db::{RootQueryDb, SourceDatabase};
 use crossbeam_channel::RecvTimeoutError;
 use serde::{Deserialize, Serialize};
 use vfs::loader::{self, LoadingProgress};
@@ -261,12 +261,36 @@ pub fn run(args: SmokeArgs) -> SmokeReport {
                     });
                 }
             },
-            Scenario::Hover => {
-                tracing::warn!("smoke[hover]: scenario not yet implemented (lands in O.6)");
-            }
-            Scenario::Deps => {
-                tracing::warn!("smoke[deps]: scenario not yet implemented (lands in O.6)");
-            }
+            Scenario::Hover => match run_hover(&args) {
+                Ok(hv) => {
+                    check_hover_budgets(&hv, &args.budgets, &mut report.violations);
+                    report.hover = Some(hv);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "smoke[hover]: failed");
+                    report.violations.push(BudgetViolation {
+                        scenario: "hover".to_string(),
+                        metric: "run_error".to_string(),
+                        observed: 0,
+                        budget: 0,
+                    });
+                }
+            },
+            Scenario::Deps => match run_deps(&args) {
+                Ok(dp) => {
+                    check_deps_budgets(&dp, &args.budgets, &mut report.violations);
+                    report.deps = Some(dp);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "smoke[deps]: failed");
+                    report.violations.push(BudgetViolation {
+                        scenario: "deps".to_string(),
+                        metric: "run_error".to_string(),
+                        observed: 0,
+                        budget: 0,
+                    });
+                }
+            },
         }
     }
 
@@ -298,6 +322,21 @@ fn emit_text_report(report: &SmokeReport) {
         for phase in &fp.phases {
             eprintln!("  - {:>16}: cold={}ms warm={}ms", phase.name, phase.cold_ms, phase.warm_ms,);
         }
+    }
+    if let Some(hv) = &report.hover {
+        eprintln!("smoke[hover]: targets={}", hv.targets.len());
+        for t in &hv.targets {
+            eprintln!(
+                "  - {}:{}:{}: cold={}ms warm={}ms",
+                t.file, t.line, t.character, t.cold_ms, t.warm_ms,
+            );
+        }
+    }
+    if let Some(dp) = &report.deps {
+        eprintln!(
+            "smoke[deps]: roots={} p50={}ms p95={}ms",
+            dp.roots_sampled, dp.cold_ms_p50, dp.cold_ms_p95,
+        );
     }
     if !report.violations.is_empty() {
         eprintln!("smoke: {} budget violation(s):", report.violations.len());
@@ -613,6 +652,152 @@ fn url_for_file_id(state: &GlobalState, file_id: vfs::FileId) -> Option<lsp_type
     lsp_types::Url::from_file_path(vfs_path.as_path()).ok()
 }
 
+/// Hover scenario — pick up to [`HOVER_MAX_TARGETS`] identifier offsets in
+/// the sample BSL file (via syntactic walk over IDENT tokens), then time
+/// `Analysis::hover` cold + warm at each offset. Hover on whitespace would
+/// short-circuit, so we restrict to IDENT tokens to keep the timings
+/// representative of real user hover hits.
+const HOVER_MAX_TARGETS: usize = 5;
+
+fn run_hover(args: &SmokeArgs) -> Result<HoverResult, String> {
+    let ctx = bootstrap_smoke(args)?;
+    let file_id = pick_sample_bsl_file(&ctx.state)
+        .ok_or_else(|| "hover: no resident BSL files in workspace".to_string())?;
+    let url = url_for_file_id(&ctx.state, file_id)
+        .ok_or_else(|| "hover: failed to compute file URL".to_string())?;
+
+    let offsets = pick_hover_offsets(&ctx.state, file_id, HOVER_MAX_TARGETS);
+    if offsets.is_empty() {
+        return Err("hover: no identifier tokens found in sample file".to_string());
+    }
+
+    let text = ctx.state.analysis_host.analysis().file_text(file_id);
+    let mut targets = Vec::with_capacity(offsets.len());
+    for offset in offsets {
+        let (line, character) = offset_to_line_col(&text, offset);
+        let (cold_ms, warm_ms) = time_hover_call(&ctx.state, file_id, offset);
+        targets.push(HoverTargetResult {
+            file: url.to_string(),
+            line,
+            character,
+            cold_ms,
+            warm_ms,
+        });
+    }
+    Ok(HoverResult { targets })
+}
+
+fn pick_hover_offsets(state: &GlobalState, file_id: vfs::FileId, max: usize) -> Vec<u32> {
+    let db = state.analysis_host.raw_database();
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let mut offsets = Vec::with_capacity(max);
+    for elem in root.descendants_with_tokens() {
+        if let Some(token) = elem.as_token() {
+            if token.kind() == syntax::SyntaxKind::IDENT {
+                offsets.push(u32::from(token.text_range().start()));
+                if offsets.len() >= max {
+                    break;
+                }
+            }
+        }
+    }
+    offsets
+}
+
+fn time_hover_call(state: &GlobalState, fid: vfs::FileId, offset: u32) -> (u64, u64) {
+    let locale = ide::Locale::default();
+    let cold_start = Instant::now();
+    {
+        let a = state.analysis_host.analysis();
+        let _ = a.hover(fid, offset, locale);
+    }
+    let cold_ms = cold_start.elapsed().as_millis() as u64;
+    let warm_start = Instant::now();
+    {
+        let a = state.analysis_host.analysis();
+        let _ = a.hover(fid, offset, locale);
+    }
+    let warm_ms = warm_start.elapsed().as_millis() as u64;
+    (cold_ms, warm_ms)
+}
+
+/// Byte-offset → (line, character) computed by counting newlines in the
+/// prefix. UTF-8 multi-byte chars map to byte positions, which matches how
+/// LSP reports offsets when negotiated to UTF-8. Not LSP-position-encoding-
+/// aware (no UTF-16 conversion) — the smoke report is descriptive, not
+/// consumed by an LSP client.
+fn offset_to_line_col(text: &str, offset: u32) -> (u32, u32) {
+    let off = (offset as usize).min(text.len());
+    let prefix = &text[..off];
+    let line = prefix.matches('\n').count() as u32;
+    let line_start = prefix.rfind('\n').map_or(0, |p| p + 1);
+    let character = (off - line_start) as u32;
+    (line, character)
+}
+
+/// Deps scenario — sample up to [`DEPS_MAX_ROOTS`] BSL files in
+/// `SourceRoot(0)` (lexicographic order so cold/warm baselines line up),
+/// time `Analysis::file_dependencies` per file (cold only — Salsa caches
+/// after first call), then report p50 / p95 of the cold timings.
+const DEPS_MAX_ROOTS: usize = 50;
+
+fn run_deps(args: &SmokeArgs) -> Result<DepsResult, String> {
+    let ctx = bootstrap_smoke(args)?;
+    let roots = enumerate_bsl_roots(&ctx.state, DEPS_MAX_ROOTS);
+    if roots.is_empty() {
+        return Err("deps: no resident BSL files in workspace".to_string());
+    }
+
+    let mut cold_ms: Vec<u64> = Vec::with_capacity(roots.len());
+    for fid in &roots {
+        let start = Instant::now();
+        {
+            let a = ctx.state.analysis_host.analysis();
+            let _ = a.file_dependencies(*fid);
+        }
+        cold_ms.push(start.elapsed().as_millis() as u64);
+    }
+    cold_ms.sort_unstable();
+    Ok(DepsResult {
+        roots_sampled: roots.len(),
+        cold_ms_p50: percentile(&cold_ms, 50),
+        cold_ms_p95: percentile(&cold_ms, 95),
+    })
+}
+
+fn enumerate_bsl_roots(state: &GlobalState, cap: usize) -> Vec<vfs::FileId> {
+    let db = state.analysis_host.raw_database();
+    let source_root_input = db.source_root_input(base_db::SourceRootId(0));
+    let source_root = source_root_input.root(db);
+    let file_set = source_root.file_set();
+
+    let mut paths: Vec<(String, vfs::FileId)> = file_set
+        .iter()
+        .filter_map(|fid| {
+            let vfs_path = file_set.path_for_file(&fid)?;
+            let std_path = vfs_path.as_path();
+            if !project_model::is_bsl_source_path(std_path) {
+                return None;
+            }
+            db.try_file_text(fid)?;
+            Some((std_path.to_string_lossy().into_owned(), fid))
+        })
+        .collect();
+    paths.sort();
+    paths.into_iter().take(cap).map(|(_, f)| f).collect()
+}
+
+/// Linear-interpolation-free percentile on a sorted slice: returns the
+/// value at index `floor(len * p / 100)`, clamped to the last element.
+fn percentile(sorted: &[u64], p: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = (sorted.len() * p / 100).min(sorted.len() - 1);
+    sorted[idx]
+}
+
 fn check_boot_budgets(boot: &BootResult, budgets: &Budgets, out: &mut Vec<BudgetViolation>) {
     if boot.vfs_done_ms > budgets.boot_vfs_done_ms {
         out.push(BudgetViolation {
@@ -653,6 +838,40 @@ fn check_first_paint_budgets(
             metric: "total_ms".to_string(),
             observed: fp.total_ms,
             budget: budgets.first_paint_total_ms,
+        });
+    }
+}
+
+fn check_hover_budgets(hv: &HoverResult, budgets: &Budgets, out: &mut Vec<BudgetViolation>) {
+    // Worst-case rather than mean: a single slow hover is the user-visible
+    // perception, so flag if any target breaches the cold/warm threshold.
+    let max_cold = hv.targets.iter().map(|t| t.cold_ms).max().unwrap_or(0);
+    let max_warm = hv.targets.iter().map(|t| t.warm_ms).max().unwrap_or(0);
+    if max_cold > budgets.hover_cold_ms {
+        out.push(BudgetViolation {
+            scenario: "hover".to_string(),
+            metric: "max_cold_ms".to_string(),
+            observed: max_cold,
+            budget: budgets.hover_cold_ms,
+        });
+    }
+    if max_warm > budgets.hover_warm_ms {
+        out.push(BudgetViolation {
+            scenario: "hover".to_string(),
+            metric: "max_warm_ms".to_string(),
+            observed: max_warm,
+            budget: budgets.hover_warm_ms,
+        });
+    }
+}
+
+fn check_deps_budgets(dp: &DepsResult, budgets: &Budgets, out: &mut Vec<BudgetViolation>) {
+    if dp.cold_ms_p95 > budgets.deps_cold_p95_ms {
+        out.push(BudgetViolation {
+            scenario: "deps".to_string(),
+            metric: "cold_ms_p95".to_string(),
+            observed: dp.cold_ms_p95,
+            budget: budgets.deps_cold_p95_ms,
         });
     }
 }
@@ -850,5 +1069,103 @@ mod tests {
         };
         let err = run_first_paint(&args).expect_err("empty workspace must produce an error");
         assert!(err.contains("no resident BSL files"), "got: {err}");
+    }
+
+    #[test]
+    fn offset_to_line_col_handles_multiple_lines() {
+        let text = "abc\nde\nfgh";
+        assert_eq!(offset_to_line_col(text, 0), (0, 0));
+        assert_eq!(offset_to_line_col(text, 2), (0, 2));
+        assert_eq!(offset_to_line_col(text, 4), (1, 0));
+        assert_eq!(offset_to_line_col(text, 5), (1, 1));
+        assert_eq!(offset_to_line_col(text, 7), (2, 0));
+        // Out-of-range offset clamps to text length.
+        assert_eq!(offset_to_line_col(text, 999), (2, 3));
+    }
+
+    #[test]
+    fn percentile_handles_typical_distributions() {
+        assert_eq!(percentile(&[], 50), 0);
+        assert_eq!(percentile(&[42], 50), 42);
+        assert_eq!(percentile(&[42], 95), 42);
+        let sorted = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        assert_eq!(percentile(&sorted, 50), 6); // idx = 10 * 50 / 100 = 5 → sorted[5] = 6
+        assert_eq!(percentile(&sorted, 95), 10); // idx = 9 (clamped) → sorted[9] = 10
+        assert_eq!(percentile(&sorted, 0), 1);
+    }
+
+    #[test]
+    fn check_hover_budgets_flags_worst_case() {
+        let hv = HoverResult {
+            targets: vec![
+                HoverTargetResult {
+                    file: "f".into(),
+                    line: 0,
+                    character: 0,
+                    cold_ms: 100,
+                    warm_ms: 5,
+                },
+                HoverTargetResult {
+                    file: "f".into(),
+                    line: 1,
+                    character: 0,
+                    cold_ms: 1500,
+                    warm_ms: 250,
+                },
+            ],
+        };
+        let budgets = Budgets { hover_cold_ms: 1_000, hover_warm_ms: 200, ..Budgets::default() };
+        let mut out = Vec::new();
+        check_hover_budgets(&hv, &budgets, &mut out);
+        let metrics: Vec<&str> = out.iter().map(|v| v.metric.as_str()).collect();
+        assert!(metrics.contains(&"max_cold_ms"));
+        assert!(metrics.contains(&"max_warm_ms"));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn check_deps_budgets_flags_p95() {
+        let dp = DepsResult { roots_sampled: 10, cold_ms_p50: 5, cold_ms_p95: 1500 };
+        let budgets = Budgets { deps_cold_p95_ms: 1_000, ..Budgets::default() };
+        let mut out = Vec::new();
+        check_deps_budgets(&dp, &budgets, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].metric, "cold_ms_p95");
+    }
+
+    #[test]
+    fn run_hover_on_synthetic_workspace_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bsl = tmp.path().join("Module.bsl");
+        std::fs::write(&bsl, "Процедура Test()\n    Сообщить(\"hi\");\nКонецПроцедуры\n")
+            .expect("write bsl");
+
+        let args = SmokeArgs {
+            source_dir: tmp.path().to_path_buf(),
+            scenarios: vec![Scenario::Hover],
+            budgets: Budgets::default(),
+            json: false,
+        };
+        let hv = run_hover(&args).expect("hover on synthetic workspace should succeed");
+        assert!(!hv.targets.is_empty(), "expected at least one hover target");
+        assert!(hv.targets.len() <= HOVER_MAX_TARGETS);
+    }
+
+    #[test]
+    fn run_deps_on_synthetic_workspace_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bsl = tmp.path().join("Module.bsl");
+        std::fs::write(&bsl, "Процедура Test()\nКонецПроцедуры\n").expect("write bsl");
+
+        let args = SmokeArgs {
+            source_dir: tmp.path().to_path_buf(),
+            scenarios: vec![Scenario::Deps],
+            budgets: Budgets::default(),
+            json: false,
+        };
+        let dp = run_deps(&args).expect("deps on synthetic workspace should succeed");
+        assert!(dp.roots_sampled >= 1);
+        // p50 ≤ p95 invariant.
+        assert!(dp.cold_ms_p50 <= dp.cold_ms_p95);
     }
 }
