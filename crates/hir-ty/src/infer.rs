@@ -3413,6 +3413,60 @@ pub fn infer_query<'db>(
     Arc::new(result)
 }
 
+/// Salsa query: per-file inference for the module-code body (Phase O.14).
+///
+/// Covers everything in [`DefWithBodyId::ModuleCode`] — module-level
+/// `Перем` declarations, top-level `Stmt::Assign`, and any other
+/// expressions outside a procedure / function. Narrow callers
+/// targeting module-level scope route through
+/// [`InferOwnerResult::ModuleCode`]; the file-wide `infer_query`
+/// folds the result into [`InferenceResult::var_types`] for completion
+/// and into `expr_types_by_body[ModuleCode]` for `Semantics::type_of_expr`.
+///
+/// # Cache key
+///
+/// Keyed on the salsa-interned [`FileIdInput`]; results are reused
+/// across every call within the same revision. `lru = 1024` matches
+/// the working set size that is realistic for ERP-scale workspaces
+/// (most files have ≤ 1 module-code body each).
+///
+/// # Cycle safety
+///
+/// Calls `db.module_bodies` (cycle-free), runs inference inside
+/// [`InferenceContext`] which may invoke `method_return_type_query`
+/// (already cycle-safe via Phase J `cycle_fn` / `cycle_initial`), and
+/// otherwise reads workspace symbols / resolver like any body.
+/// Crucially does **not** call `infer_method` or `infer_query`, so the
+/// query graph stays acyclic.
+///
+/// # Empty-result contract
+///
+/// Returns a default [`ModuleCodeInferenceResult`] when the file has
+/// no module-code body (e.g. ManagerModule.bsl that only declares
+/// methods). Callers can treat the empty case identically to a body
+/// with no expressions — `var_types` / `expr_types` will be empty.
+#[salsa::tracked(lru = 1024)]
+pub fn infer_module_code_query<'db>(
+    db: &'db dyn HirDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<ModuleCodeInferenceResult> {
+    let file_id = file_id_input.file_id(db);
+    let _p = tracing::info_span!("infer_module_code_query", ?file_id).entered();
+
+    let module_id = hir_def::ModuleId { file_id };
+    let module_bodies = db.module_bodies(module_id);
+
+    let Some(body) = module_bodies.module_code() else {
+        return Arc::new(ModuleCodeInferenceResult::default());
+    };
+
+    let mut ctx =
+        InferenceContext::new(db, file_id, DefWithBodyId::ModuleCode, &Arc::new(body.clone()));
+    ctx.infer_all();
+    let body_result = ctx.finish();
+    Arc::new(ModuleCodeInferenceResult::from_body(body_result))
+}
+
 /// Salsa query: Get type of an expression in a specific body.
 ///
 /// `ExprId` is only unique within a single `Body`, so callers must

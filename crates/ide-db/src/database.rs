@@ -447,8 +447,9 @@ impl hir::HirDatabase for RootDatabaseImpl {
         todo!("Phase O.15 wires hir::infer_method_query (Lni.5)")
     }
 
-    fn infer_module_code(&self, _file_id: FileId) -> Arc<hir::ModuleCodeInferenceResult> {
-        todo!("Phase O.14 wires hir::infer_module_code_query (Lni.4)")
+    fn infer_module_code(&self, file_id: FileId) -> Arc<hir::ModuleCodeInferenceResult> {
+        let file_id_input = FileIdInput::new(self, file_id);
+        hir::infer_module_code_query(self, file_id_input)
     }
 }
 
