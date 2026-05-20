@@ -424,6 +424,15 @@ pub struct InferenceContext<'db> {
     /// HIR body for the file.
     body: Arc<Body>,
 
+    /// Phase O.10 — `ExprId` of every `Stmt::Return { value: Some(_) }`
+    /// statement reached during inference. Populated by
+    /// [`Self::infer_stmt`]'s `Stmt::Return` arm after `infer_expr`
+    /// runs; consumed by `method_return_type_query` via
+    /// [`BodyInferenceResult::return_expr_ids`] to compute the per-method
+    /// return type without re-walking the body. `infer_query` ignores
+    /// this field — it only matters for the per-method cascade query.
+    return_expr_ids: Vec<ExprId>,
+
     /// Variable types tracked from assignments (lowercase name → Ty).
     ///
     /// **Conservative**: an `X = …` whose RHS infers to `Ty::Unknown`
@@ -499,6 +508,13 @@ pub struct BodyInferenceResult {
     /// Call-site arg/param bindings collected during inference, to be
     /// folded into [`InferenceResult::call_arg_bindings`].
     pub call_arg_bindings: Vec<CallArgBinding>,
+
+    /// Phase O.10 — `ExprId`s of every `Stmt::Return { value: Some(_) }`
+    /// statement reached during inference. Crate-private because the
+    /// only consumer is `method_return_type_query` (same `hir-ty`
+    /// crate). `infer_query` does not surface this — it is purely the
+    /// per-method cascade query's view of the body.
+    pub(crate) return_expr_ids: Vec<ExprId>,
 }
 
 impl<'db> InferenceContext<'db> {
@@ -525,6 +541,7 @@ impl<'db> InferenceContext<'db> {
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
+            return_expr_ids: Vec::new(),
         }
     }
 
@@ -596,6 +613,7 @@ impl<'db> InferenceContext<'db> {
             expr_types: self.expr_types,
             diagnostics: self.diagnostics,
             call_arg_bindings: self.call_arg_bindings,
+            return_expr_ids: self.return_expr_ids,
         }
     }
 
@@ -909,7 +927,16 @@ impl<'db> InferenceContext<'db> {
 
             Stmt::Return { value } => {
                 if let Some(expr_idx) = value {
-                    self.infer_expr(ExprId::from_idx(*expr_idx));
+                    let expr_id = ExprId::from_idx(*expr_idx);
+                    self.infer_expr(expr_id);
+                    // Phase O.10: record return-expr id for the
+                    // per-method cascade query. `infer_query` walks
+                    // every body unconditionally and discards this
+                    // field; `method_return_type_query` consumes it
+                    // from `BodyInferenceResult.return_expr_ids` to
+                    // compute the unioned return type without
+                    // re-walking the body.
+                    self.return_expr_ids.push(expr_id);
                 }
             }
 

@@ -43,6 +43,7 @@ pub mod infer;
 pub mod iteration_lookup;
 pub mod lower;
 pub mod manager_lookup;
+pub mod method_graph;
 pub mod method_lookup;
 pub mod method_resolution;
 pub mod module_implicit;
