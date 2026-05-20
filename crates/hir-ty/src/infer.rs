@@ -2278,6 +2278,16 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
+        // Pre-extract the bare-name callee for the Phase O.11 cascade
+        // arm in the `Ty::Unknown` match branch below. The match
+        // pattern needs to outlive the upcoming mutable
+        // `self.infer_expr(...)` calls, so we clone the name out
+        // here while `callee_expr` is still cheap to borrow.
+        let bare_callee_name: Option<hir_def::Name> = match callee_expr {
+            Expr::Path(n) => Some(n.clone()),
+            _ => None,
+        };
+
         // Infer callee type for non-qualified calls
         let callee_ty = self.infer_expr(callee);
 
@@ -2327,8 +2337,50 @@ impl<'db> InferenceContext<'db> {
                 (**ret).clone()
             }
             Ty::Unknown => {
-                // Phase 2: Resolve built-in functions
-                // Phase 3: Resolve user-defined functions via SymbolTree
+                // Phase O.11 — same-module bare-fn cascade. When the
+                // callee is a bare `Expr::Path(name)` that resolves
+                // through the enclosing module's symbol_tree to a
+                // user-defined method, consult
+                // `method_return_type_query` so cold-body cascade
+                // typing reaches the most common BSL idiom
+                // (`Х = ЛокФн();` inside the same module). Builtins
+                // were handled earlier in the function and returned
+                // before reaching this arm; this branch only fires
+                // for non-builtin bare names whose `callee_ty` came
+                // back `Ty::Unknown` from `infer_path_name` (module
+                // methods stay Unknown there per the doc at
+                // `infer_path_name`).
+                //
+                // BSL scope rule (body-binding shadow): local
+                // bindings (parameters, `Перем X;`, implicit locals
+                // from `Stmt::Assign`) shadow module methods. The
+                // body-binding probe mirrors the same guard at gate
+                // 2 of `dispatch_bare_ident_field_call` so a
+                // parameter named `Foo` does NOT spuriously resolve
+                // through `symbol_tree.find_method("Foo")` to the
+                // shadowed module method.
+                //
+                // Routing through `materialise_signature_enriched`
+                // (same path as qualified-call enrichment) preserves
+                // the docstring-wins precedence: if the resolved
+                // method has an explicit return-type docstring, that
+                // wins over `method_return_type_query` body inference.
+                if let Some(name) = bare_callee_name.as_ref() {
+                    if !self.body_declares_binding(name)
+                        && !self.assigned_var_names.contains(&name.as_str().to_lowercase())
+                    {
+                        let module_id = hir_def::ModuleId::new(self.file_id);
+                        let symbol_tree = self.db.symbol_tree(module_id);
+                        if let Some(method) = symbol_tree.find_method(name) {
+                            let sig = crate::method_resolution::materialise_signature_enriched(
+                                self.db, method.id, method,
+                            );
+                            if !matches!(*sig.ret, Ty::Unknown) {
+                                return (*sig.ret).clone();
+                            }
+                        }
+                    }
+                }
                 Ty::Unknown
             }
             _ => {
