@@ -146,7 +146,7 @@ pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
 pub use hir_ty::infer::{infer_module_code_query, infer_query, type_of_expr_query};
-pub use hir_ty::method_graph::method_return_type_query;
+pub use hir_ty::method_graph::{infer_method_query, method_return_type_query};
 // Phase O.11: expose method-resolution adapters so integration tests
 // under `ide/tests/` can pin the `materialise_signature_enriched`
 // wiring (cascade typing surfacing through `FunctionSignature.ret`).

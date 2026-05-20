@@ -6,11 +6,13 @@
 //! [`MethodIdInput`] and consumes the lazy per-method body
 //! lowering shipped in O.8.
 
+use std::sync::Arc;
+
 use hir_def::ty::Ty;
 use hir_def::MethodIdInput;
 
 use crate::db::HirDatabase;
-use crate::infer::InferenceContext;
+use crate::infer::{BodyInferenceResult, InferenceContext};
 
 // ============================================================================
 // Phase O.10 — per-method return-type inference (cascade-typing primitive)
@@ -158,4 +160,80 @@ pub fn method_return_type_cycle<'db>(
         (last, v) if last == v => value,
         (last, _) => Ty::union(vec![last.clone(), value]),
     }
+}
+
+// ============================================================================
+// Phase O.15 — per-method inference primitive (narrow-infer Lni.5 surface)
+// ============================================================================
+
+/// Salsa-tracked: per-method inference output.
+///
+/// Returns the `BodyInferenceResult` for a single method body, keyed
+/// on the salsa-interned [`MethodIdInput`]. Narrow callers (hover,
+/// completion, `narrow_query`, `type_of_expr_query`) route through
+/// [`InferOwnerResult::Method`] (`hir-ty::infer`) and read this
+/// directly, bypassing the file-wide `infer_query` aggregate. After
+/// O.16's wrapper rewrite, `infer_query` itself fans out to this
+/// query per body and folds the results.
+///
+/// # Body source
+///
+/// `db.method_body(method)` (Phase O.8) supplies the per-method body.
+/// The `Body::default()` fallback branches inside `method_body_query`
+/// — fired only on a symbol-tree / parse mismatch — yield an empty
+/// body, and running `InferenceContext::new_for_method + infer_all`
+/// on that empty body produces the same empty payload that
+/// [`BodyInferenceResult::empty_for`] returns. No explicit miss check
+/// needed here.
+///
+/// # Residency
+///
+/// Phase O total-VFS invariant (`6c578f3a`) — no `file_resident` gate.
+/// Tracked text reads inside `db.parse(...)` panic by Salsa contract
+/// if the invariant is violated upstream of this query.
+///
+/// # Cycle safety
+///
+/// `infer_method` calls `db.method_body` (cycle-free),
+/// `method_return_type_query` (cycle-safe via the cycle handlers
+/// above), and `proc_signature_query` (cycle-free per
+/// `proc_signature.rs:110-118`). It does **not** call
+/// `infer_module_code` (no module-code seed by design) or
+/// `infer_query`. Recursive method calls flow through
+/// `method_return_type_query`'s cycle handlers, never through
+/// `infer_method` itself, so this query needs no cycle attributes.
+///
+/// # LRU
+///
+/// `lru = 16384` — matches [`method_return_type_query`] so the two
+/// per-method tables age in lock-step. PLAN-v3 R3 / Codex Round 1 C1
+/// rationale: ERP-scale workspaces (~750k methods) need a working-set
+/// LRU; Phase L's Lni.11 measurement gate will adjust this with
+/// per-query event counters.
+///
+/// # Production callers (planned)
+///
+/// O.16 (`infer_query` thin wrapper fans out per method); O.17
+/// (`Semantics::type_of_expr`, `narrow_query`, `type_of_expr_query`,
+/// `add_implicit_locals`, `symbol_for_body_local` migrate to route
+/// through [`InferOwnerResult::Method`] which calls this query).
+/// O.15 itself ships the query alone with test coverage; no
+/// production caller exists yet.
+#[salsa::tracked(lru = 16384)]
+pub fn infer_method_query<'db>(
+    db: &'db dyn HirDatabase,
+    method: MethodIdInput<'db>,
+) -> Arc<BodyInferenceResult> {
+    let mid = method.method_id(db);
+    let _span = tracing::info_span!(
+        "infer_method",
+        file_id = mid.module.file_id.0,
+        local_id = mid.local_id,
+    )
+    .entered();
+
+    let body = db.method_body(method);
+    let mut ctx = InferenceContext::new_for_method(db, method, &body);
+    ctx.infer_all();
+    Arc::new(ctx.finish())
 }

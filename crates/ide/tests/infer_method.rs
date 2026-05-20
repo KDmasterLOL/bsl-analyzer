@@ -1,0 +1,225 @@
+//! Behavioural tests for `infer_method_query` (Phase O.15).
+//!
+//! O.15 ships the per-method Salsa inference primitive that O.16's
+//! `infer_query` thin wrapper will consume to skip re-walking each
+//! body, and that O.17's narrow callers (`Semantics::type_of_expr`,
+//! `narrow_query`, `type_of_expr_query`, completion, semantic_symbol)
+//! will reach through [`InferOwnerResult::Method`].
+//!
+//! Per-method parity contract: a single method's `BodyInferenceResult`
+//! coming out of `infer_method_query` must match the slice of
+//! `infer_query`'s file-wide aggregate keyed on the same owner.
+//! Pinning that now keeps the O.16 wrapper rewrite a safe diff.
+
+use std::sync::Arc;
+
+use hir::{
+    infer_method_query, infer_query, DefDatabase, DefWithBodyId, HirDatabase, MethodId,
+    MethodIdInput, ModuleId, Name, Ty,
+};
+use ide_db::base_db::{FileIdInput, SourceDatabase, SourceRoot, SourceRootId};
+use ide_db::RootDatabaseImpl;
+use test_fixture::Fixture;
+use vfs::FileId;
+
+fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
+    let fixture = Fixture::parse(fixture_text);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = vfs::FileSet::default();
+    for (file_id, file) in &fixture.files {
+        file_set.insert(*file_id, file.path.clone());
+        db.set_file_text(*file_id, &file.content);
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for file_id in fixture.files.keys() {
+        db.set_file_source_root(*file_id, SourceRootId(0));
+    }
+    let test_file = fixture
+        .files
+        .iter()
+        .find(|(_, f)| f.path.as_path().to_string_lossy().ends_with("/test.bsl"))
+        .map(|(id, _)| *id)
+        .expect("fixture must contain /test.bsl");
+    (db, test_file)
+}
+
+fn find_method(db: &RootDatabaseImpl, file_id: FileId, name: &str) -> MethodId {
+    let symbol_tree = db.symbol_tree(ModuleId::new(file_id));
+    symbol_tree
+        .find_method(&Name::new(name))
+        .unwrap_or_else(|| panic!("expected method `{name}` in {file_id:?}"))
+        .id
+}
+
+/// A method that only declares an implicit local with a String literal
+/// must record `expr_types[Х] == Ty::String` and
+/// `var_types["х"] == Ty::String` in its per-method
+/// `BodyInferenceResult` — the same data shape `infer_query`'s
+/// `expr_types_by_body[Method(local_id)]` slice currently exposes.
+#[test]
+fn implicit_local_assignment_populates_per_method_var_types() {
+    let (db, fid) = setup(
+        r#"
+//- /test.bsl
+Процедура P()
+    Х = "hello";
+КонецПроцедуры
+"#,
+    );
+    let mid = find_method(&db, fid, "P");
+    let result = infer_method_query(&db, MethodIdInput::new(&db, mid));
+    assert_eq!(result.owner, DefWithBodyId::Method(mid.local_id));
+    assert_eq!(result.var_types.get("х"), Some(&Ty::String));
+    assert!(
+        result.expr_types.values().any(|t| matches!(t, Ty::String)),
+        "Method P's body must record a Ty::String expr from the literal RHS"
+    );
+}
+
+/// Per-method parity: the per-method `BodyInferenceResult` produced
+/// by `infer_method_query` must agree with the slice of
+/// `infer_query`'s aggregate keyed on the same owner. This is the
+/// invariant O.16's wrapper rewrite will rely on — if it breaks here
+/// the wrapper will silently change behaviour.
+#[test]
+fn per_method_parity_with_infer_query_slice() {
+    let (db, fid) = setup(
+        r#"
+//- /test.bsl
+Процедура Один()
+    А = 1;
+КонецПроцедуры
+
+Процедура Два()
+    Б = "x";
+КонецПроцедуры
+"#,
+    );
+    let aggregate = infer_query(&db, FileIdInput::new(&db, fid));
+
+    for name in ["Один", "Два"] {
+        let mid = find_method(&db, fid, name);
+        let owner = DefWithBodyId::Method(mid.local_id);
+        let per_method = infer_method_query(&db, MethodIdInput::new(&db, mid));
+
+        // Per-body `expr_types` slice must match (HashMap equality).
+        let agg_slice = aggregate
+            .expr_types_by_body
+            .get(&owner)
+            .unwrap_or_else(|| panic!("infer_query missing expr_types for {name}"));
+        assert_eq!(
+            &per_method.expr_types, agg_slice,
+            "expr_types slice for {name} diverges between infer_method and infer_query"
+        );
+
+        // Per-body `implicit_locals` slice must match.
+        let agg_implicit = aggregate
+            .implicit_locals_by_body
+            .get(&owner)
+            .unwrap_or_else(|| panic!("infer_query missing implicit_locals for {name}"));
+        assert_eq!(
+            &per_method.implicit_locals, agg_implicit,
+            "implicit_locals slice for {name} diverges"
+        );
+    }
+}
+
+/// Bilingual procedure name: `Функция` lowering + per-method inference
+/// must handle Cyrillic-cased identifiers without panicking. The
+/// returned owner threads through unchanged.
+#[test]
+fn bilingual_procedure_inferred_owner_matches() {
+    let (db, fid) = setup(
+        r#"
+//- /test.bsl
+Функция ВернутьСтроку()
+    Возврат "x";
+КонецФункции
+"#,
+    );
+    let mid = find_method(&db, fid, "ВернутьСтроку");
+    let result = infer_method_query(&db, MethodIdInput::new(&db, mid));
+    assert_eq!(result.owner, DefWithBodyId::Method(mid.local_id));
+    // The Stmt::Return arm pushes the return expr id; we should see at
+    // least one entry from the literal.
+    assert!(
+        result.expr_types.values().any(|t| matches!(t, Ty::String)),
+        "Функция ВернутьСтроку must record Ty::String from its literal return"
+    );
+}
+
+/// Two consecutive calls with the same `MethodIdInput` inside the
+/// same revision return the SAME `Arc`. Confirms the
+/// `#[salsa::tracked(lru = 16384)]` cache wiring landed — without it
+/// every IDE interaction (hover, completion, narrow) would pay for
+/// a full body walk per call.
+#[test]
+fn salsa_cache_hit_shares_arc() {
+    let (db, fid) = setup(
+        r#"
+//- /test.bsl
+Процедура P()
+    Х = 42;
+КонецПроцедуры
+"#,
+    );
+    let mid = find_method(&db, fid, "P");
+    let input = MethodIdInput::new(&db, mid);
+    let r1 = infer_method_query(&db, input);
+    let r2 = infer_method_query(&db, input);
+    assert!(Arc::ptr_eq(&r1, &r2), "second call within the same revision must hit the Salsa cache");
+}
+
+/// `db.infer_method(method_input)` (the trait delegator wired in
+/// `RootDatabaseImpl`) must return the same `Arc` as the direct
+/// `infer_method_query(db, method_input)` call. Pins the trait-method
+/// wiring against future divergence.
+#[test]
+fn trait_method_delegates_to_query() {
+    let (db, fid) = setup(
+        r#"
+//- /test.bsl
+Процедура P()
+    А = Истина;
+КонецПроцедуры
+"#,
+    );
+    let mid = find_method(&db, fid, "P");
+    let input = MethodIdInput::new(&db, mid);
+    let via_trait = db.infer_method(input);
+    let via_query = infer_method_query(&db, input);
+    assert!(
+        Arc::ptr_eq(&via_trait, &via_query),
+        "RootDatabaseImpl::infer_method must delegate to the query without an extra layer"
+    );
+}
+
+/// `infer_method_query` does NOT call `infer_module_code` (no
+/// module-code seed by design — PLAN-v3 §3.2). A method that
+/// references a module-level implicit local must NOT see its type
+/// through `infer_method` alone — current semantics treat module
+/// `Перем`s as `Ty::Unknown` when read from a method body. This pins
+/// the no-seed invariant: changing it later would be a semantic shift
+/// requiring its own ADR.
+#[test]
+fn no_module_code_seed_into_method_var_types() {
+    let (db, fid) = setup(
+        r#"
+//- /test.bsl
+Х = "module-level";
+
+Процедура P()
+    Х = 42;
+КонецПроцедуры
+"#,
+    );
+    let mid = find_method(&db, fid, "P");
+    let result = infer_method_query(&db, MethodIdInput::new(&db, mid));
+    // Method `P` reassigns Х to Number — the method's own var_types
+    // reflects that assignment, not the module-code String.
+    assert_eq!(
+        result.var_types.get("х"),
+        Some(&Ty::Number),
+        "Method P's var_types must show its OWN assignment, not the module-code seed"
+    );
+}

@@ -443,8 +443,8 @@ impl hir::HirDatabase for RootDatabaseImpl {
         hir::proc_signature::proc_signature_query(self, method_input)
     }
 
-    fn infer_method(&self, _method: hir::MethodIdInput<'_>) -> Arc<hir::BodyInferenceResult> {
-        todo!("Phase O.15 wires hir::infer_method_query (Lni.5)")
+    fn infer_method(&self, method: hir::MethodIdInput<'_>) -> Arc<hir::BodyInferenceResult> {
+        hir::infer_method_query(self, method)
     }
 
     fn infer_module_code(&self, file_id: FileId) -> Arc<hir::ModuleCodeInferenceResult> {
