@@ -83,7 +83,7 @@ pub use workspace::{is_bsl_source, CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 
 // Re-export all Salsa query functions from the queries module
-pub use method_body::method_body_query;
+pub use method_body::{method_body_query, method_body_with_source_map_query};
 pub use queries::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
     module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
@@ -256,6 +256,28 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// # Implementation
     /// Should delegate to [`method_body::method_body_query`].
     fn method_body(&self, method: MethodIdInput<'_>) -> Arc<body::Body>;
+
+    /// Lazy per-method body lowering paired with source map (Phase O.9).
+    ///
+    /// Sister of [`Self::method_body`]: returns the lowered
+    /// [`body::Body`] together with its [`body::BodySourceMap`] so
+    /// callers can map offsets ↔ HIR nodes (hover, narrow infer, IDE
+    /// diagnostics). Shares the same residency contract — no
+    /// `file_resident` gate; tracked text reads panic by Salsa contract
+    /// if the Phase O total-VFS invariant is violated.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 4096 (one entry per method).
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse),
+    ///   [`symbol_tree`](Self::symbol_tree).
+    /// - **Typical time:** <1 ms for a single small method.
+    ///
+    /// # Implementation
+    /// Should delegate to [`method_body::method_body_with_source_map_query`].
+    fn method_body_with_source_map(
+        &self,
+        method: MethodIdInput<'_>,
+    ) -> Arc<(body::Body, body::BodySourceMap)>;
 
     /// Get metadata for a module (type and execution context).
     ///
