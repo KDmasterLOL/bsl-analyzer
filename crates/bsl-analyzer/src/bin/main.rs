@@ -261,6 +261,32 @@ enum Commands {
         #[arg(long = "index-workers")]
         index_workers: Option<usize>,
     },
+
+    /// Cold-start + critical-path performance smoke (Phase O).
+    ///
+    /// Loads a workspace and runs one or more scenarios (boot,
+    /// first_paint, hover, deps), measuring wall-clock and RSS against
+    /// configurable budgets. Scenarios populate progressively across
+    /// O.4-O.6 — O.3 (this commit) lands only the harness skeleton.
+    Smoke {
+        /// Workspace root directory.
+        #[arg(short = 's', long = "source-dir", default_value = ".")]
+        source_dir: PathBuf,
+
+        /// Scenarios to run (comma-separated). Supported names:
+        /// `boot`, `first_paint`, `hover`, `deps`.
+        #[arg(long = "scenarios", value_delimiter = ',', default_value = "boot")]
+        scenarios: Vec<String>,
+
+        /// Optional JSON file overriding the default budget table.
+        #[arg(long = "budgets")]
+        budgets: Option<PathBuf>,
+
+        /// Emit the report as JSON on stdout instead of human-readable
+        /// text. Useful for CI gate scripts.
+        #[arg(long = "json")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -736,7 +762,35 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             bench_index,
             index_workers,
         ),
+        Some(Commands::Smoke { source_dir, scenarios, budgets, json }) => {
+            run_smoke(source_dir, scenarios, budgets, json)
+        }
         Some(Commands::Lsp) | None => run_lsp_server(),
+    }
+}
+
+fn run_smoke(
+    source_dir: PathBuf,
+    scenario_names: Vec<String>,
+    budgets_path: Option<PathBuf>,
+    json: bool,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use bsl_analyzer::smoke;
+
+    let mut scenarios = Vec::with_capacity(scenario_names.len());
+    for name in &scenario_names {
+        match smoke::Scenario::parse(name) {
+            Ok(s) => scenarios.push(s),
+            Err(e) => return Err(format!("--scenarios: {e}").into()),
+        }
+    }
+
+    let budgets = smoke::Budgets::load_or_default(budgets_path.as_deref());
+    let report = smoke::run(smoke::SmokeArgs { source_dir, scenarios, budgets, json });
+    if report.passed() {
+        Ok(())
+    } else {
+        Err(format!("smoke: {} budget violation(s)", report.violations.len()).into())
     }
 }
 
