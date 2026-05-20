@@ -650,8 +650,12 @@ impl ModuleMetadata {
 /// Metadata is stored separately and accessed via module_metadata() query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleBodies {
-    /// Bodies indexed by MethodId.local_id
-    bodies: rustc_hash::FxHashMap<u32, body::LowerResult>,
+    /// Bodies indexed by MethodId.local_id.
+    ///
+    /// `IndexMap` keeps insertion order, which here equals ItemTree
+    /// `top_level_idx` order (see [`Self::lower_from_root`]). Phase L narrow-infer
+    /// relies on this for deterministic iteration without an explicit sort.
+    bodies: indexmap::IndexMap<u32, body::LowerResult>,
     /// All diagnostics from all methods
     all_diagnostics: Vec<(MethodId, BodyDiagnostic)>,
     /// Module-level variable declarations
@@ -664,7 +668,7 @@ impl ModuleBodies {
     /// Create empty ModuleBodies.
     pub fn new() -> Self {
         Self {
-            bodies: rustc_hash::FxHashMap::default(),
+            bodies: indexmap::IndexMap::new(),
             all_diagnostics: Vec::new(),
             module_vars: Vec::new(),
             module_code: None,
@@ -908,3 +912,65 @@ fn collect_module_vars(var_def: &syntax::SyntaxNode, vars: &mut Vec<ModuleVarDec
 
 // Note: All Salsa query implementations have been moved to the `queries` module.
 // See `queries.rs` for the full list of HIR-level queries.
+
+#[cfg(test)]
+mod module_bodies_order_tests {
+    //! Phase L narrow-infer Lni.A — verify `ModuleBodies` exposes a
+    //! deterministic insertion-ordered iteration that equals
+    //! `local_id`-sorted order. Subsequent commits assume this without
+    //! re-sorting at call sites.
+    use super::*;
+
+    fn lower(code: &str) -> ModuleBodies {
+        let parse = parser::parse(code);
+        let module_id = ModuleId::new(vfs::FileId(0));
+        ModuleBodies::from_parse(&parse, module_id)
+    }
+
+    #[test]
+    fn iter_bodies_order_matches_item_tree_index() {
+        let code = "\
+Процедура Первая() КонецПроцедуры
+Функция Вторая() КонецФункции
+Процедура Третья() КонецПроцедуры
+";
+        let bodies = lower(code);
+        let local_ids: Vec<u32> = bodies.iter_bodies().map(|(id, _)| id).collect();
+        let mut sorted = local_ids.clone();
+        sorted.sort();
+        assert_eq!(local_ids, sorted, "insertion order must equal local_id-sorted order");
+        assert!(local_ids.windows(2).all(|w| w[0] < w[1]), "ids strictly increasing");
+    }
+
+    #[test]
+    fn iter_bodies_stable_across_repeated_calls() {
+        let code = "\
+Процедура Альфа() КонецПроцедуры
+Процедура Бета() КонецПроцедуры
+Процедура Гамма() КонецПроцедуры
+Процедура Дельта() КонецПроцедуры
+";
+        let bodies = lower(code);
+        let first: Vec<u32> = bodies.iter_bodies().map(|(id, _)| id).collect();
+        for _ in 0..5 {
+            let again: Vec<u32> = bodies.iter_bodies().map(|(id, _)| id).collect();
+            assert_eq!(first, again, "iteration order must be stable across calls");
+        }
+    }
+
+    #[test]
+    fn method_bodies_and_lower_results_share_order() {
+        let code = "\
+Процедура А() КонецПроцедуры
+Перем М;
+Функция Б() КонецФункции
+Процедура В() КонецПроцедуры
+";
+        let bodies = lower(code);
+        let from_iter: Vec<u32> = bodies.iter_bodies().map(|(id, _)| id).collect();
+        let from_method_bodies: Vec<u32> = bodies.method_bodies().map(|(id, _, _)| id).collect();
+        let from_lower_results: Vec<u32> = bodies.iter_lower_results().map(|(id, _)| id).collect();
+        assert_eq!(from_iter, from_method_bodies);
+        assert_eq!(from_iter, from_lower_results);
+    }
+}

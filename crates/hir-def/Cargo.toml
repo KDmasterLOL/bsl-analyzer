@@ -32,6 +32,7 @@ bsl-metadata.workspace = true
 bsl-platform.workspace = true
 project-model.workspace = true
 line-index.workspace = true
+indexmap.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

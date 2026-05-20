@@ -1532,6 +1532,7 @@ dependencies = [
  "cfg-types",
  "expect-test",
  "ide-db",
+ "indexmap",
  "intern",
  "la-arena",
  "lexer",
