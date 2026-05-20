@@ -496,15 +496,21 @@ fn handle_vfs_msg(
 
         // B1 observability hook (total-VFS invariant, O.2).
         if project_model::is_bsl_source_path(std_path) {
-            if contents_str.is_some() {
+            let mutated = if contents_str.is_some() {
                 // Re-entry path: a previously-skipped BSL file became
                 // readable (watch-update). Drop the registry entry.
-                state.skipped_bsl.remove(&path);
+                state.skipped_bsl.remove(&path)
             } else if state.skipped_bsl.insert(path.clone()) {
                 tracing::warn!(
                     path = %path,
                     "BSL file unreadable by VFS; recorded as skipped",
                 );
+                true
+            } else {
+                false
+            };
+            if mutated {
+                state.degraded_files_count = state.skipped_bsl.len();
             }
         }
 
