@@ -145,7 +145,7 @@ pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
-pub use hir_ty::infer::{infer_module_code_query, infer_query, type_of_expr_query};
+pub use hir_ty::infer::{infer_module_code_query, infer_owner, infer_query, type_of_expr_query};
 pub use hir_ty::method_graph::{infer_method_query, method_return_type_query};
 // Phase O.11: expose method-resolution adapters so integration tests
 // under `ide/tests/` can pin the `materialise_signature_enriched`
@@ -732,15 +732,20 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     pub fn type_of_expr(&self, file_id: FileId, node: &syntax::SyntaxNode) -> Ty {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.db.module_bodies(module_id);
-        let infer = self.db.infer(file_id);
         let range = node.text_range();
 
         // Module-level code first. Its `DefWithBodyId::ModuleCode`
         // key is unique per file, so a hit here is unambiguous.
+        //
+        // Phase O.17: route through the per-owner Salsa cell instead
+        // of the file-wide `infer_query` aggregate. The body lookup +
+        // `expr_at_range` filter happens BEFORE the inference call,
+        // so we pay for at most ONE per-owner query per call.
         if let Some(result) = module_bodies.module_code_result() {
             if let Some(expr_id) = result.source_map.expr_at_range(range) {
                 let owner = DefWithBodyId::ModuleCode;
-                let base = infer.type_of_expr_in(owner, expr_id).cloned().unwrap_or(Ty::Unknown);
+                let routed = infer_owner(self.db, file_id, owner);
+                let base = routed.type_of_expr(expr_id).cloned().unwrap_or(Ty::Unknown);
                 return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base);
             }
         }
@@ -752,7 +757,8 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         for (local_id, body, source_map) in module_bodies.method_bodies() {
             if let Some(expr_id) = source_map.expr_at_range(range) {
                 let owner = DefWithBodyId::Method(local_id);
-                let base = infer.type_of_expr_in(owner, expr_id).cloned().unwrap_or(Ty::Unknown);
+                let routed = infer_owner(self.db, file_id, owner);
+                let base = routed.type_of_expr(expr_id).cloned().unwrap_or(Ty::Unknown);
                 return narrow_or_base(self.db, file_id, owner, body, expr_id, base);
             }
         }
@@ -785,17 +791,20 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<Ty> {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.db.module_bodies(module_id);
-        let infer = self.db.infer(file_id);
 
+        // Phase O.17: route through per-owner cells; same single-call
+        // pattern as `type_of_expr` above.
         if let Some(result) = module_bodies.module_code_result() {
             if let Some(binding_id) = result.source_map.binding_at_range(range) {
-                return infer.binding_type_in(DefWithBodyId::ModuleCode, binding_id).cloned();
+                let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
+                return routed.type_of_binding(binding_id).cloned();
             }
         }
 
         for (local_id, _body, source_map) in module_bodies.method_bodies() {
             if let Some(binding_id) = source_map.binding_at_range(range) {
-                return infer.binding_type_in(DefWithBodyId::Method(local_id), binding_id).cloned();
+                let routed = infer_owner(self.db, file_id, DefWithBodyId::Method(local_id));
+                return routed.type_of_binding(binding_id).cloned();
             }
         }
 

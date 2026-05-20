@@ -664,6 +664,28 @@ impl InferOwnerResult {
         }
     }
 
+    /// Full `ExprId -> Ty` map for this owner's body. Callers that
+    /// need bulk access (e.g. `narrow_query` building a
+    /// `base_types` overlay across all expressions in the body) use
+    /// this in preference to repeated [`Self::type_of_expr`] calls.
+    pub fn expr_types(&self) -> &FxHashMap<ExprId, Ty> {
+        match self {
+            InferOwnerResult::Method(r) => &r.expr_types,
+            InferOwnerResult::ModuleCode(r) => &r.expr_types,
+        }
+    }
+
+    /// Type of `binding` within this owner's body, if inference
+    /// recorded one. Equivalent to
+    /// `InferenceResult::binding_type_in(owner, binding)` but reads
+    /// directly from the per-owner payload.
+    pub fn type_of_binding(&self, binding: BindingId) -> Option<&Ty> {
+        match self {
+            InferOwnerResult::Method(r) => r.binding_types.get(&binding),
+            InferOwnerResult::ModuleCode(r) => r.binding_types.get(&binding),
+        }
+    }
+
     /// Variable types map (lowercase name → Ty) for this owner.
     pub fn var_types(&self) -> &FxHashMap<String, Ty> {
         match self {
@@ -688,6 +710,33 @@ impl InferOwnerResult {
             InferOwnerResult::Method(r) => &r.binding_types,
             InferOwnerResult::ModuleCode(r) => &r.binding_types,
         }
+    }
+}
+
+/// Phase O.17 — narrow-caller routing entry point.
+///
+/// Routes a `(file_id, owner)` pair to the appropriate per-owner
+/// Salsa query and wraps the result in [`InferOwnerResult`]. This is
+/// the migration target for every narrow caller previously doing
+/// `db.infer(file_id).<body-keyed-slice>` — after O.17 each call
+/// site reaches per-owner state directly, bypassing the file-wide
+/// `infer_query` aggregate. Warm narrow paths now skip the wrapper
+/// entirely (Arc::clone on the per-method cell), and cold cross-file
+/// hits invalidate only the touched method instead of every method
+/// in the file.
+pub fn infer_owner(
+    db: &dyn HirDatabase,
+    file_id: FileId,
+    owner: DefWithBodyId,
+) -> InferOwnerResult {
+    match owner {
+        DefWithBodyId::Method(local_id) => {
+            let module_id = hir_def::ModuleId { file_id };
+            let method_id = hir_def::MethodId { module: module_id, local_id };
+            let method_input = MethodIdInput::new(db, method_id);
+            InferOwnerResult::Method(db.infer_method(method_input))
+        }
+        DefWithBodyId::ModuleCode => InferOwnerResult::ModuleCode(db.infer_module_code(file_id)),
     }
 }
 
@@ -3542,8 +3591,10 @@ pub fn type_of_expr_query(
     owner: DefWithBodyId,
     expr: ExprId,
 ) -> Ty {
-    let infer = db.infer(file_id);
-    infer.type_of_expr_in(owner, expr).cloned().unwrap_or(Ty::Unknown)
+    // Phase O.17: route through per-owner Salsa cell instead of the
+    // file-wide `infer_query` aggregate. Warm hits become a single
+    // Arc::clone on the `infer_method` / `infer_module_code` cell.
+    infer_owner(db, file_id, owner).type_of_expr(expr).cloned().unwrap_or(Ty::Unknown)
 }
 
 #[cfg(test)]
