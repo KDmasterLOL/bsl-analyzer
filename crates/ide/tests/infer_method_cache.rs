@@ -1,32 +1,27 @@
-//! Phase O.18 — query-graph invariant smoke test for Phase L
-//! narrow-infer.
+//! Salsa cache invariants for `infer_method_query`.
 //!
-//! The headline Phase L win (delivered through O.13–O.17): editing one
-//! method's body must NOT invalidate other methods' `infer_method`
-//! Salsa cells. Pre-O.17 narrow callers all hit the file-wide
-//! `infer_query` aggregate, which is invalidated on any change to
-//! any body in the file — so a hover/highlight/goto-def on method A
-//! after typing in method B would pay for the whole-file rebuild.
-//! Post-O.17 each narrow caller hits exactly one `infer_method` cell,
-//! and Salsa's structural-equality short-circuit keeps unrelated
-//! cells warm.
+//! Pins the per-method cell partitioning that narrow IDE callers
+//! (`Semantics::type_of_expr`, `narrow_query`, hover, highlight,
+//! goto-def) depend on:
 //!
-//! This test pins that invariant via `Arc::ptr_eq` identity:
+//! - **Cross-method isolation across edits**: editing one method's
+//!   body inside a file does not invalidate other methods'
+//!   `infer_method` cells. The other cells keep their cached
+//!   `Arc<BodyInferenceResult>` verbatim because
+//!   `method_body_query`'s output is structurally equal across the
+//!   re-lowering, and Salsa short-circuits downstream invalidation
+//!   on `Eq`.
+//! - **Same-revision identity**: repeated `infer_method` calls within
+//!   one revision return the same `Arc` — cursor moves on the same
+//!   body pay nothing past the first warm.
+//! - **Cross-method independence**: warming one method's cell does
+//!   not invalidate any other; querying a sibling cell after the warm
+//!   leaves the first cell untouched.
 //!
-//! 1. Set up a fixture with two methods (`A` and `B`).
-//! 2. Run `db.infer_method(A_input)` to warm A's cell; capture the Arc.
-//! 3. Edit ONLY `B`'s body via `set_file_text` with a new file content
-//!    where `A`'s body byte range is unchanged.
-//! 4. Run `db.infer_method(A_input)` again.
-//! 5. Assert the returned Arc is `ptr_eq` with the captured one — i.e.
-//!    Salsa kept A's cell warm because its `method_body` output
-//!    short-circuited as structurally equal.
-//!
-//! Without Phase L this would be impossible: narrow callers all read
-//! through the file-wide aggregate, which would be invalidated by
-//! any byte change in the file. Phase J (per-method body lowering) +
-//! Phase L (per-method inference) make per-method warm preservation
-//! the load-bearing wire-up.
+//! `Arc::ptr_eq` is the load-bearing assertion mechanism: if Salsa
+//! re-executed `infer_method_query`, the returned Arc would be a
+//! fresh allocation, so `ptr_eq` is true if and only if the cell was
+//! reused from cache.
 
 use std::sync::Arc;
 
