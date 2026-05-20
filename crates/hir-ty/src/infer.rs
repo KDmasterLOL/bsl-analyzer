@@ -3411,8 +3411,9 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
 /// directly without re-entering the wrapper. File-wide consumers
 /// (arg_diagnostics_query, find-references, publishDiagnostics, ide
 /// tests) continue to read the wrapper's aggregate; the trade is one
-/// map-clone per body during the fold in exchange for the per-method
-/// partitioning that lets warm narrow paths skip the wrapper entirely.
+/// clone per per-owner map field plus entry/vector clones during the
+/// fold in exchange for the per-method partitioning that lets warm
+/// narrow paths skip the wrapper entirely.
 ///
 /// # Determinism invariant (O.16a contract)
 ///
@@ -3440,11 +3441,15 @@ pub fn infer_query<'db>(
     // Phase O.16a fold helpers — both per-body results land in the
     // same file-level aggregate. Take `&` because `db.infer_method` /
     // `db.infer_module_code` return `Arc<…>` whose payload is also
-    // pinned by Salsa's cache; we cannot move out of it, so the fields
-    // are cloned into `result`. (Pre-O.16a the walker built the per-
-    // body result inline and moved it; the new wrapper pays one map
-    // clone per body in exchange for the per-body Salsa partitioning
-    // that lets narrow callers skip the wrapper entirely.)
+    // pinned by Salsa's cache; we cannot move out of it, so the
+    // fields are cloned into `result`. Pre-O.16a the walker built
+    // the per-body result inline and moved it; the new wrapper pays
+    // **one clone per per-owner map field plus entry/vector clones**
+    // per body — three map clones (`expr_types`, `binding_types`,
+    // `implicit_locals`) plus entry-by-entry extends of
+    // `var_types`, `diagnostics`, `call_arg_bindings`. In exchange
+    // each body gets its own Salsa partition so warm narrow callers
+    // skip the wrapper entirely.
     let fold_body = |result: &mut InferenceResult, body_result: &BodyInferenceResult| {
         let owner = body_result.owner;
         // Preserve per-body expr_types so `Semantics::type_of_expr`
