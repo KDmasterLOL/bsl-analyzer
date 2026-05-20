@@ -3343,8 +3343,37 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
 /// completion — turning each interaction into a fresh whole-file pass.
 ///
 /// Invalidation flows from the underlying tracked queries
-/// (`module_bodies`, configuration, etc.); we don't enumerate
-/// dependencies manually.
+/// (`module_bodies`, `infer_method_query`, `infer_module_code_query`,
+/// configuration, etc.); we don't enumerate dependencies manually.
+///
+/// # Phase O.16a — thin fan-out wrapper
+///
+/// O.16a transformed this from an inline body-walker into a thin
+/// wrapper that fans out through the per-body Salsa queries:
+///   1. `db.infer_module_code(file_id)` for module-level code (O.14).
+///   2. `db.infer_method(MethodIdInput)` for each method body, walked
+///      in [`ModuleBodies::iter_bodies`] insertion order (O.15).
+///   3. Folds every per-body `Arc<…InferenceResult>` payload back into
+///      the file-level [`InferenceResult`] for diagnostics /
+///      find-references / `arg_diagnostics_query` consumers.
+///
+/// Per-body inference now lives in its own Salsa cell. Narrow callers
+/// (hover / highlight / goto-def — wired in O.17) read those cells
+/// directly without re-entering the wrapper. File-wide consumers
+/// (arg_diagnostics_query, find-references, publishDiagnostics, ide
+/// tests) continue to read the wrapper's aggregate; the trade is one
+/// map-clone per body during the fold in exchange for the per-method
+/// partitioning that lets warm narrow paths skip the wrapper entirely.
+///
+/// # Determinism invariant (O.16a contract)
+///
+/// `ModuleBodies::iter_bodies` is IndexMap-backed (Phase O.1, Lni.A)
+/// and yields methods in insertion order, which equals their
+/// `LocalBodyId`-sorted order because the lowering loop inserts in
+/// increasing index. The fold therefore visits methods in a single
+/// file-fixed order; `result.diagnostics`, `result.call_arg_bindings`
+/// and the iteration-dependent `result.var_types` last-write-wins
+/// outcome are byte-for-byte deterministic across runs.
 #[salsa::tracked(lru = 256)]
 pub fn infer_query<'db>(
     db: &'db dyn HirDatabase,
@@ -3359,48 +3388,76 @@ pub fn infer_query<'db>(
 
     let mut result = InferenceResult::default();
 
-    let fold_body = |result: &mut InferenceResult, body_result: BodyInferenceResult| {
+    // Phase O.16a fold helpers — both per-body results land in the
+    // same file-level aggregate. Take `&` because `db.infer_method` /
+    // `db.infer_module_code` return `Arc<…>` whose payload is also
+    // pinned by Salsa's cache; we cannot move out of it, so the fields
+    // are cloned into `result`. (Pre-O.16a the walker built the per-
+    // body result inline and moved it; the new wrapper pays one map
+    // clone per body in exchange for the per-body Salsa partitioning
+    // that lets narrow callers skip the wrapper entirely.)
+    let fold_body = |result: &mut InferenceResult, body_result: &BodyInferenceResult| {
+        let owner = body_result.owner;
         // Preserve per-body expr_types so `Semantics::type_of_expr`
-        // (M3 Task 9) can look them up via `BodySourceMap`. Before this,
-        // the merge dropped `expr_types` entirely and every syntax-node
-        // lookup returned `Ty::Unknown`.
-        result.expr_types_by_body.insert(body_result.owner, body_result.expr_types);
+        // (M3 Task 9) can look them up via `BodySourceMap`.
+        result.expr_types_by_body.insert(owner, body_result.expr_types.clone());
         // Per-binding map: keyed by `BindingId` so name shadowing within
         // or across bodies does not collide. Used by binding-anchored
         // hover (declaration-site loop variable, classic-for counter,
         // parameter).
-        result.binding_types_by_body.insert(body_result.owner, body_result.binding_types);
-        // `var_types` stays file-global: completion matches variables by name
-        // across bodies. `diagnostics` is flat file-wide but each entry is
-        // paired with its `DefWithBodyId` owner so ide-diagnostics can resolve
-        // the body-local `ExprId` through the correct `BodySourceMap`.
-        result.var_types.extend(body_result.var_types);
-        result.implicit_locals_by_body.insert(body_result.owner, body_result.implicit_locals);
-        let owner = body_result.owner;
-        result.diagnostics.extend(body_result.diagnostics.into_iter().map(|d| (owner, d)));
+        result.binding_types_by_body.insert(owner, body_result.binding_types.clone());
+        // `var_types` stays file-global: completion matches variables by
+        // name across bodies. Iteration is fixed by ModuleBodies' IndexMap
+        // backing, so last-write-wins outcome is deterministic.
+        result.var_types.extend(body_result.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        result.implicit_locals_by_body.insert(owner, body_result.implicit_locals.clone());
+        // `diagnostics` is flat file-wide but each entry is paired with
+        // its `DefWithBodyId` owner so ide-diagnostics can resolve the
+        // body-local `ExprId` through the correct `BodySourceMap`.
+        result.diagnostics.extend(body_result.diagnostics.iter().map(|d| (owner, d.clone())));
         // Call-site arg bindings carry their own owner field, so we just
         // append. `arg_diagnostics_query` consumes the file-wide list.
-        result.call_arg_bindings.extend(body_result.call_arg_bindings);
+        result.call_arg_bindings.extend(body_result.call_arg_bindings.iter().cloned());
     };
 
-    // Infer module-level code (statements outside procedures/functions)
-    if let Some(body) = module_bodies.module_code() {
-        let mut ctx =
-            InferenceContext::new(db, file_id, DefWithBodyId::ModuleCode, &Arc::new(body.clone()));
-        ctx.infer_all();
-        fold_body(&mut result, ctx.finish());
+    let fold_module_code = |result: &mut InferenceResult,
+                            module_code: &ModuleCodeInferenceResult| {
+        // Identical fold logic to `fold_body` minus the
+        // `return_expr_ids` dimension (module code has no method-level
+        // Return cascade consumer — see `ModuleCodeInferenceResult`
+        // doc-comment).
+        let owner = module_code.owner;
+        result.expr_types_by_body.insert(owner, module_code.expr_types.clone());
+        result.binding_types_by_body.insert(owner, module_code.binding_types.clone());
+        result.var_types.extend(module_code.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        result.implicit_locals_by_body.insert(owner, module_code.implicit_locals.clone());
+        result.diagnostics.extend(module_code.diagnostics.iter().map(|d| (owner, d.clone())));
+        result.call_arg_bindings.extend(module_code.call_arg_bindings.iter().cloned());
+    };
+
+    // Module-level code first — through the dedicated Salsa cell so a
+    // warm hit is a cheap Arc clone (see `infer_module_code_query`).
+    {
+        let _bspan = tracing::info_span!("infer_query.body", kind = "module_code").entered();
+        let module_code = db.infer_module_code(file_id);
+        fold_module_code(&mut result, &module_code);
     }
 
-    // Infer all method bodies (procedures and functions)
-    for (local_id, body) in module_bodies.iter_bodies() {
-        let mut ctx = InferenceContext::new(
-            db,
-            file_id,
-            DefWithBodyId::Method(local_id),
-            &Arc::new(body.clone()),
-        );
-        ctx.infer_all();
-        fold_body(&mut result, ctx.finish());
+    // Per-method bodies, walked in IndexMap-insertion order (== sorted
+    // by LocalBodyId via Phase O.1 Lni.A). Each body lives in its own
+    // `infer_method_query` Salsa cell; the wrapper's job here is pure
+    // aggregation. On warm cache every `db.infer_method(…)` below is
+    // an `Arc::clone`, so the wrapper touches no inference logic; on
+    // cold first hit each cell still pays for its own body walk, but
+    // the work is partitioned by method so narrow callers (hover /
+    // highlight / goto-def) reuse those cells without re-entering the
+    // wrapper.
+    for (local_id, _body) in module_bodies.iter_bodies() {
+        let _bspan = tracing::info_span!("infer_query.body", kind = "method").entered();
+        let method_id = hir_def::MethodId { module: module_id, local_id };
+        let method_input = MethodIdInput::new(db, method_id);
+        let body_result = db.infer_method(method_input);
+        fold_body(&mut result, &body_result);
     }
 
     info!(
