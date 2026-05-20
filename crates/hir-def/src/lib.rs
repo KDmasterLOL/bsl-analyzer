@@ -32,6 +32,7 @@ pub mod configs;
 pub mod docs;
 pub mod hir;
 pub mod item_tree;
+pub mod method_body;
 pub mod metrics;
 pub mod module_index;
 pub mod module_structure;
@@ -82,6 +83,7 @@ pub use workspace::{is_bsl_source, CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 
 // Re-export all Salsa query functions from the queries module
+pub use method_body::method_body_query;
 pub use queries::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
     module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
@@ -227,6 +229,33 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// # Implementation
     /// Should delegate to [`module_bodies_query`].
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
+
+    /// Lazy per-method body lowering (Phase O.8 — replant of Phase J.4).
+    ///
+    /// Returns the lowered [`body::Body`] for a single method, keyed by
+    /// the salsa-interned [`MethodIdInput`]. The first method-graph
+    /// query in the Phase O Phase J replay: consumed by upcoming
+    /// `method_return_type_query` (O.10) and the cascade-typed inference
+    /// path (O.11).
+    ///
+    /// # Performance
+    /// - **LRU cache:** 4096 (one entry per method; typical modules
+    ///   have ~30 methods so a workspace of ~100 active modules stays
+    ///   inside the cache).
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse),
+    ///   [`symbol_tree`](Self::symbol_tree).
+    /// - **Typical time:** <1 ms for a single small method.
+    ///
+    /// # Residency contract
+    /// Phase O total-VFS invariant (commit `6c578f3a`) guarantees that
+    /// every BSL FileId registered in a `FileSet` has a populated
+    /// `FileTextInput`. This query therefore does NOT carry the J.4
+    /// sentinel-on-cold gate; tracked text reads panic by Salsa
+    /// contract if the invariant is ever violated.
+    ///
+    /// # Implementation
+    /// Should delegate to [`method_body::method_body_query`].
+    fn method_body(&self, method: MethodIdInput<'_>) -> Arc<body::Body>;
 
     /// Get metadata for a module (type and execution context).
     ///

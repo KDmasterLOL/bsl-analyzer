@@ -321,6 +321,10 @@ impl DefDatabase for RootDatabaseImpl {
         hir::module_bodies_query(self, file_id_input)
     }
 
+    fn method_body(&self, method: hir::MethodIdInput<'_>) -> Arc<hir::Body> {
+        hir::method_body_query(self, method)
+    }
+
     fn module_metadata(&self, module_id: ModuleId) -> Arc<hir::ModuleMetadata> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         module_metadata_query(self, file_id_input)

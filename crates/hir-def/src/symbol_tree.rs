@@ -28,6 +28,7 @@ use la_arena::{Arena, Idx};
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 use std::sync::Arc;
+use syntax::{Parse, SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
 /// Symbol tree for a module.
@@ -96,6 +97,29 @@ pub struct MethodSymbol {
     /// `hir_ty::method_resolution::materialise_signature` via
     /// [`hir_ty::TyLoweringContext::lower_type_ref`].
     pub return_type_ref: Option<TypeRef>,
+}
+
+impl MethodSymbol {
+    /// Locate this method's syntax node inside the given parse tree.
+    ///
+    /// Used by the per-method body queries (`method_body_query` and
+    /// future `method_body_with_source_map_query`) to feed
+    /// `lower_method_with_externals` without re-walking the whole
+    /// module. Looks for a `PROCEDURE_DEF` / `FUNCTION_DEF` node whose
+    /// text range matches the symbol's `source_range`. Returns `None`
+    /// when the parse no longer contains a matching node — typically
+    /// because the source text moved on after the `SymbolTree` was
+    /// constructed (callers should treat that as "no body available,
+    /// retry later").
+    pub fn syntax_node(&self, parse: &Parse<SyntaxNode>) -> Option<SyntaxNode> {
+        let expected_kind =
+            if self.is_function { SyntaxKind::FUNCTION_DEF } else { SyntaxKind::PROCEDURE_DEF };
+        let target = self.source_range;
+        parse
+            .syntax_node()
+            .descendants()
+            .find(|node| node.kind() == expected_kind && node.text_range() == target)
+    }
 }
 
 /// A module-level variable symbol.
