@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base_db::SourceDatabase;
 use crossbeam_channel::RecvTimeoutError;
 use serde::{Deserialize, Serialize};
 use vfs::loader::{self, LoadingProgress};
@@ -245,9 +246,21 @@ pub fn run(args: SmokeArgs) -> SmokeReport {
                     });
                 }
             },
-            Scenario::FirstPaint => {
-                tracing::warn!("smoke[first_paint]: scenario not yet implemented (lands in O.5)");
-            }
+            Scenario::FirstPaint => match run_first_paint(&args) {
+                Ok(fp) => {
+                    check_first_paint_budgets(&fp, &args.budgets, &mut report.violations);
+                    report.first_paint = Some(fp);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "smoke[first_paint]: failed");
+                    report.violations.push(BudgetViolation {
+                        scenario: "first_paint".to_string(),
+                        metric: "run_error".to_string(),
+                        observed: 0,
+                        budget: 0,
+                    });
+                }
+            },
             Scenario::Hover => {
                 tracing::warn!("smoke[hover]: scenario not yet implemented (lands in O.6)");
             }
@@ -280,6 +293,12 @@ fn emit_text_report(report: &SmokeReport) {
             boot.degraded_files_count,
         );
     }
+    if let Some(fp) = &report.first_paint {
+        eprintln!("smoke[first_paint]: total_ms={}", fp.total_ms);
+        for phase in &fp.phases {
+            eprintln!("  - {:>16}: cold={}ms warm={}ms", phase.name, phase.cold_ms, phase.warm_ms,);
+        }
+    }
     if !report.violations.is_empty() {
         eprintln!("smoke: {} budget violation(s):", report.violations.len());
         for v in &report.violations {
@@ -293,10 +312,22 @@ fn emit_text_report(report: &SmokeReport) {
     }
 }
 
-/// Boot scenario — mirrors `server::main_loop` cold-start without the LSP
-/// transport, background indexer, or name-index priming.
+/// Primed harness state shared by smoke scenarios that need a fully-booted
+/// `GlobalState`. Created by [`bootstrap_smoke`]; held by reference (Boot)
+/// or by ownership (FirstPaint/Hover/Deps) so each scenario can take the
+/// boot measurement plus optionally drive Salsa queries on top.
+struct SmokeBootstrap {
+    state: GlobalState,
+    /// Joined when [`SmokeBootstrap`] drops via the sender disconnect. Held
+    /// here purely to keep the thread alive for the harness lifetime.
+    _drain_handle: std::thread::JoinHandle<()>,
+    boot: BootResult,
+}
+
+/// Bootstrap mirrors `server::main_loop` cold-start without LSP transport,
+/// background indexer, or name-index priming.
 ///
-/// Bootstrap sequence (matches `server::handle_loader_msg::Finished`):
+/// Sequence (matches `server::handle_loader_msg::Finished`):
 ///
 ///   1. `GlobalState::new(dummy_sender)` + `init_empty_source_root`
 ///   2. `set_workspace_root(args.source_dir)` — kicks off vfs-notify loader
@@ -310,13 +341,14 @@ fn emit_text_report(report: &SmokeReport) {
 ///      - sync `degraded_files_count = skipped_bsl.len()`
 ///      - defensive `assert_total_vfs_invariant` scan (log-only)
 ///
-/// Measures `vfs_done_ms`, post-finalize RSS, and `degraded_files_count`.
-fn run_boot(args: &SmokeArgs) -> Result<BootResult, String> {
+/// Records `vfs_done_ms`, post-finalize RSS, and `degraded_files_count` on
+/// the returned [`SmokeBootstrap::boot`] field.
+fn bootstrap_smoke(args: &SmokeArgs) -> Result<SmokeBootstrap, String> {
     let (sender, receiver) = crossbeam_channel::unbounded::<lsp_server::Message>();
     // Drain the LSP sender in a background thread so progress notifications
     // emitted by `report_progress` during bootstrap do not pile up
     // unboundedly. The thread exits when the sender is dropped along with
-    // `state` below.
+    // the returned `state`.
     let drain_handle = std::thread::spawn(move || while receiver.recv().is_ok() {});
 
     let mut state = GlobalState::new(sender);
@@ -389,10 +421,16 @@ fn run_boot(args: &SmokeArgs) -> Result<BootResult, String> {
     let rss_bytes_post_boot = read_rss_bytes();
     let degraded_files_count = state.degraded_files_count;
 
-    drop(state);
-    let _ = drain_handle.join();
+    Ok(SmokeBootstrap {
+        state,
+        _drain_handle: drain_handle,
+        boot: BootResult { vfs_done_ms, rss_bytes_post_boot, degraded_files_count },
+    })
+}
 
-    Ok(BootResult { vfs_done_ms, rss_bytes_post_boot, degraded_files_count })
+/// Boot scenario — wraps [`bootstrap_smoke`] and discards the primed state.
+fn run_boot(args: &SmokeArgs) -> Result<BootResult, String> {
+    Ok(bootstrap_smoke(args)?.boot)
 }
 
 /// Smoke twin of `server::handle_vfs_msg` for `sync_to_salsa = false`: convert
@@ -442,6 +480,139 @@ fn stream_loader_batch(state: &mut GlobalState, files: Vec<(paths::AbsPathBuf, O
     }
 }
 
+/// FirstPaint scenario — measure the first-paint stages a real LSP client
+/// requests right after `didOpen`: semantic_tokens (`Analysis::highlight`),
+/// document_symbols, folding_ranges, diagnostics. Each stage is recorded as
+/// a cold/warm pair: the cold call walks the Salsa dependency graph from
+/// the just-booted database; the warm call reuses the cache.
+///
+/// File selection is deterministic — the lexicographically-first resident
+/// BSL file in `SourceRoot(0)` (see [`pick_sample_bsl_file`]). On a real
+/// workspace this is normally a CommonModule body which exercises the same
+/// hot paths a developer first lands on.
+///
+/// Returns `Err` when the workspace contains no resident BSL files (e.g.
+/// path supplied but no `.bsl` underneath); the caller logs and inserts a
+/// `BudgetViolation` of metric `"run_error"` exactly like Boot.
+fn run_first_paint(args: &SmokeArgs) -> Result<FirstPaintResult, String> {
+    let mut ctx = bootstrap_smoke(args)?;
+    let file_id = pick_sample_bsl_file(&ctx.state)
+        .ok_or_else(|| "first_paint: no resident BSL files in workspace".to_string())?;
+    let url = url_for_file_id(&ctx.state, file_id)
+        .ok_or_else(|| "first_paint: failed to compute file URL".to_string())?;
+    let text = ctx.state.analysis_host.analysis().file_text(file_id);
+
+    tracing::info!(file_id = file_id.0, %url, "smoke[first_paint]: sample file selected");
+
+    let mut phases = Vec::with_capacity(5);
+
+    // Phase 1 — didOpen: register the file in `mem_docs`. Models the
+    // synchronous client-side handoff in `handle_did_open`; subsequent LSP
+    // requests read text and line index from `mem_docs`. Warm pass exercises
+    // the lookup path used by every later request.
+    {
+        let cold_start = Instant::now();
+        ctx.state.mem_docs.insert(url.clone(), text.clone(), 1);
+        let cold_ms = cold_start.elapsed().as_millis() as u64;
+        let warm_start = Instant::now();
+        let _ = ctx.state.mem_docs.get(&url);
+        let warm_ms = warm_start.elapsed().as_millis() as u64;
+        phases.push(FirstPaintPhase { name: "didOpen".to_string(), cold_ms, warm_ms });
+    }
+
+    // Phases 2–5 — analysis stages on fresh Salsa snapshots. `Analysis` is
+    // a snapshot wrapper so cold = first call after Boot (Salsa builds the
+    // memo graph), warm = re-call on a sibling snapshot (cache hits).
+    let stages: &[(&str, AnalysisStageFn)] = &[
+        ("semantic_tokens", semantic_tokens_stage),
+        ("document_symbols", document_symbols_stage),
+        ("folding_ranges", folding_ranges_stage),
+        ("diagnostics", diagnostics_stage),
+    ];
+    let cfg = ide::DiagnosticsConfig::default();
+    for (name, runner) in stages {
+        let (cold_ms, warm_ms) = time_analysis_call(&ctx.state, *runner, file_id, &cfg);
+        phases.push(FirstPaintPhase { name: (*name).to_string(), cold_ms, warm_ms });
+    }
+
+    let total_ms = phases.iter().map(|p| p.cold_ms).sum();
+    Ok(FirstPaintResult { phases, total_ms })
+}
+
+/// Function-pointer signature for the FirstPaint analysis-stage runners.
+/// Same shape as the LSP request handlers' inner closure: takes a Salsa
+/// snapshot, a `FileId` and the `DiagnosticsConfig` (only used by the
+/// diagnostics stage; ignored by the others).
+type AnalysisStageFn = fn(&ide::Analysis, vfs::FileId, &ide::DiagnosticsConfig);
+
+fn semantic_tokens_stage(a: &ide::Analysis, fid: vfs::FileId, _cfg: &ide::DiagnosticsConfig) {
+    let _ = a.highlight(fid);
+}
+
+fn document_symbols_stage(a: &ide::Analysis, fid: vfs::FileId, _cfg: &ide::DiagnosticsConfig) {
+    let _ = a.document_symbols(fid);
+}
+
+fn folding_ranges_stage(a: &ide::Analysis, fid: vfs::FileId, _cfg: &ide::DiagnosticsConfig) {
+    let _ = a.folding_ranges(fid);
+}
+
+fn diagnostics_stage(a: &ide::Analysis, fid: vfs::FileId, cfg: &ide::DiagnosticsConfig) {
+    let _ = a.diagnostics(fid, cfg);
+}
+
+fn time_analysis_call(
+    state: &GlobalState,
+    run: AnalysisStageFn,
+    fid: vfs::FileId,
+    cfg: &ide::DiagnosticsConfig,
+) -> (u64, u64) {
+    let cold_start = Instant::now();
+    {
+        let a = state.analysis_host.analysis();
+        run(&a, fid, cfg);
+    }
+    let cold_ms = cold_start.elapsed().as_millis() as u64;
+    let warm_start = Instant::now();
+    {
+        let a = state.analysis_host.analysis();
+        run(&a, fid, cfg);
+    }
+    let warm_ms = warm_start.elapsed().as_millis() as u64;
+    (cold_ms, warm_ms)
+}
+
+/// Pick the lexicographically-first resident BSL file in `SourceRoot(0)`.
+/// Deterministic across runs so cold/warm baselines line up. Returns `None`
+/// if the workspace has no `.bsl` files with populated `FileTextInput`.
+fn pick_sample_bsl_file(state: &GlobalState) -> Option<vfs::FileId> {
+    let db = state.analysis_host.raw_database();
+    let source_root_input = db.source_root_input(base_db::SourceRootId(0));
+    let source_root = source_root_input.root(db);
+    let file_set = source_root.file_set();
+
+    let mut bsl_paths: Vec<(String, vfs::FileId)> = file_set
+        .iter()
+        .filter_map(|fid| {
+            let vfs_path = file_set.path_for_file(&fid)?;
+            let std_path = vfs_path.as_path();
+            if !project_model::is_bsl_source_path(std_path) {
+                return None;
+            }
+            db.try_file_text(fid)?;
+            Some((std_path.to_string_lossy().into_owned(), fid))
+        })
+        .collect();
+    bsl_paths.sort();
+    bsl_paths.into_iter().next().map(|(_, fid)| fid)
+}
+
+fn url_for_file_id(state: &GlobalState, file_id: vfs::FileId) -> Option<lsp_types::Url> {
+    let vfs = state.vfs.read();
+    let vfs_path = vfs.file_path(file_id);
+    lsp_types::Url::from_file_path(vfs_path.as_path()).ok()
+}
+
 fn check_boot_budgets(boot: &BootResult, budgets: &Budgets, out: &mut Vec<BudgetViolation>) {
     if boot.vfs_done_ms > budgets.boot_vfs_done_ms {
         out.push(BudgetViolation {
@@ -467,6 +638,21 @@ fn check_boot_budgets(boot: &BootResult, budgets: &Budgets, out: &mut Vec<Budget
             metric: "degraded_files_count".to_string(),
             observed: boot.degraded_files_count as u64,
             budget: budgets.boot_degraded_files_max as u64,
+        });
+    }
+}
+
+fn check_first_paint_budgets(
+    fp: &FirstPaintResult,
+    budgets: &Budgets,
+    out: &mut Vec<BudgetViolation>,
+) {
+    if fp.total_ms > budgets.first_paint_total_ms {
+        out.push(BudgetViolation {
+            scenario: "first_paint".to_string(),
+            metric: "total_ms".to_string(),
+            observed: fp.total_ms,
+            budget: budgets.first_paint_total_ms,
         });
     }
 }
@@ -597,5 +783,72 @@ mod tests {
         // ms because of the loader's scan + finalize pipeline. Just confirm
         // it is within the (very generous) default budget.
         assert!(boot.vfs_done_ms < Budgets::default().boot_vfs_done_ms);
+    }
+
+    #[test]
+    fn check_first_paint_budgets_flags_total() {
+        let fp = FirstPaintResult {
+            phases: vec![
+                FirstPaintPhase { name: "didOpen".into(), cold_ms: 800, warm_ms: 1 },
+                FirstPaintPhase { name: "semantic_tokens".into(), cold_ms: 1200, warm_ms: 5 },
+            ],
+            total_ms: 2_000,
+        };
+        let budgets = Budgets { first_paint_total_ms: 1_000, ..Budgets::default() };
+        let mut out = Vec::new();
+        check_first_paint_budgets(&fp, &budgets, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].metric, "total_ms");
+        assert_eq!(out[0].observed, 2_000);
+    }
+
+    #[test]
+    fn check_first_paint_budgets_passes_within_threshold() {
+        let fp = FirstPaintResult {
+            phases: vec![FirstPaintPhase { name: "didOpen".into(), cold_ms: 1, warm_ms: 0 }],
+            total_ms: 1,
+        };
+        let mut out = Vec::new();
+        check_first_paint_budgets(&fp, &Budgets::default(), &mut out);
+        assert!(out.is_empty());
+    }
+
+    /// End-to-end FirstPaint on a tmpdir with one BSL file. Validates that
+    /// `run_first_paint` boots and walks all five phases, and that `total_ms`
+    /// is the sum of cold timings.
+    #[test]
+    fn run_first_paint_on_synthetic_workspace_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bsl = tmp.path().join("Module.bsl");
+        std::fs::write(&bsl, "Процедура Test()\nКонецПроцедуры\n").expect("write bsl");
+
+        let args = SmokeArgs {
+            source_dir: tmp.path().to_path_buf(),
+            scenarios: vec![Scenario::FirstPaint],
+            budgets: Budgets::default(),
+            json: false,
+        };
+        let fp = run_first_paint(&args).expect("first_paint on synthetic workspace should succeed");
+        assert_eq!(fp.phases.len(), 5);
+        let names: Vec<&str> = fp.phases.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["didOpen", "semantic_tokens", "document_symbols", "folding_ranges", "diagnostics"],
+        );
+        let cold_sum: u64 = fp.phases.iter().map(|p| p.cold_ms).sum();
+        assert_eq!(fp.total_ms, cold_sum, "total_ms must be the sum of cold timings");
+    }
+
+    #[test]
+    fn run_first_paint_errors_when_workspace_has_no_bsl() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let args = SmokeArgs {
+            source_dir: tmp.path().to_path_buf(),
+            scenarios: vec![Scenario::FirstPaint],
+            budgets: Budgets::default(),
+            json: false,
+        };
+        let err = run_first_paint(&args).expect_err("empty workspace must produce an error");
+        assert!(err.contains("no resident BSL files"), "got: {err}");
     }
 }
