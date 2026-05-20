@@ -21,6 +21,7 @@ use lsp_server::{Message, ReqQueue, Response};
 use lsp_types::Url;
 use parking_lot::RwLock;
 use project_model::Project;
+use rustc_hash::FxHashSet;
 use vfs::loader::Handle;
 use vfs::{loader, Vfs};
 
@@ -157,6 +158,22 @@ pub struct GlobalState {
 
     /// Last time progress was reported to the client.
     pub last_progress_report: std::time::Instant,
+
+    /// BSL paths the VFS loader could not read (content=None) plus any BSL
+    /// fids actively evicted from FileSet by `process_changes` because their
+    /// text became absent (Delete or content=None mid-session).
+    ///
+    /// Populated in `server::handle_vfs_msg` (B1 observability) and consulted
+    /// post-`LoadingProgress::Finished` to derive [`Self::degraded_files_count`].
+    /// This is the **single source of truth** for the count — eviction inside
+    /// `process_changes` does not double-count (Codex Round 4 C2 closure).
+    pub skipped_bsl: FxHashSet<paths::AbsPathBuf>,
+
+    /// Number of BSL files in the workspace whose text could not be made
+    /// resident. Derived as `skipped_bsl.len()` at the end of cold-start and
+    /// after each `Finished` boundary; surfaced to the smoke harness so the
+    /// Boot scenario can report degraded files without re-scanning Salsa.
+    pub degraded_files_count: usize,
 }
 
 impl GlobalState {
@@ -195,7 +212,40 @@ impl GlobalState {
             preload_external_tokens: HashMap::new(),
             request_tokens: HashMap::new(),
             last_progress_report: std::time::Instant::now(),
+            skipped_bsl: FxHashSet::default(),
+            degraded_files_count: 0,
         }
+    }
+
+    /// Defensive sweep: confirm every BSL `FileId` in any `SourceRoot` has a
+    /// populated `FileTextInput` cell. Returns the number of violations.
+    ///
+    /// The total-VFS invariant — enforced by `handle_vfs_msg`'s B1 hook and
+    /// `process_changes`'s B2-A eviction branch — should keep this at 0. Any
+    /// non-zero return indicates a regression; callers log `error!`.
+    ///
+    /// Safe to call outside tracked queries: uses `Files::try_file_text`
+    /// which returns `Option` instead of panicking.
+    pub fn assert_total_vfs_invariant(&self) -> usize {
+        use base_db::SourceDatabase;
+
+        let db = self.analysis_host.raw_database();
+        let source_root_id = base_db::SourceRootId(0);
+        let source_root_input = db.source_root_input(source_root_id);
+        let source_root = source_root_input.root(db);
+        let file_set = source_root.file_set();
+
+        let mut violations = 0;
+        for fid in file_set.iter() {
+            if !ide_db::is_bsl_source(file_set, fid) {
+                continue;
+            }
+            if db.try_file_text(fid).is_none() {
+                tracing::warn!(file_id = fid.0, "BSL fid in SourceRoot has no FileTextInput");
+                violations += 1;
+            }
+        }
+        violations
     }
 
     // ========================================================================

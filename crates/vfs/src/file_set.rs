@@ -65,6 +65,18 @@ impl FileSet {
     pub fn iter(&self) -> impl Iterator<Item = FileId> + '_ {
         self.paths.keys().copied()
     }
+
+    /// Remove a file from this set.
+    ///
+    /// Returns the path that was associated with the file, or `None` if the
+    /// file was not in the set. Used by `process_changes`'s B2-A eviction
+    /// branch to keep the total-VFS invariant when a BSL file becomes
+    /// unreadable (Delete or content=None).
+    pub fn remove(&mut self, file_id: FileId) -> Option<VfsPath> {
+        let path = self.paths.shift_remove(&file_id)?;
+        self.files.remove(&path);
+        Some(path)
+    }
 }
 
 #[cfg(test)]

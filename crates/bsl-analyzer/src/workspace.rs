@@ -188,8 +188,10 @@ impl GlobalState {
 
             db.set_file_source_root(file.file_id, source_root_id);
 
-            // Check if this is a config file change
-            {
+            // Check if this is a config file change, plus determine whether
+            // the path is a BSL source — used by the B2-A eviction branch
+            // below to keep the total-VFS invariant (O.2).
+            let is_bsl_path = {
                 let vfs = self.vfs.read();
                 let path = vfs.file_path(file.file_id);
                 let path_path = path.as_path();
@@ -205,6 +207,30 @@ impl GlobalState {
                     tracing::info!(path = %path_path.display(), "metadata XML file changed");
                     metadata_xml_changed = true;
                 }
+                project_model::is_bsl_source_path(path_path)
+            };
+
+            // B2-A active eviction (O.2 / Codex Round 4): a BSL file became
+            // unreadable (Delete OR content=None mid-session). Remove from
+            // FileSet so SourceRoot-based name resolution stops surfacing
+            // the fid, and tombstone the `FileTextInput` cell with empty
+            // text so the four direct `db.parse` callsites (hover, item-tree
+            // lowering, Analysis::file_text, module_bodies) observe an empty
+            // AST instead of stale content.
+            //
+            // Do NOT bump `degraded_files_count` here — single source of
+            // truth is `state.skipped_bsl` populated in `handle_vfs_msg`.
+            if is_bsl_path && text.is_none() {
+                if file_set.path_for_file(&file.file_id).is_some() {
+                    file_set.remove(file.file_id);
+                    db.set_file_text(file.file_id, "");
+                    file_set_modified = true;
+                    tracing::warn!(
+                        file_id = file.file_id.0,
+                        "BSL file evicted from FileSet (deleted or unreadable); FileTextInput tombstoned",
+                    );
+                }
+                continue;
             }
 
             // Ensure file is in SourceRoot's FileSet

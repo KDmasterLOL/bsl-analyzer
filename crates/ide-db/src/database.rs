@@ -118,6 +118,17 @@ impl RootDatabaseImpl {
         self.workspace_configs().version(self)
     }
 
+    /// Non-panicking probe of the per-file `FileTextInput` cell.
+    ///
+    /// Returns `Some(FileTextInput)` if the cell exists, `None` if the `FileId`
+    /// has never had a text input set. Safe to call **outside** tracked
+    /// queries; inside a tracked query the regular `file_text_input(fid)` path
+    /// is the right choice (panics on missing, but our total-VFS invariant
+    /// guarantees presence for fids reachable through SourceRoot).
+    pub fn try_file_text(&self, file_id: vfs::FileId) -> Option<base_db::FileTextInput> {
+        self.files.try_file_text(file_id)
+    }
+
     /// Bump metadata version to invalidate configuration cache.
     /// Call this when .xml metadata files change.
     pub fn bump_metadata_version(&mut self) {
