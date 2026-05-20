@@ -5,32 +5,37 @@
 //! Slot defaults to `Ty::Unknown` (gradual typing) for anything the
 //! docstring does not declare.
 //!
-//! # Scope of this slice
+//! # Cycle status (Phase O.16b — body-walk dropped)
 //!
-//! Phase 2 — docstring path **plus** a `Body`-walk fallback for the
-//! return type when the docstring omits `Возвращаемое значение:`. Param
-//! lowering stays docstring-only.
+//! Phase O.16b removed the docstring-less `Body`-walk fallback that
+//! previously called `db.infer(file_id)` for return-from-body
+//! inference. After O.16a turned `infer_query` into a thin fan-out
+//! wrapper over `db.infer_method` (Lni.5 / O.15), keeping the
+//! body-walk here would close the self-edge
+//! `proc_signature_query → infer_query → infer_method →
+//! proc_signature_query` (`infer_method`'s
+//! `InferenceContext::infer_all` consults proc signatures during
+//! qualified-call resolution).
 //!
-//! ## Cycle status
+//! Dropping the body-walk to `Ty::Unknown` for docstring-less
+//! functions is observably a no-op: the cascade-typing path
+//! (`materialise_signature_enriched` in `method_resolution.rs`,
+//! shipped Phase O.11) is the production consumer that wanted a
+//! body-derived return type, and it queries
+//! `method_return_type_query` directly — which has its own
+//! cycle-safe handlers (Phase J / O.10). PLAN-v3 §R9 verified zero
+//! production callers depended on `proc_signature_query`'s
+//! body-walked return type before O.16b.
 //!
-//! `proc_signature_query` now reads `db.infer(file_id)` for the
-//! return-from-body fallback. Today the cycle
-//! `infer → lookup_method → proc_signature_query` is structurally
-//! impossible because no `lookup_method` call site reads back into
-//! `proc_signature_query` — the consumer wiring (`proc_signature_lookup`,
-//! plan §2.4 step 4) lands in a separate slice. When that slice ships
-//! it MUST add a `salsa::cycle_fn` to this query that returns
-//! `ProcSignature { params: <doc-derived>, return_ty: Unknown }` (plan
-//! §2.4 / risk 9). Skipping the cycle handler today is intentional:
-//! the recovery shape is impossible to test until a cycle exists, and
-//! Salsa's tracked-query API treats `cycle_fn` + `cycle_initial` as a
-//! pair that breaks queries with no actual cycle.
+//! `collect_return_value_exprs` is retained under `#[cfg(test)]`
+//! because two unit tests still exercise its Stmt::Return walking
+//! shape against hand-rolled bodies.
 
 use std::sync::Arc;
 
 use hir_def::docs::{MethodDocs, ParameterDoc};
 use hir_def::symbol_tree::ParamSymbol;
-use hir_def::{Body, DefWithBodyId, ExprId, IdConversion, MethodId, MethodIdInput, Name, Stmt};
+use hir_def::{MethodIdInput, Name};
 
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
@@ -49,8 +54,13 @@ pub struct ProcSignature {
     /// actual via gradual typing.
     pub params: Vec<Ty>,
     /// Return type. `Ty::Unknown` when the docstring omits the
-    /// `Возвращаемое значение:` section. Phase 2 will walk the body for
-    /// `Возврат X` expressions when the docstring is silent.
+    /// `Возвращаемое значение:` section. Body-walked return-from-`Возврат`
+    /// inference was dropped in Phase O.16b to break the
+    /// `proc_signature_query → infer_query → infer_method →
+    /// proc_signature_query` self-edge introduced by O.16a; cascade
+    /// typing recovers the same precision via
+    /// [`crate::method_graph::method_return_type_query`] at the call
+    /// site.
     pub return_ty: Ty,
 }
 
@@ -82,11 +92,8 @@ pub fn proc_signature_query<'db>(
     let params = lower_params(method_symbol.params.as_slice(), docs);
 
     // Procedures never carry a return type — match the platform-method
-    // path (`return_type: None` → `Ty::Undefined`) so consumers can use
-    // a single sentinel for "no return". Codex pair-mode WARN: without
-    // this guard the body-walk would publish the type of a stray
-    // `Возврат X` (which `hir-def::body::lower::stmt` already flags as
-    // a diagnostic) as the procedure's signature return.
+    // path (`return_type: None` → `Ty::Undefined`) so consumers can
+    // use a single sentinel for "no return".
     let return_ty = if !method_symbol.is_function {
         Ty::Undefined
     } else if let Some(docs_return_ty) = docs.and_then(lower_return_from_docs) {
@@ -96,49 +103,28 @@ pub fn proc_signature_query<'db>(
         // instead of second-guessing via body inference).
         docs_return_ty
     } else {
-        // No return section in the docstring — walk the body for
-        // `Возврат X` expressions and union the inferred types.
-        infer_return_from_body(db, method_id)
+        // Phase O.16b: docstring-less return drops to `Ty::Unknown`.
+        // The previous body-walk path (`db.infer(file_id)` →
+        // `expr_types_by_body[Method(local_id)]` → union over
+        // `Stmt::Return`s) was a self-edge through the O.16a
+        // `infer_query` wrapper. Cascade typing recovers the same
+        // precision at the call site via
+        // [`crate::method_graph::method_return_type_query`].
+        Ty::Unknown
     };
 
     Arc::new(ProcSignature { params, return_ty })
 }
 
-/// Walk a method body for every `Stmt::Return { value: Some(_) }` and
-/// union the inferred type of each return-value expression.
+/// Walk a method body for every `Stmt::Return { value: Some(_) }`
+/// and collect the value-bearing expression ids.
 ///
-/// Returns `Ty::Unknown` when:
-/// - the method has no body in `module_bodies` (synthetic / orphan);
-/// - the body has no value-bearing return (procedure shape);
-/// - inference produced no entry for the body (`infer` couldn't run);
-/// - none of the return expressions carries a typed entry.
-///
-/// The `Ty::union` smart constructor handles the singleton-collapse and
-/// `Unknown`-merge — callers do not need to special-case the count.
-fn infer_return_from_body(db: &dyn HirDatabase, method_id: MethodId) -> Ty {
-    let module_bodies = db.module_bodies(method_id.module);
-    let Some(body) = module_bodies.body(method_id.local_id) else {
-        return Ty::Unknown;
-    };
-    let returns = collect_return_value_exprs(body);
-    if returns.is_empty() {
-        return Ty::Unknown;
-    }
-
-    let infer = db.infer(method_id.module.file_id);
-    let owner = DefWithBodyId::Method(method_id.local_id);
-    let Some(body_types) = infer.expr_types_by_body.get(&owner) else {
-        return Ty::Unknown;
-    };
-
-    let types: Vec<Ty> = returns
-        .iter()
-        .map(|expr_id| body_types.get(expr_id).cloned().unwrap_or(Ty::Unknown))
-        .collect();
-    Ty::union(types)
-}
-
-fn collect_return_value_exprs(body: &Body) -> Vec<ExprId> {
+/// Retained under `#[cfg(test)]` after Phase O.16b dropped the
+/// production caller; the local unit tests still exercise the
+/// Stmt::Return walking shape against hand-rolled bodies.
+#[cfg(test)]
+fn collect_return_value_exprs(body: &hir_def::Body) -> Vec<hir_def::ExprId> {
+    use hir_def::{ExprId, IdConversion, Stmt};
     body.stmts_iter()
         .filter_map(|(_, stmt)| match stmt {
             Stmt::Return { value: Some(expr_idx) } => Some(ExprId::from_idx(*expr_idx)),
@@ -199,6 +185,7 @@ fn lower_return_from_docs(docs: &MethodDocs) -> Option<Ty> {
 mod tests {
     use super::*;
     use hir_def::docs::TypeDoc;
+    use hir_def::{Body, ExprId, IdConversion, Stmt};
 
     fn typedoc(name: &str) -> TypeDoc {
         TypeDoc::simple(name.to_string(), None)
