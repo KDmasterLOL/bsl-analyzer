@@ -13,7 +13,7 @@
 //! `db.infer(file_id)` so the wiring is observable via standard
 //! `InferenceResult.var_types` / `expr_types_by_body`.
 
-use hir::{HirDatabase, Ty};
+use hir::{DefDatabase, DefWithBodyId, HirDatabase, ModuleId, Name, Ty};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -143,16 +143,23 @@ fn self_recursion_under_cascade_yields_unknown() {
 
 /// The cascade also fires through `Stmt::Return`: a function `Wrap`
 /// that returns a same-module call to `Inner` must propagate
-/// `Inner`'s body-inferred return type up to `Wrap`. This validates
-/// that the return-statement's expression sees the cascade-typed
-/// `Ty` through `infer_call`.
+/// `Inner`'s body-inferred return type up to `Wrap`'s body.
+///
+/// The assertion is scoped to `Wrap`'s
+/// `DefWithBodyId::Method(local_id)` (Codex O.12 C1) — otherwise a
+/// global "any body has any `Ty::String`" probe would be satisfied
+/// by the literal `"from-inner"` inside `Inner`'s OWN body and the
+/// test would not actually verify the cascade. We assert
+/// `expr_types_by_body[Wrap]` contains a `Ty::String` entry — that
+/// can only come from the call expression `Inner()`, since `Wrap`'s
+/// own body has no string literals.
 #[test]
 fn return_statement_propagates_cascade() {
     let (db, fid) = setup(
         r#"
 //- /test.bsl
 Функция Inner()
-    Возврат 42;
+    Возврат "from-inner";
 КонецФункции
 
 Функция Wrap()
@@ -161,16 +168,28 @@ fn return_statement_propagates_cascade() {
 "#,
     );
 
-    // Walk Wrap's body via `expr_types_by_body` and pick the Return
-    // expression's inferred type. The expr_types map for a body
-    // keyed by `DefWithBodyId::Method(local_id)`; pick whichever
-    // body has a Ty::Number entry (the call `Inner()` should resolve
-    // to Number via the cascade).
+    let symbol_tree = db.symbol_tree(ModuleId::new(fid));
+    let wrap_id = symbol_tree.find_method(&Name::new("Wrap")).expect("Wrap declared").id;
+    let inner_id = symbol_tree.find_method(&Name::new("Inner")).expect("Inner declared").id;
+    let wrap_owner = DefWithBodyId::Method(wrap_id.local_id);
+    let inner_owner = DefWithBodyId::Method(inner_id.local_id);
+
     let result = db.infer(fid);
-    let any_number =
-        result.expr_types_by_body.values().any(|m| m.values().any(|t| matches!(t, Ty::Number)));
+    let wrap_exprs =
+        result.expr_types_by_body.get(&wrap_owner).expect("Wrap's body must have inferred exprs");
+    let inner_exprs =
+        result.expr_types_by_body.get(&inner_owner).expect("Inner's body must have inferred exprs");
+
+    // Sanity: `Wrap` and `Inner` are distinct keys in `expr_types_by_body`.
+    assert_ne!(wrap_owner, inner_owner, "Wrap and Inner must lower to distinct DefWithBodyId");
+    // Inner contains the literal — confirms `expr_types_by_body[Inner]` sees a String.
+    assert!(inner_exprs.values().any(|t| matches!(t, Ty::String)));
+    // The actual cascade assertion: `Wrap`'s OWN body sees the
+    // call-to-`Inner` expression typed `Ty::String` via O.11.
     assert!(
-        any_number,
-        "the call to `Inner()` inside `Wrap`'s body must infer Ty::Number via the O.11 cascade"
+        wrap_exprs.values().any(|t| matches!(t, Ty::String)),
+        "Wrap's body must contain a Ty::String entry for `Inner()` via the O.11 cascade \
+         (entries: {:?})",
+        wrap_exprs.values().collect::<Vec<_>>(),
     );
 }

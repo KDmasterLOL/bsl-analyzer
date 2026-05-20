@@ -2365,6 +2365,15 @@ impl<'db> InferenceContext<'db> {
                 // the docstring-wins precedence: if the resolved
                 // method has an explicit return-type docstring, that
                 // wins over `method_return_type_query` body inference.
+                //
+                // Scope (Codex O.12 C2): this arm surfaces only the
+                // resolved method's RETURN type — it does NOT emit
+                // arity (`MismatchedArgCount`) or argument-binding
+                // diagnostics. The legacy `Ty::Unknown` arm did
+                // not either, so this is no regression; same-module
+                // bare-call argument validation is a separate
+                // follow-up (mirror of `Ty::Function`-arm's
+                // `record_call_arg_binding`/arity checks).
                 if let Some(name) = bare_callee_name.as_ref() {
                     if !self.body_declares_binding(name)
                         && !self.assigned_var_names.contains(&name.as_str().to_lowercase())
