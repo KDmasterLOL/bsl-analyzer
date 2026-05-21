@@ -1,7 +1,7 @@
 # Name-index spike — scope contract
 
-**Status**: scope frozen, not yet started.
-**Branch**: `spike/name-index-salsa-partitioned` (to be created).
+**Status**: completed. Findings folded into `name-index-v6.md` (current plan).
+**Branch**: `spike/name-index-salsa-partitioned`.
 **Effort**: 3-4 days, throwaway code.
 
 ## Why this spike exists

@@ -5,11 +5,10 @@
 
 ## Текущее состояние
 
-На текущий момент в проекте:
+Инвариант текущего состояния:
 
-- **180 диагностик** в `DiagnosticCode`;
-- **180/180 диагностик** имеют metadata в `handlers::get_metadata()`;
-- **180/180 диагностик** имеют rule-документацию в `crates/ide-diagnostics/docs/ru` и `crates/ide-diagnostics/docs/en`.
+- каждый `DiagnosticCode` имеет metadata в `handlers::get_metadata()`;
+- каждый `DiagnosticCode` имеет rule-документацию в `crates/ide-diagnostics/docs/ru` и `crates/ide-diagnostics/docs/en`.
 
 Это подтверждается локальными проверками и тестами в `crates/ide-diagnostics`.
 
@@ -96,5 +95,5 @@ cargo test -p ide-diagnostics docs::tests -- --nocapture
 
 ## Итог
 
-Сейчас metadata-слой можно считать полностью покрытым для всех существующих
-диагностик проекта: **180 кодов, 180 metadata-описаний, 180 документированных правил**.
+Сейчас metadata-слой можно считать полностью покрытым: каждый `DiagnosticCode`
+имеет metadata-описание и rule-документацию.

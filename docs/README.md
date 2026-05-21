@@ -11,14 +11,12 @@
 - Настройка MCP и AI-инструментов: `mcp/README.md`
 - Инструменты MCP и интеграция с 1С: `mcp/TOOLS_AND_EXTENSION.md`
 - Конфигурация диагностик: `configuration/DIAGNOSTICS.md`
-- Аудит диагностик: `diagnostics-audit/README.md`
 
 ## Для пользователей
 
 - `../README.md` — установка и базовые сценарии CLI
 - `configuration/PROJECT_CONFIGURATION.md` — структура `bsl-analyzer.toml`
 - `configuration/DIAGNOSTICS.md` — параметры диагностик и правила включения / отключения
-- `diagnostics-audit/README.md` — последовательный разбор диагностик по алфавиту
 - `METADATA_COMPATIBILITY.md` — ограничения и совместимость загрузки метаданных
 
 ## MCP и AI-интеграции
@@ -45,6 +43,7 @@
 - `architecture/SEARCH_BASELINE_OVERLAY.md` — описание модели `baseline + overlay`
 - `central-postgres-search/README.md` — набор документов по централизованному поиску в PostgreSQL
 
-Плановые документы и roadmap-файлы из репозитория удалены; в `docs/` остаются
-только справочные материалы и архитектурные заметки, которые полезны для
-текущего состояния проекта.
+## Roadmap и плановые документы
+
+- `roadmap/README.md` — индекс активных направлений
+- `roadmap/type-inference.md`, `roadmap/lsp-features.md`, `roadmap/workspace-symbols.md`, `roadmap/streaming-mode.md`, `roadmap/name-index*.md` — текущие планы по фичам и инфраструктуре

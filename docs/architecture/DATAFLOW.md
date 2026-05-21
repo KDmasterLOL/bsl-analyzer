@@ -89,9 +89,6 @@ collector.
 - `MissingTemporaryFileDeletion`
 - `MissingTempStorageDeletion`
 
-Это важно для документации: формулировка «framework использует только одна
-диагностика» больше неактуальна.
-
 ## Конфигурация
 
 У dataflow есть один ключевой runtime-параметр:

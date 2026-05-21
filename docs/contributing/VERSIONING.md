@@ -42,7 +42,7 @@ cargo build --release  # проверить сборку
 git add Cargo.toml Cargo.lock
 git commit -m "chore: bump version to 0.1.<next>"
 git tag v0.1.<next>
-git push origin main --tags
+git push origin develop --tags
 ```
 
 ## Зависимости
@@ -56,5 +56,5 @@ git push origin main --tags
 ```toml
 [workspace.dependencies]
 rowan = "=0.16.1"       # Закреплено
-salsa = "0.25.2"        # Разрешены patch-обновления
+salsa = "0.26"          # Разрешены patch-обновления
 ```

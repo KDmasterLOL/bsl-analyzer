@@ -1,6 +1,6 @@
 # Persistent workspace name-index (plan v3)
 
-**Status:** plan, awaiting third Codex pass.
+**Status:** superseded by `name-index-v6.md`. Kept for historical context.
 **Owner:** TBD.
 **Drives:** lazy-text-loading (separate plan, blocked on this).
 
