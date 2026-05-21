@@ -21,6 +21,7 @@
 mod config;
 mod engine;
 mod indent;
+mod ir;
 mod on_type;
 mod whitespace;
 
