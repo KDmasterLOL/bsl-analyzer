@@ -447,7 +447,6 @@ fn test_procedure_statement_without_semicolon() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "fixme(formatter): inserts space after UTF-8 BOM on first line"]
 fn regression_bom_first_line_preserved() {
     check(
         "\u{FEFF}//comment\nПерем А Экспорт;\n",
@@ -489,7 +488,6 @@ fn regression_no_space_before_index() {
 }
 
 #[test]
-#[ignore = "fixme(formatter): edits whitespace inside multi-line string literals (SDBL `|` lines)"]
 fn regression_multiline_string_literal_preserved() {
     // The string content — including the `|` continuation lines — must be
     // emitted byte-for-byte. Only the surrounding statement gets re-indented.
@@ -513,7 +511,6 @@ fn regression_multiline_string_literal_preserved() {
 }
 
 #[test]
-#[ignore = "fixme(formatter): drops space after `+` and indent of `+`-continuation lines"]
 fn regression_binary_plus_line_continuation_preserved() {
     // The newline before `+` is user-authored. Formatter must not collapse it,
     // must not glue `+":"`, must preserve the space after the operator.

@@ -3,11 +3,9 @@
 //! Traverses the syntax tree and produces formatted output.
 
 use lexer::{tokenize, TokenKind};
-use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
+use syntax::{SyntaxNode, TextRange, TextSize};
 
 use super::config::FormattingConfig;
-use super::indent::{calculate_base_indent, IndentState};
-use super::whitespace::normalize_line_whitespace;
 
 /// Information about tokens in a line for formatting decisions.
 pub(crate) struct LineTokens {
@@ -60,7 +58,10 @@ pub fn format_file(root: &SyntaxNode, config: &FormattingConfig) -> FormattingRe
     FormattingResult { text: formatted, edits }
 }
 
-/// Formats a range within a BSL file.
+/// Formats a range within a BSL file via the IR pipeline. Strategy: format
+/// the whole document, then slice the result to the line-aligned source
+/// range. The IR pipeline preserves line count (each source line maps to
+/// one output line) so the slice is well-defined.
 pub fn format_range(
     root: &SyntaxNode,
     range: TextRange,
@@ -68,51 +69,38 @@ pub fn format_range(
 ) -> FormattingResult {
     let text = root.text().to_string();
 
-    // Find line boundaries by scanning the text directly (handles both LF and CRLF)
     let line_ranges = compute_line_ranges(&text);
     if line_ranges.is_empty() {
         return FormattingResult { text: text.clone(), edits: vec![] };
     }
 
-    // Find lines that intersect with the range
-    let range_start_usize = u32::from(range.start()) as usize;
-    let range_end_usize = u32::from(range.end()) as usize;
-
-    let start_line = line_ranges
-        .iter()
-        .position(|(start, end)| range_start_usize >= *start && range_start_usize <= *end)
-        .unwrap_or(0);
-
+    let range_start = u32::from(range.start()) as usize;
+    let range_end = u32::from(range.end()) as usize;
+    let start_line =
+        line_ranges.iter().position(|(s, e)| range_start >= *s && range_start <= *e).unwrap_or(0);
     let end_line = line_ranges
         .iter()
-        .position(|(start, end)| range_end_usize >= *start && range_end_usize <= *end)
+        .position(|(s, e)| range_end >= *s && range_end <= *e)
         .unwrap_or(line_ranges.len().saturating_sub(1));
 
-    // Get the actual byte range for the selected lines
-    let (line_start_offset, _) = line_ranges[start_line];
-    let (_, line_end_offset) = line_ranges[end_line];
+    let (src_start, _) = line_ranges[start_line];
+    let (_, src_end) = line_ranges[end_line];
+    let source_slice = &text[src_start..src_end];
 
-    // Extract the text for the selected lines
-    let range_text = &text[line_start_offset..line_end_offset];
+    let formatted_full = format_text_via_ir(&text, root, config);
+    let fmt_line_ranges = compute_line_ranges(&formatted_full);
+    let (fmt_start, _) = fmt_line_ranges.get(start_line).copied().unwrap_or((src_start, src_end));
+    let (_, fmt_end) = fmt_line_ranges.get(end_line).copied().unwrap_or((src_start, src_end));
+    let formatted_slice = &formatted_full[fmt_start..fmt_end];
 
-    // Calculate base indent from context (parent blocks)
-    let base_indent = calculate_indent_at_offset(root, TextSize::from(line_start_offset as u32));
-
-    let formatted_range = format_lines(range_text, base_indent, config);
-
-    // Compute edits only for the range
-    let actual_range = TextRange::new(
-        TextSize::from(line_start_offset as u32),
-        TextSize::from(line_end_offset as u32),
-    );
-
-    if formatted_range != range_text {
-        FormattingResult {
-            text: formatted_range.clone(),
-            edits: vec![TextEdit { range: actual_range, new_text: formatted_range }],
-        }
-    } else {
-        FormattingResult { text: range_text.to_string(), edits: vec![] }
+    if formatted_slice == source_slice {
+        return FormattingResult { text: source_slice.to_string(), edits: vec![] };
+    }
+    let actual_range =
+        TextRange::new(TextSize::from(src_start as u32), TextSize::from(src_end as u32));
+    FormattingResult {
+        text: formatted_slice.to_string(),
+        edits: vec![TextEdit { range: actual_range, new_text: formatted_slice.to_string() }],
     }
 }
 
@@ -142,53 +130,49 @@ fn compute_line_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Formats text using line-based approach (similar to RDT1C).
+/// Formats text via the IR pipeline (Phase 2). String literals, BOM, and
+/// `+`-style line continuations are preserved by construction. Adds the
+/// final newline if [`FormattingConfig::insert_final_newline`] is set.
 fn format_text(text: &str, root: &SyntaxNode, config: &FormattingConfig) -> String {
-    let base_indent = calculate_base_indent(text);
-    let mut state = IndentState::with_base(base_indent);
-    let mut result = String::with_capacity(text.len());
-
-    // Detect line ending style from the original text
-    let line_ending = detect_line_ending(text);
-
-    let mut lines = text.lines().peekable();
-
-    while let Some(line) = lines.next() {
-        let formatted_line = format_line(line, &mut state, root, config);
-        result.push_str(&formatted_line);
-
-        if lines.peek().is_some() {
-            result.push_str(line_ending);
-        }
+    let mut out = format_text_via_ir(text, root, config);
+    if config.insert_final_newline && !out.is_empty() && !out.ends_with('\n') {
+        out.push_str(detect_line_ending(text));
     }
-
-    // Handle final newline
-    if config.insert_final_newline && !result.ends_with('\n') && !result.is_empty() {
-        result.push_str(line_ending);
-    }
-
-    result
+    out
 }
 
-/// Formats lines with a given base indent.
-fn format_lines(text: &str, base_indent: u32, config: &FormattingConfig) -> String {
-    let mut state = IndentState::with_base(base_indent);
-    let mut result = String::with_capacity(text.len());
-
-    // Detect line ending style from the original text
+/// Core IR pipeline shared by `format_text` and `format_range`. Skips
+/// `insert_final_newline` so that callers can slice the output without
+/// shifting line indices.
+fn format_text_via_ir(text: &str, root: &SyntaxNode, config: &FormattingConfig) -> String {
+    let ir = super::ir::Ir::build(root);
+    let decisions = super::ir::apply_policy(&ir, config, 0);
     let line_ending = detect_line_ending(text);
+    let mut out = super::ir::render_with_line_ending(&ir, &decisions, config, line_ending);
+    if config.trim_trailing_whitespace {
+        out = trim_trailing_whitespace_per_line(&out, line_ending);
+    }
+    out
+}
 
-    let mut lines = text.lines().peekable();
-
-    while let Some(line) = lines.next() {
-        let formatted_line = format_line_simple(line, &mut state, config);
-        result.push_str(&formatted_line);
-
-        if lines.peek().is_some() {
+/// Strips trailing horizontal whitespace from each line. Blank lines —
+/// whose *only* content is leading whitespace — are kept verbatim so
+/// re-indented blank lines inside a block don't collapse to width zero.
+fn trim_trailing_whitespace_per_line(s: &str, line_ending: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut first = true;
+    for line in s.split(line_ending) {
+        if !first {
             result.push_str(line_ending);
         }
+        first = false;
+        if line.chars().all(|c| c == ' ' || c == '\t') {
+            // Blank-but-indented line: keep the indent as content.
+            result.push_str(line);
+        } else {
+            result.push_str(line.trim_end_matches([' ', '\t']));
+        }
     }
-
     result
 }
 
@@ -200,82 +184,6 @@ fn detect_line_ending(text: &str) -> &'static str {
     } else {
         "\n"
     }
-}
-
-/// Formats a single line.
-fn format_line(
-    line: &str,
-    state: &mut IndentState,
-    _root: &SyntaxNode,
-    config: &FormattingConfig,
-) -> String {
-    format_line_simple(line, state, config)
-}
-
-/// Formats a single line without AST context.
-fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingConfig) -> String {
-    let trimmed = line.trim();
-
-    // Empty line - output indent to match 1C Configurator behavior
-    if trimmed.is_empty() {
-        let indent_level = state.total();
-        return config.indent_for_level(indent_level);
-    }
-
-    // Analyze tokens in the line
-    let tokens = analyze_line_tokens(trimmed);
-
-    // Check for block end keywords (КонецПроцедуры, КонецЕсли, etc.)
-    let is_block_end = is_line_block_end(&tokens);
-    let is_middle = is_line_middle_keyword(&tokens);
-    let is_block_start = is_line_block_start(&tokens);
-
-    // Adjust indent for current line
-    if is_block_end {
-        state.leave_block();
-    } else if is_middle {
-        state.set_current_offset(-1);
-    }
-
-    // Calculate indent for this line
-    let indent_level = state.total();
-    let indent = config.indent_for_level(indent_level);
-
-    // Normalize whitespace within the content (spaces around operators, etc.)
-    let normalized = normalize_line_whitespace(trimmed, config);
-    let content = if config.trim_trailing_whitespace { normalized.trim_end() } else { &normalized };
-
-    // Update state for next line
-    state.reset_current_offset();
-
-    // For block-starting keywords (Процедура, Если...Тогда, etc.) increase indent
-    // But NOT for middle keywords (Иначе, Исключение) - they don't increase indent,
-    // the content after them should be at the same level as content after their parent block start
-    if is_block_start && !is_middle && !has_block_end(&tokens) {
-        state.enter_block();
-    }
-
-    // Track parentheses for continuation (token-based, ignores parens inside strings)
-    // Only unclosed parentheses trigger continuation indent
-    let all_tokens = tokenize(trimmed);
-    let open_parens = all_tokens.iter().filter(|t| t.kind == TokenKind::LParen).count();
-    let close_parens = all_tokens.iter().filter(|t| t.kind == TokenKind::RParen).count();
-    if open_parens > close_parens {
-        state.enter_expression();
-    } else if close_parens > open_parens {
-        state.leave_expression();
-    }
-
-    // Reset expression on semicolon or block keywords
-    let is_comment_only = tokens.first.is_none();
-    if !is_comment_only {
-        let ends_with_semicolon = matches!(tokens.last, Some(TokenKind::Semicolon));
-        if ends_with_semicolon || is_block_start || is_block_end {
-            state.reset_expression();
-        }
-    }
-
-    format!("{}{}", indent, content)
 }
 
 /// Checks if the first token is a block-ending keyword.
@@ -407,45 +315,6 @@ pub(crate) fn is_line_block_start(tokens: &LineTokens) -> bool {
     }
 
     false
-}
-
-/// Checks if a block ends on the same line (e.g., `Если А Тогда Б КонецЕсли`).
-fn has_block_end(tokens: &LineTokens) -> bool {
-    // We check last token, but actually need to scan all tokens
-    // For simplicity, this is a heuristic - if line ends with block end keyword
-    matches!(
-        tokens.last,
-        Some(TokenKind::KwEndIf) | Some(TokenKind::KwEndDo) | Some(TokenKind::KwEndTry)
-    )
-}
-
-/// Calculates indent level at a given offset by analyzing parent nodes.
-fn calculate_indent_at_offset(root: &SyntaxNode, offset: TextSize) -> u32 {
-    let mut indent = 0u32;
-
-    // Find the token at offset
-    if let Some(token) = root.token_at_offset(offset).right_biased() {
-        let mut node = token.parent();
-        while let Some(parent) = node {
-            match parent.kind() {
-                SyntaxKind::PROCEDURE_DEF
-                | SyntaxKind::FUNCTION_DEF
-                | SyntaxKind::IF_STMT
-                | SyntaxKind::WHILE_STMT
-                | SyntaxKind::FOR_STMT
-                | SyntaxKind::FOR_EACH_STMT
-                | SyntaxKind::TRY_STMT
-                | SyntaxKind::PRE_REGION_DIR
-                | SyntaxKind::PRE_IF_DIR => {
-                    indent += 1;
-                }
-                _ => {}
-            }
-            node = parent.parent();
-        }
-    }
-
-    indent
 }
 
 /// Computes minimal text edits between original and formatted text.

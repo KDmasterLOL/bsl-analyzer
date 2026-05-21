@@ -1,8 +1,8 @@
-// Phase 2 of the formatter is landing as a sequence of self-contained
-// commits. This module is the foundation (build + render + boundary-gap
-// invariant); the policy and engine wiring follow. Until those land, the
-// items below are reachable only from unit tests, so suppress dead-code
-// warnings for the whole module rather than scatter narrow allows.
+// Several public items here are deliberately broader than the engine
+// currently consumes — `Atom.range`/`Gap.range` for future TextEdit
+// computation in range formatting, `render` as the LF default wrapper,
+// `apply_policy_preserve_all` as a round-trip baseline used by tests. Keep
+// them visible without scattering narrow `#[allow]` attributes.
 #![allow(dead_code)]
 
 //! Token-level IR for the BSL formatter (Phase 2 architecture).
@@ -146,7 +146,16 @@ impl Ir {
                         pending_text.push_str(token.text());
                     } else {
                         flush_gap(&mut gaps, &mut pending_start, &mut pending_text, range.start());
-                        atoms.push(Atom { kind, range, text: token.text().to_string() });
+                        // The lexer's `//[^\n]*` regex greedily eats `\r`
+                        // before `\r\n`, so COMMENT tokens in CRLF files
+                        // carry a trailing `\r`. Strip it: `\r` is line-
+                        // ending whitespace, not comment content.
+                        let text = if kind == SyntaxKind::COMMENT {
+                            token.text().trim_end_matches('\r').to_string()
+                        } else {
+                            token.text().to_string()
+                        };
+                        atoms.push(Atom { kind, range, text });
                         // Every non-root token has a parent in a valid CST.
                         atom_nodes
                             .push(token.parent().expect("token without parent in syntax tree"));
@@ -262,13 +271,17 @@ fn decide_newline_gap(ir: &Ir, gap_index: usize, gap_text: &str) -> GapDecision 
     }
 
     let next_kind = ir.atoms[gap_index].kind;
-    let raw_depth = block_depth(next_node);
-    // Body indent (blank lines between statements) stays at the inner
-    // block's level. The final indent additionally drops one level for
-    // block-boundary keywords (`КонецПроцедуры`, `Иначе`, …).
-    let body_level = raw_depth;
-    let final_level =
-        if is_block_boundary_keyword(next_kind) { raw_depth.saturating_sub(1) } else { raw_depth };
+    // Body indent (blank lines between statements) sits at the LCA's
+    // depth — the depth where the blank lines visually live. Final indent
+    // is the next atom's own depth, dropped by one for block-boundary
+    // keywords (`КонецПроцедуры`, `Иначе`, …).
+    let body_level = block_depth(&lca);
+    let next_depth = block_depth(next_node);
+    let final_level = if is_block_boundary_keyword(next_kind) {
+        next_depth.saturating_sub(1)
+    } else {
+        next_depth
+    };
     let newlines = count_newlines(gap_text);
     GapDecision::NewlineWithIndent { newlines, body_level, final_level }
 }
@@ -290,6 +303,20 @@ fn decide_inline_gap(
 
     if prev_was_unary {
         return GapDecision::None;
+    }
+
+    // UTF-8 BOM is file-leading metadata, never separated from the first
+    // content token. Without this the `next == COMMENT` rule below would
+    // synthesize a space between `\u{FEFF}` and `//...`.
+    if prev == SyntaxKind::BOM {
+        return GapDecision::None;
+    }
+
+    // Trailing inline comment (`КонецФункции\t\t// note` → `КонецФункции // note`):
+    // collapse any horizontal whitespace before a same-line comment to one
+    // space. Comments on their own line are reached via the newline path.
+    if next == SyntaxKind::COMMENT {
+        return GapDecision::OneSpace;
     }
 
     let comma_after_comma = prev == SyntaxKind::COMMA && next == SyntaxKind::COMMA;
@@ -417,9 +444,22 @@ fn block_depth(node: &SyntaxNode) -> u32 {
         .count() as u32
 }
 
-/// Render the IR to a string. Atoms are emitted verbatim; each gap is
-/// emitted per its [`GapDecision`].
+/// Render the IR to a string with LF (`"\n"`) line endings. See
+/// [`render_with_line_ending`] for CRLF support.
 pub fn render(ir: &Ir, decisions: &[GapDecision], cfg: &FormattingConfig) -> String {
+    render_with_line_ending(ir, decisions, cfg, "\n")
+}
+
+/// Render the IR using the given `line_ending` (typically `"\n"` or
+/// `"\r\n"`). The line ending is emitted whenever the policy synthesizes
+/// a newline via [`GapDecision::NewlineWithIndent`]. Preserved gaps keep
+/// whatever newline bytes the source contained.
+pub fn render_with_line_ending(
+    ir: &Ir,
+    decisions: &[GapDecision],
+    cfg: &FormattingConfig,
+    line_ending: &str,
+) -> String {
     assert_eq!(
         decisions.len(),
         ir.gaps.len(),
@@ -429,16 +469,21 @@ pub fn render(ir: &Ir, decisions: &[GapDecision], cfg: &FormattingConfig) -> Str
     );
 
     let mut out = String::new();
-    // Interleave: gap[0] atom[0] gap[1] atom[1] ... atom[n-1] gap[n].
-    emit_gap(&mut out, &ir.gaps[0], &decisions[0], cfg);
+    emit_gap(&mut out, &ir.gaps[0], &decisions[0], cfg, line_ending);
     for (i, atom) in ir.atoms.iter().enumerate() {
         out.push_str(&atom.text);
-        emit_gap(&mut out, &ir.gaps[i + 1], &decisions[i + 1], cfg);
+        emit_gap(&mut out, &ir.gaps[i + 1], &decisions[i + 1], cfg, line_ending);
     }
     out
 }
 
-fn emit_gap(out: &mut String, gap: &Gap, decision: &GapDecision, cfg: &FormattingConfig) {
+fn emit_gap(
+    out: &mut String,
+    gap: &Gap,
+    decision: &GapDecision,
+    cfg: &FormattingConfig,
+    line_ending: &str,
+) {
     match decision {
         GapDecision::Preserve => out.push_str(&gap.text),
         GapDecision::None => {}
@@ -448,7 +493,7 @@ fn emit_gap(out: &mut String, gap: &Gap, decision: &GapDecision, cfg: &Formattin
             let final_indent = cfg.indent_for_level(*final_level);
             let n = *newlines;
             for k in 0..n {
-                out.push('\n');
+                out.push_str(line_ending);
                 if k + 1 < n {
                     out.push_str(&body_indent);
                 } else {
