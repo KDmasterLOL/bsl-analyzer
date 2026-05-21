@@ -157,7 +157,7 @@ enum Commands {
         file: PathBuf,
 
         /// Write formatted output back to file (default: print to stdout)
-        #[arg(short = 'w', long)]
+        #[arg(short = 'w', long, conflicts_with = "check")]
         write: bool,
 
         /// Use spaces instead of tabs (default: tabs)
@@ -167,6 +167,11 @@ enum Commands {
         /// Number of spaces per indent level (default: 4, only with --spaces)
         #[arg(long, default_value = "4")]
         indent_size: u32,
+
+        /// Check whether the file is already formatted. Exits 0 if yes,
+        /// 1 if it would be reformatted. Does not print or write output.
+        #[arg(long)]
+        check: bool,
     },
 
     /// Start LSP server (default)
@@ -729,8 +734,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             diff_filter,
         ),
         Some(Commands::CheckConfig { config }) => check_config(config),
-        Some(Commands::Format { file, write, spaces, indent_size }) => {
-            run_format(file, write, spaces, indent_size)
+        Some(Commands::Format { file, write, spaces, indent_size, check }) => {
+            run_format(file, write, spaces, indent_size, check)
         }
         Some(Commands::Mcp { command }) => run_mcp_command(command),
         Some(Commands::Extension { command }) => run_extension_command(command),
@@ -4096,6 +4101,7 @@ fn run_format(
     write: bool,
     spaces: bool,
     indent_size: u32,
+    check: bool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use ide::formatting::{format_file, FormattingConfig};
     use std::time::Instant;
@@ -4104,13 +4110,17 @@ fn run_format(
     let file_size = content.len();
     let line_count = content.lines().count();
 
-    eprintln!("Formatting: {:?}", file);
-    eprintln!("File size: {} bytes, {} lines", file_size, line_count);
+    if !check {
+        eprintln!("Formatting: {:?}", file);
+        eprintln!("File size: {} bytes, {} lines", file_size, line_count);
+    }
 
     let start = Instant::now();
     let parsed = parser::parse(&content);
     let parse_time = start.elapsed();
-    eprintln!("Parse time: {:?}", parse_time);
+    if !check {
+        eprintln!("Parse time: {:?}", parse_time);
+    }
 
     let root = parsed.syntax_node();
 
@@ -4123,8 +4133,18 @@ fn run_format(
     let start = Instant::now();
     let result = format_file(&root, &config);
     let format_time = start.elapsed();
-    eprintln!("Format time: {:?}", format_time);
-    eprintln!("Total time: {:?}", parse_time + format_time);
+    if !check {
+        eprintln!("Format time: {:?}", format_time);
+        eprintln!("Total time: {:?}", parse_time + format_time);
+    }
+
+    if check {
+        if result.text == content {
+            return Ok(());
+        }
+        eprintln!("would reformat: {}", file.display());
+        std::process::exit(1);
+    }
 
     if write {
         fs::write(&file, &result.text)?;
