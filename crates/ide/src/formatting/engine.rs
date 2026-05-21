@@ -54,12 +54,17 @@ pub fn format_range(
 
     let range_start = u32::from(range.start()) as usize;
     let range_end = u32::from(range.end()) as usize;
-    let start_line =
-        line_ranges.iter().position(|(s, e)| range_start >= *s && range_start <= *e).unwrap_or(0);
-    let end_line = line_ranges
-        .iter()
-        .position(|(s, e)| range_end >= *s && range_end <= *e)
-        .unwrap_or(line_ranges.len().saturating_sub(1));
+    // Map byte offsets to 0-based line indices by counting `\n` before
+    // the offset. Robust on boundary bytes: an offset that lands ON a
+    // `\n` byte counts as belonging to the line that ends with it; the
+    // `position`-on-`compute_line_ranges` lookup would have failed there
+    // (line ranges exclude `\n`/`\r` bytes) and clamped to `last_line`,
+    // which exploded the formatted span to "from start_line to EOF".
+    let start_line = line_for_offset(&source, range_start);
+    let end_line = line_for_offset(&source, range_end);
+    let last_idx = line_ranges.len().saturating_sub(1);
+    let start_line = start_line.min(last_idx);
+    let end_line = end_line.min(last_idx).max(start_line);
 
     let (src_start, _) = line_ranges[start_line];
     let (_, src_end) = line_ranges[end_line];
@@ -95,6 +100,15 @@ fn render_full(
 
 fn convert_edits(edits: Vec<super::ir::GapEdit>) -> Vec<TextEdit> {
     edits.into_iter().map(|e| TextEdit { range: e.range, new_text: e.new_text }).collect()
+}
+
+/// 0-based line index of the byte at `offset` in `text`. An offset that
+/// falls ON a `\n` is treated as belonging to the line that newline ends
+/// (so `offset == \n_byte_of_line_K` returns `K`). Boundary-safe; clamps
+/// to the last line if the offset exceeds `text.len()`.
+fn line_for_offset(text: &str, offset: usize) -> usize {
+    let bounded = offset.min(text.len());
+    text.as_bytes()[..bounded].iter().filter(|&&b| b == b'\n').count()
 }
 
 fn ranges_overlap(a: TextRange, b: TextRange) -> bool {

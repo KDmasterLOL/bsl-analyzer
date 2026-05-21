@@ -793,6 +793,61 @@ fn range_unaligned_offset_snaps_to_lines() {
 }
 
 #[test]
+fn range_end_on_newline_does_not_leak_edits_to_eof() {
+    // Regression: when the requested range ends ON a `\n` byte (typical
+    // for Shift+V line selections in CRLF files — nvim's encoder snaps
+    // the end position to the line-ending byte), the line lookup used to
+    // fail and clamp `end_line` to the last line of the file, leaking
+    // edits across the whole document.
+    use syntax::{TextRange, TextSize};
+    let mut src = String::new();
+    // Build a 30-line file with stable header, malformed middle (to trigger
+    // edits there), and stable tail. All CRLF.
+    src.push_str("Процедура Т()\r\n");
+    for i in 0..10 {
+        src.push_str(&format!("\tА{i} = 1;\r\n"));
+    }
+    // Middle: badly-indented lines that the formatter will reshape.
+    let mid_start = src.len();
+    for i in 0..5 {
+        src.push_str(&format!("Б{i}=2;\r\n"));
+    }
+    let mid_end = src.len();
+    for i in 0..10 {
+        src.push_str(&format!("\tВ{i} = 3;\r\n"));
+    }
+    src.push_str("КонецПроцедуры\r\n");
+
+    let parsed = parser::parse(&src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+
+    // Select only the middle block, ending the range on the `\n` of its
+    // last line (the byte right before mid_end is `\n` in CRLF).
+    let range =
+        TextRange::new(TextSize::from(mid_start as u32), TextSize::from((mid_end - 1) as u32));
+    let result = super::engine::format_range(&root, range, &config);
+
+    // Every edit's range must lie within the lines covered by the
+    // request (mid_start..mid_end). The historical bug emitted edits up
+    // to the end of the file.
+    for edit in &result.edits {
+        let start = u32::from(edit.range.start()) as usize;
+        let end = u32::from(edit.range.end()) as usize;
+        assert!(
+            end <= mid_end + 2, /* generous for line-ending bytes */
+            "edit {:?} reaches past the requested span (mid_end={mid_end})",
+            edit
+        );
+        assert!(
+            start + 1 >= mid_start,
+            "edit {:?} starts before the requested span (mid_start={mid_start})",
+            edit
+        );
+    }
+}
+
+#[test]
 fn range_idempotent_on_already_formatted() {
     // Formatting a range of already-formatted text yields no edits.
     let src = "Процедура Т()\n\tА = 1;\nКонецПроцедуры\n";
