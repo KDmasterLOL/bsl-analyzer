@@ -1308,24 +1308,17 @@ fn column_or_function(p: &mut Parser) {
                 break;
             }
 
-            // Check if this Ident is actually a SDBL reserved word that
-            // cannot be a column name in this position. SDBL keywords are
-            // lex'd as `Ident` and must be filtered by text here.
-            //
-            // `is_clause_keyword` covers `FROM/WHERE/GROUP/...`.
-            // `AS/КАК` is an alias keyword — when the user is mid-edit at
-            // `Field. КАК Alias`, treating `КАК` as the field name swallows
-            // the alias and the rest of the SELECT into an `ERROR` span,
-            // collapsing completion. `ASC/DESC/ВОЗР/УБЫВ` are sort
-            // direction keywords with the same hazard inside `ORDER BY`.
-            // (BSL parallel: `crates/parser/src/grammar/expressions.rs`
+            // SDBL keywords are lex'd as `Ident` and must be filtered by
+            // text in the post-DOT column slot. See
+            // `is_likely_clause_start_after_dot` for the curated denylist
+            // (clause / alias / sort / CASE-frame / predicate keywords)
+            // and the rationale for what is NOT in it
+            // (`Ссылка`/`Сумма`/operator tokens stay valid as column
+            // names). BSL parallel:
+            // `crates/parser/src/grammar/expressions.rs`'s
             // `PROPERTY_NAME_TOKENS` excludes block terminators for the
-            // same reason at the token-kind layer.)
-            if super::select::is_clause_keyword(p)
-                || super::select::at_sdbl_keyword(p, "AS", "КАК")
-                || super::select::at_sdbl_keyword(p, "ASC", "ВОЗР")
-                || super::select::at_sdbl_keyword(p, "DESC", "УБЫВ")
-            {
+            // same reason at the token-kind layer.
+            if super::select::is_likely_clause_start_after_dot(p) {
                 // Incomplete: "Table.\nFROM" / "Table. КАК Alias" - don't
                 // consume the keyword as field name.
                 let err = p.start();
