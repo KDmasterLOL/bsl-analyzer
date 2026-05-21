@@ -204,10 +204,16 @@ pub fn apply_policy(ir: &Ir, cfg: &FormattingConfig, _initial_indent: u32) -> Ve
         } else {
             decide_inline_gap(prev_kind, next_kind, prev_was_unary, cfg)
         };
+        // A newline gap whose LCA is a statement-boundary container starts
+        // a new statement. The next atom is then at "start of statement"
+        // for the `+`/`-` unary heuristic, even though its raw predecessor
+        // (`;`, `Тогда`, `Иначе`, …) isn't in the unary list.
+        let crossed_stmt_boundary = matches!(decision, GapDecision::NewlineWithIndent { .. });
         decisions.push(decision);
 
         prev_was_unary = if i < ir.atoms.len() {
-            let prev_prev_kind = if i == 0 { None } else { Some(ir.atoms[i - 1].kind) };
+            let prev_prev_kind =
+                if i == 0 || crossed_stmt_boundary { None } else { Some(ir.atoms[i - 1].kind) };
             super::whitespace::is_likely_unary(ir.atoms[i].kind, prev_prev_kind)
         } else {
             false
@@ -706,6 +712,46 @@ mod tests {
         // Both atoms surrounding the newline are in the same assignment
         // statement → expression continuation → user indent kept.
         let src = "а = \"foo\"\n\t\t+ \": \" + б;";
+        assert_eq!(format_via_policy(src), src);
+    }
+
+    // ----- Cross-newline unary/binary `+`/`-` classification -----
+
+    #[test]
+    fn policy_unary_plus_after_return_across_newline() {
+        // `Возврат\n+ А;` parses as one return statement (`+ А` is the
+        // return expression). The newline gap is expression-continuation,
+        // so the user's indent on the `+` line is preserved (zero here),
+        // and the unary classification (KW_RETURN is in the unary list)
+        // collapses `+ А` to `+А`.
+        let src = "Процедура Т()\nВозврат\n+ А;\nКонецПроцедуры";
+        let expected = "Процедура Т()\n\tВозврат\n+А;\nКонецПроцедуры";
+        assert_eq!(format_via_policy(src), expected);
+    }
+
+    #[test]
+    fn policy_unary_plus_after_semicolon_across_newline() {
+        // `+ А;` is its own statement; `+` after `;` should classify as
+        // unary (start of new expression).
+        let src = "Процедура Т()\nБ = 1;\n+ А;\nКонецПроцедуры";
+        let expected = "Процедура Т()\n\tБ = 1;\n\t+А;\nКонецПроцедуры";
+        assert_eq!(format_via_policy(src), expected);
+    }
+
+    #[test]
+    fn policy_unary_plus_after_then_across_newline() {
+        // `Тогда\n+ Б;` — `+` opens body, unary on Б.
+        let src = "Если А Тогда\n+ Б;\nКонецЕсли;";
+        let expected = "Если А Тогда\n\t+Б;\nКонецЕсли;";
+        assert_eq!(format_via_policy(src), expected);
+    }
+
+    #[test]
+    fn policy_binary_plus_continuation_across_newline() {
+        // Inside a single assignment statement, `+` is binary continuation.
+        // The newline is expression-continuation (preserved), and the in-
+        // line spacing around `+` is binary (one space each side).
+        let src = "а = 1\n\t\t+ б;";
         assert_eq!(format_via_policy(src), src);
     }
 
