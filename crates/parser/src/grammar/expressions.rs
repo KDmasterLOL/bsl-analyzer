@@ -4,56 +4,56 @@ use lexer::TokenKind;
 
 use crate::event::NodeKind;
 use crate::parser::{CompletedMarker, Parser};
+use crate::token_set::TokenSet;
 
-/// Checks if current token is an identifier or keyword (keywords can be property names in BSL)
-fn is_ident_or_keyword(p: &Parser) -> bool {
-    matches!(
-        p.current(),
-        Some(TokenKind::Ident)
-            // All keywords can be used as property/method names after dot in BSL
-            // e.g. Поток.Перейти(), Объект.Для, Объект.Новый
-            | Some(TokenKind::KwProcedure)
-            | Some(TokenKind::KwEndProcedure)
-            | Some(TokenKind::KwFunction)
-            | Some(TokenKind::KwEndFunction)
-            | Some(TokenKind::KwExport)
-            | Some(TokenKind::KwVal)
-            | Some(TokenKind::KwIf)
-            | Some(TokenKind::KwThen)
-            | Some(TokenKind::KwElsIf)
-            | Some(TokenKind::KwElse)
-            | Some(TokenKind::KwEndIf)
-            | Some(TokenKind::KwFor)
-            | Some(TokenKind::KwEach)
-            | Some(TokenKind::KwIn)
-            | Some(TokenKind::KwTo)
-            | Some(TokenKind::KwWhile)
-            | Some(TokenKind::KwDo)
-            | Some(TokenKind::KwEndDo)
-            | Some(TokenKind::KwReturn)
-            | Some(TokenKind::KwContinue)
-            | Some(TokenKind::KwBreak)
-            | Some(TokenKind::KwGoto)
-            | Some(TokenKind::KwTry)
-            | Some(TokenKind::KwExcept)
-            | Some(TokenKind::KwEndTry)
-            | Some(TokenKind::KwRaise)
-            | Some(TokenKind::KwVar)
-            | Some(TokenKind::KwNew)
-            | Some(TokenKind::KwExecute)
-            | Some(TokenKind::KwAddHandler)
-            | Some(TokenKind::KwRemoveHandler)
-            | Some(TokenKind::KwAsync)
-            | Some(TokenKind::KwAwait)
-            | Some(TokenKind::KwAnd)
-            | Some(TokenKind::KwOr)
-            | Some(TokenKind::KwNot)
-            | Some(TokenKind::KwTrue)
-            | Some(TokenKind::KwFalse)
-            | Some(TokenKind::KwUndefined)
-            | Some(TokenKind::KwNull)
-    )
-}
+/// Tokens accepted as the property/method name after `.` in a field- or
+/// call-expression.
+///
+/// Mirrors rust-analyzer's `PATH_NAME_REF_KINDS` pattern: a strict
+/// position-specific allowlist instead of "everything except some
+/// keywords". Block terminators (`КонецФункции`, `КонецЕсли`, ...) and
+/// statement starters (`Функция`, `Возврат`, ...) are NOT accepted —
+/// consuming them as a property name destroys parser recovery: the
+/// enclosing block fails to close and downstream declarations vanish
+/// from the symbol tree (see
+/// `crates/ide/tests/completion_value_collections.rs::completion_after_dot_on_local_from_same_module_fn_value_table_callee_below`
+/// for the canonical regression).
+///
+/// Curated keyword whitelist comes from a `platform_data.json` audit:
+/// only keywords that are documented members of platform types.
+/// Counts at audit time:
+/// * `Процедура` (`KwProcedure`) — 20 occurrences (user-code callback
+///   structs like `Обработчик.Процедура`).
+/// * `Выполнить` (`KwExecute`) — 12 occurrences (`Query.Execute`,
+///   `DataCompositionTemplateComposer.Execute`, ...).
+/// * `Перейти` (`KwGoto`) — 6 occurrences (`HTMLDocumentField.Navigate`).
+/// * `Прервать` (`KwBreak`) — 1 occurrence (`DialogReturnCode` enum).
+/// * `Продолжить` (`KwContinue`) — 1 occurrence
+///   (`OnScreenKeyboardReturnKeyText` enum).
+/// * `To` (`KwTo`) — 1 occurrence (XDTO `Result.To` field; the
+///   English `To` keyword name was used as a struct/object field).
+/// * `Истина`/`Ложь`/`Неопределено`/`NULL` (`KwTrue`/`KwFalse`/
+///   `KwUndefined`/`KwNull`) — value-position literals, never
+///   statement-starters or block-terminators. User code can legitimately
+///   name a struct property after one (`Структура.Истина`); accepting
+///   them here cannot regress block recovery because the lexer never
+///   emits them at a structural boundary.
+///
+/// Extending this set requires corpus evidence — do NOT re-broaden to
+/// "any keyword" or add by symmetry alone.
+const PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
+    TokenKind::Ident,
+    TokenKind::KwProcedure,
+    TokenKind::KwExecute,
+    TokenKind::KwGoto,
+    TokenKind::KwBreak,
+    TokenKind::KwContinue,
+    TokenKind::KwTo,
+    TokenKind::KwTrue,
+    TokenKind::KwFalse,
+    TokenKind::KwUndefined,
+    TokenKind::KwNull,
+]);
 
 /// Parses an expression.
 pub fn expression(p: &mut Parser) {
@@ -219,19 +219,31 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
         p.skip_trivia();
         match p.current() {
             Some(TokenKind::Dot) => {
-                // Wrap the base in a FieldExpr
+                // Wrap the base in a FieldExpr.
+                //
+                // Recovery contract: after `.` we accept ONLY tokens in
+                // `PROPERTY_NAME_TOKENS` (currently `Ident`). On miss we
+                // emit the error and complete the partial FieldExpr
+                // WITHOUT consuming the lookahead. This preserves block
+                // terminators (`КонецФункции`, `КонецЕсли`, ...) and
+                // statement starters (`Функция`, `Возврат`, ...) for the
+                // enclosing block/statement to consume — without this,
+                // mid-typing `obj.<EOL>КонецФункции` would let the parser
+                // swallow the terminator as a property name and erase the
+                // next function declaration from the symbol tree.
                 let m = lhs.precede(p);
                 p.bump();
                 p.skip_trivia();
-                // After dot, accept identifiers OR keywords as property names
-                // (e.g., Объект.По, Объект.Для - keywords used as property names)
-                if is_ident_or_keyword(p) {
+                if p.at_ts(PROPERTY_NAME_TOKENS) {
                     p.bump();
                     lhs = m.complete(p, NodeKind::FieldExpr);
                     is_valid_statement = false;
                 } else {
-                    p.error_custom("ожидалось имя свойства после '.'");
-                    // ERROR RECOVERY: Complete as FieldExpr anyway, exit loop
+                    // `error_custom_no_bump` instead of `error_custom`:
+                    // the latter consumes the lookahead token into an
+                    // `ERROR` child, which would re-introduce the original
+                    // bug (block terminator swallowed inside FIELD_EXPR).
+                    p.error_custom_no_bump("ожидалось имя свойства после '.'");
                     m.complete(p, NodeKind::FieldExpr);
                     break;
                 }
