@@ -43,6 +43,7 @@ pub mod infer;
 pub mod iteration_lookup;
 pub mod lower;
 pub mod manager_lookup;
+pub mod method_graph;
 pub mod method_lookup;
 pub mod method_resolution;
 pub mod module_implicit;
@@ -69,8 +70,9 @@ pub use hir_def::ty::{
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
 pub use hir_def::{ConfigsDatabase, VisibleConfig};
 pub use infer::{
-    CallArgBinding, ImplicitLocalAssignment, ImplicitLocalInfo, InferenceContext,
-    InferenceDiagnostic, InferenceResult, ParamsShape, UnresolvedMethodKind,
+    BodyInferenceResult, CallArgBinding, ImplicitLocalAssignment, ImplicitLocalInfo,
+    InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,
+    ModuleCodeInferenceResult, ParamsShape, UnresolvedMethodKind,
 };
 pub use lower::TyLoweringContext;
 pub use manager_lookup::{lookup_manager_field, ManagerMemberInfo};

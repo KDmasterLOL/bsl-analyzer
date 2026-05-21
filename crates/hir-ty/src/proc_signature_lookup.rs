@@ -8,19 +8,18 @@
 //! [`MethodId`] — they own the receiver→`MethodId` resolution; this
 //! module owns only the conversion to `MethodInfo`.
 //!
-//! ## Cycle status
+//! ## Cycle status (post Phase O.16b)
 //!
-//! `proc_signature_query` already reads `db.infer(file_id)` for the
-//! return-from-body fallback. The cycle
-//! `infer → lookup_method → proc_signature_query` is closed the moment
-//! a `lookup_method` site starts calling [`resolve_workspace_method`]
-//! during inference. The first such consumer MUST add a
-//! `salsa::cycle_fn` to `proc_signature_query` returning the
-//! doc-derived recovery shape — see plan §2.4 / risk 9 and the cycle
-//! note in `crates/hir-ty/src/proc_signature.rs`. Today no consumer
-//! has wired this path through `infer`, so the cycle is structurally
-//! unreachable; this adapter does not attempt to install the handler
-//! without a reachable cycle to test against.
+//! `proc_signature_query` no longer reads `db.infer(file_id)`. The
+//! docstring-less branch was dropped to a direct `Ty::Unknown` return
+//! (see `proc_signature.rs` module-level doc-comment); cascade typing
+//! recovers body-derived precision at the call site via
+//! [`crate::method_graph::method_return_type_query`] (cycle-safe via
+//! `cycle_fn` / `cycle_initial`). The
+//! `proc_signature_query → infer_query → infer_method →
+//! proc_signature_query` self-edge that Phase L's wrapper rewrite
+//! would otherwise have closed is therefore broken by construction;
+//! this adapter still needs no `cycle_fn` of its own.
 
 use hir_def::{MethodId, MethodIdInput};
 

@@ -308,8 +308,24 @@ pub fn map_range_query_to_literal(literal_text: &str, query_range: TextRange) ->
     projection.record_boundary(sdbl_byte, fallback, fallback);
 
     let start = projection.projected_start.unwrap_or(fallback);
-    let end =
+    let mut end =
         if query_start == query_end { start } else { projection.projected_end.unwrap_or(fallback) };
+
+    // Both `projected_start` and `projected_end` are written from monotonically
+    // increasing BSL positions, so under a faithful projection `start <= end`.
+    // The fallback for `end` (`content_end` of the last processed line) is not
+    // monotone with `projected_start` though: when `query_end` exceeds the
+    // materialized SDBL byte count (e.g. caller passed a range derived from a
+    // partially-failed extract), `projected_end` stays `None`, and the
+    // fallback can land before `projected_start` — producing an inverted
+    // range that crashes `TextRange::new`. Clamp to a degenerate range at
+    // `start` so downstream lowering keeps a valid source map; precise
+    // positioning was already lost the moment the projection couldn't satisfy
+    // the requested endpoint.
+    if end < start {
+        end = start;
+    }
+    debug_assert!(start <= end, "sdbl_query projection produced inverted range");
 
     TextRange::new(start.into(), end.into())
 }
@@ -582,6 +598,23 @@ mod tests_range_projection {
         assert_eq!(
             map_range_query_to_literal(literal, range(2, 3)),
             range(2, (literal.len() - 1) as u32),
+        );
+    }
+
+    /// Query end byte beyond the materialized SDBL byte count: `projected_end`
+    /// stays `None`, the post-loop fallback (`content_end` of the last
+    /// processed line) can land before `projected_start`, and historically
+    /// produced an inverted range that panicked `TextRange::new`. The fix
+    /// clamps such projections to a degenerate range at `start`; the contract
+    /// here is "no inversion, no panic", not exact positioning.
+    #[test]
+    fn out_of_bounds_query_end_does_not_invert_projection() {
+        let literal = "\"X\n|Y\n|Z\"";
+        let projected = map_range_query_to_literal(literal, range(3, 1000));
+        assert!(
+            projected.start() <= projected.end(),
+            "projection produced inverted range: {:?}",
+            projected,
         );
     }
 }

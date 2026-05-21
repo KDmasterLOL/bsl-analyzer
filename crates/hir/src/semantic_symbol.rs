@@ -210,10 +210,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         }
 
         let occurrence_expr = source_map.expr_at_range(token.text_range())?;
-        let infer = self.db.infer(file_id);
-        let implicit = infer.implicit_locals_by_body.get(&owner)?.get(&name_lower)?;
-        let occurrence_ty =
-            infer.type_of_expr_in(owner, occurrence_expr).cloned().unwrap_or(Ty::Unknown);
+        // Phase O.17: route through the per-owner Salsa cell — owner
+        // is already in hand from `body_for_range`, so we hit exactly
+        // one query (the matching method or module-code) instead of
+        // the file-wide `infer_query` aggregate.
+        let routed = crate::infer_owner(self.db, file_id, owner);
+        let implicit = routed.implicit_locals().get(&name_lower)?;
+        let occurrence_ty = routed.type_of_expr(occurrence_expr).cloned().unwrap_or(Ty::Unknown);
         let (declaration, range, ty) = select_implicit_local_declaration(
             &source_map,
             implicit,

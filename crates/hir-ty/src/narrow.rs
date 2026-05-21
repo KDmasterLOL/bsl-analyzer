@@ -848,9 +848,14 @@ pub fn narrow_query(
     };
     let resolve_ns = resolve_start.elapsed().as_nanos();
 
+    // Phase O.17: route through the per-owner Salsa cell instead of
+    // `infer_query`. Warm hits become a single `Arc::clone` on the
+    // `infer_method` / `infer_module_code` cell; cold cross-file hits
+    // invalidate only the touched method rather than every body in
+    // the file.
     let infer_start = Instant::now();
-    let infer = db.infer(file_id);
-    let per_body_types = infer.expr_types_by_body.get(&owner);
+    let infer_routed = crate::infer::infer_owner(db, file_id, owner);
+    let per_body_types = Some(infer_routed.expr_types());
     let infer_ns = infer_start.elapsed().as_nanos();
 
     let base_types_start = Instant::now();

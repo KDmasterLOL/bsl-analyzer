@@ -32,8 +32,9 @@
 use hir_def::resolver::{QualifiedMethodError, Resolver};
 use hir_def::symbol_tree::MethodSymbol;
 use hir_def::ty::{FunctionSignature, Ty};
-use hir_def::{ConfigsDatabase, MethodId, Name};
+use hir_def::{MethodId, Name};
 
+use crate::db::HirDatabase;
 use crate::lower::TyLoweringContext;
 #[cfg(test)]
 use vfs::FileId;
@@ -96,7 +97,7 @@ impl MethodResolution {
 ///   any visible configuration, not indexed, or method absent in the
 ///   resolved module.
 pub fn resolve_qualified_call(
-    db: &dyn ConfigsDatabase,
+    db: &dyn HirDatabase,
     module_name: &Name,
     method_name: &Name,
     resolver: &Resolver,
@@ -131,7 +132,7 @@ pub fn resolve_qualified_call(
          symbol_tree / Resolver are out of sync",
     );
 
-    let signature = materialise_signature(method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -165,7 +166,7 @@ pub fn resolve_qualified_call(
 ///   The distinction between `NotVisibleInConfigs` and `NotFound` is
 ///   preserved inside `hir-def` for a future config-specific hint.
 pub fn resolve_three_level_call(
-    db: &dyn ConfigsDatabase,
+    db: &dyn HirDatabase,
     mdo_type_plural: &Name,
     mdo_name: &Name,
     method_name: &Name,
@@ -188,7 +189,7 @@ pub fn resolve_three_level_call(
          symbol_tree / Resolver are out of sync",
     );
 
-    let signature = materialise_signature(method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -355,7 +356,7 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
 ///
 /// [MetadataRef]: hir_def::ty::Ty::MetadataRef
 pub fn resolve_record_set_module_call(
-    db: &dyn ConfigsDatabase,
+    db: &dyn HirDatabase,
     kind: hir_def::ty::MetadataKind,
     mdo_name: &Name,
     method_name: &Name,
@@ -377,7 +378,7 @@ pub fn resolve_record_set_module_call(
          symbol_tree / Resolver are out of sync",
     );
 
-    let signature = materialise_signature(method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -405,7 +406,7 @@ pub fn resolve_record_set_module_call(
 ///
 /// [MetadataRef]: hir_def::ty::Ty::MetadataRef
 pub fn resolve_object_module_call(
-    db: &dyn ConfigsDatabase,
+    db: &dyn HirDatabase,
     kind: hir_def::ty::MetadataKind,
     mdo_name: &Name,
     method_name: &Name,
@@ -427,7 +428,7 @@ pub fn resolve_object_module_call(
          symbol_tree / Resolver are out of sync",
     );
 
-    let signature = materialise_signature(method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -456,7 +457,7 @@ pub fn resolve_object_module_call(
 ///   `lookup_method` only on this outcome — workspace authority
 ///   exhausted, platform gets the next consult.
 pub fn resolve_aliased_manager_call(
-    db: &dyn ConfigsDatabase,
+    db: &dyn HirDatabase,
     mdo_type: bsl_metadata::MdoType,
     mdo_name: &Name,
     method_name: &Name,
@@ -479,7 +480,7 @@ pub fn resolve_aliased_manager_call(
          symbol_tree / Resolver are out of sync",
     );
 
-    let signature = materialise_signature(method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -514,6 +515,53 @@ fn materialise_signature(method_symbol: &MethodSymbol) -> FunctionSignature {
         .unwrap_or_else(|| method_symbol.return_type.clone());
 
     FunctionSignature::new_with_defaults(param_types, defaults, ret)
+}
+
+/// Phase O.11 — materialise a method signature with body-inferred
+/// return-type enrichment.
+///
+/// Wraps [`materialise_signature`]. Whenever the docstring-derived
+/// signature returns `Ty::Unknown` (no `// Возвращаемое значение:`
+/// block + a default that resolves to Unknown), the O.10
+/// `method_return_type_query` is consulted. If body inference
+/// produces a non-`Unknown` `Ty`, the enriched signature carries it
+/// in place of the original Unknown — surfacing cascade-typed
+/// returns through hover without invalidating the explicit
+/// docstring-wins precedence.
+///
+/// # Tracking & cycle safety
+///
+/// This is a plain `fn`, NOT `#[salsa::tracked]`. The cycle is
+/// detected and recovered at the inner `method_return_type_query`
+/// node; the enriched-materialisation wrapper is transparent to
+/// salsa's cycle iteration. Promoting this to a tracked query would
+/// introduce a second cycle node and is explicitly deferred until
+/// smoke evidence shows excessive re-materialisation.
+///
+/// # Performance
+///
+/// The body-walk via `method_return_type_query` happens ONLY in the
+/// `Unknown`-fallback branch. Methods with an explicit return
+/// docstring short-circuit at the `matches!(*sig.ret, Ty::Unknown)`
+/// gate — no salsa work, no cascade.
+pub(crate) fn materialise_signature_enriched(
+    db: &dyn HirDatabase,
+    method_id: hir_def::MethodId,
+    method_symbol: &MethodSymbol,
+) -> FunctionSignature {
+    let mut sig = materialise_signature(method_symbol);
+    if !matches!(*sig.ret, Ty::Unknown) {
+        return sig;
+    }
+
+    let method_input = hir_def::MethodIdInput::new(db, method_id);
+    let inferred = crate::method_graph::method_return_type_query(db, method_input);
+    if matches!(inferred, Ty::Unknown) {
+        return sig;
+    }
+
+    sig.ret = Box::new(inferred);
+    sig
 }
 
 #[cfg(test)]

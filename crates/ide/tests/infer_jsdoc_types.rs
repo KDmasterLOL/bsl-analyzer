@@ -100,21 +100,20 @@ fn jsdoc_catalog_ref_return_lowers_to_metadata_ref() {
 }
 
 #[test]
-fn missing_jsdoc_keeps_unknown_no_regression() {
-    // Regression guard: a CommonModule function without JSDoc must keep
-    // the legacy `Ty::Unknown` return type — the cascade in
-    // `materialise_signature` uses `return_type_ref` only when present,
-    // then falls back to `MethodSymbol::return_type` (`Ty::Unknown` for
-    // functions).
+fn missing_jsdoc_surfaces_body_inferred_return() {
+    // Phase O.11 baseline shift: a CommonModule function without JSDoc
+    // now has its return type surfaced through `materialise_signature_enriched`
+    // — the wrapper consults `method_return_type_query` when the
+    // docstring-derived `sig.ret` comes back `Ty::Unknown`. For
+    // `Функция БезКомментария() Возврат Истина КонецФункции` the body
+    // infers `Ty::Boolean`, and the assignment `Х = ...` records that
+    // in `var_types`.
     //
-    // The inference pipeline treats `Ty::Unknown` as "no assignment
-    // tracked": `infer_stmt` skips the `var_types` write when the RHS is
-    // Unknown (see `crates/hir-ty/src/infer.rs` Stmt::Assign branch).
-    // So `var_ty("х") == None` is the observable proof that the legacy
-    // shape is unchanged — a stray `Some(Ty::<anything else>)` would
-    // mean the new wiring accidentally propagated a type we shouldn't
-    // have known. We also check no `UnresolvedMethodCall` fires — the
-    // method did resolve, it just carries no typed return.
+    // This replaces the legacy "missing JSDoc keeps Unknown" guard:
+    // cascade typing is precisely the feature that changes that
+    // contract. The explicit-JSDoc-wins precedence is still verified
+    // by the other tests in this file (the enrichment wrapper
+    // short-circuits when `*sig.ret != Ty::Unknown`).
     let fixture = r#"
 //- /CommonModules/ОбщегоНазначения/Ext/Module.bsl
 Функция БезКомментария() Экспорт
@@ -130,8 +129,8 @@ fn missing_jsdoc_keeps_unknown_no_regression() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        None,
-        "Ty::Unknown return is not tracked in var_types — matches legacy behaviour"
+        Some(hir::Ty::Boolean),
+        "cascade typing must surface `Возврат Истина` as Ty::Boolean through `materialise_signature_enriched`"
     );
     let infer = db.infer(file_id);
     let unresolved: Vec<_> = infer

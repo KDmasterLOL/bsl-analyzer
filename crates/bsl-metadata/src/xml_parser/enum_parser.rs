@@ -3,7 +3,7 @@
 use crate::error::{MetadataError, Result};
 use crate::metadata_object::{EnumValue, MdoType, MetadataObject};
 
-use super::helpers::{child_text, find_child, find_mdo_element, parse_xml};
+use super::helpers::{child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 
 /// Parse Enum XML from Designer format
 ///
@@ -58,6 +58,17 @@ pub fn parse_enum_xml(xml: &str) -> Result<MetadataObject> {
     }
 
     let mut mdo_obj = MetadataObject::new(MdoType::Enum, name);
+    if let Some(uuid_str) = mdo.attribute("uuid") {
+        match parse_uuid(uuid_str, "Enum root") {
+            Ok(uuid) => mdo_obj.set_uuid(uuid),
+            Err(err) => tracing::warn!(
+                name = %mdo_obj.name,
+                uuid_raw = %uuid_str,
+                %err,
+                "ignored malformed Enum root UUID"
+            ),
+        }
+    }
     mdo_obj.enum_values = enum_values;
 
     tracing::debug!(
@@ -105,6 +116,10 @@ mod tests {
 
         assert_eq!(enum_obj.name, "Статусы");
         assert_eq!(enum_obj.mdo_type, MdoType::Enum);
+        assert_eq!(
+            enum_obj.uuid().map(|u| u.to_string()),
+            Some("379167c7-29f4-479f-8803-914fd95e350f".to_string())
+        );
         assert_eq!(enum_obj.enum_values.len(), 3);
 
         // Check enum values

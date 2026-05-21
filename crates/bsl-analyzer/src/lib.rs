@@ -18,6 +18,7 @@ pub mod mcp_install;
 pub mod mem_docs;
 pub mod reporters;
 pub mod server;
+pub mod smoke;
 pub mod task_pool;
 pub mod workspace;
 

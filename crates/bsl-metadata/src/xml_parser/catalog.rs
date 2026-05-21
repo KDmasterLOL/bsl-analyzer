@@ -163,6 +163,20 @@ fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObj
     }
 
     let mut mdo = MetadataObject::new(mdo_type, properties.name.clone());
+    if let Some(uuid_str) = mdo_node.attribute("uuid") {
+        // Lenient: malformed UUIDs (placeholders, corrupted XML) degrade to
+        // `None` rather than abort the whole workspace load.
+        match parse_uuid(uuid_str, "MDO root") {
+            Ok(uuid) => mdo.set_uuid(uuid),
+            Err(err) => tracing::warn!(
+                ?mdo_type,
+                name = %mdo.name,
+                uuid_raw = %uuid_str,
+                %err,
+                "ignored malformed MDO root UUID"
+            ),
+        }
+    }
     if mdo_type == MdoType::Document {
         mdo.set_register_records(parse_register_records(props_node));
     }
@@ -300,4 +314,72 @@ fn parse_tabular_section_node(node: roxmltree::Node<'_, '_>) -> Result<TabularSe
 
     tabular_section.set_attributes(ts_attributes);
     Ok(tabular_section)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CATALOG_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog uuid="d11b89e1-90a2-47e7-b43f-7f231ec64b2f">
+        <Properties>
+            <Name>Валюты</Name>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+    #[test]
+    fn parse_catalog_xml_reads_root_uuid() {
+        let mdo = parse_catalog_xml(CATALOG_XML).unwrap();
+        assert_eq!(mdo.name, "Валюты");
+        assert_eq!(mdo.mdo_type, MdoType::Catalog);
+        assert_eq!(
+            mdo.uuid().map(|u| u.to_string()),
+            Some("d11b89e1-90a2-47e7-b43f-7f231ec64b2f".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_document_xml_reads_root_uuid() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Document uuid="9de71b46-e9bf-4b0b-8f3c-4abcd6a385dd">
+        <Properties><Name>АвансовыйОтчет</Name></Properties>
+    </Document>
+</MetaDataObject>"#;
+        let mdo = parse_document_xml(xml).unwrap();
+        assert_eq!(
+            mdo.uuid().map(|u| u.to_string()),
+            Some("9de71b46-e9bf-4b0b-8f3c-4abcd6a385dd".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_xml_without_uuid_attribute_degrades_to_none() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog>
+        <Properties><Name>NoUuid</Name></Properties>
+    </Catalog>
+</MetaDataObject>"#;
+        let mdo = parse_catalog_xml(xml).unwrap();
+        assert_eq!(mdo.uuid(), None);
+    }
+
+    #[test]
+    fn malformed_uuid_attribute_degrades_to_none() {
+        // Real XML always has well-formed UUIDs (verified across an ERP-scale
+        // configuration). Lenient policy: malformed → None + tracing::warn,
+        // so a corrupted file cannot abort workspace load. Also lets existing
+        // fixtures use `uuid="..."` placeholder strings.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog uuid="not-a-uuid">
+        <Properties><Name>BadUuid</Name></Properties>
+    </Catalog>
+</MetaDataObject>"#;
+        let mdo = parse_catalog_xml(xml).unwrap();
+        assert_eq!(mdo.uuid(), None);
+    }
 }

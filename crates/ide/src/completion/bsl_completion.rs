@@ -347,8 +347,12 @@ fn complete_local_symbols<DB: RootDatabase>(
     // syntax. Inference is the layer that knows whether `X = ...` is really
     // a local variable or a typed form/self property assignment.
     if let Some(owner) = owner_for_method_range(db, file_id, method_range) {
-        let infer = db.infer(file_id);
-        if let Some(implicit_locals) = infer.implicit_locals_by_body.get(&owner) {
+        // Phase O.17: route through the per-owner cell. Owner is
+        // already known from `owner_for_method_range`, so we hit
+        // exactly one query (the matching method or module-code).
+        let routed = hir::infer_owner(db, file_id, owner);
+        let implicit_locals = routed.implicit_locals();
+        if !implicit_locals.is_empty() {
             for (lower, info) in implicit_locals {
                 if seen.contains(lower) {
                     continue;

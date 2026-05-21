@@ -224,6 +224,27 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     );
                     state.warm_metadata_cache();
 
+                    // Total-VFS invariant scan (O.2): single source of truth
+                    // for the degraded count is `skipped_bsl.len()` populated
+                    // by the B1 hook in `handle_vfs_msg`. The defensive scan
+                    // catches any FileSet/FileTextInput discrepancy that
+                    // slipped past B1 + B2-A — should always be 0.
+                    state.degraded_files_count = state.skipped_bsl.len();
+                    let extra_violations = state.assert_total_vfs_invariant();
+                    if extra_violations > 0 {
+                        tracing::error!(
+                            extra_violations,
+                            "total-VFS invariant violated unexpectedly — B1/B2-A missed a path",
+                        );
+                    }
+                    if state.degraded_files_count > 0 {
+                        tracing::warn!(
+                            degraded = state.degraded_files_count,
+                            "{} BSL paths skipped (unreadable or non-UTF-8)",
+                            state.degraded_files_count,
+                        );
+                    }
+
                     state.vfs_done = true;
                     state.report_progress("Loading", Progress::End, Some("Done".into()), Some(1.0));
 
@@ -441,36 +462,60 @@ fn handle_vfs_msg(
     // outside any VFS lock. UTF-8 validation + Arc allocation for a 64 MiB
     // chunk is non-trivial, and holding `vfs.write()` across it would block
     // every read snapshot taken by background latency tasks.
-    let converted: Vec<(vfs::VfsPath, Option<Arc<str>>)> = files
-        .into_iter()
-        .filter_map(|(path, contents)| {
-            let std_path: &std::path::Path = path.as_ref();
+    //
+    // Side effect: for BSL paths whose conversion ends up with `None`
+    // content (loader could not read OR bytes are not UTF-8), record the
+    // `AbsPathBuf` in `state.skipped_bsl`. VFS treats `(Deleted|new, None)`
+    // as a no-op and never emits a `Change` for `process_changes` to see,
+    // so this is the only place observability can hook the skip.
+    let mut converted: Vec<(vfs::VfsPath, Option<Arc<str>>)> = Vec::with_capacity(files.len());
+    for (path, contents) in files {
+        let std_path: &std::path::Path = path.as_ref();
 
-            // Skip files managed by the LSP client (in MemDocs) — their
-            // content comes from didOpen/didChange, not disk.
-            if let Ok(url) = lsp_types::Url::from_file_path(std_path) {
-                if state.mem_docs.contains(&url) {
-                    return None;
-                }
+        // Skip files managed by the LSP client (in MemDocs) — their
+        // content comes from didOpen/didChange, not disk.
+        if let Ok(url) = lsp_types::Url::from_file_path(std_path) {
+            if state.mem_docs.contains(&url) {
+                continue;
             }
+        }
 
-            let vfs_path = vfs::VfsPath::new(std_path);
+        let vfs_path = vfs::VfsPath::new(std_path);
 
-            // Convert Vec<u8> to Arc<str>, stripping UTF-8 BOM if present.
-            // BOM (0xEF 0xBB 0xBF) is common in BSL files from 1C:Enterprise,
-            // but LSP clients like VS Code strip it when sending file
-            // content. Without this, VFS would see a "modify" change on
-            // every didOpen.
-            let contents_str = contents.and_then(|bytes| {
-                String::from_utf8(bytes).ok().map(|s| {
-                    let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
-                    Arc::from(s)
-                })
-            });
+        // Convert Vec<u8> to Arc<str>, stripping UTF-8 BOM if present.
+        // BOM (0xEF 0xBB 0xBF) is common in BSL files from 1C:Enterprise,
+        // but LSP clients like VS Code strip it when sending file
+        // content. Without this, VFS would see a "modify" change on
+        // every didOpen.
+        let contents_str = contents.and_then(|bytes| {
+            String::from_utf8(bytes).ok().map(|s| {
+                let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
+                Arc::from(s)
+            })
+        });
 
-            Some((vfs_path, contents_str))
-        })
-        .collect();
+        // B1 observability hook (total-VFS invariant, O.2).
+        if project_model::is_bsl_source_path(std_path) {
+            let mutated = if contents_str.is_some() {
+                // Re-entry path: a previously-skipped BSL file became
+                // readable (watch-update). Drop the registry entry.
+                state.skipped_bsl.remove(&path)
+            } else if state.skipped_bsl.insert(path.clone()) {
+                tracing::warn!(
+                    path = %path,
+                    "BSL file unreadable by VFS; recorded as skipped",
+                );
+                true
+            } else {
+                false
+            };
+            if mutated {
+                state.degraded_files_count = state.skipped_bsl.len();
+            }
+        }
+
+        converted.push((vfs_path, contents_str));
+    }
 
     // Phase 2: drain into VFS in mini-batches under short-held write locks.
     for chunk in converted.chunks(VFS_WRITE_MINI_BATCH) {

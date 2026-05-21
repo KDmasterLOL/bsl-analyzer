@@ -118,6 +118,17 @@ impl RootDatabaseImpl {
         self.workspace_configs().version(self)
     }
 
+    /// Non-panicking probe of the per-file `FileTextInput` cell.
+    ///
+    /// Returns `Some(FileTextInput)` if the cell exists, `None` if the `FileId`
+    /// has never had a text input set. Safe to call **outside** tracked
+    /// queries; inside a tracked query the regular `file_text_input(fid)` path
+    /// is the right choice (panics on missing, but our total-VFS invariant
+    /// guarantees presence for fids reachable through SourceRoot).
+    pub fn try_file_text(&self, file_id: vfs::FileId) -> Option<base_db::FileTextInput> {
+        self.files.try_file_text(file_id)
+    }
+
     /// Bump metadata version to invalidate configuration cache.
     /// Call this when .xml metadata files change.
     pub fn bump_metadata_version(&mut self) {
@@ -310,6 +321,17 @@ impl DefDatabase for RootDatabaseImpl {
         hir::module_bodies_query(self, file_id_input)
     }
 
+    fn method_body(&self, method: hir::MethodIdInput<'_>) -> Arc<hir::Body> {
+        hir::method_body_query(self, method)
+    }
+
+    fn method_body_with_source_map(
+        &self,
+        method: hir::MethodIdInput<'_>,
+    ) -> Arc<(hir::Body, hir::BodySourceMap)> {
+        hir::method_body_with_source_map_query(self, method)
+    }
+
     fn module_metadata(&self, module_id: ModuleId) -> Arc<hir::ModuleMetadata> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         module_metadata_query(self, file_id_input)
@@ -419,6 +441,15 @@ impl hir::HirDatabase for RootDatabaseImpl {
         method_input: hir::MethodIdInput<'_>,
     ) -> Arc<hir::proc_signature::ProcSignature> {
         hir::proc_signature::proc_signature_query(self, method_input)
+    }
+
+    fn infer_method(&self, method: hir::MethodIdInput<'_>) -> Arc<hir::BodyInferenceResult> {
+        hir::infer_method_query(self, method)
+    }
+
+    fn infer_module_code(&self, file_id: FileId) -> Arc<hir::ModuleCodeInferenceResult> {
+        let file_id_input = FileIdInput::new(self, file_id);
+        hir::infer_module_code_query(self, file_id_input)
     }
 }
 

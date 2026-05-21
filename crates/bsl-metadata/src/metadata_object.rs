@@ -6,6 +6,7 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::OnceLock;
+use uuid::Uuid;
 
 /// Metadata object name as it appears in Designer XML.
 pub type Name = String;
@@ -470,6 +471,15 @@ pub struct MetadataObject {
     /// `(register_type, register_name)` pairs.
     #[serde(default)]
     pub register_records: Vec<(MdoType, Name)>,
+    /// Stable Designer-assigned identifier from the XML root element.
+    ///
+    /// Read from the `uuid="…"` attribute of the typed wrapper (`<Catalog>`,
+    /// `<Document>`, `<Enum>`, …). Stable across configuration saves in 1C,
+    /// which makes it the basis for partitioning workspace-wide indices by
+    /// owner object. `None` when the XML predates the attribute or the
+    /// `MetadataObject` is synthesized in-memory (tests, fixtures).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<Uuid>,
 }
 
 /// Metadata object attribute (custom field).
@@ -742,6 +752,7 @@ impl MetadataObject {
             code_series: crate::enums::CodeSeries::default(),
             constant_type: None,
             register_records: Vec::new(),
+            uuid: None,
         }
     }
 
@@ -764,6 +775,7 @@ impl MetadataObject {
             code_series: crate::enums::CodeSeries::default(),
             constant_type: None,
             register_records: Vec::new(),
+            uuid: None,
         }
     }
 
@@ -787,6 +799,7 @@ impl MetadataObject {
             code_series: crate::enums::CodeSeries::default(),
             constant_type: None,
             register_records: Vec::new(),
+            uuid: None,
         }
     }
 
@@ -798,6 +811,16 @@ impl MetadataObject {
     /// Replace the registers that this document can record into.
     pub fn set_register_records(&mut self, records: Vec<(MdoType, Name)>) {
         self.register_records = records;
+    }
+
+    /// Designer-assigned UUID from the typed XML root element, if known.
+    pub fn uuid(&self) -> Option<&Uuid> {
+        self.uuid.as_ref()
+    }
+
+    /// Record the Designer-assigned UUID for this object.
+    pub fn set_uuid(&mut self, uuid: Uuid) {
+        self.uuid = Some(uuid);
     }
 
     /// Set the declared value type (for [`MdoType::Constant`]).

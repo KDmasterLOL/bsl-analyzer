@@ -4,7 +4,9 @@ use hir_def::{ConfigsDatabase, DefWithBodyId, ExprId, MethodIdInput};
 use std::sync::Arc;
 use vfs::FileId;
 
-use crate::infer::{InferenceDiagnostic, InferenceResult};
+use crate::infer::{
+    BodyInferenceResult, InferenceDiagnostic, InferenceResult, ModuleCodeInferenceResult,
+};
 use crate::narrow::NarrowState;
 use crate::proc_signature::ProcSignature;
 use crate::Ty;
@@ -132,4 +134,33 @@ pub trait HirDatabase: ConfigsDatabase {
     /// # Implementation
     /// Should delegate to [`crate::proc_signature::proc_signature_query`].
     fn proc_signature(&self, method_input: MethodIdInput<'_>) -> Arc<ProcSignature>;
+
+    /// Phase O.13 — per-method inference primitive (Lni.5 surface).
+    ///
+    /// Returns the inference output for a single method body, keyed
+    /// on the salsa-interned [`MethodIdInput`]. Narrow callers
+    /// (hover, completion, `narrow_query`, `type_of_expr_query`)
+    /// route through [`crate::infer::InferOwnerResult::Method`] and
+    /// read this directly, bypassing the file-wide `infer_query`
+    /// aggregate.
+    ///
+    /// O.13 lands the trait signature with a `todo!()` default
+    /// implementation in [`crate::RootDatabaseImpl`] for compile-fence
+    /// purposes (Codex Round 4 C3); the real Salsa-tracked query body
+    /// is wired in O.15.
+    fn infer_method(&self, method: MethodIdInput<'_>) -> Arc<BodyInferenceResult>;
+
+    /// Phase O.13 — module-code inference primitive (Lni.4 surface).
+    ///
+    /// Returns the inference output for the file's
+    /// [`DefWithBodyId::ModuleCode`] body — module-level `Перем`
+    /// declarations, top-level assignments, and any other module-code
+    /// expressions. Narrow callers targeting module-level scope route
+    /// through [`crate::infer::InferOwnerResult::ModuleCode`].
+    ///
+    /// O.13 lands the trait signature with a `todo!()` default
+    /// implementation in [`crate::RootDatabaseImpl`] for compile-fence
+    /// purposes (Codex Round 4 C3); the real Salsa-tracked query body
+    /// is wired in O.14.
+    fn infer_module_code(&self, file_id: FileId) -> Arc<ModuleCodeInferenceResult>;
 }

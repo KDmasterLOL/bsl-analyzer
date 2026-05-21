@@ -3,7 +3,7 @@
 use crate::error::{MetadataError, Result};
 use crate::metadata_object::{MdoType, MetadataObject};
 
-use super::helpers::{child_text, find_child, find_mdo_element, parse_xml};
+use super::helpers::{child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 use super::type_parser::parse_type_xml;
 
 /// Parse Constant XML from Designer format.
@@ -29,6 +29,18 @@ pub fn parse_constant_xml(xml: &str) -> Result<MetadataObject> {
 
     let name = child_text(props, "Name").unwrap_or("").to_string();
     let mut mdo_obj = MetadataObject::new(MdoType::Constant, name);
+
+    if let Some(uuid_str) = mdo.attribute("uuid") {
+        match parse_uuid(uuid_str, "Constant root") {
+            Ok(uuid) => mdo_obj.set_uuid(uuid),
+            Err(err) => tracing::warn!(
+                name = %mdo_obj.name,
+                uuid_raw = %uuid_str,
+                %err,
+                "ignored malformed Constant root UUID"
+            ),
+        }
+    }
 
     if let Some(type_node) = find_child(props, "Type") {
         let attr_type = parse_type_xml(type_node)?;
@@ -122,5 +134,20 @@ mod tests {
         let xml = wrap_constant("");
         let mdo = parse_constant_xml(&xml).expect("constant parses without <Type>");
         assert!(mdo.constant_type.is_none());
+    }
+
+    #[test]
+    fn parses_root_uuid() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Constant uuid="9893e2d6-f3f8-4d73-bb06-19bf26d216ab">
+        <Properties><Name>X</Name></Properties>
+    </Constant>
+</MetaDataObject>"#;
+        let mdo = parse_constant_xml(xml).expect("constant parses");
+        assert_eq!(
+            mdo.uuid().map(|u| u.to_string()),
+            Some("9893e2d6-f3f8-4d73-bb06-19bf26d216ab".to_string())
+        );
     }
 }

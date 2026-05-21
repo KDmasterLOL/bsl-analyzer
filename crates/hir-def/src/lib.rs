@@ -32,6 +32,7 @@ pub mod configs;
 pub mod docs;
 pub mod hir;
 pub mod item_tree;
+pub mod method_body;
 pub mod metrics;
 pub mod module_index;
 pub mod module_structure;
@@ -82,6 +83,7 @@ pub use workspace::{is_bsl_source, CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 
 // Re-export all Salsa query functions from the queries module
+pub use method_body::{method_body_query, method_body_with_source_map_query};
 pub use queries::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
     module_bodies_query, module_call_summary_query, module_data_query, module_index_query,
@@ -227,6 +229,55 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// # Implementation
     /// Should delegate to [`module_bodies_query`].
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
+
+    /// Lazy per-method body lowering (Phase O.8 — replant of Phase J.4).
+    ///
+    /// Returns the lowered [`body::Body`] for a single method, keyed by
+    /// the salsa-interned [`MethodIdInput`]. The first method-graph
+    /// query in the Phase O Phase J replay: consumed by upcoming
+    /// `method_return_type_query` (O.10) and the cascade-typed inference
+    /// path (O.11).
+    ///
+    /// # Performance
+    /// - **LRU cache:** 4096 (one entry per method; typical modules
+    ///   have ~30 methods so a workspace of ~100 active modules stays
+    ///   inside the cache).
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse),
+    ///   [`symbol_tree`](Self::symbol_tree).
+    /// - **Typical time:** <1 ms for a single small method.
+    ///
+    /// # Residency contract
+    /// Phase O total-VFS invariant (commit `6c578f3a`) guarantees that
+    /// every BSL FileId registered in a `FileSet` has a populated
+    /// `FileTextInput`. This query therefore does NOT carry the J.4
+    /// sentinel-on-cold gate; tracked text reads panic by Salsa
+    /// contract if the invariant is ever violated.
+    ///
+    /// # Implementation
+    /// Should delegate to [`method_body::method_body_query`].
+    fn method_body(&self, method: MethodIdInput<'_>) -> Arc<body::Body>;
+
+    /// Lazy per-method body lowering paired with source map (Phase O.9).
+    ///
+    /// Sister of [`Self::method_body`]: returns the lowered
+    /// [`body::Body`] together with its [`body::BodySourceMap`] so
+    /// callers can map offsets ↔ HIR nodes (hover, narrow infer, IDE
+    /// diagnostics). Shares the same residency contract — no
+    /// `file_resident` gate; tracked text reads panic by Salsa contract
+    /// if the Phase O total-VFS invariant is violated.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 4096 (one entry per method).
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse),
+    ///   [`symbol_tree`](Self::symbol_tree).
+    /// - **Typical time:** <1 ms for a single small method.
+    ///
+    /// # Implementation
+    /// Should delegate to [`method_body::method_body_with_source_map_query`].
+    fn method_body_with_source_map(
+        &self,
+        method: MethodIdInput<'_>,
+    ) -> Arc<(body::Body, body::BodySourceMap)>;
 
     /// Get metadata for a module (type and execution context).
     ///
@@ -650,8 +701,12 @@ impl ModuleMetadata {
 /// Metadata is stored separately and accessed via module_metadata() query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleBodies {
-    /// Bodies indexed by MethodId.local_id
-    bodies: rustc_hash::FxHashMap<u32, body::LowerResult>,
+    /// Bodies indexed by MethodId.local_id.
+    ///
+    /// `IndexMap` keeps insertion order, which here equals ItemTree
+    /// `top_level_idx` order (see [`Self::lower_from_root`]). Phase L narrow-infer
+    /// relies on this for deterministic iteration without an explicit sort.
+    bodies: indexmap::IndexMap<u32, body::LowerResult>,
     /// All diagnostics from all methods
     all_diagnostics: Vec<(MethodId, BodyDiagnostic)>,
     /// Module-level variable declarations
@@ -664,7 +719,7 @@ impl ModuleBodies {
     /// Create empty ModuleBodies.
     pub fn new() -> Self {
         Self {
-            bodies: rustc_hash::FxHashMap::default(),
+            bodies: indexmap::IndexMap::new(),
             all_diagnostics: Vec::new(),
             module_vars: Vec::new(),
             module_code: None,
@@ -908,3 +963,65 @@ fn collect_module_vars(var_def: &syntax::SyntaxNode, vars: &mut Vec<ModuleVarDec
 
 // Note: All Salsa query implementations have been moved to the `queries` module.
 // See `queries.rs` for the full list of HIR-level queries.
+
+#[cfg(test)]
+mod module_bodies_order_tests {
+    //! Phase L narrow-infer Lni.A — verify `ModuleBodies` exposes a
+    //! deterministic insertion-ordered iteration that equals
+    //! `local_id`-sorted order. Subsequent commits assume this without
+    //! re-sorting at call sites.
+    use super::*;
+
+    fn lower(code: &str) -> ModuleBodies {
+        let parse = parser::parse(code);
+        let module_id = ModuleId::new(vfs::FileId(0));
+        ModuleBodies::from_parse(&parse, module_id)
+    }
+
+    #[test]
+    fn iter_bodies_order_matches_item_tree_index() {
+        let code = "\
+Процедура Первая() КонецПроцедуры
+Функция Вторая() КонецФункции
+Процедура Третья() КонецПроцедуры
+";
+        let bodies = lower(code);
+        let local_ids: Vec<u32> = bodies.iter_bodies().map(|(id, _)| id).collect();
+        let mut sorted = local_ids.clone();
+        sorted.sort();
+        assert_eq!(local_ids, sorted, "insertion order must equal local_id-sorted order");
+        assert!(local_ids.windows(2).all(|w| w[0] < w[1]), "ids strictly increasing");
+    }
+
+    #[test]
+    fn iter_bodies_stable_across_repeated_calls() {
+        let code = "\
+Процедура Альфа() КонецПроцедуры
+Процедура Бета() КонецПроцедуры
+Процедура Гамма() КонецПроцедуры
+Процедура Дельта() КонецПроцедуры
+";
+        let bodies = lower(code);
+        let first: Vec<u32> = bodies.iter_bodies().map(|(id, _)| id).collect();
+        for _ in 0..5 {
+            let again: Vec<u32> = bodies.iter_bodies().map(|(id, _)| id).collect();
+            assert_eq!(first, again, "iteration order must be stable across calls");
+        }
+    }
+
+    #[test]
+    fn method_bodies_and_lower_results_share_order() {
+        let code = "\
+Процедура А() КонецПроцедуры
+Перем М;
+Функция Б() КонецФункции
+Процедура В() КонецПроцедуры
+";
+        let bodies = lower(code);
+        let from_iter: Vec<u32> = bodies.iter_bodies().map(|(id, _)| id).collect();
+        let from_method_bodies: Vec<u32> = bodies.method_bodies().map(|(id, _, _)| id).collect();
+        let from_lower_results: Vec<u32> = bodies.iter_lower_results().map(|(id, _)| id).collect();
+        assert_eq!(from_iter, from_method_bodies);
+        assert_eq!(from_iter, from_lower_results);
+    }
+}
