@@ -428,3 +428,166 @@ fn test_procedure_statement_without_semicolon() {
         "#]],
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests derived from real-world ObjectModule.bsl breakage.
+//
+// Each `#[ignore]` marks a currently-broken behavior. The `expect![]` block
+// captures the DESIRED output. Remove the `#[ignore]` once the formatter is
+// fixed. Run the full set with:
+//
+//     cargo test -p ide formatting -- --ignored
+//
+// Design decisions backing these expectations:
+//   * String literal contents are NEVER edited by the formatter (incl. `|`
+//     continuations of SDBL queries).
+//   * `+`-prefixed line continuations are preserved as the user wrote them
+//     (no active reflow, no space loss after the operator).
+//   * Trailing inline comments collapse leading whitespace to a single space.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "fixme(formatter): inserts space after UTF-8 BOM on first line"]
+fn regression_bom_first_line_preserved() {
+    check(
+        "\u{FEFF}//comment\nПерем А Экспорт;\n",
+        expect![[r#"
+            ﻿//comment
+            Перем А Экспорт;
+        "#]],
+    );
+}
+
+#[test]
+fn regression_no_space_before_call_paren() {
+    check(
+        "Процедура Т()
+А = З.Выполнить().Выбрать();
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	А = З.Выполнить().Выбрать();
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_no_space_before_index() {
+    check(
+        "Процедура Т()
+А = ТЗ[0].Состояние;
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	А = ТЗ[0].Состояние;
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+#[ignore = "fixme(formatter): edits whitespace inside multi-line string literals (SDBL `|` lines)"]
+fn regression_multiline_string_literal_preserved() {
+    // The string content — including the `|` continuation lines — must be
+    // emitted byte-for-byte. Only the surrounding statement gets re-indented.
+    check(
+        "Процедура Т()
+А = \"ВЫБРАТЬ
+|	X.A
+|ИЗ
+|	T КАК X\";
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	А = "ВЫБРАТЬ
+            |	X.A
+            |ИЗ
+            |	T КАК X";
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+#[ignore = "fixme(formatter): drops space after `+` and indent of `+`-continuation lines"]
+fn regression_binary_plus_line_continuation_preserved() {
+    // The newline before `+` is user-authored. Formatter must not collapse it,
+    // must not glue `+":"`, must preserve the space after the operator.
+    check(
+        "Процедура Т()
+	а = \"foo\"
+		+ \": \" + б;
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	а = "foo"
+            		+ ": " + б;
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_try_except_body_indent() {
+    // Baseline: minimal Попытка/Исключение indents correctly. The real-world
+    // ObjectModule.bsl bug — body losing one indent level — needs a more
+    // complex reproducer (nested if/else inside try). Add when isolated.
+    check(
+        "Процедура Т()
+Попытка
+А = 1;
+Исключение
+Б = 2;
+КонецПопытки;
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	Попытка
+            		А = 1;
+            	Исключение
+            		Б = 2;
+            	КонецПопытки;
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_empty_default_args_keep_spaces() {
+    // Each comma in an argument list is followed by exactly one space, even if
+    // the next token is another comma (skipped default parameter).
+    check(
+        "Процедура Т()
+Соединение = Новый HTTPСоединение(Сервер, Порт, , , , 60, ssl);
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	Соединение = Новый HTTPСоединение(Сервер, Порт, , , , 60, ssl);
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_trailing_inline_comment_single_space() {
+    // Baseline (currently correct): any run of whitespace between an end
+    // keyword and a trailing `//` comment collapses to one space.
+    check(
+        "Функция Ф()
+	Возврат 1;
+КонецФункции\t\t// trailing
+",
+        expect![[r#"
+            Функция Ф()
+            	Возврат 1;
+            КонецФункции // trailing
+        "#]],
+    );
+}

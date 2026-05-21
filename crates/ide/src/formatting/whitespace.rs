@@ -85,6 +85,8 @@ pub fn forbids_space_before(kind: SyntaxKind) -> bool {
             | SyntaxKind::R_PAREN
             | SyntaxKind::R_BRACKET
             | SyntaxKind::DOT
+            // `[` in BSL is only ever index access; no space between target and `[`.
+            | SyntaxKind::L_BRACKET
     )
 }
 
@@ -100,7 +102,14 @@ pub fn forbids_space_after(kind: SyntaxKind) -> bool {
 fn forbids_space_before_paren(prev_kind: SyntaxKind) -> bool {
     matches!(
         prev_kind,
-        SyntaxKind::IDENT | SyntaxKind::KW_NEW | SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET
+        SyntaxKind::IDENT
+            | SyntaxKind::KW_NEW
+            | SyntaxKind::R_PAREN
+            | SyntaxKind::R_BRACKET
+            // `Выполнить`/`Execute` is reserved by the lexer but appears as a
+            // method name in expressions like `Х.Выполнить()`. Treat the
+            // following `(` as a call argument list, not a control-keyword arg.
+            | SyntaxKind::KW_EXECUTE
     )
 }
 
@@ -304,7 +313,15 @@ pub fn normalize_line_whitespace(line: &str, config: &FormattingConfig) -> Strin
         let is_unary = is_likely_unary(syntax_kind, prev_syntax_kind);
 
         // Determine if we need space before this token
-        let need_space = if result.is_empty() || forbids_space_before(syntax_kind) || prev_was_unary
+        // Special case: `,` after `,` (skipped default argument) — the comma
+        // is a separator, not a value, so `needs_space_after(prev=COMMA)`
+        // outranks `forbids_space_before(next=COMMA)`. Without this, `(a, ,)`
+        // collapses to `(a,,)`.
+        let comma_after_comma =
+            syntax_kind == SyntaxKind::COMMA && prev_syntax_kind == Some(SyntaxKind::COMMA);
+        let need_space = if result.is_empty()
+            || prev_was_unary
+            || (!comma_after_comma && forbids_space_before(syntax_kind))
         {
             false
         } else if let Some(prev) = prev_syntax_kind {
