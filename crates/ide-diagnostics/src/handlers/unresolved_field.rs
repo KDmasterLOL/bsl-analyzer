@@ -29,10 +29,12 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
+    // `display(locale)` expands `Ty::Union` to `A | B` so the message
+    // names the actual member types instead of the coarse `Составной` label.
     let message = format!(
         "Поле '{}' не найдено у типа '{}'",
         field_name.as_str(),
-        receiver_ty.display_name(ctx.locale())
+        receiver_ty.display(ctx.locale())
     );
     crate::simple_hir_diagnostic(DiagnosticCode::UnresolvedField, message, range, ctx)
 }
