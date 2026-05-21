@@ -205,9 +205,11 @@ mod tests {
 
     #[test]
     fn test_region() {
+        // 1C convention: `#Область` doesn't add indent (see
+        // formatting::tests::test_region for the broader rationale).
         let code = "#Область Тест\nА = 1;\n#КонецОбласти";
         let formatted = format(code);
-        let expected = "#Область Тест\n\tА = 1;\n#КонецОбласти\n";
+        let expected = "#Область Тест\nА = 1;\n#КонецОбласти\n";
         assert_eq!(formatted, expected);
     }
 

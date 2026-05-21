@@ -216,6 +216,8 @@ fn test_try_except() {
 
 #[test]
 fn test_region() {
+    // 1C Configurator convention: `#Область` does NOT add an indent
+    // level. Module-level code inside a region stays at column 0.
     check(
         "#Область Инициализация
 А = 1;
@@ -223,8 +225,8 @@ fn test_region() {
 #КонецОбласти",
         expect![[r#"
             #Область Инициализация
-            	А = 1;
-            	Б = 2;
+            А = 1;
+            Б = 2;
             #КонецОбласти
         "#]],
     );
@@ -232,13 +234,15 @@ fn test_region() {
 
 #[test]
 fn test_preprocessor_if() {
+    // Conditional compilation directives don't add indent either —
+    // they're like C's `#ifdef`, not structural blocks.
     check(
         "#Если Сервер Тогда
 А = 1;
 #КонецЕсли",
         expect![[r#"
             #Если Сервер Тогда
-            	А = 1;
+            А = 1;
             #КонецЕсли
         "#]],
     );
@@ -254,9 +258,9 @@ fn test_preprocessor_if_else() {
 #КонецЕсли",
         expect![[r#"
             #Если Сервер Тогда
-            	А = 1;
+            А = 1;
             #Иначе
-            	Б = 2;
+            Б = 2;
             #КонецЕсли
         "#]],
     );
@@ -264,6 +268,10 @@ fn test_preprocessor_if_else() {
 
 #[test]
 fn test_procedure_in_region() {
+    // The procedure stays at column 0 inside `#Область`; the region
+    // does not push it in. This is essential for the real-world style
+    // where 1C `CommonModule`s wrap dozens of column-0 procedures in
+    // an `#Область ПрограммныйИнтерфейс` / `#Область СлужебныеПроцедурыИФункции`.
     check(
         "#Область ПрограммныйИнтерфейс
 Процедура Тест()
@@ -272,9 +280,9 @@ fn test_procedure_in_region() {
 #КонецОбласти",
         expect![[r#"
             #Область ПрограммныйИнтерфейс
-            	Процедура Тест()
-            		А = 1;
-            	КонецПроцедуры
+            Процедура Тест()
+            	А = 1;
+            КонецПроцедуры
             #КонецОбласти
         "#]],
     );

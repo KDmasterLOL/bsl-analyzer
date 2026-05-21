@@ -349,11 +349,18 @@ fn count_newlines(s: &str) -> u32 {
     s.bytes().filter(|&b| b == b'\n').count() as u32
 }
 
-/// Mirrors `engine::calculate_indent_at_offset`. CLAUSE nodes
-/// (ELSIF/ELSE/EXCEPT) are intentionally excluded — their boundary keywords
-/// get a `-1` adjustment via `is_block_boundary_keyword` instead, which
-/// matches the line-based engine's behavior of placing `Иначе`/`Исключение`
-/// at the outer indent level.
+/// CST node kinds that contribute to block-indentation depth. CLAUSE
+/// nodes (ELSIF/ELSE/EXCEPT) are intentionally excluded — their boundary
+/// keywords get a `-1` adjustment via `is_block_boundary_keyword` instead,
+/// which matches the line-based engine's behavior of placing
+/// `Иначе`/`Исключение` at the outer indent level.
+///
+/// Preprocessor directives (`#Область` / `#Если`) are intentionally NOT
+/// block-defining: 1C Configurator convention puts procedures at column
+/// zero even when wrapped in `#Область`, and conditional compilation
+/// keeps the conditional code at its host depth. Treating them as block-
+/// defining would over-indent every procedure inside `#Область` (and
+/// stack with nested regions, producing 2-3 spurious tabs).
 fn is_block_defining(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -364,8 +371,6 @@ fn is_block_defining(kind: SyntaxKind) -> bool {
             | SyntaxKind::FOR_STMT
             | SyntaxKind::FOR_EACH_STMT
             | SyntaxKind::TRY_STMT
-            | SyntaxKind::PRE_REGION_DIR
-            | SyntaxKind::PRE_IF_DIR
     )
 }
 
