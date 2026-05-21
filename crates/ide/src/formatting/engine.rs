@@ -22,28 +22,34 @@ pub struct TextEdit {
     pub new_text: String,
 }
 
-/// Formats an entire BSL file.
+/// Formats an entire BSL file. Returns the formatted text and the minimal
+/// set of per-gap edits that transform the source into it.
 pub fn format_file(root: &SyntaxNode, config: &FormattingConfig) -> FormattingResult {
-    let text = root.text().to_string();
-    let formatted = format_text(&text, root, config);
-    let edits = compute_edits(&text, &formatted);
-    FormattingResult { text: formatted, edits }
+    let source = root.text().to_string();
+    let (text, edits) = render_full(root, config, &source);
+    FormattingResult { text, edits: convert_edits(edits) }
 }
 
-/// Formats a range within a BSL file via the IR pipeline. Strategy: format
-/// the whole document, then slice the result to the line-aligned source
-/// range. The IR pipeline preserves line count (each source line maps to
-/// one output line) so the slice is well-defined.
+/// Formats a range within a BSL file. The IR pipeline runs over the full
+/// document; only the edits that overlap with `range` are returned. The
+/// `text` field carries the line-aligned formatted slice for backwards
+/// compatibility with non-LSP callers; LSP consumers only read `edits`.
 pub fn format_range(
     root: &SyntaxNode,
     range: TextRange,
     config: &FormattingConfig,
 ) -> FormattingResult {
-    let text = root.text().to_string();
+    let source = root.text().to_string();
 
-    let line_ranges = compute_line_ranges(&text);
+    // Run the full pipeline once, then filter edits by overlap.
+    // `insert_final_newline` is suppressed: a range request must not
+    // synthesize file-wide changes outside the selected region.
+    let range_config = FormattingConfig { insert_final_newline: false, ..config.clone() };
+    let (formatted_full, all_edits) = render_full(root, &range_config, &source);
+
+    let line_ranges = compute_line_ranges(&source);
     if line_ranges.is_empty() {
-        return FormattingResult { text: text.clone(), edits: vec![] };
+        return FormattingResult { text: source, edits: vec![] };
     }
 
     let range_start = u32::from(range.start()) as usize;
@@ -57,23 +63,44 @@ pub fn format_range(
 
     let (src_start, _) = line_ranges[start_line];
     let (_, src_end) = line_ranges[end_line];
-    let source_slice = &text[src_start..src_end];
+    let span = TextRange::new(TextSize::from(src_start as u32), TextSize::from(src_end as u32));
 
-    let formatted_full = format_text_via_ir(&text, root, config);
+    let edits: Vec<TextEdit> = all_edits
+        .into_iter()
+        .filter(|e| ranges_overlap(e.range, span))
+        .map(|e| TextEdit { range: e.range, new_text: e.new_text })
+        .collect();
+
     let fmt_line_ranges = compute_line_ranges(&formatted_full);
     let (fmt_start, _) = fmt_line_ranges.get(start_line).copied().unwrap_or((src_start, src_end));
     let (_, fmt_end) = fmt_line_ranges.get(end_line).copied().unwrap_or((src_start, src_end));
-    let formatted_slice = &formatted_full[fmt_start..fmt_end];
+    let formatted_slice = formatted_full[fmt_start..fmt_end].to_string();
 
-    if formatted_slice == source_slice {
-        return FormattingResult { text: source_slice.to_string(), edits: vec![] };
-    }
-    let actual_range =
-        TextRange::new(TextSize::from(src_start as u32), TextSize::from(src_end as u32));
-    FormattingResult {
-        text: formatted_slice.to_string(),
-        edits: vec![TextEdit { range: actual_range, new_text: formatted_slice.to_string() }],
-    }
+    FormattingResult { text: formatted_slice, edits }
+}
+
+/// Runs the IR pipeline end-to-end and returns the formatted text plus
+/// per-gap edits. `source` is taken from the caller so we don't re-read
+/// `root.text()` repeatedly.
+fn render_full(
+    root: &SyntaxNode,
+    config: &FormattingConfig,
+    source: &str,
+) -> (String, Vec<super::ir::GapEdit>) {
+    let ir = super::ir::Ir::build(root);
+    let decisions = super::ir::apply_policy(&ir, config, 0);
+    let line_ending = detect_line_ending(source);
+    super::ir::render_full(&ir, &decisions, config, line_ending, config.insert_final_newline)
+}
+
+fn convert_edits(edits: Vec<super::ir::GapEdit>) -> Vec<TextEdit> {
+    edits.into_iter().map(|e| TextEdit { range: e.range, new_text: e.new_text }).collect()
+}
+
+fn ranges_overlap(a: TextRange, b: TextRange) -> bool {
+    a.start() < b.end() && b.start() < a.end()
+        || a.start() == a.end() && b.start() <= a.start() && a.start() <= b.end()
+        || b.start() == b.end() && a.start() <= b.start() && b.start() <= a.end()
 }
 
 /// Computes the byte ranges (start, end) for each line in the text.
@@ -102,52 +129,6 @@ fn compute_line_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Formats text via the IR pipeline (Phase 2). String literals, BOM, and
-/// `+`-style line continuations are preserved by construction. Adds the
-/// final newline if [`FormattingConfig::insert_final_newline`] is set.
-fn format_text(text: &str, root: &SyntaxNode, config: &FormattingConfig) -> String {
-    let mut out = format_text_via_ir(text, root, config);
-    if config.insert_final_newline && !out.is_empty() && !out.ends_with('\n') {
-        out.push_str(detect_line_ending(text));
-    }
-    out
-}
-
-/// Core IR pipeline shared by `format_text` and `format_range`. Skips
-/// `insert_final_newline` so that callers can slice the output without
-/// shifting line indices.
-fn format_text_via_ir(text: &str, root: &SyntaxNode, config: &FormattingConfig) -> String {
-    let ir = super::ir::Ir::build(root);
-    let decisions = super::ir::apply_policy(&ir, config, 0);
-    let line_ending = detect_line_ending(text);
-    let mut out = super::ir::render_with_line_ending(&ir, &decisions, config, line_ending);
-    if config.trim_trailing_whitespace {
-        out = trim_trailing_whitespace_per_line(&out, line_ending);
-    }
-    out
-}
-
-/// Strips trailing horizontal whitespace from each line. Blank lines —
-/// whose *only* content is leading whitespace — are kept verbatim so
-/// re-indented blank lines inside a block don't collapse to width zero.
-fn trim_trailing_whitespace_per_line(s: &str, line_ending: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut first = true;
-    for line in s.split(line_ending) {
-        if !first {
-            result.push_str(line_ending);
-        }
-        first = false;
-        if line.chars().all(|c| c == ' ' || c == '\t') {
-            // Blank-but-indented line: keep the indent as content.
-            result.push_str(line);
-        } else {
-            result.push_str(line.trim_end_matches([' ', '\t']));
-        }
-    }
-    result
-}
-
 /// Detects the line ending style used in the text.
 /// Returns "\r\n" for CRLF, "\n" for LF.
 fn detect_line_ending(text: &str) -> &'static str {
@@ -156,58 +137,6 @@ fn detect_line_ending(text: &str) -> &'static str {
     } else {
         "\n"
     }
-}
-
-/// Computes minimal text edits between original and formatted text.
-fn compute_edits(original: &str, formatted: &str) -> Vec<TextEdit> {
-    if original == formatted {
-        return vec![];
-    }
-
-    // Simple approach: find differing ranges
-    let orig_lines: Vec<&str> = original.lines().collect();
-    let fmt_lines: Vec<&str> = formatted.lines().collect();
-
-    let mut edits = Vec::new();
-    let mut offset = 0u32;
-
-    let max_lines = orig_lines.len().max(fmt_lines.len());
-
-    for i in 0..max_lines {
-        let orig_line = orig_lines.get(i).copied().unwrap_or("");
-        let fmt_line = fmt_lines.get(i).copied().unwrap_or("");
-
-        if orig_line != fmt_line {
-            let line_start = TextSize::from(offset);
-            let line_end = TextSize::from(offset + orig_line.len() as u32);
-
-            edits.push(TextEdit {
-                range: TextRange::new(line_start, line_end),
-                new_text: fmt_line.to_string(),
-            });
-        }
-
-        offset += orig_line.len() as u32 + 1; // +1 for newline
-    }
-
-    // Handle trailing newline difference
-    let orig_has_final_nl = original.ends_with('\n');
-    let fmt_has_final_nl = formatted.ends_with('\n');
-
-    if orig_has_final_nl != fmt_has_final_nl {
-        if fmt_has_final_nl && !orig_has_final_nl {
-            // Add newline at end
-            let end = TextSize::from(original.len() as u32);
-            edits.push(TextEdit { range: TextRange::new(end, end), new_text: "\n".to_string() });
-        } else if !fmt_has_final_nl && orig_has_final_nl {
-            // Remove newline at end
-            let start = TextSize::from((original.len() - 1) as u32);
-            let end = TextSize::from(original.len() as u32);
-            edits.push(TextEdit { range: TextRange::new(start, end), new_text: String::new() });
-        }
-    }
-
-    edits
 }
 
 #[cfg(test)]
@@ -284,19 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_edits_no_change() {
-        let edits = compute_edits("hello", "hello");
-        assert!(edits.is_empty());
-    }
-
-    #[test]
-    fn test_compute_edits_with_change() {
-        let edits = compute_edits("hello", "world");
-        assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].new_text, "world");
-    }
-
-    #[test]
     fn test_range_formatting_middle_lines() {
         // Test range formatting of middle lines in a procedure
         // "Процедура Тест()" = 29 bytes (UTF-8), + \n = 30 bytes
@@ -318,27 +234,38 @@ mod tests {
 
     #[test]
     fn test_range_formatting_preserves_surrounding() {
-        // Ensure range formatting doesn't corrupt surrounding text
+        // Per-gap edits may include the `\n` byte at a line boundary
+        // (the gap spans `\n    `), so an edit's `range.start()` is
+        // allowed to reach one byte before the requested line. The real
+        // invariant is that applying the edits doesn't change the
+        // header's text content.
         let code = "Процедура Тест()\n    А = 1;\nКонецПроцедуры";
         let parsed = parser::parse(code);
         let root = parsed.syntax_node();
         let config = FormattingConfig::default();
 
-        // Format only line 1 (А = 1;)
+        let header = "Процедура Тест()";
         let line1_start = "Процедура Тест()\n".len() as u32;
         let range = TextRange::new(TextSize::from(line1_start), TextSize::from(line1_start + 10));
         let result = format_range(&root, range, &config);
 
-        // Check that the edit range is correct
-        if !result.edits.is_empty() {
-            let edit = &result.edits[0];
-            // The edit should only cover the selected line, not touch header
+        for edit in &result.edits {
+            // Any edit must leave header bytes [0..header.len()] alone.
             assert!(
-                u32::from(edit.range.start()) >= line1_start,
-                "Edit should not touch header, got start: {}, expected >= {}",
-                u32::from(edit.range.start()),
-                line1_start
+                u32::from(edit.range.end()) <= header.len() as u32
+                    || u32::from(edit.range.start()) >= header.len() as u32,
+                "edit {:?} straddles the header content",
+                edit
             );
+            // If the edit touches the `\n` at header.len(), its new_text
+            // must still begin with `\n` so the header line ending stays.
+            if u32::from(edit.range.start()) == header.len() as u32 {
+                assert!(
+                    edit.new_text.starts_with('\n'),
+                    "edit at line boundary must preserve newline: {:?}",
+                    edit
+                );
+            }
         }
     }
 

@@ -603,6 +603,59 @@ fn format_crlf(input: &str) -> String {
     format_file(&root, &config).text
 }
 
+/// Apply `result.edits` to `source` left-to-right (edits don't overlap)
+/// and return the produced text. Used to verify the *edit* path matches
+/// the *render* path — historically these have drifted on CRLF input.
+fn apply_edits(source: &str, edits: &[super::engine::TextEdit]) -> String {
+    let mut sorted: Vec<_> = edits.iter().collect();
+    sorted.sort_by_key(|e| u32::from(e.range.start()));
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    for edit in sorted {
+        let start = u32::from(edit.range.start()) as usize;
+        let end = u32::from(edit.range.end()) as usize;
+        assert!(start >= cursor, "overlapping edits not supported in test");
+        out.push_str(&source[cursor..start]);
+        out.push_str(&edit.new_text);
+        cursor = end;
+    }
+    out.push_str(&source[cursor..]);
+    out
+}
+
+#[test]
+fn edit_path_matches_render_path_lf() {
+    // The per-gap edits, when applied to the source, must reproduce the
+    // formatter's `.text`. This is the invariant that production LSP
+    // consumers rely on — they only see `.edits`, not `.text`.
+    let src = "Процедура Т()\nА=1;\nКонецПроцедуры";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let result = super::engine::format_file(&root, &config);
+    assert_eq!(apply_edits(src, &result.edits), result.text);
+}
+
+#[test]
+fn edit_path_matches_render_path_crlf_with_trailing_comment() {
+    // CRLF regression: the lexer eats `\r` into trailing COMMENT tokens.
+    // The IR strips it from the atom and re-injects it into the next gap;
+    // the gap's source `range` must also cover that `\r`. Otherwise the
+    // edit replaces `\n` only and the source's `\r` survives — yielding
+    // `\r\r\n` when the edit is applied.
+    let src = "Функция Ф()\r\n\tВозврат 1;\r\nКонецФункции\t\t// trailing\r\n";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let result = super::engine::format_file(&root, &config);
+    let applied = apply_edits(src, &result.edits);
+    assert_eq!(applied, result.text, "edit path diverges from render path");
+    assert!(
+        !applied.contains("\r\r"),
+        "applying edits introduced a doubled carriage return: {applied:?}"
+    );
+}
+
 #[test]
 fn crlf_simple_procedure_preserved() {
     let src = "Процедура Тест()\r\nКонецПроцедуры";

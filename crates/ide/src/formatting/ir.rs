@@ -21,7 +21,7 @@
 //!   * Only the policy layer reads [`SyntaxKind`] to make spacing
 //!     decisions; the builder is policy-free.
 
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, WalkEvent};
+use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize, WalkEvent};
 
 use super::FormattingConfig;
 
@@ -33,9 +33,12 @@ pub struct Atom {
 }
 
 /// The whitespace between two atoms (or framing the stream at the edges).
-/// Comments are NOT gaps — they are their own atoms.
+/// Comments are NOT gaps — they are their own atoms. `range` is the source
+/// span the gap occupies; per-gap edits replace `source[range]` with the
+/// rendered text when policy reshapes the gap.
 #[derive(Debug, Clone)]
 pub struct Gap {
+    pub range: TextRange,
     pub text: String,
 }
 
@@ -79,14 +82,18 @@ impl Ir {
 
         // Pending whitespace accumulator between two atoms.
         let mut pending_text = String::new();
-
-        // When traversing inside a coalesced LITERAL node, skip its children.
+        // End of the previous atom (or start of file for the first gap).
+        // The next gap's source range is `prev_atom_end..next_atom_start`.
+        let mut prev_atom_end = TextSize::from(0);
         let mut coalesce_until: Option<SyntaxNode> = None;
 
-        // Helper: flush accumulated whitespace into one Gap.
-        let flush_gap = |gaps: &mut Vec<Gap>, text: &mut String| {
-            gaps.push(Gap { text: std::mem::take(text) });
-        };
+        let flush_gap =
+            |gaps: &mut Vec<Gap>, text: &mut String, gap_end: TextSize, gap_start: TextSize| {
+                gaps.push(Gap {
+                    range: TextRange::new(gap_start, gap_end),
+                    text: std::mem::take(text),
+                });
+            };
 
         for event in root.preorder_with_tokens() {
             match event {
@@ -95,9 +102,11 @@ impl Ir {
                         continue;
                     }
                     if is_coalescing_literal(&node) {
-                        flush_gap(&mut gaps, &mut pending_text);
+                        let node_range = node.text_range();
+                        flush_gap(&mut gaps, &mut pending_text, node_range.start(), prev_atom_end);
                         atoms.push(Atom { kind: node.kind(), text: node.text().to_string() });
                         atom_nodes.push(node.clone());
+                        prev_atom_end = node_range.end();
                         coalesce_until = Some(node.clone());
                     }
                 }
@@ -111,11 +120,12 @@ impl Ir {
                         continue;
                     }
                     let kind = token.kind();
+                    let tok_range = token.text_range();
 
                     if matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) {
                         pending_text.push_str(token.text());
                     } else {
-                        flush_gap(&mut gaps, &mut pending_text);
+                        flush_gap(&mut gaps, &mut pending_text, tok_range.start(), prev_atom_end);
                         // The lexer's `//[^\n]*` regex greedily eats `\r`
                         // before `\r\n`, so COMMENT tokens in CRLF files
                         // carry a trailing `\r`. Strip it from the atom
@@ -133,6 +143,12 @@ impl Ir {
                         if !stripped_suffix.is_empty() {
                             pending_text.push_str(stripped_suffix);
                         }
+                        // Roll `prev_atom_end` back past the stripped `\r`
+                        // bytes so the next gap's source range covers them.
+                        // Otherwise a per-gap edit would re-insert `\r`
+                        // while leaving the original byte in place, doubling
+                        // the carriage return.
+                        prev_atom_end = tok_range.end() - TextSize::of(stripped_suffix);
                         // Every non-root token has a parent in a valid CST.
                         atom_nodes
                             .push(token.parent().expect("token without parent in syntax tree"));
@@ -142,11 +158,9 @@ impl Ir {
             }
         }
 
-        // We emit one gap before each atom; the call below emits the final
-        // trailing boundary gap. The closure always pushes, so the invariant
-        // `gaps.len() == atoms.len() + 1` holds even for empty input
-        // (no atoms, one zero-width gap).
-        flush_gap(&mut gaps, &mut pending_text);
+        // Trailing boundary gap: from the last atom's end to the root end.
+        let stream_end = root.text_range().end();
+        flush_gap(&mut gaps, &mut pending_text, stream_end, prev_atom_end);
 
         assert_eq!(
             gaps.len(),
@@ -429,23 +443,35 @@ fn block_depth(node: &SyntaxNode) -> u32 {
 }
 
 /// Render the IR to a string with LF (`"\n"`) line endings. Production
-/// callers use [`render_with_line_ending`] directly to honour the source
-/// file's line ending; this is a test-only convenience.
+/// callers use [`render_full`] directly to honour the source file's line
+/// ending and collect per-gap edits; this is a test-only convenience.
 #[cfg(test)]
 fn render(ir: &Ir, decisions: &[GapDecision], cfg: &FormattingConfig) -> String {
-    render_with_line_ending(ir, decisions, cfg, "\n")
+    render_full(ir, decisions, cfg, "\n", false).0
 }
 
-/// Render the IR using the given `line_ending` (typically `"\n"` or
-/// `"\r\n"`). The line ending is emitted whenever the policy synthesizes
-/// a newline via [`GapDecision::NewlineWithIndent`]. Preserved gaps keep
-/// whatever newline bytes the source contained.
-pub fn render_with_line_ending(
+/// A per-gap text edit produced by [`render_full`]. `range` covers the
+/// source bytes the gap occupies; replacing those bytes with `new_text`
+/// is equivalent to running the formatter on the gap in isolation.
+#[derive(Debug, Clone)]
+pub struct GapEdit {
+    pub range: TextRange,
+    pub new_text: String,
+}
+
+/// Render the IR using `line_ending` (typically `"\n"` or `"\r\n"`).
+/// Returns the full output text plus per-gap edits whose `range` ↦
+/// `new_text` collectively reproduce the same transformation. Gaps whose
+/// rendered text matches the source emit no edit. `insert_final_newline`
+/// appends one line ending to the trailing gap if the output doesn't
+/// already end with one.
+pub fn render_full(
     ir: &Ir,
     decisions: &[GapDecision],
     cfg: &FormattingConfig,
     line_ending: &str,
-) -> String {
+    insert_final_newline: bool,
+) -> (String, Vec<GapEdit>) {
     assert_eq!(
         decisions.len(),
         ir.gaps.len(),
@@ -454,29 +480,70 @@ pub fn render_with_line_ending(
         ir.gaps.len()
     );
 
+    let n_gaps = ir.gaps.len();
+    let n_atoms = ir.atoms.len();
     let mut out = String::new();
-    emit_gap(&mut out, &ir.gaps[0], &decisions[0], cfg, line_ending);
-    for (i, atom) in ir.atoms.iter().enumerate() {
-        out.push_str(&atom.text);
-        emit_gap(&mut out, &ir.gaps[i + 1], &decisions[i + 1], cfg, line_ending);
+    let mut edits = Vec::new();
+
+    // Index loop: the body reads three parallel collections (`gaps`,
+    // `decisions`, `atoms`) plus structural predicates (`is_last_gap`,
+    // `has_*_atom_same_line`) that key off the index. An iterator chain
+    // would obscure the parallelism without removing it.
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..n_gaps {
+        let has_prev_atom_same_line = i > 0;
+        let has_next_atom_same_line = i < n_atoms;
+        let is_last_gap = i == n_gaps - 1;
+
+        let mut rendered = emit_gap_text(&ir.gaps[i], &decisions[i], cfg, line_ending);
+        // Preserve-gap byte stream may carry trailing whitespace from the
+        // source; trim it per line. Synthesized decisions never emit
+        // trailing whitespace, so the trim is a no-op for them. The
+        // global trim flag also gates this so round-trip identity passes
+        // (which use `apply_policy_preserve_all`) can keep raw bytes.
+        if cfg.trim_trailing_whitespace && matches!(decisions[i], GapDecision::Preserve) {
+            rendered =
+                trim_preserve_gap(&rendered, has_prev_atom_same_line, has_next_atom_same_line);
+        }
+        // `insert_final_newline` lives on the trailing gap: if the source
+        // doesn't end with a line ending and the policy didn't add one,
+        // append one here so the edit reflects the same byte stream.
+        if is_last_gap
+            && insert_final_newline
+            && (!out.is_empty() || !rendered.is_empty() || n_atoms > 0)
+            && !rendered.ends_with('\n')
+            && !rendered.ends_with("\r\n")
+        {
+            rendered.push_str(line_ending);
+        }
+
+        if rendered != ir.gaps[i].text {
+            edits.push(GapEdit { range: ir.gaps[i].range, new_text: rendered.clone() });
+        }
+        out.push_str(&rendered);
+
+        if i < n_atoms {
+            out.push_str(&ir.atoms[i].text);
+        }
     }
-    out
+
+    (out, edits)
 }
 
-fn emit_gap(
-    out: &mut String,
+fn emit_gap_text(
     gap: &Gap,
     decision: &GapDecision,
     cfg: &FormattingConfig,
     line_ending: &str,
-) {
+) -> String {
     match decision {
-        GapDecision::Preserve => out.push_str(&gap.text),
-        GapDecision::None => {}
-        GapDecision::OneSpace => out.push(' '),
+        GapDecision::Preserve => gap.text.clone(),
+        GapDecision::None => String::new(),
+        GapDecision::OneSpace => " ".to_string(),
         GapDecision::NewlineWithIndent { newlines, body_level, final_level } => {
             let body_indent = cfg.indent_for_level(*body_level);
             let final_indent = cfg.indent_for_level(*final_level);
+            let mut out = String::new();
             let n = *newlines;
             for k in 0..n {
                 out.push_str(line_ending);
@@ -486,8 +553,45 @@ fn emit_gap(
                     out.push_str(&final_indent);
                 }
             }
+            out
         }
     }
+}
+
+/// Trim trailing horizontal whitespace per "line" in a Preserve gap. A
+/// segment of the gap that immediately follows an atom on the same line
+/// (the first segment when there is a previous atom) has its trailing
+/// `' '`/`'\t'` stripped. Other segments are pure whitespace inside the
+/// gap and are kept verbatim (the blank-but-indented rule).
+fn trim_preserve_gap(
+    gap_text: &str,
+    has_prev_atom_same_line: bool,
+    has_next_atom_same_line: bool,
+) -> String {
+    if !gap_text.contains('\n') {
+        // Single-segment gap: trim only if it is trailing whitespace
+        // after the last atom of the file (or this line, equivalently —
+        // there's a previous atom and no following atom on the same line).
+        if has_prev_atom_same_line && !has_next_atom_same_line {
+            return gap_text.trim_end_matches([' ', '\t']).to_string();
+        }
+        return gap_text.to_string();
+    }
+
+    let mut segments = gap_text.split('\n');
+    let first = segments.next().unwrap();
+    let first_rendered = if has_prev_atom_same_line {
+        first.trim_end_matches([' ', '\t']).to_string()
+    } else {
+        first.to_string()
+    };
+
+    let mut out = first_rendered;
+    for seg in segments {
+        out.push('\n');
+        out.push_str(seg);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -501,7 +605,10 @@ mod tests {
 
     fn round_trip(src: &str) -> String {
         let ir = build(src);
-        let cfg = FormattingConfig::default();
+        // Disable trim so the identity-policy passes through trailing
+        // whitespace byte-for-byte. The full formatter (which has a
+        // real policy) enables trim via the same flag.
+        let cfg = FormattingConfig { trim_trailing_whitespace: false, ..Default::default() };
         let decisions = apply_policy_preserve_all(&ir, &cfg, 0);
         render(&ir, &decisions, &cfg)
     }
