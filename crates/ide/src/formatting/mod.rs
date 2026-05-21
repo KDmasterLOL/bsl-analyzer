@@ -20,7 +20,8 @@
 
 mod config;
 mod engine;
-mod indent;
+mod ir;
+mod line_tokens;
 mod on_type;
 mod whitespace;
 

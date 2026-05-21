@@ -216,6 +216,8 @@ fn test_try_except() {
 
 #[test]
 fn test_region() {
+    // 1C Configurator convention: `#Область` does NOT add an indent
+    // level. Module-level code inside a region stays at column 0.
     check(
         "#Область Инициализация
 А = 1;
@@ -223,8 +225,8 @@ fn test_region() {
 #КонецОбласти",
         expect![[r#"
             #Область Инициализация
-            	А = 1;
-            	Б = 2;
+            А = 1;
+            Б = 2;
             #КонецОбласти
         "#]],
     );
@@ -232,13 +234,15 @@ fn test_region() {
 
 #[test]
 fn test_preprocessor_if() {
+    // Conditional compilation directives don't add indent either —
+    // they're like C's `#ifdef`, not structural blocks.
     check(
         "#Если Сервер Тогда
 А = 1;
 #КонецЕсли",
         expect![[r#"
             #Если Сервер Тогда
-            	А = 1;
+            А = 1;
             #КонецЕсли
         "#]],
     );
@@ -254,9 +258,9 @@ fn test_preprocessor_if_else() {
 #КонецЕсли",
         expect![[r#"
             #Если Сервер Тогда
-            	А = 1;
+            А = 1;
             #Иначе
-            	Б = 2;
+            Б = 2;
             #КонецЕсли
         "#]],
     );
@@ -264,6 +268,10 @@ fn test_preprocessor_if_else() {
 
 #[test]
 fn test_procedure_in_region() {
+    // The procedure stays at column 0 inside `#Область`; the region
+    // does not push it in. This is essential for the real-world style
+    // where 1C `CommonModule`s wrap dozens of column-0 procedures in
+    // an `#Область ПрограммныйИнтерфейс` / `#Область СлужебныеПроцедурыИФункции`.
     check(
         "#Область ПрограммныйИнтерфейс
 Процедура Тест()
@@ -272,9 +280,9 @@ fn test_procedure_in_region() {
 #КонецОбласти",
         expect![[r#"
             #Область ПрограммныйИнтерфейс
-            	Процедура Тест()
-            		А = 1;
-            	КонецПроцедуры
+            Процедура Тест()
+            	А = 1;
+            КонецПроцедуры
             #КонецОбласти
         "#]],
     );
@@ -427,4 +435,447 @@ fn test_procedure_statement_without_semicolon() {
             КонецПроцедуры
         "#]],
     );
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests derived from real-world ObjectModule.bsl breakage.
+//
+// Each `#[ignore]` marks a currently-broken behavior. The `expect![]` block
+// captures the DESIRED output. Remove the `#[ignore]` once the formatter is
+// fixed. Run the full set with:
+//
+//     cargo test -p ide formatting -- --ignored
+//
+// Design decisions backing these expectations:
+//   * String literal contents are NEVER edited by the formatter (incl. `|`
+//     continuations of SDBL queries).
+//   * `+`-prefixed line continuations are preserved as the user wrote them
+//     (no active reflow, no space loss after the operator).
+//   * Trailing inline comments collapse leading whitespace to a single space.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn regression_bom_first_line_preserved() {
+    check(
+        "\u{FEFF}//comment\nПерем А Экспорт;\n",
+        expect![[r#"
+            ﻿//comment
+            Перем А Экспорт;
+        "#]],
+    );
+}
+
+#[test]
+fn regression_no_space_before_call_paren() {
+    check(
+        "Процедура Т()
+А = З.Выполнить().Выбрать();
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	А = З.Выполнить().Выбрать();
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_no_space_before_index() {
+    check(
+        "Процедура Т()
+А = ТЗ[0].Состояние;
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	А = ТЗ[0].Состояние;
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_multiline_string_literal_preserved() {
+    // The string content — including the `|` continuation lines — must be
+    // emitted byte-for-byte. Only the surrounding statement gets re-indented.
+    check(
+        "Процедура Т()
+А = \"ВЫБРАТЬ
+|	X.A
+|ИЗ
+|	T КАК X\";
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	А = "ВЫБРАТЬ
+            |	X.A
+            |ИЗ
+            |	T КАК X";
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_binary_plus_line_continuation_preserved() {
+    // The newline before `+` is user-authored. Formatter must not collapse it,
+    // must not glue `+":"`, must preserve the space after the operator.
+    check(
+        "Процедура Т()
+	а = \"foo\"
+		+ \": \" + б;
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	а = "foo"
+            		+ ": " + б;
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_try_except_body_indent() {
+    // Baseline: minimal Попытка/Исключение indents correctly. The real-world
+    // ObjectModule.bsl bug — body losing one indent level — needs a more
+    // complex reproducer (nested if/else inside try). Add when isolated.
+    check(
+        "Процедура Т()
+Попытка
+А = 1;
+Исключение
+Б = 2;
+КонецПопытки;
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	Попытка
+            		А = 1;
+            	Исключение
+            		Б = 2;
+            	КонецПопытки;
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_empty_default_args_keep_spaces() {
+    // Each comma in an argument list is followed by exactly one space, even if
+    // the next token is another comma (skipped default parameter).
+    check(
+        "Процедура Т()
+Соединение = Новый HTTPСоединение(Сервер, Порт, , , , 60, ssl);
+КонецПроцедуры
+",
+        expect![[r#"
+            Процедура Т()
+            	Соединение = Новый HTTPСоединение(Сервер, Порт, , , , 60, ssl);
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_trailing_inline_comment_single_space() {
+    // Baseline (currently correct): any run of whitespace between an end
+    // keyword and a trailing `//` comment collapses to one space.
+    check(
+        "Функция Ф()
+	Возврат 1;
+КонецФункции\t\t// trailing
+",
+        expect![[r#"
+            Функция Ф()
+            	Возврат 1;
+            КонецФункции // trailing
+        "#]],
+    );
+}
+
+// ----- CRLF line-ending tests -----
+//
+// The formatter detects the source line ending and emits synthesized
+// newlines (re-indentation, block boundaries) using the same. Tests below
+// use literal `\r\n` strings rather than `expect!` to avoid raw-string
+// escaping noise; the assertions are exact equality on the bytes.
+
+fn format_crlf(input: &str) -> String {
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    format_file(&root, &config).text
+}
+
+/// Apply `result.edits` to `source` left-to-right (edits don't overlap)
+/// and return the produced text. Used to verify the *edit* path matches
+/// the *render* path — historically these have drifted on CRLF input.
+fn apply_edits(source: &str, edits: &[super::engine::TextEdit]) -> String {
+    let mut sorted: Vec<_> = edits.iter().collect();
+    sorted.sort_by_key(|e| u32::from(e.range.start()));
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    for edit in sorted {
+        let start = u32::from(edit.range.start()) as usize;
+        let end = u32::from(edit.range.end()) as usize;
+        assert!(start >= cursor, "overlapping edits not supported in test");
+        out.push_str(&source[cursor..start]);
+        out.push_str(&edit.new_text);
+        cursor = end;
+    }
+    out.push_str(&source[cursor..]);
+    out
+}
+
+#[test]
+fn edit_path_matches_render_path_lf() {
+    // The per-gap edits, when applied to the source, must reproduce the
+    // formatter's `.text`. This is the invariant that production LSP
+    // consumers rely on — they only see `.edits`, not `.text`.
+    let src = "Процедура Т()\nА=1;\nКонецПроцедуры";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let result = super::engine::format_file(&root, &config);
+    assert_eq!(apply_edits(src, &result.edits), result.text);
+}
+
+#[test]
+fn edit_path_matches_render_path_crlf_with_trailing_comment() {
+    // CRLF regression: the lexer eats `\r` into trailing COMMENT tokens.
+    // The IR strips it from the atom and re-injects it into the next gap;
+    // the gap's source `range` must also cover that `\r`. Otherwise the
+    // edit replaces `\n` only and the source's `\r` survives — yielding
+    // `\r\r\n` when the edit is applied.
+    let src = "Функция Ф()\r\n\tВозврат 1;\r\nКонецФункции\t\t// trailing\r\n";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let result = super::engine::format_file(&root, &config);
+    let applied = apply_edits(src, &result.edits);
+    assert_eq!(applied, result.text, "edit path diverges from render path");
+    assert!(
+        !applied.contains("\r\r"),
+        "applying edits introduced a doubled carriage return: {applied:?}"
+    );
+}
+
+#[test]
+fn crlf_simple_procedure_preserved() {
+    let src = "Процедура Тест()\r\nКонецПроцедуры";
+    let expected = "Процедура Тест()\r\nКонецПроцедуры\r\n";
+    assert_eq!(format_crlf(src), expected);
+}
+
+#[test]
+fn crlf_body_reindent_uses_crlf() {
+    // Indent inserted by the policy must use the source's line ending.
+    let src = "Процедура Тест()\r\nА = 1;\r\nКонецПроцедуры";
+    let expected = "Процедура Тест()\r\n\tА = 1;\r\nКонецПроцедуры\r\n";
+    assert_eq!(format_crlf(src), expected);
+}
+
+#[test]
+fn crlf_blank_lines_inside_body() {
+    let src = "Процедура Тест()\r\n\r\nА = 1;\r\n\r\nКонецПроцедуры";
+    let expected = "Процедура Тест()\r\n\t\r\n\tА = 1;\r\n\t\r\nКонецПроцедуры\r\n";
+    assert_eq!(format_crlf(src), expected);
+}
+
+#[test]
+fn crlf_trailing_inline_comment_no_trailing_cr() {
+    // The lexer's `//[^\n]*` regex eats the `\r` into the COMMENT token in
+    // CRLF files. `Ir::build` strips it; the rendered comment must not
+    // carry the spurious `\r`, and the line ending stays `\r\n`.
+    let src = "Функция Ф()\r\n\tВозврат 1;\r\nКонецФункции\t\t// trailing\r\n";
+    let expected = "Функция Ф()\r\n\tВозврат 1;\r\nКонецФункции // trailing\r\n";
+    assert_eq!(format_crlf(src), expected);
+}
+
+#[test]
+fn crlf_multiline_string_literal_preserved() {
+    // String content carries its own `\r\n` separators — they must round-
+    // trip byte-for-byte (LITERAL coalescing keeps the atom opaque).
+    let src = "А = \"ВЫБРАТЬ\r\n|\tX.A\r\n|ИЗ\r\n|\tT КАК X\";\r\n";
+    assert_eq!(format_crlf(src), src);
+}
+
+#[test]
+fn crlf_bom_preserved() {
+    let src = "\u{FEFF}// header\r\nПроцедура Т()\r\nКонецПроцедуры\r\n";
+    assert_eq!(format_crlf(src), src);
+}
+
+// ----- Range formatting parity tests -----
+//
+// The IR-based `format_range` is implemented as "format the whole file,
+// then slice the result by line index". These tests pin that invariant:
+// the formatted slice must match the corresponding slice of `format_file`
+// output, for any line span.
+
+fn format_full_lines(input: &str) -> Vec<String> {
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let text = super::engine::format_file(&root, &config).text;
+    text.split_inclusive('\n').map(|s| s.to_string()).collect()
+}
+
+fn format_range_lines(input: &str, start_line: usize, end_line: usize) -> String {
+    use syntax::{TextRange, TextSize};
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+
+    // Resolve start_line/end_line to byte offsets in the source.
+    let line_starts: Vec<u32> = std::iter::once(0u32)
+        .chain(input.char_indices().filter(|(_, c)| *c == '\n').map(|(i, _)| (i + 1) as u32))
+        .collect();
+    let start = line_starts[start_line];
+    let end = line_starts.get(end_line + 1).copied().unwrap_or(input.len() as u32);
+    let range = TextRange::new(TextSize::from(start), TextSize::from(end.saturating_sub(1)));
+    super::engine::format_range(&root, range, &config).text
+}
+
+#[test]
+fn range_parity_middle_line() {
+    let src = "Процедура Т()\nА=1;\nБ=2;\nКонецПроцедуры";
+    let full = format_full_lines(src);
+    let slice = format_range_lines(src, 1, 1);
+    // The range output excludes the trailing newline (range covers
+    // line-content bytes only); the full output keeps it.
+    assert_eq!(slice, full[1].trim_end_matches('\n'));
+}
+
+#[test]
+fn range_parity_multi_line_span() {
+    let src = "Процедура Т()\nА=1;\nБ=2;\nВ=3;\nКонецПроцедуры";
+    let full = format_full_lines(src);
+    let slice = format_range_lines(src, 1, 3);
+    let expected = format!("{}{}{}", full[1], full[2], full[3].trim_end_matches('\n'));
+    assert_eq!(slice, expected);
+}
+
+#[test]
+fn range_parity_header_line() {
+    let src = "Процедура Т()\nА=1;\nКонецПроцедуры";
+    let full = format_full_lines(src);
+    let slice = format_range_lines(src, 0, 0);
+    assert_eq!(slice, full[0].trim_end_matches('\n'));
+}
+
+#[test]
+fn range_full_file_matches_format_file_sans_final_newline() {
+    // A range that spans every source line should produce the same bytes
+    // as `format_file` minus the synthesized final newline (range formatter
+    // stops at the last line's content end).
+    let src = "Процедура Т()\nА=1;\nКонецПроцедуры";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let full = super::engine::format_file(&root, &config).text;
+    let last_line = src.matches('\n').count();
+    let slice = format_range_lines(src, 0, last_line);
+    assert_eq!(slice, full.trim_end_matches('\n'));
+}
+
+#[test]
+fn range_unaligned_offset_snaps_to_lines() {
+    // A range that starts/ends mid-line still snaps to whole lines (the
+    // formatter operates line-aligned by construction).
+    use syntax::{TextRange, TextSize};
+    let src = "Процедура Т()\nА=1;\nБ=2;\nКонецПроцедуры";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    // Offsets inside line 1 only.
+    let line1_start = "Процедура Т()\n".len() as u32;
+    let range = TextRange::new(TextSize::from(line1_start + 1), TextSize::from(line1_start + 2));
+    let out = super::engine::format_range(&root, range, &config).text;
+    // The whole of line 1 should be reformatted (`А=1;` → `А = 1;`).
+    assert_eq!(out, "\tА = 1;");
+}
+
+#[test]
+fn range_end_on_newline_does_not_leak_edits_to_eof() {
+    // Regression: when the requested range ends ON a `\n` byte (typical
+    // for Shift+V line selections in CRLF files — nvim's encoder snaps
+    // the end position to the line-ending byte), the line lookup used to
+    // fail and clamp `end_line` to the last line of the file, leaking
+    // edits across the whole document.
+    use syntax::{TextRange, TextSize};
+    let mut src = String::new();
+    // Build a 30-line file with stable header, malformed middle (to trigger
+    // edits there), and stable tail. All CRLF.
+    src.push_str("Процедура Т()\r\n");
+    for i in 0..10 {
+        src.push_str(&format!("\tА{i} = 1;\r\n"));
+    }
+    // Middle: badly-indented lines that the formatter will reshape.
+    let mid_start = src.len();
+    for i in 0..5 {
+        src.push_str(&format!("Б{i}=2;\r\n"));
+    }
+    let mid_end = src.len();
+    for i in 0..10 {
+        src.push_str(&format!("\tВ{i} = 3;\r\n"));
+    }
+    src.push_str("КонецПроцедуры\r\n");
+
+    let parsed = parser::parse(&src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+
+    // Select only the middle block, ending the range on the `\n` of its
+    // last line (the byte right before mid_end is `\n` in CRLF).
+    let range =
+        TextRange::new(TextSize::from(mid_start as u32), TextSize::from((mid_end - 1) as u32));
+    let result = super::engine::format_range(&root, range, &config);
+
+    // Every edit's range must lie within the lines covered by the
+    // request (mid_start..mid_end). The historical bug emitted edits up
+    // to the end of the file.
+    for edit in &result.edits {
+        let start = u32::from(edit.range.start()) as usize;
+        let end = u32::from(edit.range.end()) as usize;
+        assert!(
+            end <= mid_end + 2, /* generous for line-ending bytes */
+            "edit {:?} reaches past the requested span (mid_end={mid_end})",
+            edit
+        );
+        assert!(
+            start + 1 >= mid_start,
+            "edit {:?} starts before the requested span (mid_start={mid_start})",
+            edit
+        );
+    }
+}
+
+#[test]
+fn range_idempotent_on_already_formatted() {
+    // Formatting a range of already-formatted text yields no edits.
+    let src = "Процедура Т()\n\tА = 1;\nКонецПроцедуры\n";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    use syntax::{TextRange, TextSize};
+    let line1_start = "Процедура Т()\n".len() as u32;
+    let range = TextRange::new(TextSize::from(line1_start), TextSize::from(line1_start + 8));
+    let result = super::engine::format_range(&root, range, &config);
+    assert!(result.edits.is_empty(), "idempotent range should yield no edits: {:?}", result);
+}
+
+#[test]
+fn crlf_and_lf_parity_modulo_line_ending() {
+    // Formatting parity: replacing CRLF with LF in the source yields LF
+    // output that mirrors the CRLF output line-for-line.
+    let src_lf = "Процедура Т()\nЕсли А Тогда\nБ = 1;\nИначе\nВ = 2;\nКонецЕсли;\nКонецПроцедуры";
+    let src_crlf = src_lf.replace('\n', "\r\n");
+    let out_lf = format_crlf(src_lf);
+    let out_crlf = format_crlf(&src_crlf);
+    assert_eq!(out_crlf, out_lf.replace('\n', "\r\n"));
 }

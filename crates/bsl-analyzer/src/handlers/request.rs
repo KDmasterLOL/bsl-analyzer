@@ -806,6 +806,7 @@ pub fn handle_formatting(
 
     // Call IDE API
     let result = snap.analysis.format_file(file_id, &config);
+    tracing::debug!("format_file: {} edits", result.edits.len());
 
     // Convert edits
     if result.edits.is_empty() {
@@ -822,6 +823,7 @@ pub fn handle_formatting(
                 edit.range,
                 snap.position_encoding,
             )?;
+            tracing::trace!("edit {:?} → {:?}", edit.range, truncate_edit_preview(&edit.new_text));
             Some(lsp_types::TextEdit { range, new_text: edit.new_text })
         })
         .collect();
@@ -830,6 +832,27 @@ pub fn handle_formatting(
         Ok(None)
     } else {
         Ok(Some(lsp_edits))
+    }
+}
+
+/// Renders an edit's `new_text` in a debug-log-friendly form: escapes
+/// whitespace, caps length at 60 chars. Spotting `\\t`/`\\n` in the log is
+/// what makes the format trace actually readable.
+fn truncate_edit_preview(s: &str) -> String {
+    let escaped: String = s
+        .chars()
+        .map(|c| match c {
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            c => c.to_string(),
+        })
+        .collect();
+    if escaped.chars().count() > 60 {
+        let head: String = escaped.chars().take(57).collect();
+        format!("{}...", head)
+    } else {
+        escaped
     }
 }
 
@@ -902,6 +925,7 @@ pub fn handle_range_formatting(
                 edit.range,
                 snap.position_encoding,
             )?;
+            tracing::trace!("edit {:?} → {:?}", edit.range, truncate_edit_preview(&edit.new_text));
             Some(lsp_types::TextEdit { range, new_text: edit.new_text })
         })
         .collect();
