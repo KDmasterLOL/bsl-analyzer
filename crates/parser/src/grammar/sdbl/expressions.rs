@@ -1308,10 +1308,19 @@ fn column_or_function(p: &mut Parser) {
                 break;
             }
 
-            // Check if this Ident is actually a clause keyword (FROM, WHERE, etc.)
-            // Lexer returns them as Ident in some contexts
-            if super::select::is_clause_keyword(p) {
-                // Incomplete: "Table.\nFROM" - don't consume FROM
+            // SDBL keywords are lex'd as `Ident` and must be filtered by
+            // text in the post-DOT column slot. See
+            // `is_likely_clause_start_after_dot` for the curated denylist
+            // (clause / alias / sort / CASE-frame / predicate keywords)
+            // and the rationale for what is NOT in it
+            // (`Ссылка`/`Сумма`/operator tokens stay valid as column
+            // names). BSL parallel:
+            // `crates/parser/src/grammar/expressions.rs`'s
+            // `PROPERTY_NAME_TOKENS` excludes block terminators for the
+            // same reason at the token-kind layer.
+            if super::select::is_likely_clause_start_after_dot(p) {
+                // Incomplete: "Table.\nFROM" / "Table. КАК Alias" - don't
+                // consume the keyword as field name.
                 let err = p.start();
                 p.emit_error_at_marker(
                     err,

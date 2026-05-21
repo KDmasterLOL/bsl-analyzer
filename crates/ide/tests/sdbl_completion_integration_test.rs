@@ -130,6 +130,54 @@ fn test_completion_for_nested_union_with_into_clause() {
     );
 }
 
+#[test]
+fn test_completion_after_dot_followed_by_kak_alias() {
+    // Воспроизводит баг из real-world кейса: пользователь печатает
+    //   Алиас. КАК Ссылка
+    // и ставит курсор СРАЗУ после точки (до пробела и КАК), ожидая
+    // подсказку полей. Если допечатать любое валидное имя после точки и
+    // вернуться курсором к точке — completion работает. То есть тип
+    // alias'а резолвится, scope строится; проблема в том, как
+    // completion обрабатывает trailing-dot перед SDBL keyword.
+    //
+    // Параллель с BSL `obj.<EOL>КонецФункции`: после DOT парсер должен
+    // не съесть `КАК` как имя колонки (SDBL `at_property_name` НЕ
+    // включает `KwAs` в soft-keyword set — проверяется ниже), но
+    // completion должен по позиции отдать имена доступных колонок
+    // источника alias'а.
+    let code = r#"Функция ТестЗапрос()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ
+    |   Внутренний. КАК Ссылка
+    |ИЗ
+    |   (ВЫБРАТЬ
+    |       Т.Наименование КАК Поле1,
+    |       Т.Код КАК Поле2
+    |   ИЗ
+    |       Справочник.Номенклатура КАК Т) КАК Внутренний";
+    Возврат Запрос.Выполнить();
+КонецФункции"#;
+
+    let (analysis, file_id) = create_analysis(code);
+
+    // Cursor сразу после `Внутренний.` (до пробела + КАК).
+    let dot_pos =
+        code.find("Внутренний. КАК").expect("must find dot-then-КАК site") + "Внутренний.".len();
+
+    let completions = analysis.completions(file_id, dot_pos as u32, None, ide::Locale::Ru);
+
+    let labels: Vec<&str> = completions.iter().map(|c| c.label.as_str()).collect();
+    assert!(
+        labels.contains(&"Поле1"),
+        "trailing-dot before КАК alias must surface subquery field `Поле1`; got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Поле2"),
+        "trailing-dot before КАК alias must surface subquery field `Поле2`; got: {labels:?}"
+    );
+}
+
 // NOTE: Simple query without metadata test is skipped because
 // completion requires metadata (Справочник.Номенклатура) which is not
 // available in unit tests. Integration tests with real projects would test this.

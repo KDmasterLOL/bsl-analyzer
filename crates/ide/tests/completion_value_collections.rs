@@ -512,6 +512,129 @@ fn completion_after_dot_on_local_from_same_module_fn_array_callee_above() {
     }
 }
 
+// ---------- recursion cascade typing ----------
+//
+// `method_return_type_query` ships `cycle_fn` + `cycle_initial`
+// handlers (lattice bottom = `Ty::Unknown`, monotone-growing union
+// merge). The tests below pin that recursive callees still propagate
+// their concrete return type to the caller's local variable for
+// completion — a common BSL idiom is a tail-call helper that ends
+// with `Возврат Self(...)` after an explicit base-case return.
+
+#[test]
+fn completion_after_dot_on_local_from_self_recursive_value_table() {
+    // Direct self-recursion: the base case returns `Новый
+    // ТаблицаЗначений`; the recursive branch returns `СписокШагов(...)`
+    // itself. `method_return_type_query` must reach the lattice
+    // fixed-point `Ty::ValueTable` through the cycle handlers and the
+    // caller's local `ТЗ` must surface ValueTable members.
+    let items = complete(
+        r#"//- /test.bsl
+Функция СписокШагов(Глубина)
+    Если Глубина = 0 Тогда
+        Возврат Новый ТаблицаЗначений;
+    КонецЕсли;
+    Возврат СписокШагов(Глубина - 1);
+КонецФункции
+
+Процедура Тест()
+    ТЗ = СписокШагов(5);
+    ТЗ.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        !items.is_empty(),
+        "self-recursive callee must still cascade ValueTable to caller; got empty: {ls:?}"
+    );
+    for expected in ["Добавить", "Колонки", "Количество"] {
+        assert!(
+            has_label(&items, expected),
+            "self-recursion cascade must surface ValueTable member `{expected}`; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_after_dot_on_local_from_mutual_recursion_structure() {
+    // Mutual recursion: `Четный` ↔ `Нечетный`. Both functions end
+    // their recursive branch with a call into the other; only one
+    // (`Четный`) has an explicit `Новый Структура` base case.
+    // Phase J `method_return_type_query` must propagate `Ty::Structure`
+    // through both cycles (cycle initial = Unknown; the monotone
+    // union merge promotes Unknown → Structure when the base case is
+    // reached) so completion on the caller's local works regardless
+    // of which arm of the mutual pair the user calls.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Четный(Х)
+    Если Х = 0 Тогда
+        Возврат Новый Структура;
+    КонецЕсли;
+    Возврат Нечетный(Х - 1);
+КонецФункции
+
+Функция Нечетный(Х)
+    Если Х = 0 Тогда
+        Возврат Новый Структура;
+    КонецЕсли;
+    Возврат Четный(Х - 1);
+КонецФункции
+
+Процедура Тест()
+    Стр = Четный(7);
+    Стр.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        !items.is_empty(),
+        "mutual-recursion cascade must surface Structure members; got empty: {ls:?}"
+    );
+    for expected in ["Вставить", "Свойство"] {
+        assert!(
+            has_label(&items, expected),
+            "mutual-recursion cascade must surface Structure member `{expected}`; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_after_dot_on_local_from_pure_self_recursion_yields_no_items() {
+    // Sanity: a pure self-recursion with NO base-case literal (the
+    // recursive branch is the ONLY return) must cascade to
+    // `Ty::Unknown` — there is no concrete type to lift through the
+    // cycle handlers. Completion correctly shows no platform members
+    // (vs. surfacing wrong-type members from a stale cycle initial).
+    // This pins the cycle handler's lattice contract: ⊥ ⊔ ⊥ = ⊥.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Бесконечная()
+    Возврат Бесконечная();
+КонецФункции
+
+Процедура Тест()
+    Х = Бесконечная();
+    Х.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        !has_label(&items, "Добавить") && !has_label(&items, "Колонки"),
+        "pure self-recursion must NOT spuriously surface ValueTable members; got: {ls:?}"
+    );
+    assert!(
+        !has_label(&items, "Вставить") && !has_label(&items, "Свойство"),
+        "pure self-recursion must NOT spuriously surface Structure members; got: {ls:?}"
+    );
+}
+
 // ---------- chained dot through ValueTable.Колонки ----------
 
 #[test]

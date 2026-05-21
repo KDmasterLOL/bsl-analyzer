@@ -1102,6 +1102,76 @@ pub(super) fn is_clause_keyword(p: &Parser) -> bool {
         || is_join_keyword(p)
 }
 
+/// Tokens that cannot legally be a column name after `.` in
+/// `column_or_function`'s post-DOT loop.
+///
+/// SDBL keywords are lex'd as `TokenKind::Ident` and disambiguated by
+/// text inside the grammar. The post-DOT property slot allowlist
+/// (`at_property_name`) accepts any `Ident`, which combines with the
+/// SDBL text-keyword scheme to swallow `Алиас. КАК Алиас` → the
+/// `КАК` alias keyword gets consumed as the column name and the
+/// rest of the SELECT becomes orphaned ERROR tokens. This predicate
+/// is the deny-list checked AFTER `at_property_name` accepts so a
+/// genuine reserved word at the field-name slot triggers
+/// recovery-emit-then-break instead of token consumption.
+///
+/// Members fall into four buckets, each with corpus evidence in
+/// the SDBL grammar that the token is a reserved-context token at
+/// the same level as the post-DOT column slot:
+///
+/// * **Clause keywords** (via `is_clause_keyword`) — SELECT, FROM,
+///   WHERE, GROUP, HAVING, ORDER, UNION, INTO, ON, FOR, INDEX,
+///   AUTOORDER, TOTALS, + join keywords (INNER/OUTER/FULL/LEFT/
+///   RIGHT/JOIN).
+/// * **Alias / sort direction** — `AS/КАК`, `ASC/ВОЗР`,
+///   `DESC/УБЫВ`.
+/// * **CASE-expression frame** — `CASE/ВЫБОР`, `WHEN/КОГДА`,
+///   `THEN/ТОГДА`, `ELSE/ИНАЧЕ`, `END/КОНЕЦ`.
+/// * **Predicate / quantifier keywords** — `BETWEEN/МЕЖДУ`,
+///   `LIKE/ПОДОБНО`, `ESCAPE/СПЕЦСИМВОЛ`, `ALL/ВСЕ`,
+///   `DISTINCT/РАЗЛИЧНЫЕ`, `TOP/ПЕРВЫЕ`, `HIERARCHY/ИЕРАРХИИ`,
+///   `DROP/УНИЧТОЖИТЬ`, `BY/ПО`.
+///
+/// Explicitly NOT included (Codex round 1 review):
+///
+/// * `REFERENCE/ССЫЛКА` — `Алиас.Ссылка` is a base 1С idiom (every
+///   metadata object's record has a `Ссылка` field). Excluding it
+///   would break completion on the most common 1С query pattern.
+/// * `IS/ЕСТЬ`, `EMPTY/ПУСТАЯ` — predicate-only positions; not
+///   grammar-grounded as post-DOT stops, and `Т.Есть` is a
+///   plausible (if rare) domain field name.
+/// * Aggregate function names (`СУММА/SUM`, `КОЛИЧЕСТВО/COUNT`,
+///   `МАКСИМУМ/MAX`, `МИНИМУМ/MIN`, `СРЕДНЕЕ/AVG`) — `Т.Сумма`,
+///   `Т.Количество` are realistic domain field names.
+/// * Operator/literal `Kw*` tokens accepted by `at_property_name`
+///   (`KwAnd/KwOr/KwNot/KwIn/KwTrue/KwFalse/KwUndefined`). These
+///   are `TokenKind` variants, not text keywords, and accepting
+///   them as column names is the deliberate `Т.В` / `Т.Истина`
+///   semantics documented at `at_property_name`'s definition.
+///
+/// Extending this set requires corpus evidence — do NOT add by
+/// symmetry alone (parallel to BSL's `PROPERTY_NAME_TOKENS`).
+pub(super) fn is_likely_clause_start_after_dot(p: &Parser) -> bool {
+    is_clause_keyword(p)
+        || at_sdbl_keyword(p, "AS", "КАК")
+        || at_sdbl_keyword(p, "ASC", "ВОЗР")
+        || at_sdbl_keyword(p, "DESC", "УБЫВ")
+        || at_sdbl_keyword(p, "CASE", "ВЫБОР")
+        || at_sdbl_keyword(p, "WHEN", "КОГДА")
+        || at_sdbl_keyword(p, "THEN", "ТОГДА")
+        || at_sdbl_keyword(p, "ELSE", "ИНАЧЕ")
+        || at_sdbl_keyword(p, "END", "КОНЕЦ")
+        || at_sdbl_keyword(p, "BETWEEN", "МЕЖДУ")
+        || at_sdbl_keyword(p, "LIKE", "ПОДОБНО")
+        || at_sdbl_keyword(p, "ESCAPE", "СПЕЦСИМВОЛ")
+        || at_sdbl_keyword(p, "ALL", "ВСЕ")
+        || at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ")
+        || at_sdbl_keyword(p, "TOP", "ПЕРВЫЕ")
+        || at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИИ")
+        || at_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ")
+        || at_sdbl_keyword(p, "BY", "ПО")
+}
+
 /// Subset of `is_clause_keyword`: tokens that start a NEW query
 /// (`SELECT`/`ВЫБРАТЬ`) or combine query packages
 /// (`UNION`/`ОБЪЕДИНИТЬ`).

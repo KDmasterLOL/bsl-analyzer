@@ -5263,3 +5263,96 @@ fn test_slice8adn_gap_vt_args_then_clause_keyword() {
         where_in_tree,
     );
 }
+
+// ----------------------------------------------------------------------------
+// `is_likely_clause_start_after_dot` regression: SDBL keywords lex'd as
+// `Ident` MUST NOT be consumed as a column name after `.`. The denylist
+// is curated in `crates/parser/src/grammar/sdbl/select.rs` with explicit
+// rationale per token; the tests below pin both directions of the
+// denylist contract.
+//
+// POSITIVE — these idents are NOT in the denylist and must continue to
+// parse as legal column names. `Т.Ссылка` is the most common 1С query
+// pattern (every metadata record carries a `Ссылка` field).
+//
+// NEGATIVE — these idents ARE in the denylist; after a trailing `.` the
+// parser must close the column reference without swallowing the keyword.
+// The follow-up structural token (e.g. an alias name after `КАК`) must
+// remain reachable so completion / find-references / cascade typing
+// have a complete tree to work with.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_column_dot_ssylka_is_field_name() {
+    check_no_errors("SELECT Т.Ссылка FROM Справочник.Номенклатура AS Т");
+}
+
+#[test]
+fn test_column_dot_summa_is_field_name() {
+    // `Т.Сумма` — domain field named after the aggregate keyword `СУММА`.
+    // Aggregate function names are deliberately NOT in the denylist.
+    check_no_errors("SELECT Т.Сумма FROM РегистрНакопления.Продажи AS Т");
+}
+
+#[test]
+fn test_column_dot_v_operator_token_is_field_name() {
+    // `Т.В` — single-letter operator keyword token (`KwIn`) accepted by
+    // `at_property_name`'s soft-keyword set. The denylist must NOT
+    // override this — operator/literal Kw* tokens stay valid as column
+    // names.
+    check_no_errors("SELECT Т.В FROM Справочник.Номенклатура AS Т");
+}
+
+#[test]
+fn test_column_dot_istina_literal_token_is_field_name() {
+    check_no_errors("SELECT Т.Истина FROM Справочник.Номенклатура AS Т");
+}
+
+#[test]
+fn test_column_dot_kak_does_not_swallow_alias() {
+    // The user-reported symptom: `Алиас. КАК Имя` must not consume `КАК`
+    // as the column name. The `КАК Имя` alias must remain attached to
+    // the column reference. Tree-shape check below verifies the column
+    // ref closes at the dot and the alias node is a sibling, not a
+    // swallowed-into-error.
+    let input = "SELECT Т. КАК Алиас FROM Справочник.Номенклатура AS Т";
+    let parse = parse_sdbl(input);
+
+    let has_alias_node =
+        parse.syntax_node().descendants().any(|n| n.kind() == syntax::SyntaxKind::SDBL_ALIAS);
+    assert!(
+        has_alias_node,
+        "trailing-dot before КАК must preserve the SDBL_ALIAS node; tree:\n{:#?}",
+        parse.syntax_node()
+    );
+
+    // Column ref must close at the dot, not absorb the alias keyword.
+    let col_ref = parse
+        .syntax_node()
+        .descendants()
+        .find(|n| n.kind() == syntax::SyntaxKind::SDBL_COLUMN_REF)
+        .expect("SdblColumnRef must exist");
+    let col_text = col_ref.text().to_string();
+    assert!(
+        !col_text.contains("КАК"),
+        "SdblColumnRef must not contain the alias keyword; got: {col_text:?}"
+    );
+}
+
+#[test]
+fn test_column_dot_vybor_case_keyword_does_not_swallow_case_frame() {
+    let input = "SELECT Т., ВЫБОР КОГДА 1 = 1 ТОГДА 1 КОНЕЦ FROM Справочник.Номенклатура AS Т";
+    let parse = parse_sdbl(input);
+
+    let case_text = parse
+        .syntax_node()
+        .descendants()
+        .find(|n| n.kind() == syntax::SyntaxKind::SDBL_CASE_EXPR)
+        .map(|n| n.text().to_string());
+    assert!(
+        case_text.is_some_and(|t| t.contains("КОГДА") && t.contains("КОНЕЦ")),
+        "trailing-dot before ВЫБОР must preserve the SdblCaseExpr frame; \
+         tree:\n{:#?}",
+        parse.syntax_node()
+    );
+}
