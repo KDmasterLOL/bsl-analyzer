@@ -509,6 +509,92 @@ mod tests {
         assert_eq!(sig.active_parameter, Some(0));
     }
 
+    /// Chained-call regression guard: `Запрос.Выполнить().Выгрузить($0)`
+    /// must resolve `Выгрузить` on the **return type** of the inner call
+    /// (`РезультатЗапроса`), not on the literal receiver text. Pre-Ty-based
+    /// resolver this scenario produced `None` because the receiver chain
+    /// could not be reduced to a type without consulting inferred types.
+    #[test]
+    fn test_platform_method_signature_on_chained_call_return_type() {
+        let code = "Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = \"Выбрать 0\";
+    Результат = Запрос.Выполнить().Выгрузить($0);
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset).expect(
+            "signature help must resolve РезультатЗапроса.Выгрузить through the chained call's inferred return type",
+        );
+        assert!(
+            sig.signature.contains("Выгрузить"),
+            "signature must include the method name, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("ТипОбхода"),
+            "signature must include the optional parameter `ТипОбхода`, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("ОбходРезультатаЗапроса"),
+            "signature must surface the parameter's platform type `ОбходРезультатаЗапроса`, got: {}",
+            sig.signature
+        );
+        assert_eq!(
+            sig.parameters.len(),
+            1,
+            "QueryResult.Выгрузить has exactly one declared parameter, got: {:?}",
+            sig.parameters
+        );
+        assert_eq!(sig.active_parameter, Some(0));
+    }
+
+    /// Double-chained Union receiver disambiguation. The inner
+    /// `Запрос.Выполнить().Выгрузить()` returns
+    /// `Union(ТаблицаЗначений, ДеревоЗначений)` — **two non-sentinel
+    /// arms**, both of which own a `Скопировать` method with different
+    /// signatures (`ТаблицаЗначений::Скопировать` takes 4 parameters,
+    /// `ДеревоЗначений::Скопировать` takes 0). Pins the "first
+    /// non-sentinel arm wins" convention introduced in the Union
+    /// branch of `resolve_callee_at`: signature help must surface
+    /// exactly one signature, and that signature must be the
+    /// `ТаблицаЗначений` overload because `Ty::union`'s deterministic
+    /// ordering places it before `ДеревоЗначений`.
+    #[test]
+    fn test_platform_method_signature_on_chained_union_first_arm_wins() {
+        let code = "Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Выполнить().Выгрузить().Скопировать($0)
+КонецПроцедуры";
+        let (code, offset) = find_cursor(code);
+        let (db, file_id) = setup_db(&code);
+
+        let sig = signature_help(&db, file_id, offset).expect(
+            "signature help must dispatch through a multi-arm Union (no sentinels) and pick the first arm",
+        );
+        assert!(
+            sig.signature.contains("Скопировать"),
+            "signature must include the method name, got: {}",
+            sig.signature
+        );
+        // `ТаблицаЗначений::Скопировать` has parameters that
+        // `ДеревоЗначений::Скопировать` does not — `Строки`/`Колонки`
+        // are the distinguishing fingerprint. Asserting on them
+        // proves the first arm (ValueTable) won the dispatch.
+        assert!(
+            sig.signature.contains("Строки") || sig.signature.contains("Колонки"),
+            "signature must come from ТаблицаЗначений::Скопировать (not the zero-param ДеревоЗначений overload), got: {}",
+            sig.signature
+        );
+        assert!(
+            !sig.parameters.is_empty(),
+            "ТаблицаЗначений::Скопировать has parameters; an empty list would mean ДеревоЗначений won — got: {:?}",
+            sig.parameters
+        );
+    }
+
     // ---- Platform constructor signature help -------------------------------
 
     #[test]

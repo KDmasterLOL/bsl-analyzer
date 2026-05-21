@@ -7,7 +7,7 @@ use bsl_metadata::MdoType;
 use bsl_platform::{
     global_function_query, platform_method_query, MethodLookupInput, TypeNameInput,
 };
-use hir::{ManagerType, ModuleId, Name, Resolver, Semantics};
+use hir::{ManagerType, ModuleId, Name, Resolver, Semantics, Ty};
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
 use vfs::FileId;
@@ -90,6 +90,33 @@ pub fn resolve_callee_at<DB: RootDatabase>(
                     },
                     active,
                 ));
+            }
+        }
+
+        // Union receivers (typical shape: `Запрос.Выполнить()` →
+        // `Union(РезультатЗапроса, Неопределено)`) have no single
+        // `platform_type_name()`. Mirror the completion pipeline in
+        // `ide::completion::platform_completion`: skip `Undefined`/`Null`
+        // sentinels and pick the first arm that owns the method. The
+        // first match wins because signature help is a single-overload
+        // surface — there is no UX way to render two competing arms.
+        if let Ty::Union(members) = &ty {
+            for member in members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)) {
+                let Some(type_name) = member.platform_type_name() else { continue };
+                if platform_method_query(
+                    db,
+                    MethodLookupInput::new(db, type_name.to_string(), callee_name.clone()),
+                )
+                .is_some()
+                {
+                    return Some((
+                        CalleeKind::PlatformMethod {
+                            type_name: type_name.into(),
+                            method_name: callee_name.into(),
+                        },
+                        active,
+                    ));
+                }
             }
         }
 

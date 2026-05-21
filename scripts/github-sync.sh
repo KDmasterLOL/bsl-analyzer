@@ -468,7 +468,7 @@ COMMIT_MSG_FILE=$(mktemp)
     fi
 } > "$COMMIT_MSG_FILE"
 git commit -F "$COMMIT_MSG_FILE" \
-    --author="BSL Analyzer <bsl-analyzer@users.noreply.github.com>"
+    --author="BSL Analyzer <itrous@gmail.com>"
 rm -f "$COMMIT_MSG_FILE"
 
 # Пушим коммит
