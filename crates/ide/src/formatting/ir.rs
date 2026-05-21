@@ -1,19 +1,12 @@
-// Several public items here are deliberately broader than the engine
-// currently consumes — `Atom.range`/`Gap.range` for future TextEdit
-// computation in range formatting, `render` as the LF default wrapper,
-// `apply_policy_preserve_all` as a round-trip baseline used by tests. Keep
-// them visible without scattering narrow `#[allow]` attributes.
-#![allow(dead_code)]
-
 //! Token-level IR for the BSL formatter (Phase 2 architecture).
 //!
 //! Builds a flat stream of opaque [`Atom`]s separated by [`Gap`]s from a
 //! Rowan CST. The pipeline is:
 //!
 //! ```text
-//!   Ir::build(root)                      — CST traversal → IR
-//!   apply_policy_preserve_all(ir, cfg)   — per-gap GapDecision (placeholder)
-//!   render(ir, decisions, cfg)           — final String
+//!   Ir::build(root)                                  — CST traversal → IR
+//!   apply_policy(ir, cfg, initial_indent)            — per-gap GapDecision
+//!   render_with_line_ending(ir, decisions, cfg, le)  — final String
 //! ```
 //!
 //! Invariants enforced by the builder:
@@ -28,7 +21,7 @@
 //!   * Only the policy layer reads [`SyntaxKind`] to make spacing
 //!     decisions; the builder is policy-free.
 
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize, WalkEvent};
+use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, WalkEvent};
 
 use super::FormattingConfig;
 
@@ -36,7 +29,6 @@ use super::FormattingConfig;
 #[derive(Debug, Clone)]
 pub struct Atom {
     pub kind: SyntaxKind,
-    pub range: TextRange,
     pub text: String,
 }
 
@@ -44,7 +36,6 @@ pub struct Atom {
 /// Comments are NOT gaps — they are their own atoms.
 #[derive(Debug, Clone)]
 pub struct Gap {
-    pub range: TextRange,
     pub text: String,
 }
 
@@ -87,25 +78,14 @@ impl Ir {
         let mut atom_nodes: Vec<SyntaxNode> = Vec::new();
 
         // Pending whitespace accumulator between two atoms.
-        let mut pending_start: Option<TextSize> = None;
         let mut pending_text = String::new();
 
         // When traversing inside a coalesced LITERAL node, skip its children.
         let mut coalesce_until: Option<SyntaxNode> = None;
 
-        let stream_end = root.text_range().end();
-
-        // Helper: flush accumulated whitespace into one Gap and clear state.
-        let flush_gap = |gaps: &mut Vec<Gap>,
-                         start: &mut Option<TextSize>,
-                         text: &mut String,
-                         end: TextSize| {
-            let start_pos = start.take().unwrap_or(end);
-            let actual_end = if text.is_empty() { start_pos } else { end };
-            gaps.push(Gap {
-                range: TextRange::new(start_pos, actual_end),
-                text: std::mem::take(text),
-            });
+        // Helper: flush accumulated whitespace into one Gap.
+        let flush_gap = |gaps: &mut Vec<Gap>, text: &mut String| {
+            gaps.push(Gap { text: std::mem::take(text) });
         };
 
         for event in root.preorder_with_tokens() {
@@ -115,14 +95,8 @@ impl Ir {
                         continue;
                     }
                     if is_coalescing_literal(&node) {
-                        let range = node.text_range();
-                        // Close the gap that precedes this atom.
-                        flush_gap(&mut gaps, &mut pending_start, &mut pending_text, range.start());
-                        atoms.push(Atom {
-                            kind: node.kind(),
-                            range,
-                            text: node.text().to_string(),
-                        });
+                        flush_gap(&mut gaps, &mut pending_text);
+                        atoms.push(Atom { kind: node.kind(), text: node.text().to_string() });
                         atom_nodes.push(node.clone());
                         coalesce_until = Some(node.clone());
                     }
@@ -137,15 +111,11 @@ impl Ir {
                         continue;
                     }
                     let kind = token.kind();
-                    let range = token.text_range();
 
                     if matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) {
-                        if pending_start.is_none() {
-                            pending_start = Some(range.start());
-                        }
                         pending_text.push_str(token.text());
                     } else {
-                        flush_gap(&mut gaps, &mut pending_start, &mut pending_text, range.start());
+                        flush_gap(&mut gaps, &mut pending_text);
                         // The lexer's `//[^\n]*` regex greedily eats `\r`
                         // before `\r\n`, so COMMENT tokens in CRLF files
                         // carry a trailing `\r`. Strip it: `\r` is line-
@@ -155,7 +125,7 @@ impl Ir {
                         } else {
                             token.text().to_string()
                         };
-                        atoms.push(Atom { kind, range, text });
+                        atoms.push(Atom { kind, text });
                         // Every non-root token has a parent in a valid CST.
                         atom_nodes
                             .push(token.parent().expect("token without parent in syntax tree"));
@@ -169,7 +139,7 @@ impl Ir {
         // trailing boundary gap. The closure always pushes, so the invariant
         // `gaps.len() == atoms.len() + 1` holds even for empty input
         // (no atoms, one zero-width gap).
-        flush_gap(&mut gaps, &mut pending_start, &mut pending_text, stream_end);
+        flush_gap(&mut gaps, &mut pending_text);
 
         assert_eq!(
             gaps.len(),
@@ -207,8 +177,9 @@ fn is_coalescing_literal(node: &SyntaxNode) -> bool {
 }
 
 /// Minimal placeholder policy: preserve every gap. Renders the source text
-/// unchanged. Kept as the round-trip identity baseline.
-pub fn apply_policy_preserve_all(
+/// unchanged. Kept as the round-trip identity baseline used by IR tests.
+#[cfg(test)]
+fn apply_policy_preserve_all(
     ir: &Ir,
     _cfg: &FormattingConfig,
     _initial_indent: u32,
@@ -444,9 +415,11 @@ fn block_depth(node: &SyntaxNode) -> u32 {
         .count() as u32
 }
 
-/// Render the IR to a string with LF (`"\n"`) line endings. See
-/// [`render_with_line_ending`] for CRLF support.
-pub fn render(ir: &Ir, decisions: &[GapDecision], cfg: &FormattingConfig) -> String {
+/// Render the IR to a string with LF (`"\n"`) line endings. Production
+/// callers use [`render_with_line_ending`] directly to honour the source
+/// file's line ending; this is a test-only convenience.
+#[cfg(test)]
+fn render(ir: &Ir, decisions: &[GapDecision], cfg: &FormattingConfig) -> String {
     render_with_line_ending(ir, decisions, cfg, "\n")
 }
 
