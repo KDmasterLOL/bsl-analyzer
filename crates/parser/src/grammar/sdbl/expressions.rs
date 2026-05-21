@@ -1308,10 +1308,26 @@ fn column_or_function(p: &mut Parser) {
                 break;
             }
 
-            // Check if this Ident is actually a clause keyword (FROM, WHERE, etc.)
-            // Lexer returns them as Ident in some contexts
-            if super::select::is_clause_keyword(p) {
-                // Incomplete: "Table.\nFROM" - don't consume FROM
+            // Check if this Ident is actually a SDBL reserved word that
+            // cannot be a column name in this position. SDBL keywords are
+            // lex'd as `Ident` and must be filtered by text here.
+            //
+            // `is_clause_keyword` covers `FROM/WHERE/GROUP/...`.
+            // `AS/КАК` is an alias keyword — when the user is mid-edit at
+            // `Field. КАК Alias`, treating `КАК` as the field name swallows
+            // the alias and the rest of the SELECT into an `ERROR` span,
+            // collapsing completion. `ASC/DESC/ВОЗР/УБЫВ` are sort
+            // direction keywords with the same hazard inside `ORDER BY`.
+            // (BSL parallel: `crates/parser/src/grammar/expressions.rs`
+            // `PROPERTY_NAME_TOKENS` excludes block terminators for the
+            // same reason at the token-kind layer.)
+            if super::select::is_clause_keyword(p)
+                || super::select::at_sdbl_keyword(p, "AS", "КАК")
+                || super::select::at_sdbl_keyword(p, "ASC", "ВОЗР")
+                || super::select::at_sdbl_keyword(p, "DESC", "УБЫВ")
+            {
+                // Incomplete: "Table.\nFROM" / "Table. КАК Alias" - don't
+                // consume the keyword as field name.
                 let err = p.start();
                 p.emit_error_at_marker(
                     err,
