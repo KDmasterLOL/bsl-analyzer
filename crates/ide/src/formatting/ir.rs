@@ -181,13 +181,100 @@ fn is_coalescing_literal(node: &SyntaxNode) -> bool {
 }
 
 /// Minimal placeholder policy: preserve every gap. Renders the source text
-/// unchanged. Used as the baseline for Phase 2 incremental rule porting.
+/// unchanged. Kept as the round-trip identity baseline.
 pub fn apply_policy_preserve_all(
     ir: &Ir,
     _cfg: &FormattingConfig,
     _initial_indent: u32,
 ) -> Vec<GapDecision> {
     vec![GapDecision::Preserve; ir.gaps.len()]
+}
+
+/// Within-line whitespace policy ported from
+/// `crates/ide/src/formatting/whitespace.rs`. Gaps containing a newline are
+/// left as `Preserve` for now — indent normalization lands in step B.2.
+pub fn apply_policy(ir: &Ir, cfg: &FormattingConfig, _initial_indent: u32) -> Vec<GapDecision> {
+    let mut decisions = Vec::with_capacity(ir.gaps.len());
+    let mut prev_was_unary = false;
+
+    for i in 0..ir.gaps.len() {
+        let prev_kind = if i == 0 { None } else { Some(ir.atoms[i - 1].kind) };
+        let next_kind = if i == ir.atoms.len() { None } else { Some(ir.atoms[i].kind) };
+        let gap_text = ir.gaps[i].text.as_str();
+
+        decisions.push(decide_gap(prev_kind, next_kind, gap_text, prev_was_unary, cfg));
+
+        // Update the unary flag for the next iteration: was the atom we
+        // just stepped past a unary operator?
+        prev_was_unary = if i < ir.atoms.len() {
+            let prev_prev_kind = if i == 0 { None } else { Some(ir.atoms[i - 1].kind) };
+            super::whitespace::is_likely_unary(ir.atoms[i].kind, prev_prev_kind)
+        } else {
+            false
+        };
+    }
+    decisions
+}
+
+fn decide_gap(
+    prev: Option<SyntaxKind>,
+    next: Option<SyntaxKind>,
+    gap_text: &str,
+    prev_was_unary: bool,
+    cfg: &FormattingConfig,
+) -> GapDecision {
+    use super::whitespace::{
+        forbids_space_after, forbids_space_before, forbids_space_before_paren, is_likely_unary,
+        needs_space_after, needs_space_before,
+    };
+
+    // Conservative default for cross-line gaps. Step B.2 will introduce a
+    // CST-driven indent tracker; until then we never touch user-authored
+    // newlines.
+    if gap_text.contains('\n') {
+        return GapDecision::Preserve;
+    }
+
+    // Boundary gaps (leading or trailing) have no enclosing context.
+    let (Some(prev), Some(next)) = (prev, next) else {
+        return GapDecision::Preserve;
+    };
+
+    // After a unary operator, never insert space (e.g. `-1`, not `- 1`).
+    if prev_was_unary {
+        return GapDecision::None;
+    }
+
+    // Skipped default argument: `,` directly after `,` is a separator pair
+    // where `needs_space_after(prev=COMMA)` outranks `forbids_space_before(next=COMMA)`.
+    let comma_after_comma = prev == SyntaxKind::COMMA && next == SyntaxKind::COMMA;
+    if !comma_after_comma && forbids_space_before(next) {
+        return GapDecision::None;
+    }
+    if next == SyntaxKind::L_PAREN && forbids_space_before_paren(prev) {
+        return GapDecision::None;
+    }
+    if forbids_space_after(prev) {
+        return GapDecision::None;
+    }
+
+    // Next is a unary `+`/`-`: space before depends on whether `prev`
+    // requires trailing space.
+    if is_likely_unary(next, Some(prev)) {
+        return if needs_space_after(prev, cfg) {
+            GapDecision::OneSpace
+        } else {
+            GapDecision::None
+        };
+    }
+
+    if needs_space_before(next, cfg) || needs_space_after(prev, cfg) {
+        return GapDecision::OneSpace;
+    }
+
+    // Fallback: respect the source. Inserting a space here would be policy
+    // overreach for an unhandled token pair.
+    GapDecision::Preserve
 }
 
 /// Render the IR to a string. Atoms are emitted verbatim; each gap is
@@ -350,5 +437,66 @@ mod tests {
         let ir = build(src);
         assert!(!ir.atoms.is_empty());
         assert_eq!(round_trip(src), src);
+    }
+
+    /// Renders `src` through `apply_policy` (not the preserve-all baseline).
+    fn format_via_policy(src: &str) -> String {
+        let ir = build(src);
+        let cfg = FormattingConfig::default();
+        let decisions = apply_policy(&ir, &cfg, 0);
+        render(&ir, &decisions, &cfg)
+    }
+
+    #[test]
+    fn policy_assignment_spaces() {
+        // Tight `А=1;` expands to `А = 1;`.
+        assert_eq!(format_via_policy("А=1;"), "А = 1;");
+    }
+
+    #[test]
+    fn policy_method_call_no_space_before_paren() {
+        // The KW_EXECUTE-before-paren rule fires through the new pipeline.
+        assert_eq!(format_via_policy("Х.Выполнить ()"), "Х.Выполнить()");
+    }
+
+    #[test]
+    fn policy_index_no_space_before_bracket() {
+        assert_eq!(format_via_policy("Х [0]"), "Х[0]");
+    }
+
+    #[test]
+    fn policy_comma_after_comma_keeps_space() {
+        // Skipped default arguments stay visually separated.
+        assert_eq!(format_via_policy("Ф(а,,,, в)"), "Ф(а, , , , в)");
+    }
+
+    #[test]
+    fn policy_unary_minus_no_inner_space() {
+        assert_eq!(format_via_policy("А = - 1;"), "А = -1;");
+        assert_eq!(format_via_policy("Ф(-1)"), "Ф(-1)");
+    }
+
+    #[test]
+    fn policy_keyword_space() {
+        assert_eq!(format_via_policy("Возврат  А;"), "Возврат А;");
+    }
+
+    #[test]
+    fn policy_paren_no_inner_spaces() {
+        assert_eq!(format_via_policy("Ф( А )"), "Ф(А)");
+    }
+
+    #[test]
+    fn policy_preserves_newlines_unchanged() {
+        // Step B.1 leaves newline-containing gaps alone. The output is the
+        // input verbatim because no within-line normalization is triggered.
+        let src = "Процедура Т()\nКонецПроцедуры\n";
+        assert_eq!(format_via_policy(src), src);
+    }
+
+    #[test]
+    fn policy_preserves_multiline_string_atom() {
+        let src = "А = \"a\n|b\n|c\";";
+        assert_eq!(format_via_policy(src), src);
     }
 }

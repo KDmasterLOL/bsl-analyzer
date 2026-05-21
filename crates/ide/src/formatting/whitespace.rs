@@ -99,7 +99,7 @@ pub fn forbids_space_after(kind: SyntaxKind) -> bool {
 }
 
 /// Checks if there should be no space before opening paren (function call).
-fn forbids_space_before_paren(prev_kind: SyntaxKind) -> bool {
+pub(super) fn forbids_space_before_paren(prev_kind: SyntaxKind) -> bool {
     matches!(
         prev_kind,
         SyntaxKind::IDENT
@@ -114,7 +114,7 @@ fn forbids_space_before_paren(prev_kind: SyntaxKind) -> bool {
 }
 
 /// Checks if this is likely a unary operator based on previous token.
-fn is_likely_unary(kind: SyntaxKind, prev_kind: Option<SyntaxKind>) -> bool {
+pub(super) fn is_likely_unary(kind: SyntaxKind, prev_kind: Option<SyntaxKind>) -> bool {
     if !matches!(kind, SyntaxKind::MINUS | SyntaxKind::PLUS) {
         return false;
     }
@@ -357,7 +357,7 @@ pub fn normalize_line_whitespace(line: &str, config: &FormattingConfig) -> Strin
 }
 
 /// Checks if a token is punctuation (doesn't need spaces around by default).
-fn is_punctuation(kind: SyntaxKind) -> bool {
+pub(super) fn is_punctuation(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         SyntaxKind::L_PAREN
