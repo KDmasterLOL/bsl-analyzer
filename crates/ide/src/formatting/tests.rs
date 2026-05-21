@@ -588,3 +588,74 @@ fn regression_trailing_inline_comment_single_space() {
         "#]],
     );
 }
+
+// ----- CRLF line-ending tests -----
+//
+// The formatter detects the source line ending and emits synthesized
+// newlines (re-indentation, block boundaries) using the same. Tests below
+// use literal `\r\n` strings rather than `expect!` to avoid raw-string
+// escaping noise; the assertions are exact equality on the bytes.
+
+fn format_crlf(input: &str) -> String {
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    format_file(&root, &config).text
+}
+
+#[test]
+fn crlf_simple_procedure_preserved() {
+    let src = "Процедура Тест()\r\nКонецПроцедуры";
+    let expected = "Процедура Тест()\r\nКонецПроцедуры\r\n";
+    assert_eq!(format_crlf(src), expected);
+}
+
+#[test]
+fn crlf_body_reindent_uses_crlf() {
+    // Indent inserted by the policy must use the source's line ending.
+    let src = "Процедура Тест()\r\nА = 1;\r\nКонецПроцедуры";
+    let expected = "Процедура Тест()\r\n\tА = 1;\r\nКонецПроцедуры\r\n";
+    assert_eq!(format_crlf(src), expected);
+}
+
+#[test]
+fn crlf_blank_lines_inside_body() {
+    let src = "Процедура Тест()\r\n\r\nА = 1;\r\n\r\nКонецПроцедуры";
+    let expected = "Процедура Тест()\r\n\t\r\n\tА = 1;\r\n\t\r\nКонецПроцедуры\r\n";
+    assert_eq!(format_crlf(src), expected);
+}
+
+#[test]
+fn crlf_trailing_inline_comment_no_trailing_cr() {
+    // The lexer's `//[^\n]*` regex eats the `\r` into the COMMENT token in
+    // CRLF files. `Ir::build` strips it; the rendered comment must not
+    // carry the spurious `\r`, and the line ending stays `\r\n`.
+    let src = "Функция Ф()\r\n\tВозврат 1;\r\nКонецФункции\t\t// trailing\r\n";
+    let expected = "Функция Ф()\r\n\tВозврат 1;\r\nКонецФункции // trailing\r\n";
+    assert_eq!(format_crlf(src), expected);
+}
+
+#[test]
+fn crlf_multiline_string_literal_preserved() {
+    // String content carries its own `\r\n` separators — they must round-
+    // trip byte-for-byte (LITERAL coalescing keeps the atom opaque).
+    let src = "А = \"ВЫБРАТЬ\r\n|\tX.A\r\n|ИЗ\r\n|\tT КАК X\";\r\n";
+    assert_eq!(format_crlf(src), src);
+}
+
+#[test]
+fn crlf_bom_preserved() {
+    let src = "\u{FEFF}// header\r\nПроцедура Т()\r\nКонецПроцедуры\r\n";
+    assert_eq!(format_crlf(src), src);
+}
+
+#[test]
+fn crlf_and_lf_parity_modulo_line_ending() {
+    // Formatting parity: replacing CRLF with LF in the source yields LF
+    // output that mirrors the CRLF output line-for-line.
+    let src_lf = "Процедура Т()\nЕсли А Тогда\nБ = 1;\nИначе\nВ = 2;\nКонецЕсли;\nКонецПроцедуры";
+    let src_crlf = src_lf.replace('\n', "\r\n");
+    let out_lf = format_crlf(src_lf);
+    let out_crlf = format_crlf(&src_crlf);
+    assert_eq!(out_crlf, out_lf.replace('\n', "\r\n"));
+}

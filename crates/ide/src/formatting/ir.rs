@@ -118,14 +118,21 @@ impl Ir {
                         flush_gap(&mut gaps, &mut pending_text);
                         // The lexer's `//[^\n]*` regex greedily eats `\r`
                         // before `\r\n`, so COMMENT tokens in CRLF files
-                        // carry a trailing `\r`. Strip it: `\r` is line-
-                        // ending whitespace, not comment content.
-                        let text = if kind == SyntaxKind::COMMENT {
-                            token.text().trim_end_matches('\r').to_string()
+                        // carry a trailing `\r`. Strip it from the atom
+                        // (the `\r` is line-ending whitespace, not comment
+                        // content) but re-inject it into the *next* gap so
+                        // the line ending survives byte-for-byte.
+                        let (text, stripped_suffix) = if kind == SyntaxKind::COMMENT {
+                            let raw = token.text();
+                            let trimmed = raw.trim_end_matches('\r');
+                            (trimmed.to_string(), &raw[trimmed.len()..])
                         } else {
-                            token.text().to_string()
+                            (token.text().to_string(), "")
                         };
                         atoms.push(Atom { kind, text });
+                        if !stripped_suffix.is_empty() {
+                            pending_text.push_str(stripped_suffix);
+                        }
                         // Every non-root token has a parent in a valid CST.
                         atom_nodes
                             .push(token.parent().expect("token without parent in syntax tree"));
