@@ -649,6 +649,110 @@ fn crlf_bom_preserved() {
     assert_eq!(format_crlf(src), src);
 }
 
+// ----- Range formatting parity tests -----
+//
+// The IR-based `format_range` is implemented as "format the whole file,
+// then slice the result by line index". These tests pin that invariant:
+// the formatted slice must match the corresponding slice of `format_file`
+// output, for any line span.
+
+fn format_full_lines(input: &str) -> Vec<String> {
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let text = super::engine::format_file(&root, &config).text;
+    text.split_inclusive('\n').map(|s| s.to_string()).collect()
+}
+
+fn format_range_lines(input: &str, start_line: usize, end_line: usize) -> String {
+    use syntax::{TextRange, TextSize};
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+
+    // Resolve start_line/end_line to byte offsets in the source.
+    let line_starts: Vec<u32> = std::iter::once(0u32)
+        .chain(input.char_indices().filter(|(_, c)| *c == '\n').map(|(i, _)| (i + 1) as u32))
+        .collect();
+    let start = line_starts[start_line];
+    let end = line_starts.get(end_line + 1).copied().unwrap_or(input.len() as u32);
+    let range = TextRange::new(TextSize::from(start), TextSize::from(end.saturating_sub(1)));
+    super::engine::format_range(&root, range, &config).text
+}
+
+#[test]
+fn range_parity_middle_line() {
+    let src = "Процедура Т()\nА=1;\nБ=2;\nКонецПроцедуры";
+    let full = format_full_lines(src);
+    let slice = format_range_lines(src, 1, 1);
+    // The range output excludes the trailing newline (range covers
+    // line-content bytes only); the full output keeps it.
+    assert_eq!(slice, full[1].trim_end_matches('\n'));
+}
+
+#[test]
+fn range_parity_multi_line_span() {
+    let src = "Процедура Т()\nА=1;\nБ=2;\nВ=3;\nКонецПроцедуры";
+    let full = format_full_lines(src);
+    let slice = format_range_lines(src, 1, 3);
+    let expected = format!("{}{}{}", full[1], full[2], full[3].trim_end_matches('\n'));
+    assert_eq!(slice, expected);
+}
+
+#[test]
+fn range_parity_header_line() {
+    let src = "Процедура Т()\nА=1;\nКонецПроцедуры";
+    let full = format_full_lines(src);
+    let slice = format_range_lines(src, 0, 0);
+    assert_eq!(slice, full[0].trim_end_matches('\n'));
+}
+
+#[test]
+fn range_full_file_matches_format_file_sans_final_newline() {
+    // A range that spans every source line should produce the same bytes
+    // as `format_file` minus the synthesized final newline (range formatter
+    // stops at the last line's content end).
+    let src = "Процедура Т()\nА=1;\nКонецПроцедуры";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let full = super::engine::format_file(&root, &config).text;
+    let last_line = src.matches('\n').count();
+    let slice = format_range_lines(src, 0, last_line);
+    assert_eq!(slice, full.trim_end_matches('\n'));
+}
+
+#[test]
+fn range_unaligned_offset_snaps_to_lines() {
+    // A range that starts/ends mid-line still snaps to whole lines (the
+    // formatter operates line-aligned by construction).
+    use syntax::{TextRange, TextSize};
+    let src = "Процедура Т()\nА=1;\nБ=2;\nКонецПроцедуры";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    // Offsets inside line 1 only.
+    let line1_start = "Процедура Т()\n".len() as u32;
+    let range = TextRange::new(TextSize::from(line1_start + 1), TextSize::from(line1_start + 2));
+    let out = super::engine::format_range(&root, range, &config).text;
+    // The whole of line 1 should be reformatted (`А=1;` → `А = 1;`).
+    assert_eq!(out, "\tА = 1;");
+}
+
+#[test]
+fn range_idempotent_on_already_formatted() {
+    // Formatting a range of already-formatted text yields no edits.
+    let src = "Процедура Т()\n\tА = 1;\nКонецПроцедуры\n";
+    let parsed = parser::parse(src);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    use syntax::{TextRange, TextSize};
+    let line1_start = "Процедура Т()\n".len() as u32;
+    let range = TextRange::new(TextSize::from(line1_start), TextSize::from(line1_start + 8));
+    let result = super::engine::format_range(&root, range, &config);
+    assert!(result.edits.is_empty(), "idempotent range should yield no edits: {:?}", result);
+}
+
 #[test]
 fn crlf_and_lf_parity_modulo_line_ending() {
     // Formatting parity: replacing CRLF with LF in the source yields LF
