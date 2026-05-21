@@ -415,6 +415,103 @@ fn completion_method_graph_hop_then_property_hop_value_table_columns() {
     }
 }
 
+// ---------- Массив (Array) cascade with callee-below-caller ordering ----------
+
+#[test]
+fn completion_after_dot_on_local_from_same_module_fn_returning_array_callee_below() {
+    // Воспроизводит реальный сценарий из ERP: caller объявлен ВЫШЕ callee,
+    // callee возвращает `Новый Массив`. Method-graph closure должен видеть
+    // вызываемую функцию независимо от порядка объявления; cascade typing
+    // через `method_return_type_query` обязан вывести `Ty::Array` и
+    // выдать на `Пар.` методы массива (`Добавить`, `Количество`, `Найти`).
+    let items = complete(
+        r#"//- /test.bsl
+Функция ТестированиеТипов()
+    Пар = СписокПараметров();
+    Пар.$0
+КонецФункции
+
+Функция СписокПараметров()
+    Возврат Новый Массив;
+КонецФункции
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        !items.is_empty(),
+        "cascade typing must propagate Массив through `СписокПараметров()` to `Пар`; got empty"
+    );
+    for expected in ["Добавить", "Количество", "Найти"] {
+        assert!(
+            has_label(&items, expected),
+            "cascade-typed local `Пар` must surface Array member `{expected}`; got: {ls:?}"
+        );
+    }
+}
+
+// ---------- diagnostic: isolate caller-above-callee vs Array-specific ----------
+
+#[test]
+fn completion_after_dot_on_local_from_same_module_fn_value_table_callee_below() {
+    // Тот же ValueTable, что и в зелёном тесте выше, но caller ВЫШЕ callee.
+    // Если падает — виноват порядок объявления (forward-reference в
+    // method-graph closure). Если зелёный — ordering ОК, баг в Массиве.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест()
+    Х = Получить();
+    Х.$0
+КонецФункции
+
+Функция Получить()
+    Возврат Новый ТаблицаЗначений;
+КонецФункции
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(!items.is_empty(), "ValueTable callee-below cascade must work; got empty: {ls:?}");
+    for expected in ["Добавить", "Колонки", "Количество"] {
+        assert!(
+            has_label(&items, expected),
+            "ValueTable callee-below cascade must surface `{expected}`; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_after_dot_on_local_from_same_module_fn_array_callee_above() {
+    // Массив с callee ВЫШЕ caller — обратный к failing-case порядок.
+    // Если зелёный — баг в forward-reference. Если красный —
+    // баг конкретно в выводе `Ty::Array` для `Новый Массив`
+    // (cascade через method_return_type_query не достаёт Array).
+    let items = complete(
+        r#"//- /test.bsl
+Функция СписокПараметров()
+    Возврат Новый Массив;
+КонецФункции
+
+Функция ТестированиеТипов()
+    Пар = СписокПараметров();
+    Пар.$0
+КонецФункции
+"#,
+    );
+
+    let ls = labels(&items);
+    assert!(
+        !items.is_empty(),
+        "Array callee-above cascade must propagate Ty::Array; got empty: {ls:?}"
+    );
+    for expected in ["Добавить", "Количество", "Найти"] {
+        assert!(
+            has_label(&items, expected),
+            "Array callee-above cascade must surface `{expected}`; got: {ls:?}"
+        );
+    }
+}
+
 // ---------- chained dot through ValueTable.Колонки ----------
 
 #[test]

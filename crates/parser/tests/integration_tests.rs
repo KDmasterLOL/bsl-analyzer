@@ -760,6 +760,78 @@ fn test_keyword_as_method_name() {
     );
 }
 
+// ----------------------------------------------------------------------------
+// Post-DOT recovery regression: a partial field-access (`obj.<EOL>`) at the
+// tail of a function body must NOT swallow the enclosing block terminator
+// or the next item declaration.
+//
+// Pre-fix (commit before the `PROPERTY_NAME_TOKENS` allowlist landed) the
+// parser's `is_ident_or_keyword()` helper admitted ANY keyword as a property
+// name. Typing `Х.` and pausing for completion (cursor on next line, before
+// the next non-whitespace token, which is the function's `КонецФункции`)
+// caused the parser to consume that terminator as the field-name slot,
+// chain-reacting through the rest of the file: the enclosing function never
+// closed, the next `Функция X()` declaration became stray ERROR tokens, and
+// downstream completion / find-references / cascade typing collapsed because
+// the second function vanished from the symbol tree.
+//
+// The two tests below pin both the new error semantics ("ожидалось имя
+// свойства после '.'" without consuming the lookahead) and the structural
+// outcome (two FUNCTION_DEF nodes, terminator stays as block-end).
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_partial_dot_preserves_enclosing_end_function() {
+    let input = "Функция A()\n    Х = B();\n    Х.\nКонецФункции\n\nФункция B()\n    Возврат 1;\nКонецФункции\n";
+    let result = parse(input);
+
+    let errs = result.errors();
+    assert!(
+        errs.iter().any(|e| e.message().contains("свойства")),
+        "expected `ожидалось имя свойства` error on partial dot; got: {:?}",
+        errs.iter().map(|e| e.message().to_string()).collect::<Vec<_>>(),
+    );
+
+    let function_defs: Vec<_> = result
+        .syntax_node()
+        .descendants()
+        .filter(|n| n.kind().to_string() == "FUNCTION_DEF")
+        .collect();
+    assert_eq!(
+        function_defs.len(),
+        2,
+        "partial dot must leave both function declarations intact; got {} FUNCTION_DEFs",
+        function_defs.len()
+    );
+}
+
+#[test]
+fn test_partial_dot_preserves_next_function_declaration() {
+    // Symbol-tree consumers (completion, find-references, cascade typing)
+    // require the next declaration to survive parse recovery. We check the
+    // syntactic shape here; semantic recovery is pinned at the IDE layer in
+    // `crates/ide/tests/completion_value_collections.rs`.
+    let input = "Функция Caller()\n    X.\nКонецФункции\n\nФункция Callee()\n    Возврат 0;\nКонецФункции\n";
+    let result = parse(input);
+    let names: Vec<String> = result
+        .syntax_node()
+        .descendants()
+        .filter(|n| n.kind().to_string() == "FUNCTION_DEF")
+        .filter_map(|fn_def| {
+            fn_def.descendants_with_tokens().find_map(|el| {
+                el.into_token()
+                    .filter(|t| t.kind().to_string() == "IDENT")
+                    .map(|t| t.text().to_string())
+            })
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec!["Caller".to_string(), "Callee".to_string()],
+        "both declarations must be reachable through FUNCTION_DEF nodes"
+    );
+}
+
 #[test]
 fn test_large_file_performance() {
     // Large real-world BSL module for performance testing

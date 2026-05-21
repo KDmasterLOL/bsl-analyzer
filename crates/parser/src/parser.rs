@@ -83,6 +83,15 @@ impl<'a> Parser<'a> {
         self.current() == Some(kind)
     }
 
+    /// Checks if the current token is in the given set.
+    ///
+    /// Mirrors rust-analyzer's `Parser::at_ts` — the canonical way to test
+    /// position-specific allowlists (e.g. tokens accepted as a property
+    /// name after `.`). Returns false at EOF.
+    pub fn at_ts(&self, set: crate::token_set::TokenSet) -> bool {
+        self.current().is_some_and(|k| set.contains(k))
+    }
+
     /// Checks if the current token matches the given kind and text (case-insensitive).
     ///
     /// This is useful for SDBL keywords that are mapped to TokenKind::Ident.
@@ -188,6 +197,19 @@ impl<'a> Parser<'a> {
         } else {
             self.emit_error(err);
         }
+    }
+
+    /// Emits a custom error at the current position WITHOUT consuming the
+    /// lookahead token.
+    ///
+    /// Use this when the diagnostic itself is enough and the outer grammar
+    /// should keep the current token for its own recovery (e.g. block
+    /// terminators that must close the enclosing function). `error_custom`
+    /// always bumps the next token into an `ERROR` child — that is correct
+    /// for "expected `X`, got garbage" cases but wrong here.
+    pub fn error_custom_no_bump(&mut self, msg: &'static str) {
+        let err = ParseError::Custom { message: msg, recovery: RecoveryKind::MissingToken };
+        self.emit_missing(err);
     }
 
     pub(crate) fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
