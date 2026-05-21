@@ -7,8 +7,9 @@
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 use super::config::FormattingConfig;
-use super::engine::{
-    analyze_line_tokens, is_line_block_end, is_line_block_start, is_line_middle_keyword, TextEdit,
+use super::engine::TextEdit;
+use super::line_tokens::{
+    analyze_line_tokens, is_line_block_end, is_line_block_start, is_line_middle_keyword,
 };
 
 /// Result of on-type formatting.
