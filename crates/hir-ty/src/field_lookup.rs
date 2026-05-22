@@ -144,48 +144,12 @@ pub fn lookup_field(
     let coerced = crate::this_object::coerce_to_metadata_ref(projected_ty);
     let effective_ty = coerced.as_ref().unwrap_or(projected_ty);
 
-    // Union receivers (e.g. `НайтиСтроки(...) → Union(TabularSectionRow,
-    // Undefined)`). Skip nullish arms (consistent with `enumerate_fields`
-    // and `method_lookup`), then require the field to be present in every
-    // remaining arm — that's the safe semantic for `x: A | B`. The
-    // resulting [`Ty`] is the union of per-arm field types via
-    // [`Ty::union`]; `is_readonly` is the disjunction (writeable only if
-    // every arm is writeable).
     if let Ty::Union(arms) = effective_ty {
-        let live: Vec<&Ty> =
-            arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)).collect();
-        if live.is_empty() {
-            return None;
-        }
-        if live.len() == 1 {
-            return lookup_field(configs, live[0], field_name);
-        }
-        let mut per_arm: Vec<FieldInfo> = Vec::with_capacity(live.len());
-        for arm in &live {
-            let info = lookup_field(configs, arm, field_name)?;
-            per_arm.push(info);
-        }
-        let first = &per_arm[0];
-        let merged_ty = Ty::union(per_arm.iter().map(|f| f.ty.clone()).collect());
-        let merged_readonly = per_arm.iter().any(|f| f.is_readonly);
-        return Some(FieldInfo {
-            name: first.name.clone(),
-            name_en: first.name_en.clone(),
-            ty: merged_ty,
-            value_ty: None,
-            is_readonly: merged_readonly,
-            origin: first.origin,
-        });
+        return lookup_field_in_union_intersection(configs, arms, field_name);
     }
-
     if matches!(effective_ty, Ty::MetadataRef { .. }) {
-        let needle = field_name.as_str().to_lowercase();
-        return crate::field_enum::enumerate_fields(configs, effective_ty).into_iter().find(|f| {
-            f.name.as_str().to_lowercase() == needle
-                || f.name_en.as_ref().is_some_and(|en| en.as_str().to_lowercase() == needle)
-        });
+        return lookup_field_on_metadata_ref(configs, effective_ty, field_name);
     }
-
     // Phase 5 row-aware refinement on `Ty::FormControl{Table, Some(b)}`:
     // `.ВыделенныеСтроки` / `.ТекущаяСтрока` / `.ТекущиеДанные` and
     // their English aliases override the platform's bare `Массив`
@@ -193,26 +157,111 @@ pub fn lookup_field(
     // Non-refined properties (`.Видимость`, `.Заголовок`,
     // `.УсловноеОформление`, …) fall through to the platform-property
     // adapter below, which resolves them through `ТаблицаФормы` via
-    // [`Ty::platform_type_name`].
+    // [`Ty::platform_type_name`]. Both run on the ORIGINAL receiver
+    // (not `effective_ty`) — FormControl never gets FormData projection
+    // or ThisObject coercion applied.
     if let Some(refined) = crate::form_items::refine_form_control_property(receiver_ty, field_name)
     {
         return Some(refined);
     }
+    lookup_field_via_platform_property(receiver_ty, field_name)
+}
 
-    // Every other receiver type delegates to the platform-property adapter.
-    // `lookup_platform_property` decides whether the shape is supported
-    // (primitives return `None`), so we can safely call it for any
-    // non-MetadataRef receiver.
-    crate::platform_property_lookup::lookup_platform_property(receiver_ty, field_name).map(|res| {
-        use crate::field_enum::FieldOrigin;
-        FieldInfo {
-            name: field_name.clone(),
-            name_en: None,
-            ty: res.return_ty,
-            value_ty: None,
-            is_readonly: res.is_readonly,
-            origin: FieldOrigin::PlatformProperty,
-        }
+/// Resolve a field on a [`Ty::Union`] receiver via **intersection** over
+/// live arms.
+///
+/// Contract — distinct from [`crate::method_lookup::union_lookup`] which
+/// uses first-hit semantics:
+///
+/// - `Undefined` / `Null` arms are stripped (consistent with
+///   [`crate::field_enum::enumerate_fields`] and method lookup).
+/// - If **any** live arm is missing the field, the entire lookup returns
+///   `None`. Safe semantic for `x: A | B`: the field is reachable only
+///   if it exists on every possible runtime shape.
+/// - Single live arm short-circuits via a recursive `lookup_field` call
+///   so the arm's full dispatch pipeline (FormData projection,
+///   ThisObject coercion, FormControl refinement, …) runs again — the
+///   helper deliberately does not bypass the orchestrator for the
+///   degenerate one-arm case.
+/// - Multi-arm result merges per-arm `Ty` via [`Ty::union`]; the first
+///   arm's `name`/`name_en`/`origin` win (cohesion: the surface text
+///   stays stable). `is_readonly` is the **disjunction** —
+///   writeable iff EVERY arm is writeable, i.e. a single read-only arm
+///   makes the union read-only.
+fn lookup_field_in_union_intersection(
+    configs: &[VisibleConfig],
+    arms: &[Ty],
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let live: Vec<&Ty> = arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)).collect();
+    if live.is_empty() {
+        return None;
+    }
+    if live.len() == 1 {
+        return lookup_field(configs, live[0], field_name);
+    }
+    let mut per_arm: Vec<FieldInfo> = Vec::with_capacity(live.len());
+    for arm in &live {
+        let info = lookup_field(configs, arm, field_name)?;
+        per_arm.push(info);
+    }
+    let first = &per_arm[0];
+    let merged_ty = Ty::union(per_arm.iter().map(|f| f.ty.clone()).collect());
+    let merged_readonly = per_arm.iter().any(|f| f.is_readonly);
+    Some(FieldInfo {
+        name: first.name.clone(),
+        name_en: first.name_en.clone(),
+        ty: merged_ty,
+        value_ty: None,
+        is_readonly: merged_readonly,
+        origin: first.origin,
+    })
+}
+
+/// Resolve a field on a [`Ty::MetadataRef`] receiver via bilingual
+/// case-insensitive match over [`crate::field_enum::enumerate_fields`].
+///
+/// The enumerator is the source of truth for "what fields does an MDO
+/// receiver expose?" (standard + user attributes, tabular sections,
+/// register parts, `НомерСтроки` fall-through). This helper is the
+/// thin filter that turns the enumeration into a point lookup.
+///
+/// Caller is expected to pre-coerce `ThisObject` / project `FormData`
+/// before passing the receiver — see [`lookup_field`] orchestrator.
+fn lookup_field_on_metadata_ref(
+    configs: &[VisibleConfig],
+    effective_ty: &Ty,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let needle = field_name.as_str().to_lowercase();
+    crate::field_enum::enumerate_fields(configs, effective_ty).into_iter().find(|f| {
+        f.name.as_str().to_lowercase() == needle
+            || f.name_en.as_ref().is_some_and(|en| en.as_str().to_lowercase() == needle)
+    })
+}
+
+/// Resolve a field on every other receiver via the platform-property
+/// adapter.
+///
+/// `lookup_platform_property` itself decides whether the shape is
+/// supported — primitives and managers return `None` — so the wrapper
+/// is safe to call for any non-MetadataRef, non-Union receiver.
+///
+/// **Important:** takes the ORIGINAL `receiver_ty`, not the
+/// projected/coerced `effective_ty`. FormData projection and
+/// `ThisObject` coercion are MetadataRef-specific transforms and must
+/// not leak into the platform-property channel (e.g. a `FormControl`
+/// receiver must keep its `FormControl` identity through this fallback,
+/// not get projected away).
+fn lookup_field_via_platform_property(receiver_ty: &Ty, field_name: &Name) -> Option<FieldInfo> {
+    let res = crate::platform_property_lookup::lookup_platform_property(receiver_ty, field_name)?;
+    Some(FieldInfo {
+        name: field_name.clone(),
+        name_en: None,
+        ty: res.return_ty,
+        value_ty: None,
+        is_readonly: res.is_readonly,
+        origin: crate::field_enum::FieldOrigin::PlatformProperty,
     })
 }
 
@@ -1151,6 +1200,44 @@ mod tests {
 
         let only_a = lookup_field(&configs, &receiver, &Name::new("OnlyInA"));
         assert!(only_a.is_none(), "field absent in B must not resolve under union");
+    }
+
+    #[test]
+    fn lookup_field_on_union_intersection_readonly_merges_via_or() {
+        // OR-merge semantic of `is_readonly` in union intersection
+        // (`lookup_field_in_union_intersection` cohesion rule).
+        //
+        // Construction:
+        //   - arm A = `CatalogObject.A` without a user
+        //     `ДополнительныеСвойства` → HBK platform-property cascade
+        //     surfaces the field as `is_readonly = true`.
+        //   - arm B = `CatalogObject.B` WITH a user attribute named
+        //     `ДополнительныеСвойства` (not a recognised standard, so
+        //     `classify_attr` returns `None` → `UserAttribute, false`).
+        //     `push_unique` blocks the HBK fall-through behind the
+        //     user version, leaving `is_readonly = false`.
+        //
+        // Union merge MUST be `true` (writeable iff EVERY arm writeable —
+        // a single read-only arm makes the union read-only). If the
+        // merge ever flips to AND, this assertion fires.
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(catalog("A", vec![]));
+        config.add_metadata_object(catalog(
+            "B",
+            vec![attr("ДополнительныеСвойства", None, AttributeType::Boolean)],
+        ));
+        let configs = wrap(config);
+
+        let a = Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("A") };
+        let b = Ty::MetadataRef { kind: MetadataKind::CatalogObject, name: Name::new("B") };
+        let receiver = Ty::Union(vec![a, b].into());
+
+        let info = lookup_field(&configs, &receiver, &Name::new("ДополнительныеСвойства"))
+            .expect("ДополнительныеСвойства is in both arms — intersection succeeds");
+        assert!(
+            info.is_readonly,
+            "OR-merge: arm A is read-only (HBK), so union read-only regardless of arm B"
+        );
     }
 
     // -------------------------------------------------------------
