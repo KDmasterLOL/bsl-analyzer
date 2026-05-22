@@ -46,9 +46,11 @@
 //! `method_resolution::resolve_three_level_call` → `Resolver`. This module
 //! is the platform-side complement for `Expr::MethodCall { receiver, ... }`.
 
+use std::sync::Arc;
+
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
-use hir_def::ty::{MetadataKind, Ty};
+use hir_def::ty::{MetadataKind, SdblProjection, Ty};
 use hir_def::Name;
 
 use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
@@ -99,11 +101,221 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
         return union_lookup(members, method_name);
     }
 
-    match receiver_ty {
+    let info = match receiver_ty {
         Ty::ObjectManager { kind, name } => lookup_on_object_manager(*kind, name, method_name),
         Ty::MetadataRef { kind, name } => lookup_on_metadata_ref(*kind, name, method_name),
         Ty::FormControl { kind, .. } => lookup_on_form_control(*kind, method_name),
         _ => lookup_scalar_receiver(receiver_ty, method_name),
+    }?;
+
+    // SDBL chain rewrite — `Запрос.Выполнить()`, `.Выбрать()`,
+    // `.ВыполнитьПакет()` lift the platform return into the
+    // projection-typed `Ty::Query*` variants seeded in Phase 0. The
+    // hook runs AFTER scalar lookup (so it never rewrites a method
+    // that doesn't exist on the receiver) and is gated by
+    // [`is_sdbl_chain_method`] so unrelated method calls pay only a
+    // hashset-membership check.
+    Some(apply_sdbl_chain_rewrite(receiver_ty, method_name, info))
+}
+
+/// Method-name filter for [`apply_sdbl_chain_rewrite`].
+///
+/// Returns `true` for the bilingual chain entry points (`Выполнить`,
+/// `Execute`, `Выбрать`, `Choose`, `ВыполнитьПакет`, `ExecuteBatch`).
+/// Comparison is case-insensitive against Russian and English forms;
+/// the bilingual platform index treats them as the same method, so the
+/// rewrite must too.
+fn is_sdbl_chain_method(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "выполнить" | "execute" | "выбрать" | "choose" | "выполнитьпакет" | "executebatch",
+    )
+}
+
+/// Rewrite the return type of an SDBL chain method to the matching
+/// projection-typed `Ty::Query*` variant.
+///
+/// Operates on the already-resolved [`MethodInfo`] so the receiver-side
+/// signature (`params`, `overloads`) is untouched — only the return
+/// type changes. The bilingual method-name filter
+/// [`is_sdbl_chain_method`] short-circuits unrelated calls before any
+/// real work.
+///
+/// Receiver-shape guards live in [`pick_chain_rewrite`]; nullability is
+/// preserved by [`rewrite_platform_arm_in_return`] which walks `Union`
+/// arms and replaces only the target `Ty::PlatformObject(name)` arm
+/// (leaving `Ty::Undefined` / other arms intact). Example:
+///
+/// ```text
+/// receiver:  Ty::PlatformObject("Запрос")
+/// method:    Выполнить
+/// platform:  return = Union([PlatformObject("РезультатЗапроса"), Undefined])
+/// rewritten: return = Union([Ty::QueryResult{None}, Undefined])
+/// ```
+///
+/// Phase 1.3 Slice 1: projection payload is always `None`. Phase 1.3b
+/// adds constructor-arg projection synthesis; Phase 2 adds variable
+/// refinement so the projection survives a `.Текст = "..."` assignment.
+fn apply_sdbl_chain_rewrite(receiver_ty: &Ty, method_name: &Name, info: MethodInfo) -> MethodInfo {
+    if !is_sdbl_chain_method(method_name.as_str()) {
+        return info;
+    }
+    let Some((target_platform_name, replacement)) =
+        pick_chain_rewrite(receiver_ty, method_name.as_str())
+    else {
+        return info;
+    };
+    MethodInfo {
+        return_ty: rewrite_chain_arm_in_return(info.return_ty, target_platform_name, &replacement),
+        params: info.params,
+        overloads: info.overloads,
+    }
+}
+
+/// Shape of the platform return arm the chain rewrite is looking for.
+///
+/// `Запрос.Выполнить()` and `РезультатЗапроса.Выбрать()` return a
+/// named [`Ty::PlatformObject`] in the platform data; the rewrite
+/// matches on the bilingual name pair. `Запрос.ВыполнитьПакет()`
+/// returns `Массив` which lowers to the structural [`Ty::Array`]
+/// variant, not `PlatformObject("Массив")` — so the matcher needs
+/// both shapes.
+enum ChainTarget {
+    /// Match `Ty::PlatformObject(name)` where `name` is bilingually
+    /// equal to either the Russian or English canonical spelling.
+    /// Both are stored so the matcher reaches the same platform-data
+    /// row regardless of whether the lowerer produced the RU or EN
+    /// form for the cell.
+    PlatformObjectNamed { ru: &'static str, en: &'static str },
+    /// Match `Ty::Array` (or `Ty::TypedArray(_)` — same platform
+    /// method table) for `ВыполнитьПакет → Массив`-style returns.
+    AnyArray,
+}
+
+/// Pick the (target-arm, replacement-Ty) pair for a given receiver +
+/// method name, or `None` when the call is not a recognised SDBL chain
+/// entry.
+///
+/// Receiver-shape guards prevent collisions with other types that share
+/// a method name — `.Выбрать()` exists on dialogs, file pickers, mail,
+/// and standard-settings-storage managers, so the rewrite must only
+/// fire when the receiver is a `Ty::QueryResult` / `Ty::PlatformObject
+/// ("РезультатЗапроса")`. Same posture for `.Выполнить()` /
+/// `.ВыполнитьПакет()`.
+fn pick_chain_rewrite(receiver_ty: &Ty, method_name: &str) -> Option<(ChainTarget, Ty)> {
+    let lower = method_name.to_lowercase();
+    match lower.as_str() {
+        "выполнить" | "execute" => {
+            let projection = projection_of_query_receiver(receiver_ty)?;
+            Some((
+                ChainTarget::PlatformObjectNamed {
+                    ru: "РезультатЗапроса", en: "QueryResult"
+                },
+                Ty::QueryResult { projection },
+            ))
+        }
+        "выбрать" | "choose" => {
+            let projection = projection_of_query_result_receiver(receiver_ty)?;
+            Some((
+                ChainTarget::PlatformObjectNamed {
+                    ru: "ВыборкаИзРезультатаЗапроса",
+                    en: "QueryResultSelection",
+                },
+                Ty::QueryResultSelection { projection },
+            ))
+        }
+        "выполнитьпакет" | "executebatch" => {
+            // Receiver must be Query-shape; projection extraction is
+            // gating-only here — `QueryBatchResult` does not carry the
+            // single projection (batch is per-query, filled by the
+            // bridge in Phase 3 once `package_to_projections` is
+            // wired).
+            projection_of_query_receiver(receiver_ty)?;
+            Some((ChainTarget::AnyArray, Ty::QueryBatchResult { per_query: Arc::from([]) }))
+        }
+        _ => None,
+    }
+}
+
+/// Read the projection payload off a Query-shape receiver.
+///
+/// Accepts both the new `Ty::Query{projection}` (Phase 1.3b+) and the
+/// legacy `Ty::PlatformObject("Запрос")` / `Ty::PlatformObject("Query")`
+/// shape (still the only construction site through Slice 1). Returns
+/// `None` when the receiver is not a query at all — that's the gate
+/// preventing accidental rewrites of unrelated `.Выполнить()` /
+/// `.ВыполнитьПакет()` calls.
+fn projection_of_query_receiver(ty: &Ty) -> Option<Option<Arc<SdblProjection>>> {
+    match ty {
+        Ty::Query { projection } => Some(projection.clone()),
+        Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => Some(None),
+        _ => None,
+    }
+}
+
+/// Sibling of [`projection_of_query_receiver`] for `.Выбрать()`.
+///
+/// Accepts both the new `Ty::QueryResult{projection}` and the legacy
+/// `Ty::PlatformObject("РезультатЗапроса")` / `Ty::PlatformObject
+/// ("QueryResult")`. The `Ty::QueryResultSelection` it returns inherits
+/// the projection unchanged — `.Выбрать()` is a cursor over the same
+/// result schema.
+fn projection_of_query_result_receiver(ty: &Ty) -> Option<Option<Arc<SdblProjection>>> {
+    match ty {
+        Ty::QueryResult { projection } => Some(projection.clone()),
+        Ty::PlatformObject(n) if is_platform_name(n, "РезультатЗапроса", "QueryResult") => {
+            Some(None)
+        }
+        _ => None,
+    }
+}
+
+/// Case-insensitive bilingual name match against the platform's
+/// canonical Russian + English spellings.
+///
+/// Uses [`str::to_lowercase`] so Cyrillic case folds correctly; the
+/// platform_data index normalises both forms the same way, so anything
+/// the user can write into a `Новый <Name>` lift through to the same
+/// methods will also match here.
+fn is_platform_name(name: &Name, ru: &str, en: &str) -> bool {
+    let lower = name.as_str().to_lowercase();
+    lower == ru.to_lowercase() || lower == en.to_lowercase()
+}
+
+/// Replace every arm matching `target` in `return_ty` with
+/// `replacement`, walking through `Ty::Union` arms.
+///
+/// Preserves nullability: the platform table declares
+/// `Query.Execute → "РезультатЗапроса, Неопределено"` which lowers to
+/// `Ty::Union([Ty::PlatformObject("РезультатЗапроса"), Ty::Undefined])`
+/// — replacing only the matching arm keeps the `Undefined` companion
+/// intact so callers that pattern-match nullability still see it.
+fn rewrite_chain_arm_in_return(return_ty: Ty, target: ChainTarget, replacement: &Ty) -> Ty {
+    let matches_target = |arm: &Ty| -> bool {
+        match (&target, arm) {
+            (ChainTarget::PlatformObjectNamed { ru, en }, Ty::PlatformObject(n)) => {
+                is_platform_name(n, ru, en)
+            }
+            (ChainTarget::AnyArray, Ty::Array | Ty::TypedArray(_)) => true,
+            _ => false,
+        }
+    };
+
+    if matches_target(&return_ty) {
+        return replacement.clone();
+    }
+    match return_ty {
+        Ty::Union(arms) => {
+            let new_arms: Vec<Ty> = arms
+                .iter()
+                .map(|arm| if matches_target(arm) { replacement.clone() } else { arm.clone() })
+                .collect();
+            // `Ty::union` re-canonicalises (flatten + sort + dedup) so
+            // a one-element result collapses correctly when the
+            // original union had only the rewritten arm.
+            Ty::union(new_arms)
+        }
+        other => other,
     }
 }
 
@@ -729,18 +941,17 @@ mod tests {
     fn method_lookup_query_execute_returns_union_with_undefined() {
         // Pins the HBK shape for `Запрос.Выполнить` — return_type is the
         // comma-joined string `"РезультатЗапроса, Неопределено"`. After
-        // `to_method_info` splits it we must see both branches as the
-        // receiver for any downstream chain.
+        // `to_method_info` splits it AND the SDBL chain rewrite
+        // (Phase 1.3) replaces the `РезультатЗапроса` arm with
+        // `Ty::QueryResult{None}`, both branches must still be present
+        // for any downstream chain to nullability-check.
         let info = lookup_method(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"))
             .expect("Запрос.Выполнить must resolve in platform data");
         match info.return_ty {
             Ty::Union(members) => {
                 assert!(
-                    members.iter().any(|m| matches!(
-                        m,
-                        Ty::PlatformObject(n) if n.as_str().eq_ignore_ascii_case("РезультатЗапроса")
-                    )),
-                    "union must include РезультатЗапроса, got {members:?}",
+                    members.iter().any(|m| matches!(m, Ty::QueryResult { projection: None })),
+                    "union must include Ty::QueryResult{{None}} (the rewritten РезультатЗапроса arm), got {members:?}",
                 );
                 assert!(
                     members.iter().any(|m| matches!(m, Ty::Undefined)),
@@ -1270,5 +1481,151 @@ mod tests {
         // (per platform_data; this is a stable canary). If the data
         // ever drops it, swap for any other `ТаблицаФормы` method.
         let _ = lookup_method(&receiver, &Name::new("ОбновитьСтроки"));
+    }
+
+    // ============================================================
+    // SDBL chain rewrite (Phase 1.3 Slice 1)
+    // ============================================================
+
+    fn assert_query_result_in_return(return_ty: &Ty) {
+        // `Query.Execute` in platform_data returns
+        // `Union([РезультатЗапроса, Неопределено])`. After rewrite we
+        // expect the `РезультатЗапроса` arm to become
+        // `Ty::QueryResult { projection: None }`; the `Undefined` arm
+        // stays unchanged. Either single-arm form (legacy
+        // platform data without the Union) or two-arm union are
+        // acceptable — the rewrite is shape-preserving.
+        let has_query_result = match return_ty {
+            Ty::QueryResult { projection: None } => true,
+            Ty::Union(arms) => {
+                arms.iter().any(|a| matches!(a, Ty::QueryResult { projection: None }))
+            }
+            _ => false,
+        };
+        assert!(has_query_result, "expected Ty::QueryResult{{None}} in return, got {return_ty:?}",);
+    }
+
+    #[test]
+    fn sdbl_chain_rewrite_executes_query() {
+        // `Запрос.Выполнить()` — receiver `Ty::PlatformObject("Запрос")`
+        // (legacy first-step lift, since Phase 1.3b hasn't yet
+        // promoted `Новый Запрос` to `Ty::Query`).
+        let receiver = Ty::PlatformObject(Name::new("Запрос"));
+        let info = lookup_method(&receiver, &Name::new("Выполнить"))
+            .expect("Запрос.Выполнить must resolve in platform data");
+        assert_query_result_in_return(&info.return_ty);
+    }
+
+    #[test]
+    fn sdbl_chain_rewrite_executes_query_english_alias() {
+        // English `Execute` on the same receiver — bilingual platform
+        // index resolves the method, our rewrite must match the
+        // English form too.
+        let receiver = Ty::PlatformObject(Name::new("Запрос"));
+        let info = lookup_method(&receiver, &Name::new("Execute"))
+            .expect("Запрос.Execute must resolve in platform data");
+        assert_query_result_in_return(&info.return_ty);
+    }
+
+    #[test]
+    fn sdbl_chain_rewrite_choose_on_result() {
+        // `РезультатЗапроса.Выбрать()` — receiver currently surfaces
+        // as `Ty::PlatformObject("РезультатЗапроса")` until Phase 1.3
+        // wires the `.Выполнить()` lift to produce `Ty::QueryResult`.
+        let receiver = Ty::PlatformObject(Name::new("РезультатЗапроса"));
+        let info = lookup_method(&receiver, &Name::new("Выбрать"))
+            .expect("РезультатЗапроса.Выбрать must resolve in platform data");
+        match info.return_ty {
+            Ty::QueryResultSelection { projection: None } => {}
+            other => panic!("expected QueryResultSelection{{None}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdbl_chain_rewrite_choose_on_typed_result() {
+        // Direct invocation on `Ty::QueryResult { None }` — what the
+        // hook will receive once Phase 1.3 wires the `.Выполнить()`
+        // lift. The lookup path goes through `platform_type_key`
+        // (which aliases `Ty::QueryResult` to "РезультатЗапроса" per
+        // Phase 0's match-fanout) so the rewrite should fire the same
+        // way.
+        let receiver = Ty::QueryResult { projection: None };
+        let info = lookup_method(&receiver, &Name::new("Выбрать"))
+            .expect("Ty::QueryResult.Выбрать must resolve via platform alias");
+        match info.return_ty {
+            Ty::QueryResultSelection { projection: None } => {}
+            other => panic!("expected QueryResultSelection{{None}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdbl_chain_rewrite_skips_unrelated_choose() {
+        // `.Выбрать()` exists on multiple receivers (file pickers,
+        // mail, dialogs). The receiver guard must prevent the rewrite
+        // from firing on those — they keep their platform return type.
+        // `СтандартноеПериод.Выбрать()` is one example: the platform
+        // returns `Булево`, not `ВыборкаИзРезультатаЗапроса`.
+        let receiver = Ty::PlatformObject(Name::new("СтандартныйПериод"));
+        if let Some(info) = lookup_method(&receiver, &Name::new("Выбрать")) {
+            assert!(
+                !matches!(info.return_ty, Ty::QueryResultSelection { .. }),
+                "rewrite must not fire on non-query receivers — got {:?}",
+                info.return_ty,
+            );
+        }
+    }
+
+    #[test]
+    fn sdbl_chain_rewrite_execute_batch() {
+        let receiver = Ty::PlatformObject(Name::new("Запрос"));
+        let info = lookup_method(&receiver, &Name::new("ВыполнитьПакет"))
+            .expect("Запрос.ВыполнитьПакет must resolve in platform data");
+        match info.return_ty {
+            Ty::QueryBatchResult { ref per_query } => {
+                assert!(per_query.is_empty(), "Slice 1 leaves per_query empty; Phase 3 fills it",);
+            }
+            other => panic!("expected QueryBatchResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdbl_chain_rewrite_preserves_nullability_in_union() {
+        // Construct the exact union shape `Query.Execute` returns in
+        // platform_data: `Union([РезультатЗапроса, Неопределено])`.
+        // After our rewrite walks the union, the `РезультатЗапроса`
+        // arm should become `Ty::QueryResult{None}`, the `Undefined`
+        // arm must remain untouched.
+        let input =
+            Ty::union(vec![Ty::PlatformObject(Name::new("РезультатЗапроса")), Ty::Undefined]);
+        let rewritten = rewrite_chain_arm_in_return(
+            input,
+            ChainTarget::PlatformObjectNamed {
+                ru: "РезультатЗапроса", en: "QueryResult"
+            },
+            &Ty::QueryResult { projection: None },
+        );
+        match rewritten {
+            Ty::Union(arms) => {
+                assert_eq!(arms.len(), 2);
+                assert!(arms.contains(&Ty::QueryResult { projection: None }));
+                assert!(arms.contains(&Ty::Undefined));
+            }
+            other => panic!("expected Ty::Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdbl_chain_rewrite_skips_non_chain_methods() {
+        // `.Колонки` is a property, not a chain method. A hypothetical
+        // `Запрос.Колонки` (if the method existed) must not be
+        // rewritten. Tests the `is_sdbl_chain_method` gate.
+        assert!(!is_sdbl_chain_method("Колонки"));
+        assert!(!is_sdbl_chain_method("Columns"));
+        assert!(!is_sdbl_chain_method("УстановитьПараметр"));
+        // Chain methods, both forms.
+        assert!(is_sdbl_chain_method("Выполнить"));
+        assert!(is_sdbl_chain_method("execute"));
+        assert!(is_sdbl_chain_method("ВЫБРАТЬ"));
+        assert!(is_sdbl_chain_method("ExecuteBatch"));
     }
 }
