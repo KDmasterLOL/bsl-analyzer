@@ -267,8 +267,14 @@ fn lookup_field_on_metadata_ref(
 /// the same way platform method lookup is. Same posture as
 /// [`lookup_field_on_metadata_ref`].
 fn lookup_field_in_query_projection(receiver_ty: &Ty, field_name: &Name) -> Option<FieldInfo> {
-    let Ty::QueryResultSelection { projection: Some(projection) } = receiver_ty else {
-        return None;
+    let projection = match receiver_ty {
+        Ty::QueryResultSelection { projection: Some(p) } => p,
+        // Phase H Slice 3 — projected `ValueTableRow` mirrors the
+        // `QueryResultSelection` projection lookup so `Для Каждого
+        // Стр Из <ТЗ> → Стр.<column>` resolves through the SDBL
+        // `SdblProjection::fields` slice.
+        Ty::ValueTableRow { projection: Some(p) } => p,
+        _ => return None,
     };
     let needle = field_name.as_str().to_lowercase();
     projection.fields.iter().find(|(n, _)| n.as_str().to_lowercase() == needle).map(|(n, ty)| {

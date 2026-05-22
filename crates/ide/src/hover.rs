@@ -810,8 +810,11 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<
 /// length survive); otherwise fall back to the bridged `Ty.display`
 /// in the caller's locale.
 fn projection_fields_markup(ty: &Ty, locale: Locale) -> Option<String> {
-    let Ty::QueryResultSelection { projection: Some(projection) } = ty else {
-        return None;
+    let projection = match ty {
+        Ty::QueryResultSelection { projection: Some(p) }
+        | Ty::ValueTable { projection: Some(p) }
+        | Ty::ValueTableRow { projection: Some(p) } => p,
+        _ => return None,
     };
     if projection.fields.is_empty() {
         return None;
@@ -856,6 +859,13 @@ fn query_variant_platform_key(ty: &Ty) -> Option<&'static str> {
         // share the `Array` table for iteration / `.Количество()` so
         // chained access stays consistent.
         Ty::QueryBatchResult { .. } => Some("Массив"),
+        // Phase H — projected `Ty::ValueTable` / `Ty::ValueTableRow`
+        // route to the same `ТаблицаЗначений` / `СтрокаТаблицыЗначений`
+        // platform docs their projection-less counterparts use. The
+        // projection block is then appended by
+        // [`projection_fields_markup`] for the `Some(p)` shape.
+        Ty::ValueTable { .. } => Some("ТаблицаЗначений"),
+        Ty::ValueTableRow { .. } => Some("СтрокаТаблицыЗначений"),
         _ => None,
     }
 }

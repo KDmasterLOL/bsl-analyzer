@@ -175,6 +175,11 @@ pub struct RefineCtx<'a> {
     /// ExprId of the receiver — `base` of the `Expr::Field` node.
     /// Phase D only refines when this is `Expr::Path(name)`.
     pub receiver_expr_id: ExprId,
+    /// Argument ExprIds of the dispatch site. Phase H's
+    /// `.Выгрузить(arg)` narrowing inspects the first element to
+    /// decide tree-vs-table; Phase D's text-write refinement
+    /// ignores this field. Empty slice is the no-arg case.
+    pub call_args: &'a [ExprId],
 }
 
 /// Method-name filter for [`apply_sdbl_chain_rewrite`].
@@ -189,6 +194,123 @@ fn is_sdbl_chain_method(name: &str) -> bool {
         name.to_lowercase().as_str(),
         "выполнить" | "execute" | "выбрать" | "choose" | "выполнитьпакет" | "executebatch",
     )
+}
+
+/// Method-name filter for the Phase H `.Выгрузить()` narrowing.
+///
+/// `РезультатЗапроса.Выгрузить(ТипОбхода)` returns a static union of
+/// `[ТаблицаЗначений, ДеревоЗначений]`; the runtime shape depends on
+/// the iteration argument. The narrower only fires when the receiver
+/// is a `Ty::QueryResult` (or its legacy `Ty::PlatformObject
+/// ("РезультатЗапроса")` shape) — see [`is_query_result_receiver`].
+fn is_unload_method(name: &str) -> bool {
+    matches!(name.to_lowercase().as_str(), "выгрузить" | "unload")
+}
+
+/// Phase H — drop the wrong arm of the
+/// `[ТаблицаЗначений, ДеревоЗначений]` return union when
+/// `.Выгрузить(arg)`'s argument is a statically recognisable
+/// `ОбходРезультатаЗапроса` member.
+///
+/// Gated on [`is_query_result_receiver`] so the rewrite never collides
+/// with `ТабличнаяЧасть.Выгрузить` / `FormDataCollection.Выгрузить`
+/// (those declare a single-typed `ТаблицаЗначений` return — narrowing
+/// is a no-op there but would still cost the union walk).
+fn narrow_unload_return(
+    receiver_ty: &Ty,
+    info: MethodInfo,
+    refine_ctx: Option<&RefineCtx<'_>>,
+) -> MethodInfo {
+    if !is_query_result_receiver(receiver_ty) {
+        return info;
+    }
+    // Slice 1b — extract the receiver's projection so the kept
+    // `Ty::ValueTable` arm can carry it through `.Выгрузить()`. None
+    // is the legacy `Ty::PlatformObject("РезультатЗапроса")` shape;
+    // chain still narrows but the table arm stays projection-less.
+    let projection = projection_of_query_result_receiver(receiver_ty).flatten();
+    let return_ty = if let Some(ctx) = refine_ctx {
+        use crate::query_unload_refinement::{classify_unload_arg, UnloadIteration};
+        let decision = classify_unload_arg(ctx.body, ctx.call_args);
+        let narrowed = match decision {
+            UnloadIteration::Dynamic => info.return_ty,
+            UnloadIteration::Linear => drop_union_arm(info.return_ty, is_value_tree_arm),
+            UnloadIteration::Hierarchical => drop_union_arm(info.return_ty, is_value_table_arm),
+        };
+        attach_projection_to_value_table(narrowed, projection)
+    } else {
+        attach_projection_to_value_table(info.return_ty, projection)
+    };
+    MethodInfo { return_ty, params: info.params, overloads: info.overloads }
+}
+
+/// Walk `ty` and replace every `Ty::ValueTable { projection: None }`
+/// arm with `Ty::ValueTable { projection }`. Other arms pass through.
+///
+/// Operates on the bare type and inside `Ty::Union` arms. Receivers
+/// that already carry a non-None projection are intentionally left
+/// alone — projection refinement is only ever an *upgrade*. None
+/// receiver projection short-circuits to identity so the rewrite
+/// stays free for legacy code paths.
+fn attach_projection_to_value_table(ty: Ty, projection: Option<Arc<SdblProjection>>) -> Ty {
+    let Some(projection) = projection else { return ty };
+    let upgrade = |arm: &Ty| -> Option<Ty> {
+        match arm {
+            Ty::ValueTable { projection: None } => {
+                Some(Ty::ValueTable { projection: Some(projection.clone()) })
+            }
+            _ => None,
+        }
+    };
+    if let Some(upgraded) = upgrade(&ty) {
+        return upgraded;
+    }
+    let Ty::Union(members) = ty else { return ty };
+    let rebuilt: Vec<Ty> =
+        members.iter().map(|arm| upgrade(arm).unwrap_or_else(|| arm.clone())).collect();
+    Ty::Union(rebuilt.into())
+}
+
+/// `ТаблицаЗначений` shows up as the dedicated [`Ty::ValueTable`]
+/// variant (or `{ projection: .. }` once Slice 2 lands); the legacy
+/// `Ty::PlatformObject("ТаблицаЗначений")` is also accepted in case
+/// platform-string lowering ever produces it.
+fn is_value_table_arm(ty: &Ty) -> bool {
+    matches!(ty, Ty::ValueTable { .. })
+        || matches!(ty, Ty::PlatformObject(n) if is_platform_name(n, "ТаблицаЗначений", "ValueTable"))
+}
+
+/// `ДеревоЗначений` has no dedicated `Ty` variant today, so we match
+/// the bilingual `Ty::PlatformObject` shape only.
+fn is_value_tree_arm(ty: &Ty) -> bool {
+    matches!(ty, Ty::PlatformObject(n) if is_platform_name(n, "ДеревоЗначений", "ValueTree"))
+}
+
+/// Receiver gate for [`narrow_unload_return`].
+fn is_query_result_receiver(ty: &Ty) -> bool {
+    match ty {
+        Ty::QueryResult { .. } => true,
+        Ty::PlatformObject(n) => is_platform_name(n, "РезультатЗапроса", "QueryResult"),
+        _ => false,
+    }
+}
+
+/// Walk a `Ty::Union` and drop arms matching `unwanted`. Non-Union
+/// inputs pass through.
+///
+/// If dropping leaves a single arm, collapse to that arm directly. If
+/// dropping would empty the union, return the original (defensive —
+/// the platform signature should always have at least the kept arm).
+fn drop_union_arm(ty: Ty, unwanted: impl Fn(&Ty) -> bool) -> Ty {
+    let Ty::Union(members) = ty else { return ty };
+    let kept: Vec<Ty> = members.iter().filter(|t| !unwanted(t)).cloned().collect();
+    if kept.is_empty() {
+        return Ty::Union(members);
+    }
+    if kept.len() == 1 {
+        return kept.into_iter().next().unwrap();
+    }
+    Ty::Union(kept.into())
 }
 
 /// Rewrite the return type of an SDBL chain method to the matching
@@ -221,6 +343,16 @@ fn apply_sdbl_chain_rewrite(
     info: MethodInfo,
     refine_ctx: Option<&RefineCtx<'_>>,
 ) -> MethodInfo {
+    // Phase H — `QueryResult.Выгрузить(ТипОбхода)` argument-driven
+    // narrowing. The platform signature declares the return as
+    // `Union([ТаблицаЗначений, ДеревоЗначений])`; runtime shape is
+    // single-typed and chosen by the `ОбходРезультатаЗапроса` arg
+    // (default = `Прямой` → `ТаблицаЗначений`). The narrower drops
+    // the wrong arm whenever the arg shape is statically recognisable.
+    if is_unload_method(method_name.as_str()) {
+        return narrow_unload_return(receiver_ty, info, refine_ctx);
+    }
+
     if !is_sdbl_chain_method(method_name.as_str()) {
         return info;
     }
@@ -646,7 +778,8 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
         Ty::Array | Ty::TypedArray(_) => Some("Array"),
         Ty::Structure => Some("Structure"),
         Ty::Map => Some("Map"),
-        Ty::ValueTable => Some("ValueTable"),
+        Ty::ValueTable { .. } => Some("ValueTable"),
+        Ty::ValueTableRow { .. } => Some("ValueTableRow"),
         Ty::ValueList => Some("ValueList"),
         Ty::Type => Some("Type"),
         // Platform object name is stored as-authored in the `Ty` and the
@@ -1057,8 +1190,8 @@ mod tests {
         // ДеревоЗначений"` — the narrowing must at least preserve
         // `Ty::ValueTable` in the result so chained `.Добавить()` works.
         let contains_value_table = match &info.return_ty {
-            Ty::ValueTable => true,
-            Ty::Union(members) => members.iter().any(|m| matches!(m, Ty::ValueTable)),
+            Ty::ValueTable { .. } => true,
+            Ty::Union(members) => members.iter().any(|m| matches!(m, Ty::ValueTable { .. })),
             _ => false,
         };
         assert!(
@@ -1200,7 +1333,7 @@ mod tests {
         // `display_name()` fallback, and the Task 5 draft used
         // `"ТаблицаЗначений"` — both miss because platform-data stores
         // English).
-        let info = lookup_method(&Ty::ValueTable, &Name::new("Добавить"))
+        let info = lookup_method(&Ty::ValueTable { projection: None }, &Name::new("Добавить"))
             .expect("ValueTable.Добавить must resolve via bilingual platform index");
         assert!(!matches!(info.return_ty, Ty::Unknown));
     }
@@ -1337,7 +1470,7 @@ mod tests {
         let r = ts_receiver(MdoType::Catalog, "X.Y");
         let info = lookup_method(&r, &Name::new("Выгрузить"))
             .expect("TabularSection.Выгрузить must resolve");
-        assert_eq!(info.return_ty, Ty::ValueTable);
+        assert_eq!(info.return_ty, Ty::ValueTable { projection: None });
     }
 
     #[test]
@@ -1570,7 +1703,7 @@ mod tests {
         // signatures match), but if the cohesion rule ever flips to
         // "last wins", a future overload divergence between Array and
         // ValueTable would silently re-bind callers' arg-checks.
-        let u = Ty::union(vec![Ty::Array, Ty::ValueTable]);
+        let u = Ty::union(vec![Ty::Array, Ty::ValueTable { projection: None }]);
         let info = lookup_method(&u, &Name::new("Количество"))
             .expect("Union(Array, ValueTable).Количество must resolve through both branches");
         assert_eq!(info.return_ty, Ty::Number, "Количество returns Число on both branches");

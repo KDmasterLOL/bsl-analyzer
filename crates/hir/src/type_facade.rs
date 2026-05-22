@@ -376,7 +376,12 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// pretty-printer instead of the generic platform docs only when
     /// this returns `true`.
     pub fn is_query_projection(&self) -> bool {
-        matches!(self.ty, Ty::QueryResultSelection { projection: Some(_) })
+        matches!(
+            self.ty,
+            Ty::QueryResultSelection { projection: Some(_) }
+                | Ty::ValueTable { projection: Some(_) }
+                | Ty::ValueTableRow { projection: Some(_) }
+        )
     }
 
     /// Per-column `(name, type)` pairs from the SDBL projection.
@@ -388,7 +393,9 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// borrowed `Ty` via [`Type::new`] with the same `db` / `file_id`.
     pub fn projection_fields(&self) -> Option<&[(Name, Ty)]> {
         match &self.ty {
-            Ty::QueryResultSelection { projection: Some(projection) } => Some(&projection.fields),
+            Ty::QueryResultSelection { projection: Some(p) }
+            | Ty::ValueTable { projection: Some(p) }
+            | Ty::ValueTableRow { projection: Some(p) } => Some(&p.fields),
             _ => None,
         }
     }
@@ -402,9 +409,9 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// SDBL precision/scale that the bridged `Ty` drops.
     pub fn projection_field_displays(&self) -> Option<&[hir_def::ty::SdblTypeShadow]> {
         match &self.ty {
-            Ty::QueryResultSelection { projection: Some(projection) } => {
-                projection.raw_sdbl_types.as_deref()
-            }
+            Ty::QueryResultSelection { projection: Some(p) }
+            | Ty::ValueTable { projection: Some(p) }
+            | Ty::ValueTableRow { projection: Some(p) } => p.raw_sdbl_types.as_deref(),
             _ => None,
         }
     }
@@ -438,7 +445,8 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
         Ty::Array | Ty::TypedArray(_) => Some("Array"),
         Ty::Structure => Some("Structure"),
         Ty::Map => Some("Map"),
-        Ty::ValueTable => Some("ValueTable"),
+        Ty::ValueTable { .. } => Some("ValueTable"),
+        Ty::ValueTableRow { .. } => Some("ValueTableRow"),
         Ty::ValueList => Some("ValueList"),
         Ty::Type => Some("Type"),
         Ty::PlatformObject(name) => Some(name.as_str()),

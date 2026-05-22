@@ -150,7 +150,7 @@ fn infer_tabular_section_unload_returns_value_table() {
 "#
     );
     let (db, file_id) = setup(&fixture);
-    assert_eq!(var_ty(&db, file_id, "тз"), Some(Ty::ValueTable));
+    assert_eq!(var_ty(&db, file_id, "тз"), Some(Ty::ValueTable { projection: None }));
 }
 
 #[test]

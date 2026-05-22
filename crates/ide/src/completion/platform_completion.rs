@@ -827,8 +827,11 @@ pub(super) fn render_platform_property(
 /// is `"0_<name>"` so projection columns surface above the platform
 /// members in alphabetical order.
 fn projection_column_items(receiver_ty: &Ty) -> Vec<CompletionItem> {
-    let Ty::QueryResultSelection { projection: Some(projection) } = receiver_ty else {
-        return Vec::new();
+    let projection = match receiver_ty {
+        Ty::QueryResultSelection { projection: Some(p) }
+        | Ty::ValueTable { projection: Some(p) }
+        | Ty::ValueTableRow { projection: Some(p) } => p,
+        _ => return Vec::new(),
     };
     let shadows = projection.raw_sdbl_types.as_deref();
     projection

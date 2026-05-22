@@ -59,6 +59,14 @@ use crate::platform_manager_lookup::{
 /// possibly a `Ty::Union` for HBK pages that list multiple admissible
 /// elements.
 pub(crate) fn resolve_iter_element_ty(collection: &Ty) -> Option<Ty> {
+    // Phase H Slice 3 — projected `Ty::ValueTable` short-circuits the
+    // platform-template path: the row carries the same projection so
+    // `Для Каждого Стр Из <ТЗ> → Стр.<column>` resolves through the
+    // SDBL `SdblProjection::fields` slice. Projection-less ValueTable
+    // falls through to the regular `СтрокаТаблицыЗначений` lookup.
+    if let Ty::ValueTable { projection: Some(p) } = collection {
+        return Some(Ty::ValueTableRow { projection: Some(p.clone()) });
+    }
     let templates = match collection {
         Ty::PlatformObject(name) => lookup_by_type_name(name.as_str())?,
         Ty::MetadataRef { kind, .. } => lookup_by_metadata_kind(*kind)?,
@@ -70,7 +78,8 @@ pub(crate) fn resolve_iter_element_ty(collection: &Ty) -> Option<Ty> {
         Ty::TypedArray(elem) => return Some((**elem).clone()),
         Ty::Array => lookup_by_type_name("Массив")?,
         Ty::Map => lookup_by_type_name("Соответствие")?,
-        Ty::ValueTable => lookup_by_type_name("ТаблицаЗначений")?,
+        Ty::ValueTable { .. } => lookup_by_type_name("ТаблицаЗначений")?,
+        Ty::ValueTableRow { .. } => lookup_by_type_name("СтрокаТаблицыЗначений")?,
         Ty::ValueList => lookup_by_type_name("СписокЗначений")?,
         Ty::Structure => lookup_by_type_name("Структура")?,
         Ty::Union(arms) => return resolve_union(arms.as_ref(), collection),
@@ -185,7 +194,7 @@ mod tests {
     #[test]
     fn value_table_yields_row() {
         // `ТаблицаЗначений` iterates `СтрокаТаблицыЗначений`.
-        let elem = resolve_iter_element_ty(&Ty::ValueTable);
+        let elem = resolve_iter_element_ty(&Ty::ValueTable { projection: None });
         assert_eq!(elem, Some(Ty::PlatformObject(Name::new("СтрокаТаблицыЗначений"))));
     }
 

@@ -23,7 +23,7 @@ pub(super) fn builtin_to_ty(b: BuiltinTypeRef) -> Ty {
         BuiltinTypeRef::Undefined => Ty::Undefined,
         BuiltinTypeRef::Null => Ty::Null,
         BuiltinTypeRef::Structure => Ty::Structure,
-        BuiltinTypeRef::ValueTable => Ty::ValueTable,
+        BuiltinTypeRef::ValueTable => Ty::ValueTable { projection: None },
         BuiltinTypeRef::ValueList => Ty::ValueList,
         BuiltinTypeRef::Type => Ty::Type,
     }

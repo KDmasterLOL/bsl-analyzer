@@ -2318,6 +2318,7 @@ impl<'db> InferenceContext<'db> {
                 body: &self.body,
                 dispatch_expr_id: callee,
                 receiver_expr_id: base_id,
+                call_args: args,
             };
             let result = match crate::method_lookup::lookup_method_with_refinement(
                 &receiver_ty,

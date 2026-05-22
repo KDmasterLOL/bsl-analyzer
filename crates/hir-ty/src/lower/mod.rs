@@ -371,7 +371,7 @@ mod tests {
         );
         assert_eq!(
             ctx().lower_type_ref(&TypeRef::Builtin(BuiltinTypeRef::ValueTable)),
-            Ty::ValueTable
+            Ty::ValueTable { projection: None }
         );
     }
 

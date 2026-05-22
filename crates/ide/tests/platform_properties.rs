@@ -286,8 +286,8 @@ fn query_execute_unload_chain_infers_value_table() {
     // which would flunk the `contains_value_table` check below.
     let ty = var_ty(&db, file_id, "таблица");
     let contains_value_table = match &ty {
-        Some(Ty::ValueTable) => true,
-        Some(Ty::Union(members)) => members.iter().any(|m| matches!(m, Ty::ValueTable)),
+        Some(Ty::ValueTable { .. }) => true,
+        Some(Ty::Union(members)) => members.iter().any(|m| matches!(m, Ty::ValueTable { .. })),
         _ => false,
     };
     assert!(

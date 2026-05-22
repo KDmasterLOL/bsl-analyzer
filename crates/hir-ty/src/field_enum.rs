@@ -166,8 +166,14 @@ pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<Fiel
 /// arm is the IDE-completion sibling of the inference-time field
 /// lookup.
 fn enumerate_projection_fields(ty: &Ty) -> Option<Vec<FieldInfo>> {
-    let Ty::QueryResultSelection { projection: Some(projection) } = ty else {
-        return None;
+    let projection = match ty {
+        Ty::QueryResultSelection { projection: Some(p) } => p,
+        // Phase H Slice 3 — projected `Ty::ValueTableRow` surfaces
+        // its columns through the same completion / hover pipe as
+        // `Ty::QueryResultSelection`, keeping the SDBL projection
+        // visible after the `.Выгрузить()` chain.
+        Ty::ValueTableRow { projection: Some(p) } => p,
+        _ => return None,
     };
     let fields = projection
         .fields

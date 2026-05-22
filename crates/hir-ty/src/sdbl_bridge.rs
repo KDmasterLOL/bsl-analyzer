@@ -113,7 +113,7 @@ pub fn sdbl_type_to_ty(t: &sdbl_hir::SdblType) -> Ty {
             // surfaces `Unknown` so callers don't false-positive a
             // type-error on an opaque user-defined type.
             .unwrap_or(Ty::Unknown),
-        S::ValueTable => Ty::ValueTable,
+        S::ValueTable => Ty::ValueTable { projection: None },
         S::Null => Ty::Null,
         // SDBL `SUM(Number) → Aggregate(Number)` — strip the wrapper
         // and bridge the inner type. The aggregate marker is irrelevant
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(sdbl_type_to_ty(&SdblType::Date), Ty::Date);
         assert_eq!(sdbl_type_to_ty(&SdblType::DateTime), Ty::Date);
         assert_eq!(sdbl_type_to_ty(&SdblType::Null), Ty::Null);
-        assert_eq!(sdbl_type_to_ty(&SdblType::ValueTable), Ty::ValueTable);
+        assert_eq!(sdbl_type_to_ty(&SdblType::ValueTable), Ty::ValueTable { projection: None });
         assert_eq!(sdbl_type_to_ty(&SdblType::AnyRef), Ty::Unknown);
         assert_eq!(sdbl_type_to_ty(&SdblType::Unknown), Ty::Unknown);
         assert_eq!(sdbl_type_to_ty(&SdblType::Error), Ty::Unknown);

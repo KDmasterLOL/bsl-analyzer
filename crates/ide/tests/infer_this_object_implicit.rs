@@ -187,7 +187,7 @@ fn implicit_tabular_section_method_dispatches() {
 "#;
     let (db, file_id) = setup_data_processor(text);
     assert!(unresolved_method_kinds(&db, file_id).is_empty());
-    assert_eq!(var_ty(&db, file_id, "тз"), Some(Ty::ValueTable));
+    assert_eq!(var_ty(&db, file_id, "тз"), Some(Ty::ValueTable { projection: None }));
 }
 
 #[test]

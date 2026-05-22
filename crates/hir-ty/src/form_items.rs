@@ -751,7 +751,7 @@ mod tests {
         // would be wrong.
         let attr_binding = FormDataBinding::new(
             Box::new([Name::new("ТабличнаяЧасть")]),
-            FormDataTarget::Attribute { ty: Box::new(Ty::ValueTable) },
+            FormDataTarget::Attribute { ty: Box::new(Ty::ValueTable { projection: None }) },
         )
         .unwrap();
         let receiver =

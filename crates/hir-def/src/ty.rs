@@ -79,7 +79,26 @@ pub enum Ty {
     Type,
 
     /// ValueTable (ТаблицаЗначений).
-    ValueTable,
+    ///
+    /// `projection` carries an [`SdblProjection`] when the table value was
+    /// derived from a refined query result via `.Выгрузить()` (Phase H).
+    /// `None` means either non-SDBL origin (`Новый ТаблицаЗначений`, form
+    /// attribute) or an SDBL chain that the bridge couldn't refine
+    /// (dynamic text, unrecognised `КАК` alias, etc.). Platform method
+    /// dispatch always ignores `projection`; only `field_lookup` /
+    /// `iteration_lookup` / `field_enum` consult it.
+    ValueTable { projection: Option<Arc<SdblProjection>> },
+
+    /// Row of a projected [`Ty::ValueTable`] (Phase H).
+    ///
+    /// Produced by `Для Каждого <row> Из <Ty::ValueTable { Some(p) }>` so
+    /// the row's `<col>` access can resolve against the projection's
+    /// `fields` slice. Platform method / field dispatch falls back to
+    /// `СтрокаТаблицыЗначений` for everything outside the projection,
+    /// matching the runtime shape. `projection: None` mirrors the
+    /// existing platform `СтрокаТаблицыЗначений` row (no projection
+    /// enrichment).
+    ValueTableRow { projection: Option<Arc<SdblProjection>> },
 
     /// ValueList (СписокЗначений).
     ValueList,
@@ -1194,8 +1213,10 @@ impl Ty {
             (Ty::Map, Locale::En) => "Map",
             (Ty::Type, Locale::Ru) => "Тип",
             (Ty::Type, Locale::En) => "Type",
-            (Ty::ValueTable, Locale::Ru) => "ТаблицаЗначений",
-            (Ty::ValueTable, Locale::En) => "ValueTable",
+            (Ty::ValueTable { .. }, Locale::Ru) => "ТаблицаЗначений",
+            (Ty::ValueTable { .. }, Locale::En) => "ValueTable",
+            (Ty::ValueTableRow { .. }, Locale::Ru) => "СтрокаТаблицыЗначений",
+            (Ty::ValueTableRow { .. }, Locale::En) => "ValueTableRow",
             (Ty::ValueList, Locale::Ru) => "СписокЗначений",
             (Ty::ValueList, Locale::En) => "ValueList",
             (Ty::MetadataRef { .. }, Locale::Ru) => "СсылкаМетаданных",
@@ -1622,7 +1643,7 @@ mod tests {
         assert_eq!(Ty::Map.display_name(Locale::Ru), "Соответствие");
         assert_eq!(Ty::Undefined.display_name(Locale::Ru), "Неопределено");
         assert_eq!(Ty::Null.display_name(Locale::Ru), "Null");
-        assert_eq!(Ty::ValueTable.display_name(Locale::Ru), "ТаблицаЗначений");
+        assert_eq!(Ty::ValueTable { projection: None }.display_name(Locale::Ru), "ТаблицаЗначений");
         assert_eq!(Ty::ValueList.display_name(Locale::Ru), "СписокЗначений");
 
         // English side stays in lockstep with `canonical_name`.
