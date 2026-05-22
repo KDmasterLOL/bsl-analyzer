@@ -207,7 +207,8 @@ pub(super) fn platform_completions<DB: RootDatabase>(
 
     if let Some(type_name) = receiver_ty.platform_type_name() {
         tracing::debug!(type_name = ?type_name, "Platform type for completion");
-        let items = complete_platform_methods(db, type_name, position.locale);
+        let mut items = projection_column_items(&receiver_ty);
+        items.extend(complete_platform_methods(db, type_name, position.locale));
         return Some(apply_prefix_filter(items, &prefix, db));
     }
 
@@ -222,6 +223,14 @@ pub(super) fn platform_completions<DB: RootDatabase>(
         let mut items: Vec<CompletionItem> = Vec::new();
         let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
         for m in members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)) {
+            // Per-arm projection columns: a union arm shaped like
+            // `Ty::QueryResultSelection{Some(p)}` (e.g. a nullable
+            // chain return) still surfaces its SELECT columns.
+            for item in projection_column_items(m) {
+                if seen_labels.insert(item.label.clone()) {
+                    items.push(item);
+                }
+            }
             let Some(type_name) = m.platform_type_name() else { continue };
             for item in complete_platform_methods(db, type_name, position.locale) {
                 if seen_labels.insert(item.label.clone()) {
@@ -800,6 +809,52 @@ pub(super) fn render_platform_property(
         filter_text: Some(format!("{} {}", prop.name, prop.english_name)),
         source: None,
     }
+}
+
+/// Render each column of a `Ty::QueryResultSelection { projection:
+/// Some(p) }` receiver as a `CompletionItem`.
+///
+/// Returns an empty `Vec` for any receiver shape that doesn't carry
+/// a resolved SDBL projection — including projection-less
+/// `QueryResultSelection { projection: None }`. The caller mixes
+/// these items with the platform-property / platform-method output
+/// so the user sees both the SELECT aliases AND the platform
+/// `НомерСтроки` / `СледующаяСтрока` / `Уровень` on the same popup.
+///
+/// Each item uses `SdblTypeShadow.display` (`"Число(15,2)"`,
+/// `"Строка(50)"`) when the bridge captured it; otherwise the
+/// bridged `Ty.canonical_name()` is the fallback label. `sort_text`
+/// is `"0_<name>"` so projection columns surface above the platform
+/// members in alphabetical order.
+fn projection_column_items(receiver_ty: &Ty) -> Vec<CompletionItem> {
+    let Ty::QueryResultSelection { projection: Some(projection) } = receiver_ty else {
+        return Vec::new();
+    };
+    let shadows = projection.raw_sdbl_types.as_deref();
+    projection
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, (name, ty))| {
+            let label = name.as_str().to_string();
+            let detail = shadows
+                .and_then(|s| s.get(i))
+                .map(|shadow| shadow.display.clone())
+                .unwrap_or_else(|| ty.canonical_name().to_string());
+            CompletionItem {
+                label: label.clone(),
+                detail: Some(detail),
+                kind: CompletionItemKind::Field,
+                insert_text: label.clone(),
+                documentation: None,
+                // `0_` prefix sorts SELECT columns above the platform
+                // members (whose default sort is alphabetic, no prefix).
+                sort_text: Some(format!("0_{label}")),
+                filter_text: None,
+                source: None,
+            }
+        })
+        .collect()
 }
 
 /// Surface the form's own elements (Pages / Tables / Buttons / Fields /

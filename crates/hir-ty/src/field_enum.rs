@@ -103,6 +103,10 @@ pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<Fiel
     // to an empty Vec — same shape `Документы.ПКО` enumeration returned
     // pre-Step-J. Predefined-item enumeration is a separate enhancement.
 
+    if let Some(infos) = enumerate_projection_fields(ty) {
+        return infos;
+    }
+
     if let Ty::Union(arms) = ty {
         let mut out: Vec<FieldInfo> = Vec::new();
         let mut seen: std::collections::HashSet<Name> = std::collections::HashSet::new();
@@ -138,6 +142,46 @@ pub fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<Fiel
     }
 
     Vec::new()
+}
+
+/// Surface the SDBL projection columns of a
+/// `Ty::QueryResultSelection { projection: Some(p) }` receiver as
+/// IDE-visible fields.
+///
+/// Returns:
+/// - `Some(fields)` — projection-typed receiver; the slice is the
+///   per-column [`FieldInfo`]s in declaration order, marked read-only
+///   (the cursor's columns are not assignable) with `UserAttribute`
+///   origin so completion sorts them alongside other user-defined
+///   columns.
+/// - `Some(empty Vec)` — projection-typed receiver but the projection
+///   carries no columns (`SELECT *` against an unresolved table, parse
+///   error, …). Caller treats this as "no fields" — same as the
+///   `Ty::Unknown` fallthrough below.
+/// - `None` — receiver is anything else; caller falls through to the
+///   existing union / MetadataRef / register dispatch.
+///
+/// Mirrors [`field_lookup::lookup_field_in_query_projection`] which
+/// resolves a single named column on the same shape — the projection
+/// arm is the IDE-completion sibling of the inference-time field
+/// lookup.
+fn enumerate_projection_fields(ty: &Ty) -> Option<Vec<FieldInfo>> {
+    let Ty::QueryResultSelection { projection: Some(projection) } = ty else {
+        return None;
+    };
+    let fields = projection
+        .fields
+        .iter()
+        .map(|(name, field_ty)| FieldInfo {
+            name: name.clone(),
+            name_en: None,
+            ty: field_ty.clone(),
+            value_ty: None,
+            is_readonly: true,
+            origin: FieldOrigin::UserAttribute,
+        })
+        .collect();
+    Some(fields)
 }
 
 /// Whether `kind` represents a register **record-set** receiver — the only

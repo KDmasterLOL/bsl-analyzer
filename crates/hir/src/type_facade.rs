@@ -367,6 +367,47 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
             })
             .collect()
     }
+
+    /// Whether this type is a `Ty::QueryResultSelection` carrying a
+    /// resolved SDBL projection (a non-`None` payload).
+    ///
+    /// IDE consumers use this as a cheap discriminator before pulling
+    /// the field list — e.g. hover routes through the projection
+    /// pretty-printer instead of the generic platform docs only when
+    /// this returns `true`.
+    pub fn is_query_projection(&self) -> bool {
+        matches!(self.ty, Ty::QueryResultSelection { projection: Some(_) })
+    }
+
+    /// Per-column `(name, type)` pairs from the SDBL projection.
+    ///
+    /// `Some(slice)` when [`Type::is_query_projection`] returns `true`;
+    /// `None` otherwise. The slice is borrowed directly from the
+    /// `Arc<[..]>` payload, so the caller pays no allocation. Callers
+    /// that need the IDE facade `Type` for each column can wrap the
+    /// borrowed `Ty` via [`Type::new`] with the same `db` / `file_id`.
+    pub fn projection_fields(&self) -> Option<&[(Name, Ty)]> {
+        match &self.ty {
+            Ty::QueryResultSelection { projection: Some(projection) } => Some(&projection.fields),
+            _ => None,
+        }
+    }
+
+    /// Per-column SDBL display labels (`"Число(15,2)"`, `"Строка(50)"`)
+    /// indexed in lock-step with [`Type::projection_fields`].
+    ///
+    /// `None` when the receiver isn't a projection-typed selection OR
+    /// when the projection's `raw_sdbl_types` shadow was not captured
+    /// (some bridge entry points skip it). Hover uses these to render
+    /// SDBL precision/scale that the bridged `Ty` drops.
+    pub fn projection_field_displays(&self) -> Option<&[hir_def::ty::SdblTypeShadow]> {
+        match &self.ty {
+            Ty::QueryResultSelection { projection: Some(projection) } => {
+                projection.raw_sdbl_types.as_deref()
+            }
+            _ => None,
+        }
+    }
 }
 
 impl From<FieldInfo> for Field {

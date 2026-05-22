@@ -783,15 +783,60 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<
     // would silently fall to the bare `**Тип:**` line and lose the
     // rich platform docs the user gets today.
     if let Some(platform_key) = query_variant_platform_key(ty) {
-        if let Some(block) = platform_type_markup(db, platform_key) {
-            return Some(block);
+        let mut block = platform_type_markup(db, platform_key)
+            .unwrap_or_else(|| format!("**Тип:** {}\n\n", ty.display(locale)));
+        // Phase E enrichment — if this is a `Ty::QueryResultSelection`
+        // with a resolved SDBL projection, append the per-column
+        // shape so the user sees the schema directly on hover. Uses
+        // `SdblTypeShadow.display` when present (`Строка(50)` /
+        // `Число(15,2)`) and falls back to the bridged `Ty.display`
+        // when the bridge didn't capture the shadow.
+        if let Some(fields_block) = projection_fields_markup(ty, locale) {
+            block.push_str(&fields_block);
         }
-        // Fall through if platform data has no entry — extremely
-        // defensive: `Запрос` / `РезультатЗапроса` are always shipped
-        // in `platform_data.json`.
+        return Some(block);
     }
 
     Some(format!("**Тип:** {}\n\n", ty.display(locale)))
+}
+
+/// Render the SDBL projection of a [`Ty::QueryResultSelection`] as a
+/// trailing `**Поля:** ...` markup block, or `None` when the receiver
+/// is not projection-typed.
+///
+/// Format: a single bold heading followed by a comma-separated list
+/// `Имя: Строка(50), Цена: Число(15,2), …`. Per-column labels prefer
+/// the SDBL shadow when the bridge captured it (precision / scale /
+/// length survive); otherwise fall back to the bridged `Ty.display`
+/// in the caller's locale.
+fn projection_fields_markup(ty: &Ty, locale: Locale) -> Option<String> {
+    let Ty::QueryResultSelection { projection: Some(projection) } = ty else {
+        return None;
+    };
+    if projection.fields.is_empty() {
+        return None;
+    }
+    // Lead with a blank-line separator: the upstream
+    // `platform_type_markup` block doesn't always end with one (e.g.
+    // the "и еще N методов" trailer is non-terminated), and without
+    // the separator the projection heading collides with the
+    // preceding line in the rendered markup.
+    let mut out = String::from("\n\n**Поля:** ");
+    let shadows = projection.raw_sdbl_types.as_deref();
+    for (i, (name, field_ty)) in projection.fields.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(name.as_str());
+        out.push_str(": ");
+        let label = shadows
+            .and_then(|s| s.get(i))
+            .map(|shadow| shadow.display.clone())
+            .unwrap_or_else(|| field_ty.display(locale).to_string());
+        out.push_str(&label);
+    }
+    out.push_str("\n\n");
+    Some(out)
 }
 
 /// Map a projection-typed `Ty` to the platform-data key under which its
