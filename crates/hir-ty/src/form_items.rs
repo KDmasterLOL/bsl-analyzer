@@ -20,7 +20,7 @@
 //! [`lookup_form_item_field`] checks the receiver shape **before**
 //! asking `db.module_metadata(...)` — a non-`ВсеЭлементыФормы`
 //! receiver returns immediately with no Salsa cost. The managed-form
-//! gate (`Resolver::resolve_this_form`) is the second gate; both stay
+//! gate (`this_object::is_managed_form_module`) is the second gate; both stay
 //! shallow so the inference hot path pays nothing on unrelated
 //! field-access expressions.
 //!
@@ -68,7 +68,7 @@ pub fn is_form_items_collection_ty(ty: &Ty) -> bool {
 /// 1. `base_ty` is `Ty::PlatformObject("ВсеЭлементыФормы" | "FormAllItems")`
 ///    (case-insensitive, bilingual);
 /// 2. the resolver's enclosing module is a managed form
-///    ([`Resolver::resolve_this_form`] gate — strict, ordinary forms and
+///    ([`this_object::is_managed_form_module`] gate — strict, ordinary forms and
 ///    forms without a loaded `Form.xml` payload return `false`);
 /// 3. the form metadata declares an element with this name
 ///    (case-insensitive — BSL identifiers are case-insensitive).
@@ -105,7 +105,7 @@ pub(crate) fn lookup_form_item_field(
     if !is_form_items_receiver {
         return None;
     }
-    if !resolver.resolve_this_form(db) {
+    if !crate::this_object::is_managed_form_module(db, resolver) {
         return None;
     }
     let module_id = resolver.module_id()?;

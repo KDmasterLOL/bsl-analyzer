@@ -1540,7 +1540,7 @@ impl<'db> InferenceContext<'db> {
         //    through to the normal cascade and become `Ty::Unknown`.
         let name_lower = name.as_str().to_lowercase();
         if name_lower == "этотобъект" || name_lower == "thisobject" {
-            if let Some(owner) = resolver.resolve_this_object(self.db) {
+            if let Some(owner) = crate::this_object::resolve_this_object_owner(self.db, &resolver) {
                 trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
                 return Ty::ThisObject { owner };
             }
@@ -1550,7 +1550,8 @@ impl<'db> InferenceContext<'db> {
             // chain then coerces `Ty::ThisManager` to
             // `Ty::ObjectManager` — see Step J in plan
             // `linear-tumbling-noodle.md` §2.5.
-            if let Some(owner) = resolver.resolve_this_manager(self.db) {
+            if let Some(owner) = crate::this_object::resolve_this_manager_owner(self.db, &resolver)
+            {
                 trace!("resolved {} as ThisManager {{ owner: {:?} }}", name, owner);
                 return Ty::ThisManager { owner };
             }
@@ -1561,7 +1562,9 @@ impl<'db> InferenceContext<'db> {
             // variant — `*RecordSet` has no sibling kind to disambiguate the
             // way `Ty::ThisObject` disambiguates *Object from *Ref for
             // catalog/document/etc. modules.
-            if let Some((mdo, name)) = resolver.resolve_this_record_set(self.db) {
+            if let Some((mdo, name)) =
+                crate::this_object::resolve_this_record_set_owner(self.db, &resolver)
+            {
                 if let Some(kind) = hir_def::ty::MetadataKind::record_set_kind_for(mdo) {
                     trace!(
                         "resolved {} as record-set MetadataRef {{ {:?}, {} }}",
@@ -1579,7 +1582,7 @@ impl<'db> InferenceContext<'db> {
             // platform type directly. Subsequent `.Элементы` / `.Найти(…)`
             // chains then route through the existing platform-property /
             // platform-method adapters with no special-case code.
-            if resolver.resolve_this_form(self.db) {
+            if crate::this_object::is_managed_form_module(self.db, &resolver) {
                 trace!("resolved {} as managed form Self", name);
                 return Ty::PlatformObject(hir_def::Name::new(crate::form_self::FORM_TYPE_NAME));
             }
@@ -1693,7 +1696,7 @@ impl<'db> InferenceContext<'db> {
         //       the form happens to declare an attribute with that name.
         //
         //     Cheap-first probe: `resolve_form_attribute` opens with the
-        //     same `resolve_this_form` gate `form_self` uses, so non-form
+        //     same `is_managed_form_module` gate `form_self` uses, so non-form
         //     modules pay nothing.
         if !user_shadows && !body_binding_shadows {
             if let Some(ty) = crate::form_attr::resolve_form_attribute(self.db, &resolver, name) {
@@ -1707,7 +1710,7 @@ impl<'db> InferenceContext<'db> {
         // 5c. ObjectModule implicit ЭтотОбъект.<name> — bare attribute,
         //     standard attribute, or tabular section of the owning MDO.
         //     Symmetric to 5b (form attribute) but gated on
-        //     Resolver::resolve_this_object, which is None outside an
+        //     this_object::resolve_this_object_owner, which is None outside an
         //     ObjectModule of an MDO with an *Object companion
         //     (MetadataKind::object_kind_for). Extra workspace_owns_common_module
         //     guard so a user CommonModule with the same name wins (mirrors
@@ -1728,7 +1731,7 @@ impl<'db> InferenceContext<'db> {
         //     `user_shadows` / `body_binding_shadows` gates (see step 2),
         //     so we only reach here for field-shaped lookups.
         //     Symmetric to 5c (ObjectModule) but gated on
-        //     Resolver::resolve_this_record_set, which is None outside a
+        //     this_object::resolve_this_record_set_owner, which is None outside a
         //     RecordSetModule of one of the four register flavours.
         if !user_shadows && !body_binding_shadows && !workspace_owns_common_module {
             if let Some(ty) =
@@ -2242,7 +2245,7 @@ impl<'db> InferenceContext<'db> {
                     // Use the post-coercion shape so a future
                     // `Ty::ThisManager { kind: Constant, .. }` (lands
                     // when ValueManagerModule support is added — see
-                    // `Resolver::resolve_this_manager`) routes through
+                    // `this_object::resolve_this_manager_owner`) routes through
                     // the same refinement as the qualified-path
                     // `Константы.X.Имя()` shape.
                     if let Ty::ObjectManager {

@@ -12,7 +12,7 @@
 //!    entry and resolves the attribute through the MDO's declared
 //!    attribute list.
 //! 3. Non-`ObjectModule` files (common modules, test harness defaults)
-//!    where `resolve_this_object` returns `None` fall through and
+//!    where `resolve_this_object_owner` returns `None` fall through and
 //!    `ЭтотОбъект` stays `Ty::Unknown` — no spurious promotion.
 //!
 //! # Scope note
@@ -44,7 +44,7 @@ fn designer_fixture_path() -> PathBuf {
 /// for `CommonModules/` or `Configuration.xml`) locates the designer
 /// fixture's root, and `build_module_metadata` populates
 /// `ModuleMetadata::mdo` with `Catalog "Справочник1"`. That is what
-/// `Resolver::resolve_this_object` keys off.
+/// `this_object::resolve_this_object_owner` keys off.
 fn catalog_object_module_path() -> PathBuf {
     designer_fixture_path().join("Catalogs/Справочник1/Ext/ObjectModule.bsl")
 }
@@ -188,7 +188,7 @@ fn infer_this_object_unknown_field_stays_unknown() {
 
 #[test]
 fn infer_this_object_in_common_module_stays_unknown() {
-    // `Resolver::resolve_this_object` returns `None` for any
+    // `this_object::resolve_this_object_owner` returns `None` for any
     // non-`ObjectModule` — CommonModule is the canonical case. The
     // intercept in `infer_path_name` observes the `None` and lets the
     // name fall through the normal cascade, landing on `Ty::Unknown`

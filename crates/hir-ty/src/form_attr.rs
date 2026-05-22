@@ -7,7 +7,7 @@
 //! exposes them via form-data wrappers.
 //!
 //! [`resolve_form_attribute`] is the bridge: cheap form gate first
-//! (`Resolver::resolve_this_form`), then a metadata read, then a small
+//! (`this_object::is_managed_form_module`), then a metadata read, then a small
 //! lowering decision per attribute kind:
 //!
 //! - **MainAttribute typed as `cfg:CatalogObject.X` / `cfg:DocumentObject.Y` /
@@ -94,7 +94,7 @@ pub fn lower_form_attribute_to_ty(attr: &FormAttribute, configs: &[VisibleConfig
 ///
 /// Returns `Some(Ty)` only when **all** are true:
 /// 1. the resolver's enclosing module is a managed form
-///    ([`Resolver::resolve_this_form`] gate);
+///    ([`this_object::is_managed_form_module`] gate);
 /// 2. the form metadata declares an attribute with this name
 ///    (case-insensitive — BSL identifiers are case-insensitive);
 /// 3. the attribute lowers to a known shape.
@@ -107,10 +107,10 @@ pub(crate) fn resolve_form_attribute(
     resolver: &Resolver,
     name: &Name,
 ) -> Option<Ty> {
-    // Cheap gate FIRST so non-form modules pay nothing — `resolve_this_form`
-    // checks the FormType and the form payload's presence, both of which
-    // are already cached on `module_metadata`.
-    if !resolver.resolve_this_form(db) {
+    // Cheap gate FIRST so non-form modules pay nothing —
+    // `is_managed_form_module` checks the FormType and the form payload's
+    // presence, both of which are already cached on `module_metadata`.
+    if !crate::this_object::is_managed_form_module(db, resolver) {
         return None;
     }
 

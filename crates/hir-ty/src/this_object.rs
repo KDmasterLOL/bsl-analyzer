@@ -38,7 +38,7 @@
 //! - `ThisManager` — those with a manager surface (gated by
 //!   `MdoType::manager_type_prefix() != None`, same table
 //!   `Ty::ManagerCollection` factory uses). Both
-//!   `Resolver::resolve_this_manager` and this coercion read that
+//!   `this_object::resolve_this_manager_owner` and this coercion read that
 //!   single gate, so a new MDO with a manager surface grows
 //!   `ЭтотОбъект` support automatically.
 //!
@@ -49,7 +49,10 @@
 //! single source of truth catches new variants with one compile error
 //! instead of two.
 
+use bsl_metadata::{MdoType, ModuleType};
+use hir_def::resolver::Resolver;
 use hir_def::ty::{MetadataKind, Ty};
+use hir_def::{DefDatabase, Name};
 
 /// Coerce `ЭтотОбъект` receivers to their dispatch-ready Ty.
 ///
@@ -76,7 +79,7 @@ pub fn coerce_to_metadata_ref(receiver_ty: &Ty) -> Option<Ty> {
             Some(Ty::MetadataRef { kind: object_kind, name: name.clone() })
         }
         Ty::ThisManager { owner: (kind, name) } => {
-            // Gate on the same table `resolve_this_manager` uses, so
+            // Gate on the same table `resolve_this_manager_owner` uses, so
             // an unreachable case here would only fire if a caller
             // bypassed the resolver and synthesised a `ThisManager`
             // for an MDO without a manager surface.
@@ -85,6 +88,151 @@ pub fn coerce_to_metadata_ref(receiver_ty: &Ty) -> Option<Ty> {
         }
         _ => None,
     }
+}
+
+/// Resolve `ЭтотОбъект` / `ThisObject` inside an `ObjectModule.bsl`.
+///
+/// Reads the owner-module metadata via [`DefDatabase::module_metadata`]
+/// and returns `Some((mdo_type, name))` only when **both** conditions
+/// hold:
+///
+/// 1. The module is an `ObjectModule` — the single module type where
+///    `ЭтотОбъект` semantically means "the current MDO as a `*Object`
+///    reference" (record-set / form / manager / common / command
+///    modules have their own `ЭтотОбъект` semantics).
+/// 2. The MDO flavour has a matching `*Object` companion in
+///    [`MetadataKind`] (checked via [`MetadataKind::object_kind_for`]).
+///    Without a coercion target the downstream `FieldLookup` /
+///    `MethodLookup` adapters have nothing to resolve against, so a
+///    `Ty::ThisObject` constructed here would dangle.
+///
+/// Covered kinds today: `Catalog`, `Document`, `ExchangePlan`,
+/// `ChartOfAccounts`, `Task`, `BusinessProcess`, `DataProcessor`,
+/// `Report`. `ChartOfCharacteristicTypes`, registers, and enums still
+/// sit in this gap — their ObjectModule `ЭтотОбъект` stays
+/// `Ty::Unknown` until dedicated `*Object` variants land.
+///
+/// # Why in `hir-ty` (and not `Resolver`)
+///
+/// This is a **type-system** decision (`MetadataKind`-gated, produces
+/// the seed for `Ty::ThisObject`), not name resolution. The function
+/// reads the `Resolver`'s current module scope as input but returns
+/// type-system entities. Keeping it in `hir-ty` matches the layer
+/// rule from `CLAUDE.md`: `hir-def` is for syntactic / scope
+/// decisions; type-aware decisions live in `hir-ty`.
+pub fn resolve_this_object_owner(
+    db: &dyn DefDatabase,
+    resolver: &Resolver,
+) -> Option<(MdoType, Name)> {
+    let module_id = resolver.module_id()?;
+    let metadata = db.module_metadata(module_id);
+    let mdo = metadata.mdo.as_ref()?;
+
+    if metadata.module_type != ModuleType::ObjectModule {
+        return None;
+    }
+
+    MetadataKind::object_kind_for(mdo.mdo_type)?;
+
+    Some((mdo.mdo_type, Name::new(&mdo.name)))
+}
+
+/// Resolve `ЭтотОбъект` / `ThisObject` inside a `ManagerModule.bsl`.
+///
+/// Sibling of [`resolve_this_object_owner`] for the manager axis.
+/// Returns `Some((MdoType, Name))` only when the resolver's enclosing
+/// module is a `ModuleType::ManagerModule` whose MDO has a manager
+/// surface — gated on [`MdoType::manager_type_prefix`] returning
+/// `Some(_)`, the same table that `Ty::ManagerCollection` factory uses,
+/// so a flavour without a manager (constants, common modules, forms,
+/// HTTP-services, web-services, event subscriptions, scheduled jobs …)
+/// returns `None` rather than dangle a `Ty::ThisManager` no adapter
+/// can dispatch.
+///
+/// Two storage slots: `metadata.mdo` for non-register flavours
+/// (Catalog, Document, ChartOfAccounts, …); `metadata.register` for
+/// the four register flavours (Information / Accumulation / Accounting
+/// / Calculation), where `metadata.mdo` stays `None`. Both carry the
+/// `(MdoType, name)` pair this gate needs.
+pub fn resolve_this_manager_owner(
+    db: &dyn DefDatabase,
+    resolver: &Resolver,
+) -> Option<(MdoType, Name)> {
+    let module_id = resolver.module_id()?;
+    let metadata = db.module_metadata(module_id);
+
+    if metadata.module_type != ModuleType::ManagerModule {
+        return None;
+    }
+
+    let (mdo_type, name) = match (metadata.mdo.as_ref(), metadata.register.as_ref()) {
+        (Some(mdo), _) => (mdo.mdo_type, Name::new(&mdo.name)),
+        (None, Some(reg)) => (reg.mdo_type(), Name::new(reg.name())),
+        (None, None) => return None,
+    };
+
+    mdo_type.manager_type_prefix()?;
+
+    Some((mdo_type, name))
+}
+
+/// Resolve `ЭтотОбъект` / `ThisObject` inside
+/// `<Register>/Ext/RecordSetModule.bsl`.
+///
+/// Returns `Some((MdoType, Name))` only when the enclosing module is
+/// `ModuleType::RecordSetModule` whose MDO is one of the four register
+/// flavours — gated through [`MetadataKind::record_set_kind_for`] so
+/// the downstream `*RecordSet` companion always exists.
+///
+/// Two storage slots, same as [`resolve_this_manager_owner`]: register
+/// flavours populate `metadata.register`, not `metadata.mdo`.
+pub fn resolve_this_record_set_owner(
+    db: &dyn DefDatabase,
+    resolver: &Resolver,
+) -> Option<(MdoType, Name)> {
+    let module_id = resolver.module_id()?;
+    let metadata = db.module_metadata(module_id);
+
+    if metadata.module_type != ModuleType::RecordSetModule {
+        return None;
+    }
+
+    let (mdo_type, name) = match (metadata.mdo.as_ref(), metadata.register.as_ref()) {
+        (Some(mdo), _) => (mdo.mdo_type, Name::new(&mdo.name)),
+        (None, Some(reg)) => (reg.mdo_type(), Name::new(reg.name())),
+        (None, None) => return None,
+    };
+
+    MetadataKind::record_set_kind_for(mdo_type)?;
+
+    Some((mdo_type, name))
+}
+
+/// Returns `true` when the resolver's enclosing module is a managed
+/// form.
+///
+/// Sibling to [`resolve_this_object_owner`]: same input shape and
+/// parallel module-metadata gate, but answers a different question.
+/// `resolve_this_object_owner` returns the `(MdoType, Name)` pair that
+/// lets `infer_path_name` build a `Ty::ThisObject` for an object
+/// module's `ЭтотОбъект`. Forms have no `MdoType` companion (they live
+/// outside the catalog/document/exchange-plan/chart-of-accounts axis),
+/// so the form path returns just a flag — the caller maps it to the
+/// platform type `ФормаКлиентскогоПриложения` directly.
+///
+/// Gate is strict: only `ModuleType::FormModule` *and* an attached
+/// managed `Form` payload qualifies. Ordinary forms and form modules
+/// without a loaded `Form.xml` return `false` (conservative — we'd
+/// rather miss type info than mistype an ordinary form as managed).
+pub fn is_managed_form_module(db: &dyn DefDatabase, resolver: &Resolver) -> bool {
+    let Some(module_id) = resolver.module_id() else { return false };
+    let metadata = db.module_metadata(module_id);
+
+    if metadata.module_type != ModuleType::FormModule {
+        return false;
+    }
+
+    metadata.form.as_ref().is_some_and(|f| f.is_managed())
 }
 
 #[cfg(test)]
@@ -258,7 +406,7 @@ mod tests {
             Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курс") }
         );
         // And `ThisObject` for the same kind must NOT coerce — the
-        // resolver's `resolve_this_object` already gates on
+        // resolver's `resolve_this_object_owner` already gates on
         // `MetadataKind::object_kind_for`, but the coercion table is
         // the second wall of defence: a synthesised `ThisObject` on a
         // register kind has no dispatch target.

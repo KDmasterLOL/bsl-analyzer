@@ -56,7 +56,7 @@ pub const FORM_TYPE_NAME: &str = "ФормаКлиентскогоПриложе
 /// 1. `name` is a property of [`FORM_TYPE_NAME`] in the platform catalogue
 ///    (cheap `FxHashMap` probe — case-insensitive, bilingual);
 /// 2. the resolver's enclosing module is a managed form
-///    ([`Resolver::resolve_this_form`] gate — strict, ordinary forms and
+///    ([`this_object::is_managed_form_module`] gate — strict, ordinary forms and
 ///    forms without a loaded `Form.xml` payload return `false`).
 ///
 /// The order matters for cost: step 1 weeds out the common case
@@ -67,7 +67,7 @@ pub(crate) fn resolve_form_self_property(
     name: &Name,
 ) -> Option<PlatformPropertyResolution> {
     let resolution = lookup_platform_property_by_type(FORM_TYPE_NAME, name)?;
-    if !resolver.resolve_this_form(db) {
+    if !crate::this_object::is_managed_form_module(db, resolver) {
         return None;
     }
     Some(resolution)
@@ -78,7 +78,7 @@ pub(crate) fn resolve_form_self_property(
 ///
 /// `FxHashMap` lookup against the static [`PlatformDataInner`] singleton —
 /// no `db`, no resolver, no Salsa dependency. The caller is responsible
-/// for the managed-form gate (e.g. via `Resolver::resolve_this_form` or a
+/// for the managed-form gate (e.g. via `this_object::is_managed_form_module` or a
 /// direct `ModuleMetadata` check). Used by diagnostic suppression
 /// pipelines that already hold a `ModuleMetadata` and only need the
 /// platform-data half of the form-self check.

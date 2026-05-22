@@ -80,7 +80,7 @@ fn unresolved_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMet
 /// be a file *other than* `test.bsl` — typically an inline
 /// `ObjectModule.bsl` whose own body contains `ЭтотОбъект` calls.
 ///
-/// `Resolver::resolve_this_object` reads `db.module_metadata(...)`,
+/// `this_object::resolve_this_object_owner` reads `db.module_metadata(...)`,
 /// which is keyed off the file's path: the file path must walk up to a
 /// configuration root (designer fixture) for `ModuleType::ObjectModule`
 /// + `ModuleMetadata.mdo` to be populated.

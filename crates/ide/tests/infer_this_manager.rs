@@ -112,7 +112,7 @@ fn infer_this_manager_english_spelling() {
 fn infer_this_manager_resolves_in_information_register_module() {
     // Pins the register-axis claim explicitly. `InformationRegister`'s
     // `manager_type_prefix() = Some("InformationRegisterManager")` is
-    // the gate `Resolver::resolve_this_manager` and
+    // the gate `this_object::resolve_this_manager_owner` and
     // `coerce_to_metadata_ref` share, so a register's
     // `ManagerModule.bsl` must produce `Ty::ThisManager { (Register,
     // name) }` exactly the same way Catalog does. A regression that
@@ -139,7 +139,7 @@ fn infer_this_manager_resolves_in_information_register_module() {
 
 #[test]
 fn infer_this_manager_in_common_module_stays_unknown() {
-    // Non-`ManagerModule` files where `resolve_this_manager` returns
+    // Non-`ManagerModule` files where `resolve_this_manager_owner` returns
     // `None` must not produce `Ty::ThisManager`. Common module is the
     // canonical case; pinning it here guards the gate's "manager
     // module only" contract symmetrically to `ThisObject`'s
