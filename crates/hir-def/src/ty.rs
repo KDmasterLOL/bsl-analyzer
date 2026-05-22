@@ -445,6 +445,33 @@ pub fn form_control_platform_type_name(kind: FormElementKind) -> Option<&'static
     form_control_platform_type_chain(kind).first().copied()
 }
 
+/// Walk the platform-type chain for `kind` **in reverse** (most-specific
+/// extension first, base last) and return the first `Some(_)` produced
+/// by `lookup`.
+///
+/// Encapsulates the "extension overrides base" precedence rule shared
+/// by [`hir_ty::method_lookup::lookup_method`] and
+/// [`hir_ty::platform_property_lookup::lookup_platform_property`]: both
+/// query `PlatformData` per chain segment and want the kind-specific
+/// extension table (e.g. `"Расширение группы формы для обычной
+/// группы"`) to win over the base `ГруппаФормы` table.
+///
+/// `Other` has an empty chain → immediate `None` without invoking
+/// `lookup`. Single-entry chains (e.g. `Field`, `Button`, `Group`,
+/// `Decoration`, `Addition`, `Table`) collapse to one `lookup` call,
+/// identical to the pre-helper behaviour.
+pub fn form_control_chain_first_hit<T, F>(kind: FormElementKind, mut lookup: F) -> Option<T>
+where
+    F: FnMut(&str) -> Option<T>,
+{
+    for type_name in form_control_platform_type_chain(kind).iter().rev() {
+        if let Some(res) = lookup(type_name) {
+            return Some(res);
+        }
+    }
+    None
+}
+
 /// Human-facing label for a form-element kind, bilingual.
 ///
 /// Single source of truth for completion item details, hover badges and

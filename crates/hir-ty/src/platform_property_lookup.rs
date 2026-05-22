@@ -91,20 +91,14 @@ pub fn lookup_platform_property(
 ) -> Option<PlatformPropertyResolution> {
     // Form-control receivers carry an ordered platform-type chain
     // `[base, extension?]` (e.g. `Pages → ["ГруппаФормы", "Расширение
-    // группы формы для страниц"]`). Walk reversed (extension first)
-    // so kind-specific properties like `<Pages>.ТекущаяСтраница`
-    // override base members; fall through to base for shared props
-    // (`Видимость`, `Заголовок`, …). Single-entry chains (e.g. Field,
-    // Button, the catch-all `Group`) reduce to one lookup, identical
-    // to the pre-chain behaviour. `Other` returns an empty chain →
-    // immediate `None`.
+    // группы формы для страниц"]`). The reverse-walk precedence
+    // (extension overrides base, single-entry chains collapse, `Other`
+    // is empty → `None`) is shared with method_lookup and lives in
+    // [`hir_def::ty::form_control_chain_first_hit`].
     if let Ty::FormControl { kind, .. } = receiver_ty {
-        for type_name in hir_def::ty::form_control_platform_type_chain(*kind).iter().rev() {
-            if let Some(res) = lookup_platform_property_by_type(type_name, prop_name) {
-                return Some(res);
-            }
-        }
-        return None;
+        return hir_def::ty::form_control_chain_first_hit(*kind, |type_name| {
+            lookup_platform_property_by_type(type_name, prop_name)
+        });
     }
     let type_key = platform_type_key(receiver_ty)?;
     lookup_platform_property_by_type(type_key, prop_name)

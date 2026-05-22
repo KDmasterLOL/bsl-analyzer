@@ -227,13 +227,9 @@ fn lookup_on_form_control(
     kind: hir_def::ty::FormElementKind,
     method_name: &Name,
 ) -> Option<MethodInfo> {
-    let data = PlatformData::instance();
-    for type_name in hir_def::ty::form_control_platform_type_chain(kind).iter().rev() {
-        if let Some(method) = data.get_method(type_name, method_name.as_str()) {
-            return Some(to_method_info(method));
-        }
-    }
-    None
+    hir_def::ty::form_control_chain_first_hit(kind, |type_name| {
+        PlatformData::instance().get_method(type_name, method_name.as_str()).map(to_method_info)
+    })
 }
 
 /// Dispatch method lookup across a [`Ty::Union`] receiver.
