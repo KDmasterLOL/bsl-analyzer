@@ -340,6 +340,20 @@ pub(crate) fn platform_type_key(ty: &Ty) -> Option<&str> {
         // `field_lookup`. `Other` returns `None`: unrecognised XML tag,
         // no platform table to query.
         Ty::FormControl { kind, .. } => hir_def::ty::form_control_platform_type_name(*kind),
+        // Projection-typed receivers alias to the same platform
+        // method tables `Ty::PlatformObject(...)` reaches today. Phase 0
+        // carries no projection payload, so method dispatch resolves
+        // identically to the legacy `Ty::PlatformObject("Запрос")` etc.
+        // shapes (tests at `method_lookup.rs:706-729` pin this).
+        Ty::Query { .. } => Some("Запрос"),
+        Ty::QueryResult { .. } => Some("РезультатЗапроса"),
+        Ty::QueryResultSelection { .. } => Some("ВыборкаИзРезультатаЗапроса"),
+        // Batch result iterates / counts like `Массив` — share the table.
+        Ty::QueryBatchResult { .. } => Some("Array"),
+        // `AnyMetadataRef` mirrors `ManagerCollection` in Phase 0 — no
+        // scalar platform key (manager dispatch routes through
+        // `platform_manager_lookup`, not the scalar table).
+        Ty::AnyMetadataRef { .. } => None,
     }
 }
 

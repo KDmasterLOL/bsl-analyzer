@@ -407,6 +407,17 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
         // receiver that `lookup_method` already serves correctly.
         Ty::FormData { kind, .. } => Some(kind.platform_type_name()),
         Ty::FormControl { kind, .. } => hir_def::ty::form_control_platform_type_name(*kind),
+        // Projection-typed receivers alias to the same platform method
+        // tables `method_lookup::platform_type_key` reaches — without
+        // these arms `Type::methods()` would silently disagree with
+        // `lookup_method` once Phase 1 starts synthesizing the variants.
+        // `AnyMetadataRef` mirrors `ManagerCollection` (manager dispatch
+        // routes through MDO-specific tables, not the scalar key).
+        Ty::Query { .. } => Some("Запрос"),
+        Ty::QueryResult { .. } => Some("РезультатЗапроса"),
+        Ty::QueryResultSelection { .. } => Some("ВыборкаИзРезультатаЗапроса"),
+        Ty::QueryBatchResult { .. } => Some("Array"),
+        Ty::AnyMetadataRef { .. } => None,
         _ => None,
     }
 }

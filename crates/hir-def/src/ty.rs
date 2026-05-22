@@ -282,6 +282,98 @@ pub enum Ty {
     /// `Expr::Field` / `Expr::MethodCall` on a union give `Ty::Unknown` until
     /// a narrowing step selects a concrete component.
     Union(Arc<[Ty]>),
+
+    /// `Запрос` value — the platform `Query` object with an optionally-resolved
+    /// SDBL projection.
+    ///
+    /// `projection = None` is the conservative default: text is dynamic,
+    /// hasn't been traced yet, or hasn't been refined by the variable-state
+    /// refinement pass. Downstream method/field dispatch falls back to the
+    /// behaviour of `Ty::PlatformObject("Запрос")`. Phase 0 never constructs
+    /// `Some(_)` — the bridge that wires it lives in `hir-ty` (Phase 1).
+    Query { projection: Option<Arc<SdblProjection>> },
+
+    /// Return of `.Выполнить()` on a Query whose projection we know.
+    ///
+    /// `projection = None` mirrors `Ty::PlatformObject("РезультатЗапроса")`
+    /// behaviour. Phase 0 never constructs `Some(_)`.
+    QueryResult { projection: Option<Arc<SdblProjection>> },
+
+    /// Return of `.Выбрать()` on a query result — the iteration cursor.
+    ///
+    /// `projection = None` mirrors
+    /// `Ty::PlatformObject("ВыборкаИзРезультатаЗапроса")`. Phase 0 never
+    /// constructs `Some(_)`. Field lookup gains a projection-driven branch
+    /// in Phase 1.
+    QueryResultSelection { projection: Option<Arc<SdblProjection>> },
+
+    /// Return of `.ВыполнитьПакет()` — array of per-query results.
+    ///
+    /// `per_query[i]` is the projection of the `i`-th sub-query in the
+    /// batch, or `None` when unresolved. Phase 0 never constructs a
+    /// non-empty per_query — variant exists so Phase 3 can attach the
+    /// projection at `.ВыполнитьПакет()[i]` indexing.
+    QueryBatchResult { per_query: Arc<[Option<Arc<SdblProjection>>]> },
+
+    /// Coarse "some MDO of this kind, name unknown" reference.
+    ///
+    /// SDBL's `AnyObjectRef { Catalog }` (the cell type behind
+    /// `ВЫРАЗИТЬ(... КАК Catalog)` and similar) bridges to this variant.
+    /// **Distinct from [`Ty::ManagerCollection`]**: `ManagerCollection`
+    /// models the global manager container (`Справочники.` — a global
+    /// value), while `AnyMetadataRef` models a *value* of an unspecified
+    /// instance of a given MDO family.
+    ///
+    /// Phase 0 never constructs this variant — Phase 1 bridge adds the
+    /// only synthesis sites. Method/field dispatch in Phase 0 mirrors
+    /// `Ty::ManagerCollection(mdo_type)` until Phase 1 wires the
+    /// instance-shape semantics.
+    AnyMetadataRef { mdo_type: MdoType },
+}
+
+/// SDBL projection — per-field type information bridged from `sdbl-hir`.
+///
+/// Lives in `hir-def` (not `sdbl-hir`) because [`Ty`] embeds it: keeping
+/// `hir-def` independent of SDBL HIR internals while still surfacing
+/// projection data through the type system. The bridge (`hir-ty` Phase 1)
+/// fills it; `sdbl-hir` does not import `hir-def`.
+///
+/// `fields` is the **bridged** view: each entry's `Ty` is a fully-formed
+/// BSL type, not a raw `SdblType`. This is the single source of truth for
+/// field-lookup, completion, and inference on projection-typed receivers.
+///
+/// `raw_sdbl_types` is the optional **shadow** carrying display-relevant
+/// SDBL attributes (precision/scale, length) that `Ty` deliberately drops.
+/// `None` when the projection was constructed without the originating
+/// package (e.g. a manual cache-bypass path).
+///
+/// Holds bridged `Ty` rather than raw `sdbl_hir::SdblType` so the embedding
+/// type can derive [`Ord`] (required for [`Ty::union`] dedup ordering) —
+/// `sdbl_hir::SdblType` does not derive `Ord`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SdblProjection {
+    /// Per-field bridged types in declaration order.
+    pub fields: Arc<[(crate::Name, Ty)]>,
+    /// Optional shadow with pre-rendered SDBL-specific display attributes,
+    /// indexed parallel to `fields`. `None` when the bridge wasn't given
+    /// the originating package; `Some(slice)` invariant: `slice.len() ==
+    /// fields.len()`.
+    pub raw_sdbl_types: Option<Arc<[SdblTypeShadow]>>,
+}
+
+/// Display-only shadow for an SDBL field type.
+///
+/// Carries the rendered SDBL type label (`"Число(15,2)"`, `"Строка(50)"`)
+/// so hover can show precision/scale/length that the bridged [`Ty`]
+/// drops. Decoupled from `sdbl_hir::SdblType` to keep `hir-def`
+/// independent of SDBL HIR shape.
+///
+/// `display` is rendered eagerly at bridge time — no formatting in the
+/// hover hot path.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SdblTypeShadow {
+    /// Pre-rendered SDBL type label.
+    pub display: String,
 }
 
 /// Managed-form data wrapper flavour.
@@ -1153,6 +1245,29 @@ impl Ty {
             // machine name for platform lookups, logs, and tests.
             (Ty::Union(_), Locale::Ru) => "Составной",
             (Ty::Union(_), Locale::En) => "Union",
+            // Projection-typed receivers alias to their corresponding
+            // platform-object names: hover, completion and method lookup
+            // must reach the same `Запрос` / `РезультатЗапроса` /
+            // `ВыборкаИзРезультатаЗапроса` platform tables they reach today
+            // through `Ty::PlatformObject(...)`. Phase 0 carries no
+            // projection payload — Phase 1's bridge attaches it and adds
+            // projection-aware rendering in `TyDisplay`.
+            (Ty::Query { .. }, _) => "Запрос",
+            (Ty::QueryResult { .. }, _) => "РезультатЗапроса",
+            (Ty::QueryResultSelection { .. }, _) => "ВыборкаИзРезультатаЗапроса",
+            // Batch result is a `Массив` of `РезультатЗапроса` at runtime;
+            // alias to `Массив` so iteration / `.Количество()` resolve
+            // through the same table `Ty::Array` reaches.
+            (Ty::QueryBatchResult { .. }, Locale::Ru) => "Массив",
+            (Ty::QueryBatchResult { .. }, Locale::En) => "Array",
+            // `AnyMetadataRef` mirrors `ManagerCollection` semantics in
+            // Phase 0 — Phase 1 will refine to instance-shape dispatch.
+            (Ty::AnyMetadataRef { mdo_type }, Locale::Ru) => {
+                mdo_type.manager_type_prefix_ru().unwrap_or("МенеджерКоллекция")
+            }
+            (Ty::AnyMetadataRef { mdo_type }, Locale::En) => {
+                mdo_type.manager_type_prefix().unwrap_or("ManagerCollection")
+            }
         }
     }
 
@@ -1227,11 +1342,26 @@ impl Ty {
             // must narrow first (M4) or intersect method tables explicitly.
             Ty::Union(_) => None,
             Ty::PlatformObject(name) => Some(name.as_str()),
+            // `AnyMetadataRef` is an instance-shape receiver; like
+            // `ManagerCollection` / `ObjectManager` it has no flat platform
+            // table (manager / instance dispatch routes through
+            // `platform_manager_lookup`, not the scalar method index).
+            // Explicit `None` rather than the canonical-name fallback so
+            // Phase 1 synthesis can never silently mis-route through a
+            // bogus `"ManagerCollection"` key lookup.
+            Ty::AnyMetadataRef { .. } => None,
             // Platform method lookup is keyed by canonical English type
             // names (`get_type_methods("Number")`), not localized ones —
             // platform_data.json stores both `name` (RU) and `english_name`
             // (EN) and the lookup index normalises both, so EN here is
             // a deliberate machine-name choice, not user-facing output.
+            //
+            // Projection-typed `Ty::Query` / `QueryResult` /
+            // `QueryResultSelection` / `QueryBatchResult` fall through here
+            // — their `canonical_name()` returns `"Запрос"` /
+            // `"РезультатЗапроса"` / `"ВыборкаИзРезультатаЗапроса"` /
+            // `"Array"`, matching `method_lookup::platform_type_key` so
+            // `.methods()` and `lookup_method` stay consistent.
             _ => Some(self.canonical_name()),
         }
     }
