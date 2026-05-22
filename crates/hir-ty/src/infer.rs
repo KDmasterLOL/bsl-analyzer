@@ -29,10 +29,11 @@
 use base_db::FileIdInput;
 use cfg_types::{BindingId, IdConversion};
 use hir_def::body::Body;
-use hir_def::hir::{BinaryOp, Expr, Literal, Stmt, StmtIdx, UnaryOp};
+use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
+use hir_def::ty::SdblProjection;
 use hir_def::ty::Ty;
-use hir_def::{DefWithBodyId, ExprId, MethodIdInput, Name};
+use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use tracing::{debug, info, trace};
@@ -1186,6 +1187,32 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    /// Project `Новый Запрос("<literal>")`'s string-literal arg through
+    /// the SDBL ↔ Ty bridge.
+    ///
+    /// Returns `Some(projection)` when `args[0]` is a string literal
+    /// whose `SdblExprId` resolves to an `SdblPackage` with a
+    /// bridge-able first query; `None` otherwise (no args, dynamic
+    /// text, parse-error packages, asterisk-only packages).
+    ///
+    /// The `matches!` guard is belt-and-suspenders — by construction
+    /// every `ExprId` in `body.sdbl_exprs` is a string literal today,
+    /// but the explicit check prevents a future lowerer change from
+    /// quietly producing projections for non-literal expressions.
+    fn try_synthesise_query_projection(&self, args: &[ExprIdx]) -> Option<Arc<SdblProjection>> {
+        let arg_idx = *args.first()?;
+        let arg_id = ExprId::from_idx(arg_idx);
+        if !matches!(self.body.expr(arg_id), Expr::Literal(Literal::String(_))) {
+            return None;
+        }
+        let sdbl_expr_id = SdblExprId { owner: self.owner, expr_id: arg_id };
+        let file_id_input = FileIdInput::new(self.db, self.file_id);
+        let entries = sdbl_hir_for_file_query(self.db, file_id_input);
+        let (_, pkg) = entries.iter().find(|(id, _)| *id == sdbl_expr_id)?;
+        let first_query = pkg.queries().first()?;
+        crate::sdbl_bridge::query_to_projection(first_query)
+    }
+
     /// Infer the type of an expression.
     ///
     /// This is the core type inference function. It pattern-matches on the expression
@@ -1472,15 +1499,31 @@ impl<'db> InferenceContext<'db> {
                     }
                 }
 
-                // Lower the constructor name through the shared TypeRef →
-                // Ty adapter. The cascade (builtin → MDO plural → platform
-                // object fallback) moved into `lower_bare_name`, so every
-                // syntactic source of type info (`Новый X`, `Тип("…")`,
-                // JSDoc) now takes the same path — editing the fallback
-                // rules in one place is enough.
-                match type_name {
-                    Some(name) => TyLoweringContext::new().lower_bare_name(name),
-                    None => Ty::Unknown,
+                // `Новый Запрос(<text>)` always produces `Ty::Query{..}`
+                // (bilingual `Новый Query` too) — never the legacy
+                // `Ty::PlatformObject("Запрос")` shape. That stable
+                // receiver lets chain rewrites (`.Выполнить()`,
+                // `.ВыполнитьПакет()`) carry the projection forward
+                // without enumerating two query-shapes. Legacy property
+                // lookups (`Зап.Параметры`, `Зап.Текст`) still resolve
+                // because `platform_type_key` keys `Ty::Query → "Запрос"`.
+                let is_query_ctor = type_name.as_ref().is_some_and(|name| {
+                    crate::method_lookup::is_platform_name(name, "Запрос", "Query")
+                });
+                if is_query_ctor {
+                    let projection = self.try_synthesise_query_projection(args);
+                    Ty::Query { projection }
+                } else {
+                    // Lower the constructor name through the shared TypeRef →
+                    // Ty adapter. The cascade (builtin → MDO plural → platform
+                    // object fallback) moved into `lower_bare_name`, so every
+                    // syntactic source of type info (`Новый X`, `Тип("…")`,
+                    // JSDoc) now takes the same path — editing the fallback
+                    // rules in one place is enough.
+                    match type_name {
+                        Some(name) => TyLoweringContext::new().lower_bare_name(name),
+                        None => Ty::Unknown,
+                    }
                 }
             }
 

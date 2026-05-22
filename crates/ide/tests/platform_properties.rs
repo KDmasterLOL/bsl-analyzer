@@ -150,10 +150,7 @@ fn read_only_property_assignment_emits_diagnostic() {
     );
     let (field, recv) = &diags[0];
     assert_eq!(field.as_str(), "Параметры");
-    assert!(
-        matches!(recv, Ty::PlatformObject(n) if n.as_str().eq_ignore_ascii_case("Запрос")),
-        "receiver_ty must be Ty::PlatformObject(\"Запрос\"), got {recv:?}"
-    );
+    assert!(matches!(recv, Ty::Query { .. }), "receiver_ty must be Ty::Query, got {recv:?}");
 }
 
 #[test]

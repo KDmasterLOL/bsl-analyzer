@@ -277,7 +277,7 @@ fn projection_of_query_result_receiver(ty: &Ty) -> Option<Option<Arc<SdblProject
 /// platform_data index normalises both forms the same way, so anything
 /// the user can write into a `Новый <Name>` lift through to the same
 /// methods will also match here.
-fn is_platform_name(name: &Name, ru: &str, en: &str) -> bool {
+pub(crate) fn is_platform_name(name: &Name, ru: &str, en: &str) -> bool {
     let lower = name.as_str().to_lowercase();
     lower == ru.to_lowercase() || lower == en.to_lowercase()
 }

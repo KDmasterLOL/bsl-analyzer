@@ -13,7 +13,7 @@
 //! assignment `Х = Новый <Type>();` and then read `var_types["х"]`, which is
 //! merged into the file-level result.
 
-use hir::{DefDatabase, HirDatabase, ModuleId, Name, Ty};
+use hir::{DefDatabase, HirDatabase, ModuleId, Ty};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -66,12 +66,14 @@ fn new_array_gives_array_ty() {
 }
 
 #[test]
-fn new_unknown_falls_to_platform_object() {
-    // `Запрос` has no builtin entry in the TyLoweringContext cascade, so
-    // the fallback branch must produce `Ty::PlatformObject("Запрос")` just
-    // like the legacy `Expr::New` code did. Method-lookup on this ty still
-    // runs through `bsl_platform`, which is not tested here — this locks
-    // the type shape only.
+fn new_query_with_no_args_types_as_query_with_no_projection() {
+    // `Новый Запрос(...)` always produces `Ty::Query{..}` so chain
+    // rewrites (`.Выполнить()`, `.ВыполнитьПакет()`) have a stable
+    // receiver shape regardless of whether the SDBL text is known.
+    // Without a string-literal arg the projection is `None`; downstream
+    // platform-property lookup keys `Ty::Query → "Запрос"` so legacy
+    // `Зап.Параметры` / `Зап.Текст` access still resolves through the
+    // platform table.
     let fixture = r#"//- /test.bsl
 Функция Тест()
     Х = Новый Запрос();
@@ -81,8 +83,101 @@ fn new_unknown_falls_to_platform_object() {
     let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::PlatformObject(Name::new("Запрос"))),
-        "`Новый Запрос` must fall back to Ty::PlatformObject(\"Запрос\")"
+        Some(Ty::Query { projection: None }),
+        "`Новый Запрос()` without literal text must produce Ty::Query{{None}}",
+    );
+}
+
+#[test]
+fn new_query_with_dynamic_text_types_as_query_with_no_projection() {
+    // Variable / concat / non-literal first argument — projection can't
+    // be derived statically, so `Ty::Query{None}` is the conservative
+    // synthesis. The variable-text constructor never falls back to
+    // `Ty::PlatformObject("Запрос")` — that shape is gone for `Новый
+    // Запрос(...)` regardless of arg shape.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Текст = "ВЫБРАТЬ 1";
+    Х = Новый Запрос(Текст);
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::Query { projection: None }),
+        "`Новый Запрос(<variable>)` must produce Ty::Query{{None}}",
+    );
+}
+
+#[test]
+fn new_query_with_literal_text_types_as_query_with_projection() {
+    // `Новый Запрос("<sdbl>")` with a static string literal arg
+    // synthesises a projection from the SDBL HIR's SELECT field list.
+    // The bridge runs `query_to_projection` against the first sub-query
+    // of the package.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый Запрос("ВЫБРАТЬ 1 КАК А");
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    let projection = match &ty {
+        Ty::Query { projection } => projection.as_ref(),
+        other => panic!("expected Ty::Query, got {other:?}"),
+    };
+    let projection = projection.expect("literal SDBL must produce a projection");
+    assert_eq!(
+        projection.fields.len(),
+        1,
+        "single-column SELECT must yield one projection field, got {projection:?}",
+    );
+    assert_eq!(projection.fields[0].0.as_str(), "А");
+    assert_eq!(projection.fields[0].1, Ty::Number);
+}
+
+#[test]
+fn new_query_chain_propagates_projection_through_execute_select() {
+    // End-to-end projection propagation: `Новый Запрос("ВЫБРАТЬ Имя")
+    // .Выполнить().Выбрать().Имя` resolves to `Ty::String`. The chain
+    // walks constructor synthesis (`Ty::Query{Some(p)}`) → `.Выполнить()`
+    // rewrite (`Ty::QueryResult{Some(p)}`) → `.Выбрать()` rewrite
+    // (`Ty::QueryResultSelection{Some(p)}`) → projection field lookup
+    // in `lookup_field`.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый Запрос("ВЫБРАТЬ ""abc"" КАК Имя").Выполнить().Выбрать().Имя;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::String),
+        "`Новый Запрос(\"...Имя\").Выполнить().Выбрать().Имя` must resolve to Ty::String",
+    );
+}
+
+#[test]
+fn new_query_with_parse_error_literal_falls_back_to_no_projection() {
+    // Parse-error SDBL packages still go through the bridge; every
+    // sub-query yields `None` and `query_to_projection` returns None
+    // for empty/error packages. The constructor result remains
+    // `Ty::Query{None}` — never `Ty::PlatformObject` — so the chain
+    // rewrite and platform-property lookup paths keep working.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый Запрос("это не sdbl");
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::Query { projection: None }),
+        "parse-error SDBL literal must collapse to Ty::Query{{None}}, not PlatformObject",
     );
 }
 
