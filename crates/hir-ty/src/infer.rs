@@ -2305,7 +2305,25 @@ impl<'db> InferenceContext<'db> {
                 }
             }
 
-            let result = match crate::method_lookup::lookup_method(&receiver_ty, &method_name) {
+            // Phase D — variable-state refinement for SDBL chain
+            // receivers. The ctx is passed by reference so non-SDBL
+            // method lookups (the vast majority) bail out of the
+            // `is_sdbl_chain_method` filter before touching it; only
+            // `Запрос.Выполнить()` / `.Выбрать()` / `.ВыполнитьПакет()`
+            // on a projection-less receiver consult the dataflow walk.
+            let refine_ctx = crate::method_lookup::RefineCtx {
+                db: self.db,
+                file_id: self.file_id,
+                owner: self.owner,
+                body: &self.body,
+                dispatch_expr_id: callee,
+                receiver_expr_id: base_id,
+            };
+            let result = match crate::method_lookup::lookup_method_with_refinement(
+                &receiver_ty,
+                &method_name,
+                Some(&refine_ctx),
+            ) {
                 Some(mut info) => {
                     // Argument type check (M4 Task 7 follow-up): the
                     // fluent-chain path historically skipped both arg-

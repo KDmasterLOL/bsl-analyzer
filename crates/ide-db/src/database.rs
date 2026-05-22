@@ -498,6 +498,14 @@ impl hir::HirDatabase for RootDatabaseImpl {
         let file_id_input = FileIdInput::new(self, file_id);
         hir::infer_module_code_query(self, file_id_input)
     }
+
+    fn module_reaching_definitions(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
+        let file_id_input = FileIdInput::new(self, file_id);
+        queries::module_reaching_definitions_query(self, file_id_input)
+    }
 }
 
 #[salsa::db]

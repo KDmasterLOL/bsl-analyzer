@@ -596,7 +596,12 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         use ide_db::base_db::FileIdInput;
         use ide_db::RootDatabase;
         let input = FileIdInput::new(&self.db, file_id);
-        self.db.module_reaching_definitions(input)
+        // UFCS — same disambiguation pattern as in `ide-db/src/queries.rs`
+        // and `ide-db/src/salsa_provider.rs`. `HirDatabase` exposes a
+        // same-name port taking `FileId`; the explicit trait selector
+        // keeps this caller stable against future `use hir::HirDatabase`
+        // imports landing in the surrounding scope.
+        <ide_db::RootDatabaseImpl as RootDatabase>::module_reaching_definitions(&self.db, input)
     }
 
     fn reaching_definitions(

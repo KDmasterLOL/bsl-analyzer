@@ -163,4 +163,20 @@ pub trait HirDatabase: ConfigsDatabase {
     /// purposes (Codex Round 4 C3); the real Salsa-tracked query body
     /// is wired in O.14.
     fn infer_module_code(&self, file_id: FileId) -> Arc<ModuleCodeInferenceResult>;
+
+    /// Per-module reaching-definitions collection (Phase D port).
+    ///
+    /// Mirrors the same-named ide-db query on `RootDatabase` but is
+    /// addressable through the lower `HirDatabase` trait so hir-ty
+    /// can consume reaching-defs without a cross-crate upcall. The
+    /// returned `ModuleReachingDefs` keys results by method `local_id`;
+    /// callers slice it for the method they're refining.
+    ///
+    /// Phase D consumer: [`crate::query_text_dataflow::refine_query_at_dispatch`]
+    /// reads `defs_for_var_at_stmt("var.Текст", stmt_id)` to resolve a
+    /// `Зап.Текст = "..."` literal back to its `ExprId`.
+    fn module_reaching_definitions(
+        &self,
+        file_id: FileId,
+    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs>;
 }

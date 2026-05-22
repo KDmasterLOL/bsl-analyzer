@@ -50,9 +50,12 @@ use std::sync::Arc;
 
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
+use hir_def::body::Body;
 use hir_def::ty::{MetadataKind, SdblProjection, Ty};
-use hir_def::Name;
+use hir_def::{DefWithBodyId, ExprId, Name};
+use vfs::FileId;
 
+use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
 
 /// Result of a successful method lookup.
@@ -81,14 +84,40 @@ pub struct MethodInfo {
     pub overloads: Vec<Vec<Ty>>,
 }
 
-/// Resolve a method call on a typed receiver.
+/// Resolve a method call on a typed receiver (refinement-free entry).
 ///
 /// Returns `None` when:
 /// - the receiver type carries no platform method table (e.g.
 ///   `Ty::Unknown`, `Ty::Number`-style primitives that are not platform
 ///   objects, unions, manager collectives);
 /// - the method name does not exist in the resolved table.
+///
+/// Equivalent to [`lookup_method_with_refinement`] with `refine_ctx =
+/// None`: callers without inference context (tests, hir-level facade
+/// queries, hover synthesis) reach the same platform tables but skip
+/// the variable-state refinement Phase D adds for SDBL chains.
 pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo> {
+    lookup_method_with_refinement(receiver_ty, method_name, None)
+}
+
+/// Resolve a method call on a typed receiver, optionally upgrading
+/// SDBL-chain receivers via reaching-defs refinement (Phase D).
+///
+/// `refine_ctx` carries the inference-side handles
+/// ([`HirDatabase`], file/owner, dispatch + receiver `ExprId`s, body)
+/// needed by [`crate::query_text_dataflow::refine_query_at_dispatch`]
+/// to walk reaching `<var>.Текст = "..."` writes and recover a
+/// projection that earlier lowering steps could not see (assignment
+/// after `Новый Запрос`, or a constructor with a non-literal arg).
+///
+/// When `refine_ctx` is `None` (the case for the facade entry
+/// [`lookup_method`]), refinement is skipped — the receiver Ty is
+/// taken as-is, exactly matching pre-Phase-D behaviour.
+pub fn lookup_method_with_refinement(
+    receiver_ty: &Ty,
+    method_name: &Name,
+    refine_ctx: Option<&RefineCtx<'_>>,
+) -> Option<MethodInfo> {
     // `Ty::ThisObject` and `Ty::ThisManager` are coerced to dispatch-
     // ready receivers at adapter entry — `ThisObject` → `MetadataRef
     // { *Object, .. }` (hits the metadata-ref branch); `ThisManager`
@@ -98,7 +127,7 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
     let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
 
     if let Ty::Union(members) = receiver_ty {
-        return union_lookup(members, method_name);
+        return union_lookup(members, method_name, refine_ctx);
     }
 
     let info = match receiver_ty {
@@ -115,7 +144,37 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
     // that doesn't exist on the receiver) and is gated by
     // [`is_sdbl_chain_method`] so unrelated method calls pay only a
     // hashset-membership check.
-    Some(apply_sdbl_chain_rewrite(receiver_ty, method_name, info))
+    Some(apply_sdbl_chain_rewrite(receiver_ty, method_name, info, refine_ctx))
+}
+
+/// Per-dispatch context for [`lookup_method_with_refinement`].
+///
+/// Held by value at the call site; the borrow lifetime `'a` is the
+/// same that callers already use to thread `&self.body` /
+/// `&dyn HirDatabase`. The struct is `pub` so consumers in `hir-ty`
+/// and `hir` can build it from their own inference / facade state,
+/// but its only consumer is the SDBL chain rewrite — non-SDBL
+/// receivers never inspect it.
+#[derive(Clone, Copy)]
+pub struct RefineCtx<'a> {
+    /// Salsa database handle — used to pull
+    /// `module_reaching_definitions` and `sdbl_hir_for_file_query`.
+    pub db: &'a dyn HirDatabase,
+    /// File the dispatch lives in.
+    pub file_id: FileId,
+    /// Owning body of the dispatch (`Method(local_id)` or `ModuleCode`).
+    pub owner: DefWithBodyId,
+    /// HIR body containing both the dispatch expression and any
+    /// assignment statements that may reach it.
+    pub body: &'a Body,
+    /// ExprId of the dispatch site — the `Expr::Field { base, .. }`
+    /// or outer `Expr::Call` that lowers to the SDBL chain method.
+    /// Either works for [`Body::enclosing_stmt`] lookup since both
+    /// share the same enclosing statement.
+    pub dispatch_expr_id: ExprId,
+    /// ExprId of the receiver — `base` of the `Expr::Field` node.
+    /// Phase D only refines when this is `Expr::Path(name)`.
+    pub receiver_expr_id: ExprId,
 }
 
 /// Method-name filter for [`apply_sdbl_chain_rewrite`].
@@ -154,14 +213,24 @@ fn is_sdbl_chain_method(name: &str) -> bool {
 /// ```
 ///
 /// Phase 1.3 Slice 1: projection payload is always `None`. Phase 1.3b
-/// adds constructor-arg projection synthesis; Phase 2 adds variable
+/// adds constructor-arg projection synthesis; Phase D adds variable
 /// refinement so the projection survives a `.Текст = "..."` assignment.
-fn apply_sdbl_chain_rewrite(receiver_ty: &Ty, method_name: &Name, info: MethodInfo) -> MethodInfo {
+fn apply_sdbl_chain_rewrite(
+    receiver_ty: &Ty,
+    method_name: &Name,
+    info: MethodInfo,
+    refine_ctx: Option<&RefineCtx<'_>>,
+) -> MethodInfo {
     if !is_sdbl_chain_method(method_name.as_str()) {
         return info;
     }
+    let refined_ty = refine_ctx
+        .and_then(|ctx| try_refine_receiver(ctx, receiver_ty))
+        .map(|proj| Ty::Query { projections: Arc::from([Some(proj)]) });
+    let effective_ty = refined_ty.as_ref().unwrap_or(receiver_ty);
+
     let Some((target_platform_name, replacement)) =
-        pick_chain_rewrite(receiver_ty, method_name.as_str())
+        pick_chain_rewrite(effective_ty, method_name.as_str())
     else {
         return info;
     };
@@ -169,6 +238,49 @@ fn apply_sdbl_chain_rewrite(receiver_ty: &Ty, method_name: &Name, info: MethodIn
         return_ty: rewrite_chain_arm_in_return(info.return_ty, target_platform_name, &replacement),
         params: info.params,
         overloads: info.overloads,
+    }
+}
+
+/// Gate + dispatch for the Phase D refinement helper.
+///
+/// Returns `Some(projection)` only when the receiver shape is one of
+/// the projection-less Query receivers (`Ty::PlatformObject("Запрос")`
+/// or `Ty::Query{projections:[None]}` / empty) and the helper finds a
+/// well-formed reaching `<var>.Текст = "..."` writer. Any other shape
+/// — receivers that already carry a projection, non-Query types,
+/// unions — returns `None` so the chain rewrite falls back to the
+/// no-projection path unchanged.
+fn try_refine_receiver(ctx: &RefineCtx<'_>, receiver_ty: &Ty) -> Option<Arc<SdblProjection>> {
+    if !receiver_needs_refinement(receiver_ty) {
+        return None;
+    }
+    crate::query_text_dataflow::refine_query_at_dispatch(
+        ctx.db,
+        ctx.file_id,
+        ctx.owner,
+        ctx.dispatch_expr_id,
+        ctx.receiver_expr_id,
+        ctx.body,
+    )
+}
+
+/// Whether `receiver_ty` is a Query-shape that still has no
+/// projection — the precondition for Phase D refinement.
+///
+/// Mirrors the union of the two arms accepted by
+/// [`projection_of_query_receiver`] that produce `Some(None)`:
+/// legacy `Ty::PlatformObject("Запрос")` and the empty / `[None]`
+/// flavours of `Ty::Query`. Receivers that already carry a non-None
+/// projection are intentionally left alone — refinement is only ever
+/// an *upgrade* from None to Some.
+fn receiver_needs_refinement(ty: &Ty) -> bool {
+    match ty {
+        Ty::PlatformObject(n) => is_platform_name(n, "Запрос", "Query"),
+        Ty::Query { projections } => match projections.first() {
+            None | Some(None) => true,
+            Some(Some(_)) => false,
+        },
+        _ => false,
     }
 }
 
@@ -479,14 +591,24 @@ fn lookup_on_form_control(
 /// receiver shape that the chosen `params` does not represent. The
 /// FIRST successful branch's signature is bound wholesale; later
 /// branches only contribute to the return-type union.
-fn union_lookup(members: &[Ty], method_name: &Name) -> Option<MethodInfo> {
+fn union_lookup(
+    members: &[Ty],
+    method_name: &Name,
+    refine_ctx: Option<&RefineCtx<'_>>,
+) -> Option<MethodInfo> {
     let live: Vec<&Ty> =
         members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
     let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
     let mut chosen_signature: Option<(Vec<Ty>, Vec<Vec<Ty>>)> = None;
     let mut hit_any = false;
     for m in live {
-        if let Some(info) = lookup_method(m, method_name) {
+        // Per-arm refinement: `Ty::Union([Запрос, Undefined])` reaches
+        // refinement through the live arm so a nullability-typed
+        // query receiver still picks up its projection. Phase D's
+        // gate (`receiver_needs_refinement`) silently skips arms that
+        // are already-projected or non-Query, so non-SDBL unions pay
+        // only the cheap discriminant check.
+        if let Some(info) = lookup_method_with_refinement(m, method_name, refine_ctx) {
             hit_any = true;
             returns.push(info.return_ty);
             if chosen_signature.is_none() {

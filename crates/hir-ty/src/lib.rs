@@ -54,6 +54,7 @@ pub mod platform_property_lookup;
 pub mod platform_resolution;
 pub mod proc_signature;
 pub mod proc_signature_lookup;
+pub mod query_text_dataflow;
 pub mod sdbl_bridge;
 pub mod subtype;
 pub mod this_object;

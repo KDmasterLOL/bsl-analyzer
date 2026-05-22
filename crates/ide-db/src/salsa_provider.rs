@@ -179,7 +179,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
         file_id: FileId,
     ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         let input = FileIdInput::new(self.db, file_id);
-        self.db.module_reaching_definitions(input)
+        <dyn RootDatabase as RootDatabase>::module_reaching_definitions(self.db, input)
     }
 
     fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {

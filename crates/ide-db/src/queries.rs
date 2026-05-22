@@ -356,9 +356,12 @@ pub fn reaching_definitions_query<'db>(
     let method_id = method_id_input.method_id(db);
     let file_id = method_id.module.file_id;
 
-    // Delegate to module-level query (Salsa caching!)
+    // Delegate to module-level query (Salsa caching!).
+    // UFCS disambiguates from `HirDatabase::module_reaching_definitions(FileId)`,
+    // which shares the name but takes a raw `FileId` for hir-ty callers.
     let file_id_input = base_db::FileIdInput::new(db, file_id);
-    let module_reaching_defs = db.module_reaching_definitions(file_id_input);
+    let module_reaching_defs =
+        <dyn RootDatabase as RootDatabase>::module_reaching_definitions(db, file_id_input);
 
     // HashMap lookup - cheap!
     module_reaching_defs.get(method_id.local_id).cloned() // Clone Arc (cheap)

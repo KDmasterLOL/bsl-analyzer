@@ -207,6 +207,30 @@ impl Body {
         self.sdbl_exprs.iter().map(|(idx, info)| (ExprId::from_idx(*idx), info))
     }
 
+    /// Find the statement that directly owns `target` in its expression
+    /// subtree.
+    ///
+    /// "Directly owns" means the expression's `ExprId` appears under one
+    /// of the statement's own `ExprIdx` fields, recursing through
+    /// expression children only — NOT into nested statement bodies. So
+    /// for `Если cond Тогда stmt КонецЕсли`, `enclosing_stmt(target_in_cond)`
+    /// returns the `If` statement, while `enclosing_stmt(target_in_stmt)`
+    /// returns the inner stmt.
+    ///
+    /// Linear-time over the stmt arena × the target's owning expression
+    /// depth. Phase D dataflow refinement uses this to map a dispatch-site
+    /// `ExprId` back to the `StmtId` accepted by
+    /// [`ReachingDefsResult::defs_for_var_at_stmt`].
+    pub fn enclosing_stmt(&self, target: ExprId) -> Option<StmtId> {
+        let target_idx: ExprIdx = target.to_idx();
+        for (stmt_id, stmt) in self.stmts_iter() {
+            if stmt_owns_expr(self, stmt, target_idx) {
+                return Some(stmt_id);
+            }
+        }
+        None
+    }
+
     /// Whether this expression was reconstructed from a parser ERROR node.
     ///
     /// Recovered expressions carry valid type information (inference looks at
@@ -260,6 +284,81 @@ impl Body {
     #[doc(hidden)]
     pub fn set_params(&mut self, params: Box<[BindingIdx]>) {
         self.params = params;
+    }
+}
+
+/// Whether any expression that `stmt` directly owns recurses to `target`.
+///
+/// Recurses into the stmt's own `ExprIdx` fields (condition, value, lhs,
+/// rhs, etc.) but stops at nested statement bodies — those statements are
+/// visited independently by [`Body::enclosing_stmt`]'s outer loop.
+fn stmt_owns_expr(body: &Body, stmt: &Stmt, target: ExprIdx) -> bool {
+    match stmt {
+        Stmt::Expr(e) => expr_contains(body, *e, target),
+        Stmt::Assign { target: lhs, value } => {
+            expr_contains(body, *lhs, target) || expr_contains(body, *value, target)
+        }
+        Stmt::Return { value } | Stmt::Raise { value } => {
+            value.as_ref().is_some_and(|v| expr_contains(body, *v, target))
+        }
+        Stmt::Execute { expr } => expr_contains(body, *expr, target),
+        Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
+            expr_contains(body, *event, target) || expr_contains(body, *handler, target)
+        }
+        Stmt::If(if_stmt) => {
+            expr_contains(body, if_stmt.condition, target)
+                || if_stmt.elsif_branches.iter().any(|(cond, _)| expr_contains(body, *cond, target))
+        }
+        Stmt::While { condition, body: _ } => expr_contains(body, *condition, target),
+        Stmt::For { from, to, body: _, var: _ } => {
+            expr_contains(body, *from, target) || expr_contains(body, *to, target)
+        }
+        Stmt::ForEach { collection, body: _, var: _ } => expr_contains(body, *collection, target),
+        Stmt::PreprocIf(_)
+        | Stmt::Try { .. }
+        | Stmt::VarDecl { .. }
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Goto(_)
+        | Stmt::Label(_) => false,
+    }
+}
+
+/// Whether the expression sub-tree rooted at `root` contains `target`.
+///
+/// Stops at expression leaves (`Missing` / `Literal` / `Path` /
+/// `QualifiedPath`); descends through every variant that carries nested
+/// `ExprIdx` children.
+fn expr_contains(body: &Body, root: ExprIdx, target: ExprIdx) -> bool {
+    if root == target {
+        return true;
+    }
+    match body.expr_idx(root) {
+        Expr::Missing | Expr::Path(_) | Expr::QualifiedPath(_) | Expr::Literal(_) => false,
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_contains(body, *lhs, target) || expr_contains(body, *rhs, target)
+        }
+        Expr::UnaryOp { expr, .. } => expr_contains(body, *expr, target),
+        Expr::Ternary { condition, then_expr, else_expr } => {
+            expr_contains(body, *condition, target)
+                || expr_contains(body, *then_expr, target)
+                || expr_contains(body, *else_expr, target)
+        }
+        Expr::Call { callee, args } => {
+            expr_contains(body, *callee, target)
+                || args.iter().any(|a| expr_contains(body, *a, target))
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_contains(body, *receiver, target)
+                || args.iter().any(|a| expr_contains(body, *a, target))
+        }
+        Expr::Index { base, index } => {
+            expr_contains(body, *base, target) || expr_contains(body, *index, target)
+        }
+        Expr::Field { base, .. } => expr_contains(body, *base, target),
+        Expr::New { args, .. } => args.iter().any(|a| expr_contains(body, *a, target)),
+        Expr::Array(elems) => elems.iter().any(|e| expr_contains(body, *e, target)),
+        Expr::Await { expr } => expr_contains(body, *expr, target),
     }
 }
 
