@@ -880,6 +880,60 @@ mod tests {
     }
 
     #[test]
+    fn cast_projection_field_carries_precise_shadow_display() {
+        // Phase G end-to-end contract: a SELECT field whose expression is
+        // a CAST/ВЫРАЗИТЬ-typed `SdblType::Number { Some(15), Some(2) }`
+        // (the shape the lowerer now produces for
+        // `ВЫРАЗИТЬ(0 КАК Число(15, 2))`) must flow precision/scale into
+        // `SdblTypeShadow.display` via `field.ty.to_string()`. The
+        // structural `Ty` collapses to `Ty::Number` — display lives only
+        // in the shadow lane.
+        let cast_field = FieldHir {
+            expr: ExprHir::Missing { range: MODULE_RANGE },
+            alias: Some(sdbl_hir::Name::from("Цена")),
+            has_as_keyword: true,
+            has_parse_error: false,
+            raw_name: None,
+            ty: SdblType::Number { precision: Some(15), scale: Some(2) },
+            is_asterisk: false,
+            asterisk_qualifier: None,
+            diagnostic_range: MODULE_RANGE,
+            range: MODULE_RANGE,
+        };
+        let q = mk_query(vec![cast_field], Vec::new());
+        let p = query_to_projection(&q).expect("CAST field must project");
+        assert_eq!(p.fields.len(), 1);
+        assert_eq!(p.fields[0].0.as_str(), "Цена");
+        assert_eq!(p.fields[0].1, Ty::Number);
+        let shadows = p.raw_sdbl_types.as_ref().expect("Phase E shadows always populated");
+        assert_eq!(shadows.len(), 1);
+        assert_eq!(shadows[0].display, "Число(15, 2)");
+    }
+
+    #[test]
+    fn cast_projection_field_renders_precision_only_number() {
+        // Precision-only CAST (`ВЫРАЗИТЬ(0 КАК Число(15))`) is a Phase G
+        // Slice 2 addition — Display now emits `Число(15)` instead of the
+        // bare `Число` it used to collapse to.
+        let cast_field = FieldHir {
+            expr: ExprHir::Missing { range: MODULE_RANGE },
+            alias: Some(sdbl_hir::Name::from("Сумма")),
+            has_as_keyword: true,
+            has_parse_error: false,
+            raw_name: None,
+            ty: SdblType::Number { precision: Some(15), scale: None },
+            is_asterisk: false,
+            asterisk_qualifier: None,
+            diagnostic_range: MODULE_RANGE,
+            range: MODULE_RANGE,
+        };
+        let q = mk_query(vec![cast_field], Vec::new());
+        let p = query_to_projection(&q).expect("CAST field must project");
+        let shadows = p.raw_sdbl_types.as_ref().expect("shadows populated");
+        assert_eq!(shadows[0].display, "Число(15)");
+    }
+
+    #[test]
     fn composite_with_aggregate_folds_to_single_arm() {
         // `SUM(Number)` lowers to `Aggregate(Number)` which the bridge
         // strips to `Number`. A composite of `[Number, Aggregate(Number)]`

@@ -234,3 +234,49 @@ fn hover_on_projection_selection_lists_field_names() {
 "#;
     check_hover_contains(fixture, expect!["**Поля:** Имя: Строка"]);
 }
+
+#[test]
+fn hover_on_projection_selection_renders_cast_precision_and_scale() {
+    // Phase G end-to-end: `ВЫРАЗИТЬ(0 КАК Число(15, 2))` lowers to
+    // `SdblType::Number { Some(15), Some(2) }` inside the SDBL HIR; the
+    // bridge surfaces it as `SdblTypeShadow { display: "Число(15, 2)" }`;
+    // hover concatenates the column into the `**Поля:**` block with the
+    // precision-bearing display verbatim. Before Phase G the CAST fell
+    // through to `SdblType::Unknown` so the projection field was either
+    // absent or rendered as bare `Неизвестно`.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Выборка = Новый Запрос("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Число(15, 2)) КАК Цена").Выполнить().Выбрать();
+    Возврат Выб$0орка;
+КонецФункции
+"#;
+    check_hover_contains(fixture, expect!["**Поля:** Цена: Число(15, 2)"]);
+}
+
+#[test]
+fn hover_on_projection_selection_renders_cast_string_length() {
+    // Length-only CAST surfaces `Строка(50)` (Phase E Display already
+    // covered the String shape; Phase G adds the lowering path that
+    // makes the precise type reach the bridge in the first place).
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Выборка = Новый Запрос("ВЫБРАТЬ ВЫРАЗИТЬ("""" КАК Строка(50)) КАК Имя").Выполнить().Выбрать();
+    Возврат Выб$0орка;
+КонецФункции
+"#;
+    check_hover_contains(fixture, expect!["**Поля:** Имя: Строка(50)"]);
+}
+
+#[test]
+fn hover_on_projection_selection_renders_cast_precision_only_number() {
+    // Phase G Slice 2 — precision-only Number gets the `(P)` suffix in
+    // Display, so the hover output renders `Число(15)` instead of
+    // collapsing to a bare `Число`.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Выборка = Новый Запрос("ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Число(15)) КАК Сумма").Выполнить().Выбрать();
+    Возврат Выб$0орка;
+КонецФункции
+"#;
+    check_hover_contains(fixture, expect!["**Поля:** Сумма: Число(15)"]);
+}
