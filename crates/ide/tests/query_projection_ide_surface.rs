@@ -268,6 +268,31 @@ fn hover_on_projection_selection_renders_cast_string_length() {
 }
 
 #[test]
+fn hover_on_iteration_row_from_batched_helper_renders_cast_precision() {
+    // Cross-phase pin: batched SDBL package (Phase D + Phase B "pick
+    // last query" semantics) carrying a `ВЫРАЗИТЬ(0 КАК Число(15, 2))`
+    // projection (Phase G) flows through a helper return (Phase F /
+    // Phase J cascade), then through `Для Каждого … Из ТЗ` (Phase H
+    // iteration short-circuit). Hovering an iteration-row receiver
+    // must surface `Цена: Число(15, 2)` in the `**Поля:**` block —
+    // exercising the entire pipeline end-to-end.
+    let fixture = r#"//- /test.bsl
+Функция ПолучитьТЗ() Экспорт
+    Зап = Новый Запрос;
+    Зап.Текст = "ВЫБРАТЬ 1 КАК X ПОМЕСТИТЬ ВТ; ВЫБРАТЬ ВЫРАЗИТЬ(0 КАК Число(15, 2)) КАК Цена ИЗ ВТ КАК ВТ";
+    Возврат Зап.Выполнить().Выгрузить();
+КонецФункции
+
+Функция Тест()
+    Для Каждого Стр Из ПолучитьТЗ() Цикл
+        Возврат Ст$0р;
+    КонецЦикла;
+КонецФункции
+"#;
+    check_hover_contains(fixture, expect!["**Поля:** Цена: Число(15, 2)"]);
+}
+
+#[test]
 fn hover_on_projection_selection_renders_cast_precision_only_number() {
     // Phase G Slice 2 — precision-only Number gets the `(P)` suffix in
     // Display, so the hover output renders `Число(15)` instead of

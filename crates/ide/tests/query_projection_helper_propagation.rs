@@ -292,3 +292,71 @@ fn cfe_shadowed_binding_refines_through_local_only() {
         "Phase F follow-up: refinement under name shadowing CFE-visible globals",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Batched-package support (Phase D follow-up shipped 2026-05-23 alongside
+// Phase F). 1С `Запрос.Выполнить()` returns the result of the *last* query
+// in a batched SDBL package; `ПОМЕСТИТЬ`/staging SELECTs produce no rows.
+// The refinement and chain-rewrite layers now agree on that semantics.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batched_text_assignment_picks_last_query_projection() {
+    // ERP-style: a temp-table `ПОМЕСТИТЬ` stages a sub-query, then a
+    // final SELECT joins against it. Runtime returns only the final
+    // SELECT's rows. The dataflow walk produces a per-sub-query
+    // projection vector; `.Выполнить()` reads the last entry; the
+    // trailing `.Выгрузить()` carries the projection into the
+    // returned ValueTable and the caller's iteration row sees the
+    // final query's fields.
+    let fixture = r#"//- /test.bsl
+Функция ПолучитьТЗ() Экспорт
+    Зап = Новый Запрос;
+    Зап.Текст = "ВЫБРАТЬ 1 КАК Игнор ПОМЕСТИТЬ ВТ; ВЫБРАТЬ ""abc"" КАК Имя ИЗ ВТ КАК ВТ";
+    Возврат Зап.Выполнить().Выгрузить();
+КонецФункции
+
+Функция Тест()
+    Для Каждого Стр Из ПолучитьТЗ() Цикл
+        Х = Стр.Имя;
+        Возврат Х;
+    КонецЦикла;
+    Возврат Неопределено;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::String),
+        "batched query: last-SELECT's `КАК Имя` projection must reach the iteration row",
+    );
+}
+
+#[test]
+fn batched_text_assignment_drops_staging_columns() {
+    // Negative: a column that exists only in a `ПОМЕСТИТЬ` staging
+    // sub-query must NOT leak into the final selection's projection.
+    // Reading it on the iteration row types as Unknown (conservative
+    // var_types track drops Unknown, so the binding stays absent).
+    let fixture = r#"//- /test.bsl
+Функция ПолучитьТЗ() Экспорт
+    Зап = Новый Запрос;
+    Зап.Текст = "ВЫБРАТЬ 1 КАК Игнор ПОМЕСТИТЬ ВТ; ВЫБРАТЬ ""abc"" КАК Имя ИЗ ВТ КАК ВТ";
+    Возврат Зап.Выполнить().Выгрузить();
+КонецФункции
+
+Функция Тест()
+    Для Каждого Стр Из ПолучитьТЗ() Цикл
+        Х = Стр.Игнор;
+        Возврат Х;
+    КонецЦикла;
+    Возврат Неопределено;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        None,
+        "staging-only column `Игнор` must not leak into the final SELECT's projection",
+    );
+}

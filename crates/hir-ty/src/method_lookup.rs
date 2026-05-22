@@ -359,7 +359,7 @@ fn apply_sdbl_chain_rewrite(
     }
     let refined_ty = refine_ctx
         .and_then(|ctx| try_refine_receiver(ctx, receiver_ty))
-        .map(|proj| Ty::Query { projections: Arc::from([Some(proj)]) });
+        .map(|projections| Ty::Query { projections });
     let effective_ty = refined_ty.as_ref().unwrap_or(receiver_ty);
 
     let Some((target_platform_name, replacement)) =
@@ -376,14 +376,22 @@ fn apply_sdbl_chain_rewrite(
 
 /// Gate + dispatch for the Phase D refinement helper.
 ///
-/// Returns `Some(projection)` only when the receiver shape is one of
+/// Returns `Some(projections)` only when the receiver shape is one of
 /// the projection-less Query receivers (`Ty::PlatformObject("Запрос")`
 /// or `Ty::Query{projections:[None]}` / empty) and the helper finds a
 /// well-formed reaching `<var>.Текст = "..."` writer. Any other shape
 /// — receivers that already carry a projection, non-Query types,
 /// unions — returns `None` so the chain rewrite falls back to the
 /// no-projection path unchanged.
-fn try_refine_receiver(ctx: &RefineCtx<'_>, receiver_ty: &Ty) -> Option<Arc<SdblProjection>> {
+///
+/// The returned vector mirrors the SDBL package's per-sub-query
+/// projection shape (same convention as Phase B's constructor synth):
+/// `.Выполнить()` reads the last entry, `.ВыполнитьПакет()[i]` indexes
+/// by position.
+fn try_refine_receiver(
+    ctx: &RefineCtx<'_>,
+    receiver_ty: &Ty,
+) -> Option<Arc<[Option<Arc<SdblProjection>>]>> {
     if !receiver_needs_refinement(receiver_ty) {
         return None;
     }
@@ -410,17 +418,17 @@ fn try_refine_receiver(ctx: &RefineCtx<'_>, receiver_ty: &Ty) -> Option<Arc<Sdbl
 ///
 /// Mirrors the union of the two arms accepted by
 /// [`projection_of_query_receiver`] that produce `Some(None)`:
-/// legacy `Ty::PlatformObject("Запрос")` and the empty / `[None]`
+/// legacy `Ty::PlatformObject("Запрос")` and the empty / last-arm-None
 /// flavours of `Ty::Query`. Receivers that already carry a non-None
-/// projection are intentionally left alone — refinement is only ever
-/// an *upgrade* from None to Some.
+/// last projection (the entry `.Выполнить()` will read) are
+/// intentionally left alone — refinement is only ever an *upgrade*.
 ///
 /// `pub(crate)` so [`crate::infer`] can share the gate at
 /// `infer_path_name` for Phase F (binding-type refinement).
 pub(crate) fn receiver_needs_refinement(ty: &Ty) -> bool {
     match ty {
         Ty::PlatformObject(n) => is_platform_name(n, "Запрос", "Query"),
-        Ty::Query { projections } => match projections.first() {
+        Ty::Query { projections } => match projections.last() {
             None | Some(None) => true,
             Some(Some(_)) => false,
         },
@@ -492,10 +500,12 @@ fn pick_chain_rewrite(receiver_ty: &Ty, method_name: &str) -> Option<(ChainTarge
     }
 }
 
-/// Read the first sub-query's projection off a Query-shape receiver.
+/// Read the last sub-query's projection off a Query-shape receiver.
 ///
-/// `.Выполнить()` is single-result so it only ever cares about
-/// `projections[0]`. Empty slice and legacy `Ty::PlatformObject("Запрос")`
+/// `.Выполнить()` is single-result and 1С returns the **last** query
+/// in a batched package (`ВЫБРАТЬ … ПОМЕСТИТЬ Т; ВЫБРАТЬ … ИЗ Т`
+/// gives the second SELECT's rows — the `ПОМЕСТИТЬ` stages produce
+/// no result). Empty slice and legacy `Ty::PlatformObject("Запрос")`
 /// both yield `Some(None)` — the receiver is a query but no projection
 /// is available; chain rewrite still fires but produces
 /// `Ty::QueryResult{None}`.
@@ -505,7 +515,7 @@ fn pick_chain_rewrite(receiver_ty: &Ty, method_name: &str) -> Option<(ChainTarge
 /// file pickers, etc.
 fn projection_of_query_receiver(ty: &Ty) -> Option<Option<Arc<SdblProjection>>> {
     match ty {
-        Ty::Query { projections } => Some(projections.first().cloned().flatten()),
+        Ty::Query { projections } => Some(projections.last().cloned().flatten()),
         Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => Some(None),
         _ => None,
     }

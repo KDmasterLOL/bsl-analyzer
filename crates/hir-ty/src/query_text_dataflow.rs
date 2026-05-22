@@ -56,17 +56,27 @@ use hir_def::{
 use vfs::FileId;
 
 use crate::db::HirDatabase;
-use crate::sdbl_bridge::query_to_projection;
+use crate::sdbl_bridge::package_to_projections;
 
-/// Try to recover an [`SdblProjection`] for a `<name>` use site by
-/// walking reaching `<name>.Текст = "..."` writes.
+/// Try to recover the per-sub-query [`SdblProjection`] vector for a
+/// `<name>` use site by walking reaching `<name>.Текст = "..."` writes.
 ///
-/// Returns `Some(projection)` only when **every** reaching definition
+/// Returns `Some(projections)` only when **every** reaching definition
 /// for `<name>.Текст` is a static SDBL string literal whose bridge
-/// lowering produces structurally equal projections. Any ambiguity
-/// (loop-carried append, dynamic text, divergent literals across
-/// branches, multi-statement SDBL package, missing dataflow result)
-/// collapses to `None`.
+/// lowering produces structurally equal projection vectors. The vector
+/// shape mirrors [`crate::sdbl_bridge::package_to_projections`] — one
+/// entry per sub-query in the SDBL package, in source order — so the
+/// chain-rewrite consumers (`projection_of_query_receiver`,
+/// `projections_of_query_receiver`) read the same shape regardless of
+/// whether refinement came from Phase B (constructor literal) or Phase
+/// D/F (variable-state reaching defs).
+///
+/// Any ambiguity (loop-carried append, dynamic text, divergent
+/// literals across branches, missing dataflow result) collapses to
+/// `None`. Multi-statement SDBL packages (`ВЫБРАТЬ A; ВЫБРАТЬ B`) are
+/// supported — the vector carries every sub-query's projection so
+/// `.Выполнить()` can read the last (runtime semantics) and
+/// `.ВыполнитьПакет()[i]` can index by position.
 ///
 /// `use_expr_id` is the ExprId of the use site (either an
 /// `Expr::Field` chain dispatch — Phase D — or a bare `Expr::Path`
@@ -81,7 +91,7 @@ pub(crate) fn refine_query_at_use_site(
     use_expr_id: ExprId,
     name: &Name,
     body: &Body,
-) -> Option<Arc<SdblProjection>> {
+) -> Option<Arc<[Option<Arc<SdblProjection>>]>> {
     // Reaching-defs analysis runs per-method (see
     // `module_reaching_definitions_query` in `ide-db`); module-level
     // code lives in a separate `DefWithBodyId::ModuleCode` body that
@@ -124,21 +134,22 @@ pub(crate) fn refine_query_at_use_site(
     }
 
     // All reaching writes must resolve to a static SDBL literal and
-    // produce the structurally equal projection. The first
-    // successful resolution becomes the candidate; later
-    // resolutions must match it byte-for-byte (Phase D ships
-    // divergent-literal as None — Phase E may upgrade to
-    // `Ty::union` over per-branch projections).
-    let mut candidate: Option<Arc<SdblProjection>> = None;
+    // produce structurally equal projection vectors. The first
+    // successful resolution becomes the candidate; later resolutions
+    // must match it byte-for-byte (divergent literals across branches
+    // ship as None — a future phase may upgrade to per-branch
+    // projection union).
+    let mut candidate: Option<Arc<[Option<Arc<SdblProjection>>]>> = None;
     for def in defs {
         let DefSite::Assignment(stmt_raw) = def.def_site else {
             return None;
         };
         let assign_stmt_id = StmtId::from_raw(stmt_raw);
-        let proj = projection_from_text_assignment(db, file_id, owner, body, assign_stmt_id)?;
+        let projections =
+            projections_from_text_assignment(db, file_id, owner, body, assign_stmt_id)?;
         match &candidate {
-            None => candidate = Some(proj),
-            Some(prev) if **prev == *proj => (),
+            None => candidate = Some(projections),
+            Some(prev) if **prev == *projections => (),
             Some(_) => return None,
         }
     }
@@ -146,23 +157,26 @@ pub(crate) fn refine_query_at_use_site(
 }
 
 /// Resolve a single `<var>.Текст = "<literal>"` assignment to its
-/// projection.
+/// per-sub-query projection vector.
 ///
 /// Returns `None` for any shape that isn't a static SDBL string
 /// literal — `Зап.Текст = Зап.Текст + "..."` (append idiom),
 /// `Зап.Текст = ПолучитьТекст()` (dynamic), or assignments where the
 /// literal is not picked up by the lowerer's `looks_like_sdbl` gate.
-/// Multi-statement packages (`ВЫБРАТЬ A; ВЫБРАТЬ B`) also collapse to
-/// `None`: the variable-state idiom is not the canonical way to
-/// build batch queries and the user-visible refinement target for
-/// `.Выполнить()` is a single-result projection.
-fn projection_from_text_assignment(
+/// Multi-statement packages (`ВЫБРАТЬ A; ВЫБРАТЬ B`) project every
+/// sub-query in source order — the chain-rewrite layer picks the
+/// runtime-relevant entry (`last` for `.Выполнить()`, position-indexed
+/// for `.ВыполнитьПакет()[i]`).
+///
+/// An empty package (parser produced no queries) collapses to `None`
+/// so the upstream gate sees nothing to attach.
+fn projections_from_text_assignment(
     db: &dyn HirDatabase,
     file_id: FileId,
     owner: DefWithBodyId,
     body: &Body,
     assign_stmt_id: StmtId,
-) -> Option<Arc<SdblProjection>> {
+) -> Option<Arc<[Option<Arc<SdblProjection>>]>> {
     let Stmt::Assign { value, .. } = body.stmt(assign_stmt_id) else {
         return None;
     };
@@ -176,8 +190,8 @@ fn projection_from_text_assignment(
     let entries = sdbl_hir_for_file_query(db, file_id_input);
     let (_, pkg) = entries.iter().find(|(id, _)| *id == sdbl_expr_id)?;
 
-    if pkg.queries().len() != 1 {
+    if pkg.queries().is_empty() {
         return None;
     }
-    query_to_projection(&pkg.queries()[0])
+    Some(package_to_projections(pkg).into())
 }

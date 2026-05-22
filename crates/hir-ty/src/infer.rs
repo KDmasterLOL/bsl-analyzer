@@ -1690,7 +1690,7 @@ impl<'db> InferenceContext<'db> {
             // produce a receiver that `apply_sdbl_chain_rewrite` then
             // skips (already-projected receivers short-circuit).
             if crate::method_lookup::receiver_needs_refinement(ty) {
-                if let Some(projection) = crate::query_text_dataflow::refine_query_at_use_site(
+                if let Some(projections) = crate::query_text_dataflow::refine_query_at_use_site(
                     self.db,
                     self.file_id,
                     self.owner,
@@ -1698,8 +1698,7 @@ impl<'db> InferenceContext<'db> {
                     name,
                     &self.body,
                 ) {
-                    let refined =
-                        Ty::Query { projections: std::sync::Arc::from([Some(projection)]) };
+                    let refined = Ty::Query { projections };
                     trace!("Phase F refined {} to {:?}", name, refined);
                     return refined;
                 }
