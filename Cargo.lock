@@ -1544,6 +1544,7 @@ dependencies = [
  "project-model",
  "rustc-hash 2.1.2",
  "salsa",
+ "sdbl-hir",
  "smallvec",
  "smol_str",
  "syntax",

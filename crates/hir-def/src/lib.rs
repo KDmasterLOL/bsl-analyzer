@@ -43,6 +43,7 @@ pub mod queries;
 pub mod region_tree;
 pub mod resolver;
 pub mod scope;
+pub mod sdbl_cache;
 pub mod symbol_tree;
 pub mod ty;
 pub mod type_ref;
@@ -76,6 +77,7 @@ pub use name_usage_index::{
 };
 pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
+pub use sdbl_cache::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEntries, SdblInFile};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::{FunctionSignature, Ty};
 pub use type_ref::{BuiltinTypeRef, TypeRef};

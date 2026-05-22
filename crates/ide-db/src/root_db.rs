@@ -9,7 +9,7 @@ use base_db::{FileIdInput, RootQueryDb, SourceDatabase};
 use hir::DefDatabase;
 use vfs::FileId;
 
-use crate::types::SdblHirEntries;
+use crate::SdblHirEntries;
 
 /// The root database for IDE operations.
 ///

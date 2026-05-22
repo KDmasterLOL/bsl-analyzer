@@ -48,4 +48,22 @@ pub trait ConfigsDatabase: DefDatabase {
     /// were registered — callers that need "extension wins" semantics
     /// should iterate in reverse.
     fn configurations(&self, file_id: FileId) -> Vec<VisibleConfig>;
+
+    /// Resolve the *single merged* configuration visible from `file_id`.
+    ///
+    /// Returns the main configuration merged with the most-specific
+    /// extension whose registered root is a prefix of `file_id`'s path
+    /// (longest-prefix wins). Returns `None` when no configuration is
+    /// registered or when `file_id` has no resolvable path.
+    ///
+    /// Separate from [`Self::configurations`]: that method returns every
+    /// visible config (used by name resolution, which iterates them);
+    /// this one returns the single merged view that consumers need when
+    /// they pass exactly one `Configuration` down to a metadata-driven
+    /// lowerer (SDBL HIR lowering is the immediate caller).
+    ///
+    /// Implementations must perform the merge through
+    /// [`Configuration::merged_with_extension`] so the result keeps the
+    /// "main + overlay" semantics of the runtime.
+    fn merged_visible_configuration(&self, file_id: FileId) -> Option<Arc<Configuration>>;
 }

@@ -11,8 +11,10 @@
 //! - [`module_metadata_query`] - Module type and execution context (LRU: 128)
 //!
 //! **SDBL:**
-//! - [`all_sdbl_in_file_query`] - Extract SDBL queries from HIR (LRU: 128)
-//! - [`sdbl_hir_in_file_query`] - Lower SDBL to HIR + type inference (LRU: 64)
+//! - `all_sdbl_in_file_query` and `sdbl_hir_for_file_query` live in
+//!   `hir-def` (`crate::sdbl_cache`) so the SDBL ↔ Ty bridge in
+//!   `hir-ty` can consume the cache from below. Re-exported through
+//!   `ide_db::SdblHirEntries` for back-compat.
 //!
 //! **Dataflow:**
 //! - [`method_cfg_query`] - Control Flow Graph for method (LRU: 256)
@@ -22,15 +24,14 @@
 //! **Line Index:**
 //! - [`line_index_query`] - Convert byte offsets to line/column positions (LRU: 256)
 
-use std::{path::Path, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use base_db::FileIdInput;
-use bsl_metadata::Configuration;
 use hir::ModuleId;
 
 use crate::{
     metadata::{intern_configuration_path, ConfigurationPathInput},
-    RootDatabase, SdblHirEntries,
+    RootDatabase,
 };
 
 // Re-export query from metadata module
@@ -48,43 +49,6 @@ pub fn configuration_path_for_file<'db>(
     let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path)?;
     Some(intern_configuration_path(db, &config_root.to_string_lossy(), db.metadata_version()))
 }
-
-fn load_configuration_at_path(db: &dyn RootDatabase, path: &Path) -> Arc<Configuration> {
-    let path_input = intern_configuration_path(db, &path.to_string_lossy(), db.metadata_version());
-    load_configuration(db, path_input)
-}
-
-fn visible_configuration_for_file(
-    db: &dyn RootDatabase,
-    file_path: &Path,
-) -> Option<Arc<Configuration>> {
-    let paths = db.all_config_paths();
-    if paths.is_empty() {
-        let config_root = crate::vfs_helpers::find_configuration_root(db, file_path)?;
-        return Some(load_configuration_at_path(db, &config_root));
-    }
-
-    let main_path = paths.iter().find_map(|(name, path)| name.is_none().then_some(path));
-    let extension_path = paths
-        .iter()
-        .filter(|(name, path)| name.is_some() && file_path.starts_with(path))
-        .max_by_key(|(_, path)| path.as_os_str().len())
-        .map(|(_, path)| path);
-
-    match (main_path, extension_path) {
-        (Some(main_path), Some(extension_path)) => {
-            let main = load_configuration_at_path(db, main_path);
-            let extension = load_configuration_at_path(db, extension_path);
-            Some(Arc::new(main.merged_with_extension(&extension)))
-        }
-        (Some(main_path), None) => Some(load_configuration_at_path(db, main_path)),
-        (None, Some(extension_path)) => Some(load_configuration_at_path(db, extension_path)),
-        (None, None) => None,
-    }
-}
-
-// Helper types for internal use
-type SdblInFile = Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>;
 
 /// Get metadata for a module (type and execution context).
 ///
@@ -137,123 +101,9 @@ pub fn module_metadata_query<'db>(
     Arc::new(crate::metadata::build_module_metadata(&file_path, configuration.as_deref()))
 }
 
-/// Get all SDBL queries in a file with their SdblExprId.
-///
-/// This Salsa tracked query extracts SDBL queries from already-lowered BSL HIR bodies.
-/// No separate AST traversal needed - reuses module_bodies query!
-///
-/// # Salsa caching
-/// - LRU: 128 (lightweight extraction from module bodies)
-/// - Invalidation: Automatic when module_bodies changes
-/// - Sorted: Results sorted by source position for deterministic output
-///
-/// # Dependencies tracked by Salsa
-/// - module_bodies (via DefDatabase)
-/// - Automatically invalidates when file content changes
-///
-/// # Performance
-/// - First call: ~1-5ms (iterates HIR bodies to find SDBL exprs)
-/// - Cached: < 1ms
-/// - Memory: ~100 bytes per SDBL query (SdblExprId + SdblQueryInfo)
-///
-/// # Returns
-/// Vec of (SdblExprId, SdblQueryInfo) sorted by position in source file.
-/// SdblExprId uniquely identifies SDBL expression across all bodies in file.
-#[salsa::tracked(lru = 128)]
-pub fn all_sdbl_in_file_query<'db>(
-    db: &'db dyn hir::DefDatabase,
-    file_id_input: FileIdInput<'db>,
-) -> Arc<SdblInFile> {
-    let _span = tracing::debug_span!("all_sdbl_in_file", ?file_id_input).entered();
-    let file_id = file_id_input.file_id(db);
-    let module_id = ModuleId::new(file_id);
-
-    // Get module bodies (Salsa dependency tracked automatically)
-    let module_bodies = db.module_bodies(module_id);
-    let mut result = Vec::new();
-
-    // Collect from all method bodies (procedures and functions)
-    for (local_id, body) in module_bodies.iter_bodies() {
-        for (expr_id, query_info) in body.sdbl_exprs() {
-            let sdbl_expr_id = hir::SdblExprId::from_method(local_id, expr_id);
-            result.push((sdbl_expr_id, query_info.clone()));
-        }
-    }
-
-    // Collect from module-level code (statements outside methods)
-    if let Some(module_code) = module_bodies.module_code() {
-        for (expr_id, query_info) in module_code.sdbl_exprs() {
-            let sdbl_expr_id = hir::SdblExprId::from_module_code(expr_id);
-            result.push((sdbl_expr_id, query_info.clone()));
-        }
-    }
-
-    // Sort by position in file for deterministic output
-    result.sort_by_key(|(_, query_info)| query_info.bsl_literal_range.start());
-
-    tracing::debug!(count = result.len(), "Collected SDBL from HIR");
-
-    Arc::new(result)
-}
-
-/// Get SDBL HIR for all queries in a file.
-///
-/// This Salsa tracked query performs SDBL lowering to HIR with metadata-based type inference.
-/// Depends on all_sdbl_in_file_query and load_configuration for automatic dependency tracking.
-///
-/// # Salsa caching
-/// - LRU: 64 (heavy SDBL HIR lowering operation)
-/// - Invalidation: Automatic when file content or configuration changes
-/// - Dependencies: all_sdbl_in_file, load_configuration
-///
-/// # Performance
-/// - First call: ~10-50ms (SDBL parsing + lowering + type inference)
-/// - Cached: < 1ms
-/// - Memory: ~1-5 KB per SDBL query (depends on query complexity)
-///
-/// # Semantic analysis performed
-/// - Type inference from metadata (table types, field types)
-/// - Name resolution (tables, fields, aliases)
-/// - Semantic diagnostics (unknown tables, type mismatches, etc.)
-///
-/// # Returns
-/// Vec of (SdblExprId, Arc<SdblPackage>) - one entry per successfully parsed SDBL query.
-/// SdblExprId uniquely identifies SDBL expression across all bodies in file.
-#[salsa::tracked(lru = 64)]
-pub fn sdbl_hir_in_file_query<'db>(
-    db: &'db dyn RootDatabase,
-    file_id_input: FileIdInput<'db>,
-) -> SdblHirEntries {
-    let _span = tracing::debug_span!("sdbl_hir_in_file", ?file_id_input).entered();
-    let file_id = file_id_input.file_id(db);
-
-    // Get SDBL queries from BSL HIR (Salsa dependency tracked)
-    let sdbl_queries = all_sdbl_in_file_query(db, file_id_input);
-
-    if sdbl_queries.is_empty() {
-        return Arc::new(Vec::new());
-    }
-
-    // Try to load configuration for metadata-based type inference
-    let file_path_opt = crate::vfs_helpers::get_file_path(db, file_id);
-
-    let configuration = file_path_opt
-        .as_deref()
-        .and_then(|file_path| visible_configuration_for_file(db, file_path));
-
-    // Lower each SDBL query to HIR
-    // Pass Arc<Configuration> directly to avoid cloning the large structure
-    let mut result = Vec::with_capacity(sdbl_queries.len());
-    for (expr_id, query_info) in sdbl_queries.iter() {
-        // Only lower if we have a parsed AST
-        if let Some(ref sdbl_ast) = query_info.query_ast {
-            let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, configuration.clone());
-            result.push((*expr_id, Arc::new(sdbl_package)));
-        }
-    }
-
-    Arc::new(result)
-}
+// SDBL queries (`all_sdbl_in_file_query`, `sdbl_hir_for_file_query`)
+// moved to `hir_def::sdbl_cache` so the SDBL ↔ Ty bridge in `hir-ty`
+// can consume them. Re-exported through `crate::SdblHirEntries`.
 
 // ============================================================================
 // Module-Level Dataflow Queries (Batch Processing)

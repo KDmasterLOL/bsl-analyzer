@@ -15,11 +15,11 @@ use vfs::FileId;
 
 use crate::features::FeaturesInput;
 use crate::queries::{
-    all_sdbl_in_file_query, line_index_query, liveness_analysis_query, method_cfg_query,
-    module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
+    line_index_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
+    reaching_definitions_query,
 };
-use crate::types::SdblHirEntries;
-use crate::{metadata, queries, vfs_helpers, RootDatabase};
+use crate::{metadata, queries, vfs_helpers, RootDatabase, SdblHirEntries};
+use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 
 /// Default implementation of RootDatabase with Salsa integration.
 ///
@@ -399,6 +399,53 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             .map(|(name, configuration)| hir::VisibleConfig { name, configuration })
             .collect()
     }
+
+    fn merged_visible_configuration(
+        &self,
+        file_id: FileId,
+    ) -> Option<Arc<bsl_metadata::Configuration>> {
+        // Restored from the historic `visible_configuration_for_file`
+        // helper in `queries.rs`: pick the main config and the
+        // longest-path-prefix extension whose root contains `file_id`,
+        // then merge via `Configuration::merged_with_extension`. Lives
+        // here (not in hir-def) because the path-prefix probe is
+        // filesystem-bound — keeping it in the adapter preserves
+        // hir-def's no-VFS invariant.
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let paths = RootDatabaseImpl::all_config_paths(self);
+
+        let load_at = |path: &std::path::Path| -> Arc<bsl_metadata::Configuration> {
+            let path_input = metadata::intern_configuration_path(
+                self,
+                &path.to_string_lossy(),
+                self.metadata_version(),
+            );
+            metadata::load_configuration(self, path_input)
+        };
+
+        if paths.is_empty() {
+            let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
+            return Some(load_at(&config_root));
+        }
+
+        let main_path = paths.iter().find_map(|(name, path)| name.is_none().then_some(path));
+        let extension_path = paths
+            .iter()
+            .filter(|(name, path)| name.is_some() && file_path.starts_with(path))
+            .max_by_key(|(_, path)| path.as_os_str().len())
+            .map(|(_, path)| path);
+
+        match (main_path, extension_path) {
+            (Some(main_path), Some(extension_path)) => {
+                let main = load_at(main_path);
+                let extension = load_at(extension_path);
+                Some(Arc::new(main.merged_with_extension(&extension)))
+            }
+            (Some(main_path), None) => Some(load_at(main_path)),
+            (None, Some(extension_path)) => Some(load_at(extension_path)),
+            (None, None) => None,
+        }
+    }
 }
 
 #[salsa::db]
@@ -502,7 +549,7 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn sdbl_hir_in_file(&self, file_id: FileId) -> SdblHirEntries {
         let file_id_input = base_db::FileIdInput::new(self, file_id);
-        sdbl_hir_in_file_query(self, file_id_input)
+        sdbl_hir_for_file_query(self, file_id_input)
     }
 
     fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<hir::cfg::ModuleCfgs> {
