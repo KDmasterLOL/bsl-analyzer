@@ -15,11 +15,18 @@
 //!     the leading BOM-only prefix and the trailing newline are first-class.
 //!   * Multi-line / concatenated string literals (Rowan `LITERAL` nodes
 //!     containing `STRING_*` tokens) coalesce into a **single** [`Atom`];
-//!     their internal whitespace is preserved by construction.
+//!     their internal whitespace is preserved by construction *unless* the
+//!     preceding gap got a [`GapDecision::NewlineWithIndent`] decision, in
+//!     which case `render_full` re-indents `|`-continuation lines to match
+//!     the new opening-quote column (#std444 п. 3.1). Compensating edits
+//!     for those rewrites flow through the same `edits` list as gap edits.
 //!   * Comments are emitted as standalone atoms — their same-line-ness is
-//!     a property of the surrounding gap, not the atom itself.
+//!     a property of the surrounding gap, not the atom itself. Comment
+//!     bodies may also be rewritten (`//foo` → `// foo`, #std456 п. 7.3);
+//!     those rewrites are tracked via [`Ir::atom_edits`] at build time.
 //!   * Only the policy layer reads [`SyntaxKind`] to make spacing
-//!     decisions; the builder is policy-free.
+//!     decisions; the builder is policy-free apart from the two
+//!     standard-driven content normalizations noted above.
 
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize, WalkEvent};
 
@@ -194,6 +201,43 @@ impl Ir {
 
         Ir { atoms, gaps, atom_nodes, atom_edits }
     }
+}
+
+/// Rewrites the leading whitespace of every `|`-continuation line inside a
+/// multi-line string literal to `target_indent`. The opening line (before
+/// the first `\n`) and any line whose first non-whitespace char is not `|`
+/// are left untouched.
+///
+/// Per #std444 п. 3.1, the `|` markers align with the opening `"` — i.e.
+/// at the same indent the formatter placed the literal on (the
+/// `final_level` of the preceding `NewlineWithIndent` gap decision).
+///
+/// Whitespace-only lines (no `|` marker) inside the literal are also
+/// preserved verbatim — `trim_trailing_whitespace` operates on gaps, not
+/// on atom internals, so any source-authored blank inside a query body
+/// keeps the bytes the user typed. This is intentional: a blank line in
+/// SDBL is rare and almost always meaningful (visual separator), and
+/// touching it would mean overstepping the literal-content invariant.
+fn reindent_literal_continuation_lines(text: &str, target_indent: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut iter = text.split('\n');
+    if let Some(first) = iter.next() {
+        out.push_str(first);
+    }
+    for line in iter {
+        out.push('\n');
+        let content_start = line
+            .char_indices()
+            .find_map(|(i, c)| (!c.is_whitespace()).then_some(i))
+            .unwrap_or(line.len());
+        if line.as_bytes().get(content_start) == Some(&b'|') {
+            out.push_str(target_indent);
+            out.push_str(&line[content_start..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 /// Normalizes leading whitespace inside a `//` comment per #std456 п. 7.3
@@ -608,7 +652,35 @@ pub fn render_full(
         out.push_str(&rendered);
 
         if i < n_atoms {
-            out.push_str(&ir.atoms[i].text);
+            // #std444 пп. 3.1, 3.3: when the gap that precedes a multi-line
+            // string literal was re-indented (the `=` / `+` exception in
+            // `decide_newline_gap`), the `|` continuation lines inside the
+            // literal must align with the opening `"`. Source content is
+            // byte-preserved by the coalesced LITERAL atom, so we rewrite
+            // its text here at render time and emit a compensating atom
+            // edit. Untouched if the preceding gap was Preserve (literal
+            // on same line as `=`) — that case is already pinned by
+            // `regression_multiline_string_literal_preserved`.
+            let atom = &ir.atoms[i];
+            let needs_reindent = atom.kind == SyntaxKind::LITERAL
+                && atom.text.contains('\n')
+                && matches!(decisions[i], GapDecision::NewlineWithIndent { .. });
+            if needs_reindent {
+                if let GapDecision::NewlineWithIndent { final_level, .. } = decisions[i] {
+                    let target_indent = cfg.indent_for_level(final_level);
+                    let normalized =
+                        reindent_literal_continuation_lines(&atom.text, &target_indent);
+                    if normalized != atom.text {
+                        edits.push(GapEdit {
+                            range: ir.atom_nodes[i].text_range(),
+                            new_text: normalized.clone(),
+                        });
+                    }
+                    out.push_str(&normalized);
+                    continue;
+                }
+            }
+            out.push_str(&atom.text);
         }
     }
 

@@ -625,15 +625,25 @@ fn regression_multiline_literal_on_assignment_rhs_reindented() {
     let config = FormattingConfig::default();
     let output = format_file(&root, &config).text;
 
-    let quote_line = output
-        .lines()
+    let lines: Vec<&str> = output.lines().collect();
+    let quote_line = lines
+        .iter()
         .find(|l| l.trim_start().starts_with("\"ВЫБРАТЬ"))
         .expect("formatter dropped the literal");
+    let pipe_line =
+        lines.iter().find(|l| l.trim_start().starts_with("|")).expect("missing `|` continuation");
     // body of `Процедура Т()` = 1 TAB. Continuation per #std444 = body + 1.
     assert!(
         quote_line.starts_with("\t\t") && !quote_line.starts_with("\t\t\t"),
         "opening `\"` must sit at body+1 (#std444 п. 3.1); got {:?}",
         quote_line
+    );
+    // The `|` lines must align column-wise with the opening `"` — same
+    // indent prefix, since #std444 п. 3.1 example shows them stacked.
+    assert!(
+        pipe_line.starts_with("\t\t|") && !pipe_line.starts_with("\t\t\t"),
+        "`|` continuation must align with opening `\"`; got {:?}",
+        pipe_line
     );
 }
 
@@ -657,14 +667,48 @@ fn regression_multiline_literal_after_plus_continuation_reindented() {
     let config = FormattingConfig::default();
     let output = format_file(&root, &config).text;
 
-    let quote_line = output
-        .lines()
+    let lines: Vec<&str> = output.lines().collect();
+    let quote_line = lines
+        .iter()
         .find(|l| l.trim_start().starts_with("\"ВЫБРАТЬ"))
         .expect("formatter dropped the literal");
+    let pipe_line =
+        lines.iter().find(|l| l.trim_start().starts_with("|")).expect("missing `|` continuation");
     assert!(
         quote_line.starts_with("\t\t") && !quote_line.starts_with("\t\t\t"),
         "opening `\"` after `+\\n` must sit at body+1 (#std444 п. 3.3); got {:?}",
         quote_line
+    );
+    assert!(
+        pipe_line.starts_with("\t\t|") && !pipe_line.starts_with("\t\t\t"),
+        "`|` continuation after `+\\n` must align with opening `\"`; got {:?}",
+        pipe_line
+    );
+}
+
+#[test]
+fn regression_multiline_literal_same_line_keeps_pipe_at_source_column() {
+    // Sibling guard for the literal re-indent rule: when the opening `"`
+    // sits on the SAME line as `=` (no preceding newline gap), the
+    // `decide_newline_gap` exception never fires, so the continuation
+    // re-indent must also stay out — `|` lines stay at whatever column
+    // the source put them. Otherwise the existing same-line idiom
+    //     А = "ВЫБРАТЬ
+    //     |...
+    // (pinned by `regression_multiline_string_literal_preserved`) would
+    // start to move sideways.
+    let input = "Процедура Т()\n\tА = \"ВЫБРАТЬ\n|X\";\nКонецПроцедуры\n";
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let output = format_file(&root, &config).text;
+
+    let pipe_line =
+        output.lines().find(|l| l.trim_start().starts_with("|")).expect("missing `|` continuation");
+    assert!(
+        pipe_line.starts_with("|"),
+        "`|` must stay at column 0 when literal opens on the same line as `=`; got {:?}",
+        pipe_line
     );
 }
 
