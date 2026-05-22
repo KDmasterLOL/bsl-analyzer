@@ -752,6 +752,13 @@ fn platform_type_markup<DB: RootDatabase>(db: &DB, type_name: &str) -> Option<St
 ///   bare `**Тип:** name` line when the platform data has no entry for
 ///   `name`, so IDE output stays informative even if the index is
 ///   incomplete.
+/// - `Ty::Query` / `Ty::QueryResult` / `Ty::QueryResultSelection` /
+///   `Ty::QueryBatchResult` (projection-typed receivers seeded by the
+///   SDBL ↔ Ty bridge) → routed through [`platform_type_markup`] using
+///   the same `Запрос` / `РезультатЗапроса` / `ВыборкаИзРезультатаЗапроса`
+///   / `Массив` keys their `Ty::PlatformObject` counterparts use. The
+///   projection payload is not yet rendered inline — Phase 1.5+ will
+///   surface field names from `SdblProjection.fields` when present.
 /// - Anything else → single locale-aware `**Тип:** <label>` line via
 ///   [`Ty::display`]. Renders unions, MDO refs, manager refs, and
 ///   form-data wrappers richly (`СправочникСсылка.Товары` /
@@ -769,7 +776,43 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<
         return Some(format!("**Тип:** {}\n\n", name.as_str()));
     }
 
+    // Route projection-typed receivers through the same platform docs
+    // their `Ty::PlatformObject("Запрос" / "РезультатЗапроса" / …)`
+    // equivalents would reach. Without this branch, hovering over a
+    // `Новый Запрос` site once Phase 1.3 starts synthesizing `Ty::Query`
+    // would silently fall to the bare `**Тип:**` line and lose the
+    // rich platform docs the user gets today.
+    if let Some(platform_key) = query_variant_platform_key(ty) {
+        if let Some(block) = platform_type_markup(db, platform_key) {
+            return Some(block);
+        }
+        // Fall through if platform data has no entry — extremely
+        // defensive: `Запрос` / `РезультатЗапроса` are always shipped
+        // in `platform_data.json`.
+    }
+
     Some(format!("**Тип:** {}\n\n", ty.display(locale)))
+}
+
+/// Map a projection-typed `Ty` to the platform-data key under which its
+/// methods and docs are indexed.
+///
+/// Mirrors `hir_ty::method_lookup::platform_type_key` for the four
+/// projection variants seeded in Phase 0 — once Phase 1.3 starts
+/// synthesizing these, hover must reach the same `bsl-platform` row
+/// `method_lookup` reaches, or the IDE shows different surfaces for a
+/// chained `.Выполнить()` value vs a freshly-typed `Новый Запрос`.
+fn query_variant_platform_key(ty: &Ty) -> Option<&'static str> {
+    match ty {
+        Ty::Query { .. } => Some("Запрос"),
+        Ty::QueryResult { .. } => Some("РезультатЗапроса"),
+        Ty::QueryResultSelection { .. } => Some("ВыборкаИзРезультатаЗапроса"),
+        // `ВыполнитьПакет()` returns an array of `РезультатЗапроса` —
+        // share the `Array` table for iteration / `.Количество()` so
+        // chained access stays consistent.
+        Ty::QueryBatchResult { .. } => Some("Массив"),
+        _ => None,
+    }
 }
 
 /// Generates hover information for platform methods.

@@ -36,6 +36,21 @@
 //!   in projection extraction. Phase 1.2 expands `*` / `Т.*` against the
 //!   originating `ResolvedTable::fields` and re-runs the bridge over the
 //!   expanded set.
+//!
+//!   **Policy until then:** a `SELECT *` (or `SELECT Т.*`) query whose
+//!   field list contains *only* asterisks yields `None` from
+//!   [`query_to_projection`]. Inference hook callers (Phase 1.3) attach
+//!   `None` to the synthesised [`Ty::QueryResult`] / [`Ty::QueryResultSelection`]
+//!   in that case, which makes the receiver fall back to the platform
+//!   `РезультатЗапроса` / `ВыборкаИзРезультатаЗапроса` surface — same
+//!   behaviour the legacy `Ty::PlatformObject("…")` shape produces
+//!   today. No `UnresolvedField` regression on `Выборка.<Имя>` because
+//!   field lookup degrades to the platform table.
+//!
+//!   `SELECT *, NamedField` — mixed shapes — yields `Some(projection)`
+//!   carrying only `NamedField`, dropping the asterisk silently. That
+//!   matches the "best-effort projection" contract: the projection is
+//!   never wrong, only sometimes incomplete. Phase 1.2 fills the gap.
 //! - **Variable refinement / data-flow**. The bridge takes a lowered
 //!   `SdblPackage` as input; it does not trace `.Текст = "..."`
 //!   assignments. That lives in `hir-ty::query_text_dataflow` (Phase 2).
