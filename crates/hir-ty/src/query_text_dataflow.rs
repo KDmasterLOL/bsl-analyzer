@@ -18,17 +18,24 @@
 //!
 //! ## Hook surface
 //!
-//! [`refine_query_at_dispatch`] is invoked from
-//! [`crate::method_lookup::apply_sdbl_chain_rewrite`] when:
+//! [`refine_query_at_use_site`] is invoked from two callers:
 //!
-//! 1. The method is one of the SDBL chain entry points
-//!    (`Выполнить` / `Выбрать` / `ВыполнитьПакет`).
-//! 2. The receiver type carries no projection — either
+//! 1. [`crate::method_lookup::apply_sdbl_chain_rewrite`] — Phase D
+//!    chain-dispatch refinement (`Зап.Выполнить()` and friends).
+//! 2. [`crate::infer::InferCtx::infer_path_name`] — Phase F lift: bare
+//!    `Expr::Path("Зап")` uses (e.g. `Возврат Зап;` from a helper
+//!    body) refine to the same projection so cross-method propagation
+//!    via `method_return_type_query` carries it to callers.
+//!
+//! Both callers gate on `receiver_needs_refinement` (see
+//! `method_lookup.rs`) so this helper is only reached when:
+//!
+//! 1. The receiver type carries no projection — either
 //!    `Ty::PlatformObject("Запрос")` (legacy) or
 //!    `Ty::Query { projections: [None] }` (Phase B synth produced None
 //!    because the constructor arg was not a static literal).
-//! 3. The receiver expression is a bare `Expr::Path` referencing a
-//!    local binding (field receivers, chained calls, etc. are skipped).
+//! 2. The receiver/binding name is known (callers extract it from the
+//!    `Expr::Path` or pass it directly).
 //!
 //! Failure modes (multiple writes with divergent text, dynamic text,
 //! loop-carried append, non-literal RHS, owner is module-level code)
@@ -43,45 +50,38 @@ use dataflow::reaching_defs::DefSite;
 use hir_def::body::Body;
 use hir_def::hir::{Expr, Literal, Stmt};
 use hir_def::ty::SdblProjection;
-use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, IdConversion, SdblExprId, StmtId};
+use hir_def::{
+    sdbl_hir_for_file_query, DefWithBodyId, ExprId, IdConversion, Name, SdblExprId, StmtId,
+};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
 use crate::sdbl_bridge::query_to_projection;
 
-/// Try to recover an [`SdblProjection`] for a `<var>.<chain>` dispatch
-/// by walking reaching `<var>.Текст = "..."` writes.
+/// Try to recover an [`SdblProjection`] for a `<name>` use site by
+/// walking reaching `<name>.Текст = "..."` writes.
 ///
 /// Returns `Some(projection)` only when **every** reaching definition
-/// for `<var>.Текст` is a static SDBL string literal whose bridge
+/// for `<name>.Текст` is a static SDBL string literal whose bridge
 /// lowering produces structurally equal projections. Any ambiguity
 /// (loop-carried append, dynamic text, divergent literals across
 /// branches, multi-statement SDBL package, missing dataflow result)
 /// collapses to `None`.
 ///
-/// `dispatch_expr_id` is the `Expr::Field` ExprId of the chain entry
-/// (the callee of the outer `Expr::Call` for `.Выполнить()`); it is
-/// used to find the enclosing statement that
-/// [`ReachingDefsResult::defs_for_var_at_stmt`] asks for.
-/// `receiver_expr_id` is the `base` of the `Expr::Field` — Phase D
-/// only refines when this is `Expr::Path(name)`.
-pub(crate) fn refine_query_at_dispatch(
+/// `use_expr_id` is the ExprId of the use site (either an
+/// `Expr::Field` chain dispatch — Phase D — or a bare `Expr::Path`
+/// reference — Phase F). Used only to find the enclosing statement
+/// via [`Body::enclosing_stmt`]. `name` is the binding name; callers
+/// extract it from the AST and pass it directly so this helper does
+/// not need to re-inspect the receiver shape.
+pub(crate) fn refine_query_at_use_site(
     db: &dyn HirDatabase,
     file_id: FileId,
     owner: DefWithBodyId,
-    dispatch_expr_id: ExprId,
-    receiver_expr_id: ExprId,
+    use_expr_id: ExprId,
+    name: &Name,
     body: &Body,
 ) -> Option<Arc<SdblProjection>> {
-    // Receiver must be `Expr::Path(name)`. Anything else (chained
-    // call returning a query, field access on a struct, etc.) is
-    // intentionally skipped — those paths either already carry a
-    // projection from upstream lowering or aren't covered by the
-    // module-local reaching-defs analysis.
-    let Expr::Path(receiver_name) = body.expr(receiver_expr_id) else {
-        return None;
-    };
-
     // Reaching-defs analysis runs per-method (see
     // `module_reaching_definitions_query` in `ide-db`); module-level
     // code lives in a separate `DefWithBodyId::ModuleCode` body that
@@ -90,7 +90,7 @@ pub(crate) fn refine_query_at_dispatch(
         return None;
     };
 
-    // Composite keys for the `<var>.Текст` field assignment.
+    // Composite keys for the `<name>.Текст` field assignment.
     //
     // The dataflow transfer function gen/kills on `base.field`
     // strings (see `extract_var_name` in
@@ -100,16 +100,16 @@ pub(crate) fn refine_query_at_dispatch(
     // the resulting Definition sets merged — `defs_for_var`
     // lowercases internally, so the composites stay in their natural
     // case and the storage-side normaliser does the rest.
-    let receiver_lower = receiver_name.as_str().to_lowercase();
+    let receiver_lower = name.as_str().to_lowercase();
     let composite_ru = format!("{receiver_lower}.текст");
     let composite_en = format!("{receiver_lower}.text");
 
     // The reaching-defs API asks "what definitions reach the
-    // beginning of this statement?". The dispatch lives somewhere
-    // inside a single statement; both the outer `Expr::Call` and the
-    // inner `Expr::Field` resolve to the same enclosing stmt via
-    // `Body::enclosing_stmt`.
-    let dispatch_stmt_id = body.enclosing_stmt(dispatch_expr_id)?;
+    // beginning of this statement?". The use site lives somewhere
+    // inside a single statement; outer expressions (an `Expr::Call`
+    // wrapping an `Expr::Field`, the bare path itself, etc.) all
+    // resolve to the same enclosing stmt via `Body::enclosing_stmt`.
+    let dispatch_stmt_id = body.enclosing_stmt(use_expr_id)?;
 
     let module_defs = db.module_reaching_definitions(file_id);
     let method_defs = module_defs.get(local_id)?;

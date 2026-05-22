@@ -1249,7 +1249,7 @@ impl<'db> InferenceContext<'db> {
 
             Expr::Literal(lit) => self.infer_literal(lit),
 
-            Expr::Path(name) => self.infer_path_name(name),
+            Expr::Path(name) => self.infer_path_name(name, expr_id),
 
             Expr::QualifiedPath(_path) => {
                 // Standalone qualified paths never reach this branch in
@@ -1586,7 +1586,11 @@ impl<'db> InferenceContext<'db> {
     ///    inference context captures those types in [`Self::var_types`]
     ///    as [`Stmt::Assign`] is walked in [`Self::infer_stmts`].
     ///    In value / receiver position, implicit locals shadow module-level,
-    ///    manager, form, platform, and builtin names.
+    ///    manager, form, platform, and builtin names. Phase F upgrades a
+    ///    projection-less `Ty::Query{[None]}` / `Ty::PlatformObject("Запрос")`
+    ///    here via reaching-defs on `<name>.Текст` writes so bare-name
+    ///    references (e.g. `Возврат Зап;` from a helper) inherit the
+    ///    projection that Phase D used to compute only at chain dispatch.
     /// 2. **Declared locals / parameters / module symbols** — returned as
     ///    `Unknown` today when no type was inferred yet, but they still
     ///    shadow platform builtins in value position. Builtin functions are
@@ -1595,7 +1599,13 @@ impl<'db> InferenceContext<'db> {
     /// 3. **Module-level methods / variables** — returned as `Unknown`
     ///    today (no signature carrier yet); Task 2.x will synthesise
     ///    `Ty::Function` from `MethodId`.
-    fn infer_path_name(&mut self, name: &hir_def::Name) -> Ty {
+    ///
+    /// `expr_id` is the use-site ExprId. Phase F's dataflow refinement
+    /// asks "what reaching definitions of `<name>.Текст` reach the
+    /// enclosing statement of this expression?" — the answer depends on
+    /// where the path is referenced (a `Возврат Зап;` mid-procedure
+    /// sees different reaching defs than a `Зап.Выполнить()` later).
+    fn infer_path_name(&mut self, name: &hir_def::Name, expr_id: ExprId) -> Ty {
         use hir_def::resolver::Resolution;
 
         let resolver = self.get_resolver();
@@ -1671,6 +1681,29 @@ impl<'db> InferenceContext<'db> {
         //    cannot be a function value in BSL.
         if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
             trace!("resolved {} via var_types = {:?}", name, ty);
+            // Phase F — projection-less Query bindings get upgraded
+            // via reaching-defs on `<name>.Текст` writes so bare-name
+            // references (e.g. `Возврат Зап;` from a helper body)
+            // carry the projection forward through the cross-method
+            // return-type cascade. The eligibility gate matches
+            // chain-dispatch Phase D so a path resolved here will
+            // produce a receiver that `apply_sdbl_chain_rewrite` then
+            // skips (already-projected receivers short-circuit).
+            if crate::method_lookup::receiver_needs_refinement(ty) {
+                if let Some(projection) = crate::query_text_dataflow::refine_query_at_use_site(
+                    self.db,
+                    self.file_id,
+                    self.owner,
+                    expr_id,
+                    name,
+                    &self.body,
+                ) {
+                    let refined =
+                        Ty::Query { projections: std::sync::Arc::from([Some(projection)]) };
+                    trace!("Phase F refined {} to {:?}", name, refined);
+                    return refined;
+                }
+            }
             return ty.clone();
         }
 

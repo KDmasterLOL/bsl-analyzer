@@ -51,6 +51,7 @@ use std::sync::Arc;
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
 use hir_def::body::Body;
+use hir_def::hir::Expr;
 use hir_def::ty::{MetadataKind, SdblProjection, Ty};
 use hir_def::{DefWithBodyId, ExprId, Name};
 use vfs::FileId;
@@ -386,12 +387,20 @@ fn try_refine_receiver(ctx: &RefineCtx<'_>, receiver_ty: &Ty) -> Option<Arc<Sdbl
     if !receiver_needs_refinement(receiver_ty) {
         return None;
     }
-    crate::query_text_dataflow::refine_query_at_dispatch(
+    // Receiver must be `Expr::Path(name)` for the dataflow walk to
+    // ground itself on a binding key. Anything else (chained call,
+    // field of a struct, etc.) is intentionally skipped — those
+    // paths either already carry a projection from upstream lowering
+    // or aren't covered by the module-local reaching-defs analysis.
+    let Expr::Path(receiver_name) = ctx.body.expr(ctx.receiver_expr_id) else {
+        return None;
+    };
+    crate::query_text_dataflow::refine_query_at_use_site(
         ctx.db,
         ctx.file_id,
         ctx.owner,
         ctx.dispatch_expr_id,
-        ctx.receiver_expr_id,
+        receiver_name,
         ctx.body,
     )
 }
@@ -405,7 +414,10 @@ fn try_refine_receiver(ctx: &RefineCtx<'_>, receiver_ty: &Ty) -> Option<Arc<Sdbl
 /// flavours of `Ty::Query`. Receivers that already carry a non-None
 /// projection are intentionally left alone — refinement is only ever
 /// an *upgrade* from None to Some.
-fn receiver_needs_refinement(ty: &Ty) -> bool {
+///
+/// `pub(crate)` so [`crate::infer`] can share the gate at
+/// `infer_path_name` for Phase F (binding-type refinement).
+pub(crate) fn receiver_needs_refinement(ty: &Ty) -> bool {
     match ty {
         Ty::PlatformObject(n) => is_platform_name(n, "Запрос", "Query"),
         Ty::Query { projections } => match projections.first() {

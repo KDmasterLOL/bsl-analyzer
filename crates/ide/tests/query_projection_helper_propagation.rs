@@ -53,18 +53,14 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty>
 }
 
 #[test]
-#[ignore = "Phase F — binding-type refinement: Phase D refines at chain-dispatch sites only; \
-            `Возврат Зап;` resolves `Expr::Path(\"Зап\")` to the binding's stored \
-            `Ty::Query{[None]}` without consulting reaching `Зап.Текст` writes. \
-            Lifting refinement into `infer_path_name` would close this gap but \
-            changes the receiver-name eligibility contract — design lives in the \
-            phase-plan follow-up."]
 fn helper_returning_refined_query_propagates_projection_to_caller() {
-    // The helper's body produces `Ty::Query{[Some(p)]}` at the
-    // chain-dispatch site only; the `Возврат Зап` returns the
-    // binding's stored type (`Ty::Query{[None]}`), so the caller's
-    // chain sees no projection. Pinned as a regression test for the
-    // eventual Phase F lift of refinement into `infer_path_name`.
+    // Phase F closes this gap: `infer_path_name` upgrades a
+    // projection-less `Ty::Query{[None]}` (or legacy
+    // `PlatformObject("Запрос")`) binding by running the same
+    // reaching-defs walk Phase D applies at chain dispatch. The
+    // helper's `Возврат Зап;` now resolves to `Ty::Query{[Some(p)]}`,
+    // `method_return_type_query` caches it, and the caller's chain
+    // surfaces `.Имя` as `Ty::String`.
     let fixture = r#"//- /test.bsl
 Функция СоздатьЗапрос() Экспорт
     Зап = Новый Запрос;
@@ -106,5 +102,193 @@ fn helper_with_constructor_literal_propagates_projection() {
         var_ty(&db, file_id, "х"),
         Some(Ty::String),
         "constructor-time projection must propagate through helper's return type",
+    );
+}
+
+#[test]
+fn divergent_text_writes_collapse_to_unknown() {
+    // Phase F preserves Phase D's all-or-nothing rule: when reaching
+    // defs disagree on the literal SDBL text, the projection collapses
+    // and the caller's `.Имя` types as `Unknown`. Without this, two
+    // divergent SELECTs would silently pick one — worse than no
+    // refinement.
+    let fixture = r#"//- /test.bsl
+Функция СоздатьЗапрос(Флаг) Экспорт
+    Зап = Новый Запрос;
+    Если Флаг Тогда
+        Зап.Текст = "ВЫБРАТЬ ""abc"" КАК Имя";
+    Иначе
+        Зап.Текст = "ВЫБРАТЬ ""def"" КАК Цена";
+    КонецЕсли;
+    Возврат Зап;
+КонецФункции
+
+Функция Тест(Флаг)
+    Х = СоздатьЗапрос(Флаг).Выполнить().Выбрать().Имя;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        None,
+        "divergent reaching writes must collapse the chain so `Х` stays unrefined — \
+         conservative var_types drops Unknown RHS, leaving the binding absent",
+    );
+}
+
+#[test]
+fn dynamic_text_write_collapses_to_unknown() {
+    // RHS is a function call, not a string literal — the dataflow
+    // walk rejects it (`projection_from_text_assignment` requires
+    // `Expr::Literal(String)`). Caller surfaces Unknown.
+    let fixture = r#"//- /test.bsl
+Функция ПолучитьТекст()
+    Возврат "ВЫБРАТЬ ""abc"" КАК Имя";
+КонецФункции
+
+Функция СоздатьЗапрос() Экспорт
+    Зап = Новый Запрос;
+    Зап.Текст = ПолучитьТекст();
+    Возврат Зап;
+КонецФункции
+
+Функция Тест()
+    Х = СоздатьЗапрос().Выполнить().Выбрать().Имя;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        None,
+        "dynamic text RHS collapses the projection and the trailing `.Имя` resolves \
+         to Unknown — conservative var_types drops Unknown so `Х` stays absent",
+    );
+}
+
+#[test]
+fn no_text_write_keeps_projection_none() {
+    // Bare `Зап = Новый Запрос;` with no `.Текст` write — reaching
+    // defs find nothing for `зап.текст`, refinement returns None, and
+    // the caller's chain produces `Ty::Unknown` on the trailing
+    // `.Имя`. Pins that Phase F doesn't fabricate a projection out of
+    // an unrefined binding.
+    let fixture = r#"//- /test.bsl
+Функция СоздатьЗапрос() Экспорт
+    Зап = Новый Запрос;
+    Возврат Зап;
+КонецФункции
+
+Функция Тест()
+    Х = СоздатьЗапрос().Выполнить().Выбрать().Имя;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        None,
+        "no `.Текст` write keeps the projection unresolved and the trailing `.Имя` \
+         types as Unknown — conservative var_types drops the Unknown so `Х` is absent",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase F follow-ups — pinned as `#[ignore]` so the fixtures exist and
+// can be flipped to active tests when the underlying support lands. Each
+// case names the missing primitive in the ignore reason. Per Codex
+// round-1 review of the Phase F plan (REVISE on area E): keep fixtures
+// in-repo to prevent silent regression.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "Phase F follow-up: loop-carried `.Текст += ...` append idiom needs \
+            string-concatenation reasoning in projection_from_text_assignment; \
+            today the +=-style write fails the `Expr::Literal(String)` gate and \
+            collapses to None (acceptable, but no caller-side wire-through yet)."]
+fn loop_carried_text_append_recovers_to_projection() {
+    // Iterative builder idiom — projection only knowable if the
+    // dataflow walk concatenates literal fragments across the loop
+    // back-edge. Out of Phase F scope; Phase D's append-rejection
+    // policy applies.
+    let fixture = r#"//- /test.bsl
+Функция СоздатьЗапрос(Условия) Экспорт
+    Зап = Новый Запрос;
+    Зап.Текст = "ВЫБРАТЬ ""abc"" КАК Имя ИЗ Справочник.Товары ГДЕ ";
+    Для Каждого У Из Условия Цикл
+        Зап.Текст = Зап.Текст + " И " + У;
+    КонецЦикла;
+    Возврат Зап;
+КонецФункции
+
+Функция Тест(Условия)
+    Х = СоздатьЗапрос(Условия).Выполнить().Выбрать().Имя;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::String),
+        "Phase F follow-up target: loop-append builder recovers projection",
+    );
+}
+
+#[test]
+#[ignore = "Phase F follow-up: parameter-as-Query has no module-local reaching \
+            def for the param binding's `.Текст`, so refinement returns None. \
+            Closing this gap needs callee/caller cross-method dataflow."]
+fn parameter_query_with_text_write_in_caller_propagates() {
+    // The helper receives a `Запрос` argument and the caller assigns
+    // its text before passing it in. Phase F's module-local
+    // reaching-defs don't cross the parameter boundary. Cross-method
+    // dataflow would be a separate phase.
+    let fixture = r#"//- /test.bsl
+Функция Выполнить(Зап) Экспорт
+    Возврат Зап.Выполнить().Выбрать().Имя;
+КонецФункции
+
+Функция Тест()
+    Зап = Новый Запрос;
+    Зап.Текст = "ВЫБРАТЬ ""abc"" КАК Имя";
+    Х = Выполнить(Зап);
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::String),
+        "Phase F follow-up target: param-as-Query refinement across call boundary",
+    );
+}
+
+#[test]
+#[ignore = "Phase F follow-up: a binding name that collides with a CFE-visible \
+            symbol needs scope resolution before refinement; today the gate \
+            only checks var_types and may miss shadowing. Out of Phase F scope."]
+fn cfe_shadowed_binding_refines_through_local_only() {
+    // `Запрос` is also a platform constructor name; the local
+    // `Запрос = Новый Запрос;` shadows it. Phase F currently relies
+    // on var_types having already captured the local — but a CFE
+    // extension that publishes a `Запрос` global could intervene.
+    let fixture = r#"//- /test.bsl
+Функция СоздатьЗапрос() Экспорт
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ ""abc"" КАК Имя";
+    Возврат Запрос;
+КонецФункции
+
+Функция Тест()
+    Х = СоздатьЗапрос().Выполнить().Выбрать().Имя;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::String),
+        "Phase F follow-up: refinement under name shadowing CFE-visible globals",
     );
 }
