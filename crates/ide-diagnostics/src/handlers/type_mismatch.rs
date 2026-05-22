@@ -38,10 +38,14 @@ pub fn from_hir(
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     let locale = ctx.locale();
+    // `display(locale)` expands `Ty::Union` to `A | B`, so the user sees
+    // the actual member types instead of the coarse `Составной`/`Composite`
+    // label. Hover and completion already use the same surface for the
+    // same reason.
     let message = format!(
         "Несоответствие типов: ожидалось '{}', получено '{}'",
-        expected.display_name(locale),
-        actual.display_name(locale)
+        expected.display(locale),
+        actual.display(locale)
     );
     crate::simple_hir_diagnostic(DiagnosticCode::TypeMismatch, message, range, ctx)
 }

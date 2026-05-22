@@ -456,10 +456,15 @@ fn test_procedure_statement_without_semicolon() {
 
 #[test]
 fn regression_bom_first_line_preserved() {
+    // Input uses the canonical `//` + space form so that the only
+    // observable change between input and output is the BOM survival.
+    // (`//comment` without the space would also be normalized to
+    // `// comment` per #std456 п. 7.3, which is the orthogonal concern
+    // pinned by `regression_comment_spacing_normalized`.)
     check(
-        "\u{FEFF}//comment\nПерем А Экспорт;\n",
+        "\u{FEFF}// comment\nПерем А Экспорт;\n",
         expect![[r#"
-            ﻿//comment
+            ﻿// comment
             Перем А Экспорт;
         "#]],
     );
@@ -593,6 +598,223 @@ fn regression_trailing_inline_comment_single_space() {
             Функция Ф()
             	Возврат 1;
             КонецФункции // trailing
+        "#]],
+    );
+}
+
+#[test]
+fn regression_multiline_literal_on_assignment_rhs_reindented() {
+    // BSL vendor standard #std444 пункт 3.1 — длинная строковая константа,
+    // переносимая с помощью `|`, после `=` на отдельной строке стоит на
+    // стандартном отступе (на одну ступень глубже тела):
+    //
+    //     ТекстЗапроса =
+    //         "ВЫБРАТЬ
+    //         |   ...";
+    //
+    // Источник: https://its.1c.ru/db/v8std#content:444 (#std444 п. 3.1).
+    //
+    // До фикса формула continuation-зазора в `decide_newline_gap` была
+    // `Preserve`, поэтому литерал съезжал на ту колонку, на которой его
+    // напечатал пользователь (часто на один пробел). Содержимое литерала
+    // между внешними `"` всё ещё эмитится атомом LITERAL байт-в-байт —
+    // см. `regression_multiline_string_literal_preserved`.
+    let input = "Процедура Т()\n А =\n \"ВЫБРАТЬ\n |X\";\nКонецПроцедуры\n";
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let output = format_file(&root, &config).text;
+
+    let lines: Vec<&str> = output.lines().collect();
+    let quote_line = lines
+        .iter()
+        .find(|l| l.trim_start().starts_with("\"ВЫБРАТЬ"))
+        .expect("formatter dropped the literal");
+    let pipe_line =
+        lines.iter().find(|l| l.trim_start().starts_with("|")).expect("missing `|` continuation");
+    // body of `Процедура Т()` = 1 TAB. Continuation per #std444 = body + 1.
+    assert!(
+        quote_line.starts_with("\t\t") && !quote_line.starts_with("\t\t\t"),
+        "opening `\"` must sit at body+1 (#std444 п. 3.1); got {:?}",
+        quote_line
+    );
+    // The `|` lines must align column-wise with the opening `"` — same
+    // indent prefix, since #std444 п. 3.1 example shows them stacked.
+    assert!(
+        pipe_line.starts_with("\t\t|") && !pipe_line.starts_with("\t\t\t"),
+        "`|` continuation must align with opening `\"`; got {:?}",
+        pipe_line
+    );
+}
+
+#[test]
+fn regression_multiline_literal_after_plus_continuation_reindented() {
+    // BSL vendor standard #std444 пункт 3.3 — при склеивании длинных
+    // строк `+` ставится в конце предыдущей строки, а следующий литерал
+    // на стандартном отступе:
+    //
+    //     ТекстЗапроса = ТекстЗапроса +
+    //         "ВЫБРАТЬ
+    //         |   ...";
+    //
+    // Источник: https://its.1c.ru/db/v8std#content:444 (#std444 п. 3.3).
+    //
+    // Триггерится тем же предикатом, что и `=`-вариант:
+    // `prev_kind == PLUS` входит в whitelist рядом с `EQ`.
+    let input = "Процедура Т()\n А = Б +\n \"ВЫБРАТЬ\n |X\";\nКонецПроцедуры\n";
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let output = format_file(&root, &config).text;
+
+    let lines: Vec<&str> = output.lines().collect();
+    let quote_line = lines
+        .iter()
+        .find(|l| l.trim_start().starts_with("\"ВЫБРАТЬ"))
+        .expect("formatter dropped the literal");
+    let pipe_line =
+        lines.iter().find(|l| l.trim_start().starts_with("|")).expect("missing `|` continuation");
+    assert!(
+        quote_line.starts_with("\t\t") && !quote_line.starts_with("\t\t\t"),
+        "opening `\"` after `+\\n` must sit at body+1 (#std444 п. 3.3); got {:?}",
+        quote_line
+    );
+    assert!(
+        pipe_line.starts_with("\t\t|") && !pipe_line.starts_with("\t\t\t"),
+        "`|` continuation after `+\\n` must align with opening `\"`; got {:?}",
+        pipe_line
+    );
+}
+
+#[test]
+fn regression_multiline_literal_same_line_keeps_pipe_at_source_column() {
+    // Sibling guard for the literal re-indent rule: when the opening `"`
+    // sits on the SAME line as `=` (no preceding newline gap), the
+    // `decide_newline_gap` exception never fires, so the continuation
+    // re-indent must also stay out — `|` lines stay at whatever column
+    // the source put them. Otherwise the existing same-line idiom
+    //     А = "ВЫБРАТЬ
+    //     |...
+    // (pinned by `regression_multiline_string_literal_preserved`) would
+    // start to move sideways.
+    let input = "Процедура Т()\n\tА = \"ВЫБРАТЬ\n|X\";\nКонецПроцедуры\n";
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let output = format_file(&root, &config).text;
+
+    let pipe_line =
+        output.lines().find(|l| l.trim_start().starts_with("|")).expect("missing `|` continuation");
+    assert!(
+        pipe_line.starts_with("|"),
+        "`|` must stay at column 0 when literal opens on the same line as `=`; got {:?}",
+        pipe_line
+    );
+}
+
+#[test]
+fn regression_multiline_literal_as_call_arg_preserves_user_indent() {
+    // Companion to `regression_function_with_sdbl_query_real_world`: pins
+    // the *other* side of the rule. When a multi-line string literal is
+    // used as the *first* call argument on its own line, the leading
+    // whitespace is an intentional argument-continuation indent and must
+    // be preserved byte-for-byte. The assignment-RHS exception
+    // (`prev_kind == EQ`) must NOT fire here — `prev_kind == L_PAREN`
+    // falls through to `Preserve`.
+    //
+    // Uses a regular identifier (`Обработать`) rather than a BSL keyword
+    // like `Выполнить`; the latter parses as `KW_EXECUTE` + `PAREN_EXPR`
+    // rather than a real call, so it would not actually exercise the
+    // `ARG_LIST` continuation path this test is meant to pin.
+    let input = "Процедура Т()\n\tОбработать(\n\t\t\"ВЫБРАТЬ\n\t\t|*\n\t\t|ИЗ Таблица\");\nКонецПроцедуры\n";
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let output = format_file(&root, &config).text;
+
+    let quote_line = output
+        .lines()
+        .find(|l| l.trim_start().starts_with("\"ВЫБРАТЬ"))
+        .expect("formatter dropped the literal");
+    assert!(
+        quote_line.starts_with("\t\t"),
+        "user-authored argument indent must be preserved; got {:?}",
+        quote_line
+    );
+}
+
+#[test]
+fn regression_multiline_literal_as_second_call_arg_preserves_user_indent() {
+    // Same defensive pin as the previous test but for the `prev_kind ==
+    // COMMA` path: a multi-line literal that lands as the second (or any
+    // subsequent) argument of a call. Authored indent again denotes
+    // argument continuation; the `EQ`-only exception must keep its hands
+    // off.
+    let input = "Процедура Т()\n\tОбработать(Первый,\n\t\t\"ВЫБРАТЬ\n\t\t|*\n\t\t|ИЗ Таблица\");\nКонецПроцедуры\n";
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    let output = format_file(&root, &config).text;
+
+    let quote_line = output
+        .lines()
+        .find(|l| l.trim_start().starts_with("\"ВЫБРАТЬ"))
+        .expect("formatter dropped the literal");
+    assert!(
+        quote_line.starts_with("\t\t"),
+        "user-authored argument indent must be preserved across COMMA; got {:?}",
+        quote_line
+    );
+}
+
+#[test]
+fn regression_comment_spacing_normalized() {
+    // #std456 п. 7.3: «Между символами комментария `//` и началом
+    // комментария должен быть пробел». Source: https://its.1c.ru/db/v8std#content:456
+    //
+    // Applies to both standalone block comments and trailing inline
+    // comments — same lexer token, same normalization path. Comments
+    // that already have whitespace after `//` (one or many spaces, a
+    // tab) are left untouched: the user picked that spacing on purpose
+    // (e.g. for column-aligned end-of-line annotations).
+    check(
+        "//заголовок\nПроцедура Т()\n\tА = 1; //коммент\nКонецПроцедуры\n",
+        expect![[r#"
+            // заголовок
+            Процедура Т()
+            	А = 1; // коммент
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_comment_spacing_preserves_existing_whitespace() {
+    // Negative pin for the rule above: comments that already have any
+    // whitespace after `//` are not reformatted, even if the user used
+    // many spaces or a tab. Standard only requires the space to exist;
+    // anything beyond it is the user's call.
+    check(
+        "//   double-space\nПроцедура Т()\n\tА = 1; //\tafter-tab\nКонецПроцедуры\n",
+        expect![[r#"
+            //   double-space
+            Процедура Т()
+            	А = 1; //	after-tab
+            КонецПроцедуры
+        "#]],
+    );
+}
+
+#[test]
+fn regression_comment_spacing_empty_comment_untouched() {
+    // `//` alone (no body) must stay as `//`. The normalizer only inserts
+    // a space when there is a non-whitespace body character to separate.
+    check(
+        "//\nПроцедура Т()\nКонецПроцедуры\n",
+        expect![[r#"
+            //
+            Процедура Т()
+            КонецПроцедуры
         "#]],
     );
 }

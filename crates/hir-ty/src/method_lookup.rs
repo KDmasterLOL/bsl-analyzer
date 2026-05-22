@@ -30,11 +30,15 @@
 //!   with placeholder `name = "<Имя"` entries. Return types that arrive
 //!   as generics (`"СправочникОбъект"`) are rebound to
 //!   `Ty::MetadataRef { <kind>, <current mdo_name> }` there.
-//! - **`Ty::ManagerCollection(_)`** / **`Ty::Union(_)`** / primitives
-//!   (`Number`, `String`, `Boolean`, `Date`) — `None`. Collections only
-//!   expose iteration, unions wait for M4 narrowing, and primitives have
-//!   no instance methods in BSL (`СтрДлина`, `ДобавитьМесяц` are global
-//!   functions, not receiver methods).
+//! - **`Ty::Union(_)`** — dispatched per live branch (Undefined/Null
+//!   sentinels stripped); the FIRST successful branch's signature
+//!   wins for `params`/`overloads`, later branches only contribute to
+//!   the return-type union. See [`union_lookup`] for the cohesion
+//!   rule.
+//! - **`Ty::ManagerCollection(_)`** / primitives (`Number`, `String`,
+//!   `Boolean`, `Date`) — `None`. Collections only expose iteration,
+//!   primitives have no instance methods in BSL (`СтрДлина`,
+//!   `ДобавитьМесяц` are global functions, not receiver methods).
 //!
 //! User-written manager-module methods (`Документы.ПКО.СоздатьДокумент()`)
 //! are **not** in scope here — those land as `Expr::Call` of a
@@ -83,142 +87,188 @@ pub struct MethodInfo {
 ///   objects, unions, manager collectives);
 /// - the method name does not exist in the resolved table.
 pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo> {
-    // `Ty::ThisObject` is coerced to its matching `*Object`
-    // `Ty::MetadataRef` at adapter entry — see [`crate::this_object`].
-    // The coercion lands on `MetadataRef { *Object, .. }`, which is then
-    // picked up by the `platform_manager_lookup` branch below.
+    // `Ty::ThisObject` and `Ty::ThisManager` are coerced to dispatch-
+    // ready receivers at adapter entry — `ThisObject` → `MetadataRef
+    // { *Object, .. }` (hits the metadata-ref branch); `ThisManager`
+    // → `ObjectManager { .. }` (hits the manager branch). See
+    // [`crate::this_object`].
     let coerced = crate::this_object::coerce_to_metadata_ref(receiver_ty);
     let receiver_ty = coerced.as_ref().unwrap_or(receiver_ty);
 
-    // Route manager / metadata-ref receivers through the dedicated
-    // platform-manager adapter — platform data indexes them with
-    // composite `type_name` (`"CatalogManager.<Имя>"`) and
-    // placeholder per-method `name`, so the scalar `get_method` path
-    // below never hits. Workspace `ManagerModule.bsl` overrides win
-    // via `Resolver::resolve_three_level_method` at the 3-segment
-    // call site in `infer.rs` — this fallback only runs through
-    // `Expr::MethodCall` / aliased-manager shapes, where there is no
-    // CFE resolver to consult.
-    // `Ty::Union` receivers are the common "happy path + Неопределено"
-    // shape from platform return types (e.g. `Запрос.Выполнить()` →
-    // `Ty::Union([QueryResult, Undefined])`). Strip `Undefined` / `Null`
-    // sentinels (they have no instance methods) and dispatch on each
-    // remaining branch; the caller sees a unioned return type so chained
-    // calls like `Запрос.Выполнить().Выгрузить()` resolve without waiting
-    // for M4 full narrowing.
     if let Ty::Union(members) = receiver_ty {
-        let live: Vec<&Ty> =
-            members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
-        let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
-        // `params` and `overloads` MUST come from the same branch — if
-        // we let `params` win on the first hit and `overloads` on the
-        // second, callers would type-check args against overloads from
-        // a receiver shape that the chosen `params` does not represent.
-        // Cohesion rule: bind the FIRST successful branch's signature
-        // wholesale and ignore later branches' signatures (only their
-        // return types contribute to the union).
-        let mut chosen_signature: Option<(Vec<Ty>, Vec<Vec<Ty>>)> = None;
-        let mut hit_any = false;
-        for m in live {
-            if let Some(info) = lookup_method(m, method_name) {
-                hit_any = true;
-                returns.push(info.return_ty);
-                if chosen_signature.is_none() {
-                    chosen_signature = Some((info.params, info.overloads));
-                }
-            }
-        }
-        let (params, overloads) = chosen_signature.unwrap_or_default();
-        return hit_any.then(|| MethodInfo { return_ty: Ty::union(returns), params, overloads });
+        return union_lookup(members, method_name);
     }
 
     match receiver_ty {
-        Ty::ObjectManager { kind, name } => {
-            if let Some(res) = crate::platform_manager_lookup::resolve_platform_manager_method(
-                *kind,
-                name,
-                method_name,
-            ) {
-                return Some(MethodInfo {
-                    return_ty: res.return_ty,
-                    params: res.signature.params.to_vec(),
-                    overloads: res.overloads,
-                });
-            }
-            return None;
-        }
-        Ty::MetadataRef { kind, name } => {
-            // TabularSection has a flat `type_name = "Tabular section"` in
-            // platform_data — no `"Prefix.<MDO>"` shape — so it cannot be
-            // served by `platform_manager_lookup::find_prefixed_method`
-            // (which requires a dot-separated prefix). Route directly to
-            // the bilingual scalar index and rebind the generic
-            // `"Строка табличной части"` return to a row receiver so the
-            // chain `ТЧ.Добавить().Атрибут` continues resolving via
-            // `field_lookup::lookup_on_tabular_row`.
-            if let MetadataKind::TabularSection { parent } = *kind {
-                let method =
-                    PlatformData::instance().get_method("Tabular section", method_name.as_str())?;
-                return Some(build_tabular_section_method_info(method, parent, name));
-            }
-            if let Some(res) = crate::platform_manager_lookup::resolve_platform_metadata_ref_method(
-                *kind,
-                name,
-                method_name,
-            ) {
-                return Some(MethodInfo {
-                    return_ty: res.return_ty,
-                    params: res.signature.params.to_vec(),
-                    overloads: res.overloads,
-                });
-            }
-            // Scalar platform key fallback: synthetic kinds (e.g.
-            // `RegisterFilter`) wrap an existing scalar `type_name`
-            // (`"Filter"`) whose methods live under a flat HBK row, not a
-            // composite prefix. Route the lookup through the bilingual
-            // scalar index so e.g. `<recordSet>.Отбор.Сбросить()` resolves.
-            if let Some(scalar_key) = kind.scalar_platform_key() {
-                if let Some(method) =
-                    PlatformData::instance().get_method(scalar_key, method_name.as_str())
-                {
-                    return Some(to_method_info(method));
-                }
-            }
-            // MetadataRef flavours without a platform surface (register
-            // dimensions, the bare `TabularSectionRow` row receiver) fall
-            // through `None`. Row methods do not exist in HBK data —
-            // `Удалить(Индекс)` and friends are methods on the section,
-            // not on rows.
-            return None;
-        }
-        // Form-control receivers walk the platform-type chain
-        // `[base, extension?]` reversed: kind-specific extension
-        // methods (e.g. `<UsualGroup>.Скрыть()` from "Расширение
-        // группы формы для обычной группы") override the shared base
-        // `ГруппаФормы` table. Single-entry chains (Field/Button/etc.)
-        // reduce to one `get_method` call. `Other` chain is empty →
-        // immediate `None`.
-        Ty::FormControl { kind, .. } => {
-            let data = PlatformData::instance();
-            for type_name in hir_def::ty::form_control_platform_type_chain(*kind).iter().rev() {
-                if let Some(method) = data.get_method(type_name, method_name.as_str()) {
-                    return Some(to_method_info(method));
-                }
-            }
-            return None;
-        }
-        _ => {}
+        Ty::ObjectManager { kind, name } => lookup_on_object_manager(*kind, name, method_name),
+        Ty::MetadataRef { kind, name } => lookup_on_metadata_ref(*kind, name, method_name),
+        Ty::FormControl { kind, .. } => lookup_on_form_control(*kind, method_name),
+        _ => lookup_scalar_receiver(receiver_ty, method_name),
     }
+}
 
+/// Resolve a method on any receiver served by the bilingual scalar
+/// `PlatformData::get_method` index.
+///
+/// Covers `Ty::PlatformObject`, `Ty::Array`, `Ty::TypedArray`,
+/// `Ty::Map`, `Ty::Structure`, `Ty::ValueTable`, `Ty::ValueList`,
+/// `Ty::Type`, and `Ty::FormData` — everything that
+/// [`platform_type_key`] resolves to a single English type-name key.
+///
+/// Post-step: for `Ty::FormData { kind: Collection, .. }`, the generic
+/// `ДанныеФормыЭлементКоллекции` return is rewritten to the document /
+/// catalog row receiver so the chain
+/// `<коллекция>.Получить(0).Атрибут` continues resolving via
+/// `field_lookup::lookup_on_tabular_row`.
+fn lookup_scalar_receiver(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo> {
     let type_key = platform_type_key(receiver_ty)?;
-    let data = PlatformData::instance();
-    let method = data.get_method(type_key, method_name.as_str())?;
+    let method = PlatformData::instance().get_method(type_key, method_name.as_str())?;
     let mut info = to_method_info(method);
     if let Some(row) = form_data_collection_row_ty(receiver_ty) {
         info.return_ty =
             rewrite_form_data_collection_item_return(info.return_ty, &row, method.name.as_str());
     }
     Some(info)
+}
+
+/// Resolve a method on a [`Ty::ObjectManager`] receiver.
+///
+/// Platform-data indexes managers with composite `type_name`
+/// (`"CatalogManager.<Имя>"`) and placeholder per-method `name`, so the
+/// scalar `get_method` path never hits. Routed through
+/// [`crate::platform_manager_lookup::resolve_platform_manager_method`].
+///
+/// Workspace `ManagerModule.bsl` overrides win earlier via
+/// `Resolver::resolve_three_level_method` at the 3-segment call site
+/// in `infer.rs` — this fallback runs only through `Expr::MethodCall`
+/// / aliased-manager shapes, where there is no CFE resolver to
+/// consult.
+fn lookup_on_object_manager(
+    mdo_type: MdoType,
+    name: &Name,
+    method_name: &Name,
+) -> Option<MethodInfo> {
+    let res = crate::platform_manager_lookup::resolve_platform_manager_method(
+        mdo_type,
+        name,
+        method_name,
+    )?;
+    Some(MethodInfo {
+        return_ty: res.return_ty,
+        params: res.signature.params.to_vec(),
+        overloads: res.overloads,
+    })
+}
+
+/// Resolve a method on a [`Ty::MetadataRef`] receiver.
+///
+/// Three layered dispatch paths in priority order:
+///
+/// 1. **TabularSection** — flat `type_name = "Tabular section"` in
+///    platform_data has no `"Prefix.<MDO>"` shape, so it cannot be
+///    served by `platform_manager_lookup::find_prefixed_method` (which
+///    requires a dot-separated prefix). Route directly to the
+///    bilingual scalar index and rebind the generic
+///    `"Строка табличной части"` return to a row receiver so
+///    `ТЧ.Добавить().Атрибут` continues resolving via
+///    `field_lookup::lookup_on_tabular_row`.
+/// 2. **Composite metadata-ref** — object/ref flavours
+///    (`CatalogObject`, `CatalogRef`, …) go through
+///    [`crate::platform_manager_lookup::resolve_platform_metadata_ref_method`].
+/// 3. **Scalar key fallback** — synthetic kinds (e.g. `RegisterFilter`)
+///    wrap an existing scalar `type_name` (`"Filter"`) whose methods
+///    live under a flat HBK row, not a composite prefix. Route through
+///    the bilingual scalar index so e.g. `<recordSet>.Отбор.Сбросить()`
+///    resolves.
+///
+/// MetadataRef flavours without a platform surface (register
+/// dimensions, the bare `TabularSectionRow` row receiver) fall through
+/// `None`. Row methods do not exist in HBK data — `Удалить(Индекс)` and
+/// friends are methods on the section, not on rows.
+fn lookup_on_metadata_ref(
+    kind: MetadataKind,
+    name: &Name,
+    method_name: &Name,
+) -> Option<MethodInfo> {
+    if let MetadataKind::TabularSection { parent } = kind {
+        let method =
+            PlatformData::instance().get_method("Tabular section", method_name.as_str())?;
+        return Some(build_tabular_section_method_info(method, parent, name));
+    }
+    if let Some(res) = crate::platform_manager_lookup::resolve_platform_metadata_ref_method(
+        kind,
+        name,
+        method_name,
+    ) {
+        return Some(MethodInfo {
+            return_ty: res.return_ty,
+            params: res.signature.params.to_vec(),
+            overloads: res.overloads,
+        });
+    }
+    if let Some(scalar_key) = kind.scalar_platform_key() {
+        if let Some(method) = PlatformData::instance().get_method(scalar_key, method_name.as_str())
+        {
+            return Some(to_method_info(method));
+        }
+    }
+    None
+}
+
+/// Resolve a method on a [`Ty::FormControl`] receiver.
+///
+/// Walks the platform-type chain `[base, extension?]` in reverse:
+/// kind-specific extension methods (e.g. `<UsualGroup>.Скрыть()` from
+/// "Расширение группы формы для обычной группы") override the shared
+/// base `ГруппаФормы` table. Single-entry chains (Field/Button/etc.)
+/// reduce to one `get_method` call. `Other` chain is empty → immediate
+/// `None`.
+fn lookup_on_form_control(
+    kind: hir_def::ty::FormElementKind,
+    method_name: &Name,
+) -> Option<MethodInfo> {
+    let data = PlatformData::instance();
+    for type_name in hir_def::ty::form_control_platform_type_chain(kind).iter().rev() {
+        if let Some(method) = data.get_method(type_name, method_name.as_str()) {
+            return Some(to_method_info(method));
+        }
+    }
+    None
+}
+
+/// Dispatch method lookup across a [`Ty::Union`] receiver.
+///
+/// `Ty::Union` receivers are the common "happy path + Неопределено"
+/// shape from platform return types (e.g. `Запрос.Выполнить()` →
+/// `Ty::Union([QueryResult, Undefined])`). `Undefined` / `Null`
+/// sentinels are stripped (they have no instance methods); the caller
+/// sees a unioned return type so chained calls like
+/// `Запрос.Выполнить().Выгрузить()` resolve without waiting for M4
+/// full narrowing.
+///
+/// **Cohesion rule:** `params` and `overloads` MUST come from the SAME
+/// branch. If `params` won on the first hit and `overloads` on a later
+/// one, callers would type-check args against overloads belonging to a
+/// receiver shape that the chosen `params` does not represent. The
+/// FIRST successful branch's signature is bound wholesale; later
+/// branches only contribute to the return-type union.
+fn union_lookup(members: &[Ty], method_name: &Name) -> Option<MethodInfo> {
+    let live: Vec<&Ty> =
+        members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
+    let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
+    let mut chosen_signature: Option<(Vec<Ty>, Vec<Vec<Ty>>)> = None;
+    let mut hit_any = false;
+    for m in live {
+        if let Some(info) = lookup_method(m, method_name) {
+            hit_any = true;
+            returns.push(info.return_ty);
+            if chosen_signature.is_none() {
+                chosen_signature = Some((info.params, info.overloads));
+            }
+        }
+    }
+    let (params, overloads) = chosen_signature.unwrap_or_default();
+    hit_any.then(|| MethodInfo { return_ty: Ty::union(returns), params, overloads })
 }
 
 /// Pick the `PlatformData::get_method` key for a scalar receiver.
@@ -1144,6 +1194,58 @@ mod tests {
         use hir_def::ty::FormElementKind;
         let receiver = Ty::FormControl { kind: FormElementKind::Other, binding: None };
         assert!(lookup_method(&receiver, &Name::new("Скрыть")).is_none());
+    }
+
+    #[test]
+    fn method_lookup_union_two_live_branches_first_branch_signature_wins() {
+        // Cohesion rule in `union_lookup`: when MULTIPLE live branches
+        // resolve the same method, `params`/`overloads` MUST come from
+        // the FIRST successful branch only; later branches contribute
+        // their return types to the union but never overwrite the
+        // bound signature. Pins this guarantee with `Array | ValueTable`
+        // — both expose `Количество()` with `Ty::Number` return, so the
+        // union return stays `Ty::Number` and `params` is empty (both
+        // signatures match), but if the cohesion rule ever flips to
+        // "last wins", a future overload divergence between Array and
+        // ValueTable would silently re-bind callers' arg-checks.
+        let u = Ty::union(vec![Ty::Array, Ty::ValueTable]);
+        let info = lookup_method(&u, &Name::new("Количество"))
+            .expect("Union(Array, ValueTable).Количество must resolve through both branches");
+        assert_eq!(info.return_ty, Ty::Number, "Количество returns Число on both branches");
+        // Cohesion sanity: a single signature was bound — neither
+        // params nor overloads were merged across branches.
+        assert!(
+            info.overloads.is_empty(),
+            "cohesion: overloads must NOT be merged across union branches, got {:?}",
+            info.overloads,
+        );
+    }
+
+    #[test]
+    fn method_lookup_form_data_collection_get_rewrites_item_return_to_row() {
+        // Pin for the `form_data_collection_row_ty` + return-rewrite
+        // post-step inside [`lookup_scalar_receiver`].
+        //
+        // `Ty::FormData { kind: Collection, underlying:
+        // Some((Document, "Док.Товары")) }` has its platform key
+        // resolved to "ДанныеФормыКоллекция", whose `Получить` method
+        // returns generic `ДанныеФормыЭлементКоллекции`. The post-step
+        // must rebind that return to the document's tabular-section
+        // row receiver, so the chain `<коллекция>.Получить(0).Атрибут`
+        // resolves via `field_lookup::lookup_on_tabular_row`.
+        let receiver = Ty::FormData {
+            kind: hir_def::ty::FormDataKind::Collection,
+            underlying: Some((MdoType::Document, Name::new("Док.Товары"))),
+        };
+        let info = lookup_method(&receiver, &Name::new("Получить"))
+            .expect("FormDataCollection.Получить must resolve in platform data");
+        match info.return_ty {
+            Ty::MetadataRef {
+                kind: MetadataKind::TabularSectionRow { parent: MdoType::Document },
+                name,
+            } => assert_eq!(name.as_str(), "Док.Товары"),
+            other => panic!("expected TabularSectionRow{{Document}} rewrite, got {other:?}"),
+        }
     }
 
     #[test]

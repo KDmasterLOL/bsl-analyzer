@@ -635,6 +635,190 @@ fn completion_after_dot_on_local_from_pure_self_recursion_yields_no_items() {
     );
 }
 
+// ---------- Structure key tracking (NOT YET IMPLEMENTED) ----------
+
+#[test]
+#[ignore = "Structure key tracking not implemented — Ty::Structure has no payload \
+            for known keys; constructor literal `Новый Структура(\"k1, k2\")` and \
+            `.Вставить(\"k3\")` mutations are not propagated. Tech-debt pin."]
+fn completion_after_dot_on_structure_returned_from_fn_lists_keys_and_methods() {
+    // Желаемое поведение: при `Стр.|`, где `Стр` приходит из функции,
+    // которая собирает `Новый Структура("Таймаут, Адрес")` плюс
+    // `.Вставить("Шифрование")`, completion должно показать и ключи
+    // (Таймаут / Адрес / Шифрование), и собственные методы Структуры
+    // (Вставить / Свойство / Количество / Удалить / Очистить).
+    //
+    // Сейчас ключи теряются — `Ty::Structure` не несёт информации о
+    // populated keys. Этот pin фиксирует функциональный пробел.
+    let items = complete(
+        r#"//- /test.bsl
+Функция ПараметрыСоединения()
+    Пар = Новый Структура("Таймаут, Адрес");
+    Пар.Вставить("Шифрование");
+    Возврат Пар;
+КонецФункции
+
+Процедура Тест()
+    Стр = ПараметрыСоединения();
+    Стр.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for method in ["Вставить", "Свойство", "Количество", "Удалить", "Очистить"]
+    {
+        assert!(
+            has_label(&items, method),
+            "Structure method `{method}` must be offered; got: {ls:?}"
+        );
+    }
+    for key in ["Таймаут", "Адрес", "Шифрование"] {
+        assert!(
+            has_label(&items, key),
+            "Structure key `{key}` must be offered alongside methods; got: {ls:?}"
+        );
+    }
+}
+
+// ---------- ValueTable column tracking (NOT YET IMPLEMENTED) ----------
+
+#[test]
+#[ignore = "ValueTable column tracking not implemented — Ty::ValueTable has no \
+            payload for declared columns; `Колонки.Добавить(\"Имя\", …)` mutations \
+            are not propagated to row receivers in `Для Каждого … Из ТЗ`. \
+            Tech-debt pin (same shape as Structure key tracking)."]
+fn completion_after_for_each_row_lists_declared_columns() {
+    // Желаемое поведение: внутри `Для Каждого Стр Из ТЗ Цикл` после
+    // `Колонки.Добавить("Артикул", …)` / `.Добавить("Цена", …)`,
+    // completion на `Стр.|` должен показать имена колонок
+    // (`Артикул`, `Цена`) рядом с собственными методами строки
+    // (`Владелец`, `Получить`, `НомерСтроки`).
+    //
+    // Сейчас имена колонок теряются — `Ty::ValueTable` не несёт
+    // declared-columns; row receiver выходит на платформенный
+    // fallback и видит только generic-методы.
+    let items = complete(
+        r#"//- /test.bsl
+Функция СоздатьТаблицу()
+    ТЗ = Новый ТаблицаЗначений;
+    ТЗ.Колонки.Добавить("Артикул");
+    ТЗ.Колонки.Добавить("Цена");
+    Возврат ТЗ;
+КонецФункции
+
+Процедура Тест()
+    ТЗ = СоздатьТаблицу();
+    Для Каждого Стр Из ТЗ Цикл
+        Стр.$0
+    КонецЦикла;
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for column in ["Артикул", "Цена"] {
+        assert!(
+            has_label(&items, column),
+            "declared column `{column}` must be offered on row receiver; got: {ls:?}"
+        );
+    }
+    // Sanity: row's own platform methods/properties still present.
+    for member in ["Владелец", "НомерСтроки"] {
+        assert!(
+            has_label(&items, member),
+            "row platform member `{member}` must remain alongside columns; got: {ls:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "ValueTable column tracking not implemented — `ТЗ.Колонки.|` should \
+            surface declared column names alongside ValueTableColumnCollection \
+            methods. Tech-debt pin."]
+fn completion_after_dot_on_columns_lists_declared_column_names() {
+    // Желаемое поведение: `ТЗ.Колонки.|` должен показать и методы
+    // коллекции колонок (`Добавить`, `Найти`, `Количество`), и имена
+    // уже добавленных колонок как индексаторы по имени.
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест()
+    ТЗ = Новый ТаблицаЗначений;
+    ТЗ.Колонки.Добавить("Артикул");
+    ТЗ.Колонки.Добавить("Цена");
+    ТЗ.Колонки.$0
+КонецПроцедуры
+"#,
+    );
+
+    let ls = labels(&items);
+    for method in ["Добавить", "Найти", "Количество"] {
+        assert!(
+            has_label(&items, method),
+            "ColumnCollection method `{method}` must be offered; got: {ls:?}"
+        );
+    }
+    for column in ["Артикул", "Цена"] {
+        assert!(
+            has_label(&items, column),
+            "declared column name `{column}` must be offered on .Колонки; got: {ls:?}"
+        );
+    }
+}
+
+// ---------- composite: Structure key → ValueTable → row columns ----------
+
+#[test]
+#[ignore = "Composite payload tracking not implemented — requires Structure \
+            key→value-type propagation AND ValueTable column tracking AND \
+            cross-receiver iteration. Tech-debt pin (depends on both \
+            Structure key and ValueTable column tracking pins)."]
+fn completion_for_each_row_from_chained_structure_key_value_table() {
+    // Желаемое поведение (композиция трёх фич):
+    //
+    // 1. `Новый Структура("Таб", Новый ТаблицаЗначений())` —
+    //    ключ "Таб" связывается со значением типа `Ty::ValueTable`
+    //    (второй позиционный аргумент — выражение).
+    // 2. Cascade typing доводит тип возврата `Тест2()` через
+    //    `materialise_signature_enriched` (Phase O.11).
+    // 3. `Тест2().Таб` разрешается через Structure-key payload →
+    //    `Ty::ValueTable` (с колонками из `.Колонки.Добавить`).
+    // 4. `Для Каждого Стр Из <ValueTable>` даёт row receiver с
+    //    типизированными колонками — на `Стр.|` ожидаем имена
+    //    колонок (плюс платформенные row-fallback методы).
+    //
+    // Колонки определены через
+    // `Колонки.Добавить(Имя: Строка, Тип: ОписаниеТипов, …)` —
+    // см. platform_data.json. Колонка `Артикул : Строка` должна
+    // быть видна по имени; имея payload типа, в идеале и hover
+    // покажет `: Строка`, но этот пин проверяет только наличие
+    // имени в completion.
+    let items = complete(
+        r#"//- /test.bsl
+Функция Тест2()
+    ТЗ = Новый ТаблицаЗначений;
+    ТЗ.Колонки.Добавить("Артикул", Новый ОписаниеТипов("Строка"));
+    ТЗ.Колонки.Добавить("Цена", Новый ОписаниеТипов("Число"));
+    Возврат Новый Структура("Таб", ТЗ);
+КонецФункции
+
+Функция Тест()
+    Для Каждого Стр Из Тест2().Таб Цикл
+        Стр.$0
+    КонецЦикла;
+КонецФункции
+"#,
+    );
+
+    let ls = labels(&items);
+    for column in ["Артикул", "Цена"] {
+        assert!(
+            has_label(&items, column),
+            "column `{column}` must propagate Structure-key → ValueTable → row; got: {ls:?}"
+        );
+    }
+}
+
 // ---------- chained dot through ValueTable.Колонки ----------
 
 #[test]

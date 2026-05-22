@@ -1119,8 +1119,13 @@ impl Ty {
             // member-by-member rendering lives on the [`TyDisplay`]
             // wrapper accessed via [`Self::display`], so callers that
             // need "Число | Строка" use `format!("{}", ty.display(locale))`
-            // while APIs that only need a `&str` tag stay cheap.
-            (Ty::Union(_), _) => "Union",
+            // while APIs that only need a `&str` tag stay cheap. The
+            // RU label `"Составной"` matches the 1С synth-help term
+            // ("Составной тип"); EN stays as `"Union"` because
+            // `canonical_name()` delegates here and is the stable
+            // machine name for platform lookups, logs, and tests.
+            (Ty::Union(_), Locale::Ru) => "Составной",
+            (Ty::Union(_), Locale::En) => "Union",
         }
     }
 
@@ -1657,10 +1662,22 @@ mod tests {
 
     #[test]
     fn ty_union_display_name_is_coarse_label() {
+        use base_db::Locale;
         // `canonical_name()` stays as a cheap `&str` tag; nuanced rendering
         // goes through `Ty::display(locale)`. Matches the MetadataRef /
         // ObjectManager pattern.
-        assert_eq!(Ty::union(vec![Ty::Number, Ty::String]).canonical_name(), "Union");
+        let u = Ty::union(vec![Ty::Number, Ty::String]);
+        assert_eq!(u.canonical_name(), "Union");
+        assert_eq!(
+            u.display_name(Locale::Ru),
+            "Составной",
+            "Ru coarse label must match the 1С `Составной тип` term"
+        );
+        assert_eq!(
+            u.display_name(Locale::En),
+            "Union",
+            "En label stays as the canonical machine name `Union` (delegated by canonical_name)"
+        );
     }
 
     #[test]

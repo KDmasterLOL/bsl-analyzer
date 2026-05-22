@@ -15,11 +15,18 @@
 //!     the leading BOM-only prefix and the trailing newline are first-class.
 //!   * Multi-line / concatenated string literals (Rowan `LITERAL` nodes
 //!     containing `STRING_*` tokens) coalesce into a **single** [`Atom`];
-//!     their internal whitespace is preserved by construction.
+//!     their internal whitespace is preserved by construction *unless* the
+//!     preceding gap got a [`GapDecision::NewlineWithIndent`] decision, in
+//!     which case `render_full` re-indents `|`-continuation lines to match
+//!     the new opening-quote column (#std444 п. 3.1). Compensating edits
+//!     for those rewrites flow through the same `edits` list as gap edits.
 //!   * Comments are emitted as standalone atoms — their same-line-ness is
-//!     a property of the surrounding gap, not the atom itself.
+//!     a property of the surrounding gap, not the atom itself. Comment
+//!     bodies may also be rewritten (`//foo` → `// foo`, #std456 п. 7.3);
+//!     those rewrites are tracked via [`Ir::atom_edits`] at build time.
 //!   * Only the policy layer reads [`SyntaxKind`] to make spacing
-//!     decisions; the builder is policy-free.
+//!     decisions; the builder is policy-free apart from the two
+//!     standard-driven content normalizations noted above.
 
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize, WalkEvent};
 
@@ -71,6 +78,10 @@ pub struct Ir {
     /// query ancestry (statement boundaries, block depth) without
     /// embedding policy-relevant fields in `Atom` itself.
     pub atom_nodes: Vec<SyntaxNode>,
+    /// Edits that replace bytes *inside* an atom's source range (currently
+    /// only used to normalize `//foo` → `// foo` per #std456 п. 7.3).
+    /// Merged with gap edits by `render_full` so edit-path parity holds.
+    pub atom_edits: Vec<GapEdit>,
 }
 
 impl Ir {
@@ -79,6 +90,7 @@ impl Ir {
         let mut atoms: Vec<Atom> = Vec::new();
         let mut gaps: Vec<Gap> = Vec::new();
         let mut atom_nodes: Vec<SyntaxNode> = Vec::new();
+        let mut atom_edits: Vec<GapEdit> = Vec::new();
 
         // Pending whitespace accumulator between two atoms.
         let mut pending_text = String::new();
@@ -135,7 +147,23 @@ impl Ir {
                         let (text, stripped_suffix) = if kind == SyntaxKind::COMMENT {
                             let raw = token.text();
                             let trimmed = raw.trim_end_matches('\r');
-                            (trimmed.to_string(), &raw[trimmed.len()..])
+                            let normalized = normalize_comment_spacing(trimmed);
+                            let suffix = &raw[trimmed.len()..];
+                            // #std456 п. 7.3: a space must separate `//`
+                            // from the comment body. If we inserted one,
+                            // emit a compensating atom-level edit so the
+                            // edit-path stays in lock-step with the render
+                            // output. The edit covers the comment's source
+                            // bytes minus the trailing `\r` (which lives
+                            // in the next gap, see CRLF note below).
+                            if normalized != trimmed {
+                                let effective_end = tok_range.end() - TextSize::of(suffix);
+                                atom_edits.push(GapEdit {
+                                    range: TextRange::new(tok_range.start(), effective_end),
+                                    new_text: normalized.clone(),
+                                });
+                            }
+                            (normalized, suffix)
                         } else {
                             (token.text().to_string(), "")
                         };
@@ -171,8 +199,62 @@ impl Ir {
         );
         assert_eq!(atoms.len(), atom_nodes.len(), "atom_nodes must align with atoms");
 
-        Ir { atoms, gaps, atom_nodes }
+        Ir { atoms, gaps, atom_nodes, atom_edits }
     }
+}
+
+/// Rewrites the leading whitespace of every `|`-continuation line inside a
+/// multi-line string literal to `target_indent`. The opening line (before
+/// the first `\n`) and any line whose first non-whitespace char is not `|`
+/// are left untouched.
+///
+/// Per #std444 п. 3.1, the `|` markers align with the opening `"` — i.e.
+/// at the same indent the formatter placed the literal on (the
+/// `final_level` of the preceding `NewlineWithIndent` gap decision).
+///
+/// Whitespace-only lines (no `|` marker) inside the literal are also
+/// preserved verbatim — `trim_trailing_whitespace` operates on gaps, not
+/// on atom internals, so any source-authored blank inside a query body
+/// keeps the bytes the user typed. This is intentional: a blank line in
+/// SDBL is rare and almost always meaningful (visual separator), and
+/// touching it would mean overstepping the literal-content invariant.
+fn reindent_literal_continuation_lines(text: &str, target_indent: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut iter = text.split('\n');
+    if let Some(first) = iter.next() {
+        out.push_str(first);
+    }
+    for line in iter {
+        out.push('\n');
+        let content_start = line
+            .char_indices()
+            .find_map(|(i, c)| (!c.is_whitespace()).then_some(i))
+            .unwrap_or(line.len());
+        if line.as_bytes().get(content_start) == Some(&b'|') {
+            out.push_str(target_indent);
+            out.push_str(&line[content_start..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Normalizes leading whitespace inside a `//` comment per #std456 п. 7.3
+/// (`v8std/docs/std/456.md` — между `//` и началом комментария должен
+/// быть пробел): inserts exactly one space if the body starts with a
+/// non-whitespace character. Comments that already have ANY whitespace
+/// after `//` (one space, many spaces, a tab) are left untouched — the
+/// user's spacing intent is respected.
+fn normalize_comment_spacing(raw: &str) -> String {
+    let Some(rest) = raw.strip_prefix("//") else { return raw.to_string() };
+    if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+        return raw.to_string();
+    }
+    let mut s = String::with_capacity(raw.len() + 1);
+    s.push_str("// ");
+    s.push_str(rest);
+    s
 }
 
 /// A `LITERAL` node whose children include any string-flavored token. Such
@@ -265,6 +347,48 @@ fn decide_newline_gap(ir: &Ir, gap_index: usize, gap_text: &str) -> GapDecision 
     // newline is a user-authored continuation.
     let lca = lowest_common_ancestor(prev_node, next_node);
     if !is_statement_boundary_container(lca.kind()) {
+        // Vendor canon (1C Стандарт #std444 «Перенос выражений»):
+        //   п. 3.1 — длинная строковая константа после `=` на отдельной
+        //   строке стоит на «стандартном отступе» (body + 1);
+        //   п. 3.3 — то же после `+` в конце предыдущей строки.
+        // Источник: https://its.1c.ru/db/v8std#content:444
+        //
+        //     ТекстЗапроса =
+        //         "ВЫБРАТЬ
+        //         |   ...";
+        //
+        //     ТекстЗапроса = ТекстЗапроса +
+        //         "ВЫБРАТЬ
+        //         |   ...";
+        //
+        // Без этого исключения общая continuation-политика просто копирует
+        // авторскую whitespace (часто один пробел), и литерал «съезжает»
+        // влево от тела функции. Содержимое литерала между внешними `"`
+        // всё равно эмитится атомом LITERAL байт-в-байт; форматтер чинит
+        // только зазор перед открывающей кавычкой.
+        //
+        // Предикат держим узким:
+        //   * `prev_kind in (EQ, PLUS)` — RHS присваивания/сравнения и
+        //     конкатенация с `+` в конце строки;
+        //   * `next_kind == LITERAL` с `\n` внутри — коалесцированная
+        //     многострочка (см. `is_coalescing_literal`);
+        //   * `L_PAREN` / `COMMA` (отступ аргументов) и обычный `+`-перенос
+        //     перед однострочным литералом проходят мимо → Preserve.
+        let prev_kind = ir.atoms[gap_index - 1].kind;
+        let next_atom = &ir.atoms[gap_index];
+        let prev_anchors_multiline_literal = matches!(prev_kind, SyntaxKind::EQ | SyntaxKind::PLUS);
+        if prev_anchors_multiline_literal
+            && next_atom.kind == SyntaxKind::LITERAL
+            && next_atom.text.contains('\n')
+        {
+            let body_level = block_depth(&lca);
+            let newlines = count_newlines(gap_text);
+            return GapDecision::NewlineWithIndent {
+                newlines,
+                body_level,
+                final_level: body_level + 1,
+            };
+        }
         return GapDecision::Preserve;
     }
 
@@ -528,9 +652,46 @@ pub fn render_full(
         out.push_str(&rendered);
 
         if i < n_atoms {
-            out.push_str(&ir.atoms[i].text);
+            // #std444 пп. 3.1, 3.3: when the gap that precedes a multi-line
+            // string literal was re-indented (the `=` / `+` exception in
+            // `decide_newline_gap`), the `|` continuation lines inside the
+            // literal must align with the opening `"`. Source content is
+            // byte-preserved by the coalesced LITERAL atom, so we rewrite
+            // its text here at render time and emit a compensating atom
+            // edit. Untouched if the preceding gap was Preserve (literal
+            // on same line as `=`) — that case is already pinned by
+            // `regression_multiline_string_literal_preserved`.
+            let atom = &ir.atoms[i];
+            let needs_reindent = atom.kind == SyntaxKind::LITERAL
+                && atom.text.contains('\n')
+                && matches!(decisions[i], GapDecision::NewlineWithIndent { .. });
+            if needs_reindent {
+                if let GapDecision::NewlineWithIndent { final_level, .. } = decisions[i] {
+                    let target_indent = cfg.indent_for_level(final_level);
+                    let normalized =
+                        reindent_literal_continuation_lines(&atom.text, &target_indent);
+                    if normalized != atom.text {
+                        edits.push(GapEdit {
+                            range: ir.atom_nodes[i].text_range(),
+                            new_text: normalized.clone(),
+                        });
+                    }
+                    out.push_str(&normalized);
+                    continue;
+                }
+            }
+            out.push_str(&atom.text);
         }
     }
+
+    // Atom-level edits (currently only comment-spacing normalization) are
+    // already reflected in `out` via the modified `atom.text`. Surface
+    // them in the edit list too so consumers applying `edits` to the
+    // source reproduce the same output. Order edits by source start so
+    // `apply_edits`-style consumers can iterate left-to-right; gap and
+    // atom edits never overlap by construction.
+    edits.extend(ir.atom_edits.iter().cloned());
+    edits.sort_by_key(|e| e.range.start());
 
     (out, edits)
 }
@@ -631,7 +792,12 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_bom() {
-        let src = "\u{FEFF}//comment\nПерем А Экспорт;\n";
+        // Uses canonical `// comment` so the identity round-trip is not
+        // disturbed by the comment-spacing normalization that runs in
+        // `Ir::build` (see `normalize_comment_spacing`). Non-canonical
+        // input is, by design, no longer a round-trip case — it is
+        // expected to be modified.
+        let src = "\u{FEFF}// comment\nПерем А Экспорт;\n";
         assert_eq!(round_trip(src), src);
     }
 
