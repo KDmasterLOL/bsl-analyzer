@@ -14,6 +14,7 @@ hir-def = { path = "../hir-def" }
 base-db = { path = "../base-db" }
 bsl-metadata = { path = "../bsl-metadata" }
 bsl-platform = { path = "../bsl-platform" }
+sdbl-hir = { path = "../sdbl-hir" }
 syntax = { path = "../syntax" }
 intern = { path = "../intern" }
 stdx = { path = "../stdx" }
