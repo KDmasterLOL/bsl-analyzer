@@ -1447,6 +1447,30 @@ impl AstNode for SdblAsteriskField {
     }
 }
 
+impl SdblAsteriskField {
+    /// Identifier tokens preceding the trailing `*`, in source order.
+    ///
+    /// Parser grammar (`crates/parser/src/grammar/sdbl/select.rs:412`):
+    /// `asterisk-field := (identifier '.')* '*'`. The qualifier idents are
+    /// stored as direct token children of the node — DOT separators and
+    /// the final STAR are excluded.
+    ///
+    /// - Bare `*` → `[]`
+    /// - `Т.*` → `["Т"]`
+    /// - `Справочник.Товары.*` → `["Справочник", "Товары"]`
+    ///
+    /// Consumers (SDBL HIR lowering) join with `.` to match against
+    /// `TableRef::full_name` / `effective_name()`.
+    pub fn qualifier_parts(&self) -> Vec<String> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|t| t.kind() == SyntaxKind::IDENT)
+            .map(|t| t.text().to_string())
+            .collect()
+    }
+}
+
 /// SDBL FROM clause.
 #[derive(Debug, Clone)]
 pub struct SdblFromClause(SyntaxNode);

@@ -2943,3 +2943,32 @@ fn test_parse_table_name_keeps_soft_keyword_part_literal_kw() {
     );
     assert_eq!(table.parts[1].as_str(), "Истина");
 }
+
+#[test]
+fn asterisk_qualifier_lowers_bare_star_as_none() {
+    // Bare `*` carries no qualifier — `asterisk_qualifier == None`. The
+    // bridge interprets that as "expand every table in scope".
+    let hir = lower_query("ВЫБРАТЬ * ИЗ Справочник.Товары");
+    let field = &hir.select.fields[0];
+    assert!(field.is_asterisk);
+    assert_eq!(field.asterisk_qualifier, None);
+}
+
+#[test]
+fn asterisk_qualifier_lowers_aliased_star() {
+    // `Т.*` — qualifier is the single alias identifier, preserved
+    // case-exact. Bridge does case-insensitive matching against the
+    // table's `effective_name()`.
+    let hir = lower_query("ВЫБРАТЬ Т.* ИЗ Справочник.Товары КАК Т");
+    let field = &hir.select.fields[0];
+    assert!(field.is_asterisk);
+    assert_eq!(field.asterisk_qualifier.as_deref(), Some("Т"));
+}
+
+// Multi-segment qualifiers (e.g. `Справочник.Товары.*` without an alias)
+// are deliberately NOT recognised by the parser's
+// `is_asterisk_start` gate — they fall through to expression parsing
+// (see `crates/parser/src/grammar/sdbl/select.rs:383`). The bridge's
+// expand_asterisk supports multi-segment matches for forward-compat
+// if a future parser hand-off reaches `asterisk_field` directly, but
+// the end-to-end path from BSL source today is alias-only `Т.*`.

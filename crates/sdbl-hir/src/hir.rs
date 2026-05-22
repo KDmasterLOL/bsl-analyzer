@@ -132,6 +132,18 @@ pub struct FieldHir {
     /// Is this an asterisk field (* or Table.*).
     pub is_asterisk: bool,
 
+    /// Qualifier preceding the asterisk in `Т.*` / `Справочник.Товары.*`.
+    ///
+    /// Joined with `.` exactly as it appears in source — bridge consumers
+    /// compare case-insensitively against `TableRef::full_name` /
+    /// `effective_name()` to pick the originating table.
+    ///
+    /// - Non-asterisk fields → `None`
+    /// - Bare `*` → `None`
+    /// - `Т.*` → `Some("Т")`
+    /// - `Справочник.Товары.*` → `Some("Справочник.Товары")`
+    pub asterisk_qualifier: Option<String>,
+
     /// Range for diagnostic highlighting (trimmed, without trivia).
     /// For alias without AS: includes expression + alias identifier.
     /// For no alias: just the expression range.

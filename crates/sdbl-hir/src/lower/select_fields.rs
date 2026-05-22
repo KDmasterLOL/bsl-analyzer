@@ -110,6 +110,19 @@ impl LoweringContext {
 
         // Check for asterisk
         if field.is_asterisk() {
+            // Preserve the qualifier so the SDBL ↔ Ty bridge can expand
+            // `Т.*` against the originating table. Bare `*` yields None.
+            let asterisk_qualifier =
+                field.syntax().children().find_map(syntax::ast::SdblAsteriskField::cast).and_then(
+                    |node| {
+                        let parts = node.qualifier_parts();
+                        if parts.is_empty() {
+                            None
+                        } else {
+                            Some(parts.join("."))
+                        }
+                    },
+                );
             return FieldHir {
                 expr: ExprHir::Missing { range: field_range },
                 alias: None,
@@ -118,6 +131,7 @@ impl LoweringContext {
                 raw_name: None,
                 ty: SdblType::Unknown,
                 is_asterisk: true,
+                asterisk_qualifier,
                 diagnostic_range: field_range,
                 range: field_range,
             };
@@ -216,6 +230,7 @@ impl LoweringContext {
             raw_name,
             ty,
             is_asterisk: false,
+            asterisk_qualifier: None,
             diagnostic_range,
             range: field_range,
         }

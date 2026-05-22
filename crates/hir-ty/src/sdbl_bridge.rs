@@ -30,27 +30,43 @@
 //! | `TabularSectionRef { … }`     | `Ty::MetadataRef { TabularSection, name }`|
 //! | `Unknown` / `Error`           | `Ty::Unknown`                             |
 //!
+//! ## Asterisk expansion
+//!
+//! `FieldHir { is_asterisk: true }` is expanded against the originating
+//! `ResolvedTable::fields()`:
+//!
+//! - Bare `*` — expanded against every table in `SdblHir::all_tables()`
+//!   (FROM ∪ JOINs) in declaration order. Duplicate output names across
+//!   tables are deduped first-wins, mirroring `lookup_field`'s linear
+//!   scan.
+//! - `Т.*` (or `Справочник.Товары.*`) — the lowerer preserves the
+//!   qualifier in `FieldHir::asterisk_qualifier`; the bridge matches it
+//!   case-insensitively against `TableRef::effective_name()` / `full_name`
+//!   and expands the single matching table.
+//!
+//! Mixed `SELECT *, NamedField` produces a projection with the expanded
+//! asterisk first, followed by named fields, deduped by lowercased name
+//! (first occurrence wins). Dedup is bilingual when a `FieldDef`
+//! carries both a Russian and an English spelling — the dedup `seen` set
+//! receives both forms so a later named field that re-projects the
+//! English spelling of an asterisk-expanded Russian field is dropped.
+//!
+//! Asterisks against tables with no resolved metadata (parser-error FROM
+//! / unresolved temp tables) contribute no fields — they degrade the
+//! projection silently rather than emitting placeholder `Unknown`
+//! entries. Surfacing those unresolved sources as diagnostics is the
+//! responsibility of the `ide-diagnostics` / SDBL diagnostic layers,
+//! not the bridge: the bridge is a pure projection extractor and never
+//! emits its own warnings.
+//!
+//! Register virtual tables (`.Обороты(...)`, `.СрезПоследних(...)`) are
+//! pre-processed by the SDBL lowerer (`crates/sdbl-hir/src/lower/from_clause.rs`):
+//! the synthesised columns (`<Resource>Оборот`, etc.) land in
+//! `ResolvedTable::Register::fields` before the bridge runs, so the
+//! bridge expands them transparently without virtual-table-specific code.
+//!
 //! ## What the bridge does NOT do
 //!
-//! - **Asterisk expansion**. `FieldHir { is_asterisk: true }` is skipped
-//!   in projection extraction. Phase 1.2 expands `*` / `Т.*` against the
-//!   originating `ResolvedTable::fields` and re-runs the bridge over the
-//!   expanded set.
-//!
-//!   **Policy until then:** a `SELECT *` (or `SELECT Т.*`) query whose
-//!   field list contains *only* asterisks yields `None` from
-//!   [`query_to_projection`]. Inference hook callers (Phase 1.3) attach
-//!   `None` to the synthesised [`Ty::QueryResult`] / [`Ty::QueryResultSelection`]
-//!   in that case, which makes the receiver fall back to the platform
-//!   `РезультатЗапроса` / `ВыборкаИзРезультатаЗапроса` surface — same
-//!   behaviour the legacy `Ty::PlatformObject("…")` shape produces
-//!   today. No `UnresolvedField` regression on `Выборка.<Имя>` because
-//!   field lookup degrades to the platform table.
-//!
-//!   `SELECT *, NamedField` — mixed shapes — yields `Some(projection)`
-//!   carrying only `NamedField`, dropping the asterisk silently. That
-//!   matches the "best-effort projection" contract: the projection is
-//!   never wrong, only sometimes incomplete. Phase 1.2 fills the gap.
 //! - **Variable refinement / data-flow**. The bridge takes a lowered
 //!   `SdblPackage` as input; it does not trace `.Текст = "..."`
 //!   assignments. That lives in `hir-ty::query_text_dataflow` (Phase 2).
@@ -164,35 +180,92 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
 
 /// Extract a single SELECT query's projection.
 ///
-/// Walks the query's `SELECT` field list, skipping asterisk fields and
-/// parse-error fields. Returns `Some(projection)` when at least one
-/// bridge-able named field remains, `None` otherwise — callers attach
-/// a `None` projection to the receiver's [`Ty::QueryResult`] /
+/// Walks the query's `SELECT` field list, expanding asterisks against
+/// the originating `ResolvedTable::fields()` and bridging each named
+/// field's `SdblType` into a `Ty`. Returns `Some(projection)` when at
+/// least one bridge-able field remains, `None` otherwise — callers
+/// attach a `None` projection to the receiver's [`Ty::QueryResult`] /
 /// [`Ty::QueryResultSelection`] in that case.
 ///
-/// Field-name priority follows
+/// Field-name priority for named fields follows
 /// [`sdbl_hir::FieldHir::alias_or_name`]: alias > column name > raw
 /// name. Fields with no recoverable name are dropped.
-// TODO(Phase 1.2): expand `is_asterisk` fields against the originating
-// `ResolvedTable::fields` so `SELECT * FROM Catalog.X` produces a
-// projection over X's attributes instead of silently dropping the
-// asterisk.
+///
+/// Duplicate names (across asterisk expansions, across joined tables,
+/// or between an asterisk-expanded field and a named field that
+/// re-projects the same column) are deduped first-wins to mirror
+/// `lookup_field`'s linear scan order.
 pub fn query_to_projection(q: &sdbl_hir::SdblQuery) -> Option<Arc<SdblProjection>> {
-    let mut named_fields: Vec<(Name, Ty)> = Vec::with_capacity(q.hir.select.fields.len());
-    let mut shadows: Vec<SdblTypeShadow> = Vec::with_capacity(q.hir.select.fields.len());
+    // Capacity is a best-effort hint — asterisk expansion can grow the
+    // result well beyond `select.fields.len()`. Allocating up to the
+    // base length avoids over-reservation on the common no-asterisk path.
+    let initial_cap = q.hir.select.fields.len();
+    let mut named_fields: Vec<(Name, Ty)> = Vec::with_capacity(initial_cap);
+    let mut shadows: Vec<SdblTypeShadow> = Vec::with_capacity(initial_cap);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Seeds `seen` with every dedup key tied to this insertion so
+    // bilingual collisions and earlier asterisk expansions are caught
+    // first-wins. Returns whether the field was newly inserted.
+    let push_unique = |name: Name,
+                       alt_keys: &[&str],
+                       ty: Ty,
+                       shadow: SdblTypeShadow,
+                       named_fields: &mut Vec<(Name, Ty)>,
+                       shadows: &mut Vec<SdblTypeShadow>,
+                       seen: &mut std::collections::HashSet<String>|
+     -> bool {
+        let primary_key = name.as_str().to_lowercase();
+        if !seen.contains(&primary_key)
+            && !alt_keys.iter().any(|k| seen.contains(&k.to_lowercase()))
+        {
+            seen.insert(primary_key);
+            for k in alt_keys {
+                seen.insert(k.to_lowercase());
+            }
+            named_fields.push((name, ty));
+            shadows.push(shadow);
+            true
+        } else {
+            false
+        }
+    };
 
     for field in &q.hir.select.fields {
-        if field.is_asterisk || field.has_parse_error {
+        if field.has_parse_error {
+            continue;
+        }
+        if field.is_asterisk {
+            for (name, alt_en, ty, shadow) in
+                expand_asterisk(field.asterisk_qualifier.as_deref(), &q.hir)
+            {
+                let alt_keys: Vec<&str> = alt_en.as_deref().into_iter().collect();
+                push_unique(
+                    name,
+                    &alt_keys,
+                    ty,
+                    shadow,
+                    &mut named_fields,
+                    &mut shadows,
+                    &mut seen,
+                );
+            }
             continue;
         }
         let Some(name) = field.alias_or_name() else {
             continue;
         };
         let bridged = sdbl_type_to_ty(&field.ty);
-        named_fields.push((Name::new(name.as_str()), bridged));
-        // Eager rendering — the shadow lives behind `Option<Arc<…>>` so
-        // it amortises across all readers of the projection.
-        shadows.push(SdblTypeShadow { display: field.ty.to_string() });
+        let shadow = SdblTypeShadow { display: field.ty.to_string() };
+        push_unique(
+            Name::new(name.as_str()),
+            &[],
+            bridged,
+            shadow,
+            &mut named_fields,
+            &mut shadows,
+            &mut seen,
+        );
     }
 
     if named_fields.is_empty() {
@@ -213,6 +286,54 @@ pub fn query_to_projection(q: &sdbl_hir::SdblQuery) -> Option<Arc<SdblProjection
         fields: named_fields.into(),
         raw_sdbl_types: Some(shadows.into()),
     }))
+}
+
+/// Expand an asterisk field against the tables in scope.
+///
+/// - `qualifier == None` (bare `*`): yields all fields from every table
+///   in `hir.all_tables()`, in declaration order (FROM then JOINs).
+/// - `qualifier == Some(q)` (`Т.*`): yields the fields of every table
+///   whose `effective_name()` or `full_name` matches `q`
+///   case-insensitively. In valid SDBL only one table matches —
+///   alias collisions are surfaced as diagnostics elsewhere — but the
+///   bridge stays defensive and emits all matches in declaration order.
+///
+/// The English spelling of bilingual `FieldDef`s is also yielded
+/// alongside the primary name so the upstream dedup `seen` set can
+/// catch later named fields that re-project the English form of an
+/// asterisk-expanded Russian field. The returned shape is
+/// `(primary_name, alt_name_en, ty, shadow)`.
+///
+/// Tables with no resolved metadata (`TableRef::metadata == None`)
+/// contribute nothing — they degrade the projection silently instead
+/// of introducing `Unknown` placeholders.
+fn expand_asterisk(
+    qualifier: Option<&str>,
+    hir: &sdbl_hir::SdblHir,
+) -> Vec<(Name, Option<String>, Ty, SdblTypeShadow)> {
+    let qualifier_lower = qualifier.map(|q| q.to_lowercase());
+    let mut out = Vec::new();
+    for table in hir.all_tables() {
+        if let Some(q_lower) = qualifier_lower.as_deref() {
+            let effective = table.effective_name().to_lowercase();
+            let full = table.full_name.to_lowercase();
+            if effective != q_lower && full != q_lower {
+                continue;
+            }
+        }
+        let Some(resolved) = &table.metadata else {
+            continue;
+        };
+        for field_def in resolved.fields() {
+            out.push((
+                Name::new(&field_def.name),
+                field_def.name_en.clone(),
+                sdbl_type_to_ty(&field_def.ty),
+                SdblTypeShadow { display: field_def.ty.to_string() },
+            ));
+        }
+    }
+    out
 }
 
 /// Extract per-query projections from an entire SDBL package.
@@ -382,6 +503,380 @@ mod tests {
             sdbl_type_to_ty(&r),
             Ty::AnyMetadataRef { mdo_type: MdoType::ChartOfCharacteristicTypes },
         );
+    }
+
+    // ====================================================================
+    // Asterisk expansion — `SELECT *` / `SELECT Т.*` against
+    // `ResolvedTable::fields()`.
+    // ====================================================================
+
+    use sdbl_hir::{
+        ExprHir, FieldDef, FieldHir, ResolvedTable, SdblHir, SdblQuery, SelectHir, TableRef,
+    };
+    use syntax::MODULE_RANGE;
+
+    fn mk_asterisk(qualifier: Option<&str>) -> FieldHir {
+        FieldHir {
+            expr: ExprHir::Missing { range: MODULE_RANGE },
+            alias: None,
+            has_as_keyword: false,
+            has_parse_error: false,
+            raw_name: None,
+            ty: SdblType::Unknown,
+            is_asterisk: true,
+            asterisk_qualifier: qualifier.map(str::to_string),
+            diagnostic_range: MODULE_RANGE,
+            range: MODULE_RANGE,
+        }
+    }
+
+    fn mk_named(name: &str, ty: SdblType) -> FieldHir {
+        FieldHir {
+            expr: ExprHir::ColumnRef {
+                parts: vec![sdbl_hir::Name::from(name)],
+                ty: ty.clone(),
+                range: MODULE_RANGE,
+            },
+            alias: None,
+            has_as_keyword: false,
+            has_parse_error: false,
+            raw_name: Some(sdbl_hir::Name::from(name)),
+            ty,
+            is_asterisk: false,
+            asterisk_qualifier: None,
+            diagnostic_range: MODULE_RANGE,
+            range: MODULE_RANGE,
+        }
+    }
+
+    fn mk_metadata_table(full_name: &str, alias: Option<&str>, fields: Vec<FieldDef>) -> TableRef {
+        TableRef {
+            parts: full_name.split('.').map(sdbl_hir::Name::from).collect(),
+            full_name: full_name.to_string(),
+            alias: alias.map(sdbl_hir::Name::from),
+            metadata: Some(ResolvedTable::Metadata {
+                mdo_type: MdoType::Catalog,
+                name: full_name.to_string(),
+                fields,
+            }),
+            is_virtual_table: false,
+            virtual_table_params: Vec::new(),
+            subquery: Vec::new(),
+            range: MODULE_RANGE,
+        }
+    }
+
+    fn mk_register_table(
+        full_name: &str,
+        fields: Vec<FieldDef>,
+        dimensions: Vec<FieldDef>,
+        resources: Vec<FieldDef>,
+        attributes: Vec<FieldDef>,
+    ) -> TableRef {
+        TableRef {
+            parts: full_name.split('.').map(sdbl_hir::Name::from).collect(),
+            full_name: full_name.to_string(),
+            alias: None,
+            metadata: Some(ResolvedTable::Register {
+                mdo_type: MdoType::AccumulationRegister,
+                name: full_name.to_string(),
+                fields,
+                dimensions,
+                resources,
+                attributes,
+            }),
+            is_virtual_table: true,
+            virtual_table_params: Vec::new(),
+            subquery: Vec::new(),
+            range: MODULE_RANGE,
+        }
+    }
+
+    fn mk_temp_table(name: &str, alias: Option<&str>, fields: Vec<FieldDef>) -> TableRef {
+        TableRef {
+            parts: vec![sdbl_hir::Name::from(name)],
+            full_name: name.to_string(),
+            alias: alias.map(sdbl_hir::Name::from),
+            metadata: Some(ResolvedTable::TempTable { name: name.to_string(), fields }),
+            is_virtual_table: false,
+            virtual_table_params: Vec::new(),
+            subquery: Vec::new(),
+            range: MODULE_RANGE,
+        }
+    }
+
+    fn mk_query(fields: Vec<FieldHir>, from: Vec<TableRef>) -> SdblQuery {
+        let mut hir = SdblHir::empty();
+        hir.select = SelectHir { fields, distinct: false, top: None };
+        hir.from = from;
+        SdblQuery { hir, range: MODULE_RANGE }
+    }
+
+    fn projection_field_names(p: &SdblProjection) -> Vec<String> {
+        p.fields.iter().map(|(n, _)| n.as_str().to_string()).collect()
+    }
+
+    #[test]
+    fn asterisk_expands_metadata_table_fields() {
+        // `SELECT * FROM Catalog.Товары` — bare asterisk over a single
+        // resolved Metadata table walks every FieldDef and bridges types
+        // structurally.
+        let table = mk_metadata_table(
+            "Справочник.Товары",
+            None,
+            vec![
+                FieldDef::new("Ссылка", SdblType::reference(MdoType::Catalog, "Товары")),
+                FieldDef::new("Наименование", SdblType::string_with_length(150)),
+                FieldDef::new("Цена", SdblType::Number { precision: Some(15), scale: Some(2) }),
+            ],
+        );
+        let q = mk_query(vec![mk_asterisk(None)], vec![table]);
+        let p = query_to_projection(&q).expect("asterisk over resolved table must project");
+        assert_eq!(projection_field_names(&p), vec!["Ссылка", "Наименование", "Цена"]);
+        // Type bridging applies per-field. Asterisk fields lift directly
+        // from the FieldDef's `SdblType` — no aliasing layer.
+        assert_eq!(p.fields[1].1, Ty::String);
+        assert_eq!(p.fields[2].1, Ty::Number);
+    }
+
+    #[test]
+    fn qualified_asterisk_expands_only_matching_table() {
+        // `SELECT Т.* FROM Catalog.A AS Т, Catalog.B` — qualifier resolves
+        // by alias against `effective_name()`, NOT by table full_name when
+        // an alias is present.
+        let table_a = mk_metadata_table(
+            "Справочник.A",
+            Some("Т"),
+            vec![FieldDef::new("Имя", SdblType::string_with_length(50))],
+        );
+        let table_b = mk_metadata_table(
+            "Справочник.B",
+            None,
+            vec![FieldDef::new("Другое", SdblType::Boolean)],
+        );
+        let q = mk_query(vec![mk_asterisk(Some("Т"))], vec![table_a, table_b]);
+        let p = query_to_projection(&q).expect("qualified asterisk must project matching table");
+        assert_eq!(projection_field_names(&p), vec!["Имя"]);
+    }
+
+    #[test]
+    fn qualified_asterisk_matches_full_name_when_no_alias() {
+        // `SELECT Справочник.Товары.*` when no alias is set — qualifier
+        // resolves against `full_name`. Case-insensitive comparison.
+        let table = mk_metadata_table(
+            "Справочник.Товары",
+            None,
+            vec![FieldDef::new("Код", SdblType::string_with_length(11))],
+        );
+        let q = mk_query(vec![mk_asterisk(Some("справочник.товары"))], vec![table]);
+        let p = query_to_projection(&q).expect("case-insensitive full_name match must project");
+        assert_eq!(projection_field_names(&p), vec!["Код"]);
+    }
+
+    #[test]
+    fn bare_asterisk_walks_all_tables_in_declaration_order() {
+        // `SELECT * FROM A, B` — bare asterisk produces A's fields first,
+        // then B's. Order is preserved so `lookup_field`'s linear scan
+        // matches the first-occurrence-wins rule consumers expect.
+        let table_a =
+            mk_metadata_table("Справочник.A", None, vec![FieldDef::new("X", SdblType::Boolean)]);
+        let table_b =
+            mk_metadata_table("Справочник.B", None, vec![FieldDef::new("Y", SdblType::string())]);
+        let q = mk_query(vec![mk_asterisk(None)], vec![table_a, table_b]);
+        let p = query_to_projection(&q).expect("bare asterisk with tables must project");
+        assert_eq!(projection_field_names(&p), vec!["X", "Y"]);
+    }
+
+    #[test]
+    fn bare_asterisk_dedupes_duplicate_names_first_wins() {
+        // Two tables both expose `Ссылка`. First-wins dedup keeps the
+        // first table's type (here a CatalogRef) and drops the second's,
+        // mirroring `lookup_field`'s linear scan order.
+        let table_a = mk_metadata_table(
+            "Справочник.A",
+            None,
+            vec![FieldDef::new("Ссылка", SdblType::reference(MdoType::Catalog, "A"))],
+        );
+        let table_b = mk_metadata_table(
+            "Справочник.B",
+            None,
+            vec![FieldDef::new("Ссылка", SdblType::reference(MdoType::Catalog, "B"))],
+        );
+        let q = mk_query(vec![mk_asterisk(None)], vec![table_a, table_b]);
+        let p = query_to_projection(&q).expect("bare asterisk must project at least one field");
+        assert_eq!(p.fields.len(), 1);
+        assert_eq!(p.fields[0].0.as_str(), "Ссылка");
+        assert_eq!(
+            p.fields[0].1,
+            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("A") },
+        );
+    }
+
+    #[test]
+    fn mixed_asterisk_and_named_appends_named_after_expansion() {
+        // `SELECT *, NamedField` — asterisk-expanded fields come first,
+        // named field appended. Dedup is by lowercased name first-wins:
+        // a named field that re-projects an asterisk field (same name)
+        // is dropped.
+        let table = mk_metadata_table(
+            "Справочник.Товары",
+            None,
+            vec![
+                FieldDef::new("Ссылка", SdblType::reference(MdoType::Catalog, "Товары")),
+                FieldDef::new("Наименование", SdblType::string_with_length(150)),
+            ],
+        );
+        let q = mk_query(
+            vec![
+                mk_asterisk(None),
+                // Re-projection of an asterisk-expanded name — must be deduped.
+                mk_named("Ссылка", SdblType::reference(MdoType::Catalog, "Товары")),
+                // Distinct name — must be appended.
+                mk_named("Новое", SdblType::Boolean),
+            ],
+            vec![table],
+        );
+        let p = query_to_projection(&q).expect("mixed shape must project");
+        assert_eq!(projection_field_names(&p), vec!["Ссылка", "Наименование", "Новое"]);
+    }
+
+    #[test]
+    fn asterisk_against_register_walks_combined_fields() {
+        // Register virtual-table fields (`<Resource>Оборот` etc.) are
+        // synthesised by the SDBL lowerer into `Register::fields` before
+        // the bridge runs. Asterisk over a register expands every field
+        // the lowerer prepared — dimensions + resources + attributes when
+        // it's a plain register, or the synthesised virtual-table columns
+        // when it's `.Обороты(...)`.
+        let table = mk_register_table(
+            "РегистрНакопления.ОстаткиТоваров.Обороты",
+            vec![
+                FieldDef::new("Период", SdblType::Date),
+                FieldDef::new(
+                    "КоличествоОборот",
+                    SdblType::Number { precision: None, scale: None },
+                ),
+                FieldDef::new(
+                    "КоличествоПриход",
+                    SdblType::Number { precision: None, scale: None },
+                ),
+                FieldDef::new(
+                    "КоличествоРасход",
+                    SdblType::Number { precision: None, scale: None },
+                ),
+            ],
+            vec![FieldDef::new("Период", SdblType::Date)],
+            vec![FieldDef::new("Количество", SdblType::Number { precision: None, scale: None })],
+            Vec::new(),
+        );
+        let q = mk_query(vec![mk_asterisk(None)], vec![table]);
+        let p = query_to_projection(&q).expect("register virtual asterisk must project");
+        assert_eq!(
+            projection_field_names(&p),
+            vec!["Период", "КоличествоОборот", "КоличествоПриход", "КоличествоРасход"],
+        );
+    }
+
+    #[test]
+    fn asterisk_against_temp_table_expands_subquery_fields() {
+        // `SELECT * FROM ВТ_Имена AS T` — temp tables carry the
+        // originating subquery's SELECT names/types in
+        // `ResolvedTable::TempTable::fields`. The bridge treats them
+        // identically to Metadata tables.
+        let table = mk_temp_table(
+            "ВТ_Имена",
+            Some("T"),
+            vec![
+                FieldDef::new("Имя", SdblType::string_with_length(50)),
+                FieldDef::new("Активность", SdblType::Boolean),
+            ],
+        );
+        let q = mk_query(vec![mk_asterisk(None)], vec![table]);
+        let p = query_to_projection(&q).expect("temp-table asterisk must project");
+        assert_eq!(projection_field_names(&p), vec!["Имя", "Активность"]);
+    }
+
+    #[test]
+    fn qualified_asterisk_with_no_matching_table_yields_none() {
+        // `SELECT Z.* FROM Catalog.A AS Т` — qualifier `Z` matches
+        // neither alias nor full_name. Asterisk contributes nothing;
+        // the projection is None because no other fields are present.
+        let table = mk_metadata_table(
+            "Справочник.A",
+            Some("Т"),
+            vec![FieldDef::new("Имя", SdblType::string_with_length(50))],
+        );
+        let q = mk_query(vec![mk_asterisk(Some("Z"))], vec![table]);
+        assert!(
+            query_to_projection(&q).is_none(),
+            "asterisk with unresolved qualifier must drop silently",
+        );
+    }
+
+    #[test]
+    fn asterisk_against_unresolved_table_yields_none() {
+        // `SELECT * FROM <parse_error>` — TableRef::metadata is None.
+        // The bridge contributes no fields, mirroring the pre-Phase-A
+        // policy for cases where SDBL never resolves the source table.
+        let table = TableRef {
+            parts: Vec::new(),
+            full_name: String::new(),
+            alias: None,
+            metadata: None,
+            is_virtual_table: false,
+            virtual_table_params: Vec::new(),
+            subquery: Vec::new(),
+            range: MODULE_RANGE,
+        };
+        let q = mk_query(vec![mk_asterisk(None)], vec![table]);
+        assert!(query_to_projection(&q).is_none());
+    }
+
+    #[test]
+    fn bilingual_dedup_drops_named_field_reprojecting_english_spelling() {
+        // `Ссылка` and `Ref` are the bilingual pair for `MetadataKind::CatalogRef`'s
+        // standard reference attribute. An asterisk expansion that yields
+        // `Ссылка` (with `name_en = Some("Ref")`) must seed BOTH spellings
+        // into the dedup set so a later `SELECT *, T.Ref AS R` (or any
+        // named field re-projecting the English spelling) is dropped.
+        let table = mk_metadata_table(
+            "Справочник.Товары",
+            None,
+            vec![FieldDef::standard(
+                "Ссылка",
+                "Ref",
+                SdblType::reference(MdoType::Catalog, "Товары"),
+            )],
+        );
+        let q = mk_query(
+            vec![
+                mk_asterisk(None),
+                // English-spelling re-projection — must be deduped.
+                mk_named("Ref", SdblType::reference(MdoType::Catalog, "Товары")),
+            ],
+            vec![table],
+        );
+        let p = query_to_projection(&q).expect("bilingual mixed shape must project");
+        assert_eq!(
+            projection_field_names(&p),
+            vec!["Ссылка"],
+            "English spelling of an asterisk-expanded Russian field must dedup first-wins",
+        );
+    }
+
+    #[test]
+    fn asterisk_field_with_parse_error_is_skipped() {
+        // Defensive: a parse-error asterisk does not crash expansion;
+        // it's skipped entirely, just like any other parse-error field.
+        let table = mk_metadata_table(
+            "Справочник.Товары",
+            None,
+            vec![FieldDef::new("Имя", SdblType::string_with_length(50))],
+        );
+        let mut bad = mk_asterisk(None);
+        bad.has_parse_error = true;
+        let q = mk_query(vec![bad], vec![table]);
+        assert!(query_to_projection(&q).is_none());
     }
 
     #[test]
