@@ -93,3 +93,65 @@ pub(crate) fn try_resolve_platform_global_member(
 
     PlatformGlobalLookup::NotAContainer
 }
+
+/// Resolve a bare platform-global *property* name to its declared `Ty`.
+///
+/// Companion to [`try_resolve_platform_global_member`]:
+/// - That one resolves the `<Container>.<Method>()` call shape and
+///   returns the method's return type.
+/// - This one resolves the bare-identifier shape (`Метаданные`,
+///   `Справочники`, `ОбработкаОшибок`, …) and returns the property's
+///   declared type — the value the user sees when they write the name on
+///   its own and expect dot-access to surface members of that type.
+///
+/// Returns `None` when:
+/// - `name` is not a platform global property, OR
+/// - the property has no declared type (defensive — platform data
+///   normally guarantees at least one entry).
+///
+/// Single source of truth for both `infer.rs::infer_path_name` step 6
+/// (bare-identifier inference) and `ide::completion::platform_completion`
+/// (fallback when `Semantics::type_of_expr` returns `Unknown`). Without
+/// this helper both call sites lowered through identical inline code
+/// against the same singleton, easy to drift.
+///
+/// Pure function — no `db` dependency, same `PlatformDataInner` singleton
+/// the rest of this module reads.
+pub fn resolve_platform_global_property_type(name: &Name) -> Option<Ty> {
+    let prop = bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())?;
+    let declared = prop.property_types.first()?;
+    let lowering = crate::lower::TyLoweringContext::new();
+    Some(lowering.lower_bare_name(&Name::new(declared.as_str())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_platform_global_property_type_returns_declared_ty_for_known_global() {
+        // `Метаданные` is an always-present platform global (declared
+        // type: `КонфигурацияМетаданныеОбъект`). The helper must surface
+        // its declared type so completion / inference can route
+        // dot-access through the proper platform type.
+        //
+        // No skip-when-empty branch: platform data is shipped with the
+        // analyzer (`crates/bsl-platform/data/platform_data.json`). If
+        // it's missing the whole inference layer is non-functional, so
+        // this test should fail loudly rather than silently pass.
+        let ty = resolve_platform_global_property_type(&Name::new("Метаданные"))
+            .expect("`Метаданные` must resolve via platform data");
+        assert!(!matches!(ty, Ty::Unknown), "expected non-Unknown Ty, got {ty:?}");
+    }
+
+    #[test]
+    fn resolve_platform_global_property_type_returns_none_for_unknown_name() {
+        // Names that aren't platform globals must return `None` so the
+        // caller's cascade falls through to the next gate (e.g. the
+        // `PlatformObject(name)` fallback in completion).
+        let result = resolve_platform_global_property_type(&Name::new(
+            "ЗаведомоНеСуществуетГлобалПлатформы",
+        ));
+        assert!(result.is_none());
+    }
+}

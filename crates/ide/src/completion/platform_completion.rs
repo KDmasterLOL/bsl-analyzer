@@ -137,15 +137,15 @@ pub(super) fn platform_completions<DB: RootDatabase>(
             // name>)`. Without this branch the next fallback would index
             // `type_methods_query` with the property name and surface
             // zero methods.
-            if let Some(prop) =
-                bsl_platform::PlatformDataInner::instance().get_global_property(&name)
-            {
-                if let Some(declared) = prop.property_types.first() {
-                    receiver_ty = Ty::PlatformObject(Name::new(declared.as_str()));
-                }
+            //
+            // Routed through the shared `hir::resolve_platform_global_property_type`
+            // facade so the IDE doesn't dip into `PlatformDataInner::instance()`
+            // directly; same helper drives `infer.rs::infer_path_name` step 6.
+            if let Some(ty) = hir::resolve_platform_global_property_type(&name_node) {
+                receiver_ty = ty;
             }
             if receiver_ty.is_unknown() {
-                receiver_ty = TyLoweringContext::new().lower_bare_name(&Name::new(&name));
+                receiver_ty = TyLoweringContext::new().lower_bare_name(&name_node);
             }
         }
     }

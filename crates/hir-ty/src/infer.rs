@@ -1771,14 +1771,11 @@ impl<'db> InferenceContext<'db> {
         // 4 platform) so both the bare-IDENT and the typed-receiver
         // paths agree on user-shadows-platform.
         if !user_shadows && !workspace_owns_common_module {
-            if let Some(prop) =
-                bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())
+            if let Some(ty) =
+                crate::platform_global_lookup::resolve_platform_global_property_type(name)
             {
-                if let Some(declared) = prop.property_types.first() {
-                    trace!("resolved {} as platform global → {}", name, declared);
-                    let lowering = crate::lower::TyLoweringContext::new();
-                    return lowering.lower_bare_name(&hir_def::Name::new(declared.as_str()));
-                }
+                trace!("resolved {} as platform global → {:?}", name, ty);
+                return ty;
             }
         }
 
