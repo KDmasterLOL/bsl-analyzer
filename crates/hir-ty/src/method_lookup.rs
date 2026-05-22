@@ -225,30 +225,49 @@ fn pick_chain_rewrite(receiver_ty: &Ty, method_name: &str) -> Option<(ChainTarge
             ))
         }
         "выполнитьпакет" | "executebatch" => {
-            // Receiver must be Query-shape; projection extraction is
-            // gating-only here — `QueryBatchResult` does not carry the
-            // single projection (batch is per-query, filled by the
-            // bridge in Phase 3 once `package_to_projections` is
-            // wired).
-            projection_of_query_receiver(receiver_ty)?;
-            Some((ChainTarget::AnyArray, Ty::QueryBatchResult { per_query: Arc::from([]) }))
+            // Receiver must be Query-shape; the slice carried by
+            // `Ty::Query.projections` is exactly what
+            // `Ty::QueryBatchResult.per_query` consumes — copy by Arc
+            // clone (cheap).
+            let projections = projections_of_query_receiver(receiver_ty)?;
+            Some((ChainTarget::AnyArray, Ty::QueryBatchResult { per_query: projections }))
         }
         _ => None,
     }
 }
 
-/// Read the projection payload off a Query-shape receiver.
+/// Read the first sub-query's projection off a Query-shape receiver.
 ///
-/// Accepts both the new `Ty::Query{projection}` (Phase 1.3b+) and the
-/// legacy `Ty::PlatformObject("Запрос")` / `Ty::PlatformObject("Query")`
-/// shape (still the only construction site through Slice 1). Returns
-/// `None` when the receiver is not a query at all — that's the gate
-/// preventing accidental rewrites of unrelated `.Выполнить()` /
-/// `.ВыполнитьПакет()` calls.
+/// `.Выполнить()` is single-result so it only ever cares about
+/// `projections[0]`. Empty slice and legacy `Ty::PlatformObject("Запрос")`
+/// both yield `Some(None)` — the receiver is a query but no projection
+/// is available; chain rewrite still fires but produces
+/// `Ty::QueryResult{None}`.
+///
+/// Returns `None` when the receiver is not a query at all, gating
+/// accidental rewrites of unrelated `.Выполнить()` calls on dialogs,
+/// file pickers, etc.
 fn projection_of_query_receiver(ty: &Ty) -> Option<Option<Arc<SdblProjection>>> {
     match ty {
-        Ty::Query { projection } => Some(projection.clone()),
+        Ty::Query { projections } => Some(projections.first().cloned().flatten()),
         Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => Some(None),
+        _ => None,
+    }
+}
+
+/// Read the per-sub-query projection slice off a Query-shape receiver.
+///
+/// `.ВыполнитьПакет()` returns `Ty::QueryBatchResult` whose `per_query`
+/// field has the same shape, so this just hands the slice through.
+/// Empty slice and legacy `Ty::PlatformObject("Запрос")` both yield
+/// `Some(Arc::from([]))` so the chain rewrite still fires (gating
+/// remains intact) but the resulting batch carries no projection.
+fn projections_of_query_receiver(ty: &Ty) -> Option<Arc<[Option<Arc<SdblProjection>>]>> {
+    match ty {
+        Ty::Query { projections } => Some(projections.clone()),
+        Ty::PlatformObject(n) if is_platform_name(n, "Запрос", "Query") => {
+            Some(Arc::from([]))
+        }
         _ => None,
     }
 }

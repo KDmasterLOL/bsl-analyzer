@@ -1747,7 +1747,7 @@ mod tests {
         // projection (e.g. `Ty::Query{Some(p)}` after Phase 1.3b)
         // must NOT be served by this branch — the projection
         // surface only exists on the *selection* cursor.
-        let receiver = Ty::Query { projection: Some(projection_with_two_fields()) };
+        let receiver = Ty::Query { projections: Arc::from([Some(projection_with_two_fields())]) };
         assert!(lookup_field_in_query_projection(&receiver, &Name::new("КодТов")).is_none());
     }
 }

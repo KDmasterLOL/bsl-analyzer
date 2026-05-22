@@ -1187,30 +1187,46 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    /// Project `Новый Запрос("<literal>")`'s string-literal arg through
-    /// the SDBL ↔ Ty bridge.
+    /// Project every sub-query of `Новый Запрос("<literal>")`'s
+    /// string-literal arg through the SDBL ↔ Ty bridge.
     ///
-    /// Returns `Some(projection)` when `args[0]` is a string literal
-    /// whose `SdblExprId` resolves to an `SdblPackage` with a
-    /// bridge-able first query; `None` otherwise (no args, dynamic
-    /// text, parse-error packages, asterisk-only packages).
+    /// Returns a non-empty index-aligned slice when `args[0]` is a
+    /// string literal whose `SdblExprId` resolves to an `SdblPackage`:
+    /// `result[i]` is the projection of the i-th sub-query, `Some`
+    /// when the bridge resolved it, `None` for unresolvable ones
+    /// (asterisk against an unresolved table, parse errors, etc.).
+    /// Empty slice for no args / dynamic text / unrecognised literals
+    /// — the caller then types as `Ty::Query{projections: empty}`,
+    /// which downstream dispatch treats the same as the legacy
+    /// `Ty::PlatformObject("Запрос")` shape.
+    ///
+    /// Carrying the full per-sub-query slice (not just `queries[0]`)
+    /// is what lets `.ВыполнитьПакет()[i]` recover the i-th
+    /// sub-query's projection without re-fetching the package at
+    /// chain-rewrite time — the rewrite hook stays pure.
     ///
     /// The `matches!` guard is belt-and-suspenders — by construction
     /// every `ExprId` in `body.sdbl_exprs` is a string literal today,
     /// but the explicit check prevents a future lowerer change from
     /// quietly producing projections for non-literal expressions.
-    fn try_synthesise_query_projection(&self, args: &[ExprIdx]) -> Option<Arc<SdblProjection>> {
-        let arg_idx = *args.first()?;
+    fn try_synthesise_query_projections(
+        &self,
+        args: &[ExprIdx],
+    ) -> Arc<[Option<Arc<SdblProjection>>]> {
+        let Some(arg_idx) = args.first().copied() else {
+            return Arc::from([]);
+        };
         let arg_id = ExprId::from_idx(arg_idx);
         if !matches!(self.body.expr(arg_id), Expr::Literal(Literal::String(_))) {
-            return None;
+            return Arc::from([]);
         }
         let sdbl_expr_id = SdblExprId { owner: self.owner, expr_id: arg_id };
         let file_id_input = FileIdInput::new(self.db, self.file_id);
         let entries = sdbl_hir_for_file_query(self.db, file_id_input);
-        let (_, pkg) = entries.iter().find(|(id, _)| *id == sdbl_expr_id)?;
-        let first_query = pkg.queries().first()?;
-        crate::sdbl_bridge::query_to_projection(first_query)
+        let Some((_, pkg)) = entries.iter().find(|(id, _)| *id == sdbl_expr_id) else {
+            return Arc::from([]);
+        };
+        crate::sdbl_bridge::package_to_projections(pkg).into()
     }
 
     /// Infer the type of an expression.
@@ -1322,6 +1338,20 @@ impl<'db> InferenceContext<'db> {
                 // `Ty` level today.
                 match base_ty {
                     Ty::TypedArray(elem) => *elem,
+                    // `Зап.ВыполнитьПакет()[i]` — when the index is a
+                    // bare numeric literal, recover the i-th sub-query's
+                    // projection from the batch result's `per_query`
+                    // slice. Dynamic / arithmetic / out-of-range indices
+                    // degrade to `Ty::QueryResult{None}`, matching the
+                    // platform behaviour of "an in-bounds query result,
+                    // schema unknown".
+                    Ty::QueryBatchResult { per_query } => {
+                        let index_expr = self.body.expr(ExprId::from_idx(*index));
+                        let projection = const_eval_literal_index(index_expr)
+                            .and_then(|i| per_query.get(i).cloned())
+                            .flatten();
+                        Ty::QueryResult { projection }
+                    }
                     _ => Ty::Unknown,
                 }
             }
@@ -1511,8 +1541,8 @@ impl<'db> InferenceContext<'db> {
                     crate::method_lookup::is_platform_name(name, "Запрос", "Query")
                 });
                 if is_query_ctor {
-                    let projection = self.try_synthesise_query_projection(args);
-                    Ty::Query { projection }
+                    let projections = self.try_synthesise_query_projections(args);
+                    Ty::Query { projections }
                 } else {
                     // Lower the constructor name through the shared TypeRef →
                     // Ty adapter. The cascade (builtin → MDO plural → platform
@@ -3275,6 +3305,28 @@ impl<'db> InferenceContext<'db> {
 ///
 /// The user-visible form matches the 3-segment path's `<Plural>.<MDO>`
 /// convention rendered by `unresolved_method_call::from_hir`.
+/// Evaluate a bare numeric literal as a non-negative integer index.
+///
+/// Used by `Expr::Index` on `Ty::QueryBatchResult` to extract the
+/// i-th sub-query's projection. Deliberately rejects anything that
+/// isn't a positive integer literal — negative values are
+/// `Expr::UnaryOp { op: Minus, .. }`, named locals are `Expr::Local`,
+/// arithmetic is `Expr::BinaryOp`. None of those carry a statically
+/// known index at this layer, so they degrade to `None` (which
+/// surfaces as `Ty::QueryResult{None}`, mirroring the
+/// platform-runtime behaviour of "the call returned a result of
+/// unknown schema").
+fn const_eval_literal_index(expr: &Expr) -> Option<usize> {
+    let Expr::Literal(Literal::Number(n)) = expr else {
+        return None;
+    };
+    let f = n.into_inner();
+    if !f.is_finite() || f < 0.0 || f.fract() != 0.0 {
+        return None;
+    }
+    Some(f as usize)
+}
+
 fn receiver_display_name(receiver_ty: &Ty) -> Option<hir_def::Name> {
     match receiver_ty {
         Ty::MetadataRef { kind, name } => {

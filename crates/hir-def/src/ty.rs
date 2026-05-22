@@ -283,15 +283,23 @@ pub enum Ty {
     /// a narrowing step selects a concrete component.
     Union(Arc<[Ty]>),
 
-    /// `Запрос` value — the platform `Query` object with an optionally-resolved
-    /// SDBL projection.
+    /// `Запрос` value — the platform `Query` object with per-sub-query
+    /// SDBL projections.
     ///
-    /// `projection = None` is the conservative default: text is dynamic,
-    /// hasn't been traced yet, or hasn't been refined by the variable-state
-    /// refinement pass. Downstream method/field dispatch falls back to the
-    /// behaviour of `Ty::PlatformObject("Запрос")`. Phase 0 never constructs
-    /// `Some(_)` — the bridge that wires it lives in `hir-ty` (Phase 1).
-    Query { projection: Option<Arc<SdblProjection>> },
+    /// The slice mirrors `SdblPackage::queries()` index-aligned:
+    /// `projections[i]` is the projection of the i-th sub-query when
+    /// the SDBL bridge resolved it, `None` when that sub-query's
+    /// projection couldn't be derived (asterisk-only against an
+    /// unresolved table, parse error, etc.). Empty slice means the
+    /// constructor argument wasn't a recognised string literal at all —
+    /// downstream method/field dispatch then falls back to the
+    /// behaviour of `Ty::PlatformObject("Запрос")`.
+    ///
+    /// The single-projection case (the `.Выполнить()` chain) reads
+    /// `projections.first().cloned().flatten()`; the batch case
+    /// (`.ВыполнитьПакет()`) feeds the whole slice through to
+    /// [`Ty::QueryBatchResult::per_query`] verbatim.
+    Query { projections: Arc<[Option<Arc<SdblProjection>>]> },
 
     /// Return of `.Выполнить()` on a Query whose projection we know.
     ///

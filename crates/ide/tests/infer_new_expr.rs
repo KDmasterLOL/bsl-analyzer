@@ -46,6 +46,19 @@ fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty>
     db.infer(file_id).var_types.get(var_lower).cloned()
 }
 
+/// `Ty::Query` carries every sub-query's projection slice; "no
+/// projection available" can surface as either an empty slice (no
+/// SDBL info at all) or as `[None]` (SDBL ran but couldn't extract a
+/// projection). Both signal the same downstream behaviour — chain
+/// rewrite falls through to legacy platform-property dispatch — so
+/// tests that pin "no projection" accept either shape.
+fn query_no_projection(ty: &Ty) -> bool {
+    match ty {
+        Ty::Query { projections } => projections.iter().all(Option::is_none),
+        _ => false,
+    }
+}
+
 #[test]
 fn new_array_gives_array_ty() {
     // `Новый Массив` used to go through `ty_from_bare_name("Массив") →
@@ -81,10 +94,10 @@ fn new_query_with_no_args_types_as_query_with_no_projection() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "х"),
-        Some(Ty::Query { projection: None }),
-        "`Новый Запрос()` without literal text must produce Ty::Query{{None}}",
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    assert!(
+        query_no_projection(&ty),
+        "`Новый Запрос()` without literal text must produce Ty::Query with no projection, got {ty:?}",
     );
 }
 
@@ -103,10 +116,10 @@ fn new_query_with_dynamic_text_types_as_query_with_no_projection() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
-    assert_eq!(
-        var_ty(&db, file_id, "х"),
-        Some(Ty::Query { projection: None }),
-        "`Новый Запрос(<variable>)` must produce Ty::Query{{None}}",
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    assert!(
+        query_no_projection(&ty),
+        "`Новый Запрос(<variable>)` must produce Ty::Query with no projection, got {ty:?}",
     );
 }
 
@@ -124,11 +137,16 @@ fn new_query_with_literal_text_types_as_query_with_projection() {
 "#;
     let (db, file_id) = setup(fixture);
     let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
-    let projection = match &ty {
-        Ty::Query { projection } => projection.as_ref(),
+    let projections = match &ty {
+        Ty::Query { projections } => projections.clone(),
         other => panic!("expected Ty::Query, got {other:?}"),
     };
-    let projection = projection.expect("literal SDBL must produce a projection");
+    assert_eq!(
+        projections.len(),
+        1,
+        "single-query package must yield one slice entry, got {projections:?}",
+    );
+    let projection = projections[0].as_ref().expect("literal SDBL must produce a projection");
     assert_eq!(
         projection.fields.len(),
         1,
@@ -174,10 +192,118 @@ fn new_query_with_parse_error_literal_falls_back_to_no_projection() {
 КонецФункции
 "#;
     let (db, file_id) = setup(fixture);
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    assert!(
+        query_no_projection(&ty),
+        "parse-error SDBL literal must collapse to Ty::Query with no projection, not PlatformObject — got {ty:?}",
+    );
+}
+
+#[test]
+fn execute_batch_literal_zero_index_yields_first_subquery_projection() {
+    // `Запрос("ВЫБРАТЬ A; ВЫБРАТЬ B").ВыполнитьПакет()[0]` recovers
+    // the projection of the first sub-query. The batch chain rewrite
+    // forwards `Ty::Query.projections` verbatim to
+    // `Ty::QueryBatchResult.per_query`; the Expr::Index handler then
+    // const-evaluates the literal index and pulls out `per_query[0]`.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый Запрос("ВЫБРАТЬ 1 КАК ПерваяКолонка; ВЫБРАТЬ ""abc"" КАК ВтораяКолонка").ВыполнитьПакет()[0];
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    let projection = match &ty {
+        Ty::QueryResult { projection } => projection.as_ref(),
+        other => panic!("expected Ty::QueryResult, got {other:?}"),
+    };
+    let projection = projection.expect("batch[0] must carry the first sub-query's projection");
+    assert_eq!(projection.fields.len(), 1);
+    assert_eq!(projection.fields[0].0.as_str(), "ПерваяКолонка");
+    assert_eq!(projection.fields[0].1, Ty::Number);
+}
+
+#[test]
+fn execute_batch_literal_one_index_yields_second_subquery_projection() {
+    // Sibling of the [0] test — pin that the slice index actually
+    // drives field extraction, not a hardcoded first-element shortcut.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый Запрос("ВЫБРАТЬ 1 КАК ПерваяКолонка; ВЫБРАТЬ ""abc"" КАК ВтораяКолонка").ВыполнитьПакет()[1];
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    let ty = var_ty(&db, file_id, "х").expect("х must be inferred");
+    let projection = match &ty {
+        Ty::QueryResult { projection } => projection.as_ref(),
+        other => panic!("expected Ty::QueryResult, got {other:?}"),
+    };
+    let projection = projection.expect("batch[1] must carry the second sub-query's projection");
+    assert_eq!(projection.fields[0].0.as_str(), "ВтораяКолонка");
+    assert_eq!(projection.fields[0].1, Ty::String);
+}
+
+#[test]
+fn execute_batch_out_of_range_index_yields_no_projection() {
+    // Out-of-range literal index — `per_query.get(i)` returns None.
+    // The result must still be `Ty::QueryResult{None}` so chain
+    // continuation typechecks structurally and platform property
+    // lookup falls back to the legacy `РезультатЗапроса` table.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый Запрос("ВЫБРАТЬ 1 КАК А").ВыполнитьПакет()[5];
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
     assert_eq!(
         var_ty(&db, file_id, "х"),
-        Some(Ty::Query { projection: None }),
-        "parse-error SDBL literal must collapse to Ty::Query{{None}}, not PlatformObject",
+        Some(Ty::QueryResult { projection: None }),
+        "out-of-range batch index must yield Ty::QueryResult{{None}}",
+    );
+}
+
+#[test]
+fn execute_batch_dynamic_index_yields_no_projection() {
+    // Variable index — `const_eval_literal_index` returns None for
+    // non-literal expressions. Same fallback as out-of-range.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Индекс = 0;
+    Х = Новый Запрос("ВЫБРАТЬ 1 КАК А").ВыполнитьПакет()[Индекс];
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::QueryResult { projection: None }),
+        "non-literal batch index must yield Ty::QueryResult{{None}}",
+    );
+}
+
+#[test]
+fn execute_batch_chain_propagates_through_select() {
+    // End-to-end win for batch indexing: the chain
+    // `Запрос("...; ВЫБРАТЬ Имя").ВыполнитьПакет()[1].Выбрать().Имя`
+    // walks constructor synthesis (`Ty::Query{projections}`) →
+    // `.ВыполнитьПакет()` rewrite (`Ty::QueryBatchResult{per_query}`)
+    // → literal-index extraction (`Ty::QueryResult{Some(p)}`) →
+    // `.Выбрать()` rewrite (`Ty::QueryResultSelection{Some(p)}`) →
+    // projection field lookup.
+    let fixture = r#"//- /test.bsl
+Функция Тест()
+    Х = Новый Запрос("ВЫБРАТЬ 1 КАК А; ВЫБРАТЬ ""abc"" КАК Имя").ВыполнитьПакет()[1].Выбрать().Имя;
+    Возврат Х;
+КонецФункции
+"#;
+    let (db, file_id) = setup(fixture);
+    assert_eq!(
+        var_ty(&db, file_id, "х"),
+        Some(Ty::String),
+        "batch[1].Выбрать().Имя must resolve to Ty::String",
     );
 }
 
