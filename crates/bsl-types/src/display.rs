@@ -1,6 +1,638 @@
-//! Locale-aware rendering — `display_name(&TypeKind, &dyn DisplayCtx)`.
+//! Locale-aware rendering — `display_name(&TypeKind, &dyn DisplayCtx,
+//! &dyn TypeKernelDb) -> String`.
 //!
 //! The only function that renders types as user-visible strings.
-//! `Display` on `TypeKind` is debug-only.
+//! `Display` on `TypeKind` (derived) is debug-only.
 //!
-//! Filled in by Phase 1.F.
+//! See design v5 §4.5 for the contract. Phase 1 covers all `TypeKind`
+//! variants; later phases will refine register-inner / form labels
+//! when callers need them.
+
+use std::fmt::Write;
+
+use crate::facet::{
+    ArrayFacet, DateFacet, FunctionFacet, MapFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
+    PlatformObjectFacet, ProjectionFacet, StringFacet, StructureFacet, TableFacet,
+};
+use crate::intern::TypeKernelDb;
+use crate::kind::{MetadataKind, Projection, TypeId, TypeKind};
+
+/// Locale for user-visible labels. Russian is the BSL native; English
+/// is the alias surface (used for hover-in-EN clients, doc-comment
+/// authors, …).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum Locale {
+    Ru,
+    En,
+}
+
+/// Rendering context — locale + display preferences.
+pub trait DisplayCtx {
+    fn locale(&self) -> Locale;
+
+    /// `true` → hover-style rendering, show precision/length/scale.
+    /// `false` → completion-style, show bare type name only.
+    fn precision_visible(&self) -> bool;
+}
+
+/// Trivial sandbox `DisplayCtx`. Production wires its own backed by
+/// user preferences.
+pub struct PlainDisplayCtx {
+    pub locale: Locale,
+    pub precision_visible: bool,
+}
+
+impl PlainDisplayCtx {
+    pub fn hover_ru() -> Self {
+        Self { locale: Locale::Ru, precision_visible: true }
+    }
+
+    pub fn hover_en() -> Self {
+        Self { locale: Locale::En, precision_visible: true }
+    }
+
+    pub fn completion_ru() -> Self {
+        Self { locale: Locale::Ru, precision_visible: false }
+    }
+}
+
+impl DisplayCtx for PlainDisplayCtx {
+    fn locale(&self) -> Locale {
+        self.locale
+    }
+
+    fn precision_visible(&self) -> bool {
+        self.precision_visible
+    }
+}
+
+/// Render a `TypeKind` as a user-visible string.
+///
+/// `db` is needed to resolve nested `TypeId`s (Union members, Array
+/// element types, projection field types, …).
+pub fn display_name(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb) -> String {
+    let mut buf = String::new();
+    render(kind, ctx, db, &mut buf);
+    buf
+}
+
+fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mut String) {
+    match kind {
+        TypeKind::Unknown => buf.push_str(match ctx.locale() {
+            Locale::Ru => "Неизвестно",
+            Locale::En => "Unknown",
+        }),
+        TypeKind::Never => buf.push_str(match ctx.locale() {
+            Locale::Ru => "Никогда",
+            Locale::En => "Never",
+        }),
+        TypeKind::Any => buf.push_str(match ctx.locale() {
+            Locale::Ru => "Произвольный",
+            Locale::En => "Any",
+        }),
+        TypeKind::Boolean => buf.push_str(match ctx.locale() {
+            Locale::Ru => "Булево",
+            Locale::En => "Boolean",
+        }),
+        TypeKind::Null => buf.push_str("NULL"),
+        TypeKind::Undefined => buf.push_str(match ctx.locale() {
+            Locale::Ru => "Неопределено",
+            Locale::En => "Undefined",
+        }),
+        TypeKind::Uuid => buf.push_str(match ctx.locale() {
+            Locale::Ru => "УникальныйИдентификатор",
+            Locale::En => "UUID",
+        }),
+        TypeKind::Number(facet) => render_number(facet, ctx, buf),
+        TypeKind::String(facet) => render_string(facet, ctx, buf),
+        TypeKind::Date(facet) => render_date(facet, ctx, buf),
+        TypeKind::Array(facet) => render_array(facet, ctx, db, buf),
+        TypeKind::Map(facet) => render_map(facet, ctx, db, buf),
+        TypeKind::Structure(facet) => render_structure(facet, ctx, buf),
+        TypeKind::ValueList(elem) => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "СписокЗначений",
+                Locale::En => "ValueList",
+            });
+            if let Some(id) = elem {
+                buf.push_str(match ctx.locale() {
+                    Locale::Ru => " из ",
+                    Locale::En => " of ",
+                });
+                render(db.lookup_type(*id), ctx, db, buf);
+            }
+        }
+        TypeKind::ValueTable(facet) => render_table(facet, ctx, db, /* row */ false, buf),
+        TypeKind::ValueTableRow(facet) => render_table(facet, ctx, db, /* row */ true, buf),
+        TypeKind::ValueStorage => buf.push_str(match ctx.locale() {
+            Locale::Ru => "ХранилищеЗначения",
+            Locale::En => "ValueStorage",
+        }),
+        TypeKind::TypeDescriptor => buf.push_str(match ctx.locale() {
+            Locale::Ru => "Тип",
+            Locale::En => "Type",
+        }),
+        TypeKind::PlatformObject(PlatformObjectFacet { name }) => buf.push_str(name),
+        TypeKind::MetadataRef(facet) => render_meta_ref(facet, ctx, buf),
+        TypeKind::MetadataObject(facet) => render_meta_obj(facet, ctx, buf),
+        TypeKind::AnyMetadataRef { mdo_type } => {
+            write!(buf, "{:?}", mdo_type).unwrap();
+        }
+        TypeKind::ManagerCollection(mdo_type) => {
+            write!(buf, "{:?}", mdo_type).unwrap();
+        }
+        TypeKind::ObjectManager(facet) => {
+            buf.push_str(&facet.name);
+        }
+        TypeKind::TabularSection { name, .. } => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "ТабличнаяЧасть<",
+                Locale::En => "TabularSection<",
+            });
+            buf.push_str(name);
+            buf.push('>');
+        }
+        TypeKind::TabularSectionRow { name, .. } => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "СтрокаТабличнойЧасти<",
+                Locale::En => "TabularSectionRow<",
+            });
+            buf.push_str(name);
+            buf.push('>');
+        }
+        TypeKind::RegisterDimension { name, .. } => {
+            let label = match ctx.locale() {
+                Locale::Ru => "Измерение",
+                Locale::En => "Dimension",
+            };
+            write!(buf, "{}<{}>", label, name).unwrap();
+        }
+        TypeKind::RegisterResource { name, .. } => {
+            let label = match ctx.locale() {
+                Locale::Ru => "Ресурс",
+                Locale::En => "Resource",
+            };
+            write!(buf, "{}<{}>", label, name).unwrap();
+        }
+        TypeKind::RegisterAttribute { name, .. } => {
+            let label = match ctx.locale() {
+                Locale::Ru => "Реквизит",
+                Locale::En => "Attribute",
+            };
+            write!(buf, "{}<{}>", label, name).unwrap();
+        }
+        TypeKind::RegisterFilter { .. } => buf.push_str(match ctx.locale() {
+            Locale::Ru => "Отбор",
+            Locale::En => "Filter",
+        }),
+        TypeKind::Attribute { name, .. } => buf.push_str(name),
+        TypeKind::Union(members) => render_union(members.as_ref(), ctx, db, buf),
+        TypeKind::Function(facet) => render_function(facet, ctx, db, buf),
+        TypeKind::QueryResult(facet) => render_query_result(facet, ctx, db, buf),
+        TypeKind::QueryResultSelection(facet) => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "ВыборкаИзРезультата",
+                Locale::En => "QueryResultSelection",
+            });
+            render_projection_suffix(&facet.projection, ctx, db, buf);
+        }
+        TypeKind::QueryBatchResult { .. } => buf.push_str(match ctx.locale() {
+            Locale::Ru => "ПакетРезультатовЗапроса",
+            Locale::En => "QueryBatchResult",
+        }),
+        TypeKind::Query { .. } => buf.push_str(match ctx.locale() {
+            Locale::Ru => "Запрос",
+            Locale::En => "Query",
+        }),
+    }
+}
+
+fn render_number(facet: &NumberFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
+    buf.push_str(match ctx.locale() {
+        Locale::Ru => "Число",
+        Locale::En => "Number",
+    });
+    if ctx.precision_visible() {
+        match (facet.precision, facet.scale) {
+            (Some(p), Some(s)) => {
+                write!(buf, "({}, {})", p, s).unwrap();
+            }
+            (Some(p), None) => {
+                write!(buf, "({})", p).unwrap();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn render_string(facet: &StringFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
+    buf.push_str(match ctx.locale() {
+        Locale::Ru => "Строка",
+        Locale::En => "String",
+    });
+    if ctx.precision_visible() {
+        if let Some(len) = facet.length {
+            write!(buf, "({})", len).unwrap();
+        }
+    }
+}
+
+fn render_date(facet: &DateFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
+    use crate::facet::DateComponent;
+    buf.push_str(match (ctx.locale(), facet.component) {
+        (Locale::Ru, DateComponent::Date) => "Дата",
+        (Locale::Ru, DateComponent::Time) => "Время",
+        (Locale::Ru, DateComponent::DateTime) => "ДатаВремя",
+        (Locale::En, DateComponent::Date) => "Date",
+        (Locale::En, DateComponent::Time) => "Time",
+        (Locale::En, DateComponent::DateTime) => "DateTime",
+    });
+}
+
+fn render_array(facet: &ArrayFacet, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mut String) {
+    buf.push_str(match ctx.locale() {
+        Locale::Ru => "Массив",
+        Locale::En => "Array",
+    });
+    if let Some(elem) = facet.element {
+        buf.push_str(match ctx.locale() {
+            Locale::Ru => " из ",
+            Locale::En => " of ",
+        });
+        render(db.lookup_type(elem), ctx, db, buf);
+    }
+}
+
+fn render_map(facet: &MapFacet, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mut String) {
+    buf.push_str(match ctx.locale() {
+        Locale::Ru => "Соответствие",
+        Locale::En => "Map",
+    });
+    if facet.key.is_some() || facet.value.is_some() {
+        buf.push('<');
+        render_optional(facet.key, ctx, db, buf);
+        buf.push_str(", ");
+        render_optional(facet.value, ctx, db, buf);
+        buf.push('>');
+    }
+}
+
+fn render_structure(facet: &StructureFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
+    buf.push_str(match ctx.locale() {
+        Locale::Ru => "Структура",
+        Locale::En => "Structure",
+    });
+    if let Some(keys) = &facet.keys {
+        buf.push('(');
+        for (i, k) in keys.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            buf.push_str(k);
+        }
+        buf.push(')');
+    }
+}
+
+fn render_table(
+    facet: &TableFacet,
+    ctx: &dyn DisplayCtx,
+    db: &dyn TypeKernelDb,
+    is_row: bool,
+    buf: &mut String,
+) {
+    let base = match (ctx.locale(), is_row) {
+        (Locale::Ru, false) => "ТаблицаЗначений",
+        (Locale::Ru, true) => "СтрокаТаблицыЗначений",
+        (Locale::En, false) => "ValueTable",
+        (Locale::En, true) => "ValueTableRow",
+    };
+    buf.push_str(base);
+    render_projection_suffix(&facet.projection, ctx, db, buf);
+}
+
+fn render_projection_suffix(
+    projection: &Option<std::sync::Arc<Projection>>,
+    ctx: &dyn DisplayCtx,
+    db: &dyn TypeKernelDb,
+    buf: &mut String,
+) {
+    let Some(proj) = projection else { return };
+    if !ctx.precision_visible() {
+        return;
+    }
+    buf.push_str(" { ");
+    for (i, field) in proj.fields.iter().enumerate() {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        buf.push_str(&field.name);
+        buf.push_str(": ");
+        render(db.lookup_type(field.ty), ctx, db, buf);
+    }
+    buf.push_str(" }");
+}
+
+fn render_meta_ref(facet: &MetaRefFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
+    let prefix = match (ctx.locale(), facet.kind) {
+        (Locale::Ru, MetadataKind::CatalogRef) => "СправочникСсылка",
+        (Locale::Ru, MetadataKind::DocumentRef) => "ДокументСсылка",
+        (Locale::Ru, MetadataKind::EnumRef) => "ПеречислениеСсылка",
+        (Locale::Ru, MetadataKind::TaskRef) => "ЗадачаСсылка",
+        (Locale::Ru, MetadataKind::BusinessProcessRef) => "БизнесПроцессСсылка",
+        (Locale::Ru, MetadataKind::ExchangePlanRef) => "ПланОбменаСсылка",
+        (Locale::Ru, MetadataKind::ChartOfAccountsRef) => "ПланСчетовСсылка",
+        (Locale::En, MetadataKind::CatalogRef) => "CatalogRef",
+        (Locale::En, MetadataKind::DocumentRef) => "DocumentRef",
+        (Locale::En, MetadataKind::EnumRef) => "EnumRef",
+        (Locale::En, MetadataKind::TaskRef) => "TaskRef",
+        (Locale::En, MetadataKind::BusinessProcessRef) => "BusinessProcessRef",
+        (Locale::En, MetadataKind::ExchangePlanRef) => "ExchangePlanRef",
+        (Locale::En, MetadataKind::ChartOfAccountsRef) => "ChartOfAccountsRef",
+        // Fallback for variants we haven't pinned a bilingual label for
+        // yet; Debug shape is good enough for hover. Pre-existing tests
+        // pin the curated labels; new ones lower-priority MetadataKinds
+        // route through this branch.
+        _ => "",
+    };
+    if !prefix.is_empty() {
+        buf.push_str(prefix);
+        buf.push('.');
+        buf.push_str(&facet.name);
+    } else {
+        write!(buf, "{:?}.{}", facet.kind, facet.name).unwrap();
+    }
+}
+
+fn render_meta_obj(facet: &MetaObjFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
+    let prefix = match (ctx.locale(), facet.kind) {
+        (Locale::Ru, MetadataKind::CatalogObject) => "СправочникОбъект",
+        (Locale::Ru, MetadataKind::DocumentObject) => "ДокументОбъект",
+        (Locale::Ru, MetadataKind::TaskObject) => "ЗадачаОбъект",
+        (Locale::Ru, MetadataKind::BusinessProcessObject) => "БизнесПроцессОбъект",
+        (Locale::Ru, MetadataKind::DataProcessorObject) => "ОбработкаОбъект",
+        (Locale::Ru, MetadataKind::ReportObject) => "ОтчётОбъект",
+        (Locale::Ru, MetadataKind::ExchangePlanObject) => "ПланОбменаОбъект",
+        (Locale::Ru, MetadataKind::ChartOfAccountsObject) => "ПланСчетовОбъект",
+        (Locale::En, MetadataKind::CatalogObject) => "CatalogObject",
+        (Locale::En, MetadataKind::DocumentObject) => "DocumentObject",
+        (Locale::En, MetadataKind::TaskObject) => "TaskObject",
+        (Locale::En, MetadataKind::BusinessProcessObject) => "BusinessProcessObject",
+        (Locale::En, MetadataKind::DataProcessorObject) => "DataProcessorObject",
+        (Locale::En, MetadataKind::ReportObject) => "ReportObject",
+        (Locale::En, MetadataKind::ExchangePlanObject) => "ExchangePlanObject",
+        (Locale::En, MetadataKind::ChartOfAccountsObject) => "ChartOfAccountsObject",
+        _ => "",
+    };
+    if !prefix.is_empty() {
+        buf.push_str(prefix);
+        buf.push('.');
+        buf.push_str(&facet.name);
+    } else {
+        write!(buf, "{:?}.{}", facet.kind, facet.name).unwrap();
+    }
+}
+
+fn render_union(members: &[TypeId], ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mut String) {
+    for (i, &m) in members.iter().enumerate() {
+        if i > 0 {
+            buf.push_str(" | ");
+        }
+        render(db.lookup_type(m), ctx, db, buf);
+    }
+}
+
+fn render_function(
+    facet: &FunctionFacet,
+    ctx: &dyn DisplayCtx,
+    db: &dyn TypeKernelDb,
+    buf: &mut String,
+) {
+    buf.push_str(match ctx.locale() {
+        Locale::Ru => "Функция(",
+        Locale::En => "Function(",
+    });
+    for (i, p) in facet.params.iter().enumerate() {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        buf.push_str(&p.name);
+        buf.push_str(": ");
+        render(db.lookup_type(p.ty), ctx, db, buf);
+    }
+    buf.push_str(") -> ");
+    render(db.lookup_type(facet.returns), ctx, db, buf);
+}
+
+fn render_query_result(
+    facet: &ProjectionFacet,
+    ctx: &dyn DisplayCtx,
+    db: &dyn TypeKernelDb,
+    buf: &mut String,
+) {
+    buf.push_str(match ctx.locale() {
+        Locale::Ru => "РезультатЗапроса",
+        Locale::En => "QueryResult",
+    });
+    render_projection_suffix(&facet.projection, ctx, db, buf);
+}
+
+fn render_optional(
+    id: Option<TypeId>,
+    ctx: &dyn DisplayCtx,
+    db: &dyn TypeKernelDb,
+    buf: &mut String,
+) {
+    match id {
+        Some(id) => render(db.lookup_type(id), ctx, db, buf),
+        None => buf.push('?'),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use expect_test::expect;
+
+    use super::*;
+    use crate::builders::Builders;
+    use crate::facet::DateComponent;
+    use crate::kind::{ProjectionFieldSource, ProjectionOrigin};
+    use crate::testing::{InMemoryDb, RootConfigCtx};
+
+    fn ru() -> PlainDisplayCtx {
+        PlainDisplayCtx::hover_ru()
+    }
+
+    fn en() -> PlainDisplayCtx {
+        PlainDisplayCtx::hover_en()
+    }
+
+    fn show(db: &InMemoryDb, id: TypeId, ctx: &dyn DisplayCtx) -> String {
+        display_name(db.lookup_type(id), ctx, db)
+    }
+
+    #[test]
+    fn primitives_ru_and_en() {
+        let db = InMemoryDb::new();
+        expect!["Булево"].assert_eq(&show(&db, db.boolean(), &ru()));
+        expect!["Boolean"].assert_eq(&show(&db, db.boolean(), &en()));
+        expect!["Неизвестно"].assert_eq(&show(&db, db.unknown(), &ru()));
+        expect!["Unknown"].assert_eq(&show(&db, db.unknown(), &en()));
+        expect!["Произвольный"].assert_eq(&show(&db, db.any(), &ru()));
+        expect!["Any"].assert_eq(&show(&db, db.any(), &en()));
+        expect!["NULL"].assert_eq(&show(&db, db.null(), &ru()));
+        expect!["Неопределено"].assert_eq(&show(&db, db.undefined(), &ru()));
+    }
+
+    #[test]
+    fn number_with_precision_hover_vs_completion() {
+        let db = InMemoryDb::new();
+        let id = db.number(Some(15), Some(2));
+        expect!["Число(15, 2)"].assert_eq(&show(&db, id, &PlainDisplayCtx::hover_ru()));
+        expect!["Число"].assert_eq(&show(&db, id, &PlainDisplayCtx::completion_ru()));
+        expect!["Number(15, 2)"].assert_eq(&show(&db, id, &PlainDisplayCtx::hover_en()));
+        // Precision-only.
+        let p = db.number(Some(10), None);
+        expect!["Число(10)"].assert_eq(&show(&db, p, &PlainDisplayCtx::hover_ru()));
+    }
+
+    #[test]
+    fn string_length_hover_only() {
+        let db = InMemoryDb::new();
+        let id = db.string(Some(50), false);
+        expect!["Строка(50)"].assert_eq(&show(&db, id, &PlainDisplayCtx::hover_ru()));
+        expect!["String(50)"].assert_eq(&show(&db, id, &PlainDisplayCtx::hover_en()));
+        expect!["Строка"].assert_eq(&show(&db, id, &PlainDisplayCtx::completion_ru()));
+    }
+
+    #[test]
+    fn date_components() {
+        let db = InMemoryDb::new();
+        expect!["Дата"].assert_eq(&show(&db, db.date(DateComponent::Date), &ru()));
+        expect!["Время"].assert_eq(&show(&db, db.date(DateComponent::Time), &ru()));
+        expect!["ДатаВремя"].assert_eq(&show(&db, db.date(DateComponent::DateTime), &ru()));
+        expect!["DateTime"].assert_eq(&show(&db, db.date(DateComponent::DateTime), &en()));
+    }
+
+    #[test]
+    fn metadata_ref_bilingual() {
+        let db = InMemoryDb::new();
+        let cfg = RootConfigCtx;
+        let cat = db.metadata_ref(MetadataKind::CatalogRef, "Номенклатура".to_string(), &cfg);
+        expect!["СправочникСсылка.Номенклатура"].assert_eq(&show(&db, cat, &ru()));
+        expect!["CatalogRef.Номенклатура"].assert_eq(&show(&db, cat, &en()));
+    }
+
+    #[test]
+    fn array_of_element() {
+        let db = InMemoryDb::new();
+        let n = db.number(None, None);
+        let arr = db.array(Some(n));
+        expect!["Массив из Число"].assert_eq(&show(&db, arr, &ru()));
+        expect!["Array of Number"].assert_eq(&show(&db, arr, &en()));
+
+        // Bare array — no element clause.
+        let bare = db.array(None);
+        expect!["Массив"].assert_eq(&show(&db, bare, &ru()));
+    }
+
+    #[test]
+    fn register_inner_variants_use_ctx_locale() {
+        // Regression for Codex 1.F round-1 area 8: previously these
+        // variants hard-coded Russian labels even in En contexts.
+        use crate::kind::MetadataKind;
+        let db = InMemoryDb::new();
+        let cfg = RootConfigCtx;
+        let parent =
+            db.meta_ref_facet(MetadataKind::InformationRegisterRecordSet, "Цены".to_string(), &cfg);
+        let dim = db.register_dimension(parent.clone(), "Период".to_string());
+        let res = db.register_resource(parent.clone(), "Сумма".to_string());
+        let att = db.register_attribute(parent.clone(), "Комментарий".to_string());
+        let filt = db.register_filter(parent);
+
+        expect!["Измерение<Период>"].assert_eq(&show(&db, dim, &ru()));
+        expect!["Dimension<Период>"].assert_eq(&show(&db, dim, &en()));
+        expect!["Ресурс<Сумма>"].assert_eq(&show(&db, res, &ru()));
+        expect!["Resource<Сумма>"].assert_eq(&show(&db, res, &en()));
+        expect!["Реквизит<Комментарий>"].assert_eq(&show(&db, att, &ru()));
+        expect!["Attribute<Комментарий>"].assert_eq(&show(&db, att, &en()));
+        expect!["Отбор"].assert_eq(&show(&db, filt, &ru()));
+        expect!["Filter"].assert_eq(&show(&db, filt, &en()));
+    }
+
+    #[test]
+    fn union_pipe_separated_deterministic() {
+        let db = InMemoryDb::new();
+        let n = db.number(None, None);
+        let s = db.string(None, false);
+        let u = db.union(vec![n, s]);
+        // Member order is canonicalised by sort; either rendering is
+        // valid, but it must be deterministic across re-interns. We
+        // assert determinism (re-intern same id, same string), not the
+        // specific order.
+        let rendered = show(&db, u, &ru());
+        let u2 = db.union(vec![s, n]);
+        assert_eq!(show(&db, u2, &ru()), rendered);
+        // Sanity: rendering matches one of the two valid orderings.
+        assert!(rendered == "Число | Строка" || rendered == "Строка | Число", "got {:?}", rendered);
+    }
+
+    #[test]
+    fn query_result_with_projection() {
+        let db = InMemoryDb::new();
+        let n = db.number(Some(15), Some(2));
+        let s = db.string(None, false);
+        let proj = db.projection_from_fields(
+            vec![("Цена".to_string(), n), ("Наименование".to_string(), s)],
+            ProjectionFieldSource::Column,
+            ProjectionOrigin::SdblQuery,
+        );
+        let qr = db.query_result(Some(proj), crate::facet::ProjectionSource::Sdbl);
+
+        // Hover (with precision_visible) shows the projection columns.
+        expect!["РезультатЗапроса { Цена: Число(15, 2), Наименование: Строка }"].assert_eq(&show(
+            &db,
+            qr,
+            &ru(),
+        ));
+
+        // Completion mode hides projection.
+        expect!["РезультатЗапроса"].assert_eq(&show(&db, qr, &PlainDisplayCtx::completion_ru()));
+    }
+
+    #[test]
+    fn function_renders_params_and_return() {
+        use crate::facet::{ArgArity, FunctionFacet, FunctionOrigin, ParamPassing, ParamSpec};
+
+        let db = InMemoryDb::new();
+        let n = db.number(None, None);
+        let s = db.string(None, false);
+
+        let facet = FunctionFacet {
+            params: Arc::from([
+                ParamSpec {
+                    name: "Цена".to_string(),
+                    ty: n,
+                    passing: ParamPassing::ByRef,
+                    variadic: false,
+                },
+                ParamSpec {
+                    name: "Имя".to_string(),
+                    ty: s,
+                    passing: ParamPassing::ByVal,
+                    variadic: false,
+                },
+            ]),
+            defaults: Arc::from([None, None]),
+            min_args: 2,
+            max_args: ArgArity::Fixed(2),
+            returns: n,
+            origin: FunctionOrigin::UserDefined,
+        };
+        let id = db.function(facet);
+        expect!["Функция(Цена: Число, Имя: Строка) -> Число"].assert_eq(&show(&db, id, &ru()));
+    }
+}

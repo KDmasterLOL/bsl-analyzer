@@ -33,6 +33,28 @@ pub trait TypeKernelDb {
     /// Look up the `TypeKind` interned at the given handle. Returned
     /// reference borrows from `&self` of the db; it cannot outlive the
     /// db borrow.
+    ///
+    /// **Lifetime-escape compile_fail pin** — Phase 1.F asserts the
+    /// invariant via doc-test: a `&TypeKind` from `lookup_type` MUST
+    /// NOT survive the db being dropped. The snippet below is
+    /// expected NOT to compile; if it ever does, the lifetime
+    /// contract loosened and the test fails:
+    ///
+    /// ```compile_fail
+    /// use bsl_types::intern::TypeKernelDb;
+    /// use bsl_types::kind::TypeKind;
+    /// use bsl_types::testing::InMemoryDb;
+    /// use bsl_types::builders::Builders;
+    ///
+    /// fn require_borrow(_x: &TypeKind) {}
+    ///
+    /// let kind_ref: &TypeKind = {
+    ///     let db = InMemoryDb::new();
+    ///     let id = db.number(None, None);
+    ///     db.lookup_type(id)
+    /// };
+    /// require_borrow(kind_ref); // ERROR: kind_ref outlives db
+    /// ```
     fn lookup_type(&self, id: TypeId) -> &TypeKind;
 }
 
