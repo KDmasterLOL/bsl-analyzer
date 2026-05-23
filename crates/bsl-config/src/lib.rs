@@ -9,7 +9,10 @@
 //!
 //! The Salsa-tracked `ConfigsDatabase` trait stays in `hir-def`, where
 //! it can extend `DefDatabase`. This crate provides only the plain
-//! value types — no Salsa, no LSP, no I/O dependencies.
+//! value types — no direct Salsa, LSP, or I/O dependencies. Note
+//! that `bsl-metadata` (the only direct dep) transitively pulls in
+//! `bsl-platform → salsa` and `stdx → ignore`; these are inherited
+//! from Layer 0, not introduced here.
 
 #![deny(rust_2018_idioms)]
 

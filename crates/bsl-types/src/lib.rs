@@ -39,6 +39,13 @@ pub mod intern;
 pub mod kind;
 pub mod testing;
 
+// Crate-root convenience re-export — `bsl_types::ConfigId` resolves
+// alongside `bsl_types::kind::ConfigId`. `ConfigId` is the only type
+// downstream callers reach for by short path; other kernel types
+// (`TypeId`, `TypeKind`, …) stay namespaced under `kind::` to avoid
+// bloating the top-level surface.
+pub use kind::ConfigId;
+
 #[cfg(test)]
 mod tests {
     #[test]
