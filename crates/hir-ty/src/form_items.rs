@@ -35,6 +35,7 @@
 
 use bsl_config::VisibleConfig;
 use bsl_metadata::{Form, FormElement};
+use bsl_types::intern::TypeKernelDb;
 use hir_def::resolver::Resolver;
 use hir_def::ty::{
     FormDataBinding, FormDataKind, FormDataTarget, FormElementKind, MetadataKind, Ty,
@@ -113,7 +114,7 @@ pub(crate) fn lookup_form_item_field(
     let form = metadata.form.as_ref()?;
     let element = form.find_element(field.as_str())?;
     let configs = db.configurations(module_id.file_id);
-    let ty = lower_form_element(form, element, &configs);
+    let ty = lower_form_element(db, form, element, &configs);
     Some(FieldInfo {
         name: Name::new(&element.name),
         name_en: None,
@@ -139,6 +140,7 @@ pub(crate) fn lookup_form_item_field(
 /// [`lower_form_attribute_to_ty`] / [`crate::form_attr::resolve_form_attribute`]
 /// pair.
 pub(crate) fn lower_form_element(
+    db: &dyn TypeKernelDb,
     form: &Form,
     element: &FormElement,
     configs: &[VisibleConfig],
@@ -147,7 +149,7 @@ pub(crate) fn lower_form_element(
         .data_path
         .as_deref()
         .filter(|dp| !dp.starts_with('~'))
-        .and_then(|dp| resolve_data_path(dp, form, configs));
+        .and_then(|dp| resolve_data_path(db, dp, form, configs));
     Ty::FormControl { kind: element.kind, binding }
 }
 
@@ -260,6 +262,7 @@ pub(crate) fn refine_form_control_property(receiver_ty: &Ty, field: &Name) -> Op
 /// mid-path lookup miss, empty path) so the caller surfaces
 /// `binding: None` rather than a half-baked binding.
 fn resolve_data_path(
+    db: &dyn TypeKernelDb,
     data_path: &str,
     form: &Form,
     configs: &[VisibleConfig],
@@ -272,7 +275,8 @@ fn resolve_data_path(
     let mut current_ty = lower_form_attribute_to_ty(attr, configs);
 
     for seg in rest {
-        let info = field_lookup::lookup_field(configs, &current_ty, seg)?;
+        let receiver_id = crate::ty_bridge::ty_to_typeid(db, &current_ty);
+        let info = field_lookup::lookup_field(db, configs, receiver_id, seg)?;
         current_ty = info.ty;
     }
 
@@ -325,6 +329,15 @@ fn resolve_data_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.G.1 test shim: bridges the db-less readable test calls through a
+    /// fresh sandbox [`InMemoryDb`] (used only inside `resolve_data_path`'s
+    /// `lookup_field` receiver bridge).
+    fn lower_form_element(form: &Form, element: &FormElement, configs: &[VisibleConfig]) -> Ty {
+        super::lower_form_element(&InMemoryDb::new(), form, element, configs)
+    }
+
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
     use bsl_metadata::{
         AttributeType, Configuration, Form, FormAttribute, FormElement, FormElementKind, FormType,

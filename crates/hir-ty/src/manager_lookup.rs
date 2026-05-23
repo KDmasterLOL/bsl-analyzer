@@ -41,8 +41,12 @@
 
 use bsl_config::VisibleConfig;
 use bsl_metadata::{MdoType, MetadataObject};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
+
+use crate::ty_bridge::typeid_to_ty;
 
 /// Result of a successful manager-member lookup.
 ///
@@ -63,6 +67,18 @@ pub struct ManagerMemberInfo {
 /// the caller can keep its existing fall-through (`field_lookup`
 /// already covered `Ty::MetadataRef`; everything else stays `Unknown`).
 pub fn lookup_manager_field(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    receiver: TypeId,
+    member: &Name,
+) -> Option<ManagerMemberInfo> {
+    let base_ty = typeid_to_ty(db, receiver);
+    lookup_manager_field_ty(configs, &base_ty, member)
+}
+
+/// Verbatim `&Ty` manager-member pipeline behind the
+/// [`lookup_manager_field`] boundary (§4.G.1 receiver flip).
+fn lookup_manager_field_ty(
     configs: &[VisibleConfig],
     base_ty: &Ty,
     member: &Name,
@@ -158,6 +174,23 @@ mod tests {
     use bsl_config::VisibleConfig;
     use bsl_metadata::metadata_object::{EnumValue, PredefinedItem};
     use bsl_metadata::Configuration;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.G.1 test shim mirroring [`crate::field_lookup`]'s — bridges the
+    /// readable `&Ty` receiver through a fresh sandbox [`InMemoryDb`].
+    fn lookup_manager_field(
+        configs: &[VisibleConfig],
+        base_ty: &Ty,
+        member: &Name,
+    ) -> Option<ManagerMemberInfo> {
+        let db = InMemoryDb::new();
+        super::lookup_manager_field(
+            &db,
+            configs,
+            crate::ty_bridge::ty_to_typeid(&db, base_ty),
+            member,
+        )
+    }
     use std::sync::Arc;
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {

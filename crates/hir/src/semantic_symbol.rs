@@ -155,7 +155,8 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         let configs = self.db.configurations(file_id);
         let name = Name::new(token.text());
-        let field = hir_ty::lookup_field(&configs, &receiver_ty, &name)?;
+        let receiver_id = hir_ty::ty_bridge::ty_to_typeid(self.db, &receiver_ty);
+        let field = hir_ty::lookup_field(self.db, &configs, receiver_id, &name)?;
         Some(SemanticSymbol {
             key: SemanticSymbolKey::TypedMember { file_id, range: token.text_range() },
             name: field.name,

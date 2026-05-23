@@ -320,11 +320,11 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// hover / completion on attributes correctly invalidate when the
     /// MDO's XML changes.
     pub fn field_type(&self, field_name: &Name) -> Self {
-        // `lookup_field` is still `Ty`-native (§4.E.3 deferred to §4.G);
-        // bridge the receiver in and the result `Ty` back out.
+        // §4.G.1: `lookup_field` now takes the kernel receiver `TypeId`
+        // directly (we already hold `self.id`); its `FieldInfo.ty` is still
+        // `Ty` (flips in §4.G.2), so the result bridges back out.
         let configs = self.db.configurations(self.file_id);
-        let receiver = self.ty();
-        let ty = lookup_field(&configs, &receiver, field_name)
+        let ty = lookup_field(self.db, &configs, self.id, field_name)
             .map(|info| info.ty)
             .unwrap_or(Ty::Unknown);
         Self::new(self.db, self.file_id, ty)

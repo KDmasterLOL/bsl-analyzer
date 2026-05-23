@@ -23,8 +23,12 @@
 pub use crate::field_enum::FieldInfo;
 
 use bsl_config::VisibleConfig;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::{FormDataKind, MetadataKind, Ty};
 use hir_def::Name;
+
+use crate::ty_bridge::typeid_to_ty;
 
 /// Project a [`Ty::FormData`] receiver to the underlying MDO for **field**
 /// resolution.
@@ -107,7 +111,27 @@ fn lookup_form_data_tabular_section_field(
 ///
 /// `configs` should be the visible configurations for the receiver's file
 /// (`db.configurations(file_id)`).
+///
+/// Phase 3 §4.G.1: the public receiver is a kernel [`TypeId`]
+/// (boundary-flip, mirrors `method_lookup` / `iteration_lookup`). The body
+/// bridges to [`typeid_to_ty`] once and runs the verbatim Ty pipeline in
+/// [`lookup_field_ty`]; the inner pipeline still speaks `Ty` because it
+/// leans on out-of-§4.G helpers (`field_enum`, `platform_property_lookup`,
+/// `form_items`). `FieldInfo.ty` flips to `TypeId` in §4.G.2.
 pub fn lookup_field(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    receiver: TypeId,
+    field_name: &Name,
+) -> Option<FieldInfo> {
+    let receiver_ty = typeid_to_ty(db, receiver);
+    lookup_field_ty(configs, &receiver_ty, field_name)
+}
+
+/// Verbatim `&Ty` field-lookup pipeline behind the [`lookup_field`]
+/// boundary. Internal recursion (union-intersection over arms) calls this
+/// directly to avoid a needless intern round-trip per arm.
+fn lookup_field_ty(
     configs: &[VisibleConfig],
     receiver_ty: &Ty,
     field_name: &Name,
@@ -209,11 +233,11 @@ fn lookup_field_in_union_intersection(
         return None;
     }
     if live.len() == 1 {
-        return lookup_field(configs, live[0], field_name);
+        return lookup_field_ty(configs, live[0], field_name);
     }
     let mut per_arm: Vec<FieldInfo> = Vec::with_capacity(live.len());
     for arm in &live {
-        let info = lookup_field(configs, arm, field_name)?;
+        let info = lookup_field_ty(configs, arm, field_name)?;
         per_arm.push(info);
     }
     let first = &per_arm[0];
@@ -324,6 +348,26 @@ fn lookup_field_via_platform_property(receiver_ty: &Ty, field_name: &Name) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.G.1 test shim: the readable `&Ty` test calls below predate the
+    /// `TypeId`-receiver boundary-flip. Shadows the production
+    /// [`lookup_field`] with a fresh sandbox [`InMemoryDb`] per call —
+    /// the db is used only to bridge the receiver in (and `FieldInfo.ty`
+    /// back out is untouched), so a stateless intern table is sufficient.
+    fn lookup_field(
+        configs: &[VisibleConfig],
+        receiver_ty: &Ty,
+        field_name: &Name,
+    ) -> Option<FieldInfo> {
+        let db = InMemoryDb::new();
+        super::lookup_field(
+            &db,
+            configs,
+            crate::ty_bridge::ty_to_typeid(&db, receiver_ty),
+            field_name,
+        )
+    }
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
     use bsl_metadata::{Attribute, AttributeType, Configuration, MdoType, MetadataObject};
     use hir_def::ty::MetadataKind;

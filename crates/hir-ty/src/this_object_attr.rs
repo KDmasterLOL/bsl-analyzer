@@ -24,7 +24,8 @@ pub(crate) fn resolve_this_object_member(
     let receiver = Ty::MetadataRef { kind, name: mdo_name };
     let module_id = resolver.module_id()?;
     let configs = db.configurations(module_id.file_id);
-    crate::field_lookup::lookup_field(&configs, &receiver, name).map(|info| info.ty)
+    let receiver_id = crate::ty_bridge::ty_to_typeid(db, &receiver);
+    crate::field_lookup::lookup_field(db, &configs, receiver_id, name).map(|info| info.ty)
 }
 
 /// Implicit `ЭтотОбъект.<name>` resolver for RecordSetModule.
@@ -46,5 +47,6 @@ pub(crate) fn resolve_this_record_set_member(
     let receiver = Ty::MetadataRef { kind, name: mdo_name };
     let module_id = resolver.module_id()?;
     let configs = db.configurations(module_id.file_id);
-    crate::field_lookup::lookup_field(&configs, &receiver, name).map(|info| info.ty)
+    let receiver_id = crate::ty_bridge::ty_to_typeid(db, &receiver);
+    crate::field_lookup::lookup_field(db, &configs, receiver_id, name).map(|info| info.ty)
 }

@@ -445,6 +445,8 @@ mod tests {
     #[test]
     fn form_data_structure_projects_for_fields() {
         use crate::field_lookup;
+        use bsl_types::testing::InMemoryDb;
+        let db = InMemoryDb::new();
 
         let receiver = Ty::FormData {
             kind: FormDataKind::Structure,
@@ -461,11 +463,22 @@ mod tests {
         // (The actual MDO field walk is exercised by the existing
         // `MetadataRef` integration tests — duplicating that wiring here
         // would test the enumerator, not our projection.)
-        let _ = field_lookup::lookup_field(&[], &receiver, &Name::new("Дата"));
+        let _ = field_lookup::lookup_field(
+            &db,
+            &[],
+            crate::ty_bridge::ty_to_typeid(&db, &receiver),
+            &Name::new("Дата"),
+        );
         // The negative path on a Collection: no underlying, projection
         // returns None, falls through to platform property lookup on
         // `ДанныеФормыКоллекция`, which has no `Дата` field. Returns None.
         let table = Ty::FormData { kind: FormDataKind::Collection, underlying: None };
-        assert!(field_lookup::lookup_field(&[], &table, &Name::new("Дата")).is_none());
+        assert!(field_lookup::lookup_field(
+            &db,
+            &[],
+            crate::ty_bridge::ty_to_typeid(&db, &table),
+            &Name::new("Дата")
+        )
+        .is_none());
     }
 }

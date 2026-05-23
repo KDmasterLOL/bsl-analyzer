@@ -1182,7 +1182,14 @@ impl<'db> InferenceContext<'db> {
                         let info = crate::form_items::lookup_form_item_field(
                             self.db, &resolver, &base_ty, field,
                         )
-                        .or_else(|| crate::field_lookup::lookup_field(&configs, &base_ty, field));
+                        .or_else(|| {
+                            crate::field_lookup::lookup_field(
+                                self.db,
+                                &configs,
+                                ty_to_typeid(self.db, &base_ty),
+                                field,
+                            )
+                        });
                         if let Some(info) = info {
                             if info.is_readonly {
                                 self.push_inference_diagnostic(
@@ -1538,13 +1545,19 @@ impl<'db> InferenceContext<'db> {
                     crate::form_items::lookup_form_item_field(self.db, &resolver, &base_ty, field)
                 {
                     info.ty
-                } else if let Some(info) =
-                    crate::field_lookup::lookup_field(&configs, &base_ty, field)
-                {
+                } else if let Some(info) = crate::field_lookup::lookup_field(
+                    self.db,
+                    &configs,
+                    ty_to_typeid(self.db, &base_ty),
+                    field,
+                ) {
                     info.ty
-                } else if let Some(info) =
-                    crate::manager_lookup::lookup_manager_field(&configs, &base_ty, field)
-                {
+                } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
+                    self.db,
+                    &configs,
+                    ty_to_typeid(self.db, &base_ty),
+                    field,
+                ) {
                     info.ty
                 } else {
                     // Only emit on receivers where `lookup_field` is
