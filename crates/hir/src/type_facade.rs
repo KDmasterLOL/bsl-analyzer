@@ -301,12 +301,14 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     where
         DB: bsl_types::intern::TypeKernelDb,
     {
-        // Phase 3 §4.E.2a: `lookup_method` returns a kernel-native
-        // `MethodInfo`; receiver stays `&Ty`, bridge only the return id
-        // back out. §4.F.1 swaps the facade backing to `TypeId`.
-        let ty = lookup_method(self.db, &self.ty, method_name)
-            .map(|info| hir_ty::ty_bridge::typeid_to_ty(self.db, info.return_ty))
-            .unwrap_or(Ty::Unknown);
+        // Phase 3 §4.E.2b-ii: `lookup_method` is kernel-native
+        // (`receiver: TypeId`). The facade still backs on `Ty`, so
+        // bridge the receiver in and the return id back out. §4.F.1
+        // swaps the facade backing to `TypeId` and drops both bridges.
+        let ty =
+            lookup_method(self.db, hir_ty::ty_bridge::ty_to_typeid(self.db, &self.ty), method_name)
+                .map(|info| hir_ty::ty_bridge::typeid_to_ty(self.db, info.return_ty))
+                .unwrap_or(Ty::Unknown);
         Self::new(self.db, self.file_id, ty)
     }
 

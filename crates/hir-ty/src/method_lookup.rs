@@ -60,7 +60,7 @@ use vfs::FileId;
 
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
-use crate::ty_bridge::ty_to_typeid;
+use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
 
 /// Result of a successful method lookup.
 ///
@@ -78,10 +78,12 @@ use crate::ty_bridge::ty_to_typeid;
 /// Result of a successful method lookup — kernel-native surface.
 ///
 /// Phase 3 §4.E.2a: the public `MethodInfo` now carries interned
-/// [`TypeId`]s. Internal resolution still runs on legacy [`Ty`] via the
-/// private [`MethodInfoTy`] (see below); the public entry points bridge
-/// at the boundary. §4.E.2b flips the internal dispatch + SDBL machinery
-/// to kernel-native and removes the entry/exit bridges.
+/// [`TypeId`]s. The public entry points are kernel-native
+/// (`receiver: TypeId`) as of §4.E.2b-ii. Internal resolution still
+/// runs on legacy [`Ty`] via the private [`MethodInfoTy`] (see below),
+/// bridged in/out at the boundary; that internal pipeline + the SDBL
+/// chain machinery flip to kernel-native at §4.G (they depend on
+/// out-of-§4.E `Ty`/`SdblProjection` helpers that flip together then).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
     /// Return type id. `Undefined` for procedures (platform methods with
@@ -100,8 +102,9 @@ pub struct MethodInfo {
 /// Phase 3 §4.E.2a: the resolution pipeline (`lookup_*`, `union_lookup`,
 /// `apply_sdbl_chain_rewrite`, …) continues to operate on `Ty`; this is
 /// the struct it threads. The public [`MethodInfo`] is produced from it
-/// by [`method_info_ty_to_kernel`] at the boundary. §4.E.2b will delete
-/// this and run the pipeline directly on `TypeId`.
+/// by [`method_info_ty_to_kernel`] at the boundary. §4.G deletes this
+/// and runs the pipeline directly on `TypeId` once the out-of-§4.E
+/// `Ty`/`SdblProjection` helpers it leans on flip together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MethodInfoTy {
     pub(crate) return_ty: Ty,
@@ -137,10 +140,10 @@ fn method_info_ty_to_kernel(db: &dyn TypeKernelDb, info: MethodInfoTy) -> Method
 /// the variable-state refinement Phase D adds for SDBL chains.
 pub fn lookup_method(
     db: &dyn TypeKernelDb,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     method_name: &Name,
 ) -> Option<MethodInfo> {
-    lookup_method_with_refinement(db, receiver_ty, method_name, None)
+    lookup_method_with_refinement(db, receiver, method_name, None)
 }
 
 /// Resolve a method call on a typed receiver, optionally upgrading
@@ -158,18 +161,21 @@ pub fn lookup_method(
 /// taken as-is, exactly matching pre-Phase-D behaviour.
 pub fn lookup_method_with_refinement(
     db: &dyn TypeKernelDb,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
 ) -> Option<MethodInfo> {
-    // Phase 3 §4.E.2a: run the (unchanged) `Ty`-native resolution
-    // pipeline, then bridge ONLY the result to the kernel-native
-    // `MethodInfo`. The receiver stays `&Ty` until §4.E.2b flips the
-    // whole dispatch (and the SDBL chain machinery) to `TypeId`. The
-    // kernel manager-representation gap that previously blocked the
-    // receiver flip is closed (§4.E.2b-i: `TypeKind::ObjectManager`
-    // now carries `ManagerFacet { mdo: MdoType, .. }`, lossless).
-    let info = lookup_method_with_refinement_ty(receiver_ty, method_name, refine_ctx)?;
+    // Phase 3 §4.E.2b-ii (boundary-flip): the public surface is now
+    // kernel-native (`receiver: TypeId`, returns `MethodInfo`). The
+    // receiver bridge is lossless after §4.E.2b-i gave `ObjectManager`
+    // a faithful `ManagerFacet { mdo: MdoType, .. }`. The internal
+    // resolution pipeline + SDBL chain machinery still run on `Ty`
+    // (they depend on out-of-§4.E helpers — `this_object::coerce_*`,
+    // `lower::type_string`, `query_text_dataflow` — that speak `Ty` /
+    // `SdblProjection`); they flip together at §4.G when `Ty` is
+    // deleted. Bridge in at entry, bridge the result out.
+    let receiver_ty = typeid_to_ty(db, receiver);
+    let info = lookup_method_with_refinement_ty(&receiver_ty, method_name, refine_ctx)?;
     Some(method_info_ty_to_kernel(db, info))
 }
 
@@ -1189,16 +1195,16 @@ mod tests {
     use bsl_types::testing::InMemoryDb;
     use hir_def::ty::MetadataKind;
 
-    /// Phase 3 §4.E.2a test shim: the public `lookup_method` now takes
-    /// `db` and returns a kernel-native `MethodInfo`. These tests build
-    /// readable `Ty` fixtures, so this helper passes the `&Ty` receiver
-    /// straight through and bridges only the kernel *result* back to the
-    /// `Ty`-typed [`MethodInfoTy`] the assertions inspect. A fresh
-    /// sandbox [`InMemoryDb`] per call is fine — platform lookup is stateless
-    /// w.r.t. the intern table.
+    /// Phase 3 §4.E.2b-ii test shim: the public `lookup_method` now takes
+    /// `db` + an interned `TypeId` receiver and returns a kernel-native
+    /// `MethodInfo`. These tests build readable `Ty` fixtures, so this
+    /// helper interns the `&Ty` receiver and bridges the kernel *result*
+    /// back to the `Ty`-typed [`MethodInfoTy`] the assertions inspect. A
+    /// fresh sandbox [`InMemoryDb`] per call is fine — platform lookup is
+    /// stateless w.r.t. the intern table.
     fn lookup(recv: &Ty, method: &Name) -> Option<MethodInfoTy> {
         let db = InMemoryDb::new();
-        let info = super::lookup_method(&db, recv, method)?;
+        let info = super::lookup_method(&db, ty_to_typeid(&db, recv), method)?;
         Some(MethodInfoTy {
             return_ty: typeid_to_ty(&db, info.return_ty),
             params: info.params.iter().map(|id| typeid_to_ty(&db, *id)).collect(),

@@ -1448,12 +1448,17 @@ impl<'db> InferenceContext<'db> {
                 // previous "best effort" semantics by emitting
                 // `Ty::Unknown` — chain continuation still typechecks
                 // structurally, it just doesn't carry a concrete type.
-                // Phase 3 §4.E.2a: `lookup_method` returns a
-                // kernel-native `MethodInfo`; the receiver stays `&Ty`
-                // (lossless), bridge only the return id back out.
-                crate::method_lookup::lookup_method(self.db, &receiver_ty, method)
-                    .map(|info| typeid_to_ty(self.db, info.return_ty))
-                    .unwrap_or(Ty::Unknown)
+                // Phase 3 §4.E.2b-ii: `lookup_method` is kernel-native
+                // (`receiver: TypeId`, returns `MethodInfo`). Inference
+                // still works in `Ty`, so bridge the receiver in and the
+                // return id back out (transitional until infer flips).
+                crate::method_lookup::lookup_method(
+                    self.db,
+                    ty_to_typeid(self.db, &receiver_ty),
+                    method,
+                )
+                .map(|info| typeid_to_ty(self.db, info.return_ty))
+                .unwrap_or(Ty::Unknown)
             }
 
             Expr::Index { base, index } => {
@@ -2496,13 +2501,13 @@ impl<'db> InferenceContext<'db> {
             };
             let result = match crate::method_lookup::lookup_method_with_refinement(
                 self.db,
-                &receiver_ty,
+                ty_to_typeid(self.db, &receiver_ty),
                 &method_name,
                 Some(&refine_ctx),
             ) {
                 Some(info) => {
-                    // Phase 3 §4.E.2a: `lookup_method_with_refinement` is
-                    // kernel-native; bridge the result back to `Ty`
+                    // Phase 3 §4.E.2b-ii: `lookup_method_with_refinement`
+                    // is kernel-native; bridge the result back to `Ty`
                     // locals so the (unchanged) downstream constant-
                     // refinement + arg-binding logic keeps operating on
                     // `Ty`.
