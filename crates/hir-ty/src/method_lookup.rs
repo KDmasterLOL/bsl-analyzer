@@ -75,40 +75,51 @@ use crate::ty_bridge::ty_to_typeid;
 /// `ТаблицаЗначений.Скопировать`). Empty otherwise — the single
 /// signature lives in `params`. Argument-type checks accept the call
 /// when ANY overload accepts it.
+/// Result of a successful method lookup — kernel-native surface.
+///
+/// Phase 3 §4.E.2a: the public `MethodInfo` now carries interned
+/// [`TypeId`]s. Internal resolution still runs on legacy [`Ty`] via the
+/// private [`MethodInfoTy`] (see below); the public entry points bridge
+/// at the boundary. §4.E.2b flips the internal dispatch + SDBL machinery
+/// to kernel-native and removes the entry/exit bridges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
-    /// Return type. `Ty::Undefined` for procedures (platform methods with
+    /// Return type id. `Undefined` for procedures (platform methods with
     /// no declared return type).
-    pub return_ty: Ty,
-    /// Parameter types, in declaration order — flat union across
+    pub return_ty: TypeId,
+    /// Parameter type ids, in declaration order — flat union across
     /// overloads. Used by hover / completion / single-signature
     /// fallbacks.
-    pub params: Vec<Ty>,
-    /// Per-overload parameter lists. Empty for single-overload methods.
-    pub overloads: Vec<Vec<Ty>>,
+    pub params: Vec<TypeId>,
+    /// Per-overload parameter id lists. Empty for single-overload methods.
+    pub overloads: Vec<Vec<TypeId>>,
 }
 
-impl MethodInfo {
-    /// Kernel-native projection of [`Self::return_ty`].
-    ///
-    /// §4.C accessor — bridges via §4.A `ty_to_typeid`. §4.D-§4.E will
-    /// rewrite this method to read from a kernel-native field once the
-    /// MethodInfo internals migrate.
-    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
-    pub fn return_typeid(&self, db: &dyn TypeKernelDb) -> TypeId {
-        ty_to_typeid(db, &self.return_ty)
-    }
+/// Internal legacy-`Ty` resolution result.
+///
+/// Phase 3 §4.E.2a: the resolution pipeline (`lookup_*`, `union_lookup`,
+/// `apply_sdbl_chain_rewrite`, …) continues to operate on `Ty`; this is
+/// the struct it threads. The public [`MethodInfo`] is produced from it
+/// by [`method_info_ty_to_kernel`] at the boundary. §4.E.2b will delete
+/// this and run the pipeline directly on `TypeId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MethodInfoTy {
+    pub(crate) return_ty: Ty,
+    pub(crate) params: Vec<Ty>,
+    pub(crate) overloads: Vec<Vec<Ty>>,
+}
 
-    /// Kernel-native projection of [`Self::params`].
-    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
-    pub fn params_typeid(&self, db: &dyn TypeKernelDb) -> Vec<TypeId> {
-        self.params.iter().map(|t| ty_to_typeid(db, t)).collect()
-    }
-
-    /// Kernel-native projection of [`Self::overloads`].
-    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
-    pub fn overloads_typeid(&self, db: &dyn TypeKernelDb) -> Vec<Vec<TypeId>> {
-        self.overloads.iter().map(|row| row.iter().map(|t| ty_to_typeid(db, t)).collect()).collect()
+/// Bridge an internal [`MethodInfoTy`] to the public kernel-native
+/// [`MethodInfo`].
+fn method_info_ty_to_kernel(db: &dyn TypeKernelDb, info: MethodInfoTy) -> MethodInfo {
+    MethodInfo {
+        return_ty: ty_to_typeid(db, &info.return_ty),
+        params: info.params.iter().map(|t| ty_to_typeid(db, t)).collect(),
+        overloads: info
+            .overloads
+            .iter()
+            .map(|row| row.iter().map(|t| ty_to_typeid(db, t)).collect())
+            .collect(),
     }
 }
 
@@ -124,8 +135,12 @@ impl MethodInfo {
 /// None`: callers without inference context (tests, hir-level facade
 /// queries, hover synthesis) reach the same platform tables but skip
 /// the variable-state refinement Phase D adds for SDBL chains.
-pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo> {
-    lookup_method_with_refinement(receiver_ty, method_name, None)
+pub fn lookup_method(
+    db: &dyn TypeKernelDb,
+    receiver_ty: &Ty,
+    method_name: &Name,
+) -> Option<MethodInfo> {
+    lookup_method_with_refinement(db, receiver_ty, method_name, None)
 }
 
 /// Resolve a method call on a typed receiver, optionally upgrading
@@ -142,10 +157,31 @@ pub fn lookup_method(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo>
 /// [`lookup_method`]), refinement is skipped — the receiver Ty is
 /// taken as-is, exactly matching pre-Phase-D behaviour.
 pub fn lookup_method_with_refinement(
+    db: &dyn TypeKernelDb,
     receiver_ty: &Ty,
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
 ) -> Option<MethodInfo> {
+    // Phase 3 §4.E.2a: run the (unchanged) `Ty`-native resolution
+    // pipeline, then bridge ONLY the result to the kernel-native
+    // `MethodInfo`. The receiver stays `&Ty` deliberately: the kernel's
+    // `TypeKind::ObjectManager(MetaRefFacet { kind: MetadataKind, .. })`
+    // cannot represent manager `MdoType`s that lack a `MetadataKind`
+    // companion (`Constant`, `CommonModule`, `ChartOf*`, …), so an
+    // interned-receiver round-trip would silently rewrite
+    // `ObjectManager{Constant}` → `ObjectManager{Catalog}`. §4.E.2b
+    // flips the receiver to `TypeId` only after the kernel grows a
+    // faithful manager representation.
+    let info = lookup_method_with_refinement_ty(receiver_ty, method_name, refine_ctx)?;
+    Some(method_info_ty_to_kernel(db, info))
+}
+
+/// Internal `Ty`-native resolver — the pre-§4.E pipeline body.
+fn lookup_method_with_refinement_ty(
+    receiver_ty: &Ty,
+    method_name: &Name,
+    refine_ctx: Option<&RefineCtx<'_>>,
+) -> Option<MethodInfoTy> {
     // `Ty::ThisObject` and `Ty::ThisManager` are coerced to dispatch-
     // ready receivers at adapter entry — `ThisObject` → `MetadataRef
     // { *Object, .. }` (hits the metadata-ref branch); `ThisManager`
@@ -246,9 +282,9 @@ fn is_unload_method(name: &str) -> bool {
 /// is a no-op there but would still cost the union walk).
 fn narrow_unload_return(
     receiver_ty: &Ty,
-    info: MethodInfo,
+    info: MethodInfoTy,
     refine_ctx: Option<&RefineCtx<'_>>,
-) -> MethodInfo {
+) -> MethodInfoTy {
     if !is_query_result_receiver(receiver_ty) {
         return info;
     }
@@ -269,7 +305,7 @@ fn narrow_unload_return(
     } else {
         attach_projection_to_value_table(info.return_ty, projection)
     };
-    MethodInfo { return_ty, params: info.params, overloads: info.overloads }
+    MethodInfoTy { return_ty, params: info.params, overloads: info.overloads }
 }
 
 /// Walk `ty` and replace every `Ty::ValueTable { projection: None }`
@@ -344,7 +380,7 @@ fn drop_union_arm(ty: Ty, unwanted: impl Fn(&Ty) -> bool) -> Ty {
 /// Rewrite the return type of an SDBL chain method to the matching
 /// projection-typed `Ty::Query*` variant.
 ///
-/// Operates on the already-resolved [`MethodInfo`] so the receiver-side
+/// Operates on the already-resolved [`MethodInfoTy`] so the receiver-side
 /// signature (`params`, `overloads`) is untouched — only the return
 /// type changes. The bilingual method-name filter
 /// [`is_sdbl_chain_method`] short-circuits unrelated calls before any
@@ -368,9 +404,9 @@ fn drop_union_arm(ty: Ty, unwanted: impl Fn(&Ty) -> bool) -> Ty {
 fn apply_sdbl_chain_rewrite(
     receiver_ty: &Ty,
     method_name: &Name,
-    info: MethodInfo,
+    info: MethodInfoTy,
     refine_ctx: Option<&RefineCtx<'_>>,
-) -> MethodInfo {
+) -> MethodInfoTy {
     // Phase H — `QueryResult.Выгрузить(ТипОбхода)` argument-driven
     // narrowing. The platform signature declares the return as
     // `Union([ТаблицаЗначений, ДеревоЗначений])`; runtime shape is
@@ -394,7 +430,7 @@ fn apply_sdbl_chain_rewrite(
     else {
         return info;
     };
-    MethodInfo {
+    MethodInfoTy {
         return_ty: rewrite_chain_arm_in_return(info.return_ty, target_platform_name, &replacement),
         params: info.params,
         overloads: info.overloads,
@@ -644,7 +680,7 @@ fn rewrite_chain_arm_in_return(return_ty: Ty, target: ChainTarget, replacement: 
 /// catalog row receiver so the chain
 /// `<коллекция>.Получить(0).Атрибут` continues resolving via
 /// `field_lookup::lookup_on_tabular_row`.
-fn lookup_scalar_receiver(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfo> {
+fn lookup_scalar_receiver(receiver_ty: &Ty, method_name: &Name) -> Option<MethodInfoTy> {
     let type_key = platform_type_key(receiver_ty)?;
     let method = PlatformData::instance().get_method(type_key, method_name.as_str())?;
     let mut info = to_method_info(method);
@@ -671,13 +707,13 @@ fn lookup_on_object_manager(
     mdo_type: MdoType,
     name: &Name,
     method_name: &Name,
-) -> Option<MethodInfo> {
+) -> Option<MethodInfoTy> {
     let res = crate::platform_manager_lookup::resolve_platform_manager_method(
         mdo_type,
         name,
         method_name,
     )?;
-    Some(MethodInfo {
+    Some(MethodInfoTy {
         return_ty: res.return_ty,
         params: res.signature.params.to_vec(),
         overloads: res.overloads,
@@ -713,7 +749,7 @@ fn lookup_on_metadata_ref(
     kind: MetadataKind,
     name: &Name,
     method_name: &Name,
-) -> Option<MethodInfo> {
+) -> Option<MethodInfoTy> {
     if let MetadataKind::TabularSection { parent } = kind {
         let method =
             PlatformData::instance().get_method("Tabular section", method_name.as_str())?;
@@ -724,7 +760,7 @@ fn lookup_on_metadata_ref(
         name,
         method_name,
     ) {
-        return Some(MethodInfo {
+        return Some(MethodInfoTy {
             return_ty: res.return_ty,
             params: res.signature.params.to_vec(),
             overloads: res.overloads,
@@ -750,7 +786,7 @@ fn lookup_on_metadata_ref(
 fn lookup_on_form_control(
     kind: hir_def::ty::FormElementKind,
     method_name: &Name,
-) -> Option<MethodInfo> {
+) -> Option<MethodInfoTy> {
     hir_def::ty::form_control_chain_first_hit(kind, |type_name| {
         PlatformData::instance().get_method(type_name, method_name.as_str()).map(to_method_info)
     })
@@ -776,7 +812,7 @@ fn union_lookup(
     members: &[Ty],
     method_name: &Name,
     refine_ctx: Option<&RefineCtx<'_>>,
-) -> Option<MethodInfo> {
+) -> Option<MethodInfoTy> {
     let live: Vec<&Ty> =
         members.iter().filter(|m| !matches!(m, Ty::Undefined | Ty::Null)).collect();
     let mut returns: Vec<Ty> = Vec::with_capacity(live.len());
@@ -789,7 +825,7 @@ fn union_lookup(
         // gate (`receiver_needs_refinement`) silently skips arms that
         // are already-projected or non-Query, so non-SDBL unions pay
         // only the cheap discriminant check.
-        if let Some(info) = lookup_method_with_refinement(m, method_name, refine_ctx) {
+        if let Some(info) = lookup_method_with_refinement_ty(m, method_name, refine_ctx) {
             hit_any = true;
             returns.push(info.return_ty);
             if chosen_signature.is_none() {
@@ -798,7 +834,7 @@ fn union_lookup(
         }
     }
     let (params, overloads) = chosen_signature.unwrap_or_default();
-    hit_any.then(|| MethodInfo { return_ty: Ty::union(returns), params, overloads })
+    hit_any.then(|| MethodInfoTy { return_ty: Ty::union(returns), params, overloads })
 }
 
 /// Pick the `PlatformData::get_method` key for a scalar receiver.
@@ -930,7 +966,7 @@ fn is_form_data_collection_item_type_name(name: &str) -> bool {
     lc == "данныеформыэлементколлекции" || lc == "formdatacollectionitem"
 }
 
-/// Convert a `PlatformMethod` entry into the semantic `MethodInfo`.
+/// Convert a `PlatformMethod` entry into the semantic `MethodInfoTy`.
 ///
 /// - `return_type = Some("Число")` → `Ty::Number` (via
 ///   `ty_from_bare_name`); unrecognised names fall back to
@@ -946,7 +982,7 @@ fn is_form_data_collection_item_type_name(name: &str) -> bool {
 /// - Parameter types are kept as raw scalars for now; malformed comma-heavy
 ///   HBK prose stays a single `Ty::PlatformObject(...)` instead of poisoning
 ///   argument checks with bogus union members.
-pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfo {
+pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfoTy {
     let return_ty = method
         .return_type
         .as_ref()
@@ -964,7 +1000,7 @@ pub(crate) fn to_method_info(method: &PlatformMethod) -> MethodInfo {
     // declares a single signature — `params` already covers it.
     let overloads = lower_overloads(method);
 
-    MethodInfo { return_ty, params, overloads }
+    MethodInfoTy { return_ty, params, overloads }
 }
 
 /// Lower per-variant parameter lists for multi-overload methods.
@@ -995,7 +1031,7 @@ pub(crate) fn lower_overloads(method: &PlatformMethod) -> Vec<Vec<Ty>> {
         .collect()
 }
 
-/// Build a `MethodInfo` from a `PlatformData["Tabular section"]` entry,
+/// Build a `MethodInfoTy` from a `PlatformData["Tabular section"]` entry,
 /// rebinding the generic `"Строка табличной части"` (or its English alias
 /// `"Line of a tabular section"`) **in the return type** to the concrete
 /// `Ty::MetadataRef { TabularSectionRow { parent }, section_name.clone() }`
@@ -1022,7 +1058,7 @@ pub(crate) fn build_tabular_section_method_info(
     method: &PlatformMethod,
     parent: MdoType,
     section_name: &Name,
-) -> MethodInfo {
+) -> MethodInfoTy {
     let return_ty = method
         .return_type
         .as_ref()
@@ -1076,7 +1112,7 @@ pub(crate) fn build_tabular_section_method_info(
         })
         .collect();
 
-    MethodInfo { return_ty, params, overloads }
+    MethodInfoTy { return_ty, params, overloads }
 }
 
 fn rewrite_row_generic(ty: Ty, parent: MdoType, section_name: &Name) -> Ty {
@@ -1156,23 +1192,25 @@ mod tests {
     use bsl_types::testing::InMemoryDb;
     use hir_def::ty::MetadataKind;
 
-    /// §4.C drift-detector: kernel-native accessors mirror the Ty fields.
-    #[test]
-    fn method_info_typeid_round_trips_via_ty() {
+    /// Phase 3 §4.E.2a test shim: the public `lookup_method` now takes
+    /// `db` and returns a kernel-native `MethodInfo`. These tests build
+    /// readable `Ty` fixtures, so this helper passes the `&Ty` receiver
+    /// straight through and bridges only the kernel *result* back to the
+    /// `Ty`-typed [`MethodInfoTy`] the assertions inspect. A fresh
+    /// sandbox [`InMemoryDb`] per call is fine — platform lookup is stateless
+    /// w.r.t. the intern table.
+    fn lookup(recv: &Ty, method: &Name) -> Option<MethodInfoTy> {
         let db = InMemoryDb::new();
-        let info = MethodInfo {
-            return_ty: Ty::Number,
-            params: vec![Ty::String, Ty::Boolean],
-            overloads: vec![vec![Ty::Date]],
-        };
-        assert_eq!(typeid_to_ty(&db, info.return_typeid(&db)), info.return_ty);
-        let pids_via_ty: Vec<Ty> =
-            info.params_typeid(&db).iter().map(|id| typeid_to_ty(&db, *id)).collect();
-        assert_eq!(pids_via_ty, info.params);
-        let oids = info.overloads_typeid(&db);
-        let oids_via_ty: Vec<Vec<Ty>> =
-            oids.iter().map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect()).collect();
-        assert_eq!(oids_via_ty, info.overloads);
+        let info = super::lookup_method(&db, recv, method)?;
+        Some(MethodInfoTy {
+            return_ty: typeid_to_ty(&db, info.return_ty),
+            params: info.params.iter().map(|id| typeid_to_ty(&db, *id)).collect(),
+            overloads: info
+                .overloads
+                .iter()
+                .map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect())
+                .collect(),
+        })
     }
 
     fn test_method(return_type: Option<&str>, param_type: Option<&str>) -> PlatformMethod {
@@ -1198,7 +1236,7 @@ mod tests {
     fn method_lookup_platform_type_hit() {
         // `Массив.Добавить` is a staple platform method — proves the
         // type-name key resolves through `PlatformData::get_method`.
-        let info = lookup_method(&Ty::Array, &Name::new("Добавить"))
+        let info = lookup(&Ty::Array, &Name::new("Добавить"))
             .expect("Массив.Добавить must resolve in platform data");
         // Returns nothing (procedure) in platform data.
         assert_eq!(info.return_ty, Ty::Undefined);
@@ -1210,14 +1248,14 @@ mod tests {
         // `Ty::Array` — the element type only refines field/iteration,
         // method dispatch is structural.
         let receiver = Ty::TypedArray(Box::new(Ty::String));
-        let info = lookup_method(&receiver, &Name::new("Добавить"))
+        let info = lookup(&receiver, &Name::new("Добавить"))
             .expect("TypedArray must expose Массив.Добавить through the Array platform page");
         assert_eq!(info.return_ty, Ty::Undefined);
 
         // `.Количество()` returns Число — proves arithmetic-friendly
         // chaining (`.ВыделенныеСтроки.Количество()` in the form-control
         // refinement targeted by Phase 5) survives the new variant.
-        let count = lookup_method(&receiver, &Name::new("Количество"))
+        let count = lookup(&receiver, &Name::new("Количество"))
             .expect("TypedArray.Количество must resolve via the Array platform page");
         assert_eq!(count.return_ty, Ty::Number);
     }
@@ -1226,15 +1264,15 @@ mod tests {
     fn method_lookup_unknown_method_returns_none() {
         // A nonsensical method name never hits — the lookup is None, not a
         // poisoned `Ty::Unknown` signature.
-        assert!(lookup_method(&Ty::Array, &Name::new("НеСуществуетТакогоМетода")).is_none());
+        assert!(lookup(&Ty::Array, &Name::new("НеСуществуетТакогоМетода")).is_none());
     }
 
     #[test]
     fn method_lookup_returns_none_for_unknown_receiver() {
         // Unknown receiver has no method table.
-        assert!(lookup_method(&Ty::Unknown, &Name::new("Любой")).is_none());
-        assert!(lookup_method(&Ty::Undefined, &Name::new("Любой")).is_none());
-        assert!(lookup_method(&Ty::Null, &Name::new("Любой")).is_none());
+        assert!(lookup(&Ty::Unknown, &Name::new("Любой")).is_none());
+        assert!(lookup(&Ty::Undefined, &Name::new("Любой")).is_none());
+        assert!(lookup(&Ty::Null, &Name::new("Любой")).is_none());
     }
 
     #[test]
@@ -1242,7 +1280,7 @@ mod tests {
         // Primitives expose no instance methods → union of primitives still
         // returns `None` for any method name (every branch misses).
         let u = Ty::union(vec![Ty::Number, Ty::String]);
-        assert!(lookup_method(&u, &Name::new("Любой")).is_none());
+        assert!(lookup(&u, &Name::new("Любой")).is_none());
     }
 
     #[test]
@@ -1253,7 +1291,7 @@ mod tests {
         // has a `Выгрузить` method in platform data) — the `Undefined`
         // sentinel is stripped before dispatch so the chain survives.
         let u = Ty::union(vec![Ty::PlatformObject(Name::new("РезультатЗапроса")), Ty::Undefined]);
-        let info = lookup_method(&u, &Name::new("Выгрузить")).expect(
+        let info = lookup(&u, &Name::new("Выгрузить")).expect(
             "Union([QueryResult, Undefined]).Выгрузить must resolve through the live branch",
         );
         // HBK declares `QueryResult.Выгрузить` as `"ТаблицаЗначений,
@@ -1277,7 +1315,7 @@ mod tests {
         // resolve — the receiver shape that inference produces when
         // `Зап = Новый Запрос`. If this asserts None while the bilingual
         // test below passes, inference is hitting a different code path.
-        let info = lookup_method(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"));
+        let info = lookup(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"));
         assert!(info.is_some(), "PlatformObject(Запрос).Выполнить must resolve");
     }
 
@@ -1289,7 +1327,7 @@ mod tests {
         // (Phase 1.3) replaces the `РезультатЗапроса` arm with
         // `Ty::QueryResult{None}`, both branches must still be present
         // for any downstream chain to nullability-check.
-        let info = lookup_method(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"))
+        let info = lookup(&Ty::PlatformObject(Name::new("Запрос")), &Name::new("Выполнить"))
             .expect("Запрос.Выполнить must resolve in platform data");
         match info.return_ty {
             Ty::Union(members) => {
@@ -1390,7 +1428,7 @@ mod tests {
         // returns None.
         let doc =
             Ty::manager_collection(MdoType::Document).expect("Document has a manager collection");
-        assert!(lookup_method(&doc, &Name::new("Любой")).is_none());
+        assert!(lookup(&doc, &Name::new("Любой")).is_none());
     }
 
     #[test]
@@ -1403,7 +1441,7 @@ mod tests {
         // `display_name()` fallback, and the Task 5 draft used
         // `"ТаблицаЗначений"` — both miss because platform-data stores
         // English).
-        let info = lookup_method(&Ty::ValueTable { projection: None }, &Name::new("Добавить"))
+        let info = lookup(&Ty::ValueTable { projection: None }, &Name::new("Добавить"))
             .expect("ValueTable.Добавить must resolve via bilingual platform index");
         assert!(!matches!(info.return_ty, Ty::Unknown));
     }
@@ -1417,7 +1455,7 @@ mod tests {
         let om = Ty::ObjectManager {
             kind: MdoType::Catalog, name: Name::new("Номенклатура")
         };
-        let info = lookup_method(&om, &Name::new("СоздатьЭлемент"))
+        let info = lookup(&om, &Name::new("СоздатьЭлемент"))
             .expect("ObjectManager.СоздатьЭлемент must resolve via platform adapter");
         assert_eq!(
             info.return_ty,
@@ -1434,7 +1472,7 @@ mod tests {
         let om = Ty::ObjectManager {
             kind: MdoType::Catalog, name: Name::new("Номенклатура")
         };
-        assert!(lookup_method(&om, &Name::new("НетТакогоМетода")).is_none());
+        assert!(lookup(&om, &Name::new("НетТакогоМетода")).is_none());
     }
 
     #[test]
@@ -1446,7 +1484,7 @@ mod tests {
             kind: MetadataKind::CatalogObject,
             name: Name::new("Номенклатура"),
         };
-        let info = lookup_method(&r, &Name::new("Записать"))
+        let info = lookup(&r, &Name::new("Записать"))
             .expect("MetadataRef CatalogObject.Записать must resolve");
         assert_eq!(info.return_ty, Ty::Undefined);
     }
@@ -1463,7 +1501,7 @@ mod tests {
             kind: MetadataKind::RegisterFilter { parent: MdoType::InformationRegister },
             name: Name::new("РегистрСведений1"),
         };
-        let info = lookup_method(&r, &Name::new("Сбросить"))
+        let info = lookup(&r, &Name::new("Сбросить"))
             .expect("Filter.Сбросить must resolve through scalar-key fallback");
         // `Сбросить()` is a procedure → `Ty::Undefined`.
         assert_eq!(info.return_ty, Ty::Undefined);
@@ -1491,7 +1529,7 @@ mod tests {
         // `platform_resolution::tests::composite_multi_overload_method_populates_overloads`.
         let r =
             Ty::ObjectManager { kind: MdoType::InformationRegister, name: Name::new("Курсы") };
-        let Some(info) = lookup_method(&r, &Name::new("Получить")) else {
+        let Some(info) = lookup(&r, &Name::new("Получить")) else {
             // Skip when running without platform data.
             println!("Skipping: no platform data available");
             return;
@@ -1515,7 +1553,7 @@ mod tests {
         // return to a `TabularSectionRow` receiver pinned to the
         // section's parent MDO and qualified name.
         let r = ts_receiver(MdoType::Catalog, "Номенклатура.Услуги");
-        let info = lookup_method(&r, &Name::new("Добавить")).expect(
+        let info = lookup(&r, &Name::new("Добавить")).expect(
             "TabularSection.Добавить must resolve through PlatformData[\"Tabular section\"]",
         );
         assert_eq!(
@@ -1530,16 +1568,16 @@ mod tests {
     #[test]
     fn method_lookup_tabular_section_count_returns_number() {
         let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info = lookup_method(&r, &Name::new("Количество"))
-            .expect("TabularSection.Количество must resolve");
+        let info =
+            lookup(&r, &Name::new("Количество")).expect("TabularSection.Количество must resolve");
         assert_eq!(info.return_ty, Ty::Number);
     }
 
     #[test]
     fn method_lookup_tabular_section_unload_returns_value_table() {
         let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info = lookup_method(&r, &Name::new("Выгрузить"))
-            .expect("TabularSection.Выгрузить must resolve");
+        let info =
+            lookup(&r, &Name::new("Выгрузить")).expect("TabularSection.Выгрузить must resolve");
         assert_eq!(info.return_ty, Ty::ValueTable { projection: None });
     }
 
@@ -1550,8 +1588,7 @@ mod tests {
         // member ordering / membership rather than equality so
         // future Ty::union flattening tweaks don't break the test.
         let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info =
-            lookup_method(&r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
+        let info = lookup(&r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
         let members = match info.return_ty {
             Ty::Union(ref m) => m.clone(),
             other => panic!("expected Ty::Union, got {other:?}"),
@@ -1579,8 +1616,8 @@ mod tests {
         // `TypedArray(Row)` so chained `НайтиСтроки(...)[0].Колонка`
         // resolves the column instead of falling into Unknown.
         let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info = lookup_method(&r, &Name::new("НайтиСтроки"))
-            .expect("TabularSection.НайтиСтроки must resolve");
+        let info =
+            lookup(&r, &Name::new("НайтиСтроки")).expect("TabularSection.НайтиСтроки must resolve");
         match info.return_ty {
             Ty::TypedArray(elem) => match *elem {
                 Ty::MetadataRef {
@@ -1598,7 +1635,7 @@ mod tests {
     #[test]
     fn method_lookup_tabular_section_findrows_english_alias_typed_array() {
         let r = ts_receiver(MdoType::Document, "ПКО.Товары");
-        let info = lookup_method(&r, &Name::new("FindRows"))
+        let info = lookup(&r, &Name::new("FindRows"))
             .expect("TabularSection.FindRows must resolve via bilingual platform index");
         assert!(matches!(
             info.return_ty,
@@ -1617,7 +1654,7 @@ mod tests {
         // by the English method name on the Russian-conventional
         // English type key still resolves through the same row rebind.
         let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info = lookup_method(&r, &Name::new("Add"))
+        let info = lookup(&r, &Name::new("Add"))
             .expect("TabularSection.Add must resolve via bilingual platform index");
         assert!(matches!(
             info.return_ty,
@@ -1633,13 +1670,13 @@ mod tests {
         // A miss must return `None` so `UnresolvedMethodCall` can
         // surface — ТЧ no longer silently swallows typos.
         let r = ts_receiver(MdoType::Catalog, "X.Y");
-        assert!(lookup_method(&r, &Name::new("НетТакогоМетодаНаТЧ")).is_none());
+        assert!(lookup(&r, &Name::new("НетТакогоМетодаНаТЧ")).is_none());
     }
 
     #[test]
     fn method_lookup_tabular_section_parent_propagates_document() {
         let r = ts_receiver(MdoType::Document, "ПКО.Товары");
-        let info = lookup_method(&r, &Name::new("Добавить"))
+        let info = lookup(&r, &Name::new("Добавить"))
             .expect("Document TabularSection.Добавить must resolve");
         assert_eq!(
             info.return_ty,
@@ -1653,7 +1690,7 @@ mod tests {
     #[test]
     fn method_lookup_tabular_section_parent_propagates_exchange_plan() {
         let r = ts_receiver(MdoType::ExchangePlan, "ПО.Состав");
-        let info = lookup_method(&r, &Name::new("Добавить"))
+        let info = lookup(&r, &Name::new("Добавить"))
             .expect("ExchangePlan TabularSection.Добавить must resolve");
         assert_eq!(
             info.return_ty,
@@ -1672,8 +1709,7 @@ mod tests {
         // argument — narrowing it to `Ty::PlatformObject("Произвольный")`
         // would reject every real call site.
         let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info =
-            lookup_method(&r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
+        let info = lookup(&r, &Name::new("Найти")).expect("TabularSection.Найти must resolve");
         assert_eq!(
             info.params,
             vec![Ty::Unknown, Ty::String],
@@ -1695,8 +1731,7 @@ mod tests {
         // falsely rejected. Gradual typing (`Unknown ≤ A`) keeps the
         // diagnostic quiet.
         let r = ts_receiver(MdoType::Catalog, "X.Y");
-        let info =
-            lookup_method(&r, &Name::new("Индекс")).expect("TabularSection.Индекс must resolve");
+        let info = lookup(&r, &Name::new("Индекс")).expect("TabularSection.Индекс must resolve");
         assert_eq!(
             info.params,
             vec![Ty::Unknown],
@@ -1707,7 +1742,7 @@ mod tests {
     #[test]
     fn method_lookup_tabular_section_parent_propagates_chart_of_accounts() {
         let r = ts_receiver(MdoType::ChartOfAccounts, "Основной.ВидыСубконто");
-        let info = lookup_method(&r, &Name::new("Добавить"))
+        let info = lookup(&r, &Name::new("Добавить"))
             .expect("ChartOfAccounts TabularSection.Добавить must resolve");
         assert_eq!(
             info.return_ty,
@@ -1730,11 +1765,11 @@ mod tests {
         use hir_def::ty::FormElementKind;
         let receiver = Ty::FormControl { kind: FormElementKind::UsualGroup, binding: None };
         assert!(
-            lookup_method(&receiver, &Name::new("Скрыть")).is_some(),
+            lookup(&receiver, &Name::new("Скрыть")).is_some(),
             "<UsualGroup>.Скрыть must resolve via the usual-group extension chain entry"
         );
         assert!(
-            lookup_method(&receiver, &Name::new("Показать")).is_some(),
+            lookup(&receiver, &Name::new("Показать")).is_some(),
             "<UsualGroup>.Показать must resolve via the usual-group extension chain entry"
         );
     }
@@ -1747,7 +1782,7 @@ mod tests {
         use hir_def::ty::FormElementKind;
         let receiver = Ty::FormControl { kind: FormElementKind::Pages, binding: None };
         assert!(
-            lookup_method(&receiver, &Name::new("Скрыть")).is_none(),
+            lookup(&receiver, &Name::new("Скрыть")).is_none(),
             "Pages chain must not borrow UsualGroup-extension methods"
         );
     }
@@ -1758,7 +1793,7 @@ mod tests {
         // iterations and we return None safely without panicking.
         use hir_def::ty::FormElementKind;
         let receiver = Ty::FormControl { kind: FormElementKind::Other, binding: None };
-        assert!(lookup_method(&receiver, &Name::new("Скрыть")).is_none());
+        assert!(lookup(&receiver, &Name::new("Скрыть")).is_none());
     }
 
     #[test]
@@ -1774,7 +1809,7 @@ mod tests {
         // "last wins", a future overload divergence between Array and
         // ValueTable would silently re-bind callers' arg-checks.
         let u = Ty::union(vec![Ty::Array, Ty::ValueTable { projection: None }]);
-        let info = lookup_method(&u, &Name::new("Количество"))
+        let info = lookup(&u, &Name::new("Количество"))
             .expect("Union(Array, ValueTable).Количество must resolve through both branches");
         assert_eq!(info.return_ty, Ty::Number, "Количество returns Число on both branches");
         // Cohesion sanity: a single signature was bound — neither
@@ -1802,7 +1837,7 @@ mod tests {
             kind: hir_def::ty::FormDataKind::Collection,
             underlying: Some((MdoType::Document, Name::new("Док.Товары"))),
         };
-        let info = lookup_method(&receiver, &Name::new("Получить"))
+        let info = lookup(&receiver, &Name::new("Получить"))
             .expect("FormDataCollection.Получить must resolve in platform data");
         match info.return_ty {
             Ty::MetadataRef {
@@ -1824,7 +1859,7 @@ mod tests {
         // ТаблицаФормы has documented platform method `ОбновитьСтроки`
         // (per platform_data; this is a stable canary). If the data
         // ever drops it, swap for any other `ТаблицаФормы` method.
-        let _ = lookup_method(&receiver, &Name::new("ОбновитьСтроки"));
+        let _ = lookup(&receiver, &Name::new("ОбновитьСтроки"));
     }
 
     // ============================================================
@@ -1855,7 +1890,7 @@ mod tests {
         // (legacy first-step lift, since Phase 1.3b hasn't yet
         // promoted `Новый Запрос` to `Ty::Query`).
         let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let info = lookup_method(&receiver, &Name::new("Выполнить"))
+        let info = lookup(&receiver, &Name::new("Выполнить"))
             .expect("Запрос.Выполнить must resolve in platform data");
         assert_query_result_in_return(&info.return_ty);
     }
@@ -1866,7 +1901,7 @@ mod tests {
         // index resolves the method, our rewrite must match the
         // English form too.
         let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let info = lookup_method(&receiver, &Name::new("Execute"))
+        let info = lookup(&receiver, &Name::new("Execute"))
             .expect("Запрос.Execute must resolve in platform data");
         assert_query_result_in_return(&info.return_ty);
     }
@@ -1877,7 +1912,7 @@ mod tests {
         // as `Ty::PlatformObject("РезультатЗапроса")` until Phase 1.3
         // wires the `.Выполнить()` lift to produce `Ty::QueryResult`.
         let receiver = Ty::PlatformObject(Name::new("РезультатЗапроса"));
-        let info = lookup_method(&receiver, &Name::new("Выбрать"))
+        let info = lookup(&receiver, &Name::new("Выбрать"))
             .expect("РезультатЗапроса.Выбрать must resolve in platform data");
         match info.return_ty {
             Ty::QueryResultSelection { projection: None } => {}
@@ -1894,7 +1929,7 @@ mod tests {
         // Phase 0's match-fanout) so the rewrite should fire the same
         // way.
         let receiver = Ty::QueryResult { projection: None };
-        let info = lookup_method(&receiver, &Name::new("Выбрать"))
+        let info = lookup(&receiver, &Name::new("Выбрать"))
             .expect("Ty::QueryResult.Выбрать must resolve via platform alias");
         match info.return_ty {
             Ty::QueryResultSelection { projection: None } => {}
@@ -1910,7 +1945,7 @@ mod tests {
         // `СтандартноеПериод.Выбрать()` is one example: the platform
         // returns `Булево`, not `ВыборкаИзРезультатаЗапроса`.
         let receiver = Ty::PlatformObject(Name::new("СтандартныйПериод"));
-        if let Some(info) = lookup_method(&receiver, &Name::new("Выбрать")) {
+        if let Some(info) = lookup(&receiver, &Name::new("Выбрать")) {
             assert!(
                 !matches!(info.return_ty, Ty::QueryResultSelection { .. }),
                 "rewrite must not fire on non-query receivers — got {:?}",
@@ -1922,7 +1957,7 @@ mod tests {
     #[test]
     fn sdbl_chain_rewrite_execute_batch() {
         let receiver = Ty::PlatformObject(Name::new("Запрос"));
-        let info = lookup_method(&receiver, &Name::new("ВыполнитьПакет"))
+        let info = lookup(&receiver, &Name::new("ВыполнитьПакет"))
             .expect("Запрос.ВыполнитьПакет must resolve in platform data");
         match info.return_ty {
             Ty::QueryBatchResult { ref per_query } => {

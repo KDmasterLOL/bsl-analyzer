@@ -297,9 +297,16 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// Thin bridge over [`lookup_method`] — adds no cache, so Salsa's
     /// `PlatformData::instance` (used by the adapter) controls caching
     /// at the platform-data layer.
-    pub fn method_return_type(&self, method_name: &Name) -> Self {
-        let ty =
-            lookup_method(&self.ty, method_name).map(|info| info.return_ty).unwrap_or(Ty::Unknown);
+    pub fn method_return_type(&self, method_name: &Name) -> Self
+    where
+        DB: bsl_types::intern::TypeKernelDb,
+    {
+        // Phase 3 §4.E.2a: `lookup_method` returns a kernel-native
+        // `MethodInfo`; receiver stays `&Ty`, bridge only the return id
+        // back out. §4.F.1 swaps the facade backing to `TypeId`.
+        let ty = lookup_method(self.db, &self.ty, method_name)
+            .map(|info| hir_ty::ty_bridge::typeid_to_ty(self.db, info.return_ty))
+            .unwrap_or(Ty::Unknown);
         Self::new(self.db, self.file_id, ty)
     }
 

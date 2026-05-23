@@ -1448,8 +1448,11 @@ impl<'db> InferenceContext<'db> {
                 // previous "best effort" semantics by emitting
                 // `Ty::Unknown` — chain continuation still typechecks
                 // structurally, it just doesn't carry a concrete type.
-                crate::method_lookup::lookup_method(&receiver_ty, method)
-                    .map(|info| info.return_ty)
+                // Phase 3 §4.E.2a: `lookup_method` returns a
+                // kernel-native `MethodInfo`; the receiver stays `&Ty`
+                // (lossless), bridge only the return id back out.
+                crate::method_lookup::lookup_method(self.db, &receiver_ty, method)
+                    .map(|info| typeid_to_ty(self.db, info.return_ty))
                     .unwrap_or(Ty::Unknown)
             }
 
@@ -2492,11 +2495,25 @@ impl<'db> InferenceContext<'db> {
                 call_args: args,
             };
             let result = match crate::method_lookup::lookup_method_with_refinement(
+                self.db,
                 &receiver_ty,
                 &method_name,
                 Some(&refine_ctx),
             ) {
-                Some(mut info) => {
+                Some(info) => {
+                    // Phase 3 §4.E.2a: `lookup_method_with_refinement` is
+                    // kernel-native; bridge the result back to `Ty`
+                    // locals so the (unchanged) downstream constant-
+                    // refinement + arg-binding logic keeps operating on
+                    // `Ty`.
+                    let mut return_ty = typeid_to_ty(self.db, info.return_ty);
+                    let mut params: Vec<Ty> =
+                        info.params.iter().map(|id| typeid_to_ty(self.db, *id)).collect();
+                    let overloads: Vec<Vec<Ty>> = info
+                        .overloads
+                        .iter()
+                        .map(|row| row.iter().map(|id| typeid_to_ty(self.db, *id)).collect())
+                        .collect();
                     // Argument type check (M4 Task 7 follow-up): the
                     // fluent-chain path historically skipped both arg-
                     // count and arg-type diagnostics. Emit the type
@@ -2516,24 +2533,23 @@ impl<'db> InferenceContext<'db> {
                         self.refine_constant_method(
                             mdo_name,
                             &method_name,
-                            &mut info.return_ty,
-                            &mut info.params,
+                            &mut return_ty,
+                            &mut params,
                         );
                     }
                     self.record_call_arg_binding(
                         callee,
                         args,
                         ParamsShape::Overloaded {
-                            flat: Arc::<[Ty]>::from(&info.params[..]),
-                            overloads: info
-                                .overloads
+                            flat: Arc::<[Ty]>::from(&params[..]),
+                            overloads: overloads
                                 .iter()
                                 .map(|ov| Arc::<[Ty]>::from(&ov[..]))
                                 .collect::<Vec<Arc<[Ty]>>>()
                                 .into(),
                         },
                     );
-                    info.return_ty
+                    return_ty
                 }
                 None => {
                     // Authoritative-receiver gate. `MetadataRef` and

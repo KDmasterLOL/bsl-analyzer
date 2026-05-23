@@ -181,8 +181,19 @@ pub struct ResolvedPlatformMethod {
 
 impl ResolvedPlatformMethod {
     /// Drop the handle and keep just the inference-shaped projection.
-    pub fn into_method_info(self) -> MethodInfo {
-        MethodInfo { return_ty: self.return_ty, params: self.params, overloads: self.overloads }
+    ///
+    /// Phase 3 §4.E.2a: the public [`MethodInfo`] is kernel-native, so
+    /// this bridges the resolution's `Ty` fields to interned ids.
+    pub fn into_method_info(self, db: &dyn TypeKernelDb) -> MethodInfo {
+        MethodInfo {
+            return_ty: crate::ty_bridge::ty_to_typeid(db, &self.return_ty),
+            params: self.params.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect(),
+            overloads: self
+                .overloads
+                .iter()
+                .map(|row| row.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect())
+                .collect(),
+        }
     }
 
     /// Kernel-native projection of [`Self::return_ty`].
@@ -370,7 +381,7 @@ fn lookup_prefixed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
+    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use bsl_types::testing::InMemoryDb;
 
     /// §4.C drift-detector: `ResolvedPlatformMethod` kernel-native accessors
@@ -637,9 +648,12 @@ mod tests {
             params: vec![Ty::String],
             overloads: vec![vec![Ty::Boolean]],
         };
-        let info = res.into_method_info();
-        assert_eq!(info.return_ty, Ty::Number);
-        assert_eq!(info.params, vec![Ty::String]);
-        assert_eq!(info.overloads, vec![vec![Ty::Boolean]]);
+        // Phase 3 §4.E.2a: `into_method_info` now bridges to the
+        // kernel-native `MethodInfo`; compare via the interned ids.
+        let db = InMemoryDb::new();
+        let info = res.into_method_info(&db);
+        assert_eq!(typeid_to_ty(&db, info.return_ty), Ty::Number);
+        assert_eq!(info.params, vec![ty_to_typeid(&db, &Ty::String)]);
+        assert_eq!(info.overloads, vec![vec![ty_to_typeid(&db, &Ty::Boolean)]]);
     }
 }

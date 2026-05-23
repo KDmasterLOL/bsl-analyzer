@@ -42,9 +42,11 @@ use crate::Ty;
 pub fn resolve_workspace_method(db: &dyn HirDatabase, method_id: MethodId) -> MethodInfo {
     let method_input = MethodIdInput::new(db, method_id);
     let signature = proc_signature_query(db, method_input);
+    // Phase 3 §4.E.2a: the public `MethodInfo` is kernel-native; bridge
+    // the workspace signature's `Ty` return / params to interned ids.
     MethodInfo {
-        return_ty: signature.return_ty.clone(),
-        params: signature.params.clone(),
+        return_ty: crate::ty_bridge::ty_to_typeid(db, &signature.return_ty),
+        params: signature.params.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect(),
         overloads: Vec::new(),
     }
 }
