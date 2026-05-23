@@ -15,6 +15,7 @@ base-db = { path = "../base-db" }
 bsl-config = { path = "../bsl-config" }
 bsl-metadata = { path = "../bsl-metadata" }
 bsl-platform = { path = "../bsl-platform" }
+bsl-types.workspace = true
 sdbl-hir = { path = "../sdbl-hir" }
 syntax = { path = "../syntax" }
 intern = { path = "../intern" }

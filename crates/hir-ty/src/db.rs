@@ -28,7 +28,7 @@ use crate::Ty;
 /// }
 /// ```
 #[salsa::db]
-pub trait HirDatabase: ConfigsDatabase {
+pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
     /// Infer types for all expressions in a file.
     ///
     /// This is the main entry point for type inference. It runs type inference

@@ -32,6 +32,7 @@ pub mod queries;
 pub mod root_db;
 pub mod salsa_provider;
 pub mod streaming;
+pub mod type_kernel;
 pub mod types;
 pub(crate) mod vfs_helpers;
 

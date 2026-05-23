@@ -80,7 +80,7 @@ pub trait TypeKernelDb {
 /// nested unions / sentinels), hence the `&dyn TypeKernelDb` parameter.
 /// Members are already-interned `TypeId`s; canonicalise does not
 /// recursively re-intern them, so termination is straightforward.
-pub(crate) fn canonicalise(db: &dyn TypeKernelDb, kind: TypeKind) -> TypeKind {
+pub fn canonicalise(db: &dyn TypeKernelDb, kind: TypeKind) -> TypeKind {
     match kind {
         // Provenance stripping on primitive facets.
         TypeKind::Number(NumberFacet { precision, scale, .. }) => {

@@ -18,6 +18,7 @@ use crate::queries::{
     line_index_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
     reaching_definitions_query,
 };
+use crate::type_kernel::{TypeKernelHandle, TypeKernelInner, TypeKernelInput};
 use crate::{metadata, queries, vfs_helpers, RootDatabase, SdblHirEntries};
 use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 
@@ -51,6 +52,12 @@ pub struct RootDatabaseImpl {
     /// query reads from this input, Salsa's standard revision tracking
     /// kicks in for that query.
     features_input: parking_lot::RwLock<Option<FeaturesInput>>,
+
+    /// Monotonic production type-kernel storage shared by database clones.
+    type_kernel: Arc<TypeKernelInner>,
+
+    /// Salsa input whose value is the shared type-kernel handle.
+    type_kernel_input: parking_lot::RwLock<Option<TypeKernelInput>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -68,6 +75,8 @@ impl Clone for RootDatabaseImpl {
             // so cloning the handle is safe.
             workspace_configs_input: parking_lot::RwLock::new(*self.workspace_configs_input.read()),
             features_input: parking_lot::RwLock::new(*self.features_input.read()),
+            type_kernel: Arc::clone(&self.type_kernel),
+            type_kernel_input: parking_lot::RwLock::new(*self.type_kernel_input.read()),
         }
     }
 }
@@ -80,11 +89,14 @@ impl RootDatabaseImpl {
     /// a Salsa input and register a proper invalidation dependency — even
     /// before the LSP layer has published any configuration paths.
     pub fn new() -> Self {
+        let type_kernel = Arc::new(TypeKernelInner::new());
         let db = Self {
             storage: salsa::Storage::default(),
             files: Files::new(),
             workspace_configs_input: parking_lot::RwLock::new(None),
             features_input: parking_lot::RwLock::new(None),
+            type_kernel: Arc::clone(&type_kernel),
+            type_kernel_input: parking_lot::RwLock::new(None),
         };
         let input = metadata::WorkspaceConfigsInput::new(&db, Vec::new(), 0);
         *db.workspace_configs_input.write() = Some(input);
@@ -95,7 +107,13 @@ impl RootDatabaseImpl {
         let defaults = project_model::FeaturesConfig::default();
         let features = FeaturesInput::new(&db, defaults.type_narrowing);
         *db.features_input.write() = Some(features);
+        let type_kernel_input = TypeKernelInput::new(&db, TypeKernelHandle::new(type_kernel));
+        *db.type_kernel_input.write() = Some(type_kernel_input);
         db
+    }
+
+    pub(crate) fn type_kernel_inner(&self) -> &Arc<TypeKernelInner> {
+        &self.type_kernel
     }
 
     /// Handle of the singleton workspace-configs Salsa input.

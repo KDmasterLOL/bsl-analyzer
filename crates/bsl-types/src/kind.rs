@@ -41,6 +41,14 @@ impl TypeId {
     pub fn raw(self) -> u64 {
         self.0
     }
+
+    /// Construct a TypeId from a raw storage index.
+    ///
+    /// Reserved for production [`TypeKernelDb`](crate::intern::TypeKernelDb)
+    /// implementations that manage the underlying type table.
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 // `ConfigId` is now defined canonically in `bsl-config` (Layer 0.5);
