@@ -29,6 +29,7 @@ tracing.workspace = true
 parser.workspace = true
 parser-error.workspace = true
 sdbl-hir.workspace = true
+bsl-config.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
 project-model.workspace = true

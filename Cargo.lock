@@ -1557,6 +1557,7 @@ name = "hir-def"
 version = "0.1.197"
 dependencies = [
  "base-db",
+ "bsl-config",
  "bsl-metadata",
  "bsl-platform",
  "cfg-types",

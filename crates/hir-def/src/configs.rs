@@ -18,18 +18,14 @@ use vfs::FileId;
 
 use crate::DefDatabase;
 
-/// A configuration visible from a given file: main or extension.
-///
-/// Carries only the metadata — never a filesystem URI — because name
-/// resolution and type inference only consume the declarative
-/// `Configuration` description.
-#[derive(Clone, Debug)]
-pub struct VisibleConfig {
-    /// Extension name; `None` for the main configuration.
-    pub name: Option<String>,
-    /// Loaded configuration metadata.
-    pub configuration: Arc<Configuration>,
-}
+// Transitional alias (Phase 2.C). The canonical definition lives in
+// `bsl-config` (Layer 0.5). This re-export keeps every existing
+// `use hir_def::configs::VisibleConfig` and
+// `use hir_def::VisibleConfig` site working while §2.E migrates
+// consumers to import directly from `bsl-config`. The alias is
+// removed in §2.F once the pre-deletion audit shows zero residual
+// references via the hir-def path.
+pub use bsl_config::VisibleConfig;
 
 /// Metadata visibility trait.
 ///
