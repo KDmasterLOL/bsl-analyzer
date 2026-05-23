@@ -40,6 +40,8 @@
 
 use bsl_metadata::MdoType;
 use bsl_platform::PlatformData;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 use smol_str::SmolStr;
@@ -48,8 +50,32 @@ use crate::lower::type_string::lower_platform_type_name;
 use crate::platform_manager_lookup::{
     map_generic_metadata_return_type, metadata_kind_to_prefix_and_mdo,
 };
+use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
 
 /// Resolve the element type for `Для каждого … Из <collection> Цикл`.
+///
+/// Phase 3 §4.E.4 (boundary-flip): the public surface is kernel-native
+/// (`collection: TypeId`, returns `Option<TypeId>`). The bridge is
+/// lossless after §4.E.2b-i. The internal resolution still runs on `Ty`
+/// via [`resolve_iter_element_ty_inner`] (it leans on out-of-§4.E
+/// helpers — `lower::type_string`, `platform_manager_lookup` — that
+/// speak `Ty`); those flip together at §4.G. Bridge in/out at the edge.
+///
+/// Receiver-side `Unknown` absorption: because `collection` is an
+/// interned [`TypeId`], a union receiver that mixed `Unknown` with a
+/// concrete arm (`Unknown | Массив`) was already canonicalised to the
+/// concrete arm at intern time (kernel `canonicalise_union` absorbs
+/// `Unknown`, single-source-of-truth rule, same as §4.E.1). So such a
+/// receiver iterates as its concrete arm rather than reaching the
+/// mixed-arm `None` guard in [`resolve_union`] — consistent with
+/// gradual typing, where the `Unknown` arm adds no constraint.
+pub(crate) fn resolve_iter_element_ty(db: &dyn TypeKernelDb, collection: TypeId) -> Option<TypeId> {
+    let collection_ty = typeid_to_ty(db, collection);
+    let elem_ty = resolve_iter_element_ty_inner(&collection_ty)?;
+    Some(ty_to_typeid(db, &elem_ty))
+}
+
+/// Internal `Ty`-native resolver — the pre-§4.E body.
 ///
 /// Returns `None` when the platform syntax help did not declare the
 /// receiver iterable, when a `Ty::Union` mixes iterable and
@@ -58,7 +84,7 @@ use crate::platform_manager_lookup::{
 /// without an MDO context). On success returns the element `Ty`,
 /// possibly a `Ty::Union` for HBK pages that list multiple admissible
 /// elements.
-pub(crate) fn resolve_iter_element_ty(collection: &Ty) -> Option<Ty> {
+fn resolve_iter_element_ty_inner(collection: &Ty) -> Option<Ty> {
     // Phase H Slice 3 — projected `Ty::ValueTable` short-circuits the
     // platform-template path: the row carries the same projection so
     // `Для Каждого Стр Из <ТЗ> → Стр.<column>` resolves through the
@@ -133,7 +159,8 @@ fn resolve_union(arms: &[Ty], _outer: &Ty) -> Option<Ty> {
     if alive.is_empty() {
         return None;
     }
-    let resolved: Option<Vec<Ty>> = alive.iter().map(|t| resolve_iter_element_ty(t)).collect();
+    let resolved: Option<Vec<Ty>> =
+        alive.iter().map(|t| resolve_iter_element_ty_inner(t)).collect();
     let resolved = resolved?;
     if resolved.len() == 1 {
         Some(resolved.into_iter().next().unwrap())
@@ -174,27 +201,40 @@ fn resolve_one_template(template: &str, context: Option<(MdoType, &Name)>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::testing::InMemoryDb;
     use hir_def::ty::MetadataKind;
+
+    /// Phase 3 §4.E.4 test shim: the public `resolve_iter_element_ty`
+    /// now takes `db` + an interned `TypeId` and returns `Option<TypeId>`.
+    /// Tests build readable `Ty` fixtures, so this interns the collection
+    /// and bridges the kernel result back to `Ty`. A fresh sandbox
+    /// [`InMemoryDb`] per call is fine — platform lookup is stateless
+    /// w.r.t. the intern table.
+    fn resolve(collection: &Ty) -> Option<Ty> {
+        let db = InMemoryDb::new();
+        super::resolve_iter_element_ty(&db, ty_to_typeid(&db, collection))
+            .map(|id| typeid_to_ty(&db, id))
+    }
 
     #[test]
     fn array_yields_unknown_per_platform_arbitrary() {
         // Per HBK, `Массив` iterates `Произвольный`, which lowers to
         // `Ty::Unknown` via `lower_platform_type_name`.
-        let elem = resolve_iter_element_ty(&Ty::Array);
+        let elem = resolve(&Ty::Array);
         assert_eq!(elem, Some(Ty::Unknown));
     }
 
     #[test]
     fn map_yields_kluch_i_znachenie() {
         // `Соответствие` iterates `КлючИЗначение`.
-        let elem = resolve_iter_element_ty(&Ty::Map);
+        let elem = resolve(&Ty::Map);
         assert_eq!(elem, Some(Ty::PlatformObject(Name::new("КлючИЗначение"))));
     }
 
     #[test]
     fn value_table_yields_row() {
         // `ТаблицаЗначений` iterates `СтрокаТаблицыЗначений`.
-        let elem = resolve_iter_element_ty(&Ty::ValueTable { projection: None });
+        let elem = resolve(&Ty::ValueTable { projection: None });
         assert_eq!(elem, Some(Ty::PlatformObject(Name::new("СтрокаТаблицыЗначений"))));
     }
 
@@ -206,7 +246,7 @@ mod tests {
             kind: MetadataKind::InformationRegisterRecordSet,
             name: Name::new("БУС_ЗаполнениеКаталога"),
         };
-        let elem = resolve_iter_element_ty(&receiver);
+        let elem = resolve(&receiver);
         assert_eq!(
             elem,
             Some(Ty::MetadataRef {
@@ -222,7 +262,7 @@ mod tests {
             kind: MetadataKind::AccumulationRegisterRecordSet,
             name: Name::new("ОстаткиТоваров"),
         };
-        let elem = resolve_iter_element_ty(&receiver);
+        let elem = resolve(&receiver);
         assert_eq!(
             elem,
             Some(Ty::MetadataRef {
@@ -238,24 +278,47 @@ mod tests {
         // table (which only declares `"Произвольный"` for `Массив`) and
         // surfaces `t` directly. This is the whole point of carrying
         // the element type through the new variant.
-        let elem = resolve_iter_element_ty(&Ty::TypedArray(Box::new(Ty::String)));
+        let elem = resolve(&Ty::TypedArray(Box::new(Ty::String)));
         assert_eq!(elem, Some(Ty::String));
     }
 
     #[test]
-    fn union_of_array_and_typed_array_iterates_to_union_with_unknown() {
-        // Pre-Phase-5 guard: a `Union(Ty::Array, Ty::TypedArray(String))`
-        // collection iterates to `Union(Ty::Unknown, Ty::String)`.
-        // `Ty::Array` resolves through the platform `iter_element_types`
-        // table (`["Произвольный"]` → `Ty::Unknown`); `Ty::TypedArray`
-        // surfaces its element directly. The smart constructor unions
-        // both and keeps `Unknown` because losing a member would erase
-        // the warning that one arm has no element witness. Phase 5
-        // (row-typed arrays) must keep this conservative.
+    fn union_of_array_and_typed_array_iterates_to_concrete_arm() {
+        // A `Union(Ty::Array, Ty::TypedArray(String))` collection
+        // iterates to the element union of `Ty::Unknown` (`Ty::Array`
+        // resolves `["Произвольный"]` → `Ty::Unknown`) and `Ty::String`
+        // (`Ty::TypedArray` surfaces its element directly). Phase 3
+        // §4.E.4: the kernel surface returns an interned `TypeId`, and
+        // kernel `canonicalise_union` ABSORBS `Unknown` (single-source-
+        // of-truth rule, same divergence as §4.E.1) — so the element
+        // type collapses to the concrete `Ty::String` arm rather than
+        // the legacy `Union(Unknown, String)` the `Ty`-native smart
+        // constructor produced.
         let arms: Vec<Ty> = vec![Ty::Array, Ty::TypedArray(Box::new(Ty::String))];
         let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
-        let elem = resolve_iter_element_ty(&union);
-        assert_eq!(elem, Some(Ty::union(vec![Ty::Unknown, Ty::String])));
+        let elem = resolve(&union);
+        assert_eq!(elem, Some(Ty::String));
+    }
+
+    #[test]
+    fn union_receiver_with_unknown_arm_absorbs_to_concrete_iterable() {
+        // §4.E.4 receiver-side divergence: `Union(Unknown, Array)` is
+        // interned as the collection receiver, and kernel
+        // `canonicalise_union` ABSORBS the `Unknown` arm -> the receiver
+        // is just `Array`. So iteration yields `Array`'s element
+        // (`Произвольный` -> `Unknown`) instead of the legacy `None`
+        // that the `Ty`-native `resolve_union` returned (it treated the
+        // live `Unknown` arm as a blocking non-iterable). Consistent
+        // with gradual typing: the `Unknown` arm adds no constraint.
+        let arms: Vec<Ty> = vec![Ty::Unknown, Ty::Array];
+        let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
+        assert_eq!(resolve(&union), Some(Ty::Unknown));
+
+        // Same rule with a typed concrete arm: `Unknown | TypedArray(String)`
+        // collapses to `TypedArray(String)` and iterates to `String`.
+        let arms: Vec<Ty> = vec![Ty::Unknown, Ty::TypedArray(Box::new(Ty::String))];
+        let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
+        assert_eq!(resolve(&union), Some(Ty::String));
     }
 
     #[test]
@@ -267,14 +330,14 @@ mod tests {
             name: Name::new("ПКО.Товары"),
         };
         let collection = Ty::TypedArray(Box::new(row.clone()));
-        let elem = resolve_iter_element_ty(&collection);
+        let elem = resolve(&collection);
         assert_eq!(elem, Some(row));
     }
 
     #[test]
     fn non_iterable_string_returns_none() {
         // Plain strings have no `Элементы коллекции:` chapter.
-        let elem = resolve_iter_element_ty(&Ty::String);
+        let elem = resolve(&Ty::String);
         assert_eq!(elem, None);
     }
 
@@ -285,7 +348,7 @@ mod tests {
         // (Произвольный) — the live arm's element.
         let arms: Vec<Ty> = vec![Ty::Array, Ty::Undefined];
         let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
-        let elem = resolve_iter_element_ty(&union);
+        let elem = resolve(&union);
         assert_eq!(elem, Some(Ty::Unknown));
     }
 
@@ -295,7 +358,7 @@ mod tests {
         // overinference would be wrong, so the answer is `None`.
         let arms: Vec<Ty> = vec![Ty::Array, Ty::String];
         let union = Ty::Union(std::sync::Arc::from(arms.into_boxed_slice()));
-        let elem = resolve_iter_element_ty(&union);
+        let elem = resolve(&union);
         assert_eq!(elem, None);
     }
 }

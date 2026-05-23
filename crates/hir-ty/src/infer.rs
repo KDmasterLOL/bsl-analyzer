@@ -1257,7 +1257,15 @@ impl<'db> InferenceContext<'db> {
 
             Stmt::ForEach { var, collection, body } => {
                 let coll_ty = self.infer_expr(ExprId::from_idx(*collection));
-                if let Some(elem_ty) = crate::iteration_lookup::resolve_iter_element_ty(&coll_ty) {
+                // Phase 3 §4.E.4: `resolve_iter_element_ty` is
+                // kernel-native; inference works in `Ty`, so bridge the
+                // collection in and the element id back out.
+                if let Some(elem_ty) = crate::iteration_lookup::resolve_iter_element_ty(
+                    self.db,
+                    ty_to_typeid(self.db, &coll_ty),
+                )
+                .map(|id| typeid_to_ty(self.db, id))
+                {
                     // BSL semantics: `Для каждого X Из Y Цикл` rebinds
                     // X to elements of Y for the duration of the body
                     // and leaves it as the last yielded element (or
