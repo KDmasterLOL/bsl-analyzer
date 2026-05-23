@@ -24,10 +24,13 @@
 
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{TypeId, TypeKind};
 use hir_def::configs::ConfigsDatabase;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 use hir_ty::lower::type_string::{lower_param_type_string, lower_return_type_string};
+use hir_ty::ty_bridge::{ty_to_typeid, typeid_to_ty};
 use hir_ty::{
     enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
 };
@@ -118,23 +121,44 @@ pub struct Field {
 pub struct Type<'db, DB> {
     db: &'db DB,
     file_id: FileId,
-    ty: Ty,
+    id: TypeId,
 }
 
-impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
+impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// Wrap a raw [`Ty`] in the facade.
+    ///
+    /// Phase 3 §4.F: the facade is backed by an interned [`TypeId`]; the
+    /// `Ty`-accepting constructor bridges at the boundary so existing IDE
+    /// callers stay source-compatible while the deep `Ty` removal lands.
+    /// New kernel-native callers should prefer [`Type::from_id`].
     ///
     /// `file_id` anchors the lookup in a specific file's visible
     /// configurations — swapping it changes which extensions' MDOs the
     /// facade sees (matches the Salsa invalidation graph).
     pub fn new(db: &'db DB, file_id: FileId, ty: Ty) -> Self {
-        Self { db, file_id, ty }
+        Self { db, file_id, id: ty_to_typeid(db, &ty) }
+    }
+
+    /// Wrap an interned [`TypeId`] in the facade (kernel-native entry).
+    pub fn from_id(db: &'db DB, file_id: FileId, id: TypeId) -> Self {
+        Self { db, file_id, id }
+    }
+
+    /// The interned type id backing this facade.
+    pub fn id(&self) -> TypeId {
+        self.id
+    }
+
+    /// Borrow the kernel [`TypeKind`] backing this facade.
+    pub fn kind(&self) -> &TypeKind {
+        self.db.lookup_type(self.id)
     }
 
     /// Underlying [`Ty`] — escape hatch for callers that need the raw
-    /// variant (e.g. union narrowing in M4).
-    pub fn ty(&self) -> &Ty {
-        &self.ty
+    /// variant (e.g. union narrowing in M4). Bridged from the interned
+    /// id; §4.G removes this once all callers consume [`Type::kind`].
+    pub fn ty(&self) -> Ty {
+        typeid_to_ty(self.db, self.id)
     }
 
     /// Short human-readable name in the given locale, e.g.
@@ -142,7 +166,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// a union. Delegates to [`Ty::display_name`] and owns a fresh `String`
     /// so callers can format freely.
     pub fn display_name(&self, locale: base_db::Locale) -> String {
-        self.ty.display_name(locale).to_string()
+        self.ty().display_name(locale).to_string()
     }
 
     /// Stable English machine-name; equivalent to
@@ -150,14 +174,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// context where the canonical English label is intentional rather
     /// than locale-dependent.
     pub fn canonical_name(&self) -> String {
-        self.ty.canonical_name().to_string()
-    }
-
-    /// `Display`-able wrapper that knows the locale. Equivalent to
-    /// `Ty::display`, exposed on the facade for IDE-layer convenience —
-    /// emitters write `format!("{}", ty.display(locale))`.
-    pub fn display(&self, locale: base_db::Locale) -> hir_def::ty::TyDisplay<'_> {
-        self.ty.display(locale)
+        self.ty().canonical_name().to_string()
     }
 
     /// `true` for types that carry an MDO reference — `CatalogRef`,
@@ -166,14 +183,8 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// Does **not** return `true` for `ObjectManager`, `ManagerCollection`,
     /// or `TabularSection`/`TabularSectionRow`; those are manager-side
     /// or container-side abstractions, not first-class references.
-    pub fn is_ref_type(&self) -> bool
-    where
-        DB: bsl_types::intern::TypeKernelDb,
-    {
-        // Phase 3 §4.E: `is_ref_ty` is kernel-native; bridge the
-        // facade's `Ty` to an interned id at the call boundary.
-        // §4.F.1 swaps the facade backing to `TypeId` and drops this.
-        is_ref_ty(self.db, hir_ty::ty_bridge::ty_to_typeid(self.db, &self.ty))
+    pub fn is_ref_type(&self) -> bool {
+        is_ref_ty(self.db, self.id)
     }
 
     /// Structural assignability: is `self` usable where `other` is expected?
@@ -208,18 +219,14 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// [`Semantics::type_of_expr`]: crate::Semantics::type_of_expr
     /// [`NarrowState`]: hir_ty::narrow::NarrowState
     /// [`HirDatabase::narrow`]: hir_ty::HirDatabase::narrow
-    pub fn is_assignable_to(&self, other: &Self) -> bool
-    where
-        DB: bsl_types::intern::TypeKernelDb,
-    {
-        // Phase 3 §4.E: `is_assignable` is kernel-native; bridge both
-        // facade `Ty` values to interned ids. §4.F.1 swaps the facade
-        // backing to `TypeId` and drops the bridge.
-        is_assignable(
-            self.db,
-            hir_ty::ty_bridge::ty_to_typeid(self.db, &self.ty),
-            hir_ty::ty_bridge::ty_to_typeid(self.db, &other.ty),
-        )
+    pub fn is_assignable_to(&self, other: &Self) -> bool {
+        // `TypeId` is db-local, so `other.id` is only meaningful in
+        // `other.db`. Re-intern `other` into `self.db` before comparing
+        // so a cross-db pair (the old `Ty`-based facade was db-agnostic)
+        // can't misclassify or panic. Same-db pairs round-trip through a
+        // canonical id, so the result is unchanged.
+        let other_id = ty_to_typeid(self.db, &other.ty());
+        is_assignable(self.db, self.id, other_id)
     }
 
     /// The corresponding manager type — e.g. `CatalogRef.Товары` →
@@ -232,7 +239,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// (primitives, collections, unions, platform objects, tabular
     /// sections / rows, register record-set / record-manager receivers).
     pub fn manager(&self) -> Option<Self> {
-        let (mdo_type, name) = match &self.ty {
+        let (mdo_type, name) = match self.ty() {
             Ty::MetadataRef { kind, name } => {
                 let mdo = match kind {
                     MetadataKind::CatalogRef | MetadataKind::CatalogObject => MdoType::Catalog,
@@ -297,19 +304,14 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// Thin bridge over [`lookup_method`] — adds no cache, so Salsa's
     /// `PlatformData::instance` (used by the adapter) controls caching
     /// at the platform-data layer.
-    pub fn method_return_type(&self, method_name: &Name) -> Self
-    where
-        DB: bsl_types::intern::TypeKernelDb,
-    {
-        // Phase 3 §4.E.2b-ii: `lookup_method` is kernel-native
-        // (`receiver: TypeId`). The facade still backs on `Ty`, so
-        // bridge the receiver in and the return id back out. §4.F.1
-        // swaps the facade backing to `TypeId` and drops both bridges.
-        let ty =
-            lookup_method(self.db, hir_ty::ty_bridge::ty_to_typeid(self.db, &self.ty), method_name)
-                .map(|info| hir_ty::ty_bridge::typeid_to_ty(self.db, info.return_ty))
-                .unwrap_or(Ty::Unknown);
-        Self::new(self.db, self.file_id, ty)
+    pub fn method_return_type(&self, method_name: &Name) -> Self {
+        // Phase 3 §4.F: facade + `lookup_method` are both kernel-native,
+        // so the receiver id and the returned id flow through without a
+        // bridge.
+        let id = lookup_method(self.db, self.id, method_name)
+            .map(|info| info.return_ty)
+            .unwrap_or_else(|| ty_to_typeid(self.db, &Ty::Unknown));
+        Self::from_id(self.db, self.file_id, id)
     }
 
     /// Resolve a field access `x.field_name` to its type.
@@ -318,9 +320,13 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// hover / completion on attributes correctly invalidate when the
     /// MDO's XML changes.
     pub fn field_type(&self, field_name: &Name) -> Self {
+        // `lookup_field` is still `Ty`-native (§4.E.3 deferred to §4.G);
+        // bridge the receiver in and the result `Ty` back out.
         let configs = self.db.configurations(self.file_id);
-        let ty =
-            lookup_field(&configs, &self.ty, field_name).map(|info| info.ty).unwrap_or(Ty::Unknown);
+        let receiver = self.ty();
+        let ty = lookup_field(&configs, &receiver, field_name)
+            .map(|info| info.ty)
+            .unwrap_or(Ty::Unknown);
         Self::new(self.db, self.file_id, ty)
     }
 
@@ -341,7 +347,8 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
         // extension members (`<UsualGroup>.Скрыть`, …) appear next to
         // shared base methods. Single-entry chains reduce to one
         // platform-data lookup, identical to the pre-chain shape.
-        if let Ty::FormControl { kind, .. } = &self.ty {
+        let receiver = self.ty();
+        if let Ty::FormControl { kind, .. } = &receiver {
             let chain = hir_def::ty::form_control_platform_type_chain(*kind);
             let mut methods: Vec<Method> = Vec::new();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -358,7 +365,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
             return methods;
         }
 
-        let Some(type_key) = platform_type_key(&self.ty) else {
+        let Some(type_key) = platform_type_key(&receiver) else {
             return Vec::new();
         };
         PlatformData::instance()
@@ -380,7 +387,8 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// so callers do not need to prepare the receiver.
     pub fn fields(&self) -> Vec<Field> {
         let configs = self.db.configurations(self.file_id);
-        enumerate_fields(&configs, &self.ty)
+        let receiver = self.ty();
+        enumerate_fields(&configs, &receiver)
             .into_iter()
             .map(|info| Field {
                 name: info.name.clone(),
@@ -402,7 +410,7 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// this returns `true`.
     pub fn is_query_projection(&self) -> bool {
         matches!(
-            self.ty,
+            self.ty(),
             Ty::QueryResultSelection { projection: Some(_) }
                 | Ty::ValueTable { projection: Some(_) }
                 | Ty::ValueTableRow { projection: Some(_) }
@@ -411,16 +419,17 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
 
     /// Per-column `(name, type)` pairs from the SDBL projection.
     ///
-    /// `Some(slice)` when [`Type::is_query_projection`] returns `true`;
-    /// `None` otherwise. The slice is borrowed directly from the
-    /// `Arc<[..]>` payload, so the caller pays no allocation. Callers
-    /// that need the IDE facade `Type` for each column can wrap the
-    /// borrowed `Ty` via [`Type::new`] with the same `db` / `file_id`.
-    pub fn projection_fields(&self) -> Option<&[(Name, Ty)]> {
-        match &self.ty {
+    /// `Some(vec)` when [`Type::is_query_projection`] returns `true`;
+    /// `None` otherwise. Phase 3 §4.F: the facade is backed by an
+    /// interned id, so the projection is materialised by bridging — the
+    /// pairs are owned rather than borrowed. Callers that need the IDE
+    /// facade `Type` for each column can wrap each `Ty` via [`Type::new`]
+    /// with the same `db` / `file_id`.
+    pub fn projection_fields(&self) -> Option<Vec<(Name, Ty)>> {
+        match self.ty() {
             Ty::QueryResultSelection { projection: Some(p) }
             | Ty::ValueTable { projection: Some(p) }
-            | Ty::ValueTableRow { projection: Some(p) } => Some(&p.fields),
+            | Ty::ValueTableRow { projection: Some(p) } => Some(p.fields.to_vec()),
             _ => None,
         }
     }
@@ -432,11 +441,13 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// when the projection's `raw_sdbl_types` shadow was not captured
     /// (some bridge entry points skip it). Hover uses these to render
     /// SDBL precision/scale that the bridged `Ty` drops.
-    pub fn projection_field_displays(&self) -> Option<&[hir_def::ty::SdblTypeShadow]> {
-        match &self.ty {
+    pub fn projection_field_displays(&self) -> Option<Vec<hir_def::ty::SdblTypeShadow>> {
+        match self.ty() {
             Ty::QueryResultSelection { projection: Some(p) }
             | Ty::ValueTable { projection: Some(p) }
-            | Ty::ValueTableRow { projection: Some(p) } => p.raw_sdbl_types.as_deref(),
+            | Ty::ValueTableRow { projection: Some(p) } => {
+                p.raw_sdbl_types.as_deref().map(<[_]>::to_vec)
+            }
             _ => None,
         }
     }
@@ -722,7 +733,7 @@ mod tests {
         let manager = cat.manager().expect("CatalogRef has a manager form");
         match manager.ty() {
             Ty::ObjectManager { kind, name } => {
-                assert_eq!(*kind, MdoType::Catalog);
+                assert_eq!(kind, MdoType::Catalog);
                 assert_eq!(name.as_str(), "Номенклатура");
             }
             other => panic!("expected ObjectManager, got {other:?}"),
@@ -750,7 +761,7 @@ mod tests {
         let manager = reg.manager().expect("register ref has a manager form");
         match manager.ty() {
             Ty::ObjectManager { kind, name } => {
-                assert_eq!(*kind, MdoType::AccumulationRegister);
+                assert_eq!(kind, MdoType::AccumulationRegister);
                 assert_eq!(name.as_str(), "X");
             }
             other => panic!("expected ObjectManager, got {other:?}"),
@@ -767,7 +778,7 @@ mod tests {
         let ret = arr.method_return_type(&Name::new("Добавить"));
         // `Добавить` is a procedure — `lookup_method` returns
         // `Ty::Undefined`.
-        assert_eq!(ret.ty(), &Ty::Undefined);
+        assert_eq!(ret.ty(), Ty::Undefined);
     }
 
     #[test]
@@ -777,7 +788,7 @@ mod tests {
         let (db, file_id) = empty_db();
         let arr = Type::new(&db, file_id, Ty::Array);
         let ret = arr.method_return_type(&Name::new("НеСуществует"));
-        assert_eq!(ret.ty(), &Ty::Unknown);
+        assert_eq!(ret.ty(), Ty::Unknown);
     }
 
     #[test]
