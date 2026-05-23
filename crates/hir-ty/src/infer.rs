@@ -400,6 +400,44 @@ pub enum ParamsShape {
     Overloaded { flat: Arc<[Ty]>, overloads: Arc<[Arc<[Ty]>]> },
 }
 
+impl ParamsShape {
+    /// Kernel-native projection — every `Ty` in the shape is bridged
+    /// through §4.A to a [`TypeId`].
+    ///
+    /// §4.C accessor — `arg_diagnostics` and other §4.D-§4.E consumers
+    /// will rewrite to consume `TypeId` directly once `ParamsShape`
+    /// internals migrate.
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn typeid_view(&self, db: &dyn bsl_types::intern::TypeKernelDb) -> ParamsShapeTypeIds {
+        match self {
+            ParamsShape::Single(row) => ParamsShapeTypeIds::Single(
+                row.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect(),
+            ),
+            ParamsShape::Overloaded { flat, overloads } => ParamsShapeTypeIds::Overloaded {
+                flat: flat.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect(),
+                overloads: overloads
+                    .iter()
+                    .map(|row| row.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect())
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// Kernel-native mirror of [`ParamsShape`].
+///
+/// §4.C accessor — produced by [`ParamsShape::typeid_view`], consumed
+/// by §4.D-§4.E once the call-arg validators migrate away from `Ty`.
+#[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamsShapeTypeIds {
+    Single(Arc<[bsl_types::kind::TypeId]>),
+    Overloaded {
+        flat: Arc<[bsl_types::kind::TypeId]>,
+        overloads: Arc<[Arc<[bsl_types::kind::TypeId]>]>,
+    },
+}
+
 /// Context for type inference.
 ///
 /// Performs type inference for a **single body** (one method, or the
@@ -3751,6 +3789,40 @@ pub fn type_of_expr_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.C drift-detector: `ParamsShape::typeid_view` mirrors both
+    /// `Single` and `Overloaded` variants.
+    #[test]
+    fn params_shape_typeid_view_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+
+        let single = ParamsShape::Single(Arc::from([Ty::Number, Ty::String]));
+        match single.typeid_view(&db) {
+            ParamsShapeTypeIds::Single(ids) => {
+                let via_ty: Vec<Ty> = ids.iter().map(|id| typeid_to_ty(&db, *id)).collect();
+                assert_eq!(via_ty, vec![Ty::Number, Ty::String]);
+            }
+            _ => panic!("expected Single"),
+        }
+
+        let overloaded = ParamsShape::Overloaded {
+            flat: Arc::from([Ty::Number]),
+            overloads: Arc::from([Arc::from([Ty::Number]) as Arc<[Ty]>]),
+        };
+        match overloaded.typeid_view(&db) {
+            ParamsShapeTypeIds::Overloaded { flat, overloads } => {
+                let flat_via_ty: Vec<Ty> = flat.iter().map(|id| typeid_to_ty(&db, *id)).collect();
+                assert_eq!(flat_via_ty, vec![Ty::Number]);
+                assert_eq!(overloads.len(), 1);
+                let row_via_ty: Vec<Ty> =
+                    overloads[0].iter().map(|id| typeid_to_ty(&db, *id)).collect();
+                assert_eq!(row_via_ty, vec![Ty::Number]);
+            }
+            _ => panic!("expected Overloaded"),
+        }
+    }
 
     #[test]
     fn test_inference_result_default() {

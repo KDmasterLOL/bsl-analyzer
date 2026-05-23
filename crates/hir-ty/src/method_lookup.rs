@@ -50,6 +50,8 @@ use std::sync::Arc;
 
 use bsl_metadata::MdoType;
 use bsl_platform::{PlatformData, PlatformMethod};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::body::Body;
 use hir_def::hir::Expr;
 use hir_def::ty::{MetadataKind, SdblProjection, Ty};
@@ -58,6 +60,7 @@ use vfs::FileId;
 
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
+use crate::ty_bridge::ty_to_typeid;
 
 /// Result of a successful method lookup.
 ///
@@ -83,6 +86,30 @@ pub struct MethodInfo {
     pub params: Vec<Ty>,
     /// Per-overload parameter lists. Empty for single-overload methods.
     pub overloads: Vec<Vec<Ty>>,
+}
+
+impl MethodInfo {
+    /// Kernel-native projection of [`Self::return_ty`].
+    ///
+    /// §4.C accessor — bridges via §4.A `ty_to_typeid`. §4.D-§4.E will
+    /// rewrite this method to read from a kernel-native field once the
+    /// MethodInfo internals migrate.
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn return_typeid(&self, db: &dyn TypeKernelDb) -> TypeId {
+        ty_to_typeid(db, &self.return_ty)
+    }
+
+    /// Kernel-native projection of [`Self::params`].
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn params_typeid(&self, db: &dyn TypeKernelDb) -> Vec<TypeId> {
+        self.params.iter().map(|t| ty_to_typeid(db, t)).collect()
+    }
+
+    /// Kernel-native projection of [`Self::overloads`].
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn overloads_typeid(&self, db: &dyn TypeKernelDb) -> Vec<Vec<TypeId>> {
+        self.overloads.iter().map(|row| row.iter().map(|t| ty_to_typeid(db, t)).collect()).collect()
+    }
 }
 
 /// Resolve a method call on a typed receiver (refinement-free entry).
@@ -1123,9 +1150,30 @@ fn is_tabular_row_type_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
     use bsl_metadata::MdoType;
     use bsl_platform::MethodParam;
+    use bsl_types::testing::InMemoryDb;
     use hir_def::ty::MetadataKind;
+
+    /// §4.C drift-detector: kernel-native accessors mirror the Ty fields.
+    #[test]
+    fn method_info_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let info = MethodInfo {
+            return_ty: Ty::Number,
+            params: vec![Ty::String, Ty::Boolean],
+            overloads: vec![vec![Ty::Date]],
+        };
+        assert_eq!(typeid_to_ty(&db, info.return_typeid(&db)), info.return_ty);
+        let pids_via_ty: Vec<Ty> =
+            info.params_typeid(&db).iter().map(|id| typeid_to_ty(&db, *id)).collect();
+        assert_eq!(pids_via_ty, info.params);
+        let oids = info.overloads_typeid(&db);
+        let oids_via_ty: Vec<Vec<Ty>> =
+            oids.iter().map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect()).collect();
+        assert_eq!(oids_via_ty, info.overloads);
+    }
 
     fn test_method(return_type: Option<&str>, param_type: Option<&str>) -> PlatformMethod {
         PlatformMethod {

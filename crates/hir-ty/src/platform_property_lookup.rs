@@ -49,11 +49,14 @@
 //! it does not own.
 
 use bsl_platform::{PlatformData, PlatformProperty};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::Ty;
 use hir_def::Name;
 
 use crate::lower::type_string::lower_platform_type_name;
 use crate::method_lookup::platform_type_key;
+use crate::ty_bridge::ty_to_typeid;
 
 /// Result of a successful platform-property lookup.
 ///
@@ -72,6 +75,16 @@ pub struct PlatformPropertyResolution {
     /// `true` when `Использование:` reads `"Только чтение"` on the property
     /// page. Feeds the `ReadOnlyPropertyAssignment` diagnostic.
     pub is_readonly: bool,
+}
+
+impl PlatformPropertyResolution {
+    /// Kernel-native projection of [`Self::return_ty`].
+    ///
+    /// §4.C accessor — bridges via §4.A `ty_to_typeid`.
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn return_typeid(&self, db: &dyn TypeKernelDb) -> TypeId {
+        ty_to_typeid(db, &self.return_ty)
+    }
 }
 
 /// Resolve `receiver.prop_name` against the platform-property catalogue.
@@ -157,6 +170,16 @@ fn map_property_type_list(types: &[smol_str::SmolStr]) -> Ty {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.C drift-detector: kernel-native accessor mirrors return_ty.
+    #[test]
+    fn platform_property_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let res = PlatformPropertyResolution { return_ty: Ty::String, is_readonly: false };
+        assert_eq!(typeid_to_ty(&db, res.return_typeid(&db)), res.return_ty);
+    }
 
     #[test]
     fn query_text_resolves_to_string_writable() {

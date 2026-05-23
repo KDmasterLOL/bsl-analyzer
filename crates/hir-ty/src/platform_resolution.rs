@@ -52,6 +52,8 @@ use bsl_platform::{
     platform_method_query, prefixed_method_query, MethodLookupInput, PlatformMethod,
     PrefixedMethodLookupInput,
 };
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 use smol_str::SmolStr;
@@ -181,6 +183,29 @@ impl ResolvedPlatformMethod {
     /// Drop the handle and keep just the inference-shaped projection.
     pub fn into_method_info(self) -> MethodInfo {
         MethodInfo { return_ty: self.return_ty, params: self.params, overloads: self.overloads }
+    }
+
+    /// Kernel-native projection of [`Self::return_ty`].
+    ///
+    /// §4.C accessor — bridges via §4.A `ty_to_typeid`.
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn return_typeid(&self, db: &dyn TypeKernelDb) -> TypeId {
+        crate::ty_bridge::ty_to_typeid(db, &self.return_ty)
+    }
+
+    /// Kernel-native projection of [`Self::params`].
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn params_typeid(&self, db: &dyn TypeKernelDb) -> Vec<TypeId> {
+        self.params.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect()
+    }
+
+    /// Kernel-native projection of [`Self::overloads`].
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn overloads_typeid(&self, db: &dyn TypeKernelDb) -> Vec<Vec<TypeId>> {
+        self.overloads
+            .iter()
+            .map(|row| row.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect())
+            .collect()
     }
 }
 
@@ -345,6 +370,32 @@ fn lookup_prefixed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.C drift-detector: `ResolvedPlatformMethod` kernel-native accessors
+    /// mirror the Ty fields.
+    #[test]
+    fn resolved_platform_method_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let res = ResolvedPlatformMethod {
+            handle: PlatformMethodHandle {
+                method_id: 0,
+                origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from("X") },
+            },
+            return_ty: Ty::Number,
+            params: vec![Ty::String, Ty::Boolean],
+            overloads: vec![vec![Ty::Date]],
+        };
+        assert_eq!(typeid_to_ty(&db, res.return_typeid(&db)), res.return_ty);
+        let pids_via_ty: Vec<Ty> =
+            res.params_typeid(&db).iter().map(|id| typeid_to_ty(&db, *id)).collect();
+        assert_eq!(pids_via_ty, res.params);
+        let oids = res.overloads_typeid(&db);
+        let oids_via_ty: Vec<Vec<Ty>> =
+            oids.iter().map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect()).collect();
+        assert_eq!(oids_via_ty, res.overloads);
+    }
 
     // Minimal Salsa database for unit tests in this crate. Mirrors
     // `bsl_platform::db::tests::TestDatabase` and avoids pulling

@@ -33,12 +33,15 @@
 
 use std::sync::Arc;
 
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::docs::{MethodDocs, ParameterDoc};
 use hir_def::symbol_tree::ParamSymbol;
 use hir_def::{MethodIdInput, Name};
 
 use crate::db::HirDatabase;
 use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
+use crate::ty_bridge::ty_to_typeid;
 use crate::Ty;
 
 /// Lowered signature of a workspace-defined procedure / function.
@@ -62,6 +65,22 @@ pub struct ProcSignature {
     /// [`crate::method_graph::method_return_type_query`] at the call
     /// site.
     pub return_ty: Ty,
+}
+
+impl ProcSignature {
+    /// Kernel-native projection of [`Self::return_ty`].
+    ///
+    /// §4.C accessor — bridges via §4.A `ty_to_typeid`.
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn return_typeid(&self, db: &dyn TypeKernelDb) -> TypeId {
+        ty_to_typeid(db, &self.return_ty)
+    }
+
+    /// Kernel-native projection of [`Self::params`].
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn params_typeid(&self, db: &dyn TypeKernelDb) -> Vec<TypeId> {
+        self.params.iter().map(|t| ty_to_typeid(db, t)).collect()
+    }
 }
 
 /// Salsa-tracked query: lower a workspace method's signature.
@@ -184,8 +203,21 @@ fn lower_return_from_docs(docs: &MethodDocs) -> Option<Ty> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
+    use bsl_types::testing::InMemoryDb;
     use hir_def::docs::TypeDoc;
     use hir_def::{Body, ExprId, IdConversion, Stmt};
+
+    /// §4.C drift-detector: kernel-native accessor mirrors the Ty fields.
+    #[test]
+    fn proc_signature_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let sig = ProcSignature { params: vec![Ty::Number, Ty::String], return_ty: Ty::Boolean };
+        assert_eq!(typeid_to_ty(&db, sig.return_typeid(&db)), sig.return_ty);
+        let pids = sig.params_typeid(&db);
+        let pids_via_ty: Vec<Ty> = pids.iter().map(|id| typeid_to_ty(&db, *id)).collect();
+        assert_eq!(pids_via_ty, sig.params);
+    }
 
     fn typedoc(name: &str) -> TypeDoc {
         TypeDoc::simple(name.to_string(), None)

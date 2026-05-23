@@ -38,11 +38,14 @@
 
 use bsl_metadata::MdoType;
 use bsl_platform::{find_prefixed_method, PlatformMethod};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::{FunctionSignature, MetadataKind, Ty};
 use hir_def::Name;
 
 use crate::lower::type_string::{lower_param_type_string, lower_platform_type_name};
 use crate::method_lookup::lower_overloads;
+use crate::ty_bridge::ty_to_typeid;
 
 /// Outcome of a successful platform-method lookup.
 ///
@@ -71,6 +74,30 @@ pub struct PlatformMethodResolution {
     /// signature only and false-fired on legitimate alternative call
     /// shapes.
     pub overloads: Vec<Vec<Ty>>,
+}
+
+impl PlatformMethodResolution {
+    /// Kernel-native projection of [`Self::return_ty`].
+    ///
+    /// §4.C accessor — bridges via §4.A `ty_to_typeid`.
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn return_typeid(&self, db: &dyn TypeKernelDb) -> TypeId {
+        ty_to_typeid(db, &self.return_ty)
+    }
+
+    /// Kernel-native projection of [`Self::signature`]`.params` —
+    /// the single-overload parameter list consumed by `infer.rs`
+    /// arg validation / call binding.
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn signature_params_typeid(&self, db: &dyn TypeKernelDb) -> Vec<TypeId> {
+        self.signature.params.iter().map(|t| ty_to_typeid(db, t)).collect()
+    }
+
+    /// Kernel-native projection of [`Self::overloads`].
+    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
+    pub fn overloads_typeid(&self, db: &dyn TypeKernelDb) -> Vec<Vec<TypeId>> {
+        self.overloads.iter().map(|row| row.iter().map(|t| ty_to_typeid(db, t)).collect()).collect()
+    }
 }
 
 /// Resolve `<manager-collective>.<mdo_name>.<method>()` through platform data.
@@ -319,6 +346,24 @@ pub(crate) fn map_generic_metadata_return_type(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.C drift-detector: kernel-native accessors mirror return_ty / overloads.
+    #[test]
+    fn platform_manager_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let res = PlatformMethodResolution {
+            signature: FunctionSignature::function(Vec::new(), Ty::Number),
+            return_ty: Ty::Number,
+            overloads: vec![vec![Ty::String]],
+        };
+        assert_eq!(typeid_to_ty(&db, res.return_typeid(&db)), res.return_ty);
+        let oids = res.overloads_typeid(&db);
+        let oids_via_ty: Vec<Vec<Ty>> =
+            oids.iter().map(|row| row.iter().map(|id| typeid_to_ty(&db, *id)).collect()).collect();
+        assert_eq!(oids_via_ty, res.overloads);
+    }
 
     #[test]
     fn manager_create_item_on_catalog_returns_catalog_object() {
