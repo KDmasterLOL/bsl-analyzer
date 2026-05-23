@@ -8,6 +8,5 @@ description = "Layer 0.5 — visible configurations and ConfigId for the bsl-ana
 
 [dependencies]
 bsl-metadata.workspace = true
-intern.workspace = true
 
 [dev-dependencies]
