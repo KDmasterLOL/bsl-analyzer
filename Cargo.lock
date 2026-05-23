@@ -295,6 +295,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsl-config"
+version = "0.1.197"
+dependencies = [
+ "bsl-metadata",
+ "intern",
+]
+
+[[package]]
 name = "bsl-debug"
 version = "0.1.197"
 dependencies = [
