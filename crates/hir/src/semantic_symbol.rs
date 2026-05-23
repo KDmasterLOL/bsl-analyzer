@@ -163,7 +163,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             kind: SemanticSymbolKind::Property,
             definition: None,
             declaration: None,
-            ty: Some(field.ty),
+            ty: Some(hir_ty::ty_bridge::typeid_to_ty(self.db, field.ty)),
         })
     }
 

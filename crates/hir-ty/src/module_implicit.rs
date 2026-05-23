@@ -11,6 +11,7 @@ use vfs::FileId;
 use crate::db::HirDatabase;
 use crate::field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
 use crate::form_attr::lower_form_attribute_to_ty;
+use crate::ty_bridge::ty_to_typeid;
 
 /// Symbols visible as bare-ident in the current module.
 pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<FieldInfo> {
@@ -25,7 +26,7 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
                 return Vec::new();
             };
             let receiver = Ty::MetadataRef { kind, name: Name::new(&mdo.name) };
-            enumerate_fields(&configs, &receiver)
+            enumerate_fields(db, &configs, &receiver)
         }
         ModuleType::RecordSetModule => {
             let Some((mdo_type, name)) = module_owner_mdo(&metadata) else {
@@ -35,7 +36,7 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
                 return Vec::new();
             };
             let receiver = Ty::MetadataRef { kind, name };
-            enumerate_fields(&configs, &receiver)
+            enumerate_fields(db, &configs, &receiver)
         }
         ModuleType::ManagerModule => Vec::new(),
         ModuleType::FormModule => {
@@ -47,7 +48,7 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
                 .map(|attr| FieldInfo {
                     name: Name::new(&attr.name),
                     name_en: None,
-                    ty: lower_form_attribute_to_ty(attr, &configs),
+                    ty: ty_to_typeid(db, &lower_form_attribute_to_ty(attr, &configs)),
                     value_ty: None,
                     is_readonly: false,
                     origin: if attr.is_main {

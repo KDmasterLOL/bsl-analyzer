@@ -1544,21 +1544,21 @@ impl<'db> InferenceContext<'db> {
                 if let Some(info) =
                     crate::form_items::lookup_form_item_field(self.db, &resolver, &base_ty, field)
                 {
-                    info.ty
+                    typeid_to_ty(self.db, info.ty)
                 } else if let Some(info) = crate::field_lookup::lookup_field(
                     self.db,
                     &configs,
                     ty_to_typeid(self.db, &base_ty),
                     field,
                 ) {
-                    info.ty
+                    typeid_to_ty(self.db, info.ty)
                 } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
                     self.db,
                     &configs,
                     ty_to_typeid(self.db, &base_ty),
                     field,
                 ) {
-                    info.ty
+                    typeid_to_ty(self.db, info.ty)
                 } else {
                     // Only emit on receivers where `lookup_field` is
                     // actually authoritative — today that is

@@ -325,7 +325,7 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
         // `Ty` (flips in §4.G.2), so the result bridges back out.
         let configs = self.db.configurations(self.file_id);
         let ty = lookup_field(self.db, &configs, self.id, field_name)
-            .map(|info| info.ty)
+            .map(|info| typeid_to_ty(self.db, info.ty))
             .unwrap_or(Ty::Unknown);
         Self::new(self.db, self.file_id, ty)
     }
@@ -388,13 +388,13 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     pub fn fields(&self) -> Vec<Field> {
         let configs = self.db.configurations(self.file_id);
         let receiver = self.ty();
-        enumerate_fields(&configs, &receiver)
+        enumerate_fields(self.db, &configs, &receiver)
             .into_iter()
             .map(|info| Field {
                 name: info.name.clone(),
                 english_name: info.name_en.clone().unwrap_or_else(|| info.name.clone()),
-                ty: info.ty,
-                value_ty: info.value_ty,
+                ty: typeid_to_ty(self.db, info.ty),
+                value_ty: info.value_ty.map(|t| typeid_to_ty(self.db, t)),
                 is_readonly: info.is_readonly,
                 origin: HirFieldOrigin::from(info.origin),
             })
@@ -453,21 +453,25 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     }
 }
 
-impl From<FieldInfo> for Field {
-    fn from(info: FieldInfo) -> Self {
-        Self {
-            name: info.name.clone(),
-            english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
-            ty: info.ty,
-            value_ty: info.value_ty,
-            is_readonly: info.is_readonly,
-            origin: HirFieldOrigin::from(info.origin),
-        }
+/// Bridge a kernel [`FieldInfo`] into the `Ty`-typed hir [`Field`] DTO.
+/// §4.G.2: needs `db` to resolve the interned `ty` / `value_ty`. The
+/// `Field` DTO itself flips to `TypeId` in §4.G.5.
+fn field_from_info(db: &dyn TypeKernelDb, info: FieldInfo) -> Field {
+    Field {
+        name: info.name.clone(),
+        english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
+        ty: typeid_to_ty(db, info.ty),
+        value_ty: info.value_ty.map(|t| typeid_to_ty(db, t)),
+        is_readonly: info.is_readonly,
+        origin: HirFieldOrigin::from(info.origin),
     }
 }
 
 pub fn module_implicit_fields<DB: hir_ty::db::HirDatabase>(db: &DB, file_id: FileId) -> Vec<Field> {
-    hir_ty::module_implicit_fields(db, file_id).into_iter().map(Field::from).collect()
+    hir_ty::module_implicit_fields(db, file_id)
+        .into_iter()
+        .map(|info| field_from_info(db, info))
+        .collect()
 }
 
 /// Pick the `PlatformData` key for a receiver, matching

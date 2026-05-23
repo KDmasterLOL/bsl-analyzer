@@ -115,14 +115,17 @@ pub(crate) fn lookup_form_item_field(
     let element = form.find_element(field.as_str())?;
     let configs = db.configurations(module_id.file_id);
     let ty = lower_form_element(db, form, element, &configs);
-    Some(FieldInfo {
-        name: Name::new(&element.name),
-        name_en: None,
-        ty,
-        value_ty: None,
-        is_readonly: true,
-        origin: FieldOrigin::PlatformProperty,
-    })
+    Some(crate::field_enum::field_info_ty_to_kernel(
+        db,
+        crate::field_enum::FieldInfoTy {
+            name: Name::new(&element.name),
+            name_en: None,
+            ty,
+            value_ty: None,
+            is_readonly: true,
+            origin: FieldOrigin::PlatformProperty,
+        },
+    ))
 }
 
 /// Lower a single [`FormElement`] to a [`Ty::FormControl`].
@@ -188,7 +191,10 @@ fn row_ty_of_tabular_section_target(target: &FormDataTarget) -> Option<Ty> {
 ///
 /// `is_readonly` matches `platform_data.json` for these three
 /// properties — the slot itself is read-only.
-pub(crate) fn refine_form_control_property(receiver_ty: &Ty, field: &Name) -> Option<FieldInfo> {
+pub(crate) fn refine_form_control_property(
+    receiver_ty: &Ty,
+    field: &Name,
+) -> Option<crate::field_enum::FieldInfoTy> {
     let Ty::FormControl { kind: FormElementKind::Table, binding: Some(binding) } = receiver_ty
     else {
         return None;
@@ -226,7 +232,7 @@ pub(crate) fn refine_form_control_property(receiver_ty: &Ty, field: &Name) -> Op
             return None;
         };
 
-    Some(FieldInfo {
+    Some(crate::field_enum::FieldInfoTy {
         name: canonical_ru,
         name_en: Some(canonical_en),
         ty,
@@ -277,7 +283,7 @@ fn resolve_data_path(
     for seg in rest {
         let receiver_id = crate::ty_bridge::ty_to_typeid(db, &current_ty);
         let info = field_lookup::lookup_field(db, configs, receiver_id, seg)?;
-        current_ty = info.ty;
+        current_ty = crate::ty_bridge::typeid_to_ty(db, info.ty);
     }
 
     let target = match &current_ty {

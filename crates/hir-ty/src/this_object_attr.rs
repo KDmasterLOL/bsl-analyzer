@@ -25,7 +25,8 @@ pub(crate) fn resolve_this_object_member(
     let module_id = resolver.module_id()?;
     let configs = db.configurations(module_id.file_id);
     let receiver_id = crate::ty_bridge::ty_to_typeid(db, &receiver);
-    crate::field_lookup::lookup_field(db, &configs, receiver_id, name).map(|info| info.ty)
+    crate::field_lookup::lookup_field(db, &configs, receiver_id, name)
+        .map(|info| crate::ty_bridge::typeid_to_ty(db, info.ty))
 }
 
 /// Implicit `ЭтотОбъект.<name>` resolver for RecordSetModule.
@@ -48,5 +49,6 @@ pub(crate) fn resolve_this_record_set_member(
     let module_id = resolver.module_id()?;
     let configs = db.configurations(module_id.file_id);
     let receiver_id = crate::ty_bridge::ty_to_typeid(db, &receiver);
-    crate::field_lookup::lookup_field(db, &configs, receiver_id, name).map(|info| info.ty)
+    crate::field_lookup::lookup_field(db, &configs, receiver_id, name)
+        .map(|info| crate::ty_bridge::typeid_to_ty(db, info.ty))
 }
