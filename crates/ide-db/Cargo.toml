@@ -10,6 +10,7 @@ parser.workspace = true
 hir.workspace = true
 sdbl-hir.workspace = true
 base-db.workspace = true
+bsl-config.workspace = true
 bsl-metadata.workspace = true
 project-model.workspace = true
 bsl-platform.workspace = true

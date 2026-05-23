@@ -33,8 +33,8 @@
 //!   which already routes `Ty::FormControl` through the per-kind
 //!   platform table.
 
+use bsl_config::VisibleConfig;
 use bsl_metadata::{Form, FormElement};
-use hir_def::configs::VisibleConfig;
 use hir_def::resolver::Resolver;
 use hir_def::ty::{
     FormDataBinding, FormDataKind, FormDataTarget, FormElementKind, MetadataKind, Ty,

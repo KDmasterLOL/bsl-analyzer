@@ -10,8 +10,8 @@
 //! shared `resolve_defined_type_terminal` walk without taking a dependency
 //! on `hir-ty`.
 
+use bsl_config::VisibleConfig;
 use bsl_metadata::{AttributeType, MetadataResolver};
-use hir_def::configs::VisibleConfig;
 
 /// Adapter that exposes `&[VisibleConfig]` as a `MetadataResolver`.
 ///

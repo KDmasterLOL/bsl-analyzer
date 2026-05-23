@@ -24,20 +24,21 @@ use crate::{
     SdblHirEntries,
 };
 
-/// Visible configuration for a file: main config or extension.
+/// Path-aware wrapper over [`bsl_config::VisibleConfig`].
 ///
-/// Carries both the loaded `Configuration` and its root directory so that
-/// callers can resolve configuration-local URIs (e.g.
-/// `CommonModules/X/Ext/Module.bsl`) against the correct config root. Used
-/// for cross-configuration resolution under 1C extension semantics.
+/// `bsl-config::VisibleConfig` (Layer 0.5) carries only the metadata
+/// — semantic resolution and type inference never need the
+/// configuration's filesystem location. Path-aware callers (URI
+/// resolution against the configuration root for
+/// `CommonModules/X/Ext/Module.bsl` lookups) wrap that metadata
+/// form with the absolute root via this struct. See Phase 2 plan §1.5.
 #[derive(Clone)]
-pub struct VisibleConfig {
-    /// Extension name; `None` for the main configuration.
-    pub name: Option<String>,
+pub struct VisibleConfigWithRoot {
+    /// Metadata-only configuration view (extension name + loaded
+    /// `Configuration`).
+    pub config: bsl_config::VisibleConfig,
     /// Configuration root directory (absolute path).
     pub root: PathBuf,
-    /// Loaded configuration metadata.
-    pub configuration: Arc<Configuration>,
 }
 
 /// Abstraction over analysis data sources.
@@ -74,9 +75,14 @@ pub trait AnalysisProvider {
     ///
     /// Default implementation falls back to the single active configuration
     /// without a meaningful root path (streaming/test providers).
-    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfig> {
+    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfigWithRoot> {
         self.configuration()
-            .map(|cfg| vec![VisibleConfig { name: None, root: PathBuf::new(), configuration: cfg }])
+            .map(|cfg| {
+                vec![VisibleConfigWithRoot {
+                    config: bsl_config::VisibleConfig { name: None, configuration: cfg },
+                    root: PathBuf::new(),
+                }]
+            })
             .unwrap_or_default()
     }
 

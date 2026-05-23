@@ -22,7 +22,7 @@
 
 pub use crate::field_enum::FieldInfo;
 
-use hir_def::configs::VisibleConfig;
+use bsl_config::VisibleConfig;
 use hir_def::ty::{FormDataKind, MetadataKind, Ty};
 use hir_def::Name;
 

@@ -503,12 +503,14 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn visible_configurations(
         &self,
         _file_id: vfs::FileId,
-    ) -> Vec<ide_db::provider::VisibleConfig> {
+    ) -> Vec<ide_db::provider::VisibleConfigWithRoot> {
         match &self.configuration {
-            Some(cfg) => vec![ide_db::provider::VisibleConfig {
-                name: None,
+            Some(cfg) => vec![ide_db::provider::VisibleConfigWithRoot {
+                config: bsl_config::VisibleConfig {
+                    name: None,
+                    configuration: std::sync::Arc::clone(cfg),
+                },
                 root: std::path::PathBuf::from("/test"),
-                configuration: std::sync::Arc::clone(cfg),
             }],
             None => Vec::new(),
         }

@@ -143,7 +143,8 @@ pub use hir_def::{
 };
 
 // Re-export hir-ty types and queries
-pub use hir_def::{ConfigsDatabase, VisibleConfig};
+pub use bsl_config::VisibleConfig;
+pub use hir_def::ConfigsDatabase;
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::db::HirDatabase;
 pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};

@@ -39,8 +39,8 @@
 //! [`predefined_ref_kind_for`] is the single edit needed when they
 //! land.
 
+use bsl_config::VisibleConfig;
 use bsl_metadata::{MdoType, MetadataObject};
-use hir_def::configs::VisibleConfig;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 
@@ -155,9 +155,9 @@ fn find_mdo<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_config::VisibleConfig;
     use bsl_metadata::metadata_object::{EnumValue, PredefinedItem};
     use bsl_metadata::Configuration;
-    use hir_def::configs::VisibleConfig;
     use std::sync::Arc;
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {

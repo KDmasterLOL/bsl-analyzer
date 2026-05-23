@@ -62,6 +62,7 @@ pub mod this_object;
 pub mod this_object_attr;
 
 // Re-export main types for convenience
+pub use bsl_config::VisibleConfig;
 pub use field_enum::{enumerate_fields, FieldInfo, FieldOrigin};
 pub use field_lookup::lookup_field;
 pub use form_items::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
@@ -71,7 +72,7 @@ pub use hir_def::ty::{
     FunctionSignature, MetadataKind, Ty,
 };
 pub use hir_def::type_ref::{BuiltinTypeRef, TypeRef};
-pub use hir_def::{ConfigsDatabase, VisibleConfig};
+pub use hir_def::ConfigsDatabase;
 pub use infer::{
     BodyInferenceResult, CallArgBinding, ImplicitLocalAssignment, ImplicitLocalInfo,
     InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,

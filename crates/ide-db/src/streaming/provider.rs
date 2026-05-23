@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
-use crate::provider::{AnalysisProvider, VisibleConfig};
+use crate::provider::{AnalysisProvider, VisibleConfigWithRoot};
 
 use super::global_context::GlobalContext;
 use super::shared_state::SharedState;
@@ -58,13 +58,16 @@ impl AnalysisProvider for StreamingProvider {
         self.global.configuration.clone()
     }
 
-    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfig> {
+    fn visible_configurations(&self, _file_id: FileId) -> Vec<VisibleConfigWithRoot> {
         let (Some(configuration), Some(root)) =
             (self.global.configuration.clone(), self.global.config_root.clone())
         else {
             return Vec::new();
         };
-        vec![VisibleConfig { name: None, root, configuration }]
+        vec![VisibleConfigWithRoot {
+            config: bsl_config::VisibleConfig { name: None, configuration },
+            root,
+        }]
     }
 
     fn workspace_symbols(&self, _source_root_id: SourceRootId) -> Arc<WorkspaceSymbols> {

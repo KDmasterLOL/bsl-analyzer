@@ -31,8 +31,8 @@
 //! ordinary forms and non-form modules return `None` so the caller can fall
 //! through the normal cascade in `infer_path_name`.
 
+use bsl_config::VisibleConfig;
 use bsl_metadata::{AttributeType, FormAttribute};
-use hir_def::configs::VisibleConfig;
 use hir_def::resolver::Resolver;
 use hir_def::ty::{FormDataKind, MetadataKind, Ty};
 use hir_def::Name;

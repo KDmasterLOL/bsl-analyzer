@@ -81,7 +81,7 @@ pub fn find_common_module_for_file(
 ///
 /// CommonModule URIs in metadata are stored config-relative
 /// (`CommonModules/{Name}/Ext/Module.bsl`); each candidate URI is
-/// resolved against its `VisibleConfig.root` before comparison so the
+/// resolved against the entry's `root` before comparison so the
 /// match works under multi-root CFE setups. Providers that don't
 /// supply a meaningful root (streaming/test providers) fall through to
 /// the legacy raw-URI comparison so single-config behaviour is
@@ -99,7 +99,7 @@ pub fn find_common_module_for_file_anywhere(
     let file_path_lower = file_path.to_lowercase();
 
     for visible in ctx.visible_configurations() {
-        let module = visible.configuration.common_modules().iter().find(|m| {
+        let module = visible.config.configuration.common_modules().iter().find(|m| {
             let Some(uri) = m.uri() else { return false };
             if visible.root.as_os_str().is_empty() {
                 // Single-config provider: legacy raw-URI comparison.

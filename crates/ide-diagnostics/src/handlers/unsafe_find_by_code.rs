@@ -55,11 +55,9 @@ pub fn from_hir(
     // diagnosing safety against main-only flags would yield false
     // negatives (and false positives) for projects that use CFE
     // overrides.
-    let mdo = ctx
-        .visible_configurations()
-        .iter()
-        .rev()
-        .find_map(|vc| vc.configuration.find_metadata_object(mdo_type, object_name).cloned())?;
+    let mdo = ctx.visible_configurations().iter().rev().find_map(|vc| {
+        vc.config.configuration.find_metadata_object(mdo_type, object_name).cloned()
+    })?;
 
     if mdo.is_find_by_code_safe() {
         return None;

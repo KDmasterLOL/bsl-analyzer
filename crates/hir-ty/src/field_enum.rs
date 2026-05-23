@@ -13,11 +13,11 @@
 //! `field_lookup.rs` and `type_facade.rs`. They now live here as
 //! `pub(crate)` so both modules use the single canonical copy.
 
+use bsl_config::VisibleConfig;
 use bsl_metadata::{AttributeType, MdoType, MetadataObject, RegisterPeriodicity};
 use bsl_platform::{
     standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData, StandardKind,
 };
-use hir_def::configs::VisibleConfig;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
