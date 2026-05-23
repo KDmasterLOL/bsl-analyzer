@@ -78,8 +78,22 @@
 use std::sync::Arc;
 
 use bsl_metadata::MdoType;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::{MetadataKind, SdblProjection, SdblTypeShadow, Ty};
 use hir_def::Name;
+
+use crate::ty_bridge::ty_to_typeid;
+
+/// Kernel-native counterpart of [`sdbl_type_to_ty`].
+///
+/// §4.B shim — bridges through the §4.A `Ty` → `TypeId` translator.
+/// §4.D-§4.E will rewrite this to construct `TypeKind` directly once
+/// `infer.rs`/`field_lookup.rs` consumers stop reading `Ty`.
+#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
+pub fn sdbl_type_to_typeid(db: &dyn TypeKernelDb, t: &sdbl_hir::SdblType) -> TypeId {
+    ty_to_typeid(db, &sdbl_type_to_ty(t))
+}
 
 /// Map a single SDBL field type to its BSL counterpart.
 ///
@@ -349,10 +363,22 @@ pub fn package_to_projections(pkg: &sdbl_hir::SdblPackage) -> Vec<Option<Arc<Sdb
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
+    use bsl_types::testing::InMemoryDb;
     use sdbl_hir::SdblType;
 
     fn boxed_number() -> Box<SdblType> {
         Box::new(SdblType::Number { precision: Some(15), scale: Some(2) })
+    }
+
+    /// §4.B drift-detector: kernel-native shim mirrors the Ty path.
+    #[test]
+    fn sdbl_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let t = SdblType::Boolean;
+        let via_ty = sdbl_type_to_ty(&t);
+        let via_typeid = sdbl_type_to_typeid(&db, &t);
+        assert_eq!(typeid_to_ty(&db, via_typeid), via_ty);
     }
 
     #[test]

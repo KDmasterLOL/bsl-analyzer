@@ -18,6 +18,8 @@ use bsl_metadata::{AttributeType, MdoType, MetadataObject, RegisterPeriodicity};
 use bsl_platform::{
     standard_attributes_for, MdoTemplateKind, ObjectView, PlatformData, StandardKind,
 };
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::type_ref::TypeRef;
 use hir_def::Name;
@@ -950,6 +952,20 @@ pub(crate) fn attribute_type_to_ty(attr_type: &AttributeType, configs: &[Visible
     TyLoweringContext::with_resolver(&resolver).lower_type_ref(&type_ref)
 }
 
+/// Kernel-native counterpart of [`attribute_type_to_ty`].
+///
+/// §4.B shim — bridges through the §4.A `Ty` → `TypeId` translator.
+/// §4.D-§4.E will rewrite this to construct `TypeKind` directly once
+/// callers stop reading `Ty`.
+#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
+pub(crate) fn attribute_type_to_typeid(
+    db: &dyn TypeKernelDb,
+    attr_type: &AttributeType,
+    configs: &[VisibleConfig],
+) -> TypeId {
+    crate::ty_bridge::ty_to_typeid(db, &attribute_type_to_ty(attr_type, configs))
+}
+
 /// Lower a register-part type, falling back to a symbolic
 /// `MetadataKind::Register{Dimension,Resource,Attribute}` when `attr_type`
 /// is absent.
@@ -1037,10 +1053,23 @@ fn push_unique(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
     use bsl_metadata::{Attribute, Configuration};
+    use bsl_types::testing::InMemoryDb;
     use std::sync::Arc;
     use uuid::Uuid;
+
+    /// §4.B drift-detector: kernel-native attribute shim mirrors the Ty path.
+    #[test]
+    fn attribute_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let configs: Vec<VisibleConfig> = Vec::new();
+        let attr_type = AttributeType::String { length: Some(10) };
+        let via_ty = attribute_type_to_ty(&attr_type, &configs);
+        let via_typeid = attribute_type_to_typeid(&db, &attr_type, &configs);
+        assert_eq!(typeid_to_ty(&db, via_typeid), via_ty);
+    }
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {
         vec![VisibleConfig { name: None, configuration: Arc::new(config) }]

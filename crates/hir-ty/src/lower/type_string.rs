@@ -24,10 +24,13 @@
 //! every typed sink.
 
 use bsl_platform::{split_type_alternatives, PlatformData};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::ty::Ty;
 use hir_def::Name;
 
 use super::builtin_names::ty_from_bare_name;
+use crate::ty_bridge::ty_to_typeid;
 
 /// Lower a raw HBK parameter-type string to a [`Ty`].
 ///
@@ -136,9 +139,45 @@ pub fn is_arbitrary_type_name(name: &str) -> bool {
     trimmed.eq_ignore_ascii_case("Arbitrary") || trimmed.to_lowercase() == "произвольный"
 }
 
+// ── §4.B kernel-native counterparts ──────────────────────────
+//
+// Shim through the §4.A `Ty` → `TypeId` bridge. §4.D-§4.E will
+// rewrite these to construct `TypeKind` unions directly once
+// consumers stop reading the legacy `Ty` enum.
+
+/// Kernel-native counterpart of [`lower_param_type_string`].
+#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
+pub fn lower_param_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeId {
+    ty_to_typeid(db, &lower_param_type_string(raw))
+}
+
+/// Kernel-native counterpart of [`lower_return_type_string`].
+#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
+pub fn lower_return_type_string_typeid(db: &dyn TypeKernelDb, raw: &str) -> TypeId {
+    ty_to_typeid(db, &lower_return_type_string(raw))
+}
+
+/// Kernel-native counterpart of [`lower_platform_type_name`].
+#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
+pub fn lower_platform_type_name_typeid(db: &dyn TypeKernelDb, name: &str) -> TypeId {
+    ty_to_typeid(db, &lower_platform_type_name(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ty_bridge::typeid_to_ty;
+    use bsl_types::testing::InMemoryDb;
+
+    /// §4.B drift-detector: kernel-native shim mirrors the Ty path.
+    #[test]
+    fn type_string_typeid_round_trips_via_ty() {
+        let db = InMemoryDb::new();
+        let raw = "Число, Строка";
+        let via_ty = lower_param_type_string(raw);
+        let via_typeid = lower_param_type_string_typeid(&db, raw);
+        assert_eq!(typeid_to_ty(&db, via_typeid), via_ty);
+    }
 
     #[test]
     fn split_handles_comma_semicolon_and_trailing_garbage() {
