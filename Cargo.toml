@@ -24,6 +24,7 @@ base-db = { path = "crates/base-db" }
 bsl-config = { path = "crates/bsl-config" }
 bsl-metadata = { path = "crates/bsl-metadata" }
 bsl-platform = { path = "crates/bsl-platform" }
+bsl-types = { path = "crates/bsl-types" }
 cfg = { path = "crates/cfg" }
 cfg-types = { path = "crates/cfg-types" }
 dataflow = { path = "crates/dataflow" }

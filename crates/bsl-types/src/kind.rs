@@ -47,63 +47,388 @@ impl TypeId {
 // `bsl_types::ConfigId` import paths continue to resolve (Phase 2.D).
 pub use bsl_config::ConfigId;
 
-/// Surface form of a metadata reference type.
+/// Metadata object kind.
 ///
-/// Distinguishes the BSL runtime type that wraps a configuration MDO —
-/// e.g. `CatalogRef` is `СправочникСсылка.X`, `CatalogObject` is
-/// `СправочникОбъект.X`. The same `MdoType::Catalog` projects to
-/// `CatalogRef` or `CatalogObject` depending on the syntactic
-/// construct.
+/// Classifies the flavour of MDO (or MDO fragment) that a metadata reference
+/// carries. The reference `name` is the MDO identifier as it appears in the
+/// configuration (`"ПКО"`, `"Номенклатура"`). For [`Self::TabularSection`] /
+/// [`Self::TabularSectionRow`] the name encodes `"Parent.Section"` (e.g.
+/// `"ПКО.Товары"`) — parent MDO first, tabular section name second — and the
+/// variant **also** carries the parent [`MdoType`], so callers never have to
+/// probe several candidates to disambiguate `Catalog "X"` from `Document "X"`
+/// with an identically named section.
 ///
-/// Today this enum lives also in `hir-def::ty::MetadataKind`; Phase 2
-/// migration replaces that with a re-export from here. Variant set
-/// matches `hir-def` 1:1 so the migration is mechanical.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
-#[non_exhaustive]
+/// Adding a variant? Also extend:
+/// - `metadata_kind_from_prefix` in `hir-ty/src/lower/mod.rs` (prefix → kind),
+/// - `mdo_ref_prefix` in `hir-def/src/type_ref.rs` if a new `MdoType` prefix is
+///   needed,
+/// - JSDoc parser in `hir-def/src/ty/doc_types.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MetadataKind {
-    // ── Reference forms ────────────────────────────────────────
+    /// Catalog reference (СправочникСсылка).
     CatalogRef,
+    /// Document reference (ДокументСсылка).
     DocumentRef,
-    EnumRef,
-    TaskRef,
-    BusinessProcessRef,
-    ExchangePlanRef,
-    ChartOfAccountsRef,
-    InformationRegisterRef,
-    AccumulationRegisterRef,
-    AccountingRegisterRef,
-    CalculationRegisterRef,
-
-    // ── Object forms ───────────────────────────────────────────
-    CatalogObject,
+    /// Document object (ДокументОбъект).
     DocumentObject,
-    TaskObject,
-    BusinessProcessObject,
-    DataProcessorObject,
-    ReportObject,
-    ExchangePlanObject,
-    ChartOfAccountsObject,
-
-    // ── Register record-manager / record-set / record forms ────
+    /// Catalog object (СправочникОбъект).
+    CatalogObject,
+    /// Information register record manager (РегистрСведенийМенеджерЗаписи).
     InformationRegisterRecordManager,
+    /// Information register record set (РегистрСведенийНаборЗаписей).
+    ///
+    /// Returned by `РегистрыСведений.X.СоздатьНаборЗаписей()`. Companion
+    /// to [`Self::InformationRegisterRecordManager`]: that variant models
+    /// a single-record manager, this one models the multi-record set
+    /// receiver. Methods (`Записать`, `Загрузить`, `Очистить`, …) are
+    /// indexed under composite `InformationRegisterRecordSet.<Имя>` in
+    /// platform data; workspace `RecordSetModule.bsl` exports also flow
+    /// through this kind via `record_set_kind_to_mdo`.
     InformationRegisterRecordSet,
+    /// Accumulation register record set (РегистрНакопленияНаборЗаписей).
     AccumulationRegisterRecordSet,
+    /// Accounting register record set (РегистрБухгалтерииНаборЗаписей).
     AccountingRegisterRecordSet,
+    /// Calculation register record set (РегистрРасчетаНаборЗаписей).
     CalculationRegisterRecordSet,
+    /// Information register record (РегистрСведенийЗапись).
+    ///
+    /// The element type yielded when iterating an
+    /// [`Self::InformationRegisterRecordSet`] with `Для каждого … Из …`.
+    /// HBK names this composite `РегистрСведенийЗапись.<Имя регистра
+    /// сведений>` and indexes its methods (`Удалить`, `Установить…`,
+    /// access to dimensions/resources/attributes) under
+    /// `InformationRegisterRecord.<Имя>` in platform data. Today this
+    /// kind is a leaf receiver in `hir-ty`: field-resolution onto register
+    /// dimensions/resources is wired through `bsl-metadata` in a follow-up,
+    /// the same way [`Self::RegisterDimension`] is staged.
     InformationRegisterRecord,
+    /// Accumulation register record (РегистрНакопленияЗапись). Element of
+    /// [`Self::AccumulationRegisterRecordSet`]; see
+    /// [`Self::InformationRegisterRecord`] for the full rationale.
     AccumulationRegisterRecord,
+    /// Accounting register record (РегистрБухгалтерииЗапись). Element of
+    /// [`Self::AccountingRegisterRecordSet`]; see
+    /// [`Self::InformationRegisterRecord`] for the full rationale.
     AccountingRegisterRecord,
+    /// Calculation register record (РегистрРасчетаЗапись). Element of
+    /// [`Self::CalculationRegisterRecordSet`]; see
+    /// [`Self::InformationRegisterRecord`] for the full rationale.
     CalculationRegisterRecord,
+    /// Enum reference (ПеречислениеСсылка).
+    EnumRef,
+    /// Task reference (ЗадачаСсылка).
+    TaskRef,
+    /// Task object (ЗадачаОбъект). Companion to [`Self::TaskRef`] —
+    /// emitted from `<Type>cfg:TaskObject.X</Type>` and used as the
+    /// underlying MDO behind a Task form's `Объект`.
+    TaskObject,
+    /// Business process reference (БизнесПроцессСсылка).
+    BusinessProcessRef,
+    /// Business process object (БизнесПроцессОбъект). Companion to
+    /// [`Self::BusinessProcessRef`] — emitted from
+    /// `<Type>cfg:BusinessProcessObject.X</Type>` and used as the
+    /// underlying MDO behind a BusinessProcess form's `Объект`.
+    BusinessProcessObject,
+    /// DataProcessor object (ОбработкаОбъект). DataProcessors only have
+    /// an Object form (no `*Ref` companion) — used as the underlying
+    /// MDO behind a DataProcessor form's `Объект`.
+    DataProcessorObject,
+    /// Report object (ОтчётОбъект). Symmetric to
+    /// [`Self::DataProcessorObject`] — Reports only have an Object form.
+    ReportObject,
+    /// Exchange plan reference (ПланОбменаСсылка).
+    ExchangePlanRef,
+    /// Exchange plan object (ПланОбменаОбъект).
+    ExchangePlanObject,
+    /// Chart of accounts reference (ПланСчетовСсылка).
+    ChartOfAccountsRef,
+    /// Chart of accounts object (ПланСчетовОбъект).
+    ChartOfAccountsObject,
+    /// Information register reference / record key form
+    /// (РегистрСведенийКлючЗаписи / `InformationRegisterRef`).
+    ///
+    /// Companion to [`Self::InformationRegisterRecordManager`]: the manager
+    /// variant models the runtime record-manager object, this one models the
+    /// XML-emitted reference/key token as a value type.
+    InformationRegisterRef,
+    /// Accumulation register reference / record key form
+    /// (РегистрНакопленияКлючЗаписи / `AccumulationRegisterRef`).
+    AccumulationRegisterRef,
+    /// Accounting register reference / record key form
+    /// (РегистрБухгалтерииКлючЗаписи / `AccountingRegisterRef`).
+    AccountingRegisterRef,
+    /// Calculation register reference / record key form
+    /// (РегистрРасчётаКлючЗаписи / `CalculationRegisterRef`).
+    CalculationRegisterRef,
+    /// Dimension (измерение) of a register — opaque symbolic form.
+    ///
+    /// Used as a fallback metadata reference when the XML-parsed
+    /// `attr_type` on a `bsl_metadata::register::Dimension` is absent and
+    /// the field-lookup adapter has no concrete type to return. `parent`
+    /// pins the register flavour (`InformationRegister`,
+    /// `AccumulationRegister`, `AccountingRegister`,
+    /// `CalculationRegister`) so downstream tooling can still surface
+    /// "dimension of register X" even without a typed payload. The enclosing
+    /// metadata reference name carries `"Register.Dimension"` (mirrors the
+    /// `TabularSection` convention) so the originating register is
+    /// recoverable.
+    ///
+    /// Kept as a leaf receiver in M4 Task 2: further field access on this
+    /// variant returns `None`. A follow-up that wires the
+    /// `Движения.X.Добавить()` record surface can promote it to a receiver
+    /// once `bsl-metadata` exposes the record shape.
+    RegisterDimension {
+        /// Register flavour that owns the dimension.
+        parent: MdoType,
+    },
+    /// Resource (ресурс) of a register — opaque symbolic form.
+    ///
+    /// Same semantics as [`Self::RegisterDimension`]: fallback metadata
+    /// reference when the XML-parsed `attr_type` is missing, `parent` pins
+    /// the register flavour, name carries `"Register.Resource"`.
+    RegisterResource {
+        /// Register flavour that owns the resource.
+        parent: MdoType,
+    },
+    /// Attribute (реквизит) of a register — opaque symbolic form.
+    ///
+    /// Same semantics as [`Self::RegisterDimension`]: fallback metadata
+    /// reference when the XML-parsed `attr_type` is missing, `parent` pins
+    /// the register flavour, name carries `"Register.Attribute"`.
+    RegisterAttribute {
+        /// Register flavour that owns the attribute.
+        parent: MdoType,
+    },
+    /// Per-record-set `Отбор` (Filter) — synthetic receiver.
+    ///
+    /// 1С runtime exposes a `.Отбор` property on every register record set
+    /// whose member names are the owning register's dimensions and each member
+    /// is a `ЭлементОтбора` (FilterItem). The HBK shipped in
+    /// `bsl-platform/data/platform_data.json` does not declare this property
+    /// on any RecordSet `type_name` (gap of the source archive, not a scraper
+    /// bug), so we synthesize it here.
+    ///
+    /// `parent` pins the register flavour; the enclosing metadata reference
+    /// name carries the bare register name (no `"Register.Filter"` composite —
+    /// there is at most one `Отбор` per record-set so a second segment would
+    /// be redundant).
+    ///
+    /// Method/property surface:
+    /// - Members (dimensions) come from `hir-ty` field enumeration.
+    /// - The 10 platform `Filter` methods (`Сбросить`, `Получить`,
+    ///   `Найти`, …) are wired through a scalar-key side channel
+    ///   ([`Self::scalar_platform_key`] returning `"Filter"`), not through
+    ///   [`Self::platform_prefix`] — `Filter` is a scalar `type_name`, not a
+    ///   composite `Filter.<X>` prefix.
+    RegisterFilter {
+        /// Register flavour that owns the record set producing this `Отбор`.
+        parent: MdoType,
+    },
+    /// Tabular section of a metadata object (`ТабличнаяЧасть`).
+    ///
+    /// `parent` identifies the MDO flavour that owns this section (Catalog,
+    /// Document, BusinessProcess, Task, ChartOf*), and the name of the
+    /// enclosing metadata reference carries `"Parent.Section"` (e.g.
+    /// `"ПКО.Товары"`). Together they pin one specific MDO: `Catalog "X"`
+    /// and `Document "X"` with a shared tabular-section name resolve
+    /// unambiguously because their [`Self::TabularSection`] receivers differ
+    /// in `parent`.
+    TabularSection {
+        /// MDO flavour that owns the section (matches the parent's `mdo_type`).
+        parent: MdoType,
+    },
+    /// A single row of a tabular section (`СтрокаТабличнойЧасти`).
+    ///
+    /// Uses the same `parent` + `"Parent.Section"` name convention as
+    /// [`Self::TabularSection`].
+    TabularSectionRow {
+        /// MDO flavour that owns the enclosing section.
+        parent: MdoType,
+    },
+}
 
-    // ── Register inner shapes (parameterised by parent flavour) ─
-    RegisterDimension { parent: MdoType },
-    RegisterResource { parent: MdoType },
-    RegisterAttribute { parent: MdoType },
-    RegisterFilter { parent: MdoType },
+impl MetadataKind {
+    /// The `*Object` variant for an MDO flavour, or `None` if the
+    /// flavour does not carry an object form in [`MetadataKind`] today.
+    ///
+    /// Single source of truth for the `ЭтотОбъект` coercion and any future
+    /// callers that need to pick the right `*Object` [`MetadataKind`] given an
+    /// [`MdoType`]. Keeping the mapping here rather than duplicating it at
+    /// every call site lets resolvers gate `ThisObject` construction on the
+    /// same set of flavours the field / method adapters actually coerce:
+    /// producing a `ThisObject` for an MDO with no `*Object` surface would
+    /// leave the receiver dangling.
+    ///
+    /// New `*Object` variants should update this method.
+    pub fn object_kind_for(mdo_type: MdoType) -> Option<Self> {
+        match mdo_type {
+            MdoType::Catalog => Some(MetadataKind::CatalogObject),
+            MdoType::Document => Some(MetadataKind::DocumentObject),
+            MdoType::ExchangePlan => Some(MetadataKind::ExchangePlanObject),
+            MdoType::ChartOfAccounts => Some(MetadataKind::ChartOfAccountsObject),
+            MdoType::Task => Some(MetadataKind::TaskObject),
+            MdoType::BusinessProcess => Some(MetadataKind::BusinessProcessObject),
+            MdoType::DataProcessor => Some(MetadataKind::DataProcessorObject),
+            MdoType::Report => Some(MetadataKind::ReportObject),
+            _ => None,
+        }
+    }
 
-    // ── Tabular sections (parameterised by owner MDO) ──────────
-    TabularSection { parent: MdoType },
-    TabularSectionRow { parent: MdoType },
+    /// Sibling of [`Self::object_kind_for`] for register record-set modules.
+    ///
+    /// Returns the `*RecordSet` companion kind for the four register
+    /// [`MdoType`] flavours. Non-register flavours return `None`.
+    pub fn record_set_kind_for(mdo_type: MdoType) -> Option<Self> {
+        match mdo_type {
+            MdoType::InformationRegister => Some(MetadataKind::InformationRegisterRecordSet),
+            MdoType::AccumulationRegister => Some(MetadataKind::AccumulationRegisterRecordSet),
+            MdoType::AccountingRegister => Some(MetadataKind::AccountingRegisterRecordSet),
+            MdoType::CalculationRegister => Some(MetadataKind::CalculationRegisterRecordSet),
+            _ => None,
+        }
+    }
+
+    /// English prefix under which this kind's platform methods and properties
+    /// are indexed in `bsl-platform` (`CatalogObject`, `CatalogRef`, …).
+    ///
+    /// `None` for kinds without a composite platform surface today
+    /// (dimensions, resources, attributes, tabular sections, and scalar
+    /// synthetic receivers). Single source of truth shared by semantic method
+    /// resolution, property enumeration, and dot-completion on metadata
+    /// receivers.
+    pub fn platform_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::CatalogObject => Some("CatalogObject"),
+            Self::CatalogRef => Some("CatalogRef"),
+            Self::DocumentObject => Some("DocumentObject"),
+            Self::DocumentRef => Some("DocumentRef"),
+            Self::EnumRef => Some("EnumRef"),
+            Self::TaskRef => Some("TaskRef"),
+            Self::TaskObject => Some("TaskObject"),
+            Self::BusinessProcessRef => Some("BusinessProcessRef"),
+            Self::BusinessProcessObject => Some("BusinessProcessObject"),
+            Self::DataProcessorObject => Some("DataProcessorObject"),
+            Self::ReportObject => Some("ReportObject"),
+            Self::ExchangePlanRef => Some("ExchangePlanRef"),
+            Self::ExchangePlanObject => Some("ExchangePlanObject"),
+            Self::ChartOfAccountsRef => Some("ChartOfAccountsRef"),
+            Self::ChartOfAccountsObject => Some("ChartOfAccountsObject"),
+            Self::InformationRegisterRecordManager => Some("InformationRegisterRecordManager"),
+            Self::InformationRegisterRecordSet => Some("InformationRegisterRecordSet"),
+            Self::AccumulationRegisterRecordSet => Some("AccumulationRegisterRecordSet"),
+            Self::AccountingRegisterRecordSet => Some("AccountingRegisterRecordSet"),
+            Self::CalculationRegisterRecordSet => Some("CalculationRegisterRecordSet"),
+            Self::InformationRegisterRecord => Some("InformationRegisterRecord"),
+            Self::AccumulationRegisterRecord => Some("AccumulationRegisterRecord"),
+            Self::AccountingRegisterRecord => Some("AccountingRegisterRecord"),
+            Self::CalculationRegisterRecord => Some("CalculationRegisterRecord"),
+            Self::InformationRegisterRef
+            | Self::AccumulationRegisterRef
+            | Self::AccountingRegisterRef
+            | Self::CalculationRegisterRef
+            | Self::RegisterDimension { .. }
+            | Self::RegisterResource { .. }
+            | Self::RegisterAttribute { .. }
+            | Self::RegisterFilter { .. }
+            | Self::TabularSection { .. }
+            | Self::TabularSectionRow { .. } => None,
+        }
+    }
+
+    /// Scalar `type_name` under which this kind's methods/properties are
+    /// indexed in `bsl-platform` when the surface is a flat platform type (no
+    /// `"<Prefix>.<MDO>"` composite).
+    ///
+    /// Companion to [`Self::platform_prefix`]: `platform_prefix` covers
+    /// composite indexing (`"CatalogObject.<Имя>"`); this method covers
+    /// scalar indexing (`"Filter"`).
+    pub fn scalar_platform_key(self) -> Option<&'static str> {
+        match self {
+            Self::RegisterFilter { .. } => Some("Filter"),
+            _ => None,
+        }
+    }
+
+    /// User-facing label for this kind in the chosen locale.
+    ///
+    /// The current callers pass `base_db::Locale`; this layer intentionally
+    /// avoids depending on `base-db`, so locale is accepted by debug label and
+    /// `Debug == "En"` selects English. All other values use Russian, matching
+    /// `base_db::Locale`'s default.
+    pub fn display_label(self, locale: impl std::fmt::Debug) -> &'static str {
+        let is_en = format!("{locale:?}") == "En";
+        match (self, is_en) {
+            (Self::CatalogRef, false) => "СправочникСсылка",
+            (Self::CatalogRef, true) => "CatalogRef",
+            (Self::CatalogObject, false) => "СправочникОбъект",
+            (Self::CatalogObject, true) => "CatalogObject",
+            (Self::DocumentRef, false) => "ДокументСсылка",
+            (Self::DocumentRef, true) => "DocumentRef",
+            (Self::DocumentObject, false) => "ДокументОбъект",
+            (Self::DocumentObject, true) => "DocumentObject",
+            (Self::EnumRef, false) => "ПеречислениеСсылка",
+            (Self::EnumRef, true) => "EnumRef",
+            (Self::TaskRef, false) => "ЗадачаСсылка",
+            (Self::TaskRef, true) => "TaskRef",
+            (Self::TaskObject, false) => "ЗадачаОбъект",
+            (Self::TaskObject, true) => "TaskObject",
+            (Self::BusinessProcessRef, false) => "БизнесПроцессСсылка",
+            (Self::BusinessProcessRef, true) => "BusinessProcessRef",
+            (Self::BusinessProcessObject, false) => "БизнесПроцессОбъект",
+            (Self::BusinessProcessObject, true) => "BusinessProcessObject",
+            (Self::DataProcessorObject, false) => "ОбработкаОбъект",
+            (Self::DataProcessorObject, true) => "DataProcessorObject",
+            (Self::ReportObject, false) => "ОтчётОбъект",
+            (Self::ReportObject, true) => "ReportObject",
+            (Self::ExchangePlanRef, false) => "ПланОбменаСсылка",
+            (Self::ExchangePlanRef, true) => "ExchangePlanRef",
+            (Self::ExchangePlanObject, false) => "ПланОбменаОбъект",
+            (Self::ExchangePlanObject, true) => "ExchangePlanObject",
+            (Self::ChartOfAccountsRef, false) => "ПланСчетовСсылка",
+            (Self::ChartOfAccountsRef, true) => "ChartOfAccountsRef",
+            (Self::ChartOfAccountsObject, false) => "ПланСчетовОбъект",
+            (Self::ChartOfAccountsObject, true) => "ChartOfAccountsObject",
+            (Self::InformationRegisterRef, false) => "РегистрСведенийКлючЗаписи",
+            (Self::InformationRegisterRef, true) => "InformationRegisterRef",
+            (Self::InformationRegisterRecordManager, false) => "РегистрСведенийМенеджерЗаписи",
+            (Self::InformationRegisterRecordManager, true) => "InformationRegisterRecordManager",
+            (Self::InformationRegisterRecordSet, false) => "РегистрСведенийНаборЗаписей",
+            (Self::InformationRegisterRecordSet, true) => "InformationRegisterRecordSet",
+            (Self::InformationRegisterRecord, false) => "РегистрСведенийЗапись",
+            (Self::InformationRegisterRecord, true) => "InformationRegisterRecord",
+            (Self::AccumulationRegisterRef, false) => "РегистрНакопленияКлючЗаписи",
+            (Self::AccumulationRegisterRef, true) => "AccumulationRegisterRef",
+            (Self::AccumulationRegisterRecordSet, false) => "РегистрНакопленияНаборЗаписей",
+            (Self::AccumulationRegisterRecordSet, true) => "AccumulationRegisterRecordSet",
+            (Self::AccumulationRegisterRecord, false) => "РегистрНакопленияЗапись",
+            (Self::AccumulationRegisterRecord, true) => "AccumulationRegisterRecord",
+            (Self::AccountingRegisterRef, false) => "РегистрБухгалтерииКлючЗаписи",
+            (Self::AccountingRegisterRef, true) => "AccountingRegisterRef",
+            (Self::AccountingRegisterRecordSet, false) => "РегистрБухгалтерииНаборЗаписей",
+            (Self::AccountingRegisterRecordSet, true) => "AccountingRegisterRecordSet",
+            (Self::AccountingRegisterRecord, false) => "РегистрБухгалтерииЗапись",
+            (Self::AccountingRegisterRecord, true) => "AccountingRegisterRecord",
+            (Self::CalculationRegisterRef, false) => "РегистрРасчётаКлючЗаписи",
+            (Self::CalculationRegisterRef, true) => "CalculationRegisterRef",
+            (Self::CalculationRegisterRecordSet, false) => "РегистрРасчетаНаборЗаписей",
+            (Self::CalculationRegisterRecordSet, true) => "CalculationRegisterRecordSet",
+            (Self::CalculationRegisterRecord, false) => "РегистрРасчетаЗапись",
+            (Self::CalculationRegisterRecord, true) => "CalculationRegisterRecord",
+            (Self::RegisterDimension { .. }, false) => "Измерение",
+            (Self::RegisterDimension { .. }, true) => "Dimension",
+            (Self::RegisterResource { .. }, false) => "Ресурс",
+            (Self::RegisterResource { .. }, true) => "Resource",
+            (Self::RegisterAttribute { .. }, false) => "Реквизит",
+            (Self::RegisterAttribute { .. }, true) => "Attribute",
+            (Self::RegisterFilter { .. }, false) => "Отбор",
+            (Self::RegisterFilter { .. }, true) => "Filter",
+            (Self::TabularSection { .. }, false) => "ТабличнаяЧасть",
+            (Self::TabularSection { .. }, true) => "TabularSection",
+            (Self::TabularSectionRow { .. }, false) => "СтрокаТабличнойЧасти",
+            (Self::TabularSectionRow { .. }, true) => "TabularSectionRow",
+        }
+    }
 }
 
 /// Literal value embedded in a `DefaultValue::Literal`.

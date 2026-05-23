@@ -1562,6 +1562,7 @@ dependencies = [
  "bsl-config",
  "bsl-metadata",
  "bsl-platform",
+ "bsl-types",
  "cfg-types",
  "expect-test",
  "ide-db",

@@ -32,6 +32,7 @@ sdbl-hir.workspace = true
 bsl-config.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
+bsl-types.workspace = true
 project-model.workspace = true
 line-index.workspace = true
 indexmap.workspace = true
