@@ -382,6 +382,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsl-types"
+version = "0.1.197"
+dependencies = [
+ "bsl-metadata",
+ "elsa",
+ "expect-test",
+ "intern",
+ "rustc-hash 2.1.2",
+ "smol_str",
+ "tracing",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1133,6 +1146,15 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "elsa"
+version = "1.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9abf33c656a7256451ebb7d0082c5a471820c31269e49d807c538c252352186e"
+dependencies = [
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "encode_unicode"

@@ -108,6 +108,7 @@ parking_lot = "0.12"
 indexmap = "2.1"
 itertools = "0.12"
 smol_str = "0.3.2"
+elsa = "1.10"
 la-arena = "0.3"
 smallvec = "1.13"
 triomphe = { version = "0.1.14", default-features = false, features = ["std"] }
