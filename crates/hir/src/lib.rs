@@ -7,9 +7,11 @@ pub mod name_classify;
 mod semantic_symbol;
 pub mod type_facade;
 
+pub use bsl_types::kind::TypeId;
 pub use definition::{Definition, ReferenceScope};
 pub use hir_ty::coerce_this_object_to_metadata_ref;
 pub use hir_ty::resolve_platform_global_property_type;
+pub use hir_ty::ty_bridge;
 pub use hir_ty::TyLoweringContext;
 pub use hir_ty::{is_form_items_collection_ty, FORM_ITEMS_TYPE_EN, FORM_ITEMS_TYPE_RU};
 pub use hir_ty::{PlatformMethodHandle, PlatformMethodOrigin};
@@ -748,7 +750,10 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             if let Some(expr_id) = result.source_map.expr_at_range(range) {
                 let owner = DefWithBodyId::ModuleCode;
                 let routed = infer_owner(self.db, file_id, owner);
-                let base = routed.type_of_expr(expr_id).cloned().unwrap_or(Ty::Unknown);
+                // Phase 3 §4.D: accessor bridges `TypeId` → owned `Ty`
+                // via the type kernel; the `Semantics` boundary keeps
+                // its `Ty` surface intact.
+                let base = routed.type_of_expr(self.db, expr_id).unwrap_or(Ty::Unknown);
                 return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base);
             }
         }
@@ -761,7 +766,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             if let Some(expr_id) = source_map.expr_at_range(range) {
                 let owner = DefWithBodyId::Method(local_id);
                 let routed = infer_owner(self.db, file_id, owner);
-                let base = routed.type_of_expr(expr_id).cloned().unwrap_or(Ty::Unknown);
+                let base = routed.type_of_expr(self.db, expr_id).unwrap_or(Ty::Unknown);
                 return narrow_or_base(self.db, file_id, owner, body, expr_id, base);
             }
         }
@@ -800,14 +805,15 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         if let Some(result) = module_bodies.module_code_result() {
             if let Some(binding_id) = result.source_map.binding_at_range(range) {
                 let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
-                return routed.type_of_binding(binding_id).cloned();
+                // Phase 3 §4.D: accessor bridges `TypeId` → owned `Ty`.
+                return routed.type_of_binding(self.db, binding_id);
             }
         }
 
         for (local_id, _body, source_map) in module_bodies.method_bodies() {
             if let Some(binding_id) = source_map.binding_at_range(range) {
                 let routed = infer_owner(self.db, file_id, DefWithBodyId::Method(local_id));
-                return routed.type_of_binding(binding_id).cloned();
+                return routed.type_of_binding(self.db, binding_id);
             }
         }
 

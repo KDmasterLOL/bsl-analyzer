@@ -204,7 +204,17 @@ fn strip_projection(p: Option<Arc<Projection>>) -> Option<Arc<Projection>> {
                 source: ProjectionFieldSource::Unknown,
             })
             .collect();
-        Arc::new(Projection { fields, origin: ProjectionOrigin::Unknown })
+        // Phase 3 §4.D: `raw_sdbl_types` is preserved through
+        // canonicalisation — the display shadows (`Число(15)` etc.)
+        // carry user-visible information that hover renders. Two
+        // projections that differ only in shadows intern as distinct
+        // ids; provenance (`origin`, `source`) is still zeroed because
+        // it isn't user-visible.
+        Arc::new(Projection {
+            fields,
+            origin: ProjectionOrigin::Unknown,
+            raw_sdbl_types: arc.raw_sdbl_types.clone(),
+        })
     })
 }
 

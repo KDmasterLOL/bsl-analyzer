@@ -1541,6 +1541,7 @@ dependencies = [
  "bsl-config",
  "bsl-metadata",
  "bsl-platform",
+ "bsl-types",
  "cfg",
  "dataflow",
  "expect-test",

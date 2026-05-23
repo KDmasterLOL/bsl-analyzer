@@ -480,6 +480,38 @@ pub struct ExprRef(pub(crate) u32);
 pub struct Projection {
     pub fields: Arc<[ProjectionField]>,
     pub origin: ProjectionOrigin,
+    /// Optional display-only shadow with pre-rendered SDBL type labels,
+    /// indexed parallel to `fields`.
+    ///
+    /// `None` when the originating bridge wasn't given an SDBL package
+    /// (e.g. hand-built `ValueTable` literals, form-attribute
+    /// projections). `Some(slice)` invariant: `slice.len() == fields.len()`.
+    ///
+    /// Phase 3 §4.D: introduced so the `Ty ↔ TypeId` bridge preserves
+    /// hover-rendered precision (`Число(15,2)`, `Строка(50)`) across the
+    /// inference storage migration.
+    pub raw_sdbl_types: Option<Arc<[crate::facet::SdblTypeShadowFacet]>>,
+}
+
+impl Projection {
+    /// Constructor for callers outside `bsl-types`. The struct is
+    /// `#[non_exhaustive]` so this is the only forward-compatible
+    /// construction surface (adding new fields stays additive).
+    pub fn new(
+        fields: Arc<[ProjectionField]>,
+        origin: ProjectionOrigin,
+        raw_sdbl_types: Option<Arc<[crate::facet::SdblTypeShadowFacet]>>,
+    ) -> Self {
+        Self { fields, origin, raw_sdbl_types }
+    }
+}
+
+impl ProjectionField {
+    /// Constructor — `ProjectionField` is `#[non_exhaustive]` so external
+    /// callers (e.g. the `hir-ty` bridge) need this to construct values.
+    pub fn new(name: Name, ty: TypeId, source: ProjectionFieldSource) -> Self {
+        Self { name, ty, source }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

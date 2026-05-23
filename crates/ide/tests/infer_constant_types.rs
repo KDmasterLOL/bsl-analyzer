@@ -73,7 +73,8 @@ fn setup_with_configs(
 }
 
 fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
+    Some(hir::ty_bridge::typeid_to_ty(db, id))
 }
 
 fn type_mismatches(db: &RootDatabaseImpl, file_id: FileId) -> Vec<(Ty, Ty)> {

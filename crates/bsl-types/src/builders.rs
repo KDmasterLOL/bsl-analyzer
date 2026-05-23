@@ -333,7 +333,7 @@ pub trait Builders: TypeKernelDb {
             .into_iter()
             .map(|(name, ty)| ProjectionField { name, ty, source: field_source })
             .collect();
-        Arc::new(Projection { fields, origin })
+        Arc::new(Projection { fields, origin, raw_sdbl_types: None })
     }
 }
 

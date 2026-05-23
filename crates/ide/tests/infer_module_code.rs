@@ -83,7 +83,11 @@ fn module_level_implicit_local_assignment_populates_var_types() {
     let input = FileIdInput::new(&db, fid);
     let result = infer_module_code_query(&db, input);
     assert_eq!(result.owner, DefWithBodyId::ModuleCode);
-    assert_eq!(result.var_types.get("х"), Some(&Ty::String));
+    // Phase 3 §4.D: var_types stores TypeId; bridge before comparing.
+    assert_eq!(
+        result.var_types.get("х").copied().map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid)),
+        Some(Ty::String),
+    );
 }
 
 /// Two consecutive calls inside the same Salsa revision return the

@@ -67,7 +67,8 @@ fn setup_at(path: PathBuf, text: &str) -> (RootDatabaseImpl, FileId) {
 }
 
 fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
+    Some(hir::ty_bridge::typeid_to_ty(db, id))
 }
 
 #[test]
@@ -152,9 +153,13 @@ fn infer_this_manager_in_common_module_stays_unknown() {
     let (db, file_id) = setup_at(common_module_path(), text);
 
     let infer = db.infer(file_id);
-    let has_this_manager = infer.var_types.values().any(|ty| matches!(ty, Ty::ThisManager { .. }));
+    // Phase 3 §4.D: var_types stores TypeId; bridge before matching.
+    let bridge = |tid: &hir::TypeId| hir::ty_bridge::typeid_to_ty(&db, *tid);
+    let has_this_manager =
+        infer.var_types.values().any(|tid| matches!(bridge(tid), Ty::ThisManager { .. }));
     assert!(!has_this_manager, "common module must not produce Ty::ThisManager");
-    let has_this_object = infer.var_types.values().any(|ty| matches!(ty, Ty::ThisObject { .. }));
+    let has_this_object =
+        infer.var_types.values().any(|tid| matches!(bridge(tid), Ty::ThisObject { .. }));
     assert!(!has_this_object, "common module must not produce Ty::ThisObject either");
 }
 

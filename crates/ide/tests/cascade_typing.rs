@@ -43,7 +43,12 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
 fn var_ty(db: &RootDatabaseImpl, fid: FileId, name: &str) -> Ty {
     let result = db.infer(fid);
     let key = name.to_lowercase();
-    result.var_types.get(&key).cloned().unwrap_or(Ty::Unknown)
+    result
+        .var_types
+        .get(&key)
+        .copied()
+        .map(|id| hir::ty_bridge::typeid_to_ty(db, id))
+        .unwrap_or(Ty::Unknown)
 }
 
 /// Bare same-module fn-call cascade: `Х = ЛокФн();` where `ЛокФн`
@@ -182,12 +187,16 @@ fn return_statement_propagates_cascade() {
 
     // Sanity: `Wrap` and `Inner` are distinct keys in `expr_types_by_body`.
     assert_ne!(wrap_owner, inner_owner, "Wrap and Inner must lower to distinct DefWithBodyId");
+    // Phase 3 §4.D: per-body `expr_types` now stores `TypeId`; bridge
+    // through the kernel to keep the structural `matches!` assertion.
+    let has_string =
+        |tid: &hir::TypeId| matches!(hir::ty_bridge::typeid_to_ty(&db, *tid), Ty::String);
     // Inner contains the literal — confirms `expr_types_by_body[Inner]` sees a String.
-    assert!(inner_exprs.values().any(|t| matches!(t, Ty::String)));
+    assert!(inner_exprs.values().any(has_string));
     // The actual cascade assertion: `Wrap`'s OWN body sees the
     // call-to-`Inner` expression typed `Ty::String` via O.11.
     assert!(
-        wrap_exprs.values().any(|t| matches!(t, Ty::String)),
+        wrap_exprs.values().any(has_string),
         "Wrap's body must contain a Ty::String entry for `Inner()` via the O.11 cascade \
          (entries: {:?})",
         wrap_exprs.values().collect::<Vec<_>>(),

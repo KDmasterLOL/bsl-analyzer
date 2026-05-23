@@ -69,9 +69,11 @@ fn implicit_local_assignment_populates_per_method_var_types() {
     let mid = find_method(&db, fid, "P");
     let result = infer_method_query(&db, MethodIdInput::new(&db, mid));
     assert_eq!(result.owner, DefWithBodyId::Method(mid.local_id));
-    assert_eq!(result.var_types.get("х"), Some(&Ty::String));
+    // Phase 3 §4.D: per-body maps store TypeId; bridge to compare Ty.
+    let bridge = |tid: hir::TypeId| hir::ty_bridge::typeid_to_ty(&db, tid);
+    assert_eq!(result.var_types.get("х").copied().map(bridge), Some(Ty::String));
     assert!(
-        result.expr_types.values().any(|t| matches!(t, Ty::String)),
+        result.expr_types.values().any(|tid| matches!(bridge(*tid), Ty::String)),
         "Method P's body must record a Ty::String expr from the literal RHS"
     );
 }
@@ -143,7 +145,10 @@ fn bilingual_procedure_inferred_owner_matches() {
     // The Stmt::Return arm pushes the return expr id; we should see at
     // least one entry from the literal.
     assert!(
-        result.expr_types.values().any(|t| matches!(t, Ty::String)),
+        result
+            .expr_types
+            .values()
+            .any(|tid| matches!(hir::ty_bridge::typeid_to_ty(&db, *tid), Ty::String)),
         "Функция ВернутьСтроку must record Ty::String from its literal return"
     );
 }
@@ -218,8 +223,8 @@ fn no_module_code_seed_into_method_var_types() {
     // Method `P` reassigns Х to Number — the method's own var_types
     // reflects that assignment, not the module-code String.
     assert_eq!(
-        result.var_types.get("х"),
-        Some(&Ty::Number),
+        result.var_types.get("х").copied().map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid)),
+        Some(Ty::Number),
         "Method P's var_types must show its OWN assignment, not the module-code seed"
     );
 }

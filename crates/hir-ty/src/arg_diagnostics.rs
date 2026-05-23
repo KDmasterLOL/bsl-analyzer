@@ -186,8 +186,9 @@ pub fn arg_diagnostics_query(
             .args
             .iter()
             .map(|arg_id| {
-                let base =
-                    infer.type_of_expr_in(binding.owner, *arg_id).cloned().unwrap_or(Ty::Unknown);
+                // Phase 3 §4.D: accessor now bridges the stored `TypeId`
+                // back to `Ty`; takes `db` and returns an owned value.
+                let base = infer.type_of_expr_in(db, binding.owner, *arg_id).unwrap_or(Ty::Unknown);
                 narrow_arg(narrow, body, *arg_id, base)
             })
             .collect();

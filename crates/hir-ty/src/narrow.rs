@@ -859,7 +859,7 @@ pub fn narrow_query(
     let infer_ns = infer_start.elapsed().as_nanos();
 
     let base_types_start = Instant::now();
-    let base_types = build_base_types_for_body(body, per_body_types);
+    let base_types = build_base_types_for_body(db, body, per_body_types);
     let base_types_ns = base_types_start.elapsed().as_nanos();
 
     // Inline CFG build + solve so the `narrow_body` test helper signature
@@ -975,8 +975,9 @@ fn log_narrow_query_stages(owner: DefWithBodyId, stages: &NarrowQueryStages) {
 /// wrong overlay entry. Task 6.7 can upgrade the seed to the merged
 /// reaching type without violating this invariant.
 fn build_base_types_for_body(
+    db: &dyn bsl_types::intern::TypeKernelDb,
     body: &Body,
-    per_body_types: Option<&FxHashMap<hir_def::ExprId, Ty>>,
+    per_body_types: Option<&FxHashMap<hir_def::ExprId, bsl_types::kind::TypeId>>,
 ) -> FxHashMap<Name, Ty> {
     let mut base_types: FxHashMap<Name, Ty> = FxHashMap::default();
     let Some(per_body) = per_body_types else {
@@ -984,13 +985,18 @@ fn build_base_types_for_body(
     };
     for (expr_id, expr) in body.exprs_iter() {
         if let Expr::Path(name) = expr {
-            if let Some(ty) = per_body.get(&expr_id) {
+            if let Some(tid) = per_body.get(&expr_id).copied() {
                 // Fold the key so a mixed-case source (`Х` and `х` both
                 // referring to the same BSL variable) lands on the same
                 // entry — the overlay round-trips through `fold_name`
                 // at every write, so the seed must honour the same
                 // invariant.
-                base_types.entry(fold_name(name)).or_insert_with(|| ty.clone());
+                //
+                // Phase 3 §4.D: per-body storage is `TypeId` now; bridge
+                // back to `Ty` for the dataflow lattice.
+                base_types
+                    .entry(fold_name(name))
+                    .or_insert_with(|| crate::ty_bridge::typeid_to_ty(db, tid));
             }
         }
     }

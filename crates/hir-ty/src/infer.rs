@@ -27,6 +27,8 @@
 //! - Diagnostic collection (UnresolvedMethodCall, MismatchedArgCount)
 
 use base_db::FileIdInput;
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use cfg_types::{BindingId, IdConversion};
 use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
@@ -44,6 +46,7 @@ use crate::db::HirDatabase;
 use crate::lower::TyLoweringContext;
 use crate::method_resolution;
 use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
+use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
 
 /// Result of type inference for a file/module.
 ///
@@ -61,22 +64,30 @@ pub struct InferenceResult {
     /// Per-body inferred expression types.
     ///
     /// Outer key = body owner (`Method(local_id)` or `ModuleCode`), inner
-    /// map = that body's `ExprId -> Ty`.
+    /// map = that body's `ExprId -> TypeId`.
+    ///
+    /// Phase 3 §4.D: inner value storage migrated from `Ty` to `TypeId`.
+    /// Callers needing the `Ty` view bridge via [`Self::type_of_expr_in`]
+    /// (which takes `db` and returns owned `Ty`), or convert raw `TypeId`
+    /// values through [`crate::ty_bridge::typeid_to_ty`].
     ///
     /// Shape note: M3 ships this as a nested map, not a flat
-    /// `FxHashMap<(DefWithBodyId, ExprId), Ty>`. No current caller uses
+    /// `FxHashMap<(DefWithBodyId, ExprId), TypeId>`. No current caller uses
     /// the "grab the whole body's map in one lookup" shortcut the nesting
     /// would enable (`Semantics::type_of_expr` does a single point
     /// lookup), but the nested shape stays open for Tasks 10-12 hooks
     /// (body-scoped completion, narrowing) that need per-body iteration.
     /// If those never materialise, a later cleanup can flatten.
-    pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, Ty>>,
+    pub expr_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<ExprId, TypeId>>,
 
     /// Variable types inferred from assignments.
     ///
     /// Maps lowercase variable name to its last inferred type.
     /// Populated by tracking `Stmt::Assign { target: Path(name), value }` during inference.
     /// Used by completion to resolve receiver types for method lookup.
+    ///
+    /// Phase 3 §4.D: stores `TypeId` (interned via the type kernel) instead
+    /// of `Ty`. Bridge to `Ty` via [`crate::ty_bridge::typeid_to_ty`].
     ///
     /// File-global merge across all bodies (last-write-wins on lowercase
     /// name). Useful for name-based completion which has no body context.
@@ -85,7 +96,7 @@ pub struct InferenceResult {
     /// [`InferenceResult::binding_type_in`]: this map collides on
     /// shadowing (same name across procedures or repeated within one
     /// body), `binding_types_by_body` does not.
-    pub var_types: FxHashMap<String, Ty>,
+    pub var_types: FxHashMap<String, TypeId>,
 
     /// Per-body, per-binding inferred types.
     ///
@@ -98,7 +109,9 @@ pub struct InferenceResult {
     /// [`InferenceResult::var_types`] from `Stmt::ForEach` and
     /// `Stmt::For`. Mirrors the per-body shape of
     /// [`InferenceResult::expr_types_by_body`].
-    pub binding_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<BindingId, Ty>>,
+    ///
+    /// Phase 3 §4.D: inner storage migrated from `Ty` to `TypeId`.
+    pub binding_types_by_body: FxHashMap<DefWithBodyId, FxHashMap<BindingId, TypeId>>,
 
     /// Per-body implicit locals introduced by simple assignments.
     ///
@@ -173,8 +186,27 @@ impl InferenceResult {
     /// for a procedure / function, `DefWithBodyId::ModuleCode` for
     /// module-level code. Returns `None` if inference produced no entry
     /// for that `(owner, expr)` pair.
-    pub fn type_of_expr_in(&self, owner: DefWithBodyId, expr: ExprId) -> Option<&Ty> {
-        self.expr_types_by_body.get(&owner)?.get(&expr)
+    ///
+    /// Phase 3 §4.D: bridges the stored `TypeId` to owned `Ty` via the
+    /// kernel; signature now takes `db` and returns `Option<Ty>` (owned)
+    /// instead of `Option<&Ty>`. Internal callers that already hold the
+    /// `TypeId` should read the raw map (`expr_types_by_body`) directly.
+    pub fn type_of_expr_in(
+        &self,
+        db: &dyn TypeKernelDb,
+        owner: DefWithBodyId,
+        expr: ExprId,
+    ) -> Option<Ty> {
+        let id = *self.expr_types_by_body.get(&owner)?.get(&expr)?;
+        Some(typeid_to_ty(db, id))
+    }
+
+    /// Raw `TypeId` view of the per-(owner, expr) entry. Cheaper than
+    /// [`Self::type_of_expr_in`] for callers that can stay in the
+    /// kernel space (no bridge round-trip). Returns `None` when no
+    /// inference entry exists.
+    pub fn type_id_of_expr_in(&self, owner: DefWithBodyId, expr: ExprId) -> Option<TypeId> {
+        self.expr_types_by_body.get(&owner)?.get(&expr).copied()
     }
 
     /// Get the inferred type of a specific binding in `owner`'s body.
@@ -183,8 +215,23 @@ impl InferenceResult {
     /// classic-for counters, parameters) to avoid name shadowing across
     /// or within bodies — two bindings with the same lowercase name
     /// resolve to distinct entries here.
-    pub fn binding_type_in(&self, owner: DefWithBodyId, id: BindingId) -> Option<&Ty> {
-        self.binding_types_by_body.get(&owner)?.get(&id)
+    ///
+    /// Phase 3 §4.D: see [`Self::type_of_expr_in`] for the signature
+    /// rationale.
+    pub fn binding_type_in(
+        &self,
+        db: &dyn TypeKernelDb,
+        owner: DefWithBodyId,
+        id: BindingId,
+    ) -> Option<Ty> {
+        let typeid = *self.binding_types_by_body.get(&owner)?.get(&id)?;
+        Some(typeid_to_ty(db, typeid))
+    }
+
+    /// Raw `TypeId` view of the per-(owner, binding) entry. Kernel-native
+    /// counterpart to [`Self::binding_type_in`].
+    pub fn type_id_of_binding_in(&self, owner: DefWithBodyId, id: BindingId) -> Option<TypeId> {
+        self.binding_types_by_body.get(&owner)?.get(&id).copied()
     }
 
     /// Check if there are any diagnostics.
@@ -542,15 +589,22 @@ pub struct InferenceContext<'db> {
 pub struct BodyInferenceResult {
     /// Owner of the body that produced this output.
     pub owner: DefWithBodyId,
-    /// Variable types discovered during inference (lowercase name → Ty).
-    pub var_types: FxHashMap<String, Ty>,
+    /// Variable types discovered during inference (lowercase name → `TypeId`).
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`. Bridge via
+    /// [`crate::ty_bridge::typeid_to_ty`].
+    pub var_types: FxHashMap<String, TypeId>,
     /// Implicit locals introduced by simple assignments in this body.
     pub implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
     /// Per-binding inferred types (declaration-site arms). Folded into
     /// [`InferenceResult::binding_types_by_body`] keyed by `owner`.
-    pub binding_types: FxHashMap<BindingId, Ty>,
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub binding_types: FxHashMap<BindingId, TypeId>,
     /// Expression types keyed by body-local `ExprId`.
-    pub expr_types: FxHashMap<ExprId, Ty>,
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub expr_types: FxHashMap<ExprId, TypeId>,
     /// Diagnostics collected during inference.
     pub diagnostics: Vec<InferenceDiagnostic>,
     /// Call-site arg/param bindings collected during inference, to be
@@ -603,14 +657,20 @@ pub struct ModuleCodeInferenceResult {
     /// Always [`DefWithBodyId::ModuleCode`]. Kept explicit so the
     /// struct can be inspected uniformly with `BodyInferenceResult`.
     pub owner: DefWithBodyId,
-    /// Variable types discovered during inference (lowercase name → Ty).
-    pub var_types: FxHashMap<String, Ty>,
+    /// Variable types discovered during inference (lowercase name → `TypeId`).
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub var_types: FxHashMap<String, TypeId>,
     /// Implicit locals introduced by simple assignments in module code.
     pub implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
     /// Per-binding inferred types (declaration-site arms).
-    pub binding_types: FxHashMap<BindingId, Ty>,
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub binding_types: FxHashMap<BindingId, TypeId>,
     /// Expression types keyed by body-local `ExprId`.
-    pub expr_types: FxHashMap<ExprId, Ty>,
+    ///
+    /// Phase 3 §4.D: storage migrated from `Ty` to `TypeId`.
+    pub expr_types: FxHashMap<ExprId, TypeId>,
     /// Diagnostics collected during inference.
     pub diagnostics: Vec<InferenceDiagnostic>,
     /// Call-site arg/param bindings collected during inference.
@@ -693,21 +753,35 @@ impl InferOwnerResult {
     }
 
     /// Type of expression `expr` within this owner's body, if inference
-    /// recorded one. Equivalent to
-    /// `InferenceResult::type_of_expr_in(owner, expr)` but reads
-    /// directly from the per-owner payload.
-    pub fn type_of_expr(&self, expr: ExprId) -> Option<&Ty> {
+    /// recorded one. Bridges the stored `TypeId` to owned `Ty` via the
+    /// type kernel.
+    ///
+    /// Phase 3 §4.D: signature takes `db` and returns `Option<Ty>`
+    /// (owned) instead of `Option<&Ty>`. Callers that can stay in
+    /// kernel space should use [`Self::type_id_of_expr`].
+    pub fn type_of_expr(&self, db: &dyn TypeKernelDb, expr: ExprId) -> Option<Ty> {
+        let id = self.type_id_of_expr(expr)?;
+        Some(typeid_to_ty(db, id))
+    }
+
+    /// Raw `TypeId` view of `expr` within this owner's body — kernel-native
+    /// counterpart to [`Self::type_of_expr`].
+    pub fn type_id_of_expr(&self, expr: ExprId) -> Option<TypeId> {
         match self {
-            InferOwnerResult::Method(r) => r.expr_types.get(&expr),
-            InferOwnerResult::ModuleCode(r) => r.expr_types.get(&expr),
+            InferOwnerResult::Method(r) => r.expr_types.get(&expr).copied(),
+            InferOwnerResult::ModuleCode(r) => r.expr_types.get(&expr).copied(),
         }
     }
 
-    /// Full `ExprId -> Ty` map for this owner's body. Callers that
-    /// need bulk access (e.g. `narrow_query` building a
-    /// `base_types` overlay across all expressions in the body) use
-    /// this in preference to repeated [`Self::type_of_expr`] calls.
-    pub fn expr_types(&self) -> &FxHashMap<ExprId, Ty> {
+    /// Full `ExprId -> TypeId` map for this owner's body. Callers that
+    /// need bulk access (e.g. `narrow_query` building a `base_types`
+    /// overlay across all expressions in the body) use this in
+    /// preference to repeated [`Self::type_id_of_expr`] calls.
+    ///
+    /// Phase 3 §4.D: map values migrated from `Ty` to `TypeId`. Callers
+    /// needing `Ty` views must bridge per-entry via
+    /// [`crate::ty_bridge::typeid_to_ty`].
+    pub fn expr_types(&self) -> &FxHashMap<ExprId, TypeId> {
         match self {
             InferOwnerResult::Method(r) => &r.expr_types,
             InferOwnerResult::ModuleCode(r) => &r.expr_types,
@@ -718,15 +792,26 @@ impl InferOwnerResult {
     /// recorded one. Equivalent to
     /// `InferenceResult::binding_type_in(owner, binding)` but reads
     /// directly from the per-owner payload.
-    pub fn type_of_binding(&self, binding: BindingId) -> Option<&Ty> {
+    ///
+    /// Phase 3 §4.D: see [`Self::type_of_expr`] for the signature
+    /// rationale.
+    pub fn type_of_binding(&self, db: &dyn TypeKernelDb, binding: BindingId) -> Option<Ty> {
+        let id = self.type_id_of_binding(binding)?;
+        Some(typeid_to_ty(db, id))
+    }
+
+    /// Raw `TypeId` view of `binding` within this owner's body.
+    pub fn type_id_of_binding(&self, binding: BindingId) -> Option<TypeId> {
         match self {
-            InferOwnerResult::Method(r) => r.binding_types.get(&binding),
-            InferOwnerResult::ModuleCode(r) => r.binding_types.get(&binding),
+            InferOwnerResult::Method(r) => r.binding_types.get(&binding).copied(),
+            InferOwnerResult::ModuleCode(r) => r.binding_types.get(&binding).copied(),
         }
     }
 
-    /// Variable types map (lowercase name → Ty) for this owner.
-    pub fn var_types(&self) -> &FxHashMap<String, Ty> {
+    /// Variable types map (lowercase name → `TypeId`) for this owner.
+    ///
+    /// Phase 3 §4.D: map values migrated to `TypeId`.
+    pub fn var_types(&self) -> &FxHashMap<String, TypeId> {
         match self {
             InferOwnerResult::Method(r) => &r.var_types,
             InferOwnerResult::ModuleCode(r) => &r.var_types,
@@ -744,7 +829,9 @@ impl InferOwnerResult {
 
     /// Per-binding inferred types for declaration-site identifiers
     /// (loop variables, classic-for counters, parameters).
-    pub fn binding_types(&self) -> &FxHashMap<BindingId, Ty> {
+    ///
+    /// Phase 3 §4.D: map values migrated to `TypeId`.
+    pub fn binding_types(&self) -> &FxHashMap<BindingId, TypeId> {
         match self {
             InferOwnerResult::Method(r) => &r.binding_types,
             InferOwnerResult::ModuleCode(r) => &r.binding_types,
@@ -866,13 +953,27 @@ impl<'db> InferenceContext<'db> {
     }
 
     /// Finish inference and return the per-body output.
+    ///
+    /// Phase 3 §4.D: inference operates on `Ty` internally during the
+    /// walk (no per-step bridge churn); at the boundary, the three
+    /// direct `Ty`-valued maps (`var_types`, `binding_types`,
+    /// `expr_types`) are converted to `TypeId` via
+    /// [`crate::ty_bridge::ty_to_typeid`]. `implicit_locals` keeps its
+    /// nested `Ty` payload (leaf migration deferred to §4.E).
     pub fn finish(self) -> BodyInferenceResult {
+        let db = self.db;
+        let var_types =
+            self.var_types.into_iter().map(|(k, v)| (k, ty_to_typeid(db, &v))).collect();
+        let binding_types =
+            self.binding_types.into_iter().map(|(k, v)| (k, ty_to_typeid(db, &v))).collect();
+        let expr_types =
+            self.expr_types.into_iter().map(|(k, v)| (k, ty_to_typeid(db, &v))).collect();
         BodyInferenceResult {
             owner: self.owner,
-            var_types: self.var_types,
+            var_types,
             implicit_locals: self.implicit_locals,
-            binding_types: self.binding_types,
-            expr_types: self.expr_types,
+            binding_types,
+            expr_types,
             diagnostics: self.diagnostics,
             call_arg_bindings: self.call_arg_bindings,
             return_expr_ids: self.return_expr_ids,
@@ -3647,7 +3748,7 @@ pub fn infer_query<'db>(
         // `var_types` stays file-global: completion matches variables by
         // name across bodies. Iteration is fixed by ModuleBodies' IndexMap
         // backing, so last-write-wins outcome is deterministic.
-        result.var_types.extend(body_result.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        result.var_types.extend(body_result.var_types.iter().map(|(k, v)| (k.clone(), *v)));
         result.implicit_locals_by_body.insert(owner, body_result.implicit_locals.clone());
         // `diagnostics` is flat file-wide but each entry is paired with
         // its `DefWithBodyId` owner so ide-diagnostics can resolve the
@@ -3667,7 +3768,7 @@ pub fn infer_query<'db>(
         let owner = module_code.owner;
         result.expr_types_by_body.insert(owner, module_code.expr_types.clone());
         result.binding_types_by_body.insert(owner, module_code.binding_types.clone());
-        result.var_types.extend(module_code.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        result.var_types.extend(module_code.var_types.iter().map(|(k, v)| (k.clone(), *v)));
         result.implicit_locals_by_body.insert(owner, module_code.implicit_locals.clone());
         result.diagnostics.extend(module_code.diagnostics.iter().map(|d| (owner, d.clone())));
         result.call_arg_bindings.extend(module_code.call_arg_bindings.iter().cloned());
@@ -3783,7 +3884,9 @@ pub fn type_of_expr_query(
     // Phase O.17: route through per-owner Salsa cell instead of the
     // file-wide `infer_query` aggregate. Warm hits become a single
     // Arc::clone on the `infer_method` / `infer_module_code` cell.
-    infer_owner(db, file_id, owner).type_of_expr(expr).cloned().unwrap_or(Ty::Unknown)
+    // Phase 3 §4.D: per-owner accessor now bridges `TypeId` → `Ty`
+    // via the type kernel; takes `db` and returns owned `Ty`.
+    infer_owner(db, file_id, owner).type_of_expr(db, expr).unwrap_or(Ty::Unknown)
 }
 
 #[cfg(test)]
@@ -4068,9 +4171,12 @@ mod tests {
 
     #[test]
     fn module_code_inference_result_from_body_preserves_fields() {
+        // Phase 3 §4.D: result-struct maps store `TypeId`; intern via a
+        // sandbox kernel to populate the payload.
+        let db = InMemoryDb::new();
         let mut body = BodyInferenceResult::empty_for(DefWithBodyId::ModuleCode);
-        body.var_types.insert("х".to_string(), Ty::String);
-        body.expr_types.insert(make_expr(3), Ty::Boolean);
+        body.var_types.insert("х".to_string(), ty_to_typeid(&db, &Ty::String));
+        body.expr_types.insert(make_expr(3), ty_to_typeid(&db, &Ty::Boolean));
         body.diagnostics.push(InferenceDiagnostic::TypeMismatch {
             expr: make_expr(4),
             expected: Ty::String,
@@ -4080,37 +4186,51 @@ mod tests {
         let lifted = ModuleCodeInferenceResult::from_body(body);
 
         assert_eq!(lifted.owner, DefWithBodyId::ModuleCode);
-        assert_eq!(lifted.var_types.get("х"), Some(&Ty::String));
-        assert_eq!(lifted.expr_types.get(&make_expr(3)), Some(&Ty::Boolean));
+        assert_eq!(
+            lifted.var_types.get("х").copied().map(|id| typeid_to_ty(&db, id)),
+            Some(Ty::String),
+        );
+        assert_eq!(
+            lifted.expr_types.get(&make_expr(3)).copied().map(|id| typeid_to_ty(&db, id)),
+            Some(Ty::Boolean),
+        );
         assert_eq!(lifted.diagnostics.len(), 1);
     }
 
     #[test]
     fn infer_owner_result_method_accessors_route_to_method_payload() {
+        let db = InMemoryDb::new();
         let mut body = BodyInferenceResult::empty_for(DefWithBodyId::Method(2));
-        body.var_types.insert("х".to_string(), Ty::Number);
-        body.expr_types.insert(make_expr(5), Ty::String);
+        body.var_types.insert("х".to_string(), ty_to_typeid(&db, &Ty::Number));
+        body.expr_types.insert(make_expr(5), ty_to_typeid(&db, &Ty::String));
 
         let routed = InferOwnerResult::Method(Arc::new(body));
 
         assert_eq!(routed.owner(), DefWithBodyId::Method(2));
-        assert_eq!(routed.type_of_expr(make_expr(5)), Some(&Ty::String));
-        assert_eq!(routed.type_of_expr(make_expr(99)), None);
-        assert_eq!(routed.var_types().get("х"), Some(&Ty::Number));
+        assert_eq!(routed.type_of_expr(&db, make_expr(5)), Some(Ty::String));
+        assert_eq!(routed.type_of_expr(&db, make_expr(99)), None);
+        assert_eq!(
+            routed.var_types().get("х").copied().map(|id| typeid_to_ty(&db, id)),
+            Some(Ty::Number),
+        );
         assert!(routed.implicit_locals().is_empty());
         assert!(routed.binding_types().is_empty());
     }
 
     #[test]
     fn infer_owner_result_module_code_accessors_route_to_module_payload() {
+        let db = InMemoryDb::new();
         let mut mc = ModuleCodeInferenceResult::default();
-        mc.var_types.insert("у".to_string(), Ty::Boolean);
-        mc.expr_types.insert(make_expr(1), Ty::Date);
+        mc.var_types.insert("у".to_string(), ty_to_typeid(&db, &Ty::Boolean));
+        mc.expr_types.insert(make_expr(1), ty_to_typeid(&db, &Ty::Date));
 
         let routed = InferOwnerResult::ModuleCode(Arc::new(mc));
 
         assert_eq!(routed.owner(), DefWithBodyId::ModuleCode);
-        assert_eq!(routed.type_of_expr(make_expr(1)), Some(&Ty::Date));
-        assert_eq!(routed.var_types().get("у"), Some(&Ty::Boolean));
+        assert_eq!(routed.type_of_expr(&db, make_expr(1)), Some(Ty::Date));
+        assert_eq!(
+            routed.var_types().get("у").copied().map(|id| typeid_to_ty(&db, id)),
+            Some(Ty::Boolean),
+        );
     }
 }

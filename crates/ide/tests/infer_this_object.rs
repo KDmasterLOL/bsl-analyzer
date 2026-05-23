@@ -79,7 +79,8 @@ fn setup(text: &str) -> (RootDatabaseImpl, FileId) {
 }
 
 fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
+    Some(hir::ty_bridge::typeid_to_ty(db, id))
 }
 
 #[test]
@@ -209,7 +210,11 @@ fn infer_this_object_in_common_module_stays_unknown() {
     // common-module `ЭтотОбъект` would violate Task 5's scope
     // (coercion only covers `*Object` MDO kinds).
     let infer = db.infer(file_id);
-    let has_this_object = infer.var_types.values().any(|ty| matches!(ty, Ty::ThisObject { .. }));
+    // Phase 3 §4.D: var_types stores TypeId; bridge before pattern-match.
+    let has_this_object = infer
+        .var_types
+        .values()
+        .any(|tid| matches!(hir::ty_bridge::typeid_to_ty(&db, *tid), Ty::ThisObject { .. }));
     assert!(!has_this_object, "common module must not produce Ty::ThisObject");
 }
 

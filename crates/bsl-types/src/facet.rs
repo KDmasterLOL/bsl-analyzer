@@ -241,6 +241,26 @@ impl ProjectionFacet {
     }
 }
 
+/// Display-only shadow for an SDBL field type, carried alongside a
+/// [`Projection`] when the IDE needs precision / scale / length info
+/// the bridged `TypeId` cannot carry (e.g. `Число(15,2)`, `Строка(50)`).
+///
+/// Phase 3 §4.D: introduced to preserve hover-rendered precision through
+/// the `Ty ↔ TypeId` bridge round-trip. Decoupled from `sdbl-hir` so the
+/// kernel stays independent of SDBL HIR shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct SdblTypeShadowFacet {
+    /// Pre-rendered SDBL type label (locale-stable).
+    pub display: String,
+}
+
+impl SdblTypeShadowFacet {
+    pub fn new(display: String) -> Self {
+        Self { display }
+    }
+}
+
 // ── Platform object facet ────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -472,6 +472,7 @@ mod canon_tests {
                     source: field_src,
                 }]),
                 origin: proj_origin,
+                raw_sdbl_types: None,
             }))
         };
 
@@ -506,6 +507,7 @@ mod canon_tests {
                     source: field_src,
                 }]),
                 origin: proj_origin,
+                raw_sdbl_types: None,
             }))
         };
 
@@ -590,6 +592,7 @@ mod canon_tests {
                 source: ProjectionFieldSource::Cast,
             }]),
             origin: ProjectionOrigin::SdblQuery,
+            raw_sdbl_types: None,
         });
         let proj_b = Arc::new(Projection {
             fields: Arc::from([ProjectionField {
@@ -598,6 +601,7 @@ mod canon_tests {
                 source: ProjectionFieldSource::Column,
             }]),
             origin: ProjectionOrigin::Unknown,
+            raw_sdbl_types: None,
         });
 
         let a = db.intern_type(TypeKind::QueryResult(ProjectionFacet {

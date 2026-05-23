@@ -186,6 +186,7 @@ mod tests {
                     source: field_source,
                 }]),
                 origin,
+                raw_sdbl_types: None,
             })
         };
 

@@ -161,7 +161,7 @@ fn type_of_call_expr_matches_infer() {
         })
         .expect("BodySourceMap must locate the literal ExprId");
     assert_eq!(
-        infer.type_of_expr_in(owner_match, expr_match).cloned(),
+        infer.type_of_expr_in(&db, owner_match, expr_match),
         Some(Ty::Number),
         "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );
@@ -203,7 +203,7 @@ fn type_of_module_level_expr_resolves() {
         .expect("module-level BodySourceMap must locate the literal");
     let infer = db.infer(file_id);
     assert_eq!(
-        infer.type_of_expr_in(DefWithBodyId::ModuleCode, expr_id).cloned(),
+        infer.type_of_expr_in(&db, DefWithBodyId::ModuleCode, expr_id),
         Some(Ty::Number),
         "direct ModuleCode lookup must agree with Semantics::type_of_expr"
     );
@@ -258,7 +258,7 @@ fn type_of_field_expr_matches_infer() {
         .expect("BodySourceMap must locate the field-expr ExprId");
     let infer = db.infer(file_id);
     assert_eq!(
-        infer.type_of_expr_in(owner, expr_id).cloned(),
+        infer.type_of_expr_in(&db, owner, expr_id),
         Some(Ty::Number),
         "direct expr_types_by_body lookup must agree with Semantics::type_of_expr"
     );

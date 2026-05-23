@@ -216,7 +216,8 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         // the file-wide `infer_query` aggregate.
         let routed = crate::infer_owner(self.db, file_id, owner);
         let implicit = routed.implicit_locals().get(&name_lower)?;
-        let occurrence_ty = routed.type_of_expr(occurrence_expr).cloned().unwrap_or(Ty::Unknown);
+        // Phase 3 §4.D: accessor bridges stored `TypeId` → owned `Ty`.
+        let occurrence_ty = routed.type_of_expr(self.db, occurrence_expr).unwrap_or(Ty::Unknown);
         let (declaration, range, ty) = select_implicit_local_declaration(
             &source_map,
             implicit,

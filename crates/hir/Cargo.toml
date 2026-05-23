@@ -12,6 +12,7 @@ base-db.workspace = true
 bsl-config.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
+bsl-types.workspace = true
 syntax.workspace = true
 vfs.workspace = true
 stdx.workspace = true

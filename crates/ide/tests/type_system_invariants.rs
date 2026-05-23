@@ -87,14 +87,17 @@ fn single_resolver_cascade_across_builtins_locals_and_managers() {
 "#;
     let (db, file_id) = setup(fixture);
     let infer = db.infer(file_id);
+    // Phase 3 §4.D: var_types stores TypeId; bridge for assert_eq!.
+    let var_ty =
+        |n: &str| infer.var_types.get(n).copied().map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid));
 
     assert_eq!(
-        infer.var_types.get("м").cloned(),
+        var_ty("м"),
         Some(Ty::Array),
         "`Новый Массив()` must still lower through TyLoweringContext"
     );
     assert_eq!(
-        infer.var_types.get("к").cloned(),
+        var_ty("к"),
         Some(Ty::ManagerCollection(bsl_metadata::MdoType::Document)),
         "`Документы` must still resolve to Ty::ManagerCollection via MdoType::from_plural"
     );
@@ -131,14 +134,17 @@ fn jsdoc_and_three_level_share_signature_materialisation() {
 "#;
     let (db, file_id) = setup(fixture);
     let infer = db.infer(file_id);
+    // Phase 3 §4.D: var_types stores TypeId; bridge for assert_eq!.
+    let var_ty =
+        |n: &str| infer.var_types.get(n).copied().map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid));
 
     assert_eq!(
-        infer.var_types.get("а").cloned(),
+        var_ty("а"),
         Some(Ty::String),
         "2-segment call must materialise signature from JSDoc"
     );
     assert_eq!(
-        infer.var_types.get("б").cloned(),
+        var_ty("б"),
         Some(Ty::MetadataRef { kind: MetadataKind::DocumentRef, name: Name::new("ПКО") }),
         "3-segment call must materialise signature through the same path"
     );
@@ -165,10 +171,12 @@ fn single_method_lookup_path_agrees_across_infer_and_facade() {
     let infer = db.infer(file_id);
 
     // Path A: whole-program inference.
+    // Phase 3 §4.D: var_types stores TypeId; bridge to Ty.
     let infer_ty = infer
         .var_types
         .get("б")
-        .cloned()
+        .copied()
+        .map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid))
         .expect("Массив.Количество() must produce a var_type entry");
 
     // Path B: hir::Type facade (the API IDE completion uses after M3).
@@ -223,8 +231,13 @@ fn single_field_lookup_path_agrees_across_infer_and_facade() {
     )]);
 
     let infer = db.infer(file_id);
-    let infer_ty =
-        infer.var_types.get("р").cloned().expect("С.Реквизит2 must produce a var_type entry");
+    // Phase 3 §4.D: var_types stores TypeId; bridge to Ty.
+    let infer_ty = infer
+        .var_types
+        .get("р")
+        .copied()
+        .map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid))
+        .expect("С.Реквизит2 must produce a var_type entry");
 
     // The facade routes through `field_lookup::lookup_field` with the
     // same `configurations(file_id)` the inference used.

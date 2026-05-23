@@ -17,7 +17,6 @@ use bsl_types::testing::RootConfigCtx;
 use hir_def::ty::{FormDataBinding, FormDataKind, FormDataTarget, SdblProjection, Ty};
 use hir_def::Name;
 
-#[allow(dead_code, reason = "Phase 3 bridge — callers migrate in 4.B-4.F")]
 pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
     match ty {
         Ty::Unknown => db.unknown(),
@@ -102,7 +101,6 @@ pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
     }
 }
 
-#[allow(dead_code, reason = "Phase 3 bridge — callers migrate in 4.B-4.F")]
 pub fn typeid_to_ty(db: &dyn TypeKernelDb, id: TypeId) -> Ty {
     match db.lookup_type(id) {
         TypeKind::Unknown => Ty::Unknown,
@@ -297,16 +295,28 @@ fn sdbl_projection_to_projection(
     db: &dyn TypeKernelDb,
     projection: &Arc<SdblProjection>,
 ) -> Arc<Projection> {
-    if projection.raw_sdbl_types.is_some() {
-        debug_loss("T→K", "Projection", "dropping raw_sdbl_types shadow");
-        // loss-ok: raw_sdbl_types is display-only per §3.6.
-    }
-    let fields = projection
+    // Phase 3 §4.D: preserve `raw_sdbl_types` through the bridge so
+    // hover keeps rendering precision-bearing labels (`Число(15,2)`,
+    // `Строка(50)`). Length invariant: when both `fields` and
+    // `raw_sdbl_types` are present they index parallel.
+    let fields: Arc<[bsl_types::kind::ProjectionField]> = projection
         .fields
         .iter()
-        .map(|(name, ty)| (ty_name_to_kernel(name, "Projection"), ty_to_typeid(db, ty)))
+        .map(|(name, ty)| {
+            bsl_types::kind::ProjectionField::new(
+                ty_name_to_kernel(name, "Projection"),
+                ty_to_typeid(db, ty),
+                ProjectionFieldSource::Unknown,
+            )
+        })
         .collect();
-    db.projection_from_fields(fields, ProjectionFieldSource::Unknown, ProjectionOrigin::SdblQuery)
+    let raw_sdbl_types = projection.raw_sdbl_types.as_ref().map(|shadows| {
+        shadows
+            .iter()
+            .map(|s| bsl_types::facet::SdblTypeShadowFacet::new(s.display.clone()))
+            .collect::<Arc<[_]>>()
+    });
+    Arc::new(Projection::new(fields, ProjectionOrigin::SdblQuery, raw_sdbl_types))
 }
 
 fn projection_to_sdbl_projection(
@@ -328,7 +338,15 @@ fn projection_to_sdbl_projection(
             (kernel_name_to_ty(&field.name), typeid_to_ty(db, field.ty))
         })
         .collect();
-    Arc::new(SdblProjection { fields, raw_sdbl_types: None })
+    // Phase 3 §4.D: copy kernel-side shadows back into the legacy
+    // `SdblTypeShadow` shape so hover renders precision-aware labels.
+    let raw_sdbl_types = projection.raw_sdbl_types.as_ref().map(|shadows| {
+        shadows
+            .iter()
+            .map(|s| hir_def::ty::SdblTypeShadow { display: s.display.clone() })
+            .collect::<Arc<[_]>>()
+    });
+    Arc::new(SdblProjection { fields, raw_sdbl_types })
 }
 
 fn table_facet_to_sdbl_projection(

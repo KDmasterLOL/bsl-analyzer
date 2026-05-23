@@ -135,7 +135,9 @@ fn edit_in_one_method_keeps_other_methods_infer_cell_warm() {
     );
 
     // Bonus: confirm B's new body produces the expected literal type.
-    let b_after_var = b_after.var_types.get("y").cloned();
+    // Phase 3 §4.D: var_types stores TypeId; bridge to Ty for the pattern.
+    let b_after_var =
+        b_after.var_types.get("y").copied().map(|tid| hir::ty_bridge::typeid_to_ty(&db, tid));
     assert!(
         matches!(b_after_var, Some(hir::Ty::Number)),
         "B's edited body should still infer Y = <Number>; got {b_after_var:?}"

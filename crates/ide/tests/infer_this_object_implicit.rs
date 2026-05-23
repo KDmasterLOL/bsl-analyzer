@@ -51,7 +51,8 @@ fn has_platform_data() -> bool {
 }
 
 fn var_ty(db: &RootDatabaseImpl, file_id: FileId, var_lower: &str) -> Option<Ty> {
-    db.infer(file_id).var_types.get(var_lower).cloned()
+    let id = db.infer(file_id).var_types.get(var_lower).copied()?;
+    Some(hir::ty_bridge::typeid_to_ty(db, id))
 }
 
 fn unresolved_method_kinds(db: &RootDatabaseImpl, file_id: FileId) -> Vec<UnresolvedMethodKind> {

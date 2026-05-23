@@ -229,5 +229,9 @@ fn wrapper_clones_per_body_maps_into_aggregate() {
     }
     // Specifically pin Ty::Number from the literal RHS — proves the
     // fold isn't silently dropping entries.
-    assert_eq!(aggregate.var_types.get("х"), Some(&Ty::Number));
+    //
+    // Phase 3 §4.D: var_types stores TypeId; bridge before comparing.
+    let agg_x =
+        aggregate.var_types.get("х").copied().map(|id| hir::ty_bridge::typeid_to_ty(&db, id));
+    assert_eq!(agg_x, Some(Ty::Number));
 }

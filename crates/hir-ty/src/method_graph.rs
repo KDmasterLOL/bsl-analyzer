@@ -93,10 +93,21 @@ pub fn method_return_type_query<'db>(db: &'db dyn HirDatabase, method: MethodIdI
     // unioning so the union does not accidentally collapse to Unknown
     // (e.g. a function with `Возврат X;` where X did not infer to a
     // concrete type).
+    // Phase 3 §4.D: per-body `expr_types` now stores `TypeId`. We
+    // bridge each return-expr's stored id back to `Ty` for the legacy
+    // `Ty::union` lattice; once §4.E migrates `Ty::union` consumers we
+    // can drop the bridge call.
     let return_tys: Vec<Ty> = result
         .return_expr_ids
         .iter()
-        .map(|id| result.expr_types.get(id).cloned().unwrap_or(Ty::Unknown))
+        .map(|id| {
+            result
+                .expr_types
+                .get(id)
+                .copied()
+                .map(|tid| crate::ty_bridge::typeid_to_ty(db, tid))
+                .unwrap_or(Ty::Unknown)
+        })
         .filter(|t| !matches!(t, Ty::Unknown))
         .collect();
 
