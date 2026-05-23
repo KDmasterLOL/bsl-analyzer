@@ -67,7 +67,7 @@ pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
-pub use configs::{ConfigsDatabase, VisibleConfig};
+pub use configs::ConfigsDatabase;
 pub use item_tree::ItemTree;
 pub use module_index::ModuleIndex;
 pub use name::Name;

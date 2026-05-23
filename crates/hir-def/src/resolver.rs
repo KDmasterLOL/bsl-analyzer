@@ -20,7 +20,9 @@
 
 use std::sync::Arc;
 
-use crate::configs::{ConfigsDatabase, VisibleConfig};
+use bsl_config::VisibleConfig;
+
+use crate::configs::ConfigsDatabase;
 use crate::scope::{ExprScopes, ScopeId};
 use crate::{DefDatabase, MethodId, ModuleId, Name, PathResolution, QualifiedName, VariableId};
 

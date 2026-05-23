@@ -18,12 +18,7 @@ use vfs::FileId;
 
 use crate::DefDatabase;
 
-// Transitional alias (Phase 2.C). The canonical definition lives in
-// `bsl-config` (Layer 0.5). This re-export keeps legacy imports
-// resolving while §2.E migrates consumers to the canonical path.
-// Removed in §2.F once the pre-deletion audit shows zero residual
-// references through the hir-def adapter path.
-pub use bsl_config::VisibleConfig;
+use bsl_config::VisibleConfig;
 
 /// Metadata visibility trait.
 ///
