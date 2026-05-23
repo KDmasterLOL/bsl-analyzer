@@ -392,6 +392,7 @@ dependencies = [
 name = "bsl-types"
 version = "0.1.197"
 dependencies = [
+ "bsl-config",
  "bsl-metadata",
  "elsa",
  "expect-test",

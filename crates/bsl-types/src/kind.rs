@@ -42,33 +42,10 @@ impl TypeId {
     }
 }
 
-/// Per-MDO configuration identity carried by [`MetaRefFacet`] and
-/// [`MetaObjFacet`].
-///
-/// Required (never `None`) so that two `MetadataRef`s for the same
-/// `(kind, name)` from different configurations don't collide on the
-/// kernel level. Sandbox uses [`Self::Root`]; production resolves to
-/// either [`Self::Resolved`] for known configurations or
-/// [`Self::Unknown`] for unresolvable names (carries the name so
-/// distinct unresolved names don't collide).
-///
-/// Documented limitation: two distinct configurations that both fail
-/// to resolve the **same** name collide at the kernel layer (both
-/// produce `ConfigId::Unknown(name)`). Diagnostics differentiate by
-/// source location, not by kernel identity.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-#[non_exhaustive]
-pub enum ConfigId {
-    /// Single-config workspaces or sandbox tests.
-    Root,
-    /// Multi-config workspace; index into the interned configuration
-    /// table maintained by `bsl-config::VisibleConfig` (Phase 2+).
-    Resolved(u32),
-    /// MDO name couldn't be resolved against any known configuration.
-    /// Carries the name itself so different unresolved names produce
-    /// different `ConfigId` values.
-    Unknown(Name),
-}
+// `ConfigId` is now defined canonically in `bsl-config` (Layer 0.5);
+// re-exported here so existing `bsl_types::kind::ConfigId` and
+// `bsl_types::ConfigId` import paths continue to resolve (Phase 2.D).
+pub use bsl_config::ConfigId;
 
 /// Surface form of a metadata reference type.
 ///
