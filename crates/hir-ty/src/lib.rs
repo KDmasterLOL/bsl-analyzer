@@ -60,6 +60,7 @@ pub mod sdbl_bridge;
 pub mod subtype;
 pub mod this_object;
 pub mod this_object_attr;
+pub mod ty_bridge;
 
 // Re-export main types for convenience
 pub use bsl_config::VisibleConfig;

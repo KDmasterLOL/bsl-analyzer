@@ -132,12 +132,24 @@ pub struct MdoRefFacet {
     pub name: Name,
 }
 
+impl MdoRefFacet {
+    pub fn new(mdo_type: MdoType, name: Name) -> Self {
+        Self { mdo_type, name }
+    }
+}
+
 /// Data-path binding for a form control.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct FormBindingFacet {
     pub path: Arc<[Name]>,
     pub target: FormBindingTargetFacet,
+}
+
+impl FormBindingFacet {
+    pub fn new(path: Arc<[Name]>, target: FormBindingTargetFacet) -> Self {
+        Self { path, target }
+    }
 }
 
 /// Resolved target of a form binding path.
@@ -273,6 +285,12 @@ pub struct ParamSpec {
     pub variadic: bool,
 }
 
+impl ParamSpec {
+    pub fn new(name: Name, ty: TypeId, passing: ParamPassing, variadic: bool) -> Self {
+        Self { name, ty, passing, variadic }
+    }
+}
+
 /// Default value for a parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -316,6 +334,19 @@ pub struct FunctionFacet {
     pub max_args: ArgArity,
     pub returns: TypeId,
     pub origin: FunctionOrigin,
+}
+
+impl FunctionFacet {
+    pub fn new(
+        params: Arc<[ParamSpec]>,
+        defaults: Arc<[Option<DefaultValue>]>,
+        min_args: u16,
+        max_args: ArgArity,
+        returns: TypeId,
+        origin: FunctionOrigin,
+    ) -> Self {
+        Self { params, defaults, min_args, max_args, returns, origin }
+    }
 }
 
 /// `ProjectionFieldSource` lives in `crate::kind` next to `Projection`;
