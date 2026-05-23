@@ -2672,7 +2672,14 @@ impl<'db> InferenceContext<'db> {
                         // either side as permissive.
                         let types_ok =
                             inferred.iter().zip(sig.params.iter()).all(|(actual, expected)| {
-                                crate::subtype::is_assignable(actual, expected)
+                                // Phase 3 §4.E: `is_assignable` is
+                                // kernel-native; bridge the inferred /
+                                // declared `Ty` to interned ids here.
+                                crate::subtype::is_assignable(
+                                    self.db,
+                                    ty_to_typeid(self.db, actual),
+                                    ty_to_typeid(self.db, expected),
+                                )
                             });
                         if types_ok && full_match.is_none() {
                             full_match = Some(idx);

@@ -197,11 +197,17 @@ pub fn arg_diagnostics_query(
         let emit_start = Instant::now();
         match &binding.params {
             ParamsShape::Single(params) => {
-                emit_single(&binding.args, &arg_types, params, &mut out, binding.owner)
+                emit_single(db, &binding.args, &arg_types, params, &mut out, binding.owner)
             }
-            ParamsShape::Overloaded { flat, overloads } => {
-                emit_overloaded(&binding.args, &arg_types, flat, overloads, &mut out, binding.owner)
-            }
+            ParamsShape::Overloaded { flat, overloads } => emit_overloaded(
+                db,
+                &binding.args,
+                &arg_types,
+                flat,
+                overloads,
+                &mut out,
+                binding.owner,
+            ),
         }
         emit_ns += emit_start.elapsed().as_nanos();
     }
@@ -406,6 +412,7 @@ fn resolve_body(module_bodies: &hir_def::ModuleBodies, owner: DefWithBodyId) -> 
 /// Walks `min(args.len(), params.len())` so an unpaired tail (caught
 /// separately by `MismatchedArgCount`) doesn't double-fire.
 fn emit_single(
+    db: &dyn HirDatabase,
     args: &[ExprId],
     arg_types: &[Ty],
     params: &[Ty],
@@ -413,7 +420,11 @@ fn emit_single(
     owner: DefWithBodyId,
 ) {
     for ((arg_id, arg_ty), param_ty) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
-        if !crate::subtype::is_coercible_to(arg_ty, param_ty) {
+        // Phase 3 §4.E: `is_coercible_to` is kernel-native; bridge the
+        // `Ty` arg / param to interned ids at the call boundary.
+        let arg_id_ty = crate::ty_bridge::ty_to_typeid(db, arg_ty);
+        let param_id_ty = crate::ty_bridge::ty_to_typeid(db, param_ty);
+        if !crate::subtype::is_coercible_to(db, arg_id_ty, param_id_ty) {
             out.push((
                 owner,
                 InferenceDiagnostic::TypeMismatch {
@@ -439,6 +450,7 @@ fn emit_single(
 /// "what's accepted" and "what the message says is wrong" and reopen
 /// the false-positive bug this query exists to fix.
 fn emit_overloaded(
+    db: &dyn HirDatabase,
     args: &[ExprId],
     arg_types: &[Ty],
     flat: &[Ty],
@@ -447,7 +459,7 @@ fn emit_overloaded(
     owner: DefWithBodyId,
 ) {
     if overloads.is_empty() {
-        emit_single(args, arg_types, flat, out, owner);
+        emit_single(db, args, arg_types, flat, out, owner);
         return;
     }
 
@@ -455,7 +467,15 @@ fn emit_overloaded(
         if args.len() > params.len() {
             return false;
         }
-        arg_types.iter().zip(params.iter()).all(|(a, p)| crate::subtype::is_coercible_to(a, p))
+        // Phase 3 §4.E: bridge each pair to interned ids before the
+        // kernel-native coercion check.
+        arg_types.iter().zip(params.iter()).all(|(a, p)| {
+            crate::subtype::is_coercible_to(
+                db,
+                crate::ty_bridge::ty_to_typeid(db, a),
+                crate::ty_bridge::ty_to_typeid(db, p),
+            )
+        })
     });
     if any_accepts {
         return;
@@ -466,5 +486,5 @@ fn emit_overloaded(
         .min_by_key(|params| params.len().abs_diff(args.len()))
         .map(|p| p.as_ref())
         .unwrap_or(flat);
-    emit_single(args, arg_types, chosen, out, owner);
+    emit_single(db, args, arg_types, chosen, out, owner);
 }

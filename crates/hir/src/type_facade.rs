@@ -166,8 +166,14 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// Does **not** return `true` for `ObjectManager`, `ManagerCollection`,
     /// or `TabularSection`/`TabularSectionRow`; those are manager-side
     /// or container-side abstractions, not first-class references.
-    pub fn is_ref_type(&self) -> bool {
-        is_ref_ty(&self.ty)
+    pub fn is_ref_type(&self) -> bool
+    where
+        DB: bsl_types::intern::TypeKernelDb,
+    {
+        // Phase 3 §4.E: `is_ref_ty` is kernel-native; bridge the
+        // facade's `Ty` to an interned id at the call boundary.
+        // §4.F.1 swaps the facade backing to `TypeId` and drops this.
+        is_ref_ty(self.db, hir_ty::ty_bridge::ty_to_typeid(self.db, &self.ty))
     }
 
     /// Structural assignability: is `self` usable where `other` is expected?
@@ -202,8 +208,18 @@ impl<'db, DB: ConfigsDatabase> Type<'db, DB> {
     /// [`Semantics::type_of_expr`]: crate::Semantics::type_of_expr
     /// [`NarrowState`]: hir_ty::narrow::NarrowState
     /// [`HirDatabase::narrow`]: hir_ty::HirDatabase::narrow
-    pub fn is_assignable_to(&self, other: &Self) -> bool {
-        is_assignable(&self.ty, &other.ty)
+    pub fn is_assignable_to(&self, other: &Self) -> bool
+    where
+        DB: bsl_types::intern::TypeKernelDb,
+    {
+        // Phase 3 §4.E: `is_assignable` is kernel-native; bridge both
+        // facade `Ty` values to interned ids. §4.F.1 swaps the facade
+        // backing to `TypeId` and drops the bridge.
+        is_assignable(
+            self.db,
+            hir_ty::ty_bridge::ty_to_typeid(self.db, &self.ty),
+            hir_ty::ty_bridge::ty_to_typeid(self.db, &other.ty),
+        )
     }
 
     /// The corresponding manager type — e.g. `CatalogRef.Товары` →
@@ -1157,23 +1173,37 @@ mod tests {
     }
 
     #[test]
-    fn is_assignable_unknown_inside_union_is_permissive() {
-        // Documents the **gradual-typing** composition: `Ty::union`
-        // preserves `Unknown` members (`hir-def/src/ty.rs` smart
-        // constructor does not absorb `Unknown`), so any union that
-        // acquired an `Unknown` through failed inference will pass all
-        // assignment checks. Intentional at M4 Task 7 — revisit when
-        // `TypeMismatch` gets a live emitter (see FIXME in
-        // `is_assignable`).
+    fn is_assignable_unknown_inside_union_collapses_to_concrete_arm() {
+        // Phase 3 §4.E: the kernel's `canonicalise_union` ABSORBS
+        // `Unknown` once a concrete arm remains (`bsl-types`
+        // `intern.rs` step 4, plan §1.D rule 4). This DIVERGES from the
+        // legacy `hir-def` `Ty::union` smart constructor, which
+        // preserved `Unknown` members. Since assignability now runs on
+        // interned `TypeId`s, a union built with an `Unknown` arm no
+        // longer carries that arm — it collapses to the concrete
+        // member(s).
+        //
+        // Net behavioural shift (intentional, single-source-of-truth):
+        // the old "an Unknown arm makes the whole union permissive"
+        // gradual quirk is GONE. It was explicitly flagged as a
+        // revisit-point at M4 Task 7; the kernel resolves it in favour
+        // of the concrete arm.
         let (db, file_id) = empty_db();
+
+        // `Union(Unknown, String)` canonicalises to `String`, so
+        // `String ≤ String` (reflexivity) → still true.
         let unknown_or_string = Ty::union(vec![Ty::Unknown, Ty::String]);
-        // Union-left: `Unknown ≤ String` (gradual bottom) + `String ≤
-        // String` (reflex) → true.
         assert!(t(&db, file_id, unknown_or_string).is_assignable_to(&t(&db, file_id, Ty::String)));
-        // Union-right: `String ≤ Unknown` (gradual top) short-circuits
-        // inside the `any`.
+
+        // `Union(Number, Unknown)` canonicalises to `Number`, so the
+        // target is just `Number`. `String ≤ Number` → FALSE. Under the
+        // legacy union-preserves-Unknown rule this returned true via the
+        // gradual `String ≤ Unknown` arm; the kernel drops that arm.
         let number_or_unknown = Ty::union(vec![Ty::Number, Ty::Unknown]);
-        assert!(t(&db, file_id, Ty::String).is_assignable_to(&t(&db, file_id, number_or_unknown)));
+        assert!(
+            !t(&db, file_id, Ty::String).is_assignable_to(&t(&db, file_id, number_or_unknown)),
+            "kernel absorbs Unknown: Number|Unknown collapses to Number, so String is not assignable"
+        );
     }
 
     #[test]
