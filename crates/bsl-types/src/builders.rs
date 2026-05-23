@@ -23,9 +23,9 @@ use std::sync::Arc;
 use bsl_metadata::Name;
 
 use crate::facet::{
-    ArrayFacet, DateFacet, FunctionFacet, MapFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
-    PlatformObjectFacet, ProjectionFacet, ProjectionSource, StringFacet, StructureFacet,
-    TableFacet, TableSource,
+    ArrayFacet, DateFacet, FormBindingFacet, FormDataFacet, FormElementFacet, FunctionFacet,
+    MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet, PlatformObjectFacet,
+    ProjectionFacet, ProjectionSource, StringFacet, StructureFacet, TableFacet, TableSource,
 };
 use crate::intern::TypeKernelDb;
 use crate::kind::{
@@ -243,6 +243,28 @@ pub trait Builders: TypeKernelDb {
         MetaRefFacet { kind, name, config_id }
     }
 
+    // ── Form-specific shapes ──────────────────────────────────
+
+    /// `ДанныеФормы*` wrapper with optional underlying MDO.
+    fn mk_form_data(&self, kind: FormDataFacet, underlying: Option<MdoRefFacet>) -> TypeId {
+        self.intern_type(TypeKind::FormData { kind, underlying })
+    }
+
+    /// Form control with optional resolved binding.
+    fn mk_form_control(&self, kind: FormElementFacet, binding: Option<FormBindingFacet>) -> TypeId {
+        self.intern_type(TypeKind::FormControl { kind, binding })
+    }
+
+    /// Contextual `ЭтотОбъект`.
+    fn mk_this_object(&self, config_id: ConfigId, owner: MdoRefFacet) -> TypeId {
+        self.intern_type(TypeKind::ThisObject { config_id, owner })
+    }
+
+    /// Contextual `ЭтотМенеджер`.
+    fn mk_this_manager(&self, config_id: ConfigId, owner: MdoRefFacet) -> TypeId {
+        self.intern_type(TypeKind::ThisManager { config_id, owner })
+    }
+
     // ── Platform wrapper ──────────────────────────────────────
 
     /// `Запрос`, `ТабличныйДокумент`, … — typed platform value.
@@ -322,8 +344,14 @@ impl<T: TypeKernelDb + ?Sized> Builders for T {}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::facet::{DateComponent, NumberFacet};
+    use bsl_metadata::MdoType;
+
+    use crate::facet::{
+        DateComponent, FormBindingTargetFacet, FormDataFacet, FormElementFacet, NumberFacet,
+    };
     use crate::testing::{InMemoryDb, RootConfigCtx};
 
     #[test]
@@ -432,6 +460,104 @@ mod tests {
         let arr_untyped = db.array(None);
         assert_eq!(arr_typed, arr_typed_2);
         assert_ne!(arr_typed, arr_untyped);
+    }
+
+    #[test]
+    fn builder_form_data_round_trip() {
+        let db = InMemoryDb::new();
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
+        let a = db.mk_form_data(FormDataFacet::Structure, Some(owner.clone()));
+        let b = db.mk_form_data(FormDataFacet::Structure, Some(owner.clone()));
+        assert_eq!(a, b);
+
+        match db.lookup_type(a) {
+            TypeKind::FormData { kind, underlying } => {
+                assert_eq!(*kind, FormDataFacet::Structure);
+                assert_eq!(underlying.as_ref(), Some(&owner));
+            }
+            other => panic!("expected FormData; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn builder_form_data_distinguishes_kind_and_underlying() {
+        let db = InMemoryDb::new();
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
+        let structure = db.mk_form_data(FormDataFacet::Structure, Some(owner.clone()));
+        let collection = db.mk_form_data(FormDataFacet::Collection, Some(owner.clone()));
+        let bare_structure = db.mk_form_data(FormDataFacet::Structure, None);
+
+        assert_ne!(structure, collection);
+        assert_ne!(structure, bare_structure);
+    }
+
+    #[test]
+    fn builder_form_control_round_trip() {
+        let db = InMemoryDb::new();
+        let ty = db.string(Some(30), false);
+        let binding = FormBindingFacet {
+            path: Arc::from(["Объект".to_string(), "Наименование".to_string()]),
+            target: FormBindingTargetFacet::Attribute { ty },
+        };
+        let id = db.mk_form_control(FormElementFacet::Field, Some(binding.clone()));
+
+        match db.lookup_type(id) {
+            TypeKind::FormControl { kind, binding: stored } => {
+                assert_eq!(*kind, FormElementFacet::Field);
+                assert_eq!(stored.as_ref(), Some(&binding));
+            }
+            other => panic!("expected FormControl; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn builder_form_control_distinguishes_kind_and_binding() {
+        let db = InMemoryDb::new();
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
+        let binding = FormBindingFacet {
+            path: Arc::from(["Объект".to_string(), "Товары".to_string()]),
+            target: FormBindingTargetFacet::TabularSection {
+                mdo_ref: owner,
+                section: "Товары".to_string(),
+            },
+        };
+        let table = db.mk_form_control(FormElementFacet::Table, Some(binding.clone()));
+        let field = db.mk_form_control(FormElementFacet::Field, Some(binding));
+        let bare_table = db.mk_form_control(FormElementFacet::Table, None);
+
+        assert_ne!(table, field);
+        assert_ne!(table, bare_table);
+    }
+
+    #[test]
+    fn builder_this_object_and_manager_round_trip() {
+        let db = InMemoryDb::new();
+        let owner = MdoRefFacet { mdo_type: MdoType::Document, name: "Заказ".to_string() };
+        let object = db.mk_this_object(ConfigId::Root, owner.clone());
+        let manager = db.mk_this_manager(ConfigId::Root, owner.clone());
+        assert_ne!(object, manager);
+
+        assert_eq!(
+            db.lookup_type(object),
+            &TypeKind::ThisObject { config_id: ConfigId::Root, owner: owner.clone() }
+        );
+        assert_eq!(
+            db.lookup_type(manager),
+            &TypeKind::ThisManager { config_id: ConfigId::Root, owner }
+        );
+    }
+
+    #[test]
+    fn builder_this_variants_distinguish_config_id() {
+        let db = InMemoryDb::new();
+        let owner = MdoRefFacet { mdo_type: MdoType::Document, name: "Заказ".to_string() };
+        let root = db.mk_this_object(ConfigId::Root, owner.clone());
+        let resolved = db.mk_this_object(ConfigId::Resolved(1), owner);
+
+        assert_ne!(root, resolved);
     }
 
     #[test]

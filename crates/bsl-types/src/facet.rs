@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use bsl_metadata::Name;
+use bsl_metadata::{MdoType, Name};
 
 use crate::kind::{ConfigId, ExprRef, LiteralValue, MetadataKind, Projection, TypeId, TypeOrigin};
 
@@ -111,6 +111,41 @@ pub struct MetaObjFacet {
     pub kind: MetadataKind,
     pub name: Name,
     pub config_id: ConfigId,
+}
+
+/// Form data shape exposed by `ДанныеФормы*` platform values.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FormDataFacet {
+    Structure,
+    Collection,
+    StructureWithCollection,
+}
+
+/// Coarse taxonomy of form controls.
+pub use bsl_metadata::FormElementKind as FormElementFacet;
+
+/// Minimal owned MDO reference used by form-specific type facets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct MdoRefFacet {
+    pub mdo_type: MdoType,
+    pub name: Name,
+}
+
+/// Data-path binding for a form control.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct FormBindingFacet {
+    pub path: Arc<[Name]>,
+    pub target: FormBindingTargetFacet,
+}
+
+/// Resolved target of a form binding path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FormBindingTargetFacet {
+    TabularSection { mdo_ref: MdoRefFacet, section: Name },
+    Attribute { ty: TypeId },
 }
 
 // ── Collection facets ────────────────────────────────────────

@@ -14,8 +14,9 @@ use std::sync::Arc;
 use bsl_metadata::{MdoType, Name};
 
 use crate::facet::{
-    ArrayFacet, DateFacet, FunctionFacet, MapFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
-    PlatformObjectFacet, ProjectionFacet, StringFacet, StructureFacet, TableFacet,
+    ArrayFacet, DateFacet, FormBindingFacet, FormDataFacet, FormElementFacet, FunctionFacet,
+    MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet, PlatformObjectFacet,
+    ProjectionFacet, StringFacet, StructureFacet, TableFacet,
 };
 
 /// Opaque numeric handle to an interned `TypeKind`.
@@ -625,6 +626,28 @@ pub enum TypeKind {
     Attribute {
         parent: MetaRefFacet,
         name: Name,
+    },
+
+    // ── Form-specific shapes ──────────────────────────────────
+    /// Form data wrapper (`ДанныеФормыСтруктура`, collection, or mixed).
+    FormData {
+        kind: FormDataFacet,
+        underlying: Option<MdoRefFacet>,
+    },
+    /// Form control with optional resolved data binding.
+    FormControl {
+        kind: FormElementFacet,
+        binding: Option<FormBindingFacet>,
+    },
+    /// Contextual `ЭтотОбъект` value inside an object module.
+    ThisObject {
+        config_id: ConfigId,
+        owner: MdoRefFacet,
+    },
+    /// Contextual `ЭтотМенеджер` receiver inside a manager module.
+    ThisManager {
+        config_id: ConfigId,
+        owner: MdoRefFacet,
     },
 
     // ── Platform wrappers ─────────────────────────────────────

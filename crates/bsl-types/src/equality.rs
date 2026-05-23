@@ -124,8 +124,15 @@ fn function_eq_no_origin(x: &FunctionFacet, y: &FunctionFacet) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::facet::NumberFacet;
-    use crate::kind::{TypeKind, TypeOrigin};
+    use std::sync::Arc;
+
+    use bsl_metadata::MdoType;
+
+    use crate::facet::{
+        FormBindingFacet, FormBindingTargetFacet, FormDataFacet, FormElementFacet, MdoRefFacet,
+        NumberFacet,
+    };
+    use crate::kind::{ConfigId, TypeKind, TypeOrigin};
 
     #[test]
     fn semantic_eq_ignores_number_origin() {
@@ -229,5 +236,48 @@ mod tests {
             source: ProjectionSource::Sdbl,
         });
         assert!(!super::semantic_eq(&a, &different_ty));
+    }
+
+    #[test]
+    fn this_variants_match_metadata_config_identity_rules() {
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
+        let root = TypeKind::ThisObject { config_id: ConfigId::Root, owner: owner.clone() };
+        let resolved =
+            TypeKind::ThisObject { config_id: ConfigId::Resolved(1), owner: owner.clone() };
+        let same = TypeKind::ThisObject { config_id: ConfigId::Root, owner };
+
+        assert!(super::semantic_eq(&root, &same));
+        assert!(super::type_eq(&root, &same));
+        assert!(!super::semantic_eq(&root, &resolved));
+        assert!(!super::type_eq(&root, &resolved));
+    }
+
+    #[test]
+    fn form_variants_use_structural_equality() {
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
+        let form_a =
+            TypeKind::FormData { kind: FormDataFacet::Structure, underlying: Some(owner.clone()) };
+        let form_b =
+            TypeKind::FormData { kind: FormDataFacet::Structure, underlying: Some(owner.clone()) };
+        let form_c =
+            TypeKind::FormData { kind: FormDataFacet::Collection, underlying: Some(owner.clone()) };
+
+        assert!(super::semantic_eq(&form_a, &form_b));
+        assert!(!super::semantic_eq(&form_a, &form_c));
+
+        let binding = FormBindingFacet {
+            path: Arc::from(["Объект".to_string(), "Цена".to_string()]),
+            target: FormBindingTargetFacet::Attribute { ty: crate::kind::TypeId(42) },
+        };
+        let control_a =
+            TypeKind::FormControl { kind: FormElementFacet::Field, binding: Some(binding.clone()) };
+        let control_b =
+            TypeKind::FormControl { kind: FormElementFacet::Field, binding: Some(binding) };
+        let control_c = TypeKind::FormControl { kind: FormElementFacet::Button, binding: None };
+
+        assert!(super::semantic_eq(&control_a, &control_b));
+        assert!(!super::semantic_eq(&control_a, &control_c));
     }
 }

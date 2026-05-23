@@ -12,7 +12,8 @@
 use std::sync::Arc;
 
 use crate::facet::{
-    DateFacet, FunctionFacet, NumberFacet, ProjectionFacet, StringFacet, TableFacet,
+    DateFacet, FormBindingFacet, FormBindingTargetFacet, FunctionFacet, MdoRefFacet, NumberFacet,
+    ProjectionFacet, StringFacet, TableFacet,
 };
 use crate::kind::{
     Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeId, TypeKind,
@@ -135,11 +136,58 @@ pub(crate) fn canonicalise(db: &dyn TypeKernelDb, kind: TypeKind) -> TypeKind {
             origin: crate::facet::FunctionOrigin::Unknown,
         }),
 
+        // Form facets can carry nested TypeIds. Re-intern them so any
+        // non-canonical handle collapses before this outer type is keyed.
+        TypeKind::FormData { kind, underlying } => {
+            TypeKind::FormData { kind, underlying: underlying.map(canonicalise_mdo_ref) }
+        }
+        TypeKind::FormControl { kind, binding } => TypeKind::FormControl {
+            kind,
+            binding: binding.map(|b| canonicalise_form_binding(db, b)),
+        },
+        TypeKind::ThisObject { config_id, owner } => {
+            TypeKind::ThisObject { config_id, owner: canonicalise_mdo_ref(owner) }
+        }
+        TypeKind::ThisManager { config_id, owner } => {
+            TypeKind::ThisManager { config_id, owner: canonicalise_mdo_ref(owner) }
+        }
+
         // Union algebra.
         TypeKind::Union(members) => canonicalise_union(db, members),
 
         // Variants without provenance pass through.
         other => other,
+    }
+}
+
+fn canonicalise_mdo_ref(owner: MdoRefFacet) -> MdoRefFacet {
+    // Existing Name-bearing facets preserve spelling/case exactly; keep
+    // the same rule for form MDO references.
+    owner
+}
+
+fn canonicalise_form_binding(
+    db: &dyn TypeKernelDb,
+    FormBindingFacet { path, target }: FormBindingFacet,
+) -> FormBindingFacet {
+    FormBindingFacet { path, target: canonicalise_form_binding_target(db, target) }
+}
+
+fn canonicalise_form_binding_target(
+    db: &dyn TypeKernelDb,
+    target: FormBindingTargetFacet,
+) -> FormBindingTargetFacet {
+    match target {
+        FormBindingTargetFacet::TabularSection { mdo_ref, section } => {
+            FormBindingTargetFacet::TabularSection {
+                mdo_ref: canonicalise_mdo_ref(mdo_ref),
+                section,
+            }
+        }
+        FormBindingTargetFacet::Attribute { ty } => {
+            let ty = db.intern_type(db.lookup_type(ty).clone());
+            FormBindingTargetFacet::Attribute { ty }
+        }
     }
 }
 

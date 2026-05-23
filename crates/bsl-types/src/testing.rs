@@ -269,8 +269,13 @@ mod tests {
 mod canon_tests {
     use std::sync::Arc;
 
+    use bsl_metadata::MdoType;
+
     use super::*;
-    use crate::facet::NumberFacet;
+    use crate::facet::{
+        FormBindingFacet, FormBindingTargetFacet, FormDataFacet, FormElementFacet, MdoRefFacet,
+        NumberFacet,
+    };
     use crate::kind::TypeOrigin;
 
     /// Provenance must not leak into canonical identity: two `Number`
@@ -303,6 +308,31 @@ mod canon_tests {
         let c = db.intern_type(kind);
         assert_eq!(a, b);
         assert_eq!(b, c);
+    }
+
+    #[test]
+    fn form_and_this_variants_intern_idempotently() {
+        let db = InMemoryDb::new();
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
+        let attr_ty = db.intern_type(TypeKind::Number(NumberFacet::with_scale(15, 2)));
+        let binding = FormBindingFacet {
+            path: Arc::from(["Объект".to_string(), "Цена".to_string()]),
+            target: FormBindingTargetFacet::Attribute { ty: attr_ty },
+        };
+
+        let kinds = [
+            TypeKind::FormData { kind: FormDataFacet::Collection, underlying: Some(owner.clone()) },
+            TypeKind::FormControl { kind: FormElementFacet::Field, binding: Some(binding) },
+            TypeKind::ThisObject { config_id: crate::kind::ConfigId::Root, owner: owner.clone() },
+            TypeKind::ThisManager { config_id: crate::kind::ConfigId::Root, owner },
+        ];
+
+        for kind in kinds {
+            let a = db.intern_type(kind.clone());
+            let b = db.intern_type(kind);
+            assert_eq!(a, b);
+        }
     }
 
     /// `Union([X, X])` → `X` (single-member unwrap after dedupe).
@@ -498,6 +528,8 @@ mod canon_tests {
 
         let db = InMemoryDb::new();
         let n = db.intern_type(TypeKind::Number(NumberFacet::with_scale(15, 2)));
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
 
         let kinds = [
             TypeKind::Unknown,
@@ -515,6 +547,19 @@ mod canon_tests {
             TypeKind::Array(ArrayFacet { element: None }),
             TypeKind::Array(ArrayFacet { element: Some(n) }),
             TypeKind::Map(MapFacet { key: None, value: Some(n) }),
+            TypeKind::FormData { kind: FormDataFacet::Structure, underlying: Some(owner.clone()) },
+            TypeKind::FormControl {
+                kind: FormElementFacet::Table,
+                binding: Some(FormBindingFacet {
+                    path: Arc::from(["Объект".to_string(), "Товары".to_string()]),
+                    target: FormBindingTargetFacet::TabularSection {
+                        mdo_ref: owner.clone(),
+                        section: "Товары".to_string(),
+                    },
+                }),
+            },
+            TypeKind::ThisObject { config_id: crate::kind::ConfigId::Root, owner: owner.clone() },
+            TypeKind::ThisManager { config_id: crate::kind::ConfigId::Root, owner },
             TypeKind::Union(Arc::from([n, db.boolean()])),
         ];
 

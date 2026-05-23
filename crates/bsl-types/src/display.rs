@@ -11,8 +11,9 @@
 use std::fmt::Write;
 
 use crate::facet::{
-    ArrayFacet, DateFacet, FunctionFacet, MapFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
-    PlatformObjectFacet, ProjectionFacet, StringFacet, StructureFacet, TableFacet,
+    ArrayFacet, DateFacet, FormBindingFacet, FormBindingTargetFacet, FunctionFacet, MapFacet,
+    MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet, PlatformObjectFacet, ProjectionFacet,
+    StringFacet, StructureFacet, TableFacet,
 };
 use crate::intern::TypeKernelDb;
 use crate::kind::{MetadataKind, Projection, TypeId, TypeKind};
@@ -187,6 +188,41 @@ fn render(kind: &TypeKind, ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mu
             Locale::En => "Filter",
         }),
         TypeKind::Attribute { name, .. } => buf.push_str(name),
+        TypeKind::FormData { underlying, .. } => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "ДанныеФормы",
+                Locale::En => "FormData",
+            });
+            if let Some(owner) = underlying {
+                buf.push(':');
+                render_mdo_ref(owner, ctx, buf);
+            }
+        }
+        TypeKind::FormControl { binding, .. } => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "ЭлементФормы",
+                Locale::En => "FormControl",
+            });
+            if let Some(binding) = binding {
+                render_form_binding(binding, ctx, db, buf);
+            }
+        }
+        TypeKind::ThisObject { owner, .. } => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "ЭтотОбъект",
+                Locale::En => "ThisObject",
+            });
+            buf.push(':');
+            render_mdo_ref(owner, ctx, buf);
+        }
+        TypeKind::ThisManager { owner, .. } => {
+            buf.push_str(match ctx.locale() {
+                Locale::Ru => "ЭтотМенеджер",
+                Locale::En => "ThisManager",
+            });
+            buf.push(':');
+            render_mdo_ref(owner, ctx, buf);
+        }
         TypeKind::Union(members) => render_union(members.as_ref(), ctx, db, buf),
         TypeKind::Function(facet) => render_function(facet, ctx, db, buf),
         TypeKind::QueryResult(facet) => render_query_result(facet, ctx, db, buf),
@@ -394,6 +430,50 @@ fn render_meta_obj(facet: &MetaObjFacet, ctx: &dyn DisplayCtx, buf: &mut String)
     }
 }
 
+fn render_mdo_ref(facet: &MdoRefFacet, ctx: &dyn DisplayCtx, buf: &mut String) {
+    buf.push_str(match ctx.locale() {
+        Locale::Ru => facet.mdo_type.russian_name(),
+        Locale::En => facet.mdo_type.english_name(),
+    });
+    buf.push('.');
+    buf.push_str(&facet.name);
+}
+
+fn render_form_binding(
+    binding: &FormBindingFacet,
+    ctx: &dyn DisplayCtx,
+    db: &dyn TypeKernelDb,
+    buf: &mut String,
+) {
+    buf.push(':');
+    if !binding.path.is_empty() {
+        for (i, segment) in binding.path.iter().enumerate() {
+            if i > 0 {
+                buf.push('.');
+            }
+            buf.push_str(segment);
+        }
+        buf.push_str(" -> ");
+    }
+    render_form_binding_target(&binding.target, ctx, db, buf);
+}
+
+fn render_form_binding_target(
+    target: &FormBindingTargetFacet,
+    ctx: &dyn DisplayCtx,
+    db: &dyn TypeKernelDb,
+    buf: &mut String,
+) {
+    match target {
+        FormBindingTargetFacet::TabularSection { mdo_ref, section } => {
+            render_mdo_ref(mdo_ref, ctx, buf);
+            buf.push('.');
+            buf.push_str(section);
+        }
+        FormBindingTargetFacet::Attribute { ty } => render(db.lookup_type(*ty), ctx, db, buf),
+    }
+}
+
 fn render_union(members: &[TypeId], ctx: &dyn DisplayCtx, db: &dyn TypeKernelDb, buf: &mut String) {
     for (i, &m) in members.iter().enumerate() {
         if i > 0 {
@@ -454,12 +534,16 @@ fn render_optional(
 mod tests {
     use std::sync::Arc;
 
+    use bsl_metadata::MdoType;
     use expect_test::expect;
 
     use super::*;
     use crate::builders::Builders;
-    use crate::facet::DateComponent;
-    use crate::kind::{ProjectionFieldSource, ProjectionOrigin};
+    use crate::facet::{
+        DateComponent, FormBindingFacet, FormBindingTargetFacet, FormDataFacet, FormElementFacet,
+        MdoRefFacet,
+    };
+    use crate::kind::{ConfigId, ProjectionFieldSource, ProjectionOrigin};
     use crate::testing::{InMemoryDb, RootConfigCtx};
 
     fn ru() -> PlainDisplayCtx {
@@ -634,5 +718,73 @@ mod tests {
         };
         let id = db.function(facet);
         expect!["Функция(Цена: Число, Имя: Строка) -> Число"].assert_eq(&show(&db, id, &ru()));
+    }
+
+    #[test]
+    fn form_variants_render_bilingually_with_payloads() {
+        let db = InMemoryDb::new();
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
+        let form_data =
+            db.mk_form_data(FormDataFacet::StructureWithCollection, Some(owner.clone()));
+        expect!["ДанныеФормы:Справочник.Контрагенты"].assert_eq(&show(&db, form_data, &ru()));
+        expect!["FormData:Catalog.Контрагенты"].assert_eq(&show(&db, form_data, &en()));
+
+        let binding = FormBindingFacet {
+            path: Arc::from(["Объект".to_string(), "Наименование".to_string()]),
+            target: FormBindingTargetFacet::Attribute { ty: db.string(Some(50), false) },
+        };
+        let control = db.mk_form_control(FormElementFacet::Field, Some(binding));
+        expect!["ЭлементФормы:Объект.Наименование -> Строка(50)"].assert_eq(&show(
+            &db,
+            control,
+            &ru(),
+        ));
+        expect!["FormControl:Объект.Наименование -> String(50)"].assert_eq(&show(
+            &db,
+            control,
+            &en(),
+        ));
+    }
+
+    #[test]
+    fn this_variants_render_owner_bilingually() {
+        let db = InMemoryDb::new();
+        let owner = MdoRefFacet {
+            mdo_type: MdoType::Document, name: "ЗаказКлиента".to_string()
+        };
+        let object = db.mk_this_object(ConfigId::Root, owner.clone());
+        let manager = db.mk_this_manager(ConfigId::Root, owner);
+
+        expect!["ЭтотОбъект:Документ.ЗаказКлиента"].assert_eq(&show(&db, object, &ru()));
+        expect!["ThisObject:Document.ЗаказКлиента"].assert_eq(&show(&db, object, &en()));
+        expect!["ЭтотМенеджер:Документ.ЗаказКлиента"].assert_eq(&show(&db, manager, &ru()));
+        expect!["ThisManager:Document.ЗаказКлиента"].assert_eq(&show(&db, manager, &en()));
+    }
+
+    #[test]
+    fn form_control_tabular_section_binding_renders_target() {
+        let db = InMemoryDb::new();
+        let owner =
+            MdoRefFacet { mdo_type: MdoType::Catalog, name: "Контрагенты".to_string() };
+        let binding = FormBindingFacet {
+            path: Arc::from(["Объект".to_string(), "Товары".to_string()]),
+            target: FormBindingTargetFacet::TabularSection {
+                mdo_ref: owner,
+                section: "Товары".to_string(),
+            },
+        };
+        let control = db.mk_form_control(FormElementFacet::Table, Some(binding));
+
+        expect!["ЭлементФормы:Объект.Товары -> Справочник.Контрагенты.Товары"].assert_eq(&show(
+            &db,
+            control,
+            &ru(),
+        ));
+        expect!["FormControl:Объект.Товары -> Catalog.Контрагенты.Товары"].assert_eq(&show(
+            &db,
+            control,
+            &en(),
+        ));
     }
 }
