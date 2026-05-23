@@ -24,8 +24,9 @@ use bsl_metadata::Name;
 
 use crate::facet::{
     ArrayFacet, DateFacet, FormBindingFacet, FormDataFacet, FormElementFacet, FunctionFacet,
-    MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet, PlatformObjectFacet,
-    ProjectionFacet, ProjectionSource, StringFacet, StructureFacet, TableFacet, TableSource,
+    ManagerFacet, MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
+    PlatformObjectFacet, ProjectionFacet, ProjectionSource, StringFacet, StructureFacet,
+    TableFacet, TableSource,
 };
 use crate::intern::TypeKernelDb;
 use crate::kind::{
@@ -45,6 +46,17 @@ use crate::kind::{
 /// known MDOs and `Unknown(name)` otherwise.
 pub trait ConfigCtx {
     fn resolve_config_id(&self, kind: MetadataKind, name: &Name) -> ConfigId;
+
+    /// [`ConfigId`] resolution for an object manager (`Справочники.X`).
+    ///
+    /// Keyed by the MDO family rather than a [`MetadataKind`] because
+    /// managers have no value-type companion (see
+    /// [`crate::facet::ManagerFacet`]). The default returns
+    /// [`ConfigId::Root`]; the production `bsl-config` oracle overrides
+    /// it to resolve per-config managers by `(mdo, name)`.
+    fn resolve_manager_config_id(&self, _mdo: bsl_metadata::MdoType, _name: &Name) -> ConfigId {
+        ConfigId::Root
+    }
 }
 
 impl ConfigCtx for crate::testing::RootConfigCtx {
@@ -188,11 +200,16 @@ pub trait Builders: TypeKernelDb {
         self.intern_type(TypeKind::ManagerCollection(mdo_type))
     }
 
-    /// `ObjectManager` — `Справочники.X`. Takes the same
-    /// `(kind, name, cfg)` shape as [`Builders::metadata_ref`].
-    fn object_manager(&self, kind: MetadataKind, name: Name, cfg: &dyn ConfigCtx) -> TypeId {
-        let config_id = cfg.resolve_config_id(kind, &name);
-        self.intern_type(TypeKind::ObjectManager(MetaRefFacet { kind, name, config_id }))
+    /// `ObjectManager` — `Справочники.X`. Keyed by [`MdoType`] (the
+    /// metadata-object family), not a [`MetadataKind`] value-companion.
+    fn object_manager(
+        &self,
+        mdo: bsl_metadata::MdoType,
+        name: Name,
+        cfg: &dyn ConfigCtx,
+    ) -> TypeId {
+        let config_id = cfg.resolve_manager_config_id(mdo, &name);
+        self.intern_type(TypeKind::ObjectManager(ManagerFacet { mdo, name, config_id }))
     }
 
     // ── Metadata inner shapes ─────────────────────────────────

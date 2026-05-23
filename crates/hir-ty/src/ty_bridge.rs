@@ -49,11 +49,7 @@ pub fn ty_to_typeid(db: &dyn TypeKernelDb, ty: &Ty) -> TypeId {
         Ty::ObjectManager { kind, name } => {
             debug_loss("T→K", "ObjectManager", "defaulting config_id to Root");
             // loss-ok: Ty has no config axis; §3.6 requires Root during T→K.
-            db.object_manager(
-                manager_metadata_kind_for_mdo(*kind),
-                ty_name_to_kernel(name, "ObjectManager"),
-                &RootConfigCtx,
-            )
+            db.object_manager(*kind, ty_name_to_kernel(name, "ObjectManager"), &RootConfigCtx)
         }
         Ty::ThisObject { owner } => {
             debug_loss("T→K", "ThisObject", "defaulting config_id to Root");
@@ -258,10 +254,7 @@ pub fn typeid_to_ty(db: &dyn TypeKernelDb, id: TypeId) -> Ty {
         TypeKind::ObjectManager(facet) => {
             debug_loss("K→T", "ObjectManager", "dropping config_id");
             // loss-ok: Ty::ObjectManager has no config axis per §3.6.
-            Ty::ObjectManager {
-                kind: metadata_kind_to_mdo(facet.kind),
-                name: kernel_name_to_ty(&facet.name),
-            }
+            Ty::ObjectManager { kind: facet.mdo, name: kernel_name_to_ty(&facet.name) }
         }
         TypeKind::Function(facet) => function_from_facet(db, facet),
         TypeKind::QueryResult(facet) => Ty::QueryResult {
@@ -543,39 +536,6 @@ fn form_data_facet_to_kind(kind: &FormDataFacet) -> FormDataKind {
     }
 }
 
-fn manager_metadata_kind_for_mdo(mdo_type: MdoType) -> MetadataKind {
-    match mdo_type {
-        MdoType::Catalog => MetadataKind::CatalogObject,
-        MdoType::Document => MetadataKind::DocumentObject,
-        MdoType::InformationRegister => MetadataKind::InformationRegisterRecordManager,
-        MdoType::AccumulationRegister => MetadataKind::AccumulationRegisterRecordSet,
-        MdoType::AccountingRegister => MetadataKind::AccountingRegisterRecordSet,
-        MdoType::CalculationRegister => MetadataKind::CalculationRegisterRecordSet,
-        MdoType::ChartOfAccounts => MetadataKind::ChartOfAccountsObject,
-        MdoType::BusinessProcess => MetadataKind::BusinessProcessObject,
-        MdoType::Task => MetadataKind::TaskObject,
-        MdoType::Enum => MetadataKind::EnumRef,
-        MdoType::ExchangePlan => MetadataKind::ExchangePlanObject,
-        MdoType::DataProcessor => MetadataKind::DataProcessorObject,
-        MdoType::Report => MetadataKind::ReportObject,
-        MdoType::ChartOfCharacteristicTypes
-        | MdoType::ChartOfCalculationTypes
-        | MdoType::ExternalDataSource
-        | MdoType::Constant
-        | MdoType::Cube
-        | MdoType::DimensionTable
-        | MdoType::CommonModule => {
-            debug_loss(
-                "T→K",
-                "ObjectManager",
-                "encoding MdoType without MetadataKind companion as CatalogRef",
-            );
-            // loss-ok: current TypeKind::ObjectManager has no MdoType field for these manager families.
-            MetadataKind::CatalogRef
-        }
-    }
-}
-
 fn metadata_kind_to_mdo(kind: MetadataKind) -> MdoType {
     match kind {
         MetadataKind::CatalogRef | MetadataKind::CatalogObject => MdoType::Catalog,
@@ -756,6 +716,25 @@ mod tests {
         rt_object_manager,
         Ty::ObjectManager { kind: MdoType::Catalog, name: name("Номенклатура") }
     );
+
+    /// §4.E.2b-i: these manager families have no `MetadataKind`
+    /// value-companion. Before `ManagerFacet`, T→K collapsed them to
+    /// `CatalogRef`, so the round-trip rewrote the MDO family. Now they
+    /// survive losslessly.
+    #[test]
+    fn object_manager_without_metadata_kind_companion_round_trips() {
+        for mdo in [
+            MdoType::Constant,
+            MdoType::CommonModule,
+            MdoType::ChartOfCharacteristicTypes,
+            MdoType::ChartOfCalculationTypes,
+            MdoType::ExternalDataSource,
+            MdoType::Cube,
+            MdoType::DimensionTable,
+        ] {
+            round_trip(Ty::ObjectManager { kind: mdo, name: name("X") });
+        }
+    }
     rt_test!(rt_this_object, Ty::ThisObject { owner: (MdoType::Catalog, name("Номенклатура")) });
     rt_test!(rt_this_manager, Ty::ThisManager { owner: (MdoType::Document, name("Заказ")) });
     rt_test!(

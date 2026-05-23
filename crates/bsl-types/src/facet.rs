@@ -113,6 +113,32 @@ pub struct MetaObjFacet {
     pub config_id: ConfigId,
 }
 
+/// Facet for `TypeKind::ObjectManager` — `Справочники.X`, `Константы.X`, ….
+///
+/// Keyed by [`MdoType`] (the metadata-object family), **not** by
+/// [`MetadataKind`]: a manager is identified by which kind of metadata
+/// object it manages, whereas `MetadataKind` is a value/reference
+/// taxonomy (Ref / Object / RecordSet). Several manager families
+/// (`Constant`, `CommonModule`, `ChartOfCharacteristicTypes`,
+/// `ChartOfCalculationTypes`, `ExternalDataSource`, `Cube`,
+/// `DimensionTable`) have no `MetadataKind` value-companion at all, so
+/// `MetaRefFacet` could not represent them losslessly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct ManagerFacet {
+    pub mdo: MdoType,
+    pub name: Name,
+    /// Required (never `None`). Single-config workspaces use
+    /// `ConfigId::Root`.
+    pub config_id: ConfigId,
+}
+
+impl ManagerFacet {
+    pub fn new(mdo: MdoType, name: Name, config_id: ConfigId) -> Self {
+        Self { mdo, name, config_id }
+    }
+}
+
 /// Form data shape exposed by `ДанныеФормы*` platform values.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FormDataFacet {

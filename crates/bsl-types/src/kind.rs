@@ -15,8 +15,8 @@ use bsl_metadata::{MdoType, Name};
 
 use crate::facet::{
     ArrayFacet, DateFacet, FormBindingFacet, FormDataFacet, FormElementFacet, FunctionFacet,
-    MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet, PlatformObjectFacet,
-    ProjectionFacet, StringFacet, StructureFacet, TableFacet,
+    ManagerFacet, MapFacet, MdoRefFacet, MetaObjFacet, MetaRefFacet, NumberFacet,
+    PlatformObjectFacet, ProjectionFacet, StringFacet, StructureFacet, TableFacet,
 };
 
 /// Opaque numeric handle to an interned `TypeKind`.
@@ -707,7 +707,7 @@ pub enum TypeKind {
     /// `Справочники`, `Документы`, … — collective managers.
     ManagerCollection(MdoType),
     /// `Справочники.X` — concrete object manager.
-    ObjectManager(MetaRefFacet),
+    ObjectManager(ManagerFacet),
 
     // ── Functions / callables ─────────────────────────────────
     Function(FunctionFacet),

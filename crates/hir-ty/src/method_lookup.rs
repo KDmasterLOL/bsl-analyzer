@@ -164,14 +164,11 @@ pub fn lookup_method_with_refinement(
 ) -> Option<MethodInfo> {
     // Phase 3 §4.E.2a: run the (unchanged) `Ty`-native resolution
     // pipeline, then bridge ONLY the result to the kernel-native
-    // `MethodInfo`. The receiver stays `&Ty` deliberately: the kernel's
-    // `TypeKind::ObjectManager(MetaRefFacet { kind: MetadataKind, .. })`
-    // cannot represent manager `MdoType`s that lack a `MetadataKind`
-    // companion (`Constant`, `CommonModule`, `ChartOf*`, …), so an
-    // interned-receiver round-trip would silently rewrite
-    // `ObjectManager{Constant}` → `ObjectManager{Catalog}`. §4.E.2b
-    // flips the receiver to `TypeId` only after the kernel grows a
-    // faithful manager representation.
+    // `MethodInfo`. The receiver stays `&Ty` until §4.E.2b flips the
+    // whole dispatch (and the SDBL chain machinery) to `TypeId`. The
+    // kernel manager-representation gap that previously blocked the
+    // receiver flip is closed (§4.E.2b-i: `TypeKind::ObjectManager`
+    // now carries `ManagerFacet { mdo: MdoType, .. }`, lossless).
     let info = lookup_method_with_refinement_ty(receiver_ty, method_name, refine_ctx)?;
     Some(method_info_ty_to_kernel(db, info))
 }
