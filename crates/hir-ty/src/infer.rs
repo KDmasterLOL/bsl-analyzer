@@ -426,7 +426,7 @@ pub struct CallArgBinding {
 
 /// Parameter-list shape captured per call site.
 ///
-/// `Arc<[Ty]>` is used (instead of `Vec<Ty>`) so that the same signature
+/// `Arc<[TypeId]>` is used (instead of `Vec<TypeId>`) so that the same signature
 /// can be shared across many call sites of the same method without
 /// re-allocating the parameter list per record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,7 +434,7 @@ pub enum ParamsShape {
     /// Single parameter list — covers plain functions, workspace
     /// `CommonModule.Method`, three-segment manager calls,
     /// non-overloaded receiver methods, and `Ty::Function` callees.
-    Single(Arc<[Ty]>),
+    Single(Arc<[TypeId]>),
 
     /// Multi-overload signature.
     ///
@@ -445,45 +445,7 @@ pub enum ParamsShape {
     /// the call when any entry's per-arg `is_assignable` check passes,
     /// and falls back to the closest-by-arity overload for the
     /// diagnostic message otherwise.
-    Overloaded { flat: Arc<[Ty]>, overloads: Arc<[Arc<[Ty]>]> },
-}
-
-impl ParamsShape {
-    /// Kernel-native projection — every `Ty` in the shape is bridged
-    /// through §4.A to a [`TypeId`].
-    ///
-    /// §4.C accessor — `arg_diagnostics` and other §4.D-§4.E consumers
-    /// will rewrite to consume `TypeId` directly once `ParamsShape`
-    /// internals migrate.
-    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
-    pub fn typeid_view(&self, db: &dyn bsl_types::intern::TypeKernelDb) -> ParamsShapeTypeIds {
-        match self {
-            ParamsShape::Single(row) => ParamsShapeTypeIds::Single(
-                row.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect(),
-            ),
-            ParamsShape::Overloaded { flat, overloads } => ParamsShapeTypeIds::Overloaded {
-                flat: flat.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect(),
-                overloads: overloads
-                    .iter()
-                    .map(|row| row.iter().map(|t| crate::ty_bridge::ty_to_typeid(db, t)).collect())
-                    .collect(),
-            },
-        }
-    }
-}
-
-/// Kernel-native mirror of [`ParamsShape`].
-///
-/// §4.C accessor — produced by [`ParamsShape::typeid_view`], consumed
-/// by §4.D-§4.E once the call-arg validators migrate away from `Ty`.
-#[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParamsShapeTypeIds {
-    Single(Arc<[bsl_types::kind::TypeId]>),
-    Overloaded {
-        flat: Arc<[bsl_types::kind::TypeId]>,
-        overloads: Arc<[Arc<[bsl_types::kind::TypeId]>]>,
-    },
+    Overloaded { flat: Arc<[TypeId]>, overloads: Arc<[Arc<[TypeId]>]> },
 }
 
 /// Context for type inference.
@@ -2300,12 +2262,7 @@ impl<'db> InferenceContext<'db> {
                             callee,
                             args,
                             ParamsShape::Single(
-                                resolution
-                                    .signature
-                                    .params
-                                    .iter()
-                                    .map(|id| typeid_to_ty(self.db, *id))
-                                    .collect(),
+                                resolution.signature.params.iter().copied().collect(),
                             ),
                         );
                         self.expr_types.insert(callee, Ty::Unknown);
@@ -2390,12 +2347,7 @@ impl<'db> InferenceContext<'db> {
                             callee,
                             args,
                             ParamsShape::Single(
-                                resolution
-                                    .signature
-                                    .params
-                                    .iter()
-                                    .map(|id| typeid_to_ty(self.db, *id))
-                                    .collect(),
+                                resolution.signature.params.iter().copied().collect(),
                             ),
                         );
                         self.expr_types.insert(callee, Ty::Unknown);
@@ -2488,12 +2440,7 @@ impl<'db> InferenceContext<'db> {
                             callee,
                             args,
                             ParamsShape::Single(
-                                resolution
-                                    .signature
-                                    .params
-                                    .iter()
-                                    .map(|id| typeid_to_ty(self.db, *id))
-                                    .collect(),
+                                resolution.signature.params.iter().copied().collect(),
                             ),
                         );
                         self.expr_types.insert(callee, Ty::Unknown);
@@ -2586,11 +2533,11 @@ impl<'db> InferenceContext<'db> {
                         callee,
                         args,
                         ParamsShape::Overloaded {
-                            flat: Arc::<[Ty]>::from(&params[..]),
+                            flat: params.iter().map(|t| ty_to_typeid(self.db, t)).collect(),
                             overloads: overloads
                                 .iter()
-                                .map(|ov| Arc::<[Ty]>::from(&ov[..]))
-                                .collect::<Vec<Arc<[Ty]>>>()
+                                .map(|ov| ov.iter().map(|t| ty_to_typeid(self.db, t)).collect())
+                                .collect::<Vec<Arc<[TypeId]>>>()
                                 .into(),
                         },
                     );
@@ -2799,16 +2746,16 @@ impl<'db> InferenceContext<'db> {
                 // the base-time `chosen` so a "no overload accepts"
                 // failure renders the message against the same overload
                 // the legacy emitter would have picked.
-                let overloads_arc: Arc<[Arc<[Ty]>]> = sigs
+                let overloads_arc: Arc<[Arc<[TypeId]>]> = sigs
                     .iter()
-                    .map(|s| Arc::<[Ty]>::from(&s.params[..]))
+                    .map(|s| s.params.iter().map(|t| ty_to_typeid(self.db, t)).collect())
                     .collect::<Vec<_>>()
                     .into();
                 self.record_call_arg_binding(
                     callee,
                     args,
                     ParamsShape::Overloaded {
-                        flat: Arc::<[Ty]>::from(&chosen.params[..]),
+                        flat: chosen.params.iter().map(|t| ty_to_typeid(self.db, t)).collect(),
                         overloads: overloads_arc,
                     },
                 );
@@ -2884,7 +2831,7 @@ impl<'db> InferenceContext<'db> {
                 self.record_call_arg_binding(
                     callee,
                     args,
-                    ParamsShape::Single(Arc::<[Ty]>::from(&params[..])),
+                    ParamsShape::Single(params.iter().map(|t| ty_to_typeid(self.db, t)).collect()),
                 );
 
                 // Return function's return type
@@ -3011,14 +2958,7 @@ impl<'db> InferenceContext<'db> {
                 self.record_call_arg_binding(
                     call_expr,
                     args,
-                    ParamsShape::Single(
-                        resolution
-                            .signature
-                            .params
-                            .iter()
-                            .map(|id| typeid_to_ty(self.db, *id))
-                            .collect(),
-                    ),
+                    ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
                 );
 
                 // Return method's return type
@@ -3344,14 +3284,7 @@ impl<'db> InferenceContext<'db> {
                 self.record_call_arg_binding(
                     call_expr,
                     args,
-                    ParamsShape::Single(
-                        resolution
-                            .signature
-                            .params
-                            .iter()
-                            .map(|id| typeid_to_ty(self.db, *id))
-                            .collect(),
-                    ),
+                    ParamsShape::Single(resolution.signature.params.iter().copied().collect()),
                 );
 
                 typeid_to_ty(self.db, resolution.return_type)
@@ -3404,7 +3337,7 @@ impl<'db> InferenceContext<'db> {
                     self.record_call_arg_binding(
                         call_expr,
                         args,
-                        ParamsShape::Single(Arc::<[Ty]>::from(&res.signature.params[..])),
+                        ParamsShape::Single(res.signature_params_typeid(self.db).into()),
                     );
                     return res.return_ty;
                 }
@@ -3975,18 +3908,21 @@ pub fn type_of_expr_query(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::typeid_to_ty;
+    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use bsl_types::testing::InMemoryDb;
 
-    /// §4.C drift-detector: `ParamsShape::typeid_view` mirrors both
-    /// `Single` and `Overloaded` variants.
+    /// `ParamsShape` stores kernel ids directly; bridge back only when a
+    /// legacy `Ty` view is needed by an assertion or downstream payload.
     #[test]
-    fn params_shape_typeid_view_round_trips_via_ty() {
+    fn params_shape_typeids_round_trip_via_ty() {
         let db = InMemoryDb::new();
 
-        let single = ParamsShape::Single(Arc::from([Ty::Number, Ty::String]));
-        match single.typeid_view(&db) {
-            ParamsShapeTypeIds::Single(ids) => {
+        let single = ParamsShape::Single(Arc::from([
+            ty_to_typeid(&db, &Ty::Number),
+            ty_to_typeid(&db, &Ty::String),
+        ]));
+        match single {
+            ParamsShape::Single(ids) => {
                 let via_ty: Vec<Ty> = ids.iter().map(|id| typeid_to_ty(&db, *id)).collect();
                 assert_eq!(via_ty, vec![Ty::Number, Ty::String]);
             }
@@ -3994,11 +3930,11 @@ mod tests {
         }
 
         let overloaded = ParamsShape::Overloaded {
-            flat: Arc::from([Ty::Number]),
-            overloads: Arc::from([Arc::from([Ty::Number]) as Arc<[Ty]>]),
+            flat: Arc::from([ty_to_typeid(&db, &Ty::Number)]),
+            overloads: Arc::from([Arc::from([ty_to_typeid(&db, &Ty::Number)]) as Arc<[TypeId]>]),
         };
-        match overloaded.typeid_view(&db) {
-            ParamsShapeTypeIds::Overloaded { flat, overloads } => {
+        match overloaded {
+            ParamsShape::Overloaded { flat, overloads } => {
                 let flat_via_ty: Vec<Ty> = flat.iter().map(|id| typeid_to_ty(&db, *id)).collect();
                 assert_eq!(flat_via_ty, vec![Ty::Number]);
                 assert_eq!(overloads.len(), 1);

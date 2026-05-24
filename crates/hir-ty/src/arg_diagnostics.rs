@@ -41,7 +41,6 @@ use bsl_types::kind::TypeId;
 use crate::db::HirDatabase;
 use crate::infer::{InferenceDiagnostic, ParamsShape};
 use crate::narrow::{narrowed_type_at, NarrowState};
-use crate::Ty;
 
 /// Salsa query: emit `TypeMismatch` diagnostics for call arguments,
 /// applying the narrowing overlay before each per-arg assignability
@@ -417,22 +416,20 @@ fn emit_single(
     db: &dyn HirDatabase,
     args: &[ExprId],
     arg_types: &[TypeId],
-    params: &[Ty],
+    params: &[TypeId],
     out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
     owner: DefWithBodyId,
 ) {
-    for ((arg_id, &arg_ty), param_ty) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
-        // Phase 3 §4.G.4: `arg_ty` is already a kernel `TypeId`; only the
-        // `Ty`-typed param needs interning. The `TypeMismatch` diagnostic
-        // still carries `Ty`, so bridge `actual` back out (flips in a
-        // later slice that touches `InferenceDiagnostic`).
-        let param_id_ty = crate::ty_bridge::ty_to_typeid(db, param_ty);
-        if !crate::subtype::is_coercible_to(db, arg_ty, param_id_ty) {
+    for ((arg_id, &arg_ty), &param_id) in args.iter().zip(arg_types.iter()).zip(params.iter()) {
+        // Phase 3 §4.D.4a: params are now kernel `TypeId`s too. The
+        // `TypeMismatch` diagnostic still carries `Ty`, so bridge the
+        // message payloads back out until §4.D.4c.
+        if !crate::subtype::is_coercible_to(db, arg_ty, param_id) {
             out.push((
                 owner,
                 InferenceDiagnostic::TypeMismatch {
                     expr: *arg_id,
-                    expected: param_ty.clone(),
+                    expected: crate::ty_bridge::typeid_to_ty(db, param_id),
                     actual: crate::ty_bridge::typeid_to_ty(db, arg_ty),
                 },
             ));
@@ -456,8 +453,8 @@ fn emit_overloaded(
     db: &dyn HirDatabase,
     args: &[ExprId],
     arg_types: &[TypeId],
-    flat: &[Ty],
-    overloads: &[Arc<[Ty]>],
+    flat: &[TypeId],
+    overloads: &[Arc<[TypeId]>],
     out: &mut Vec<(DefWithBodyId, InferenceDiagnostic)>,
     owner: DefWithBodyId,
 ) {
@@ -470,17 +467,16 @@ fn emit_overloaded(
         if args.len() > params.len() {
             return false;
         }
-        // Phase 3 §4.G.4: `arg_types` are kernel ids; only the `Ty`-typed
-        // overload params need interning before the coercion check.
-        arg_types.iter().zip(params.iter()).all(|(&a, p)| {
-            crate::subtype::is_coercible_to(db, a, crate::ty_bridge::ty_to_typeid(db, p))
-        })
+        arg_types
+            .iter()
+            .zip(params.iter())
+            .all(|(&a, &p)| crate::subtype::is_coercible_to(db, a, p))
     });
     if any_accepts {
         return;
     }
 
-    let chosen: &[Ty] = overloads
+    let chosen: &[TypeId] = overloads
         .iter()
         .min_by_key(|params| params.len().abs_diff(args.len()))
         .map(|p| p.as_ref())

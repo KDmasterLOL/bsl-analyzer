@@ -88,7 +88,6 @@ impl PlatformMethodResolution {
     /// Kernel-native projection of [`Self::signature`]`.params` —
     /// the single-overload parameter list consumed by `infer.rs`
     /// arg validation / call binding.
-    #[allow(dead_code, reason = "Phase 3 §4.C — consumers migrate in 4.D-4.E")]
     pub fn signature_params_typeid(&self, db: &dyn TypeKernelDb) -> Vec<TypeId> {
         self.signature.params.iter().map(|t| ty_to_typeid(db, t)).collect()
     }
