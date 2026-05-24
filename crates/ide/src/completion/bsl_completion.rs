@@ -272,7 +272,7 @@ fn complete_module_self_attributes<DB: RootDatabase>(
     hir::module_implicit_fields(db, file_id)
         .into_iter()
         .filter(|field| field.name.as_str().to_lowercase().starts_with(&prefix_lower))
-        .map(|field| render_mdo_field(&field, locale))
+        .map(|field| render_mdo_field(db, &field, locale))
         .collect()
 }
 

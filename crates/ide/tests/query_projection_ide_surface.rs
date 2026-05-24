@@ -64,7 +64,7 @@ fn projection_fields_visible_via_hir_type_accessors() {
         type_facade.projection_fields().expect("projection_fields must surface the column slice");
     assert_eq!(fields.len(), 1, "single-column SELECT yields one projection field");
     assert_eq!(fields[0].0.as_str(), "Имя");
-    assert_eq!(fields[0].1, Ty::String);
+    assert_eq!(hir::ty_bridge::typeid_to_ty(&db, fields[0].1), Ty::String);
 }
 
 #[test]

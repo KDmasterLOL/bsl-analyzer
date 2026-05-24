@@ -44,7 +44,7 @@ pub struct Method {
     /// English method name.
     pub english_name: Name,
     /// `None` for procedures.
-    pub return_ty: Option<Ty>,
+    pub return_ty: Option<TypeId>,
     /// Method parameters in declaration order.
     pub params: Vec<MethodParam>,
 }
@@ -53,7 +53,7 @@ pub struct Method {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodParam {
     pub name: Name,
-    pub ty: Option<Ty>,
+    pub ty: Option<TypeId>,
     pub optional: bool,
 }
 
@@ -102,9 +102,9 @@ pub struct Field {
     /// metadata does not declare a separate English alias.
     pub english_name: Name,
     /// Field type after lowering through [`TyLoweringContext`].
-    pub ty: Ty,
+    pub ty: TypeId,
     /// Domain value type wrapped by a synthetic/platform accessor.
-    pub value_ty: Option<Ty>,
+    pub value_ty: Option<TypeId>,
     /// Whether this field is read-only.
     pub is_readonly: bool,
     /// Where this field originated from.
@@ -356,7 +356,7 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
             // matches `lookup_method` precedence.
             for type_name in chain.iter().rev() {
                 for m in PlatformData::instance().get_type_methods(type_name) {
-                    let dto = method_dto_from_platform(m);
+                    let dto = method_dto_from_platform(self.db, m);
                     if seen.insert(dto.name.as_str().to_lowercase()) {
                         methods.push(dto);
                     }
@@ -371,7 +371,7 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
         PlatformData::instance()
             .get_type_methods(type_key)
             .into_iter()
-            .map(method_dto_from_platform)
+            .map(|m| method_dto_from_platform(self.db, m))
             .collect()
     }
 
@@ -393,8 +393,8 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
             .map(|info| Field {
                 name: info.name.clone(),
                 english_name: info.name_en.clone().unwrap_or_else(|| info.name.clone()),
-                ty: typeid_to_ty(self.db, info.ty),
-                value_ty: info.value_ty.map(|t| typeid_to_ty(self.db, t)),
+                ty: info.ty,
+                value_ty: info.value_ty,
                 is_readonly: info.is_readonly,
                 origin: HirFieldOrigin::from(info.origin),
             })
@@ -420,16 +420,20 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     /// Per-column `(name, type)` pairs from the SDBL projection.
     ///
     /// `Some(vec)` when [`Type::is_query_projection`] returns `true`;
-    /// `None` otherwise. Phase 3 §4.F: the facade is backed by an
-    /// interned id, so the projection is materialised by bridging — the
-    /// pairs are owned rather than borrowed. Callers that need the IDE
-    /// facade `Type` for each column can wrap each `Ty` via [`Type::new`]
-    /// with the same `db` / `file_id`.
-    pub fn projection_fields(&self) -> Option<Vec<(Name, Ty)>> {
+    /// `None` otherwise. Phase 3 §4.G.5c: each column type is the interned
+    /// kernel [`TypeId`] (the SDBL projection's `Ty` is interned at this
+    /// boundary). Callers that need the IDE facade `Type` for a column can
+    /// wrap the id via [`Type::from_id`] with the same `db` / `file_id`.
+    pub fn projection_fields(&self) -> Option<Vec<(Name, TypeId)>> {
         match self.ty() {
             Ty::QueryResultSelection { projection: Some(p) }
             | Ty::ValueTable { projection: Some(p) }
-            | Ty::ValueTableRow { projection: Some(p) } => Some(p.fields.to_vec()),
+            | Ty::ValueTableRow { projection: Some(p) } => Some(
+                p.fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty_to_typeid(self.db, ty)))
+                    .collect(),
+            ),
             _ => None,
         }
     }
@@ -453,25 +457,22 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     }
 }
 
-/// Bridge a kernel [`FieldInfo`] into the `Ty`-typed hir [`Field`] DTO.
-/// §4.G.2: needs `db` to resolve the interned `ty` / `value_ty`. The
-/// `Field` DTO itself flips to `TypeId` in §4.G.5.
-fn field_from_info(db: &dyn TypeKernelDb, info: FieldInfo) -> Field {
+/// Project a kernel [`FieldInfo`] into the hir [`Field`] DTO.
+/// §4.G.5c: the DTO is kernel-native (`TypeId`), so `ty` / `value_ty`
+/// pass through without bridging.
+fn field_from_info(info: FieldInfo) -> Field {
     Field {
         name: info.name.clone(),
         english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
-        ty: typeid_to_ty(db, info.ty),
-        value_ty: info.value_ty.map(|t| typeid_to_ty(db, t)),
+        ty: info.ty,
+        value_ty: info.value_ty,
         is_readonly: info.is_readonly,
         origin: HirFieldOrigin::from(info.origin),
     }
 }
 
 pub fn module_implicit_fields<DB: hir_ty::db::HirDatabase>(db: &DB, file_id: FileId) -> Vec<Field> {
-    hir_ty::module_implicit_fields(db, file_id)
-        .into_iter()
-        .map(|info| field_from_info(db, info))
-        .collect()
+    hir_ty::module_implicit_fields(db, file_id).into_iter().map(field_from_info).collect()
 }
 
 /// Pick the `PlatformData` key for a receiver, matching
@@ -517,20 +518,25 @@ fn platform_type_key(ty: &Ty) -> Option<&str> {
 /// [`hir_ty::lower::type_string`] pipeline so the DTO stays consistent
 /// with what `lookup_method` produces (param-asymmetric gradual typing,
 /// `;`-separator-aware unions, `Произвольный` collapse).
-fn method_dto_from_platform(method: &PlatformMethod) -> Method {
+fn method_dto_from_platform(db: &dyn TypeKernelDb, method: &PlatformMethod) -> Method {
     let params = method
         .parameters
         .iter()
         .map(|param| MethodParam {
             name: Name::new(param.name.as_str()),
-            ty: param.param_type.as_ref().map(|ty| lower_param_type_string(ty)),
+            // Phase 3 §4.G.5c: the DTO is kernel-native; intern the lowered
+            // `Ty` at this boundary (`type_string` lowering stays internal).
+            ty: param.param_type.as_ref().map(|ty| ty_to_typeid(db, &lower_param_type_string(ty))),
             optional: param.is_optional,
         })
         .collect();
     Method {
         name: Name::new(method.name.as_str()),
         english_name: fallback_name(method.english_name.as_str(), method.name.as_str()),
-        return_ty: method.return_type.as_ref().map(|ret| lower_return_type_string(ret)),
+        return_ty: method
+            .return_type
+            .as_ref()
+            .map(|ret| ty_to_typeid(db, &lower_return_type_string(ret))),
         params,
     }
 }
@@ -857,7 +863,7 @@ mod tests {
             .find(|field| field.name == Name::new("Реквизит2"))
             .expect("custom attribute must be present");
         assert_eq!(attr.english_name, Name::new("Реквизит2"));
-        assert_eq!(attr.ty, Ty::Number);
+        assert_eq!(typeid_to_ty(&db, attr.ty), Ty::Number);
     }
 
     #[test]
@@ -878,7 +884,7 @@ mod tests {
             .expect("tabular section must be present");
         assert_eq!(section.english_name, Name::new("ТабличнаяЧасть1"));
         assert_eq!(
-            section.ty,
+            typeid_to_ty(&db, section.ty),
             Ty::MetadataRef {
                 kind: MetadataKind::TabularSection { parent: MdoType::Catalog },
                 name: Name::new("Справочник1.ТабличнаяЧасть1"),
@@ -911,7 +917,7 @@ mod tests {
             .find(|field| field.name == Name::new("Справочник1"))
             .expect("register dimension must appear in .fields()");
         assert_eq!(
-            dim.ty,
+            typeid_to_ty(&db, dim.ty),
             Ty::MetadataRef {
                 kind: MetadataKind::CatalogRef, name: Name::new("Справочник1")
             },
@@ -931,7 +937,7 @@ mod tests {
             .find(|field| field.name == Name::new("АдресСайта"))
             .expect("object module must expose owner MDO attributes as bare identifiers");
 
-        assert_eq!(attr.ty, Ty::String);
+        assert_eq!(typeid_to_ty(&db, attr.ty), Ty::String);
     }
 
     #[test]
@@ -1322,6 +1328,10 @@ mod tests {
         let matches: Vec<_> =
             fields.iter().filter(|field| field.name == Name::new("Реквизит2")).collect();
         assert_eq!(matches.len(), 1, "duplicate Russian names must be deduplicated");
-        assert_eq!(matches[0].ty, Ty::Number, "attribute must win over tabular section");
+        assert_eq!(
+            typeid_to_ty(&db, matches[0].ty),
+            Ty::Number,
+            "attribute must win over tabular section"
+        );
     }
 }

@@ -321,7 +321,7 @@ fn complete_prefix_methods_for_receiver<DB: RootDatabase>(
     }
 
     let mut items: Vec<CompletionItem> =
-        mdo_fields.iter().map(|f| render_mdo_field(f, locale)).collect();
+        mdo_fields.iter().map(|f| render_mdo_field(db, f, locale)).collect();
     // Dedup keyed on the visible Russian label only. An MDO attribute and
     // a platform method are conceptually distinct symbols even when they
     // share an English alias (the platform method's English form is not
@@ -945,11 +945,15 @@ fn render_form_element(
 /// - `sort_text` uses a short prefix (`"10_"`, `"20_"`, …) so MDO fields
 ///   sort before platform methods in the popup: user attributes first, then
 ///   tabular sections, then standard attributes, then register parts.
-pub(super) fn render_mdo_field(field: &Field, locale: ide_db::base_db::Locale) -> CompletionItem {
+pub(super) fn render_mdo_field<DB: RootDatabase>(
+    db: &DB,
+    field: &Field,
+    locale: ide_db::base_db::Locale,
+) -> CompletionItem {
     let filter_text = format!("{} {}", field.name, field.english_name);
     CompletionItem {
         label: field.name.to_string(),
-        detail: Some(render_field_detail(field, locale)),
+        detail: Some(render_field_detail(db, field, locale)),
         kind: CompletionItemKind::Field,
         insert_text: field.name.to_string(),
         documentation: None,
@@ -971,11 +975,22 @@ pub(super) fn render_mdo_field(field: &Field, locale: ide_db::base_db::Locale) -
 ///   in the chosen locale.
 /// - Appends `" [Только чтение]"` / `" [Read-only]"` for read-only
 ///   fields, mirroring the marker [`render_platform_property`] uses.
-fn render_field_detail(field: &Field, locale: ide_db::base_db::Locale) -> String {
+fn render_field_detail<DB: RootDatabase>(
+    db: &DB,
+    field: &Field,
+    locale: ide_db::base_db::Locale,
+) -> String {
+    // Phase 3 §4.G.5c: bridge the kernel field ids to `Ty` for the still-`Ty`
+    // `render_ty_detail` helper (flips to kernel display in 5d).
+    let field_ty = hir::ty_bridge::typeid_to_ty(db, field.ty);
     let mut body = if let Some(value_ty) = &field.value_ty {
-        format!("{} → {}", render_ty_detail(&field.ty, locale), render_ty_detail(value_ty, locale))
+        format!(
+            "{} → {}",
+            render_ty_detail(&field_ty, locale),
+            render_ty_detail(&hir::ty_bridge::typeid_to_ty(db, *value_ty), locale)
+        )
     } else {
-        render_ty_detail(&field.ty, locale)
+        render_ty_detail(&field_ty, locale)
     };
     match field.origin {
         HirFieldOrigin::FormAttribute => body.push_str(" (реквизит формы)"),

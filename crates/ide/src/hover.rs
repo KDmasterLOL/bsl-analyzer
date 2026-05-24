@@ -113,7 +113,7 @@ fn hover_field<DB: RootDatabase>(
 
     if let Some(field) = mdo_field_on_ty(db, file_id, &receiver_ty, name) {
         if field.value_ty.is_some() {
-            return Some(render_mdo_field_hover(&field, name, range, locale));
+            return Some(render_mdo_field_hover(db, &field, name, range, locale));
         }
     }
 
@@ -164,21 +164,25 @@ fn mdo_field_on_ty<DB: RootDatabase>(
     })
 }
 
-fn render_mdo_field_hover(
+fn render_mdo_field_hover<DB: RootDatabase>(
+    db: &DB,
     field: &Field,
     name: &str,
     range: TextRange,
     locale: Locale,
 ) -> HoverResult {
     let mut markup = format!("**{}**\n\n", name);
+    // Phase 3 §4.G.5c: `Field.ty`/`value_ty` are kernel ids; bridge to `Ty`
+    // for the still-`Ty` render helpers (those flip to kernel display in 5d).
+    let field_ty = hir::ty_bridge::typeid_to_ty(db, field.ty);
     let detail = if let Some(value_ty) = &field.value_ty {
         format!(
             "{} → {}",
-            render_hover_ty_detail(&field.ty, locale),
-            render_hover_ty_detail(value_ty, locale),
+            render_hover_ty_detail(&field_ty, locale),
+            render_hover_ty_detail(&hir::ty_bridge::typeid_to_ty(db, *value_ty), locale),
         )
     } else {
-        render_hover_ty_detail(&field.ty, locale)
+        render_hover_ty_detail(&field_ty, locale)
     };
     markup.push_str(&format!("**Тип:** {detail}\n\n"));
     HoverResult { markup, range: Some(range) }
