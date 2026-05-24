@@ -53,7 +53,7 @@ use crate::db::HirDatabase;
 use crate::lower::TyLoweringContext;
 use crate::method_resolution;
 use crate::platform_manager_lookup::{resolve_platform_manager_method, PlatformMethodResolution};
-use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
+use crate::ty_bridge::typeid_to_ty;
 
 /// Result of type inference for a file/module.
 ///
@@ -1673,9 +1673,7 @@ impl<'db> InferenceContext<'db> {
                     // JSDoc) now takes the same path — editing the fallback
                     // rules in one place is enough.
                     match type_name {
-                        Some(name) => {
-                            ty_to_typeid(self.db, &TyLoweringContext::new().lower_bare_name(name))
-                        }
+                        Some(name) => TyLoweringContext::new().lower_bare_name_id(self.db, name),
                         None => self.db.unknown(),
                     }
                 }
@@ -1961,7 +1959,7 @@ impl<'db> InferenceContext<'db> {
                 crate::this_object_attr::resolve_this_object_member(self.db, &resolver, name)
             {
                 trace!("resolved {} as implicit ЭтотОбъект.{} member", name, name);
-                return ty_to_typeid(self.db, &ty);
+                return ty;
             }
         }
 
@@ -1979,7 +1977,7 @@ impl<'db> InferenceContext<'db> {
                 crate::this_object_attr::resolve_this_record_set_member(self.db, &resolver, name)
             {
                 trace!("resolved {} as implicit record-set ЭтотОбъект.{} member", name, name);
-                return ty_to_typeid(self.db, &ty);
+                return ty;
             }
         }
 
@@ -3445,7 +3443,7 @@ impl<'db> InferenceContext<'db> {
             };
             return mdo.constant_type.as_ref().map(|attr| {
                 let type_ref = hir_def::TypeRef::from_attribute_type(attr);
-                ty_to_typeid(self.db, &TyLoweringContext::new().lower_type_ref(&type_ref))
+                TyLoweringContext::new().lower_type_ref_id(self.db, &type_ref)
             });
         }
         None

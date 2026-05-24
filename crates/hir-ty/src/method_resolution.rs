@@ -508,13 +508,15 @@ fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) ->
         .collect();
     let defaults: Box<[bool]> = method_symbol.params.iter().map(|p| p.has_default).collect();
 
-    // The `return_type` default (set during symbol-tree construction) is
-    // still `Ty` (`hir_def::symbol_tree`, db-free); bridge it here.
+    // No docstring return type → kernel sentinel matching the symbol-tree
+    // default: functions get `Unknown` (inference may refine), procedures
+    // `Undefined`. Equivalent to the old `return_type` Ty field (set to
+    // exactly these per `is_function` in `hir_def::symbol_tree`).
     let ret = method_symbol
         .return_type_ref
         .as_ref()
         .map(|t| ctx.lower_type_ref_id(db, t))
-        .unwrap_or_else(|| crate::ty_bridge::ty_to_typeid(db, &method_symbol.return_type));
+        .unwrap_or_else(|| if method_symbol.is_function { db.unknown() } else { db.undefined() });
 
     let max_args = Some(params.len() as u32);
     FunctionSignature { params, defaults, ret, max_args }

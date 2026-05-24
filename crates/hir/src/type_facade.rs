@@ -29,11 +29,10 @@ use bsl_types::display::{display_name as kernel_display, Locale as KernelLocale,
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{Projection, TypeId, TypeKind};
 use hir_def::configs::ConfigsDatabase;
-use hir_def::ty::{MetadataKind, Ty};
+use hir_def::ty::MetadataKind;
 use hir_def::Name;
 use hir_ty::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 use hir_ty::method_lookup::platform_type_key_id;
-use hir_ty::ty_bridge::ty_to_typeid;
 use hir_ty::{
     enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
 };
@@ -306,7 +305,7 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
         // bridge.
         let id = lookup_method(self.db, self.id, method_name)
             .map(|info| info.return_ty)
-            .unwrap_or_else(|| ty_to_typeid(self.db, &Ty::Unknown));
+            .unwrap_or_else(|| self.db.unknown());
         Self::from_id(self.db, self.file_id, id)
     }
 
@@ -525,7 +524,8 @@ fn fallback_name(name: &str, fallback: &str) -> Name {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hir_ty::ty_bridge::typeid_to_ty;
+    use hir_def::ty::Ty;
+    use hir_ty::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::fs;

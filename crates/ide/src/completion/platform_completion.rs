@@ -146,12 +146,8 @@ pub(super) fn platform_completions<DB: RootDatabase>(
                 receiver_id = id;
             }
             if matches!(db.lookup_type(receiver_id), TypeKind::Unknown) {
-                // `lower_bare_name` is a syntactic Ty lowerer (no db); intern
-                // its result so the receiver stays a kernel id.
-                receiver_id = hir::ty_bridge::ty_to_typeid(
-                    db,
-                    &TyLoweringContext::new().lower_bare_name(&name_node),
-                );
+                // Syntactic kernel-native lowerer (no Ty round-trip).
+                receiver_id = TyLoweringContext::new().lower_bare_name_id(db, &name_node);
             }
         }
     }

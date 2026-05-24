@@ -8,8 +8,10 @@
 //! record-set variant follows the same path for `RecordSetModule.bsl`, using
 //! the owning register's `*RecordSet` receiver.
 
+use bsl_types::builders::Builders;
+use bsl_types::kind::TypeId;
+use bsl_types::testing::RootConfigCtx;
 use hir_def::resolver::Resolver;
-use hir_def::ty::Ty;
 use hir_def::Name;
 
 use crate::db::HirDatabase;
@@ -18,15 +20,13 @@ pub(crate) fn resolve_this_object_member(
     db: &dyn HirDatabase,
     resolver: &Resolver,
     name: &Name,
-) -> Option<Ty> {
+) -> Option<TypeId> {
     let (mdo_type, mdo_name) = crate::this_object::resolve_this_object_owner(db, resolver)?;
     let kind = hir_def::ty::MetadataKind::object_kind_for(mdo_type)?;
-    let receiver = Ty::MetadataRef { kind, name: mdo_name };
     let module_id = resolver.module_id()?;
     let configs = db.configurations(module_id.file_id);
-    let receiver_id = crate::ty_bridge::ty_to_typeid(db, &receiver);
-    crate::field_lookup::lookup_field(db, &configs, receiver_id, name)
-        .map(|info| crate::ty_bridge::typeid_to_ty(db, info.ty))
+    let receiver_id = db.metadata_ref(kind, mdo_name.as_str().to_string(), &RootConfigCtx);
+    crate::field_lookup::lookup_field(db, &configs, receiver_id, name).map(|info| info.ty)
 }
 
 /// Implicit `ЭтотОбъект.<name>` resolver for RecordSetModule.
@@ -42,13 +42,11 @@ pub(crate) fn resolve_this_record_set_member(
     db: &dyn HirDatabase,
     resolver: &Resolver,
     name: &Name,
-) -> Option<Ty> {
+) -> Option<TypeId> {
     let (mdo_type, mdo_name) = crate::this_object::resolve_this_record_set_owner(db, resolver)?;
     let kind = hir_def::ty::MetadataKind::record_set_kind_for(mdo_type)?;
-    let receiver = Ty::MetadataRef { kind, name: mdo_name };
     let module_id = resolver.module_id()?;
     let configs = db.configurations(module_id.file_id);
-    let receiver_id = crate::ty_bridge::ty_to_typeid(db, &receiver);
-    crate::field_lookup::lookup_field(db, &configs, receiver_id, name)
-        .map(|info| crate::ty_bridge::typeid_to_ty(db, info.ty))
+    let receiver_id = db.metadata_ref(kind, mdo_name.as_str().to_string(), &RootConfigCtx);
+    crate::field_lookup::lookup_field(db, &configs, receiver_id, name).map(|info| info.ty)
 }
