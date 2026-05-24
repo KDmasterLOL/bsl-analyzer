@@ -118,19 +118,16 @@ pub(crate) fn try_resolve_platform_global_member(
 /// against the same singleton, easy to drift.
 ///
 /// Reads the same `PlatformDataInner` singleton as the rest of this module;
-/// takes `db` only to intern the lowered result into the type kernel
+/// takes `db` to mint the lowered result into the type kernel
 /// (Phase 3 §4.G.5b — kernel-native public boundary).
 pub fn resolve_platform_global_property_type(db: &dyn TypeKernelDb, name: &Name) -> Option<TypeId> {
     let prop = bsl_platform::PlatformDataInner::instance().get_global_property(name.as_str())?;
     let declared = prop.property_types.first()?;
-    // Phase 3 §4.G.5b: kernel-native public boundary. The lowering still
-    // runs in `Ty` space (TyLoweringContext is internal, Phase 4); intern
-    // the result at this leaf so callers get a kernel id.
+    // Phase 3 §4.A.4: mint the id natively through the lowering context's
+    // kernel recursion — no `Ty` round-trip. (The `Ty`-returning lowering
+    // surface survives until its other consumers migrate in Phase 4.B+.)
     let lowering = crate::lower::TyLoweringContext::new();
-    Some(crate::ty_bridge::ty_to_typeid(
-        db,
-        &lowering.lower_bare_name(&Name::new(declared.as_str())),
-    ))
+    Some(lowering.lower_bare_name_id(db, &Name::new(declared.as_str())))
 }
 
 #[cfg(test)]
