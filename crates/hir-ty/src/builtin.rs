@@ -9,18 +9,22 @@
 //! `global_functions`).
 //!
 //! The single source of truth is the platform JSON; this module is a thin
-//! adapter that lowers `param_type` / `return_type` strings to [`Ty`]
-//! through [`crate::lower::type_string`] (the unified pipeline shared with
-//! `method_lookup`), reconstructs the `defaults` mask from `is_optional`,
+//! adapter that captures `param_type` / `return_type` strings as db-free
+//! [`BuiltinSignature`] descriptors (lowered on demand to a kernel
+//! [`FunctionSignature`] through [`crate::lower::type_string`], the unified
+//! pipeline shared with `method_lookup`), reconstructs the `defaults` mask
+//! from `is_optional`,
 //! and derives the documented argument cap (`max_args`) from the
 //! platform-idiomatic `<имя>1-<имя><цифра>` last-parameter naming
 //! (e.g. `Значение1-Значение10` → `max_args = 1 + 10` for `СтрШаблон`).
 
-use hir_def::ty::{FunctionSignatureTy, Ty};
+use bsl_types::builders::Builders;
+use bsl_types::intern::TypeKernelDb;
+use hir_def::ty::FunctionSignature;
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 
-use crate::lower::type_string::{lower_param_type_string, lower_return_type_string};
+use crate::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 
 /// Global registry of built-in platform functions.
 ///
@@ -38,31 +42,118 @@ pub fn builtin_functions() -> &'static BuiltinFunctions {
 /// Both the Russian (`нстр`) and English (`nstr`) keys point at the same
 /// signature list.
 ///
-/// **Multi-overload model.** Each name maps to a `Vec<FunctionSignatureTy>`. The
+/// **Multi-overload model.** Each name maps to a `Vec<BuiltinSignature>`. The
 /// vast majority of platform functions have a single-element vector, but a
 /// handful (`ПодключитьВнешнююКомпоненту`, `Дата`, `ОткрытьФорму`, …) declare
 /// several `<p class="V8SH_chapter">Вариант синтаксиса:</p>` sections in
-/// the HBK source — those become one [`FunctionSignatureTy`] per overload. A
+/// the HBK source — those become one [`BuiltinSignature`] per overload. A
 /// call is accepted as soon as ANY overload's arity / type-check accepts it
 /// (see consumers in `infer.rs`).
 #[derive(Debug)]
 pub struct BuiltinFunctions {
     /// Overload sets indexed by lowercase function name.
-    signatures: FxHashMap<String, Vec<FunctionSignatureTy>>,
+    signatures: FxHashMap<String, Vec<BuiltinSignature>>,
+}
+
+/// A single built-in overload in **db-free descriptor form**.
+///
+/// The static [`BUILTIN_FUNCTIONS`] table is populated once at startup,
+/// before any [`TypeKernelDb`] exists, so it cannot store interned
+/// [`TypeId`](bsl_types::kind::TypeId)s. Instead each parameter / return
+/// type is kept as a [`ParamTypeSpec`] / [`ReturnTypeSpec`] (raw platform
+/// type-name string or a sentinel) and lowered to a kernel
+/// [`FunctionSignature`] on demand via [`BuiltinSignature::lower`] at the
+/// db-bearing consumer (`infer_call`). The lowering is byte-identical to
+/// the legacy eager `lower_*_type_string` path — guaranteed by the §4.A.2
+/// drift tests (`lower_*_typeid(s) == ty_to_typeid(lower_*(s))`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinSignature {
+    params: Box<[ParamTypeSpec]>,
+    defaults: Box<[bool]>,
+    ret: ReturnTypeSpec,
+    max_args: Option<u32>,
+}
+
+/// Db-free description of a built-in parameter type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParamTypeSpec {
+    /// A platform type-name string lowered via [`lower_param_type_string_typeid`].
+    Raw(String),
+    /// `Unknown` — missing / unrecognised `param_type` (deliberately
+    /// permissive; arity is the only hard check).
+    Unknown,
+    /// The `Тип` platform type — the `Новый` constructor keyword's lone
+    /// hand-curated parameter (`db.type_descriptor()`).
+    TypeDescriptor,
+}
+
+/// Db-free description of a built-in return type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReturnTypeSpec {
+    /// A platform type-name string (possibly a comma-separated union)
+    /// lowered via [`lower_return_type_string_typeid`].
+    Raw(String),
+    /// `Undefined` — the platform JSON carries no `return_type`.
+    Undefined,
+    /// `Unknown` — hand-curated fallbacks whose return is intentionally open.
+    Unknown,
+}
+
+impl BuiltinSignature {
+    /// Lower the descriptor into a kernel-native [`FunctionSignature`].
+    pub fn lower(&self, db: &dyn TypeKernelDb) -> FunctionSignature {
+        let params = self
+            .params
+            .iter()
+            .map(|p| match p {
+                ParamTypeSpec::Raw(s) => lower_param_type_string_typeid(db, s),
+                ParamTypeSpec::Unknown => db.unknown(),
+                ParamTypeSpec::TypeDescriptor => db.type_descriptor(),
+            })
+            .collect();
+        let ret = match &self.ret {
+            ReturnTypeSpec::Raw(s) => lower_return_type_string_typeid(db, s),
+            ReturnTypeSpec::Undefined => db.undefined(),
+            ReturnTypeSpec::Unknown => db.unknown(),
+        };
+        FunctionSignature { params, defaults: self.defaults.clone(), ret, max_args: self.max_args }
+    }
+
+    /// Per-parameter "has default" mask — the arity-only view used by
+    /// `Expr::New` constructor selection (no db / lowering required).
+    pub fn defaults(&self) -> &[bool] {
+        &self.defaults
+    }
+
+    /// Documented argument cap (`None` = unbounded variadic tail).
+    pub fn max_args(&self) -> Option<u32> {
+        self.max_args
+    }
+
+    /// Number of declared parameters.
+    pub fn param_count(&self) -> usize {
+        self.params.len()
+    }
+
+    /// Number of arguments the caller MUST supply (mirrors
+    /// [`FunctionSignature::required_count`]).
+    pub fn required_count(&self) -> usize {
+        self.defaults.iter().rposition(|has_default| !*has_default).map_or(0, |i| i + 1)
+    }
 }
 
 impl BuiltinFunctions {
     /// Create and populate the built-in functions registry.
     fn new() -> Self {
-        let mut signatures: FxHashMap<String, Vec<FunctionSignatureTy>> = FxHashMap::default();
+        let mut signatures: FxHashMap<String, Vec<BuiltinSignature>> = FxHashMap::default();
 
         // 1. Adapt every platform global function from the JSON-backed
-        //    `bsl-platform` registry into a list of typed
-        //    `FunctionSignatureTy`s — one entry for single-overload
+        //    `bsl-platform` registry into a list of db-free
+        //    `BuiltinSignature` descriptors — one entry for single-overload
         //    functions, one per variant for multi-overload pages.
         let platform = bsl_platform::PlatformData::instance();
         for func in platform.all_global_functions() {
-            let sigs = signatures_from_global_function(func);
+            let sigs = descriptors_from_global_function(func);
             signatures.insert(func.name.to_lowercase(), sigs.clone());
             signatures.insert(func.english_name.to_lowercase(), sigs);
         }
@@ -84,32 +175,36 @@ impl BuiltinFunctions {
     /// Returns the full overload list — callers that only need the first
     /// signature can use `.first()`. For multi-overload functions an arity /
     /// type check accepts the call when ANY overload accepts it.
-    pub fn get(&self, name: &str) -> Option<&[FunctionSignatureTy]> {
+    pub fn get(&self, name: &str) -> Option<&[BuiltinSignature]> {
         let name_lower = name.to_lowercase();
         self.signatures.get(&name_lower).map(|v| v.as_slice())
     }
 }
 
-/// Convert a [`bsl_platform::GlobalFunction`] into one or more typed
-/// [`FunctionSignatureTy`]s — one per declared syntax variant.
+/// Convert a [`bsl_platform::GlobalFunction`] into one or more db-free
+/// [`BuiltinSignature`] descriptors — one per declared syntax variant.
 ///
 /// Mapping rules (per signature):
-/// - Each parameter's `param_type` is run through
-///   [`lower_param_type_string`]; `None` or unrecognised tokens collapse
-///   to `Ty::Unknown` (deliberately permissive — `MismatchedArgCount`
-///   only checks arity, not assignability).
+/// - Each parameter's `param_type` is captured as a [`ParamTypeSpec`]:
+///   `Some(s)` → `Raw(s)`, `None` → `Unknown`. The `Raw` string is lowered
+///   later via [`lower_param_type_string_typeid`] in
+///   [`BuiltinSignature::lower`], where unrecognised tokens collapse to
+///   `Unknown` (deliberately permissive — `MismatchedArgCount` only checks
+///   arity, not assignability).
 /// - `defaults[i]` mirrors `parameters[i].is_optional`.
-/// - `max_args` is derived in this precedence (see [`signature_from_params`]):
+/// - `max_args` is derived in this precedence (see [`descriptor_from_params`]):
 ///   1. **Explicit flag** — `last.is_variadic == true` lifts to `None`
 ///      (truly unbounded, e.g. `Мин`/`Макс`).
 ///   2. **Name idiom** — last param named `<word>N-<word>M` (e.g.
 ///      `Значение1-Значение10` for `СтрШаблон`) caps at
 ///      `(params.len() - 1) + M`.
 ///   3. **Fixed arity** — `Some(params.len())` otherwise.
-/// - `return_type` may be a comma-separated union (`"Булево, Неопределено"`);
-///   each piece is mapped individually and recombined via `Ty::union`. The
-///   same return type is shared across all overloads — the platform JSON
-///   does not carry per-variant return types today.
+/// - `return_type` is captured as a [`ReturnTypeSpec`] (`Raw` string, or
+///   `Undefined` when the platform JSON carries none); a comma-separated
+///   union (`"Булево, Неопределено"`) is split and recombined via
+///   `db.union` during [`BuiltinSignature::lower`]. The same return type is
+///   shared across all overloads — the platform JSON does not carry
+///   per-variant return types today.
 ///
 /// **Multi-overload functions.** When `func.variants` is non-empty (e.g.
 /// `ПодключитьВнешнююКомпоненту` with its `По идентификатору` and
@@ -118,23 +213,21 @@ impl BuiltinFunctions {
 /// signatures accepts it. When `func.variants` is empty, a single
 /// signature is built from the legacy flat `func.parameters` list — the
 /// pre-overload behaviour.
-fn signatures_from_global_function(
-    func: &bsl_platform::GlobalFunction,
-) -> Vec<FunctionSignatureTy> {
+fn descriptors_from_global_function(func: &bsl_platform::GlobalFunction) -> Vec<BuiltinSignature> {
     let ret = match &func.return_type {
-        None => Ty::Undefined,
-        Some(s) => lower_return_type_string(s.as_str()),
+        None => ReturnTypeSpec::Undefined,
+        Some(s) => ReturnTypeSpec::Raw(s.to_string()),
     };
 
     if func.variants.is_empty() {
-        return vec![signature_from_params(&func.parameters, ret)];
+        return vec![descriptor_from_params(&func.parameters, ret)];
     }
-    func.variants.iter().map(|v| signature_from_params(&v.parameters, ret.clone())).collect()
+    func.variants.iter().map(|v| descriptor_from_params(&v.parameters, ret.clone())).collect()
 }
 
-/// Build a single [`FunctionSignatureTy`] from a flat parameter list and a
-/// pre-mapped return type. Shared between single-overload and per-variant
-/// paths.
+/// Build a single [`BuiltinSignature`] descriptor from a flat parameter
+/// list and a captured return-type spec. Shared between single-overload
+/// and per-variant paths.
 ///
 /// Variadic-encoding precedence on the **last** parameter:
 /// 1. **Explicit flag** — `last.is_variadic == true` → `max_args = None`
@@ -150,15 +243,20 @@ fn signatures_from_global_function(
 ///    `СтрШаблон`'s `Значение1-Значение10`; the ellipsis form is reserved
 ///    for symmetry — no current corpus entry uses it.
 /// 4. **Fixed arity** — otherwise `max_args = Some(params.len())`.
-pub(crate) fn signature_from_params(
+pub(crate) fn descriptor_from_params(
     params_in: &[bsl_platform::MethodParam],
-    ret: Ty,
-) -> FunctionSignatureTy {
+    ret: ReturnTypeSpec,
+) -> BuiltinSignature {
     let mut params = Vec::with_capacity(params_in.len());
     let mut defaults = Vec::with_capacity(params_in.len());
     for param in params_in {
-        params
-            .push(param.param_type.as_deref().map(lower_param_type_string).unwrap_or(Ty::Unknown));
+        params.push(
+            param
+                .param_type
+                .as_deref()
+                .map(|s| ParamTypeSpec::Raw(s.to_string()))
+                .unwrap_or(ParamTypeSpec::Unknown),
+        );
         defaults.push(param.is_optional);
     }
 
@@ -177,7 +275,12 @@ pub(crate) fn signature_from_params(
         Some(params.len() as u32)
     };
 
-    FunctionSignatureTy::new_with_defaults(params, defaults, ret).with_max_args(max_args)
+    BuiltinSignature {
+        params: params.into_boxed_slice(),
+        defaults: defaults.into_boxed_slice(),
+        ret,
+        max_args,
+    }
 }
 
 /// Split a capped-variadic name idiom into `(head, tail)` around either
@@ -269,12 +372,23 @@ fn variadic_param_max(name: &str) -> Option<u32> {
 ///
 /// Each entry is a separate insert so future drift (a name appearing in
 /// platform JSON later) is easy to audit and remove.
-fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<FunctionSignatureTy>>) {
+fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<BuiltinSignature>>) {
     // `Новый` is the constructor keyword (`Новый Массив`, `Новый Запрос`).
     // Real call sites are handled in `infer_new_expr`; the signature here
     // exists purely so the resolver / completion treat the bare token as
     // a known builtin name. Not a regular call — typed permissively.
-    insert_pair(sigs, ("новый", "new"), FunctionSignatureTy::function(vec![Ty::Type], Ty::Unknown));
+    // Mirrors the legacy `function(vec![Ty::Type], Ty::Unknown)`:
+    // single required `Тип` parameter, `max_args = Some(1)`.
+    insert_pair(
+        sigs,
+        ("новый", "new"),
+        BuiltinSignature {
+            params: Box::new([ParamTypeSpec::TypeDescriptor]),
+            defaults: Box::new([false]),
+            ret: ReturnTypeSpec::Unknown,
+            max_args: Some(1),
+        },
+    );
 
     // `ОписаниеТипов(<Типы>, [<СписокИсключаемыхТипов>], [<Квалификаторы…>])`
     // is both a type name (class for `Новый ОписаниеТипов(...)`) and a
@@ -285,8 +399,12 @@ fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<FunctionSignatureTy>>) {
     insert_pair(
         sigs,
         ("описаниетипов", "typedescription"),
-        FunctionSignatureTy::new_with_defaults(vec![Ty::Unknown], vec![false], Ty::Unknown)
-            .with_max_args(None),
+        BuiltinSignature {
+            params: Box::new([ParamTypeSpec::Unknown]),
+            defaults: Box::new([false]),
+            ret: ReturnTypeSpec::Unknown,
+            max_args: None,
+        },
     );
 }
 
@@ -299,9 +417,9 @@ fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<FunctionSignatureTy>>) {
 /// is single-overload by design — when a name matters enough to be
 /// hand-curated, we have a specific shape in mind.
 fn insert_pair(
-    sigs: &mut FxHashMap<String, Vec<FunctionSignatureTy>>,
+    sigs: &mut FxHashMap<String, Vec<BuiltinSignature>>,
     (ru, en): (&str, &str),
-    sig: FunctionSignatureTy,
+    sig: BuiltinSignature,
 ) {
     sigs.entry(ru.to_string()).or_insert_with(|| vec![sig.clone()]);
     sigs.entry(en.to_string()).or_insert_with(|| vec![sig]);
@@ -310,6 +428,9 @@ fn insert_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsl_types::facet::DateComponent;
+    use bsl_types::kind::TypeKind;
+    use bsl_types::testing::InMemoryDb;
 
     #[test]
     fn lookup_is_case_insensitive_and_bilingual() {
@@ -322,9 +443,9 @@ mod tests {
     }
 
     /// Helper: assert the lookup returns a single-element overload set and
-    /// hand back the lone signature for further assertions. The vast majority
+    /// hand back the lone descriptor for further assertions. The vast majority
     /// of platform functions go through this path.
-    fn single_signature<'a>(builtins: &'a BuiltinFunctions, name: &str) -> &'a FunctionSignatureTy {
+    fn single_signature<'a>(builtins: &'a BuiltinFunctions, name: &str) -> &'a BuiltinSignature {
         let sigs = builtins.get(name).unwrap_or_else(|| panic!("{name} should exist"));
         assert_eq!(sigs.len(), 1, "{name} should be single-overload, got {} overloads", sigs.len());
         &sigs[0]
@@ -335,12 +456,13 @@ mod tests {
         // The bug that drove the Slice 1 work — НСтр in `platform_data.json`
         // declares `КодЯзыка` with `is_optional=true`. Calling
         // `НСтр("ru = '...'", "ru")` must satisfy arity (required=1, total=2).
+        let db = InMemoryDb::new();
         let builtins = builtin_functions();
         let nstr = single_signature(builtins, "нстр");
-        assert_eq!(nstr.params.len(), 2, "НСтр has 2 declared params");
+        assert_eq!(nstr.param_count(), 2, "НСтр has 2 declared params");
         assert_eq!(nstr.required_count(), 1, "second param is optional, so required=1");
-        assert_eq!(nstr.max_args, Some(2), "fixed arity caps at params.len()");
-        assert_eq!(*nstr.ret, Ty::String);
+        assert_eq!(nstr.max_args(), Some(2), "fixed arity caps at params.len()");
+        assert_eq!(nstr.lower(&db).ret, db.string(None, false));
     }
 
     #[test]
@@ -348,31 +470,34 @@ mod tests {
         // СтрШаблон has the platform idiom `Значение1-Значение10` last param.
         // The adapter must lift it to a hard 11-arg cap (1 template + 10
         // values), not to an unbounded variadic.
+        let db = InMemoryDb::new();
         let builtins = builtin_functions();
         let sig = single_signature(builtins, "стршаблон");
         assert_eq!(
-            sig.max_args,
+            sig.max_args(),
             Some(11),
             "Значение1-Значение10 → cap at (params.len()-1) + 10 = 11"
         );
-        assert_eq!(*sig.ret, Ty::String);
+        assert_eq!(sig.lower(&db).ret, db.string(None, false));
     }
 
     #[test]
     fn strlen_returns_number() {
+        let db = InMemoryDb::new();
         let builtins = builtin_functions();
-        let sig = single_signature(builtins, "стрдлина");
-        assert_eq!(*sig.ret, Ty::Number);
+        let sig = single_signature(builtins, "стрдлина").lower(&db);
+        assert_eq!(sig.ret, db.number(None, None));
         assert_eq!(sig.params.len(), 1);
-        assert_eq!(sig.params[0], Ty::String);
+        assert_eq!(sig.params[0], db.string(None, false));
         assert_eq!(sig.required_count(), 1);
     }
 
     #[test]
     fn currentdate_takes_no_args() {
+        let db = InMemoryDb::new();
         let builtins = builtin_functions();
-        let sig = single_signature(builtins, "текущаядата");
-        assert_eq!(*sig.ret, Ty::Date);
+        let sig = single_signature(builtins, "текущаядата").lower(&db);
+        assert_eq!(sig.ret, db.date(DateComponent::DateTime));
         assert!(sig.params.is_empty());
         assert_eq!(sig.required_count(), 0);
     }
@@ -386,7 +511,7 @@ mod tests {
         // qualifier-list cap.
         let builtins = builtin_functions();
         let sig = single_signature(builtins, "описаниетипов");
-        assert_eq!(sig.max_args, None, "fallback marks truly unbounded variadic");
+        assert_eq!(sig.max_args(), None, "fallback marks truly unbounded variadic");
         assert_eq!(sig.required_count(), 1, "only the type-list is required");
     }
 
@@ -434,7 +559,7 @@ mod tests {
         assert!(!name_implies_unbounded_variadic("X1,...,X-end-"));
     }
 
-    /// `signature_from_params` lifts `max_args = None` for the
+    /// `descriptor_from_params` lifts `max_args = None` for the
     /// `<word>N,...,<word>N` letter-suffix shape, even when the
     /// `MethodParam.is_variadic` JSON flag is `false`. Locks the PR3
     /// Step 1 fix for `FormattedString.На основании строк`.
@@ -446,9 +571,10 @@ mod tests {
             is_optional: true,
             is_variadic: false,
         }];
-        let sig = signature_from_params(&params, Ty::Unknown);
+        let sig = descriptor_from_params(&params, ReturnTypeSpec::Unknown);
         assert_eq!(
-            sig.max_args, None,
+            sig.max_args(),
+            None,
             "letter-suffix `,...,` name idiom must lift max_args to None"
         );
     }
@@ -465,8 +591,8 @@ mod tests {
             is_optional: false,
             is_variadic: true,
         }];
-        let sig = signature_from_params(&params, Ty::Unknown);
-        assert_eq!(sig.max_args, None, "is_variadic=true must lift the cap");
+        let sig = descriptor_from_params(&params, ReturnTypeSpec::Unknown);
+        assert_eq!(sig.max_args(), None, "is_variadic=true must lift the cap");
         assert_eq!(sig.required_count(), 1, "non-optional param stays required");
     }
 
@@ -481,8 +607,8 @@ mod tests {
             is_optional: false,
             is_variadic: true,
         }];
-        let sig = signature_from_params(&params, Ty::Unknown);
-        assert_eq!(sig.max_args, None, "explicit flag must override the cap idiom");
+        let sig = descriptor_from_params(&params, ReturnTypeSpec::Unknown);
+        assert_eq!(sig.max_args(), None, "explicit flag must override the cap idiom");
     }
 
     /// Regression guard for `НСтр`-shaped fixed-arity signatures: with
@@ -505,8 +631,8 @@ mod tests {
                 is_variadic: false,
             },
         ];
-        let sig = signature_from_params(&params, Ty::String);
-        assert_eq!(sig.max_args, Some(2), "fixed-arity cap stays at params.len()");
+        let sig = descriptor_from_params(&params, ReturnTypeSpec::Raw("Строка".to_string()));
+        assert_eq!(sig.max_args(), Some(2), "fixed-arity cap stays at params.len()");
         assert_eq!(sig.required_count(), 1, "optional second param drops required to 1");
     }
 
@@ -514,15 +640,16 @@ mod tests {
     fn return_type_union_is_parsed() {
         // Some platform functions return a comma-separated union
         // (e.g. "Булево, Неопределено"). The adapter must hand it to
-        // `Ty::union` rather than dropping it to Unknown.
-        let union = lower_return_type_string("Булево, Неопределено");
-        // Ty::union of {Boolean, Undefined} is a true union (no collapse).
-        match &union {
-            Ty::Union(parts) => {
-                assert!(parts.contains(&Ty::Boolean));
-                assert!(parts.contains(&Ty::Undefined));
+        // `db.union` rather than dropping it to Unknown.
+        let db = InMemoryDb::new();
+        let union = lower_return_type_string_typeid(&db, "Булево, Неопределено");
+        // A true union of {Boolean, Undefined} (no collapse).
+        match db.lookup_type(union) {
+            TypeKind::Union(parts) => {
+                assert!(parts.contains(&db.boolean()));
+                assert!(parts.contains(&db.undefined()));
             }
-            other => panic!("expected Ty::Union, got {other:?}"),
+            other => panic!("expected TypeKind::Union, got {other:?}"),
         }
     }
 
@@ -530,13 +657,13 @@ mod tests {
     fn none_param_type_maps_to_unknown() {
         // Platform JSON has 7 functions with `param_type = null` (e.g.
         // ОткрытьФорму(Владелец)). The adapter must collapse those to
-        // Ty::Unknown rather than panicking. ОткрытьФорму is also a
+        // `Unknown` rather than panicking. ОткрытьФорму is also a
         // multi-overload page, so the lookup may return several
         // signatures — at least one must have parameters.
         let builtins = builtin_functions();
         if let Some(sigs) = builtins.get("открытьформа") {
             assert!(
-                sigs.iter().any(|s| !s.params.is_empty()),
+                sigs.iter().any(|s| s.param_count() > 0),
                 "at least one ОткрытьФорму overload must have params"
             );
         }
@@ -557,12 +684,25 @@ mod tests {
         // overwrite. We construct a scratch map, prime it with a sentinel
         // overload set under both lowercase keys, then ask `insert_pair`
         // to register a different signature for the same pair.
-        let mut sigs: FxHashMap<String, Vec<FunctionSignatureTy>> = FxHashMap::default();
-        let json_like = FunctionSignatureTy::function(vec![Ty::Number, Ty::Number], Ty::Number);
+        let mut sigs: FxHashMap<String, Vec<BuiltinSignature>> = FxHashMap::default();
+        let json_like = BuiltinSignature {
+            params: Box::new([
+                ParamTypeSpec::Raw("Число".to_string()),
+                ParamTypeSpec::Raw("Число".to_string()),
+            ]),
+            defaults: Box::new([false, false]),
+            ret: ReturnTypeSpec::Raw("Число".to_string()),
+            max_args: Some(2),
+        };
         sigs.insert("foo".into(), vec![json_like.clone()]);
         sigs.insert("bar".into(), vec![json_like.clone()]);
 
-        let fallback = FunctionSignatureTy::function(vec![Ty::String], Ty::String);
+        let fallback = BuiltinSignature {
+            params: Box::new([ParamTypeSpec::Raw("Строка".to_string())]),
+            defaults: Box::new([false]),
+            ret: ReturnTypeSpec::Raw("Строка".to_string()),
+            max_args: Some(1),
+        };
         insert_pair(&mut sigs, ("foo", "bar"), fallback);
 
         // Both keys keep the JSON-like overload set, not the fallback.

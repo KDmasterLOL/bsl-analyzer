@@ -39,6 +39,7 @@ use cfg_types::{BindingId, IdConversion};
 use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
+use hir_def::ty::FunctionSignature;
 use hir_def::ty::SdblProjection;
 use hir_def::ty::Ty;
 use hir_def::{sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId};
@@ -1572,8 +1573,9 @@ impl<'db> InferenceContext<'db> {
                 //
                 // Resolves the platform constructors for the bare type name
                 // (case-insensitive, bilingual via `constructors_by_type`).
-                // Each overload becomes a `FunctionSignatureTy` through the
-                // same adapter that handles global functions, so the
+                // Each overload becomes a `BuiltinSignature` descriptor
+                // through the same adapter that handles global functions
+                // (arity only — `Новый` never type-checks args), so the
                 // PR1/PR2/PR3 `is_variadic` precedence applies uniformly:
                 // explicit JSON flag → `,...,<X>N` name idiom → `<X>N-<X>M`
                 // capped name → fixed arity. Diagnostic fires only when
@@ -1593,10 +1595,16 @@ impl<'db> InferenceContext<'db> {
                         bsl_platform::PlatformDataInner::instance().get_constructors(name.as_str());
                     if !ctors.is_empty() {
                         let arg_count = args.len();
-                        let sigs: Vec<hir_def::ty::FunctionSignatureTy> = ctors
+                        // Constructor arity uses the db-free descriptor
+                        // view only — `Новый` never type-checks args, so no
+                        // kernel lowering is needed here.
+                        let sigs: Vec<builtin::BuiltinSignature> = ctors
                             .iter()
                             .map(|ctor| {
-                                builtin::signature_from_params(&ctor.parameters, Ty::Unknown)
+                                builtin::descriptor_from_params(
+                                    &ctor.parameters,
+                                    builtin::ReturnTypeSpec::Unknown,
+                                )
                             })
                             .collect();
 
@@ -1605,17 +1613,17 @@ impl<'db> InferenceContext<'db> {
                         let mut best_distance = usize::MAX;
                         for (idx, sig) in sigs.iter().enumerate() {
                             let required = sig
-                                .defaults
+                                .defaults()
                                 .iter()
                                 .rposition(|has_default| !*has_default)
                                 .map_or(0, |i| i + 1);
                             let too_few = arg_count < required;
-                            let too_many = sig.max_args.is_some_and(|m| arg_count > m as usize);
+                            let too_many = sig.max_args().is_some_and(|m| arg_count > m as usize);
                             if !too_few && !too_many {
                                 arity_match = Some(idx);
                                 break;
                             }
-                            let upper = sig.max_args.map_or(arg_count, |m| m as usize);
+                            let upper = sig.max_args().map_or(arg_count, |m| m as usize);
                             let distance = if too_few {
                                 required - arg_count
                             } else {
@@ -1630,7 +1638,7 @@ impl<'db> InferenceContext<'db> {
                         if arity_match.is_none() {
                             let sig = &sigs[best_idx];
                             let required = sig
-                                .defaults
+                                .defaults()
                                 .iter()
                                 .rposition(|has_default| !*has_default)
                                 .map_or(0, |i| i + 1);
@@ -1638,7 +1646,7 @@ impl<'db> InferenceContext<'db> {
                                 InferenceDiagnostic::MismatchedArgCount {
                                     call_expr: expr_id,
                                     required_count: required,
-                                    total_count: sig.params.len(),
+                                    total_count: sig.param_count(),
                                     found: arg_count,
                                 },
                             );
@@ -2656,6 +2664,12 @@ impl<'db> InferenceContext<'db> {
                     "BuiltinFunctions::get must never return an empty overload set"
                 );
 
+                // Lower the db-free descriptors to kernel signatures once
+                // for this call site. (Body inference is Salsa-cached, so a
+                // given builtin's strings are re-lowered at most once per
+                // body revision.)
+                let sigs: Vec<FunctionSignature> = sigs.iter().map(|s| s.lower(self.db)).collect();
+
                 for arg in args {
                     self.infer_expr(*arg);
                 }
@@ -2680,11 +2694,7 @@ impl<'db> InferenceContext<'db> {
                 let mut best_idx = 0usize;
                 let mut best_distance = usize::MAX;
                 for (idx, sig) in sigs.iter().enumerate() {
-                    let required = sig
-                        .defaults
-                        .iter()
-                        .rposition(|has_default| !*has_default)
-                        .map_or(0, |i| i + 1);
+                    let required = sig.required_count();
                     let too_few = arg_count < required;
                     let too_many = sig.max_args.is_some_and(|m| arg_count > m as usize);
                     if !too_few && !too_many {
@@ -2692,15 +2702,11 @@ impl<'db> InferenceContext<'db> {
                             arity_match = Some(idx);
                         }
                         // Type check: zip arg types against this overload's
-                        // params; `is_assignable` treats `Ty::Unknown` on
-                        // either side as permissive.
+                        // params; `is_assignable` treats `Unknown` on either
+                        // side as permissive.
                         let types_ok =
                             inferred.iter().zip(sig.params.iter()).all(|(actual, expected)| {
-                                crate::subtype::is_assignable(
-                                    self.db,
-                                    *actual,
-                                    ty_to_typeid(self.db, expected),
-                                )
+                                crate::subtype::is_assignable(self.db, *actual, *expected)
                             });
                         if types_ok && full_match.is_none() {
                             full_match = Some(idx);
@@ -2723,11 +2729,7 @@ impl<'db> InferenceContext<'db> {
                     Some(idx) => &sigs[idx],
                     None => {
                         let sig = &sigs[best_idx];
-                        let required = sig
-                            .defaults
-                            .iter()
-                            .rposition(|has_default| !*has_default)
-                            .map_or(0, |i| i + 1);
+                        let required = sig.required_count();
                         self.push_inference_diagnostic(InferenceDiagnostic::MismatchedArgCount {
                             call_expr: callee,
                             required_count: required,
@@ -2761,14 +2763,14 @@ impl<'db> InferenceContext<'db> {
                 // the legacy emitter would have picked.
                 let overloads_arc: Arc<[Arc<[TypeId]>]> = sigs
                     .iter()
-                    .map(|s| s.params.iter().map(|t| ty_to_typeid(self.db, t)).collect())
+                    .map(|s| s.params.iter().copied().collect())
                     .collect::<Vec<_>>()
                     .into();
                 self.record_call_arg_binding(
                     callee,
                     args,
                     ParamsShape::Overloaded {
-                        flat: chosen.params.iter().map(|t| ty_to_typeid(self.db, t)).collect(),
+                        flat: chosen.params.iter().copied().collect(),
                         overloads: overloads_arc,
                     },
                 );
@@ -2779,9 +2781,9 @@ impl<'db> InferenceContext<'db> {
                 // (e.g. `Булево` for AttachAddIn), so the union path is a
                 // future-proof default.
                 let ret = if sigs.len() == 1 {
-                    ty_to_typeid(self.db, &chosen.ret)
+                    chosen.ret
                 } else {
-                    self.db.union(sigs.iter().map(|s| ty_to_typeid(self.db, &s.ret)).collect())
+                    self.db.union(sigs.iter().map(|s| s.ret).collect())
                 };
                 // Pin the bare callee's cached type so the second pass
                 // in `infer_all` doesn't re-enter `Expr::Path` on the
@@ -4132,76 +4134,62 @@ mod tests {
     /// `BuiltinFunctions::get` returns a slice (multi-overload aware) — for
     /// the single-overload functions exercised here, the lone signature is
     /// at index 0.
-    fn first_sig<'a>(
-        builtins: &'a builtin::BuiltinFunctions,
+    fn first_sig(
+        db: &dyn bsl_types::intern::TypeKernelDb,
+        builtins: &builtin::BuiltinFunctions,
         name: &str,
-    ) -> &'a hir_def::ty::FunctionSignatureTy {
+    ) -> FunctionSignature {
         let sigs = builtins.get(name).unwrap_or_else(|| panic!("{name} should exist"));
-        &sigs[0]
+        sigs[0].lower(db)
     }
 
     #[test]
     fn test_builtin_function_lookup() {
         // Verify builtin functions are accessible for inference.
         // The actual integration happens in infer_expr() for Expr::Path.
+        let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();
 
         // Test that СтрДлина returns Number
-        let strlen_sig = first_sig(builtins, "стрдлина");
-        assert_eq!(*strlen_sig.ret, Ty::Number);
+        let strlen_sig = first_sig(&db, builtins, "стрдлина");
+        assert_eq!(strlen_sig.ret, db.number(None, None));
         assert_eq!(strlen_sig.params.len(), 1);
-        assert_eq!(strlen_sig.params[0], Ty::String);
+        assert_eq!(strlen_sig.params[0], db.string(None, false));
 
         // Test English variant
-        let strlen_en = first_sig(builtins, "strlen");
-        assert_eq!(*strlen_en.ret, Ty::Number);
+        let strlen_en = first_sig(&db, builtins, "strlen");
+        assert_eq!(strlen_en.ret, db.number(None, None));
 
         // Test case-insensitive lookup
         let upper_case = builtins.get("СТРДЛИНА");
         assert!(upper_case.is_some(), "Lookup should be case-insensitive");
-
-        // Test that the resolved type would be correct
-        // When Expr::Path("СтрДлина") is inferred, it should return:
-        // Ty::Function { params: [Ty::String], ret: Ty::Number }
-        let sig = first_sig(builtins, "стрдлина");
-        let ty = Ty::Function {
-            params: sig.params.clone(),
-            defaults: sig.defaults.clone(),
-            max_args: sig.max_args,
-            ret: sig.ret.clone(),
-        };
-        match ty {
-            Ty::Function { params, ret, .. } => {
-                assert_eq!(params.len(), 1);
-                assert_eq!(*ret, Ty::Number);
-            }
-            _ => panic!("Expected Function type"),
-        }
     }
 
     #[test]
     fn test_builtin_date_function() {
+        let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();
 
         // ТекущаяДата() -> Дата
-        let current_date = first_sig(builtins, "текущаядата");
-        assert_eq!(*current_date.ret, Ty::Date);
+        let current_date = first_sig(&db, builtins, "текущаядата");
+        assert_eq!(current_date.ret, db.date(bsl_types::facet::DateComponent::DateTime));
         assert!(current_date.params.is_empty());
 
         // Год(Дата) -> Число
-        let year = first_sig(builtins, "год");
-        assert_eq!(*year.ret, Ty::Number);
+        let year = first_sig(&db, builtins, "год");
+        assert_eq!(year.ret, db.number(None, None));
         assert_eq!(year.params.len(), 1);
-        assert_eq!(year.params[0], Ty::Date);
+        assert_eq!(year.params[0], db.date(bsl_types::facet::DateComponent::DateTime));
     }
 
     #[test]
     fn test_builtin_type_function() {
+        let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();
 
         // ТипЗнч(Any) -> Type
-        let type_of = first_sig(builtins, "типзнч");
-        assert_eq!(*type_of.ret, Ty::Type);
+        let type_of = first_sig(&db, builtins, "типзнч");
+        assert_eq!(type_of.ret, db.type_descriptor());
     }
 
     // ----- Phase O.13 (Lni.1–Lni.3) type-lift unit tests -----
