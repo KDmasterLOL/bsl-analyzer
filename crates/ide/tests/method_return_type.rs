@@ -56,7 +56,9 @@ fn find_method(db: &RootDatabaseImpl, file_id: FileId, name: &str) -> MethodId {
 fn return_ty_for(db: &RootDatabaseImpl, file_id: FileId, name: &str) -> Ty {
     let mid = find_method(db, file_id, name);
     let input = MethodIdInput::new(db, mid);
-    method_return_type_query(db, input)
+    // `method_return_type_query` is kernel-native (§4.D.3); bridge back to
+    // `Ty` so the behavioural assertions stay readable.
+    hir::ty_bridge::typeid_to_ty(db, method_return_type_query(db, input))
 }
 
 // ---------------------------------------------------------------------
@@ -217,5 +219,5 @@ fn return_type_caches_via_salsa() {
     let first = method_return_type_query(&db, input);
     let second = method_return_type_query(&db, input);
     assert_eq!(first, second);
-    assert_eq!(first, Ty::String);
+    assert_eq!(hir::ty_bridge::typeid_to_ty(&db, first), Ty::String);
 }

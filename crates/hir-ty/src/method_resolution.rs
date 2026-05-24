@@ -550,7 +550,12 @@ pub(crate) fn materialise_signature_enriched(
     let mut sig: FunctionSignatureTy = materialise_signature(method_symbol);
     if matches!(*sig.ret, Ty::Unknown) {
         let method_input = hir_def::MethodIdInput::new(db, method_id);
-        let inferred = crate::method_graph::method_return_type_query(db, method_input);
+        // `method_return_type_query` is kernel-native (§4.D.3); bridge its
+        // `TypeId` back into the still-`Ty` `FunctionSignatureTy.ret`.
+        let inferred = crate::ty_bridge::typeid_to_ty(
+            db,
+            crate::method_graph::method_return_type_query(db, method_input),
+        );
         if !matches!(inferred, Ty::Unknown) {
             *sig.ret = inferred;
         }
