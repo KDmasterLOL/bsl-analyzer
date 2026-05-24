@@ -35,18 +35,20 @@
 
 use bsl_config::VisibleConfig;
 use bsl_metadata::{Form, FormElement};
+use bsl_types::builders::Builders;
+use bsl_types::facet::{FormBindingTargetFacet, FormElementFacet};
 use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::{TypeId, TypeKind};
+use bsl_types::testing::RootConfigCtx;
 use hir_def::resolver::Resolver;
-use hir_def::ty::{
-    FormDataBinding, FormDataKind, FormDataTarget, FormElementKind, MetadataKind, Ty,
-};
+use hir_def::ty::{FormDataBinding, FormDataKind, FormDataTarget, MetadataKind, Ty};
 use hir_def::Name;
 
 use crate::db::HirDatabase;
 use crate::field_enum::{FieldInfo, FieldOrigin};
 use crate::field_lookup;
 use crate::form_attr::lower_form_attribute_to_ty;
-use crate::ty_bridge::ty_to_typeid;
+use crate::ty_bridge::form_binding_to_facet;
 
 /// Russian platform type name for the form-elements collection.
 pub const FORM_ITEMS_TYPE_RU: &str = "ВсеЭлементыФормы";
@@ -87,18 +89,17 @@ pub fn is_form_items_collection_ty(ty: &Ty) -> bool {
 pub(crate) fn lookup_form_item_field(
     db: &dyn HirDatabase,
     resolver: &Resolver,
-    base_ty: &Ty,
+    receiver: TypeId,
     field: &Name,
 ) -> Option<FieldInfo> {
-    let is_form_items_receiver = match base_ty {
-        Ty::PlatformObject(name) => {
-            // BSL identifiers are case-insensitive AND the platform names
-            // are Cyrillic — ASCII case folding (`eq_ignore_ascii_case`)
-            // does NOT cover Cyrillic, so a mixed-case spelling like
-            // `вСеЭлементыФормы` would silently miss. Use `Name::eq_ignore_case`
-            // which lowercases both sides via the same Unicode-aware
-            // path the rest of the resolver uses (mirrors `scope.rs` /
-            // `narrow.rs`).
+    // BSL identifiers are case-insensitive AND the platform names are
+    // Cyrillic — ASCII case folding does NOT cover Cyrillic, so a
+    // mixed-case spelling like `вСеЭлементыФормы` would silently miss.
+    // `Name::eq_ignore_case` lowercases both sides via the same
+    // Unicode-aware path the rest of the resolver uses.
+    let is_form_items_receiver = match db.lookup_type(receiver) {
+        TypeKind::PlatformObject(facet) => {
+            let name = Name::new(facet.name.as_str());
             name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_RU))
                 || name.eq_ignore_case(&Name::new(FORM_ITEMS_TYPE_EN))
         }
@@ -115,11 +116,10 @@ pub(crate) fn lookup_form_item_field(
     let form = metadata.form.as_ref()?;
     let element = form.find_element(field.as_str())?;
     let configs = db.configurations(module_id.file_id);
-    let ty = lower_form_element(db, form, element, &configs);
     Some(FieldInfo {
         name: Name::new(&element.name),
         name_en: None,
-        ty: ty_to_typeid(db, &ty),
+        ty: lower_form_element(db, form, element, &configs),
         value_ty: None,
         is_readonly: true,
         origin: FieldOrigin::PlatformProperty,
@@ -145,13 +145,18 @@ pub(crate) fn lower_form_element(
     form: &Form,
     element: &FormElement,
     configs: &[VisibleConfig],
-) -> Ty {
+) -> TypeId {
+    // `resolve_data_path` is still `Ty`-native (its `FormDataBinding`
+    // provenance types are `hir_def::ty` and die with `Ty` in §4.E.6);
+    // convert its result to the kernel `FormBindingFacet` at this
+    // boundary via the existing bridge.
     let binding = element
         .data_path
         .as_deref()
         .filter(|dp| !dp.starts_with('~'))
-        .and_then(|dp| resolve_data_path(db, dp, form, configs));
-    Ty::FormControl { kind: element.kind, binding }
+        .and_then(|dp| resolve_data_path(db, dp, form, configs))
+        .map(|b| form_binding_to_facet(db, &b));
+    db.mk_form_control(element.kind, binding)
 }
 
 /// Build the row Ty for a tabular-section binding — the same shape
@@ -159,13 +164,21 @@ pub(crate) fn lower_form_element(
 /// iteration. `MetadataKind::TabularSectionRow { parent: mdo }` carries
 /// the column schema; the qualified name `"Owner.Section"` lets the
 /// enumerator find the section inside the right MDO.
-fn row_ty_of_tabular_section_target(target: &FormDataTarget) -> Option<Ty> {
+fn row_typeid_of_tabular_section_target(
+    db: &dyn TypeKernelDb,
+    target: &FormBindingTargetFacet,
+) -> Option<TypeId> {
     match target {
-        FormDataTarget::TabularSection { mdo_type, owner, section } => Some(Ty::MetadataRef {
-            kind: MetadataKind::TabularSectionRow { parent: *mdo_type },
-            name: Name::new(&format!("{}.{}", owner.as_str(), section.as_str())),
-        }),
-        FormDataTarget::Attribute { .. } => None,
+        FormBindingTargetFacet::TabularSection { mdo_ref, section } => {
+            let qualified = format!("{}.{}", mdo_ref.name.as_str(), section.as_str());
+            Some(db.metadata_ref(
+                MetadataKind::TabularSectionRow { parent: mdo_ref.mdo_type },
+                qualified,
+                &RootConfigCtx,
+            ))
+        }
+        FormBindingTargetFacet::Attribute { .. } => None,
+        _ => None,
     }
 }
 
@@ -191,14 +204,17 @@ fn row_ty_of_tabular_section_target(target: &FormDataTarget) -> Option<Ty> {
 /// properties — the slot itself is read-only.
 pub(crate) fn refine_form_control_property(
     db: &dyn TypeKernelDb,
-    receiver_ty: &Ty,
+    receiver: TypeId,
     field: &Name,
 ) -> Option<FieldInfo> {
-    let Ty::FormControl { kind: FormElementKind::Table, binding: Some(binding) } = receiver_ty
-    else {
-        return None;
+    // Extract the binding target (owned) before any builder callback.
+    let target = match db.lookup_type(receiver) {
+        TypeKind::FormControl { kind: FormElementFacet::Table, binding: Some(binding) } => {
+            binding.target.clone()
+        }
+        _ => return None,
     };
-    let row = row_ty_of_tabular_section_target(binding.target())?;
+    let row = row_typeid_of_tabular_section_target(db, &target)?;
 
     // Bilingual canonical names — recreated as `Name` so
     // `eq_ignore_case` runs the same Unicode-aware fold the rest of
@@ -220,9 +236,9 @@ pub(crate) fn refine_form_control_property(
     let (canonical_ru, canonical_en, ty, is_readonly) =
         if field.eq_ignore_case(&selected_rows_ru) || field.eq_ignore_case(&selected_rows_en) {
             // `.ВыделенныеСтроки` — refined from platform's bare `Массив`
-            // to `TypedArray(row)` so iteration / indexing yields the
-            // section row Ty rather than `Произвольный → Unknown`.
-            (selected_rows_ru, selected_rows_en, Ty::TypedArray(Box::new(row)), true)
+            // to a typed array over `row` so iteration / indexing yields
+            // the section row type rather than `Произвольный → Unknown`.
+            (selected_rows_ru, selected_rows_en, db.array(Some(row)), true)
         } else if field.eq_ignore_case(&current_row_ru) || field.eq_ignore_case(&current_row_en) {
             (current_row_ru, current_row_en, row, false)
         } else if field.eq_ignore_case(&current_data_ru) || field.eq_ignore_case(&current_data_en) {
@@ -234,7 +250,7 @@ pub(crate) fn refine_form_control_property(
     Some(FieldInfo {
         name: canonical_ru,
         name_en: Some(canonical_en),
-        ty: ty_to_typeid(db, &ty),
+        ty,
         value_ty: None,
         is_readonly,
         origin: FieldOrigin::PlatformProperty,
@@ -336,11 +352,15 @@ mod tests {
     use super::*;
     use bsl_types::testing::InMemoryDb;
 
-    /// §4.G.1 test shim: bridges the db-less readable test calls through a
-    /// fresh sandbox [`InMemoryDb`] (used only inside `resolve_data_path`'s
-    /// `lookup_field` receiver bridge).
+    use crate::ty_bridge::ty_to_typeid;
+
+    /// Test shim: the kernel-native `lower_form_element` now returns a
+    /// `TypeId`; bridge back to `Ty` so the shape-asserting tests below
+    /// read in the source type language.
     fn lower_form_element(form: &Form, element: &FormElement, configs: &[VisibleConfig]) -> Ty {
-        super::lower_form_element(&InMemoryDb::new(), form, element, configs)
+        let db = InMemoryDb::new();
+        let id = super::lower_form_element(&db, form, element, configs);
+        crate::ty_bridge::typeid_to_ty(&db, id)
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,7 +375,8 @@ mod tests {
 
     fn refine_form_control_property(receiver_ty: &Ty, field: &Name) -> Option<FieldInfoForTest> {
         let db = InMemoryDb::new();
-        super::refine_form_control_property(&db, receiver_ty, field).map(|info| FieldInfoForTest {
+        let receiver = ty_to_typeid(&db, receiver_ty);
+        super::refine_form_control_property(&db, receiver, field).map(|info| FieldInfoForTest {
             name: info.name,
             name_en: info.name_en,
             ty: crate::ty_bridge::typeid_to_ty(&db, info.ty),

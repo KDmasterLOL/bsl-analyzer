@@ -33,12 +33,16 @@
 
 use bsl_config::VisibleConfig;
 use bsl_metadata::{AttributeType, FormAttribute};
+use bsl_types::builders::Builders;
+use bsl_types::facet::{FormDataFacet, MdoRefFacet};
+use bsl_types::intern::TypeKernelDb;
+use bsl_types::kind::TypeId;
 use hir_def::resolver::Resolver;
 use hir_def::ty::{FormDataKind, MetadataKind, Ty};
 use hir_def::Name;
 
 use crate::db::HirDatabase;
-use crate::field_enum::attribute_type_to_ty;
+use crate::field_enum::{attribute_type_to_ty, attribute_type_to_typeid};
 
 /// Pure adapter from a [`FormAttribute`] declaration to a [`Ty`].
 ///
@@ -90,6 +94,48 @@ pub fn lower_form_attribute_to_ty(attr: &FormAttribute, configs: &[VisibleConfig
     attribute_type_to_ty(&attr.attr_type, configs)
 }
 
+/// Kernel-native counterpart of [`lower_form_attribute_to_ty`].
+///
+/// Same lowering rules, building `TypeKind` directly via `db.mk_form_data`
+/// / [`attribute_type_to_typeid`] instead of `Ty`. Used by the flipped
+/// `resolve_form_attribute` / `module_implicit` / `lower_form_element`
+/// pipelines (§4.E.4f). The `Ty` version is kept for `resolve_data_path`
+/// (still Ty-native — its `FormDataBinding` provenance types die with
+/// `Ty` in §4.E.6) and the shape-asserting unit tests.
+pub fn lower_form_attribute_to_typeid(
+    db: &dyn TypeKernelDb,
+    attr: &FormAttribute,
+    configs: &[VisibleConfig],
+) -> TypeId {
+    let has_columns = !attr.columns.is_empty();
+
+    if attr.is_main {
+        let kind = if has_columns {
+            FormDataFacet::StructureWithCollection
+        } else {
+            FormDataFacet::Structure
+        };
+
+        if let AttributeType::Ref { mdo_type, name: mdo_name } = &attr.attr_type {
+            if MetadataKind::object_kind_for(*mdo_type).is_some() {
+                return db.mk_form_data(
+                    kind,
+                    Some(MdoRefFacet::new(*mdo_type, mdo_name.as_str().to_string())),
+                );
+            }
+        }
+        if matches!(&attr.attr_type, AttributeType::AnyObjectRef { .. }) {
+            return db.mk_form_data(kind, None);
+        }
+    }
+
+    if has_columns {
+        return db.mk_form_data(FormDataFacet::Collection, None);
+    }
+
+    attribute_type_to_typeid(db, &attr.attr_type, configs)
+}
+
 /// Resolve a bare identifier as a managed-form attribute.
 ///
 /// Returns `Some(Ty)` only when **all** are true:
@@ -106,7 +152,7 @@ pub(crate) fn resolve_form_attribute(
     db: &dyn HirDatabase,
     resolver: &Resolver,
     name: &Name,
-) -> Option<Ty> {
+) -> Option<TypeId> {
     // Cheap gate FIRST so non-form modules pay nothing —
     // `is_managed_form_module` checks the FormType and the form payload's
     // presence, both of which are already cached on `module_metadata`.
@@ -119,12 +165,11 @@ pub(crate) fn resolve_form_attribute(
     let form = metadata.form.as_ref()?;
     let attr = form.find_attribute(name.as_str())?;
 
-    // `attribute_type_to_ty` reads `configs` only for `DefinedType` chain
-    // unwrapping; pre-computing the slice here avoids paying that cost on
-    // the common Structure/Collection short-circuits but keeps the call
-    // shape pure for testing (see [`lower_form_attribute_to_ty`]).
+    // `attribute_type_to_typeid` reads `configs` only for `DefinedType`
+    // chain unwrapping; pre-computing the slice here avoids paying that
+    // cost on the common Structure/Collection short-circuits.
     let configs = db.configurations(module_id.file_id);
-    Some(lower_form_attribute_to_ty(attr, &configs))
+    Some(lower_form_attribute_to_typeid(db, attr, &configs))
 }
 
 #[cfg(test)]

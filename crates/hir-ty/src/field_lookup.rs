@@ -31,7 +31,6 @@ use bsl_types::testing::RootConfigCtx;
 use hir_def::Name;
 
 use crate::field_enum::enumerate_fields_inner;
-use crate::ty_bridge::typeid_to_ty;
 
 /// Project a [`Ty::FormData`] receiver to the underlying MDO for **field**
 /// resolution.
@@ -188,15 +187,11 @@ fn lookup_field_inner(
     // Phase 5 row-aware refinement on `FormControl{Table, Some(b)}`:
     // `.ВыделенныеСтроки` / `.ТекущаяСтрока` / `.ТекущиеДанные` and their
     // English aliases override the platform's bare `Массив` (or row-shaped)
-    // property types with `TypedArray(row)` / `row`. Non-refined properties
-    // fall through to the platform-property adapter below. Both run on the
-    // ORIGINAL receiver (not `effective_ty`) — FormControl never gets
-    // FormData projection or ThisObject coercion applied.
-    //
-    // `refine_form_control_property` is still `Ty`-native (form_items,
-    // §4.E.4f); bridge the receiver here at the one call site.
-    if let Some(refined) =
-        crate::form_items::refine_form_control_property(db, &typeid_to_ty(db, receiver), field_name)
+    // property types. Non-refined properties fall through to the
+    // platform-property adapter below. Both run on the ORIGINAL receiver
+    // (not `effective_ty`) — FormControl never gets FormData projection or
+    // ThisObject coercion applied.
+    if let Some(refined) = crate::form_items::refine_form_control_property(db, receiver, field_name)
     {
         return Some(refined);
     }
@@ -363,7 +358,7 @@ fn lookup_field_via_platform_property(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty_bridge::ty_to_typeid;
+    use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
     use hir_def::ty::Ty;
 
     #[derive(Debug, Clone, PartialEq, Eq)]

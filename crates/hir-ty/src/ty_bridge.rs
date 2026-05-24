@@ -366,7 +366,10 @@ fn projection_facet_to_sdbl_projection(
     facet.projection.as_ref().map(|p| projection_to_sdbl_projection(db, p))
 }
 
-fn form_binding_to_facet(db: &dyn TypeKernelDb, binding: &FormDataBinding) -> FormBindingFacet {
+pub(crate) fn form_binding_to_facet(
+    db: &dyn TypeKernelDb,
+    binding: &FormDataBinding,
+) -> FormBindingFacet {
     let path = binding.path().iter().map(|name| ty_name_to_kernel(name, "FormControl")).collect();
     let target = match binding.target() {
         FormDataTarget::TabularSection { mdo_type, owner, section } => {

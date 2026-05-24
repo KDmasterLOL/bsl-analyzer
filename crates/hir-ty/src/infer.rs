@@ -1139,12 +1139,8 @@ impl<'db> InferenceContext<'db> {
                         let base_ty = self.infer_expr(ExprId::from_idx(*base));
                         let configs = self.db.configurations(self.file_id);
                         let resolver = self.get_resolver();
-                        let base_ty_for_form = typeid_to_ty(self.db, base_ty);
                         let info = crate::form_items::lookup_form_item_field(
-                            self.db,
-                            &resolver,
-                            &base_ty_for_form,
-                            field,
+                            self.db, &resolver, base_ty, field,
                         )
                         .or_else(|| {
                             crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
@@ -1492,13 +1488,9 @@ impl<'db> InferenceContext<'db> {
                 // the bodies that observed it.
                 let configs = self.db.configurations(self.file_id);
                 let resolver = self.get_resolver();
-                let base_ty_for_form = typeid_to_ty(self.db, base_ty);
-                if let Some(info) = crate::form_items::lookup_form_item_field(
-                    self.db,
-                    &resolver,
-                    &base_ty_for_form,
-                    field,
-                ) {
+                if let Some(info) =
+                    crate::form_items::lookup_form_item_field(self.db, &resolver, base_ty, field)
+                {
                     info.ty
                 } else if let Some(info) =
                     crate::field_lookup::lookup_field(self.db, &configs, base_ty, field)
@@ -1950,7 +1942,7 @@ impl<'db> InferenceContext<'db> {
         if !user_shadows && !body_binding_shadows {
             if let Some(ty) = crate::form_attr::resolve_form_attribute(self.db, &resolver, name) {
                 trace!("resolved {} as managed-form attribute", name);
-                return ty_to_typeid(self.db, &ty);
+                return ty;
             }
         }
 
