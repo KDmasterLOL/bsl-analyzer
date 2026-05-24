@@ -754,7 +754,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
                 // via the type kernel; the `Semantics` boundary keeps
                 // its `Ty` surface intact.
                 let base = routed.type_of_expr(self.db, expr_id).unwrap_or(Ty::Unknown);
-                return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base);
+                // Phase 3 §4.G.3: `narrow_or_base` operates in kernel
+                // `TypeId` space; bridge in/out so `Semantics` keeps its
+                // `Ty` surface. The full TypeId flip lands in §4.G.5.
+                let base_id = hir_ty::ty_bridge::ty_to_typeid(self.db, &base);
+                let narrowed =
+                    narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base_id);
+                return hir_ty::ty_bridge::typeid_to_ty(self.db, narrowed);
             }
         }
 
@@ -767,7 +773,10 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
                 let owner = DefWithBodyId::Method(local_id);
                 let routed = infer_owner(self.db, file_id, owner);
                 let base = routed.type_of_expr(self.db, expr_id).unwrap_or(Ty::Unknown);
-                return narrow_or_base(self.db, file_id, owner, body, expr_id, base);
+                // Phase 3 §4.G.3: bridge through kernel `TypeId` space.
+                let base_id = hir_ty::ty_bridge::ty_to_typeid(self.db, &base);
+                let narrowed = narrow_or_base(self.db, file_id, owner, body, expr_id, base_id);
+                return hir_ty::ty_bridge::typeid_to_ty(self.db, narrowed);
             }
         }
 

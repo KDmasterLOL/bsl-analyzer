@@ -67,7 +67,6 @@ pub fn ty_from_bare_name(name: &str) -> Ty {
 }
 
 /// Kernel-native counterpart of [`ty_from_bare_name`].
-#[allow(dead_code, reason = "Phase 3 §4.B producer — callers migrate in 4.C-4.E")]
 pub fn bare_name_to_typeid(db: &dyn TypeKernelDb, name: &str) -> TypeId {
     ty_to_typeid(db, &ty_from_bare_name(name))
 }

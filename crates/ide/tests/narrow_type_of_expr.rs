@@ -25,8 +25,8 @@
 //! can exercise without changing the caching strategy elsewhere in the crate.
 
 use hir::{
-    narrow_query, narrowed_type_at, DefDatabase, DefWithBodyId, ExprId, IdConversion, ModuleId,
-    Name, Semantics, Ty, Type,
+    narrow_query, narrowed_type_at, ty_bridge, DefDatabase, DefWithBodyId, ExprId, IdConversion,
+    ModuleId, Name, Semantics, Ty, Type,
 };
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
@@ -160,7 +160,8 @@ fn narrowed_type_at_then_body_returns_narrowed_ty() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
+            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
         Some(Ty::String),
         "then-body `Х` must observe the narrowed Ty::String (True-edge overlay)"
     );
@@ -212,7 +213,8 @@ fn narrowed_type_at_guard_receiver_returns_pre_narrow_reaching_ty() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
+            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
         Some(Ty::Number),
         "guard-receiver `Х` observes the pre-narrow reaching type (Number from `Х = 42`), \
          not the narrowed one (String)"
@@ -266,7 +268,8 @@ fn narrowed_type_at_after_one_sided_if_on_parameter_drops() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
+            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
         None,
         "post-КонецЕсли `Х` must drop the one-sided narrowing (entry only in True branch)"
     );
@@ -354,7 +357,8 @@ fn narrow_is_case_insensitive_across_guard_and_hover() {
     // the lowercase-receiver guard. If case-folding regresses this
     // returns `None` and `Semantics::type_of_expr` falls back to base.
     assert_eq!(
-        narrowed_type_at(&result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
+            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
         Some(Ty::String),
         "mixed-case guard receiver (`х`) must narrow the uppercase reference (`Х`)"
     );
@@ -404,7 +408,8 @@ fn narrow_query_handles_module_code_body() {
     let result = narrow_query(&db, file_id, DefWithBodyId::ModuleCode)
         .expect("narrow_query must converge for ModuleCode");
     assert_eq!(
-        narrowed_type_at(&result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
+            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
         Some(Ty::String),
         "module-code narrowing must reach the then-body Х"
     );
@@ -465,7 +470,8 @@ fn narrowed_type_at_else_body_inherits_reaching_when_complement_degrades() {
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
     assert_eq!(
-        narrowed_type_at(&result, expr_id.to_idx(), &Name::new("Х")),
+        narrowed_type_at(&db, &result, expr_id.to_idx(), &Name::new("Х"))
+            .map(|id| ty_bridge::typeid_to_ty(&db, id)),
         Some(Ty::Number),
         "else-body Х inherits the Conditional-IN reaching type when the complement is Unknown"
     );

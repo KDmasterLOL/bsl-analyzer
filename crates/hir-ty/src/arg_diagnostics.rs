@@ -189,7 +189,7 @@ pub fn arg_diagnostics_query(
                 // Phase 3 §4.D: accessor now bridges the stored `TypeId`
                 // back to `Ty`; takes `db` and returns an owned value.
                 let base = infer.type_of_expr_in(db, binding.owner, *arg_id).unwrap_or(Ty::Unknown);
-                narrow_arg(narrow, body, *arg_id, base)
+                narrow_arg(db, narrow, body, *arg_id, base)
             })
             .collect();
         narrow_arg_ns += narrow_arg_start.elapsed().as_nanos();
@@ -374,6 +374,7 @@ fn log_owner_stats(
 /// `arg_diagnostics_query` would otherwise re-pay the lookup cost
 /// once per arg.
 fn narrow_arg(
+    db: &dyn HirDatabase,
     narrow: Option<&dataflow::DataflowResult<NarrowState>>,
     body: &Body,
     expr_id: ExprId,
@@ -385,9 +386,12 @@ fn narrow_arg(
     let Expr::Path(name) = body.expr(expr_id) else {
         return base;
     };
-    match narrowed_type_at(result, expr_id.to_idx(), name) {
-        Some(narrowed) if !matches!(narrowed, Ty::Unknown) => narrowed,
-        _ => base,
+    // Phase 3 §4.G.3: `narrowed_type_at` now returns a kernel `TypeId`
+    // (and `None` when the overlay carries no narrowing). Bridge back to
+    // `Ty` here; the full TypeId flip of `arg_types` lands in §4.G.4.
+    match narrowed_type_at(db, result, expr_id.to_idx(), name) {
+        Some(id) => crate::ty_bridge::typeid_to_ty(db, id),
+        None => base,
     }
 }
 
