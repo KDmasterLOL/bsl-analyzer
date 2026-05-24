@@ -23,13 +23,14 @@
 pub use crate::field_enum::FieldInfo;
 
 use bsl_config::VisibleConfig;
+use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::ty::{FormDataKind, MetadataKind, Ty};
 use hir_def::Name;
 
-use crate::field_enum::{enumerate_fields_ty, FieldInfoTy};
-use crate::ty_bridge::typeid_to_ty;
+use crate::field_enum::enumerate_fields_inner;
+use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
 
 /// Project a [`Ty::FormData`] receiver to the underlying MDO for **field**
 /// resolution.
@@ -60,10 +61,11 @@ pub(crate) fn project_form_data_for_fields(ty: &Ty) -> Option<Ty> {
 }
 
 fn lookup_form_data_tabular_section_field(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     receiver_ty: &Ty,
     field_name: &Name,
-) -> Option<FieldInfoTy> {
+) -> Option<FieldInfo> {
     let Ty::FormData { kind, underlying: Some((mdo_type, mdo_name)) } = receiver_ty else {
         return None;
     };
@@ -84,13 +86,14 @@ fn lookup_form_data_tabular_section_field(
         };
 
         let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
-        return Some(FieldInfoTy {
+        let ty = Ty::FormData {
+            kind: FormDataKind::Collection,
+            underlying: Some((*mdo_type, qualified)),
+        };
+        return Some(FieldInfo {
             name: Name::new(ts.name()),
             name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
-            ty: Ty::FormData {
-                kind: FormDataKind::Collection,
-                underlying: Some((*mdo_type, qualified)),
-            },
+            ty: ty_to_typeid(db, &ty),
             value_ty: None,
             is_readonly: false,
             origin: crate::field_enum::FieldOrigin::TabularSection,
@@ -113,12 +116,6 @@ fn lookup_form_data_tabular_section_field(
 /// `configs` should be the visible configurations for the receiver's file
 /// (`db.configurations(file_id)`).
 ///
-/// Phase 3 §4.G.1: the public receiver is a kernel [`TypeId`]
-/// (boundary-flip, mirrors `method_lookup` / `iteration_lookup`). The body
-/// bridges to [`typeid_to_ty`] once and runs the verbatim Ty pipeline in
-/// [`lookup_field_ty`]; the inner pipeline still speaks `Ty` because it
-/// leans on out-of-§4.G helpers (`field_enum`, `platform_property_lookup`,
-/// `form_items`). `FieldInfo.ty` flips to `TypeId` in §4.G.2.
 pub fn lookup_field(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
@@ -126,20 +123,15 @@ pub fn lookup_field(
     field_name: &Name,
 ) -> Option<FieldInfo> {
     let receiver_ty = typeid_to_ty(db, receiver);
-    lookup_field_ty(configs, &receiver_ty, field_name)
-        .map(|f| crate::field_enum::field_info_ty_to_kernel(db, f))
+    lookup_field_inner(db, configs, &receiver_ty, field_name)
 }
 
-/// Verbatim `&Ty` field-lookup pipeline behind the [`lookup_field`]
-/// boundary. Internal recursion (union-intersection over arms) calls this
-/// directly to avoid a needless intern round-trip per arm. Builds the
-/// db-free [`FieldInfoTy`]; the public [`lookup_field`] interns at the
-/// boundary (§4.G.2).
-fn lookup_field_ty(
+fn lookup_field_inner(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     receiver_ty: &Ty,
     field_name: &Name,
-) -> Option<FieldInfoTy> {
+) -> Option<FieldInfo> {
     // SDBL projection branch — when `Ty::QueryResultSelection` carries
     // a resolved projection (Phase 1.3b+ synthesises it; Slice 1 only
     // ever passes `None` here), field lookup consults the projection's
@@ -147,11 +139,12 @@ fn lookup_field_ty(
     // `ВыборкаИзРезультатаЗапроса` surface. A miss in the projection
     // does NOT short-circuit — it falls through so platform properties
     // like `.НомерСтроки` / `.СледующаяСтрока` still resolve.
-    if let Some(info) = lookup_field_in_query_projection(receiver_ty, field_name) {
+    if let Some(info) = lookup_field_in_query_projection(db, receiver_ty, field_name) {
         return Some(info);
     }
 
-    if let Some(info) = lookup_form_data_tabular_section_field(configs, receiver_ty, field_name) {
+    if let Some(info) = lookup_form_data_tabular_section_field(db, configs, receiver_ty, field_name)
+    {
         return Some(info);
     }
 
@@ -184,10 +177,10 @@ fn lookup_field_ty(
     let effective_ty = coerced.as_ref().unwrap_or(projected_ty);
 
     if let Ty::Union(arms) = effective_ty {
-        return lookup_field_in_union_intersection(configs, arms, field_name);
+        return lookup_field_in_union_intersection(db, configs, arms, field_name);
     }
     if matches!(effective_ty, Ty::MetadataRef { .. }) {
-        return lookup_field_on_metadata_ref(configs, effective_ty, field_name);
+        return lookup_field_on_metadata_ref(db, configs, effective_ty, field_name);
     }
     // Phase 5 row-aware refinement on `Ty::FormControl{Table, Some(b)}`:
     // `.ВыделенныеСтроки` / `.ТекущаяСтрока` / `.ТекущиеДанные` and
@@ -199,11 +192,12 @@ fn lookup_field_ty(
     // [`Ty::platform_type_name`]. Both run on the ORIGINAL receiver
     // (not `effective_ty`) — FormControl never gets FormData projection
     // or ThisObject coercion applied.
-    if let Some(refined) = crate::form_items::refine_form_control_property(receiver_ty, field_name)
+    if let Some(refined) =
+        crate::form_items::refine_form_control_property(db, receiver_ty, field_name)
     {
         return Some(refined);
     }
-    lookup_field_via_platform_property(receiver_ty, field_name)
+    lookup_field_via_platform_property(db, receiver_ty, field_name)
 }
 
 /// Resolve a field on a [`Ty::Union`] receiver via **intersection** over
@@ -222,32 +216,33 @@ fn lookup_field_ty(
 ///   ThisObject coercion, FormControl refinement, …) runs again — the
 ///   helper deliberately does not bypass the orchestrator for the
 ///   degenerate one-arm case.
-/// - Multi-arm result merges per-arm `Ty` via [`Ty::union`]; the first
+/// - Multi-arm result merges per-arm `TypeId` via [`TypeKernelDb::union`]; the first
 ///   arm's `name`/`name_en`/`origin` win (cohesion: the surface text
 ///   stays stable). `is_readonly` is the **disjunction** —
 ///   writeable iff EVERY arm is writeable, i.e. a single read-only arm
 ///   makes the union read-only.
 fn lookup_field_in_union_intersection(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     arms: &[Ty],
     field_name: &Name,
-) -> Option<FieldInfoTy> {
+) -> Option<FieldInfo> {
     let live: Vec<&Ty> = arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)).collect();
     if live.is_empty() {
         return None;
     }
     if live.len() == 1 {
-        return lookup_field_ty(configs, live[0], field_name);
+        return lookup_field_inner(db, configs, live[0], field_name);
     }
-    let mut per_arm: Vec<FieldInfoTy> = Vec::with_capacity(live.len());
+    let mut per_arm: Vec<FieldInfo> = Vec::with_capacity(live.len());
     for arm in &live {
-        let info = lookup_field_ty(configs, arm, field_name)?;
+        let info = lookup_field_inner(db, configs, arm, field_name)?;
         per_arm.push(info);
     }
     let first = &per_arm[0];
-    let merged_ty = Ty::union(per_arm.iter().map(|f| f.ty.clone()).collect());
+    let merged_ty = db.union(per_arm.iter().map(|f| f.ty).collect());
     let merged_readonly = per_arm.iter().any(|f| f.is_readonly);
-    Some(FieldInfoTy {
+    Some(FieldInfo {
         name: first.name.clone(),
         name_en: first.name_en.clone(),
         ty: merged_ty,
@@ -268,12 +263,13 @@ fn lookup_field_in_union_intersection(
 /// Caller is expected to pre-coerce `ThisObject` / project `FormData`
 /// before passing the receiver — see [`lookup_field`] orchestrator.
 fn lookup_field_on_metadata_ref(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     effective_ty: &Ty,
     field_name: &Name,
-) -> Option<FieldInfoTy> {
+) -> Option<FieldInfo> {
     let needle = field_name.as_str().to_lowercase();
-    enumerate_fields_ty(configs, effective_ty).into_iter().find(|f| {
+    enumerate_fields_inner(db, configs, effective_ty).into_iter().find(|f| {
         f.name.as_str().to_lowercase() == needle
             || f.name_en.as_ref().is_some_and(|en| en.as_str().to_lowercase() == needle)
     })
@@ -294,7 +290,11 @@ fn lookup_field_on_metadata_ref(
 /// Case-insensitive bilingual match: BSL field-access is case-folded
 /// the same way platform method lookup is. Same posture as
 /// [`lookup_field_on_metadata_ref`].
-fn lookup_field_in_query_projection(receiver_ty: &Ty, field_name: &Name) -> Option<FieldInfoTy> {
+fn lookup_field_in_query_projection(
+    db: &dyn TypeKernelDb,
+    receiver_ty: &Ty,
+    field_name: &Name,
+) -> Option<FieldInfo> {
     let projection = match receiver_ty {
         Ty::QueryResultSelection { projection: Some(p) } => p,
         // Phase H Slice 3 — projected `ValueTableRow` mirrors the
@@ -306,10 +306,10 @@ fn lookup_field_in_query_projection(receiver_ty: &Ty, field_name: &Name) -> Opti
     };
     let needle = field_name.as_str().to_lowercase();
     projection.fields.iter().find(|(n, _)| n.as_str().to_lowercase() == needle).map(|(n, ty)| {
-        FieldInfoTy {
+        FieldInfo {
             name: n.clone(),
             name_en: None,
-            ty: ty.clone(),
+            ty: ty_to_typeid(db, ty),
             value_ty: None,
             // SDBL projection fields are not writeable through the
             // selection cursor — `Выборка.X = ...` is a runtime error.
@@ -337,12 +337,16 @@ fn lookup_field_in_query_projection(receiver_ty: &Ty, field_name: &Name) -> Opti
 /// not leak into the platform-property channel (e.g. a `FormControl`
 /// receiver must keep its `FormControl` identity through this fallback,
 /// not get projected away).
-fn lookup_field_via_platform_property(receiver_ty: &Ty, field_name: &Name) -> Option<FieldInfoTy> {
+fn lookup_field_via_platform_property(
+    db: &dyn TypeKernelDb,
+    receiver_ty: &Ty,
+    field_name: &Name,
+) -> Option<FieldInfo> {
     let res = crate::platform_property_lookup::lookup_platform_property(receiver_ty, field_name)?;
-    Some(FieldInfoTy {
+    Some(FieldInfo {
         name: field_name.clone(),
         name_en: None,
-        ty: res.return_ty,
+        ty: ty_to_typeid(db, &res.return_ty),
         value_ty: None,
         is_readonly: res.is_readonly,
         origin: crate::field_enum::FieldOrigin::PlatformProperty,
@@ -353,16 +357,31 @@ fn lookup_field_via_platform_property(receiver_ty: &Ty, field_name: &Name) -> Op
 mod tests {
     use super::*;
 
-    /// §4.G test shim: readable `&Ty` test calls assert on a `Ty`-typed
-    /// `.ty`. Route through the db-free [`lookup_field_ty`] (yields the
-    /// `Ty`-typed [`FieldInfoTy`]) so assertions stay on `Ty` without a
-    /// throwaway interner.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FieldInfoForTest {
+        name: Name,
+        name_en: Option<Name>,
+        ty: Ty,
+        value_ty: Option<Ty>,
+        is_readonly: bool,
+        origin: crate::field_enum::FieldOrigin,
+    }
+
     fn lookup_field(
         configs: &[VisibleConfig],
         receiver_ty: &Ty,
         field_name: &Name,
-    ) -> Option<FieldInfoTy> {
-        lookup_field_ty(configs, receiver_ty, field_name)
+    ) -> Option<FieldInfoForTest> {
+        let db = bsl_types::testing::InMemoryDb::new();
+        let receiver = ty_to_typeid(&db, receiver_ty);
+        super::lookup_field(&db, configs, receiver, field_name).map(|info| FieldInfoForTest {
+            name: info.name,
+            name_en: info.name_en,
+            ty: typeid_to_ty(&db, info.ty),
+            value_ty: info.value_ty.map(|ty| typeid_to_ty(&db, ty)),
+            is_readonly: info.is_readonly,
+            origin: info.origin,
+        })
     }
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};
     use bsl_metadata::{Attribute, AttributeType, Configuration, MdoType, MetadataObject};
@@ -1769,8 +1788,10 @@ mod tests {
         // projection-branch returned `None` so the orchestrator
         // continued to the platform fallback.)
         let receiver = Ty::QueryResultSelection { projection: Some(projection_with_two_fields()) };
+        let db = bsl_types::testing::InMemoryDb::new();
         assert!(
-            lookup_field_in_query_projection(&receiver, &Name::new("НесуществующееПоле")).is_none(),
+            lookup_field_in_query_projection(&db, &receiver, &Name::new("НесуществующееПоле"))
+                .is_none(),
             "projection lookup must miss on unknown field — orchestrator continues to platform fallback",
         );
     }
@@ -1784,7 +1805,8 @@ mod tests {
         // legacy `Ty::PlatformObject` behaviour for tests that pin
         // the chain without any SDBL trace.
         let receiver = Ty::QueryResultSelection { projection: None };
-        assert!(lookup_field_in_query_projection(&receiver, &Name::new("Имя")).is_none());
+        let db = bsl_types::testing::InMemoryDb::new();
+        assert!(lookup_field_in_query_projection(&db, &receiver, &Name::new("Имя")).is_none());
     }
 
     #[test]
@@ -1794,6 +1816,7 @@ mod tests {
         // must NOT be served by this branch — the projection
         // surface only exists on the *selection* cursor.
         let receiver = Ty::Query { projections: Arc::from([Some(projection_with_two_fields())]) };
-        assert!(lookup_field_in_query_projection(&receiver, &Name::new("КодТов")).is_none());
+        let db = bsl_types::testing::InMemoryDb::new();
+        assert!(lookup_field_in_query_projection(&db, &receiver, &Name::new("КодТов")).is_none());
     }
 }

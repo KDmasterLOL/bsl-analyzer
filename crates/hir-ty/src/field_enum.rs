@@ -48,11 +48,6 @@ pub enum FieldOrigin {
 }
 
 /// A single field exposed by a receiver type.
-///
-/// Phase 3 §4.G.2: public field types are kernel [`TypeId`]s. The
-/// internal enumerate/lookup helper tree builds the `Ty`-typed mirror
-/// [`FieldInfoTy`] (db-free) and converts at the db-bearing boundary via
-/// [`field_info_ty_to_kernel`] — same idiom as `MethodInfo`/`MethodInfoTy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldInfo {
     /// Russian canonical name.
@@ -69,32 +64,6 @@ pub struct FieldInfo {
     pub is_readonly: bool,
     /// Where this field came from.
     pub origin: FieldOrigin,
-}
-
-/// `Ty`-typed mirror of [`FieldInfo`] built by the db-free enumerate /
-/// lookup helper tree. Converted to the public `TypeId`-bearing
-/// [`FieldInfo`] at the db boundary (§4.G.2).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FieldInfoTy {
-    pub name: Name,
-    pub name_en: Option<Name>,
-    pub ty: Ty,
-    pub value_ty: Option<Ty>,
-    pub is_readonly: bool,
-    pub origin: FieldOrigin,
-}
-
-/// Bridge a db-free [`FieldInfoTy`] into the public kernel [`FieldInfo`],
-/// interning `ty` / `value_ty` into `db`.
-pub(crate) fn field_info_ty_to_kernel(db: &dyn TypeKernelDb, info: FieldInfoTy) -> FieldInfo {
-    FieldInfo {
-        name: info.name,
-        name_en: info.name_en,
-        ty: ty_to_typeid(db, &info.ty),
-        value_ty: info.value_ty.map(|t| ty_to_typeid(db, &t)),
-        is_readonly: info.is_readonly,
-        origin: info.origin,
-    }
 }
 
 /// Enumerate every field exposed by `receiver_ty` against the visible
@@ -116,23 +85,19 @@ pub(crate) fn field_info_ty_to_kernel(db: &dyn TypeKernelDb, info: FieldInfoTy) 
 /// (`Ty::Unknown`, primitives, `Ty::PlatformObject`, managers, plain
 /// `TabularSection` collection receivers).
 ///
-/// Public, db-bearing entry: interns each field's `Ty` into the kernel.
-/// The db-free traversal lives in [`enumerate_fields_ty`].
 pub fn enumerate_fields(
     db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     receiver_ty: &Ty,
 ) -> Vec<FieldInfo> {
-    enumerate_fields_ty(configs, receiver_ty)
-        .into_iter()
-        .map(|f| field_info_ty_to_kernel(db, f))
-        .collect()
+    enumerate_fields_inner(db, configs, receiver_ty)
 }
 
-/// Db-free field enumeration producing the `Ty`-typed [`FieldInfoTy`].
-/// Internal callers (`lookup_field_ty`, union recursion) use this; the
-/// public [`enumerate_fields`] wraps it with kernel interning.
-pub(crate) fn enumerate_fields_ty(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<FieldInfoTy> {
+pub(crate) fn enumerate_fields_inner(
+    db: &dyn TypeKernelDb,
+    configs: &[VisibleConfig],
+    receiver_ty: &Ty,
+) -> Vec<FieldInfo> {
     // Symmetric with `lookup_field`: `Ty::FormData{Structure | StructureWithCollection,
     // underlying: Some((mdo, name))}` projects to `MetadataRef{*Object, name}`
     // so the MDO's attributes/tabular sections are enumerable for hover and
@@ -152,15 +117,15 @@ pub(crate) fn enumerate_fields_ty(configs: &[VisibleConfig], receiver_ty: &Ty) -
     // to an empty Vec — same shape `Документы.ПКО` enumeration returned
     // pre-Step-J. Predefined-item enumeration is a separate enhancement.
 
-    if let Some(infos) = enumerate_projection_fields(ty) {
+    if let Some(infos) = enumerate_projection_fields(db, ty) {
         return infos;
     }
 
     if let Ty::Union(arms) = ty {
-        let mut out: Vec<FieldInfoTy> = Vec::new();
+        let mut out: Vec<FieldInfo> = Vec::new();
         let mut seen: std::collections::HashSet<Name> = std::collections::HashSet::new();
         for arm in arms.iter().filter(|t| !matches!(t, Ty::Undefined | Ty::Null)) {
-            for info in enumerate_fields_ty(configs, arm) {
+            for info in enumerate_fields_inner(db, configs, arm) {
                 push_unique(&mut out, &mut seen, info);
             }
         }
@@ -172,22 +137,22 @@ pub(crate) fn enumerate_fields_ty(configs: &[VisibleConfig], receiver_ty: &Ty) -
     };
 
     if let Some(mdo_type) = mdo_type_for_kind(*kind) {
-        return enumerate_mdo_fields(configs, *kind, mdo_type, name);
+        return enumerate_mdo_fields(db, configs, *kind, mdo_type, name);
     }
 
     if let Some(parent) = register_parent_for_kind(*kind) {
-        return enumerate_register_fields(configs, *kind, parent, name);
+        return enumerate_register_fields(db, configs, *kind, parent, name);
     }
 
     if let MetadataKind::RegisterFilter { parent } = kind {
-        return enumerate_filter_fields(configs, *parent, name);
+        return enumerate_filter_fields(db, configs, *parent, name);
     }
 
     if let MetadataKind::TabularSectionRow { parent } = kind {
         let Some((parent_name, section_name)) = split_parent_section(name.as_str()) else {
             return Vec::new();
         };
-        return enumerate_tabular_row_fields(configs, *parent, parent_name, section_name);
+        return enumerate_tabular_row_fields(db, configs, *parent, parent_name, section_name);
     }
 
     Vec::new()
@@ -214,7 +179,7 @@ pub(crate) fn enumerate_fields_ty(configs: &[VisibleConfig], receiver_ty: &Ty) -
 /// resolves a single named column on the same shape — the projection
 /// arm is the IDE-completion sibling of the inference-time field
 /// lookup.
-fn enumerate_projection_fields(ty: &Ty) -> Option<Vec<FieldInfoTy>> {
+fn enumerate_projection_fields(db: &dyn TypeKernelDb, ty: &Ty) -> Option<Vec<FieldInfo>> {
     let projection = match ty {
         Ty::QueryResultSelection { projection: Some(p) } => p,
         // Phase H Slice 3 — projected `Ty::ValueTableRow` surfaces
@@ -227,10 +192,10 @@ fn enumerate_projection_fields(ty: &Ty) -> Option<Vec<FieldInfoTy>> {
     let fields = projection
         .fields
         .iter()
-        .map(|(name, field_ty)| FieldInfoTy {
+        .map(|(name, field_ty)| FieldInfo {
             name: name.clone(),
             name_en: None,
-            ty: field_ty.clone(),
+            ty: ty_to_typeid(db, field_ty),
             value_ty: None,
             is_readonly: true,
             origin: FieldOrigin::UserAttribute,
@@ -292,10 +257,11 @@ fn is_record_kind(kind: MetadataKind) -> bool {
 /// keeps the first push). This preserves the priority `mdo.attributes`
 /// → tabular sections → HBK platform properties.
 fn push_platform_prefix_properties(
+    db: &dyn TypeKernelDb,
     kind: MetadataKind,
     mdo_type: MdoType,
     mdo_name: &Name,
-    out: &mut Vec<FieldInfoTy>,
+    out: &mut Vec<FieldInfo>,
     seen: &mut std::collections::HashSet<Name>,
     mut ty_override: impl FnMut(&str) -> Option<Ty>,
 ) {
@@ -326,7 +292,7 @@ fn push_platform_prefix_properties(
         // this receiver's `mdo_name` so the chain stays typed.
         let specialized = specialize_self_ref_ty(mdo_type, mdo_name, &res.return_ty);
         let ty = ty_override(prop.name.as_str()).or(specialized).unwrap_or(res.return_ty);
-        let info = FieldInfoTy {
+        let info = FieldInfo {
             name: Name::new(prop.name.as_str()),
             // english_name shape: `<Type>.<Name>.<Property>` (composite).
             // Take the rightmost segment so the bilingual lookup matches
@@ -334,7 +300,7 @@ fn push_platform_prefix_properties(
             // A dot-free `english_name` returns itself via `rsplit`,
             // matching the bilingual-key convention used elsewhere.
             name_en: Some(Name::new(en_tail)),
-            ty,
+            ty: ty_to_typeid(db, &ty),
             value_ty: None,
             is_readonly: res.is_readonly,
             origin: FieldOrigin::PlatformProperty,
@@ -465,11 +431,12 @@ fn name_in_spec(spec_names: &std::collections::HashSet<String>, ru: &str, en: &s
 // ---------------------------------------------------------------------------
 
 fn enumerate_mdo_fields(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MetadataKind,
     mdo_type: MdoType,
     mdo_name: &Name,
-) -> Vec<FieldInfoTy> {
+) -> Vec<FieldInfo> {
     for cfg in configs.iter().rev() {
         let Some(mdo) = cfg.configuration.find_metadata_object(mdo_type, mdo_name.as_str()) else {
             continue;
@@ -488,10 +455,11 @@ fn enumerate_mdo_fields(
                 Some(s) => (FieldOrigin::StandardAttribute, s.is_readonly),
                 None => (FieldOrigin::UserAttribute, false),
             };
-            let info = FieldInfoTy {
+            let ty = attribute_type_to_ty(&attr.attr_type, configs);
+            let info = FieldInfo {
                 name: Name::new(&attr.name),
                 name_en: attr.name_en.as_deref().filter(|s| !s.is_empty()).map(Name::new),
-                ty: attribute_type_to_ty(&attr.attr_type, configs),
+                ty: ty_to_typeid(db, &ty),
                 value_ty: None,
                 is_readonly,
                 origin,
@@ -501,13 +469,14 @@ fn enumerate_mdo_fields(
 
         for ts in &mdo.tabular_sections {
             let qualified = Name::new(&format!("{}.{}", mdo_name.as_str(), ts.name()));
-            let info = FieldInfoTy {
+            let ty = Ty::MetadataRef {
+                kind: MetadataKind::TabularSection { parent: mdo_type },
+                name: qualified,
+            };
+            let info = FieldInfo {
                 name: Name::new(ts.name()),
                 name_en: ts.name_en().filter(|s| !s.is_empty()).map(Name::new),
-                ty: Ty::MetadataRef {
-                    kind: MetadataKind::TabularSection { parent: mdo_type },
-                    name: qualified,
-                },
+                ty: ty_to_typeid(db, &ty),
                 value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::TabularSection,
@@ -530,7 +499,9 @@ fn enumerate_mdo_fields(
         // (`ЭтотОбъект` → `ДокументОбъект`, `Ссылка` → `ДокументСсылка`,
         // …) can be re-typed to a concrete `MetadataRef` anchored on
         // this receiver, restoring chain typing.
-        push_platform_prefix_properties(kind, mdo_type, mdo_name, &mut out, &mut seen, |_| None);
+        push_platform_prefix_properties(db, kind, mdo_type, mdo_name, &mut out, &mut seen, |_| {
+            None
+        });
 
         return out;
     }
@@ -538,11 +509,12 @@ fn enumerate_mdo_fields(
 }
 
 fn enumerate_register_fields(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MetadataKind,
     parent: MdoType,
     register_name: &Name,
-) -> Vec<FieldInfoTy> {
+) -> Vec<FieldInfo> {
     for cfg in configs.iter().rev() {
         let Some(register) =
             cfg.configuration.find_register_by_type_and_name(parent, register_name.as_str())
@@ -567,13 +539,14 @@ fn enumerate_register_fields(
         // the platform property always wins (the dimension stays
         // reachable as `<recordSet>.Отбор.Отбор`).
         if is_record_set_kind(kind) {
-            let info = FieldInfoTy {
+            let ty = Ty::MetadataRef {
+                kind: MetadataKind::RegisterFilter { parent },
+                name: register_name.clone(),
+            };
+            let info = FieldInfo {
                 name: Name::new("Отбор"),
                 name_en: Some(Name::new("Filter")),
-                ty: Ty::MetadataRef {
-                    kind: MetadataKind::RegisterFilter { parent },
-                    name: register_name.clone(),
-                },
+                ty: ty_to_typeid(db, &ty),
                 value_ty: None,
                 is_readonly: true,
                 origin: FieldOrigin::PlatformProperty,
@@ -582,17 +555,18 @@ fn enumerate_register_fields(
         }
 
         for dim in register.dimensions() {
-            let info = FieldInfoTy {
+            let ty = register_part_ty(
+                dim.attr_type(),
+                MetadataKind::RegisterDimension { parent },
+                register_name,
+                dim.name(),
+                configs,
+            );
+            let info = FieldInfo {
                 name: Name::new(dim.name()),
                 // Dimension has no `name_en` in bsl-metadata.
                 name_en: None,
-                ty: register_part_ty(
-                    dim.attr_type(),
-                    MetadataKind::RegisterDimension { parent },
-                    register_name,
-                    dim.name(),
-                    configs,
-                ),
+                ty: ty_to_typeid(db, &ty),
                 value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::RegisterDimension,
@@ -601,16 +575,17 @@ fn enumerate_register_fields(
         }
 
         for res in register.resources() {
-            let info = FieldInfoTy {
+            let ty = register_part_ty(
+                res.attr_type(),
+                MetadataKind::RegisterResource { parent },
+                register_name,
+                res.name(),
+                configs,
+            );
+            let info = FieldInfo {
                 name: Name::new(res.name()),
                 name_en: res.name_en().filter(|s| !s.is_empty()).map(Name::new),
-                ty: register_part_ty(
-                    res.attr_type(),
-                    MetadataKind::RegisterResource { parent },
-                    register_name,
-                    res.name(),
-                    configs,
-                ),
+                ty: ty_to_typeid(db, &ty),
                 value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::RegisterResource,
@@ -631,10 +606,10 @@ fn enumerate_register_fields(
                     ty = recorders_ty;
                 }
             }
-            let info = FieldInfoTy {
+            let info = FieldInfo {
                 name: Name::new(attr.name()),
                 name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
-                ty,
+                ty: ty_to_typeid(db, &ty),
                 value_ty: None,
                 is_readonly: false,
                 origin: FieldOrigin::RegisterAttribute,
@@ -651,6 +626,7 @@ fn enumerate_register_fields(
         // `Filter`. Recorder override widens the platform-declared base
         // ref into a union of concrete document refs for record kinds.
         push_platform_prefix_properties(
+            db,
             kind,
             parent,
             register_name,
@@ -718,10 +694,11 @@ fn recorder_union_ty(
 /// against any visible configuration; same fallthrough policy as
 /// [`enumerate_register_fields`].
 fn enumerate_filter_fields(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     parent: MdoType,
     register_name: &Name,
-) -> Vec<FieldInfoTy> {
+) -> Vec<FieldInfo> {
     for cfg in configs.iter().rev() {
         let Some(register) =
             cfg.configuration.find_register_by_type_and_name(parent, register_name.as_str())
@@ -735,15 +712,16 @@ fn enumerate_filter_fields(
             std::collections::HashSet::with_capacity(out.capacity() * 2);
 
         for dim in register.dimensions() {
-            let info = FieldInfoTy {
+            let ty = Ty::PlatformObject(Name::new("ЭлементОтбора"));
+            let value_ty = dim
+                .attr_type()
+                .map(|attr_type| attribute_type_to_ty(attr_type, configs))
+                .unwrap_or(Ty::Unknown);
+            let info = FieldInfo {
                 name: Name::new(dim.name()),
                 name_en: None,
-                ty: Ty::PlatformObject(Name::new("ЭлементОтбора")),
-                value_ty: Some(
-                    dim.attr_type()
-                        .map(|attr_type| attribute_type_to_ty(attr_type, configs))
-                        .unwrap_or(Ty::Unknown),
-                ),
+                ty: ty_to_typeid(db, &ty),
+                value_ty: Some(ty_to_typeid(db, &value_ty)),
                 is_readonly: false,
                 origin: FieldOrigin::RegisterDimension,
             };
@@ -751,11 +729,13 @@ fn enumerate_filter_fields(
         }
 
         for key in standard_keys {
-            let info = FieldInfoTy {
+            let ty = Ty::PlatformObject(Name::new("ЭлементОтбора"));
+            let value_ty = standard_filter_key_value_ty(configs, parent, register_name, key);
+            let info = FieldInfo {
                 name: Name::new(key),
                 name_en: None,
-                ty: Ty::PlatformObject(Name::new("ЭлементОтбора")),
-                value_ty: Some(standard_filter_key_value_ty(configs, parent, register_name, key)),
+                ty: ty_to_typeid(db, &ty),
+                value_ty: Some(ty_to_typeid(db, &value_ty)),
                 is_readonly: false,
                 origin: FieldOrigin::PlatformProperty,
             };
@@ -822,11 +802,12 @@ fn standard_filter_keys(
 }
 
 fn enumerate_tabular_row_fields(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     parent: MdoType,
     parent_name: &str,
     section_name: &str,
-) -> Vec<FieldInfoTy> {
+) -> Vec<FieldInfo> {
     let mdo = find_mdo(configs, parent, parent_name);
     let Some(mdo) = mdo else {
         return Vec::new();
@@ -835,16 +816,19 @@ fn enumerate_tabular_row_fields(
         return Vec::new();
     };
 
-    let mut out: Vec<FieldInfoTy> = ts
+    let mut out: Vec<FieldInfo> = ts
         .attributes()
         .iter()
-        .map(|attr| FieldInfoTy {
-            name: Name::new(attr.name()),
-            name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
-            ty: attribute_type_to_ty(attr.attr_type(), configs),
-            value_ty: None,
-            is_readonly: false,
-            origin: FieldOrigin::TabularSectionRowColumn,
+        .map(|attr| {
+            let ty = attribute_type_to_ty(attr.attr_type(), configs);
+            FieldInfo {
+                name: Name::new(attr.name()),
+                name_en: attr.name_en().filter(|s| !s.is_empty()).map(Name::new),
+                ty: ty_to_typeid(db, &ty),
+                value_ty: None,
+                is_readonly: false,
+                origin: FieldOrigin::TabularSectionRowColumn,
+            }
         })
         .collect();
 
@@ -863,10 +847,10 @@ fn enumerate_tabular_row_fields(
             "Line of a tabular section",
             &nr_name,
         ) {
-            out.push(FieldInfoTy {
+            out.push(FieldInfo {
                 name: nr_name,
                 name_en: Some(nr_name_en),
-                ty: prop.return_ty,
+                ty: ty_to_typeid(db, &prop.return_ty),
                 value_ty: None,
                 is_readonly: prop.is_readonly,
                 origin: FieldOrigin::PlatformProperty,
@@ -1078,9 +1062,9 @@ fn classify_attr<'a>(
 /// seen before. Prevents duplicate field entries when extensions re-declare
 /// the same attribute.
 fn push_unique(
-    out: &mut Vec<FieldInfoTy>,
+    out: &mut Vec<FieldInfo>,
     seen: &mut std::collections::HashSet<Name>,
-    info: FieldInfoTy,
+    info: FieldInfo,
 ) {
     if seen.contains(&info.name) {
         return;
@@ -1101,10 +1085,29 @@ fn push_unique(
 mod tests {
     use super::*;
 
-    /// §4.G test shim: readable tests assert on `Ty`-typed `.ty`. Route
-    /// through the db-free [`enumerate_fields_ty`] yielding [`FieldInfoTy`].
-    fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<FieldInfoTy> {
-        enumerate_fields_ty(configs, receiver_ty)
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FieldInfoForTest {
+        name: Name,
+        name_en: Option<Name>,
+        ty: Ty,
+        value_ty: Option<Ty>,
+        is_readonly: bool,
+        origin: FieldOrigin,
+    }
+
+    fn enumerate_fields(configs: &[VisibleConfig], receiver_ty: &Ty) -> Vec<FieldInfoForTest> {
+        let db = InMemoryDb::new();
+        super::enumerate_fields(&db, configs, receiver_ty)
+            .into_iter()
+            .map(|info| FieldInfoForTest {
+                name: info.name,
+                name_en: info.name_en,
+                ty: typeid_to_ty(&db, info.ty),
+                value_ty: info.value_ty.map(|ty| typeid_to_ty(&db, ty)),
+                is_readonly: info.is_readonly,
+                origin: info.origin,
+            })
+            .collect()
     }
     use crate::ty_bridge::typeid_to_ty;
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};

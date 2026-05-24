@@ -46,6 +46,7 @@ use crate::db::HirDatabase;
 use crate::field_enum::{FieldInfo, FieldOrigin};
 use crate::field_lookup;
 use crate::form_attr::lower_form_attribute_to_ty;
+use crate::ty_bridge::ty_to_typeid;
 
 /// Russian platform type name for the form-elements collection.
 pub const FORM_ITEMS_TYPE_RU: &str = "ВсеЭлементыФормы";
@@ -115,17 +116,14 @@ pub(crate) fn lookup_form_item_field(
     let element = form.find_element(field.as_str())?;
     let configs = db.configurations(module_id.file_id);
     let ty = lower_form_element(db, form, element, &configs);
-    Some(crate::field_enum::field_info_ty_to_kernel(
-        db,
-        crate::field_enum::FieldInfoTy {
-            name: Name::new(&element.name),
-            name_en: None,
-            ty,
-            value_ty: None,
-            is_readonly: true,
-            origin: FieldOrigin::PlatformProperty,
-        },
-    ))
+    Some(FieldInfo {
+        name: Name::new(&element.name),
+        name_en: None,
+        ty: ty_to_typeid(db, &ty),
+        value_ty: None,
+        is_readonly: true,
+        origin: FieldOrigin::PlatformProperty,
+    })
 }
 
 /// Lower a single [`FormElement`] to a [`Ty::FormControl`].
@@ -192,9 +190,10 @@ fn row_ty_of_tabular_section_target(target: &FormDataTarget) -> Option<Ty> {
 /// `is_readonly` matches `platform_data.json` for these three
 /// properties — the slot itself is read-only.
 pub(crate) fn refine_form_control_property(
+    db: &dyn TypeKernelDb,
     receiver_ty: &Ty,
     field: &Name,
-) -> Option<crate::field_enum::FieldInfoTy> {
+) -> Option<FieldInfo> {
     let Ty::FormControl { kind: FormElementKind::Table, binding: Some(binding) } = receiver_ty
     else {
         return None;
@@ -232,10 +231,10 @@ pub(crate) fn refine_form_control_property(
             return None;
         };
 
-    Some(crate::field_enum::FieldInfoTy {
+    Some(FieldInfo {
         name: canonical_ru,
         name_en: Some(canonical_en),
-        ty,
+        ty: ty_to_typeid(db, &ty),
         value_ty: None,
         is_readonly,
         origin: FieldOrigin::PlatformProperty,
@@ -342,6 +341,28 @@ mod tests {
     /// `lookup_field` receiver bridge).
     fn lower_form_element(form: &Form, element: &FormElement, configs: &[VisibleConfig]) -> Ty {
         super::lower_form_element(&InMemoryDb::new(), form, element, configs)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FieldInfoForTest {
+        name: Name,
+        name_en: Option<Name>,
+        ty: Ty,
+        value_ty: Option<Ty>,
+        is_readonly: bool,
+        origin: FieldOrigin,
+    }
+
+    fn refine_form_control_property(receiver_ty: &Ty, field: &Name) -> Option<FieldInfoForTest> {
+        let db = InMemoryDb::new();
+        super::refine_form_control_property(&db, receiver_ty, field).map(|info| FieldInfoForTest {
+            name: info.name,
+            name_en: info.name_en,
+            ty: crate::ty_bridge::typeid_to_ty(&db, info.ty),
+            value_ty: info.value_ty.map(|ty| crate::ty_bridge::typeid_to_ty(&db, ty)),
+            is_readonly: info.is_readonly,
+            origin: info.origin,
+        })
     }
 
     use bsl_metadata::tabular_section::{TabularSection, TabularSectionAttribute};

@@ -46,7 +46,7 @@ use bsl_types::kind::TypeId;
 use hir_def::ty::{MetadataKind, Ty};
 use hir_def::Name;
 
-use crate::ty_bridge::typeid_to_ty;
+use crate::ty_bridge::{ty_to_typeid, typeid_to_ty};
 
 /// Result of a successful manager-member lookup.
 ///
@@ -59,20 +59,6 @@ pub struct ManagerMemberInfo {
     /// Type of the member after promotion / predefined-item lookup
     /// (kernel handle, §4.G.2).
     pub ty: TypeId,
-}
-
-/// `Ty`-typed mirror of [`ManagerMemberInfo`] built by the db-free
-/// helper tree; converted at the [`lookup_manager_field`] boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ManagerMemberInfoTy {
-    pub ty: Ty,
-}
-
-fn manager_member_info_ty_to_kernel(
-    db: &dyn TypeKernelDb,
-    info: ManagerMemberInfoTy,
-) -> ManagerMemberInfo {
-    ManagerMemberInfo { ty: crate::ty_bridge::ty_to_typeid(db, &info.ty) }
 }
 
 /// Single adapter entry for `Expr::Field` on a manager-global receiver.
@@ -88,21 +74,18 @@ pub fn lookup_manager_field(
     member: &Name,
 ) -> Option<ManagerMemberInfo> {
     let base_ty = typeid_to_ty(db, receiver);
-    lookup_manager_field_ty(configs, &base_ty, member)
-        .map(|info| manager_member_info_ty_to_kernel(db, info))
+    lookup_manager_field_inner(db, configs, &base_ty, member)
 }
 
-/// Verbatim `&Ty` manager-member pipeline behind the
-/// [`lookup_manager_field`] boundary (§4.G.1 receiver flip). Builds the
-/// db-free [`ManagerMemberInfoTy`]; the public entry interns (§4.G.2).
-fn lookup_manager_field_ty(
+fn lookup_manager_field_inner(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     base_ty: &Ty,
     member: &Name,
-) -> Option<ManagerMemberInfoTy> {
+) -> Option<ManagerMemberInfo> {
     match base_ty {
-        Ty::ManagerCollection(kind) => promote_collection_member(configs, *kind, member),
-        Ty::ObjectManager { kind, name } => lookup_predefined(configs, *kind, name, member),
+        Ty::ManagerCollection(kind) => promote_collection_member(db, configs, *kind, member),
+        Ty::ObjectManager { kind, name } => lookup_predefined(db, configs, *kind, name, member),
         _ => None,
     }
 }
@@ -116,17 +99,21 @@ fn lookup_manager_field_ty(
 /// and the `registers` vec (InformationRegister/…), so
 /// `РегистрыСведений.РегистрСведений1` promotes too.
 fn promote_collection_member(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MdoType,
     mdo_name: &Name,
-) -> Option<ManagerMemberInfoTy> {
+) -> Option<ManagerMemberInfo> {
     let needle = mdo_name.as_str();
     let exists = configs.iter().rev().any(|cfg| {
         cfg.configuration.find_metadata_object(kind, needle).is_some()
             || cfg.configuration.find_register_by_type_and_name(kind, needle).is_some()
     });
 
-    exists.then(|| ManagerMemberInfoTy { ty: Ty::ObjectManager { kind, name: mdo_name.clone() } })
+    exists.then(|| {
+        let ty = Ty::ObjectManager { kind, name: mdo_name.clone() };
+        ManagerMemberInfo { ty: ty_to_typeid(db, &ty) }
+    })
 }
 
 /// Resolve a predefined-item / enum-value member on an
@@ -139,11 +126,12 @@ fn promote_collection_member(
 /// a predefined item is a value of the owner's ref kind, so the name
 /// shouldn't switch to the member.
 pub(crate) fn lookup_predefined(
+    db: &dyn TypeKernelDb,
     configs: &[VisibleConfig],
     kind: MdoType,
     owner_name: &Name,
     member_name: &Name,
-) -> Option<ManagerMemberInfoTy> {
+) -> Option<ManagerMemberInfo> {
     let ref_kind = predefined_ref_kind_for(kind)?;
     let mdo = find_mdo(configs, kind, owner_name.as_str())?;
     let hit = match kind {
@@ -154,8 +142,9 @@ pub(crate) fn lookup_predefined(
         _ => false,
     };
 
-    hit.then(|| ManagerMemberInfoTy {
-        ty: Ty::MetadataRef { kind: ref_kind, name: owner_name.clone() },
+    hit.then(|| {
+        let ty = Ty::MetadataRef { kind: ref_kind, name: owner_name.clone() };
+        ManagerMemberInfo { ty: ty_to_typeid(db, &ty) }
     })
 }
 
@@ -191,15 +180,21 @@ mod tests {
     use bsl_config::VisibleConfig;
     use bsl_metadata::metadata_object::{EnumValue, PredefinedItem};
     use bsl_metadata::Configuration;
-    /// §4.G test shim: readable tests assert on a `Ty`-typed `.ty`. Route
-    /// through the db-free [`lookup_manager_field_ty`] yielding the
-    /// `Ty`-typed [`ManagerMemberInfoTy`].
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ManagerMemberInfoForTest {
+        ty: Ty,
+    }
+
     fn lookup_manager_field(
         configs: &[VisibleConfig],
         base_ty: &Ty,
         member: &Name,
-    ) -> Option<ManagerMemberInfoTy> {
-        lookup_manager_field_ty(configs, base_ty, member)
+    ) -> Option<ManagerMemberInfoForTest> {
+        let db = bsl_types::testing::InMemoryDb::new();
+        let receiver = ty_to_typeid(&db, base_ty);
+        super::lookup_manager_field(&db, configs, receiver, member)
+            .map(|info| ManagerMemberInfoForTest { ty: typeid_to_ty(&db, info.ty) })
     }
     use std::sync::Arc;
 
