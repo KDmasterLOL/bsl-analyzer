@@ -13,7 +13,7 @@
 //! assignment `Х = Новый <Type>();` and then read `var_types["х"]`, which is
 //! merged into the file-level result.
 
-use hir::{DefDatabase, HirDatabase, ModuleId, Ty};
+use hir::{ty_bridge::typeid_to_ty, DefDatabase, HirDatabase, ModuleId, Ty};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use test_fixture::Fixture;
@@ -154,7 +154,7 @@ fn new_query_with_literal_text_types_as_query_with_projection() {
         "single-column SELECT must yield one projection field, got {projection:?}",
     );
     assert_eq!(projection.fields[0].0.as_str(), "А");
-    assert_eq!(projection.fields[0].1, Ty::Number);
+    assert_eq!(typeid_to_ty(&db, projection.fields[0].1), Ty::Number);
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn execute_batch_literal_zero_index_yields_first_subquery_projection() {
     let projection = projection.expect("batch[0] must carry the first sub-query's projection");
     assert_eq!(projection.fields.len(), 1);
     assert_eq!(projection.fields[0].0.as_str(), "ПерваяКолонка");
-    assert_eq!(projection.fields[0].1, Ty::Number);
+    assert_eq!(typeid_to_ty(&db, projection.fields[0].1), Ty::Number);
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn execute_batch_literal_one_index_yields_second_subquery_projection() {
     };
     let projection = projection.expect("batch[1] must carry the second sub-query's projection");
     assert_eq!(projection.fields[0].0.as_str(), "ВтораяКолонка");
-    assert_eq!(projection.fields[0].1, Ty::String);
+    assert_eq!(typeid_to_ty(&db, projection.fields[0].1), Ty::String);
 }
 
 #[test]

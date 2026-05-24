@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 pub use bsl_metadata::FormElementKind;
 use bsl_metadata::MdoType;
+use bsl_types::kind::TypeId;
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;
 
@@ -365,27 +366,45 @@ pub enum Ty {
 /// projection data through the type system. The bridge (`hir-ty` Phase 1)
 /// fills it; `sdbl-hir` does not import `hir-def`.
 ///
-/// `fields` is the **bridged** view: each entry's `Ty` is a fully-formed
-/// BSL type, not a raw `SdblType`. This is the single source of truth for
-/// field-lookup, completion, and inference on projection-typed receivers.
+/// `fields` is the **bridged** view: each entry's [`TypeId`] is an interned
+/// BSL type handle, not a raw `SdblType`. This is the single source of truth
+/// for field-lookup, completion, and inference on projection-typed receivers.
 ///
 /// `raw_sdbl_types` is the optional **shadow** carrying display-relevant
 /// SDBL attributes (precision/scale, length) that `Ty` deliberately drops.
 /// `None` when the projection was constructed without the originating
 /// package (e.g. a manual cache-bypass path).
 ///
-/// Holds bridged `Ty` rather than raw `sdbl_hir::SdblType` so the embedding
-/// type can derive [`Ord`] (required for [`Ty::union`] dedup ordering) —
-/// `sdbl_hir::SdblType` does not derive `Ord`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Holds interned `TypeId`s rather than raw `sdbl_hir::SdblType`; ordering is
+/// implemented manually below because `TypeId` intentionally has no semantic
+/// [`Ord`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SdblProjection {
-    /// Per-field bridged types in declaration order.
-    pub fields: Arc<[(crate::Name, Ty)]>,
+    /// Per-field interned `TypeId`s under the same-db invariant.
+    pub fields: Arc<[(crate::Name, TypeId)]>,
     /// Optional shadow with pre-rendered SDBL-specific display attributes,
     /// indexed parallel to `fields`. `None` when the bridge wasn't given
     /// the originating package; `Some(slice)` invariant: `slice.len() ==
     /// fields.len()`.
     pub raw_sdbl_types: Option<Arc<[SdblTypeShadow]>>,
+}
+
+// Deterministic raw-id ordering only (NOT semantic); required while `Ty`
+// embeds `Arc<SdblProjection>` and derives `Ord`, until §4.E deletes `Ty`.
+impl Ord for SdblProjection {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.fields
+            .iter()
+            .map(|(n, t)| (n, t.raw()))
+            .cmp(other.fields.iter().map(|(n, t)| (n, t.raw())))
+            .then_with(|| self.raw_sdbl_types.cmp(&other.raw_sdbl_types))
+    }
+}
+
+impl PartialOrd for SdblProjection {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Display-only shadow for an SDBL field type.

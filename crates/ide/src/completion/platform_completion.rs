@@ -855,9 +855,7 @@ fn projection_column_items<DB: RootDatabase>(
             let detail = shadows
                 .and_then(|s| s.get(i))
                 .map(|shadow| shadow.display.clone())
-                .unwrap_or_else(|| {
-                    hir::kernel_type_label(db, hir::ty_bridge::ty_to_typeid(db, ty), locale, false)
-                });
+                .unwrap_or_else(|| hir::kernel_type_label(db, *ty, locale, false));
             CompletionItem {
                 label: label.clone(),
                 detail: Some(detail),

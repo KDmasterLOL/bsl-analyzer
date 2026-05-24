@@ -793,9 +793,9 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<
         // with a resolved SDBL projection, append the per-column
         // shape so the user sees the schema directly on hover. Uses
         // `SdblTypeShadow.display` when present (`Строка(50)` /
-        // `Число(15,2)`) and falls back to the bridged `Ty.display`
-        // when the bridge didn't capture the shadow.
-        if let Some(fields_block) = projection_fields_markup(ty, locale) {
+        // `Число(15,2)`) and falls back to kernel display when the
+        // bridge didn't capture the shadow.
+        if let Some(fields_block) = projection_fields_markup(db, ty, locale) {
             block.push_str(&fields_block);
         }
         return Some(block);
@@ -815,9 +815,9 @@ fn ty_info_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<
 /// Format: a single bold heading followed by a comma-separated list
 /// `Имя: Строка(50), Цена: Число(15,2), …`. Per-column labels prefer
 /// the SDBL shadow when the bridge captured it (precision / scale /
-/// length survive); otherwise fall back to the bridged `Ty.display`
-/// in the caller's locale.
-fn projection_fields_markup(ty: &Ty, locale: Locale) -> Option<String> {
+/// length survive); otherwise fall back to kernel rendering of the
+/// interned field type in the caller's locale.
+fn projection_fields_markup<DB: RootDatabase>(db: &DB, ty: &Ty, locale: Locale) -> Option<String> {
     let projection = match ty {
         Ty::QueryResultSelection { projection: Some(p) }
         | Ty::ValueTable { projection: Some(p) }
@@ -843,7 +843,7 @@ fn projection_fields_markup(ty: &Ty, locale: Locale) -> Option<String> {
         let label = shadows
             .and_then(|s| s.get(i))
             .map(|shadow| shadow.display.clone())
-            .unwrap_or_else(|| field_ty.display(locale).to_string());
+            .unwrap_or_else(|| hir::kernel_type_label(db, *field_ty, locale, false));
         out.push_str(&label);
     }
     out.push_str("\n\n");

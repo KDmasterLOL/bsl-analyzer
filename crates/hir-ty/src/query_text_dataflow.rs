@@ -193,5 +193,5 @@ fn projections_from_text_assignment(
     if pkg.queries().is_empty() {
         return None;
     }
-    Some(package_to_projections(pkg).into())
+    Some(package_to_projections(db, pkg).into())
 }

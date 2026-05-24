@@ -285,7 +285,7 @@ pub fn typeid_to_ty(db: &dyn TypeKernelDb, id: TypeId) -> Ty {
 }
 
 fn sdbl_projection_to_projection(
-    db: &dyn TypeKernelDb,
+    _db: &dyn TypeKernelDb,
     projection: &Arc<SdblProjection>,
 ) -> Arc<Projection> {
     // Phase 3 §4.D: preserve `raw_sdbl_types` through the bridge so
@@ -298,7 +298,7 @@ fn sdbl_projection_to_projection(
         .map(|(name, ty)| {
             bsl_types::kind::ProjectionField::new(
                 ty_name_to_kernel(name, "Projection"),
-                ty_to_typeid(db, ty),
+                *ty,
                 ProjectionFieldSource::Unknown,
             )
         })
@@ -313,7 +313,7 @@ fn sdbl_projection_to_projection(
 }
 
 fn projection_to_sdbl_projection(
-    db: &dyn TypeKernelDb,
+    _db: &dyn TypeKernelDb,
     projection: &Arc<Projection>,
 ) -> Arc<SdblProjection> {
     if projection.origin != ProjectionOrigin::Unknown {
@@ -326,9 +326,9 @@ fn projection_to_sdbl_projection(
         .map(|field| {
             if field.source != ProjectionFieldSource::Unknown {
                 debug_loss("K→T", "Projection", "dropping projection field source");
-                // loss-ok: SdblProjection carries field name and Ty only.
+                // loss-ok: SdblProjection carries field name and TypeId only.
             }
-            (kernel_name_to_ty(&field.name), typeid_to_ty(db, field.ty))
+            (kernel_name_to_ty(&field.name), field.ty)
         })
         .collect();
     // Phase 3 §4.D: copy kernel-side shadows back into the legacy
@@ -664,13 +664,23 @@ mod tests {
         assert_eq!(typeid_to_ty(&db, id), ty);
     }
 
+    fn round_trip_with_db(make_ty: impl FnOnce(&InMemoryDb) -> Ty) {
+        let db = db();
+        let ty = make_ty(&db);
+        let id = ty_to_typeid(&db, &ty);
+        assert_eq!(typeid_to_ty(&db, id), ty);
+    }
+
     fn name(s: &str) -> Name {
         Name::new(s)
     }
 
-    fn projection() -> Arc<SdblProjection> {
+    fn projection(db: &dyn TypeKernelDb) -> Arc<SdblProjection> {
         Arc::new(SdblProjection {
-            fields: Arc::new([(name("A"), Ty::Number), (name("B"), Ty::String)]),
+            fields: Arc::new([
+                (name("A"), ty_to_typeid(db, &Ty::Number)),
+                (name("B"), ty_to_typeid(db, &Ty::String)),
+            ]),
             raw_sdbl_types: None,
         })
     }
@@ -772,32 +782,34 @@ mod tests {
 
     #[test]
     fn value_table_projection_preserves_fields() {
-        round_trip(Ty::ValueTable { projection: Some(projection()) });
+        round_trip_with_db(|db| Ty::ValueTable { projection: Some(projection(db)) });
     }
 
     #[test]
     fn value_table_row_projection_preserves_fields() {
-        round_trip(Ty::ValueTableRow { projection: Some(projection()) });
+        round_trip_with_db(|db| Ty::ValueTableRow { projection: Some(projection(db)) });
     }
 
     #[test]
     fn query_projection_preserves_per_query_shape() {
-        round_trip(Ty::Query { projections: Arc::new([Some(projection()), None]) });
+        round_trip_with_db(|db| Ty::Query { projections: Arc::new([Some(projection(db)), None]) });
     }
 
     #[test]
     fn query_result_projection_preserves_fields() {
-        round_trip(Ty::QueryResult { projection: Some(projection()) });
+        round_trip_with_db(|db| Ty::QueryResult { projection: Some(projection(db)) });
     }
 
     #[test]
     fn query_result_selection_projection_preserves_fields() {
-        round_trip(Ty::QueryResultSelection { projection: Some(projection()) });
+        round_trip_with_db(|db| Ty::QueryResultSelection { projection: Some(projection(db)) });
     }
 
     #[test]
     fn query_batch_projection_preserves_per_query_shape() {
-        round_trip(Ty::QueryBatchResult { per_query: Arc::new([Some(projection()), None]) });
+        round_trip_with_db(|db| Ty::QueryBatchResult {
+            per_query: Arc::new([Some(projection(db)), None]),
+        });
     }
 
     #[test]
@@ -885,7 +897,7 @@ mod tests {
             typeid_to_ty(&db, id),
             Ty::QueryResult {
                 projection: Some(Arc::new(SdblProjection {
-                    fields: Arc::new([(name("Flag"), Ty::Boolean)]),
+                    fields: Arc::new([(name("Flag"), ty)]),
                     raw_sdbl_types: None,
                 })),
             }

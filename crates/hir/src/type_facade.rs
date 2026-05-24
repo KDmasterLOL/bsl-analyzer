@@ -426,19 +426,16 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     ///
     /// `Some(vec)` when [`Type::is_query_projection`] returns `true`;
     /// `None` otherwise. Phase 3 §4.G.5c: each column type is the interned
-    /// kernel [`TypeId`] (the SDBL projection's `Ty` is interned at this
-    /// boundary). Callers that need the IDE facade `Type` for a column can
+    /// kernel [`TypeId`] (the SDBL projection stores the interned handles
+    /// directly). Callers that need the IDE facade `Type` for a column can
     /// wrap the id via [`Type::from_id`] with the same `db` / `file_id`.
     pub fn projection_fields(&self) -> Option<Vec<(Name, TypeId)>> {
         match self.ty() {
             Ty::QueryResultSelection { projection: Some(p) }
             | Ty::ValueTable { projection: Some(p) }
-            | Ty::ValueTableRow { projection: Some(p) } => Some(
-                p.fields
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), ty_to_typeid(self.db, ty)))
-                    .collect(),
-            ),
+            | Ty::ValueTableRow { projection: Some(p) } => {
+                Some(p.fields.iter().map(|(name, ty)| (name.clone(), *ty)).collect())
+            }
             _ => None,
         }
     }

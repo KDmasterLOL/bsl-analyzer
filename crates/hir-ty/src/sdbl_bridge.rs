@@ -1,8 +1,9 @@
 //! Bridge from SDBL HIR (`sdbl_hir`) types to BSL types (`hir_def::Ty`).
 //!
-//! Pure functions — no `db` access, no Salsa queries. The bridge is the
-//! single source of truth for "how does an SDBL field type project onto
-//! the BSL type system?". Callers (Phase 1.3 inference hooks) consume
+//! The bridge is the single source of truth for "how does an SDBL field
+//! type project onto the BSL type system?". Projection producers mint
+//! kernel `TypeId`s through the caller's `TypeKernelDb`. Callers
+//! (Phase 1.3 inference hooks) consume
 //! `query_to_projection` / `package_to_projections` to attach
 //! [`SdblProjection`] payloads to the new
 //! [`Ty::Query`] / [`Ty::QueryResult`] / [`Ty::QueryResultSelection`] /
@@ -237,7 +238,7 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
 ///
 /// Walks the query's `SELECT` field list, expanding asterisks against
 /// the originating `ResolvedTable::fields()` and bridging each named
-/// field's `SdblType` into a `Ty`. Returns `Some(projection)` when at
+/// field's `SdblType` into a `TypeId`. Returns `Some(projection)` when at
 /// least one bridge-able field remains, `None` otherwise — callers
 /// attach a `None` projection to the receiver's [`Ty::QueryResult`] /
 /// [`Ty::QueryResultSelection`] in that case.
@@ -250,12 +251,15 @@ fn ref_kind_for(mdo: MdoType) -> Option<MetadataKind> {
 /// or between an asterisk-expanded field and a named field that
 /// re-projects the same column) are deduped first-wins to mirror
 /// `lookup_field`'s linear scan order.
-pub fn query_to_projection(q: &sdbl_hir::SdblQuery) -> Option<Arc<SdblProjection>> {
+pub fn query_to_projection(
+    db: &dyn TypeKernelDb,
+    q: &sdbl_hir::SdblQuery,
+) -> Option<Arc<SdblProjection>> {
     // Capacity is a best-effort hint — asterisk expansion can grow the
     // result well beyond `select.fields.len()`. Allocating up to the
     // base length avoids over-reservation on the common no-asterisk path.
     let initial_cap = q.hir.select.fields.len();
-    let mut named_fields: Vec<(Name, Ty)> = Vec::with_capacity(initial_cap);
+    let mut named_fields: Vec<(Name, TypeId)> = Vec::with_capacity(initial_cap);
     let mut shadows: Vec<SdblTypeShadow> = Vec::with_capacity(initial_cap);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -264,9 +268,9 @@ pub fn query_to_projection(q: &sdbl_hir::SdblQuery) -> Option<Arc<SdblProjection
     // first-wins. Returns whether the field was newly inserted.
     let push_unique = |name: Name,
                        alt_keys: &[&str],
-                       ty: Ty,
+                       ty: TypeId,
                        shadow: SdblTypeShadow,
-                       named_fields: &mut Vec<(Name, Ty)>,
+                       named_fields: &mut Vec<(Name, TypeId)>,
                        shadows: &mut Vec<SdblTypeShadow>,
                        seen: &mut std::collections::HashSet<String>|
      -> bool {
@@ -292,7 +296,7 @@ pub fn query_to_projection(q: &sdbl_hir::SdblQuery) -> Option<Arc<SdblProjection
         }
         if field.is_asterisk {
             for (name, alt_en, ty, shadow) in
-                expand_asterisk(field.asterisk_qualifier.as_deref(), &q.hir)
+                expand_asterisk(db, field.asterisk_qualifier.as_deref(), &q.hir)
             {
                 let alt_keys: Vec<&str> = alt_en.as_deref().into_iter().collect();
                 push_unique(
@@ -310,7 +314,7 @@ pub fn query_to_projection(q: &sdbl_hir::SdblQuery) -> Option<Arc<SdblProjection
         let Some(name) = field.alias_or_name() else {
             continue;
         };
-        let bridged = sdbl_type_to_ty(&field.ty);
+        let bridged = sdbl_type_to_typeid(db, &field.ty);
         let shadow = SdblTypeShadow { display: field.ty.to_string() };
         push_unique(
             Name::new(name.as_str()),
@@ -363,9 +367,10 @@ pub fn query_to_projection(q: &sdbl_hir::SdblQuery) -> Option<Arc<SdblProjection
 /// contribute nothing — they degrade the projection silently instead
 /// of introducing `Unknown` placeholders.
 fn expand_asterisk(
+    db: &dyn TypeKernelDb,
     qualifier: Option<&str>,
     hir: &sdbl_hir::SdblHir,
-) -> Vec<(Name, Option<String>, Ty, SdblTypeShadow)> {
+) -> Vec<(Name, Option<String>, TypeId, SdblTypeShadow)> {
     let qualifier_lower = qualifier.map(|q| q.to_lowercase());
     let mut out = Vec::new();
     for table in hir.all_tables() {
@@ -383,7 +388,7 @@ fn expand_asterisk(
             out.push((
                 Name::new(&field_def.name),
                 field_def.name_en.clone(),
-                sdbl_type_to_ty(&field_def.ty),
+                sdbl_type_to_typeid(db, &field_def.ty),
                 SdblTypeShadow { display: field_def.ty.to_string() },
             ));
         }
@@ -397,8 +402,11 @@ fn expand_asterisk(
 /// Indices align with `pkg.queries()` — `result[i]` is the projection of
 /// the `i`-th sub-query in the batch. Phase 3 attaches the result to
 /// [`Ty::QueryBatchResult { per_query: ... }`].
-pub fn package_to_projections(pkg: &sdbl_hir::SdblPackage) -> Vec<Option<Arc<SdblProjection>>> {
-    pkg.queries().iter().map(query_to_projection).collect()
+pub fn package_to_projections(
+    db: &dyn TypeKernelDb,
+    pkg: &sdbl_hir::SdblPackage,
+) -> Vec<Option<Arc<SdblProjection>>> {
+    pkg.queries().iter().map(|q| query_to_projection(db, q)).collect()
 }
 
 #[cfg(test)]
@@ -725,6 +733,7 @@ mod tests {
 
     #[test]
     fn asterisk_expands_metadata_table_fields() {
+        let db = InMemoryDb::new();
         // `SELECT * FROM Catalog.Товары` — bare asterisk over a single
         // resolved Metadata table walks every FieldDef and bridges types
         // structurally.
@@ -738,16 +747,20 @@ mod tests {
             ],
         );
         let q = mk_query(vec![mk_asterisk(None)], vec![table]);
-        let p = query_to_projection(&q).expect("asterisk over resolved table must project");
+        let p = query_to_projection(&db, &q).expect("asterisk over resolved table must project");
         assert_eq!(projection_field_names(&p), vec!["Ссылка", "Наименование", "Цена"]);
         // Type bridging applies per-field. Asterisk fields lift directly
         // from the FieldDef's `SdblType` — no aliasing layer.
-        assert_eq!(p.fields[1].1, Ty::String);
-        assert_eq!(p.fields[2].1, Ty::Number);
+        assert_eq!(p.fields[1].1, sdbl_type_to_typeid(&db, &SdblType::String { length: None }));
+        assert_eq!(
+            p.fields[2].1,
+            sdbl_type_to_typeid(&db, &SdblType::Number { precision: Some(15), scale: Some(2) },),
+        );
     }
 
     #[test]
     fn qualified_asterisk_expands_only_matching_table() {
+        let db = InMemoryDb::new();
         // `SELECT Т.* FROM Catalog.A AS Т, Catalog.B` — qualifier resolves
         // by alias against `effective_name()`, NOT by table full_name when
         // an alias is present.
@@ -762,12 +775,14 @@ mod tests {
             vec![FieldDef::new("Другое", SdblType::Boolean)],
         );
         let q = mk_query(vec![mk_asterisk(Some("Т"))], vec![table_a, table_b]);
-        let p = query_to_projection(&q).expect("qualified asterisk must project matching table");
+        let p =
+            query_to_projection(&db, &q).expect("qualified asterisk must project matching table");
         assert_eq!(projection_field_names(&p), vec!["Имя"]);
     }
 
     #[test]
     fn qualified_asterisk_matches_full_name_when_no_alias() {
+        let db = InMemoryDb::new();
         // `SELECT Справочник.Товары.*` when no alias is set — qualifier
         // resolves against `full_name`. Case-insensitive comparison.
         let table = mk_metadata_table(
@@ -776,12 +791,14 @@ mod tests {
             vec![FieldDef::new("Код", SdblType::string_with_length(11))],
         );
         let q = mk_query(vec![mk_asterisk(Some("справочник.товары"))], vec![table]);
-        let p = query_to_projection(&q).expect("case-insensitive full_name match must project");
+        let p =
+            query_to_projection(&db, &q).expect("case-insensitive full_name match must project");
         assert_eq!(projection_field_names(&p), vec!["Код"]);
     }
 
     #[test]
     fn bare_asterisk_walks_all_tables_in_declaration_order() {
+        let db = InMemoryDb::new();
         // `SELECT * FROM A, B` — bare asterisk produces A's fields first,
         // then B's. Order is preserved so `lookup_field`'s linear scan
         // matches the first-occurrence-wins rule consumers expect.
@@ -790,12 +807,13 @@ mod tests {
         let table_b =
             mk_metadata_table("Справочник.B", None, vec![FieldDef::new("Y", SdblType::string())]);
         let q = mk_query(vec![mk_asterisk(None)], vec![table_a, table_b]);
-        let p = query_to_projection(&q).expect("bare asterisk with tables must project");
+        let p = query_to_projection(&db, &q).expect("bare asterisk with tables must project");
         assert_eq!(projection_field_names(&p), vec!["X", "Y"]);
     }
 
     #[test]
     fn bare_asterisk_dedupes_duplicate_names_first_wins() {
+        let db = InMemoryDb::new();
         // Two tables both expose `Ссылка`. First-wins dedup keeps the
         // first table's type (here a CatalogRef) and drops the second's,
         // mirroring `lookup_field`'s linear scan order.
@@ -810,17 +828,19 @@ mod tests {
             vec![FieldDef::new("Ссылка", SdblType::reference(MdoType::Catalog, "B"))],
         );
         let q = mk_query(vec![mk_asterisk(None)], vec![table_a, table_b]);
-        let p = query_to_projection(&q).expect("bare asterisk must project at least one field");
+        let p =
+            query_to_projection(&db, &q).expect("bare asterisk must project at least one field");
         assert_eq!(p.fields.len(), 1);
         assert_eq!(p.fields[0].0.as_str(), "Ссылка");
         assert_eq!(
             p.fields[0].1,
-            Ty::MetadataRef { kind: MetadataKind::CatalogRef, name: Name::new("A") },
+            sdbl_type_to_typeid(&db, &SdblType::reference(MdoType::Catalog, "A")),
         );
     }
 
     #[test]
     fn mixed_asterisk_and_named_appends_named_after_expansion() {
+        let db = InMemoryDb::new();
         // `SELECT *, NamedField` — asterisk-expanded fields come first,
         // named field appended. Dedup is by lowercased name first-wins:
         // a named field that re-projects an asterisk field (same name)
@@ -843,12 +863,13 @@ mod tests {
             ],
             vec![table],
         );
-        let p = query_to_projection(&q).expect("mixed shape must project");
+        let p = query_to_projection(&db, &q).expect("mixed shape must project");
         assert_eq!(projection_field_names(&p), vec!["Ссылка", "Наименование", "Новое"]);
     }
 
     #[test]
     fn asterisk_against_register_walks_combined_fields() {
+        let db = InMemoryDb::new();
         // Register virtual-table fields (`<Resource>Оборот` etc.) are
         // synthesised by the SDBL lowerer into `Register::fields` before
         // the bridge runs. Asterisk over a register expands every field
@@ -877,7 +898,7 @@ mod tests {
             Vec::new(),
         );
         let q = mk_query(vec![mk_asterisk(None)], vec![table]);
-        let p = query_to_projection(&q).expect("register virtual asterisk must project");
+        let p = query_to_projection(&db, &q).expect("register virtual asterisk must project");
         assert_eq!(
             projection_field_names(&p),
             vec!["Период", "КоличествоОборот", "КоличествоПриход", "КоличествоРасход"],
@@ -886,6 +907,7 @@ mod tests {
 
     #[test]
     fn asterisk_against_temp_table_expands_subquery_fields() {
+        let db = InMemoryDb::new();
         // `SELECT * FROM ВТ_Имена AS T` — temp tables carry the
         // originating subquery's SELECT names/types in
         // `ResolvedTable::TempTable::fields`. The bridge treats them
@@ -899,12 +921,13 @@ mod tests {
             ],
         );
         let q = mk_query(vec![mk_asterisk(None)], vec![table]);
-        let p = query_to_projection(&q).expect("temp-table asterisk must project");
+        let p = query_to_projection(&db, &q).expect("temp-table asterisk must project");
         assert_eq!(projection_field_names(&p), vec!["Имя", "Активность"]);
     }
 
     #[test]
     fn qualified_asterisk_with_no_matching_table_yields_none() {
+        let db = InMemoryDb::new();
         // `SELECT Z.* FROM Catalog.A AS Т` — qualifier `Z` matches
         // neither alias nor full_name. Asterisk contributes nothing;
         // the projection is None because no other fields are present.
@@ -915,13 +938,14 @@ mod tests {
         );
         let q = mk_query(vec![mk_asterisk(Some("Z"))], vec![table]);
         assert!(
-            query_to_projection(&q).is_none(),
+            query_to_projection(&db, &q).is_none(),
             "asterisk with unresolved qualifier must drop silently",
         );
     }
 
     #[test]
     fn asterisk_against_unresolved_table_yields_none() {
+        let db = InMemoryDb::new();
         // `SELECT * FROM <parse_error>` — TableRef::metadata is None.
         // The bridge contributes no fields, mirroring the pre-Phase-A
         // policy for cases where SDBL never resolves the source table.
@@ -936,11 +960,12 @@ mod tests {
             range: MODULE_RANGE,
         };
         let q = mk_query(vec![mk_asterisk(None)], vec![table]);
-        assert!(query_to_projection(&q).is_none());
+        assert!(query_to_projection(&db, &q).is_none());
     }
 
     #[test]
     fn bilingual_dedup_drops_named_field_reprojecting_english_spelling() {
+        let db = InMemoryDb::new();
         // `Ссылка` and `Ref` are the bilingual pair for `MetadataKind::CatalogRef`'s
         // standard reference attribute. An asterisk expansion that yields
         // `Ссылка` (with `name_en = Some("Ref")`) must seed BOTH spellings
@@ -963,7 +988,7 @@ mod tests {
             ],
             vec![table],
         );
-        let p = query_to_projection(&q).expect("bilingual mixed shape must project");
+        let p = query_to_projection(&db, &q).expect("bilingual mixed shape must project");
         assert_eq!(
             projection_field_names(&p),
             vec!["Ссылка"],
@@ -973,6 +998,7 @@ mod tests {
 
     #[test]
     fn asterisk_field_with_parse_error_is_skipped() {
+        let db = InMemoryDb::new();
         // Defensive: a parse-error asterisk does not crash expansion;
         // it's skipped entirely, just like any other parse-error field.
         let table = mk_metadata_table(
@@ -983,11 +1009,12 @@ mod tests {
         let mut bad = mk_asterisk(None);
         bad.has_parse_error = true;
         let q = mk_query(vec![bad], vec![table]);
-        assert!(query_to_projection(&q).is_none());
+        assert!(query_to_projection(&db, &q).is_none());
     }
 
     #[test]
     fn cast_projection_field_carries_precise_shadow_display() {
+        let db = InMemoryDb::new();
         // Phase G end-to-end contract: a SELECT field whose expression is
         // a CAST/ВЫРАЗИТЬ-typed `SdblType::Number { Some(15), Some(2) }`
         // (the shape the lowerer now produces for
@@ -1008,10 +1035,13 @@ mod tests {
             range: MODULE_RANGE,
         };
         let q = mk_query(vec![cast_field], Vec::new());
-        let p = query_to_projection(&q).expect("CAST field must project");
+        let p = query_to_projection(&db, &q).expect("CAST field must project");
         assert_eq!(p.fields.len(), 1);
         assert_eq!(p.fields[0].0.as_str(), "Цена");
-        assert_eq!(p.fields[0].1, Ty::Number);
+        assert_eq!(
+            p.fields[0].1,
+            sdbl_type_to_typeid(&db, &SdblType::Number { precision: Some(15), scale: Some(2) },),
+        );
         let shadows = p.raw_sdbl_types.as_ref().expect("Phase E shadows always populated");
         assert_eq!(shadows.len(), 1);
         assert_eq!(shadows[0].display, "Число(15, 2)");
@@ -1019,6 +1049,7 @@ mod tests {
 
     #[test]
     fn cast_projection_field_renders_precision_only_number() {
+        let db = InMemoryDb::new();
         // Precision-only CAST (`ВЫРАЗИТЬ(0 КАК Число(15))`) is a Phase G
         // Slice 2 addition — Display now emits `Число(15)` instead of the
         // bare `Число` it used to collapse to.
@@ -1035,7 +1066,7 @@ mod tests {
             range: MODULE_RANGE,
         };
         let q = mk_query(vec![cast_field], Vec::new());
-        let p = query_to_projection(&q).expect("CAST field must project");
+        let p = query_to_projection(&db, &q).expect("CAST field must project");
         let shadows = p.raw_sdbl_types.as_ref().expect("shadows populated");
         assert_eq!(shadows[0].display, "Число(15)");
     }

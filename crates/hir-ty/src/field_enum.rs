@@ -117,7 +117,7 @@ pub(crate) fn enumerate_fields_inner(
     // to an empty Vec — same shape `Документы.ПКО` enumeration returned
     // pre-Step-J. Predefined-item enumeration is a separate enhancement.
 
-    if let Some(infos) = enumerate_projection_fields(db, ty) {
+    if let Some(infos) = enumerate_projection_fields(ty) {
         return infos;
     }
 
@@ -179,7 +179,7 @@ pub(crate) fn enumerate_fields_inner(
 /// resolves a single named column on the same shape — the projection
 /// arm is the IDE-completion sibling of the inference-time field
 /// lookup.
-fn enumerate_projection_fields(db: &dyn TypeKernelDb, ty: &Ty) -> Option<Vec<FieldInfo>> {
+fn enumerate_projection_fields(ty: &Ty) -> Option<Vec<FieldInfo>> {
     let projection = match ty {
         Ty::QueryResultSelection { projection: Some(p) } => p,
         // Phase H Slice 3 — projected `Ty::ValueTableRow` surfaces
@@ -195,7 +195,7 @@ fn enumerate_projection_fields(db: &dyn TypeKernelDb, ty: &Ty) -> Option<Vec<Fie
         .map(|(name, field_ty)| FieldInfo {
             name: name.clone(),
             name_en: None,
-            ty: ty_to_typeid(db, field_ty),
+            ty: *field_ty,
             value_ty: None,
             is_readonly: true,
             origin: FieldOrigin::UserAttribute,

@@ -135,7 +135,7 @@ fn lookup_field_inner(
     // SDBL projection branch — when `Ty::QueryResultSelection` carries
     // a resolved projection (Phase 1.3b+ synthesises it; Slice 1 only
     // ever passes `None` here), field lookup consults the projection's
-    // `(Name, Ty)` table BEFORE falling through to the platform
+    // `(Name, TypeId)` table BEFORE falling through to the platform
     // `ВыборкаИзРезультатаЗапроса` surface. A miss in the projection
     // does NOT short-circuit — it falls through so platform properties
     // like `.НомерСтроки` / `.СледующаяСтрока` still resolve.
@@ -291,7 +291,7 @@ fn lookup_field_on_metadata_ref(
 /// the same way platform method lookup is. Same posture as
 /// [`lookup_field_on_metadata_ref`].
 fn lookup_field_in_query_projection(
-    db: &dyn TypeKernelDb,
+    _db: &dyn TypeKernelDb,
     receiver_ty: &Ty,
     field_name: &Name,
 ) -> Option<FieldInfo> {
@@ -309,7 +309,7 @@ fn lookup_field_in_query_projection(
         FieldInfo {
             name: n.clone(),
             name_en: None,
-            ty: ty_to_typeid(db, ty),
+            ty: *ty,
             value_ty: None,
             // SDBL projection fields are not writeable through the
             // selection cursor — `Выборка.X = ...` is a runtime error.
@@ -1748,13 +1748,15 @@ mod tests {
     // SDBL projection-branch lookup (Phase 1.3 Slice 2)
     // ============================================================
 
-    fn projection_with_two_fields() -> std::sync::Arc<hir_def::ty::SdblProjection> {
+    fn projection_with_two_fields(
+        db: &dyn TypeKernelDb,
+    ) -> std::sync::Arc<hir_def::ty::SdblProjection> {
         // Manually-constructed projection mirroring what the bridge
         // produces for `SELECT Код AS КодТов, Наименование FROM …`.
         std::sync::Arc::new(hir_def::ty::SdblProjection {
             fields: std::sync::Arc::from([
-                (Name::new("КодТов"), Ty::String),
-                (Name::new("Наименование"), Ty::String),
+                (Name::new("КодТов"), ty_to_typeid(db, &Ty::String)),
+                (Name::new("Наименование"), ty_to_typeid(db, &Ty::String)),
             ]),
             raw_sdbl_types: None,
         })
@@ -1762,10 +1764,14 @@ mod tests {
 
     #[test]
     fn sdbl_projection_field_resolves_via_projection_table() {
-        let receiver = Ty::QueryResultSelection { projection: Some(projection_with_two_fields()) };
-        let info = lookup_field(&[], &receiver, &Name::new("КодТов"))
+        let db = bsl_types::testing::InMemoryDb::new();
+        let receiver = ty_to_typeid(
+            &db,
+            &Ty::QueryResultSelection { projection: Some(projection_with_two_fields(&db)) },
+        );
+        let info = super::lookup_field(&db, &[], receiver, &Name::new("КодТов"))
             .expect("projection field must resolve");
-        assert_eq!(info.ty, Ty::String);
+        assert_eq!(typeid_to_ty(&db, info.ty), Ty::String);
         assert!(info.is_readonly, "SDBL projection fields are read-only");
     }
 
@@ -1773,9 +1779,13 @@ mod tests {
     fn sdbl_projection_field_lookup_is_case_insensitive() {
         // BSL field access is case-folded; the projection lookup
         // matches the same way platform field/method lookup does.
-        let receiver = Ty::QueryResultSelection { projection: Some(projection_with_two_fields()) };
-        assert!(lookup_field(&[], &receiver, &Name::new("кодтов")).is_some());
-        assert!(lookup_field(&[], &receiver, &Name::new("НАИМЕНОВАНИЕ")).is_some());
+        let db = bsl_types::testing::InMemoryDb::new();
+        let receiver = ty_to_typeid(
+            &db,
+            &Ty::QueryResultSelection { projection: Some(projection_with_two_fields(&db)) },
+        );
+        assert!(super::lookup_field(&db, &[], receiver, &Name::new("кодтов")).is_some());
+        assert!(super::lookup_field(&db, &[], receiver, &Name::new("НАИМЕНОВАНИЕ")).is_some());
     }
 
     #[test]
@@ -1787,8 +1797,9 @@ mod tests {
         // we don't pin the lookup result here — only that the
         // projection-branch returned `None` so the orchestrator
         // continued to the platform fallback.)
-        let receiver = Ty::QueryResultSelection { projection: Some(projection_with_two_fields()) };
         let db = bsl_types::testing::InMemoryDb::new();
+        let receiver =
+            Ty::QueryResultSelection { projection: Some(projection_with_two_fields(&db)) };
         assert!(
             lookup_field_in_query_projection(&db, &receiver, &Name::new("НесуществующееПоле"))
                 .is_none(),
@@ -1815,8 +1826,9 @@ mod tests {
         // projection (e.g. `Ty::Query{Some(p)}` after Phase 1.3b)
         // must NOT be served by this branch — the projection
         // surface only exists on the *selection* cursor.
-        let receiver = Ty::Query { projections: Arc::from([Some(projection_with_two_fields())]) };
         let db = bsl_types::testing::InMemoryDb::new();
+        let receiver =
+            Ty::Query { projections: Arc::from([Some(projection_with_two_fields(&db))]) };
         assert!(lookup_field_in_query_projection(&db, &receiver, &Name::new("КодТов")).is_none());
     }
 }

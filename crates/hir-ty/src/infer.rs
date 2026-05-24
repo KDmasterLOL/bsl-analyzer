@@ -1381,7 +1381,7 @@ impl<'db> InferenceContext<'db> {
         let Some((_, pkg)) = entries.iter().find(|(id, _)| *id == sdbl_expr_id) else {
             return Arc::from([]);
         };
-        crate::sdbl_bridge::package_to_projections(pkg).into()
+        crate::sdbl_bridge::package_to_projections(self.db, pkg).into()
     }
 
     /// Infer the type of an expression.
